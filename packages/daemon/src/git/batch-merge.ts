@@ -2,7 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
-import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, type MergeEmptyKind, type WorktreeGateStamp } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, type MergeEmptyKind, type WorktreeGateStamp } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
@@ -122,6 +122,15 @@ export interface BatchLandedBranch extends BatchCandidate {
    *  put harness attribution on its own commit, against this project's CLAUDE.md, and this landing path
    *  is what caught it. Omitted (not present) on a `noop` landing, which reuses an already-landed sha. */
   strippedTrailerCount?: number;
+  /** How many lines in Loom's RESERVED trailer namespace (`Loom-Worker-*`/`Loom-Landed-*`, never line 0 —
+   *  see {@link matchReservedLoomTrailerLine}) {@link stripReservedLoomTrailerLines} removed from this
+   *  branch's OWN commit bodies before landing — 0 when none did (the common case). Non-zero means a
+   *  worker's own commit carried a line in Loom's reserved namespace (e.g. an earlier
+   *  `Loom-Worker-Branch:` paragraph quoted verbatim), which this landing path caught and stripped rather
+   *  than refuse the whole batch for. Omitted (not present) on a `noop` landing, same posture as
+   *  {@link strippedTrailerCount}.
+   *  @decision 95940402 (round 4, R2) */
+  strippedReservedLineCount?: number;
   /** Whether the tip commit's follow-up `Loom-Worker-Base`/`Loom-Worker-PathSet` amend (card d62dad73
    *  phase 2) actually landed. `true` for the ordinary case; `false` when that best-effort amend failed
    *  (rare — logged at the stamp site, {@link landBranchCommitsIndividually}) and the branch landed WITHOUT
@@ -196,6 +205,7 @@ interface LandResult {
   reason?: string;
   emptyKind?: MergeEmptyKind;
   strippedTrailerCount?: number;
+  strippedReservedLineCount?: number;
   pathSetStamped?: boolean;
   /** The branch tip this landing was assembled from (resolved once, at the top of the land). */
   branchTip?: string;
@@ -401,10 +411,12 @@ async function landBranchCommitsIndividually(
     }
   }
 
+  // @decision 95940402 — `batchHeadBefore` (already read above), never a fresh literal "HEAD" re-resolve:
+  // the same worker-writable-ref race this card's other fixes close, now for the merge-base/noop leg.
   let mergeBase: string;
   try {
     mergeBase = (await withTimeout(
-      git.raw(["merge-base", "HEAD", branchTip]), timeoutMs, "git merge-base (batch land)",
+      git.raw(["merge-base", batchHeadBefore, branchTip]), timeoutMs, "git merge-base (batch land)",
     )).trim();
   } catch (e) {
     return { ok: false, reason: `failed to compute merge-base: ${(e as Error).message}` };
@@ -414,7 +426,7 @@ async function landBranchCommitsIndividually(
     // The branch's own tip is already an ancestor of the batch's current HEAD — nothing new to land
     // (typically: already landed by an earlier candidate in THIS batch, or already on main before the
     // batch was cut). Classify exactly like the solo path's own noop branch.
-    const landedSha = await findLandedSquashCommit(batchWorktreePath, branch, "HEAD", deps);
+    const landedSha = await findLandedSquashCommit(batchWorktreePath, branch, batchHeadBefore, deps);
     return landedSha
       ? { ok: true, noop: true, emptyKind: "ALREADY_MERGED", sha: landedSha, branchTip }
       : { ok: true, noop: true, emptyKind: "STAGE_EMPTY_RETRY", branchTip };
@@ -559,11 +571,23 @@ async function landBranchCommitsIndividually(
   };
 
   let strippedTrailerCount = 0;
+  // @decision 95940402 (round 4, R2) — how many RESERVED Loom-* lines (never line 0, see A2's own check
+  // above) `stripReservedLoomTrailerLines` removed across this branch's own commits, 0 in the common case.
+  let strippedReservedLineCount = 0;
   let pathSetStamped = true;
   // Tracks HEAD across iterations so each commit's own `git commit` can be verified to have actually
   // moved HEAD — see the empty-commit check right after the commit call below for why this can't just
   // be inferred from the commit call resolving.
   let currentHead = batchHeadBefore;
+  // @decision 95940402 — the parent+tree this candidate's OWN last landing commit must verify against,
+  // captured fresh on every iteration (so they always describe the LAST one once the loop ends) and used
+  // for the final post-loop verify below — never re-derived from a late re-read of HEAD.
+  let lastExpectedParent: string | undefined;
+  let lastExpectedTree: string | undefined;
+  // @decision 95940402 (round 2) — the PathSet digest THIS process actually computed for the amend
+  // below, so the final post-loop verify can confirm the landed tip's own trailer matches it (never a
+  // forger's own planted value), rather than trusting the trailer's mere presence.
+  let computedPathSetDigest: string | undefined;
   for (let i = 0; i < commitShas.length; i++) {
     const sha = commitShas[i]!;
     const isLast = i === commitShas.length - 1;
@@ -611,10 +635,14 @@ async function landBranchCommitsIndividually(
     // @decision 2eb78eb2 — detect an ALREADY-PRESENT (redundant) commit's empty stage EXPLICITLY, before
     // the manual commit below, via `git diff --cached --name-only` (not `--quiet`, whose exit-code signal
     // is indistinguishable from any other `.raw()` failure here) — so a redundant drop reads distinctly.
+    // @decision 95940402 (round 3) — compares against the PINNED expected parent explicitly, never an
+    // implicit HEAD: an implicit HEAD re-resolves at call time, exactly the worker-writable-ref race this
+    // card's other checks already close.
+    const expectedParentForThisCommit = currentHead;
     let stagedPaths: string;
     try {
       stagedPaths = await withTimeout(
-        git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached --name-only (batch land, empty-stage probe)",
+        git.raw(["diff", "--cached", "--name-only", expectedParentForThisCommit]), timeoutMs, "git diff --cached --name-only (batch land, empty-stage probe)",
       );
     } catch (e) {
       await rollback();
@@ -644,9 +672,44 @@ async function landBranchCommitsIndividually(
       await rollback();
       return fail({ ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${(e as Error).message}` });
     }
+    // A reserved-key SUBJECT is a distinct hazard from a reserved line in the BODY:
+    // `stripReservedLoomTrailerLines` below deliberately never touches line 0, so a one-line worker
+    // commit whose own subject IS a reserved line becomes a non-final-paragraph reserved line once the
+    // tip's real trailer is appended after a blank line — `verifyLoomNamespaceExact` (correctly) refuses
+    // that as a forgery, which maps to `batchHeadMoved` and ABORTS THE WHOLE BATCH (`assembleBatchBranches`
+    // never falls back per-candidate on that outcome) — the wrong remedy for a WORKER-authored defect,
+    // not a racer's tamper.
+    //
+    // @decision 95940402 (round 4, A2) — catch it here instead: drop ONLY this candidate, before anything
+    // is committed; it falls back to the ordinary solo merge path, where card f224632d's own check applies.
+    const rawSubject = (originalMessage.split(/\r?\n/)[0] ?? "").trim();
+    if (matchReservedLoomTrailerLine(rawSubject)) {
+      await rollback();
+      return fail({
+        ok: false,
+        reason: `${branch}: commit ${sha.slice(0, 7)}'s own subject line is a reserved Loom trailer line ("${rawSubject}") — dropping this branch rather than risk a reader treating a worker-authored line as a genuine Loom trailer; it will be retried via the ordinary solo merge path`,
+      });
+    }
     const { message: cleanedMessage, stripped } = stripClaudeSessionTrailer(originalMessage);
     if (stripped) strippedTrailerCount++;
-    const finalMessage = isLast ? `${cleanedMessage}\n\nLoom-Worker-Branch: ${branch}\n` : `${cleanedMessage}\n`;
+    // @decision 95940402 (round 4, R2) — strip any OTHER reserved Loom trailer line the worker's own
+    // commit body happens to carry (the real 5e323196/6cc1333f shape: an earlier `Loom-Worker-Branch:`
+    // paragraph quoted verbatim) BEFORE this candidate's message is built — never refuse the whole batch
+    // for a line Loom itself is about to overwrite anyway. Chained right after the Claude-Session strip,
+    // same spot, so by the time `finalMessage` is built the worker's own body is already clean of both.
+    const { message: reservedStrippedMessage, strippedCount: reservedStrippedThisCommit } = stripReservedLoomTrailerLines(cleanedMessage);
+    if (reservedStrippedThisCommit > 0) strippedReservedLineCount += reservedStrippedThisCommit;
+    const finalMessage = isLast ? `${reservedStrippedMessage}\n\nLoom-Worker-Branch: ${branch}\n` : `${reservedStrippedMessage}\n`;
+    // @decision 95940402 — capture the staged tree in this SAME pre-commit window as the parent pin
+    // below (card c862f14c's load-bearing adjacency rule, ported from mergeBranchLocked): no git call may
+    // land between this capture and the commit, or a later read can't prove it reflects what was staged.
+    let preCommitTree: string;
+    try {
+      preCommitTree = (await withTimeout(git.raw(["write-tree"]), timeoutMs, "git write-tree (batch land, pre-commit tree capture)")).trim();
+    } catch (e) {
+      await rollback();
+      return fail({ ok: false, reason: `${branch}: failed to capture the staged tree before landing ${sha.slice(0, 7)}: ${(e as Error).message}` });
+    }
     try {
       // @decision 24c0bdba — kill-confirmed: an orphaned child here must never later land onto whatever
       // this SAME worktree happens to be staging by the time it resumes (rollback, or the next candidate).
@@ -696,6 +759,44 @@ async function landBranchCommitsIndividually(
       await rollback();
       return fail({ ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} produced an empty commit — its content was already present in the batch tree; dropping this branch rather than risk amending an unrelated commit` });
     }
+    // @decision 95940402 — `newHead !== currentHead` alone never proves `newHead` is OUR commit; a
+    // same-tree forged substitute would pass that check trivially. Verify parent+tree before trusting it,
+    // and never rollback() on a mismatch — this outcome discards the whole worktree regardless.
+    const verifiedPlain = await verifyCommitParentAndTree(git, timeoutMs, newHead, expectedParentForThisCommit, preCommitTree);
+    if (!verifiedPlain.ok) {
+      return {
+        ok: false, headMoved: true,
+        reason: `${branch}: the batch worktree's HEAD after landing ${sha.slice(0, 7)} (${newHead.slice(0, 8)}) does not verify as the commit this call just made (expected parent ${expectedParentForThisCommit.slice(0, 8)}, tree ${preCommitTree.slice(0, 8)}) — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+      };
+    }
+    // Parent+tree never proves the MESSAGE wasn't forged; `verifyLoomTrailersExactAndReadable` audits the
+    // WHOLE reserved namespace AND round-trips it through the same reader every other caller trusts.
+    // Defense-in-depth for the tip (the amend below rewrites its message, so the final post-loop check is
+    // authoritative); for non-tip (no amend) this IS the check.
+    //
+    // @decision 95940402 (round 3/4)
+    const expectedTrailersAfterPlainCommit: Record<string, string> = isLast ? { "Loom-Worker-Branch": branch } : {};
+    const plainTrailerVerify = verifyLoomTrailersExactAndReadable(verifiedPlain.body ?? "", expectedTrailersAfterPlainCommit);
+    if (!plainTrailerVerify.ok) {
+      if (plainTrailerVerify.kind === "displaced") {
+        return {
+          ok: false, headMoved: true,
+          reason: `${branch}: the commit message's final paragraph is not Loom's trailer block — a commit-msg hook appended text after it; Loom's merge trailers would be invisible to its own readers`,
+        };
+      }
+      if (plainTrailerVerify.kind === "unreadable") {
+        return {
+          ok: false, headMoved: true,
+          reason: `${branch}: a commit-msg hook altered Loom's trailer paragraph — Loom's merge trailers would be unreadable`,
+        };
+      }
+      return {
+        ok: false, headMoved: true,
+        reason: `${branch}: the batch worktree's HEAD after landing ${sha.slice(0, 7)} (${newHead.slice(0, 8)}) carries an unexpected Loom-* trailer — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+      };
+    }
+    lastExpectedParent = expectedParentForThisCommit;
+    lastExpectedTree = preCommitTree;
     currentHead = newHead;
     if (!isLast) continue;
     // Stamp `Loom-Worker-Base` + `Loom-Worker-PathSet` via a follow-up amend (card d62dad73 phase 2),
@@ -713,6 +814,7 @@ async function landBranchCommitsIndividually(
     try {
       // `currentHead` was just verified (above) to be this commit's own real sha — no need to re-query.
       const digest = await changedPathSetDigest(git, batchHeadBefore, currentHead, timeoutMs);
+      computedPathSetDigest = digest;
       const amendedMessage = `${finalMessage.replace(/\s+$/, "")}\nLoom-Worker-Base: ${batchHeadBefore}\nLoom-Worker-PathSet: ${digest}\n`;
       // @decision 24c0bdba — kill-confirmed, same reasoning as the plain commit above.
       await killableCanonicalRaw(
@@ -764,15 +866,55 @@ async function landBranchCommitsIndividually(
     console.warn(`[git] landBranchCommitsIndividually: stripped a Claude-Session: trailer from ${strippedTrailerCount} ` +
       `of ${branch}'s own commit(s) before landing — this project's mainline commits don't carry harness attribution`);
   }
+  if (strippedReservedLineCount > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] landBranchCommitsIndividually: stripped ${strippedReservedLineCount} reserved Loom-* ` +
+      `trailer line(s) from ${branch}'s own commit(s) before landing — a worker's own commit carried a line in Loom's reserved merge-trailer namespace`);
+  }
 
   let landedSha: string;
-  let landedSubject: string;
   try {
     landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
-    landedSubject = (await withTimeout(git.raw(["log", "-1", "--format=%s"]), timeoutMs, "git log -1 subject (batch land)")).trim();
   } catch (e) {
     return { ok: false, reason: `${branch}: landed but failed to read the result: ${(e as Error).message}` };
   }
+
+  // @decision 95940402 — this `rev-parse HEAD` is the late re-read a racer can steer; verify `landedSha`
+  // is this candidate's own last landing commit (parent+tree+trailers) before trusting it, and derive
+  // `landedSubject` from the SAME verified read — never a second, independently-steerable bare HEAD call.
+  const finalVerify = (lastExpectedParent !== undefined && lastExpectedTree !== undefined)
+    ? await verifyCommitParentAndTree(git, timeoutMs, landedSha, lastExpectedParent, lastExpectedTree)
+    : { ok: false as const, body: undefined as string | undefined };
+  // The tip's reserved namespace must be EXACTLY the expected set AND round-trip through the reader;
+  // `verifyLoomTrailersExactAndReadable` also rejects a duplicate, case variant, `Loom-Landed-Tip`, or
+  // hidden-paragraph line, unlike a check that only reads parseLoomTrailerBlock's resolved fields.
+  //
+  // @decision 95940402 (round 3/4, Code Review 820ce6e3)
+  const expectedFinalTrailers: Record<string, string> = { "Loom-Worker-Branch": branch };
+  if (pathSetStamped) {
+    expectedFinalTrailers["Loom-Worker-Base"] = batchHeadBefore;
+    if (computedPathSetDigest !== undefined) expectedFinalTrailers["Loom-Worker-PathSet"] = computedPathSetDigest;
+  }
+  const finalTrailerVerify = verifyLoomTrailersExactAndReadable(finalVerify.body ?? "", expectedFinalTrailers);
+  if (!finalVerify.ok || !finalTrailerVerify.ok) {
+    if (finalVerify.ok && !finalTrailerVerify.ok && finalTrailerVerify.kind === "displaced") {
+      return {
+        ok: false, headMoved: true,
+        reason: `${branch}: the commit message's final paragraph is not Loom's trailer block — a commit-msg hook appended text after it; Loom's merge trailers would be invisible to its own readers`,
+      };
+    }
+    if (finalVerify.ok && !finalTrailerVerify.ok && finalTrailerVerify.kind === "unreadable") {
+      return {
+        ok: false, headMoved: true,
+        reason: `${branch}: a commit-msg hook altered Loom's trailer paragraph — Loom's merge trailers would be unreadable`,
+      };
+    }
+    return {
+      ok: false, headMoved: true,
+      reason: `${branch}: the batch worktree's final HEAD (${landedSha.slice(0, 8)}) does not verify as this landing's own commit${lastExpectedParent !== undefined && lastExpectedTree !== undefined ? ` (expected parent ${lastExpectedParent.slice(0, 8)}, tree ${lastExpectedTree.slice(0, 8)})` : ""} — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+    };
+  }
+  const landedSubject = (finalVerify.body ?? "").split(/\r?\n/)[0]?.trim() ?? "";
 
   // @decision bc2240d7 (round 2, card f01c219d) — runs UNCONDITIONALLY (no `mergeShas.length > 0` gate):
   // the 3-way merge absorbs an ordinary rename-following cherry-pick (batch-merge-robustness.mjs (7e))
@@ -801,7 +943,7 @@ async function landBranchCommitsIndividually(
     }
   }
 
-  return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, pathSetStamped, branchTip };
+  return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, strippedReservedLineCount, pathSetStamped, branchTip };
 }
 
 /**
@@ -985,7 +1127,7 @@ export async function assembleBatchBranches(
       dropped.push({ ...c, reason: "batch land reported ok with no sha/subject" });
       continue;
     }
-    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, pathSetStamped: r.pathSetStamped, assembledTip: r.branchTip });
+    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, strippedReservedLineCount: r.strippedReservedLineCount, pathSetStamped: r.pathSetStamped, assembledTip: r.branchTip });
     assembledTipSha = r.sha;
   }
   return { landed, dropped, assembledTipSha };

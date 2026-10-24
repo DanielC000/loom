@@ -12,7 +12,7 @@ import { gitSubcommand, gitSubSubcommand } from "./_git-argv.mjs";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, deriveTasklessSubject, killableRemoveDir, GIT_OP_TIMEOUT_MS, WORKTREE_ADD_TIMEOUT_MS } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, deriveTasklessSubject, killableRemoveDir, GIT_OP_TIMEOUT_MS, WORKTREE_ADD_TIMEOUT_MS, matchReservedLoomTrailerLine, scanLoomNamespaceLines, stripReservedLoomTrailerLines, verifyLoomTrailersExactAndReadable, parseLoomTrailerBlock } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
 
@@ -33,6 +33,124 @@ const commitInto = (dir, file, body, msg) => {
 
 const repo = path.join(os.tmpdir(), `loom-wt-repo-${Date.now()}-${process.pid}`);
 const taskId = "abcd1234-ef56-7890";
+
+// ── Card 95940402 round 4 (A1/A3) — the shared RESERVED-trailer predicate, the narrowed namespace scan,
+//    and the strip function's own line-level contract. Pure functions, no git/LOOM_HOME needed.
+{
+  check("(trl-1) matchReservedLoomTrailerLine: exact reserved key matches",
+    JSON.stringify(matchReservedLoomTrailerLine("Loom-Worker-Branch: foo")) === JSON.stringify({ key: "Loom-Worker-Branch", value: "foo" }));
+  check("(trl-2) matchReservedLoomTrailerLine: case-insensitive, key kept verbatim (card 95940402's own 'lower' probe mode)",
+    JSON.stringify(matchReservedLoomTrailerLine("loom-worker-branch: foo")) === JSON.stringify({ key: "loom-worker-branch", value: "foo" }));
+  check("(trl-3) matchReservedLoomTrailerLine: leading whitespace tolerated (round 3's own lead-ws probe mode)",
+    matchReservedLoomTrailerLine("  Loom-Worker-Branch: foo")?.key === "Loom-Worker-Branch");
+  check("(trl-4) matchReservedLoomTrailerLine: space before the colon tolerated (round 3's own space-colon probe mode)",
+    matchReservedLoomTrailerLine("Loom-Worker-Branch : foo")?.key === "Loom-Worker-Branch");
+  check("(trl-5) matchReservedLoomTrailerLine: tab before the colon tolerated (round 3's own tab-colon probe mode)",
+    matchReservedLoomTrailerLine("Loom-Worker-Branch\t: foo")?.key === "Loom-Worker-Branch");
+  check("(trl-6) matchReservedLoomTrailerLine: Loom-Landed-Tip is reserved",
+    matchReservedLoomTrailerLine(`Loom-Landed-Tip: ${"a".repeat(40)}`)?.key === "Loom-Landed-Tip");
+  check("(trl-7) matchReservedLoomTrailerLine: a non-Loom project's own 'loom-bridge:' subject is NOT reserved (card 95940402 round 4, A1)",
+    matchReservedLoomTrailerLine("loom-bridge: fix crash") === null);
+  check("(trl-8) matchReservedLoomTrailerLine: a 'loom-cli:' prose line is NOT reserved",
+    matchReservedLoomTrailerLine("loom-cli: do a thing") === null);
+  check("(trl-9) matchReservedLoomTrailerLine: a foreign (non-reserved) trailer is NOT reserved",
+    matchReservedLoomTrailerLine("Reviewed-by: forger") === null);
+  check("(trl-10) matchReservedLoomTrailerLine: a non-key:value line is NOT reserved",
+    matchReservedLoomTrailerLine("just some prose") === null);
+
+  const narrowed = scanLoomNamespaceLines("subject\n\nloom-bridge: fix crash\nLoom-Worker-Branch: real\n");
+  check("(sln-1) scanLoomNamespaceLines (round 4, A1): narrowed to the RESERVED namespace only — 'loom-bridge:' is NOT scanned",
+    !narrowed.some((l) => l.key === "loom-bridge"));
+  check("(sln-2) scanLoomNamespaceLines: the real reserved line IS still scanned",
+    narrowed.some((l) => l.key === "Loom-Worker-Branch" && l.value === "real"));
+
+  // A1: a non-Loom project's own "loom-bridge:" line must land UNTOUCHED, whether it's the SUBJECT or a
+  // BODY line — the exact Major this round fixes (round 3's broader scanner refused the whole batch for it).
+  const subjCase = stripReservedLoomTrailerLines("loom-bridge: fix crash\n\nsome body\n");
+  check("(srl-1) stripReservedLoomTrailerLines (A1): a 'loom-bridge:' SUBJECT is untouched",
+    subjCase.strippedCount === 0 && subjCase.message === "loom-bridge: fix crash\n\nsome body\n");
+  const bodyCase = stripReservedLoomTrailerLines("feat(x): thing\n\nloom-bridge: fix crash\n");
+  check("(srl-2) stripReservedLoomTrailerLines (A1): a 'loom-bridge:' BODY line is untouched",
+    bodyCase.strippedCount === 0 && bodyCase.message === "feat(x): thing\n\nloom-bridge: fix crash\n");
+
+  // A1: an INDENTED reserved line in the body IS stripped — the strip and the scanner must tolerate the
+  // SAME whitespace shapes, or an indented reserved line would survive the strip and still refuse the
+  // batch at the post-commit namespace check.
+  const indented = stripReservedLoomTrailerLines("feat(x): thing\n\n  Loom-Worker-Branch: old\n");
+  check("(srl-3) stripReservedLoomTrailerLines (A1): an indented reserved BODY line IS stripped",
+    indented.strippedCount === 1 && !/Loom-Worker-Branch/.test(indented.message));
+
+  // The function's own contract: line 0 (the subject) is NEVER stripped even when reserved-shaped —
+  // `batch-merge.ts`'s own A2 check is what handles that hazard instead, by dropping the whole candidate.
+  const reservedSubject = stripReservedLoomTrailerLines("Loom-Worker-Branch: other\n\nbody text\n");
+  check("(srl-4) stripReservedLoomTrailerLines: a reserved-shaped SUBJECT (line 0) is NEVER stripped",
+    reservedSubject.strippedCount === 0 && reservedSubject.message === "Loom-Worker-Branch: other\n\nbody text\n");
+
+  // A3: a reserved line in the MIDDLE of a paragraph is removed WITHOUT merging the lines around it — a
+  // naive paragraph-level rejoin could silently concatenate "Some intro text." and "More text after."
+  // onto one line; this operates per LINE, so it can't.
+  const midPara = stripReservedLoomTrailerLines(
+    "feat(x): add thing\n\nSome intro text.\nLoom-Worker-Branch: old-value\nMore text after.\n\nSome other paragraph.\n",
+  );
+  check("(srl-5) stripReservedLoomTrailerLines (A3): exactly one line stripped", midPara.strippedCount === 1);
+  check("(srl-6) stripReservedLoomTrailerLines (A3): surrounding lines stay on their OWN lines, never merged, and the later paragraph break survives",
+    midPara.message === "feat(x): add thing\n\nSome intro text.\nMore text after.\n\nSome other paragraph.\n");
+
+  // Removing a line that sat ALONE in its own paragraph leaves a double-blank-line run behind, which
+  // collapses to one — mirroring stripClaudeSessionTrailer's own collapse rule.
+  const aloneInParagraph = stripReservedLoomTrailerLines("feat(x): add thing\n\nLoom-Worker-Branch: evil\n\nReal paragraph.\n");
+  check("(srl-7) stripReservedLoomTrailerLines: a run of 3+ newlines left behind collapses to 2",
+    aloneInParagraph.message === "feat(x): add thing\n\nReal paragraph.\n");
+
+  // Round 5, F1: a mid-message line ending CRLF (authored via commit-tree/--cleanup=verbatim, which
+  // skips the normalization an ordinary `git commit -m` applies) must be stripped exactly like an
+  // LF-terminated one — before this fix the un-normalized split left a trailing `\r` that
+  // matchReservedLoomTrailerLine's own `[ \t]*$` anchor silently rejected, evading the strip entirely.
+  const crlfReserved = stripReservedLoomTrailerLines("feat(x): thing\r\n\r\nLoom-Worker-Branch: evil\r\n\r\nReal paragraph.\r\n");
+  check("(srl-8) stripReservedLoomTrailerLines (F1): a mid-message CRLF reserved line IS stripped", crlfReserved.strippedCount === 1);
+  check("(srl-9) stripReservedLoomTrailerLines (F1): no trace of the reserved line survives", !/Loom-Worker-Branch/i.test(crlfReserved.message));
+}
+
+// ── Card 95940402 round 4 (R1) — `verifyLoomTrailersExactAndReadable`'s own forged/displaced/unreadable
+//    discriminant, unit-level (the real-git end-to-end proof lives in batch-merge-head-moved.mjs's (K3)).
+{
+  const branch = "mybranch";
+  check("(vlt-1) happy path, tip, no base/pathset yet",
+    verifyLoomTrailersExactAndReadable(`feat(x): thing\n\nLoom-Worker-Branch: ${branch}`, { "Loom-Worker-Branch": branch }).ok === true);
+  check("(vlt-2) happy path, tip, with base+pathset",
+    verifyLoomTrailersExactAndReadable(
+      `feat(x): thing\n\nLoom-Worker-Branch: ${branch}\nLoom-Worker-Base: deadbeef\nLoom-Worker-PathSet: cafebabe`,
+      { "Loom-Worker-Branch": branch, "Loom-Worker-Base": "deadbeef", "Loom-Worker-PathSet": "cafebabe" },
+    ).ok === true);
+  check("(vlt-3) happy path, non-tip (expected: {}), nothing to round-trip",
+    verifyLoomTrailersExactAndReadable("feat(x): thing\n", {}).ok === true);
+  check("(vlt-4) forged: wrong branch value",
+    verifyLoomTrailersExactAndReadable(`feat(x): thing\n\nLoom-Worker-Branch: wrongbranch`, { "Loom-Worker-Branch": branch }).kind === "forged");
+  check("(vlt-5) forged: a non-tip commit carrying an unexpected reserved line",
+    verifyLoomTrailersExactAndReadable(`feat(x): thing\n\nLoom-Worker-Base: ${"b".repeat(40)}`, {}).kind === "forged");
+  check("(vlt-6) displaced: the exact right namespace, intact, but not the final paragraph",
+    verifyLoomTrailersExactAndReadable(`feat(x): thing\n\nLoom-Worker-Branch: ${branch}\n\n[ci skip]`, { "Loom-Worker-Branch": branch }).kind === "displaced");
+  // R1: the namespace-exact audit alone reports "exact" for each of these (the corrupting line is
+  // invisible to the narrowed scan), but the READER (parseLoomTrailerBlock) can't read it back.
+  check("(vlt-7) unreadable: prose folded into the trailer paragraph with no blank-line separator",
+    verifyLoomTrailersExactAndReadable(`feat(x): thing\n\nLoom-Worker-Branch: ${branch}\n[skip ci]`, { "Loom-Worker-Branch": branch }).kind === "unreadable");
+  check("(vlt-8) unreadable: an indented continuation line folded into the trailer paragraph",
+    verifyLoomTrailersExactAndReadable(`feat(x): thing\n\nLoom-Worker-Branch: ${branch}\n    continued text`, { "Loom-Worker-Branch": branch }).kind === "unreadable");
+  check("(vlt-9) unreadable: a zero-width-character-prefixed Loom-Landed-Tip line",
+    verifyLoomTrailersExactAndReadable(`feat(x): thing\n\nLoom-Worker-Branch: ${branch}\n​Loom-Landed-Tip: ${"a".repeat(40)}`, { "Loom-Worker-Branch": branch }).kind === "unreadable");
+  check("(vlt-10) unreadable also implies namespace-exact was reported clean (the K3 zw/continuation/prose repro mechanism)",
+    scanLoomNamespaceLines(`feat(x): thing\n\nLoom-Worker-Branch: ${branch}\n​Loom-Landed-Tip: ${"a".repeat(40)}`).length === 1);
+
+  // Round 5, F3: the SOLO path (mergeBranchLocked, card cc9bce38) writes Loom-Landed-Tip — when `expected`
+  // itself names that key, a message whose reader round-trips it correctly must be OK, not hardcoded
+  // "unreadable" the way a literal `parsed.landedTip !== null` check would wrongly force.
+  const landedTipValue = "a".repeat(40);
+  check("(vlt-11) F3: an EXPECTED Loom-Landed-Tip round-trips OK (solo-path reuse, card f224632d)",
+    verifyLoomTrailersExactAndReadable(
+      `feat(x): thing\n\nLoom-Worker-Branch: ${branch}\nLoom-Landed-Tip: ${landedTipValue}`,
+      { "Loom-Worker-Branch": branch, "Loom-Landed-Tip": landedTipValue },
+    ).ok === true);
+}
 
 try {
   // (a) a real repo with a commit on the default branch. Configure a git identity so mergeBranch's PLAIN

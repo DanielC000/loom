@@ -4307,6 +4307,228 @@ export function parseLoomTrailerBlock(message: string): LoomTrailers | null {
 }
 
 /**
+ * Loom's RESERVED commit-trailer namespace — exactly the keys {@link parseLoomTrailerBlock}/
+ * {@link readLandedTipTrailer} parse (`Loom-Worker-Branch`, `Loom-Worker-Base`, `Loom-Worker-PathSet`,
+ * `Loom-Landed-Tip`), generalized to the two PREFIX families those keys fall under
+ * (`Loom-Worker-*`/`Loom-Landed-*`, case-insensitive) so an older/foreign key under either prefix is also
+ * caught — the real `5e323196`/`6cc1333f` shape: an earlier `Loom-Worker-Branch:` paragraph quoted
+ * verbatim inside a worker's own commit body.
+ *
+ * A non-Loom project's own subject/prose using the bare word "loom" ("loom-bridge: fix crash", a
+ * `loom-cli:` line) is a legitimate, UNRESERVED use and must never trip this — round 3's own
+ * `scanLoomNamespaceLines` matched any `loom-*` key, which is exactly what made such a line refuse the
+ * whole batch.
+ *
+ * @decision 95940402 (round 4, A1) — this constant is the fix, and the ONE definition
+ * {@link scanLoomNamespaceLines}, {@link stripReservedLoomTrailerLines}, and `batch-merge.ts`'s own
+ * subject check all share — never a second, independently-drifting copy of this regex.
+ */
+const RESERVED_LOOM_TRAILER_KEY = /^(?:loom-worker|loom-landed)-[a-z0-9-]*$/i;
+
+/**
+ * Matches one line shaped like `<key>: <value>` where `<key>` is in Loom's {@link RESERVED_LOOM_TRAILER_KEY}
+ * namespace — tolerating leading whitespace/tabs and a space or tab before the colon (round 3's own
+ * space-colon/tab-colon/lead-ws probe modes must stay caught by whatever reads this). Returns the parsed
+ * `{key, value}` (key verbatim as written, so a caller can tell `Loom-Worker-Branch` apart from
+ * `loom-worker-branch`) or `null` when the line isn't `key: value`-shaped at all, or its key isn't
+ * reserved. The ONE shared predicate every reserved-trailer check in this file (and `batch-merge.ts`)
+ * builds on — never a second, independently-drifting regex (card 95940402 round 4, A1).
+ */
+export function matchReservedLoomTrailerLine(line: string): { key: string; value: string } | null {
+  const m = /^[ \t]*([A-Za-z][A-Za-z0-9-]*)[ \t]*:[ \t]*(.*?)[ \t]*$/.exec(line);
+  if (!m) return null;
+  const key = m[1]!;
+  if (!RESERVED_LOOM_TRAILER_KEY.test(key)) return null;
+  return { key, value: m[2]! };
+}
+
+/**
+ * Normalizes every `\r\n` pair to a bare `\n` — the ONE shared first step {@link scanLoomNamespaceLines}
+ * and {@link stripReservedLoomTrailerLines} both apply before splitting `message` into paragraphs/lines,
+ * so a CRLF-terminated line reads identically in both.
+ *
+ * Before this, only the scanner normalized; the strip split on a bare `\n`, leaving a trailing `\r` on
+ * every line, which `matchReservedLoomTrailerLine`'s own `[ \t]*$` anchor (excluding `\r`) then silently
+ * rejected — a `Loom-Worker-Branch: x\r\n` line evaded the strip while the scanner still flagged it.
+ *
+ * @decision 95940402 (round 5, F1) — authored via `commit-tree`/`--cleanup=verbatim`, which skips the
+ * normalization an ordinary `git commit -m` applies.
+ */
+function normalizeMessageNewlines(message: string): string {
+  return message.replace(/\r\n/g, "\n");
+}
+
+/**
+ * Every line ANYWHERE in `message` (any paragraph) shaped like a RESERVED Loom trailer key (see
+ * {@link matchReservedLoomTrailerLine}) — the raw material for an EXHAUSTIVE audit of Loom's reserved
+ * namespace, unlike {@link parseLoomTrailerBlock}, which only structurally reads the FINAL paragraph's
+ * trailers and cannot see a duplicate, a case variant, or a line planted in an earlier paragraph. `key` is
+ * verbatim as written (so a caller can tell `Loom-Worker-Branch` apart from `loom-worker-branch`);
+ * `finalParagraph` is true only when the line's own paragraph is the message's LAST one (paragraphs split
+ * the same way `parseLoomTrailerBlock` splits them: a run of one-or-more blank lines).
+ *
+ * @decision 95940402 (round 4, A1) — NARROWED from "any `loom-*:` line" to the RESERVED namespace only;
+ * see {@link RESERVED_LOOM_TRAILER_KEY}'s own doc for why the broader match was itself a bug.
+ */
+export function scanLoomNamespaceLines(message: string): { key: string; value: string; finalParagraph: boolean }[] {
+  const paragraphs = normalizeMessageNewlines(message).replace(/\s+$/, "").split(/\n(?:[ \t]*\n)+/);
+  const lastIdx = paragraphs.length - 1;
+  const out: { key: string; value: string; finalParagraph: boolean }[] = [];
+  paragraphs.forEach((para, idx) => {
+    for (const line of para.split("\n")) {
+      const m = matchReservedLoomTrailerLine(line);
+      if (m) out.push({ key: m.key, value: m.value, finalParagraph: idx === lastIdx });
+    }
+  });
+  return out;
+}
+
+/**
+ * Strips every line in Loom's RESERVED trailer namespace (see {@link matchReservedLoomTrailerLine}) out of
+ * `message`, NEVER touching line 0 (the subject) even when it happens to match — a reserved-shaped
+ * SUBJECT is a distinct hazard `batch-merge.ts` refuses the whole candidate for instead of silently
+ * stripping (card 95940402 round 4, A2). Operates on the raw message line-by-line (never a paragraph
+ * rejoin, so a reserved line sitting in the MIDDLE of a paragraph can't accidentally merge the lines
+ * around it). When nothing is stripped, returns the ORIGINAL `message` untouched, byte-for-byte including
+ * its original line endings; when something IS stripped, the rebuilt message's lines are joined with a
+ * bare `\n`, then any resulting run of 3+ newlines collapses to exactly 2 (mirrors
+ * {@link stripClaudeSessionTrailer}'s own collapse rule) so removing a reserved line doesn't leave a
+ * visible gap where it sat. Returns `{message, strippedCount}` rather than mutating silently —
+ * `strippedCount` lets a caller surface a non-blocking notice and feed a landing total.
+ *
+ * @decision 95940402 (round 5, F1) — splits via {@link normalizeMessageNewlines}, the SAME normalization
+ * {@link scanLoomNamespaceLines} applies, so the two can never disagree on where a line ends.
+ */
+export function stripReservedLoomTrailerLines(message: string): { message: string; strippedCount: number } {
+  const lines = normalizeMessageNewlines(message).split("\n");
+  if (lines.length === 0) return { message, strippedCount: 0 };
+  const subject = lines[0]!;
+  let strippedCount = 0;
+  const rest = lines.slice(1).filter((l) => {
+    if (matchReservedLoomTrailerLine(l)) { strippedCount++; return false; }
+    return true;
+  });
+  if (strippedCount === 0) return { message, strippedCount: 0 };
+  const cleaned = [subject, ...rest].join("\n").replace(/\n{3,}/g, "\n\n");
+  return { message: cleaned, strippedCount };
+}
+
+/**
+ * A batch-landed commit's RESERVED Loom namespace must match `expected` EXACTLY (up to surrounding
+ * whitespace — {@link scanLoomNamespaceLines}'s own regex trims a value's leading/trailing spaces/tabs
+ * before this ever compares it, round 4, R5): every key once, correct value, in the message's FINAL
+ * paragraph, canonical case, nothing else in the reserved namespace anywhere (a duplicate, a case
+ * variant, a hidden-paragraph line, or `Loom-Landed-Tip` on a batch tip all fail this).
+ *
+ * Foreign (non-reserved) trailers stay untouched by this check, so a real commit-msg hook adding one — or
+ * a non-Loom project's own "loom-bridge:"-shaped line (round 4, A1: no longer even scanned, see
+ * {@link RESERVED_LOOM_TRAILER_KEY}) — never breaks a landing.
+ *
+ * @decision 95940402 (round 3, Code Review 820ce6e3) — pass `{}` to assert a NON-TIP commit carries zero
+ * reserved-namespace lines at all.
+ */
+export function verifyLoomNamespaceExact(message: string, expected: Readonly<Record<string, string>>): boolean {
+  const lines = scanLoomNamespaceLines(message);
+  const seen = new Set<string>();
+  for (const l of lines) {
+    if (!l.finalParagraph) return false;
+    const want = expected[l.key];
+    if (want === undefined || seen.has(l.key) || want !== l.value) return false;
+    seen.add(l.key);
+  }
+  return seen.size === Object.keys(expected).length;
+}
+
+/**
+ * True when `message` carries EXACTLY `expected`'s reserved Loom namespace (every key once, correct
+ * value, nothing extra) but NOT all in the final paragraph — the shape a commit-msg hook produces by
+ * appending its OWN paragraph (prose, or a foreign trailer block) after Loom's own, intact trailer
+ * paragraph. This is a DISTINCT, honest failure from a real forgery (wrong value, extra namespace key, a
+ * duplicate): the trailers Loom wrote are completely unmolested, they are just no longer the message's
+ * last paragraph, so {@link parseLoomTrailerBlock} (and this card's own `verifyLoomNamespaceExact`) can no
+ * longer see them as such. Never call this before `verifyLoomNamespaceExact` has already returned `false`
+ * for the same `message`/`expected` pair — it does not independently verify value-correctness beyond what
+ * the exact-set check below already establishes.
+ */
+export function loomTrailerBlockDisplaced(message: string, expected: Readonly<Record<string, string>>): boolean {
+  const expectedKeys = Object.keys(expected);
+  if (expectedKeys.length === 0) return false; // nothing expected ⇒ nothing to displace
+  const lines = scanLoomNamespaceLines(message);
+  const seen = new Map<string, string>();
+  for (const l of lines) {
+    if (seen.has(l.key)) return false; // a duplicate is a forgery, not a displacement
+    seen.set(l.key, l.value);
+  }
+  if (seen.size !== expectedKeys.length) return false; // missing or extra namespace keys ⇒ a forgery
+  for (const k of expectedKeys) {
+    if (seen.get(k) !== expected[k]) return false; // wrong value ⇒ a forgery
+  }
+  return !lines.every((l) => l.finalParagraph); // the exact right set exists, just not all in the last paragraph
+}
+
+/**
+ * The outcome of {@link verifyLoomTrailersExactAndReadable} — `kind` is set only on `ok:false` and
+ * distinguishes three honestly-different causes a caller must word differently:
+ *  - `"forged"` — the reserved namespace itself is wrong (missing/extra/duplicate/case-variant key, or a
+ *    wrong value) — the generic "may have been tampered with" wording.
+ *  - `"displaced"` — the exact right namespace exists, intact, just not in the message's final paragraph
+ *    (see {@link loomTrailerBlockDisplaced}) — a commit-msg hook appended a paragraph after it.
+ *  - `"unreadable"` — the namespace audit (`verifyLoomNamespaceExact`) reports exact, but the READER
+ *    ({@link parseLoomTrailerBlock}, every mainline caller's only way to actually read a trailer) still
+ *    can't read it back as the same values — a commit-msg hook altered Loom's own trailer paragraph
+ *    without changing any reserved line's OWN text.
+ *
+ * @decision 95940402 (round 4, R1) — a prose line folded into the trailer paragraph with no blank-line
+ * separator, an indented continuation, or a zero-width-character-prefixed key all produce `"unreadable"`:
+ * each breaks the reader's per-line `key: value` requirement while staying invisible to the narrower scan.
+ */
+export type LoomTrailerVerification = { ok: true } | { ok: false; kind: "forged" | "displaced" | "unreadable" };
+
+/**
+ * Composes {@link verifyLoomNamespaceExact} + {@link loomTrailerBlockDisplaced} with a REAL round-trip
+ * through {@link parseLoomTrailerBlock} — the one reader every other mainline consumer (hold-release,
+ * `findLandedSquashCommit`, the merged-commit map, `readLandedTipTrailer`, mainline-watch) actually uses.
+ * Round 3's own exact-set audit could report "exact" while that reader still returned `null` or a
+ * DIFFERENT value, because `scanLoomNamespaceLines`'s per-line match and `parseLoomTrailerBlock`'s
+ * per-line `key: value` requirement are not the same test — a line that breaks the SECOND without
+ * matching the reserved-key shape the FIRST looks for (a prose line folded into the trailer paragraph, an
+ * indented continuation, a zero-width-prefixed key) passed round 3's check while leaving the commit's own
+ * trailers unreadable to every real reader (card 95940402 round 4, R1).
+ *
+ * `expected`'s `"Loom-Worker-Branch"` entry (when present) is also what this function round-trips against
+ * the reader: `parseLoomTrailerBlock(message)` must return non-null with `.branch`/`.landedTip`/`.base`/
+ * `.pathSet` each equal to `expected`'s own `"Loom-Worker-Branch"`/`"Loom-Landed-Tip"`/`"Loom-Worker-Base"`/
+ * `"Loom-Worker-PathSet"` entry (or `null` when `expected` carries none of the latter three) — never a
+ * literal `null` hardcoded for `landedTip`.
+ *
+ * A batch tip never passes a `"Loom-Landed-Tip"` entry (so `landedTip` must be `null` there, unchanged
+ * batch behavior); the SOLO squash path's `mergeBranchLocked` DOES write it (`cc9bce38`).
+ *
+ * @decision 95940402 (round 5, F3) — compare against `expected["Loom-Landed-Tip"] ?? null`, never a
+ * hardcoded `null`, so card `f224632d` can reuse this for the solo path too.
+ *
+ * @decision 95940402 (round 4, R1) — when `expected` has no `"Loom-Worker-Branch"` entry (the non-tip
+ * case, `expected: {}`), there is nothing to round-trip — the exact-set check already proved zero
+ * reserved lines exist.
+ */
+export function verifyLoomTrailersExactAndReadable(
+  message: string, expected: Readonly<Record<string, string>>,
+): LoomTrailerVerification {
+  if (!verifyLoomNamespaceExact(message, expected)) {
+    return { ok: false, kind: loomTrailerBlockDisplaced(message, expected) ? "displaced" : "forged" };
+  }
+  const expectedBranch = expected["Loom-Worker-Branch"];
+  if (expectedBranch === undefined) return { ok: true }; // nothing to round-trip (e.g. a non-tip commit)
+  const parsed = parseLoomTrailerBlock(message);
+  if (!parsed) return { ok: false, kind: "unreadable" };
+  if (parsed.branch !== expectedBranch) return { ok: false, kind: "unreadable" };
+  if ((parsed.landedTip ?? null) !== (expected["Loom-Landed-Tip"] ?? null)) return { ok: false, kind: "unreadable" };
+  if ((parsed.base ?? null) !== (expected["Loom-Worker-Base"] ?? null)) return { ok: false, kind: "unreadable" };
+  if ((parsed.pathSet ?? null) !== (expected["Loom-Worker-PathSet"] ?? null)) return { ok: false, kind: "unreadable" };
+  return { ok: true };
+}
+
+/**
  * The flag portion of every `changedPathsBetween`-family diff invocation, factored out to ONE array so a
  * new caller can never drift its own copy out of parity with this one (card c862f14c — {@link
  * stagedPathsAgainstHead}'s own doc explains why flag parity, not staged-vs-range timing, is the actual
@@ -8767,6 +8989,40 @@ export async function checkCutBaseAncestry(
   }
 }
 
+/**
+ * Shared parent+tree(+single-parent) identity check for "is `sha` the exact commit a just-completed `git
+ * commit`/`git commit --amend` call produced" — reused by the solo squash path ({@link mergeBranchLocked}'s
+ * own `verifyLandedAsOwnCommit` closure, below) and the batch cherry-pick path (`git/batch-merge.ts`'s
+ * `landBranchCommitsIndividually`).
+ *
+ * @decision 95940402 — a bare post-commit `rev-parse HEAD` re-read and a `Loom-Worker-Branch:` trailer are
+ * both forgeable by anyone with `.git` write access; never trust either as proof of a commit's identity in
+ * place of this check.
+ *
+ * `ok` is `true` only when `sha` has EXACTLY one parent, that parent equals `expectedParent`, and `sha`'s
+ * own tree equals `expectedTree`; `false` (never throws) on any mismatch or git-read failure. `body` (card
+ * 95940402 round 2) is the raw commit MESSAGE — present whenever the `cat-file -p` read itself succeeded,
+ * even if `ok` is `false` on a parent/tree mismatch — so a caller that also needs to inspect trailers
+ * (e.g. a `Loom-Worker-Branch:` block) doesn't need a second read of the same object.
+ */
+export async function verifyCommitParentAndTree(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, expectedParent: string, expectedTree: string,
+): Promise<{ ok: boolean; body?: string }> {
+  try {
+    const raw = await withTimeout(git.raw(["cat-file", "-p", sha]), timeoutMs, "git cat-file -p <sha> (canonical, own-commit parent-count verify — immune to grafts/replace-refs)");
+    const headerEnd = raw.indexOf("\n\n");
+    const header = (headerEnd === -1 ? raw : raw.slice(0, headerEnd)).split(/\r?\n/);
+    const body = headerEnd === -1 ? "" : raw.slice(headerEnd + 2);
+    const parentLines = header.filter((l) => l.startsWith("parent "));
+    if (parentLines.length !== 1) return { ok: false, body }; // exactly one parent
+    if (parentLines[0]!.slice("parent ".length).trim() !== expectedParent) return { ok: false, body }; // and it must be ours
+    const tree = (await withTimeout(git.raw(["rev-parse", `${sha}^{tree}`]), timeoutMs, "git rev-parse <sha>^{tree} (canonical, own-commit tree verify)")).trim();
+    return { ok: tree === expectedTree, body };
+  } catch {
+    return { ok: false };
+  }
+}
+
 // `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
 // merge-danger-window.ts) — a caller with no op identity handy (a test, or any future caller) just gets an
 // unattributed window entry (repo/branch only), never a functional difference in what this function does.
@@ -9315,21 +9571,14 @@ async function mergeBranchLocked(
     // @decision 2a6a292a round 23 (card aa7677fa round 5) — round 22's `rev-list --parents` honored
     // `info/grafts` (a graft-hidden second parent reads as single-parent); `cat-file -p` reads the RAW
     // object, immune to grafts/replace-refs — parsed only up to the first blank line (the header block).
+    // @decision 95940402 — the actual parent+tree+single-parent check now lives in the shared, exported
+    // `verifyCommitParentAndTree` (above), reused by the batch path; this closure only adds the
+    // uncaptured-base short-circuit and the ledger-base return value.
     const verifyLandedAsOwnCommit = async (sha: string): Promise<string | undefined> => {
       if (preCommitHead === undefined || stagedTree === undefined) return undefined;
-      try {
-        const raw = await withTimeout(git.raw(["cat-file", "-p", sha]), timeoutMs, "git cat-file -p <sha> (canonical, own-commit parent-count verify — immune to grafts/replace-refs)");
-        const headerEnd = raw.indexOf("\n\n");
-        const header = (headerEnd === -1 ? raw : raw.slice(0, headerEnd)).split(/\r?\n/);
-        const parentLines = header.filter((l) => l.startsWith("parent "));
-        if (parentLines.length !== 1) return undefined; // exactly one parent
-        if (parentLines[0]!.slice("parent ".length).trim() !== preCommitHead) return undefined; // and it must be ours
-        const tree = (await withTimeout(git.raw(["rev-parse", `${sha}^{tree}`]), timeoutMs, "git rev-parse <sha>^{tree} (canonical, own-commit tree verify)")).trim();
-        if (tree !== stagedTree) return undefined;
-        return preCommitHead;
-      } catch {
-        return undefined;
-      }
+      // @decision 95940402 — no try/catch here: verifyCommitParentAndTree already catches its own
+      // git-read failures and resolves {ok:false} rather than throwing.
+      return (await verifyCommitParentAndTree(git, timeoutMs, sha, preCommitHead, stagedTree)).ok ? preCommitHead : undefined;
     };
     // @decision 2a6a292a round 23 (card aa7677fa round 5) — a bare `landedBase === undefined` collapses
     // "uncaptured" (nothing was ever checked) and "rejected" (checked — a real race) — a caller needs

@@ -708,7 +708,7 @@ type MergeBatchResult = {
   /** @decision c85f842d — keep `opId` OPTIONAL, unlike the solo path's — this method has real early
    *  bail-outs (ownership/repo-mismatch, too-few-candidates, no gateCommand) with no op minted yet. */
   opId?: string;
-  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[];
+  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[];
   /** @decision 553ea58c — use `landedCount`, the real git-verified total, never `landed.length` — that
    *  array under-reports if a worker session row was hard-deleted between selection and finalize. */
   landedCount?: number;
@@ -23213,7 +23213,7 @@ export class SessionService {
             };
           }
 
-          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[] = [];
+          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[] = [];
           for (const lb of result.landed) {
             const worker = this.db.getSession(lb.workerSessionId);
             if (!worker) continue;
@@ -23253,7 +23253,7 @@ export class SessionService {
             };
             if (!lb.assembledTip || !liveTip || liveTip !== lb.assembledTip) {
               const branchAdvancedDuringGate = noteRetained("pre-stop", liveTip);
-              landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, branchAdvancedDuringGate });
+              landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, strippedReservedLineCount: lb.strippedReservedLineCount, branchAdvancedDuringGate });
               continue;
             }
             // m3: the tip is re-checked INSIDE finalizeMerge (after the worker's hard stop/reap, just before the worktree
@@ -23282,7 +23282,7 @@ export class SessionService {
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
             // Claude-Session trailer that got stripped before landing — surface it to the calling manager
             // rather than leaving it as a console.warn only the host log would show.
-            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, ...(lateRetained ? { branchAdvancedDuringGate: lateRetained } : {}), ...(dirtyRetained ? { worktreeRetainedDirty: dirtyRetained } : {}) });
+            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, strippedReservedLineCount: lb.strippedReservedLineCount, ...(lateRetained ? { branchAdvancedDuringGate: lateRetained } : {}), ...(dirtyRetained ? { worktreeRetainedDirty: dirtyRetained } : {}) });
           }
           const droppedFallback = result.dropped.map((d) => ({ workerSessionId: d.workerSessionId, reason: d.reason }));
           const fallback = await runFallback([
