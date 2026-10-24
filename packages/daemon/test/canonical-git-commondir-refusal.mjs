@@ -470,20 +470,34 @@ if (process.platform === "win32") {
   check("(12e) the wording tells the human to VERIFY intent first, never presenting re-pin as the default", /verify/i.test(msg12e) && /escalate to the Platform Lead/i.test(msg12e));
   unpinFor(boundSub);
 
-  // (12e-2) Code Review M1 — a LONG (~100+ char) path's full live toplevel must survive
-  // describeGitFailure().text's 400-char cap intact: leading with the toplevel CHANGE, not repoPath/pin
-  // metadata, is what makes this possible on an ordinary path length.
+  // (12e-2) Code Review M1 — the live toplevel must survive describeGitFailure().text's 400-char cap
+  // EVEN WHEN the pinned value alone is long enough to overflow the cap if it led (the pre-M1 ordering).
+  // The pinned value is a SYNTHETIC string stored directly in the pin map — never independently walked,
+  // so it needs no real directory and can be made arbitrarily long without risking a Windows path-length
+  // failure; only the LIVE side needs to be a real, walkable repo. A realistic ~100-char real path (the
+  // reviewer's own "ordinary 80-100-char paths") would NOT actually have overflowed the cap even under
+  // the OLD ordering (measured: ~272 chars total) — this synthetic pinned value is what makes the test
+  // genuinely discriminating rather than vacuously passing under either ordering.
   const longSegment = "a-very-long-directory-segment-name-that-pads-this-path-out-toward-the-hundred-character-mark-for-M1";
   const longAncestor = initRepo("12e2-" + longSegment.slice(0, 40));
   const longSub = path.join(longAncestor, "bound-subproj-also-long-" + longSegment);
   fs.mkdirSync(longSub, { recursive: true });
-  pinFor(longSub); // pins to longAncestor
-  const longDecoy = initRepo("12e2-decoy-" + longSegment.slice(0, 40));
-  pinMap.set(literalRepoPathKey(longSub), { toplevel: longDecoy, pinnedAt: new Date().toISOString(), source: "bind", projectId: "x", repoKey: "primary" });
+  const syntheticPinnedToplevel = "C:\\synthetic\\" + "pinned-segment-".repeat(25) + "end"; // ~390 chars
+  pinMap.set(literalRepoPathKey(longSub), { toplevel: syntheticPinnedToplevel, pinnedAt: new Date().toISOString(), source: "bind", projectId: "x", repoKey: "primary" });
   const check12e2 = checkCommondirTrust(longSub, undefined);
-  check("(12e-2) sanity: the live toplevel here really is long enough to risk truncation", check12e2.ok === false && check12e2.liveToplevel.length > 60);
+  check("(12e-2) sanity: the pinned value alone is long enough that leading with it (pre-M1 ordering) would overflow the cap before live even starts", check12e2.ok === false && check12e2.pinnedToplevel.length > 350);
+  check("(12e-2) sanity: this scenario's raw reason really does exceed the 400-char cap overall", check12e2.reason.length > 400);
   const d12e2 = describeGitFailure(new CanonicalGitPinMismatchRefusal(check12e2.reason, check12e2.pinnedToplevel, check12e2.liveToplevel));
-  check("(12e-2) the FULL live toplevel survives describeGitFailure().text intact, not cut by the 400-char cap", d12e2.text.includes(check12e2.liveToplevel));
+  // @decision a8bc0404 — a bare `.text.includes(liveToplevel)` is VACUOUS here: `longSub` is always a
+  // subdirectory of its own resolved `liveToplevel` (the subdir-bound shape), so `repoPath` — which
+  // appears EARLY in the reason regardless of ordering — already contains `liveToplevel` as its own
+  // PREFIX substring, satisfying a bare `.includes()` even when the template's own INTENDED, quoted
+  // mention of live toplevel is the part that actually got truncated. Checking for the QUOTED form is
+  // what actually discriminates old (pinned-first) vs. new (live-first) ordering — measured directly:
+  // reconstructing the OLD template with these exact values truncates the quoted live value (NOT found),
+  // while the NEW template (this scenario's real reason) preserves it.
+  const quotedLive = `"${check12e2.liveToplevel}"`;
+  check("(12e-2) the FULL live toplevel still survives describeGitFailure().text intact (quoted, at its intended spot), despite the oversized pinned value", d12e2.text.includes(quotedLive));
   unpinFor(longSub);
 
   // (12f) card a8bc0404, reviewer N-1 — prepareCanonicalEnv's GIT_CEILING_DIRECTORIES, for a subdir-bound
