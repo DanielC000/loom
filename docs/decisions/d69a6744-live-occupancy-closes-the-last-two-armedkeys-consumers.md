@@ -127,7 +127,10 @@ secondary outright), and (Round 3, after a Code Review found the freshness decli
 OTHER established precedents) `provenanceUnknown` marking — reusing `db0a9db0`'s own existing field and
 clear-by-id refusal — for the shape where a ghost third party reaches the collision first. **Round 3's own
 marking was itself order-dependent for a specific three-party read order (fixed in Round 4 — the marking
-check now tests the STANDING prior too, not just the incoming entry).** See
+check now tests the STANDING prior too, not just the incoming entry).** A marked union is never unrecoverable, only unresolvable BY BARE ID: clear-by-id refuses it, but a clear
+addressed to the union's own RECORDED identity (clear-by-path, or the project `/clear` when that recorded
+identity happens to be a real, resolvable registered repo) still lifts the WHOLE union — disclosed, not
+silent, since the refusal text already named the ambiguity before any such clear runs. See
 `docs/decisions/e7652e06-boot-freshness-not-resolvability-parity.md`, especially its own "Round 3" AND
 "Round 4" sections, before trusting a shortened restatement of this (including this one).
 

@@ -40,6 +40,7 @@ const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-qua
 const {
   listActiveMergeQuarantines, assertRepoNotQuarantined, MERGE_QUARANTINE_DIR,
   reenterMergeQuarantinesAtBoot, enterMergeQuarantine, clearMergeQuarantineByToken,
+  clearMergeQuarantineLatchFile, quarantineLatchIdFor, clearMergeQuarantineByRecordedPath,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 const GIT_ID = "-c user.email=e7652e06@loom -c user.name=e7652e06";
@@ -254,6 +255,30 @@ function scenarioThirdPartyBackedCase4Unchanged() {
   const union = listActiveMergeQuarantines().find((e) => (e.tokens ?? []).includes(xToken) || (e.tokens ?? []).includes(zToken));
   check("*** CASE 4 UNCHANGED *** x and z union into ONE entry, backed by sub's own genuine identity", !!union && (union.tokens ?? []).includes(xToken) && (union.tokens ?? []).includes(zToken));
   check("*** CASE 4 UNCHANGED *** x's own identity stays queryable/blocked (never lost in the union)", !assertRepoNotQuarantined(x).ok);
+
+  // *** CODE REVIEW fb1580b8, SF-2 *** — x's own secondary claim at kSub is non-fresh (x never freshly
+  // owns kSub; sub does), so round 4's prior-side check marks THIS union too — a deliberate, measured
+  // side effect (see the decision record's "Round 4" section), not an accident. Pin it directly.
+  check("*** SF-2 *** the x/z/sub union carries provenanceUnknown (x's own non-fresh claim at kSub)", !!union?.provenanceUnknown);
+
+  const xId = clearMergeQuarantineLatchFile(quarantineLatchIdFor(x));
+  check("*** SF-2 *** clear-by-id(x) refuses (ambiguous/incomplete provenance)", xId.ok === false);
+  check("*** SF-2 *** x stays blocked after the refused clear-by-id", !assertRepoNotQuarantined(x).ok);
+
+  // The union's own RECORDED repoPath is x (the "older" identity, kept as the base by
+  // unionQuarantineEntries) — clear-by-path on THAT identity lifts the whole (disclosed) union and
+  // removes every one of its own physical latch files. Check THIS scenario's own two files specifically
+  // (never the whole MERGE_QUARANTINE_DIR — earlier scenarios in this file leave their own files behind).
+  check("(precondition) the union's own recorded repoPath is x", union?.repoPath === x);
+  const xLatchFile = path.join(MERGE_QUARANTINE_DIR, `${hashKey(kX)}.json`);
+  const xPath = clearMergeQuarantineByRecordedPath(x);
+  check("*** SF-2 *** clear-by-path(x) lifts the union", xPath.wasQuarantined === true);
+  check("*** SF-2 *** x is unblocked after clear-by-path(x)", assertRepoNotQuarantined(x).ok);
+  check("*** SF-2 *** x's own latch file is gone from disk", !fs.existsSync(xLatchFile));
+  check("*** SF-2 *** z's own latch file is gone from disk", !fs.existsSync(zFile));
+
+  reenterMergeQuarantinesAtBoot([sub, x]);
+  check("*** SF-2 *** x stays unblocked after a reboot (the clear durably survives, no re-quarantine)", assertRepoNotQuarantined(x).ok);
 }
 
 scenarioThirdPartyBackedCase4Unchanged();

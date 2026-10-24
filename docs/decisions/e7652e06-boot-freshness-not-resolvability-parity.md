@@ -498,15 +498,29 @@ silent assumption that none exists.
   - `legit-r-s-union` (CASE 1) — the genuine toplevel-recompute collision; R and S correctly union,
     carrying both genuine tokens.
   - `third-party-backed-case4-unchanged` (CASE 4) — the `9a55fb90`/`d163aef5` `x`/`z`/`sub` shape; `x` and
-    `z` still union, backed by `sub`'s own genuine, not-yet-processed identity.
+    `z` still union, backed by `sub`'s own genuine, not-yet-processed identity. (Round 4, Code Review
+    `fb1580b8` SF-2) — this SAME scenario ALSO pins the deliberate marking side effect: the union carries
+    `provenanceUnknown`, `clearMergeQuarantineLatchFile` on `x`'s own id refuses, `clearMergeQuarantineByRecordedPath(x)`
+    (the union's own RECORDED identity) lifts it and deletes both `x`'s and `z`'s own physical latch
+    files, and `x` stays unblocked after a reboot.
 - RED/GREEN via `pnpm --filter @loom/daemon negative-control --file packages/daemon/src/git/merge-quarantine.ts
   --test packages/daemon/test/merge-quarantine-e7652e06-boot-freshness-discriminator.mjs` (default `--ref HEAD`,
   this card's true parent, commit `38f35bdb`) — 5 of the new file's checks fail on the parent (the
   headline forward-order fail-open AND the reverse-order stranding), all pass after the fix, tree restored
-  byte-identical.
-- Full `merge-quarantine*.mjs` corpus (71 files), individually, fresh `LOOM_HOME` per file, both env
-  states (`env -u LOOM_DEV -u LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane — re-run clean
-  after EACH of Round 2 and Round 3's own shipped fixes; every regression either round's own intermediate
-  attempt caused was caught by this exact run, never by review or the new scenarios alone.
+  byte-identical. Round 4's own SF-2 additions were separately RED/GREEN-proven against `295ba4b9` (the
+  true Round-3 parent): exactly the 4 new SF-2 checks that depend on marking fail (the union forms
+  unmarked, clear-by-id(x) succeeds instead of refusing, and the subsequent clear-by-path call then finds
+  nothing left to lift), all pass after Round 4's fix.
+- Full `merge-quarantine*.mjs` corpus — 71 files through Round 3, 72 from Round 4 on (adding this card's
+  own new test file) — individually, fresh `LOOM_HOME` per file, both env states (`env -u LOOM_DEV -u
+  LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane — re-run clean after EACH of Round 2, Round
+  3, and Round 4's own shipped fixes; every regression any round's own intermediate attempt caused was
+  caught by this exact run, never by review or the new scenarios alone. **Round 4 specifically: 144 runs
+  (72 files × 2 env states), run with NOTHING ELSE concurrent in this worktree** — an earlier attempt that
+  overlapped a `negative-control` call (which rebuilds `dist/`) with this same corpus run produced exactly
+  one `TypeError` from a cache-busted `dist/git/merge-quarantine.js` re-import racing the concurrent
+  rebuild; a clean, isolated re-run (and a 20-vs-20 branch/reverted A/B, same file, same env, nothing else
+  running) reproduced zero failures on either side — a process artifact from violating the one-lane rule,
+  not a code defect either pre- or post-fix.
 - `pnpm --filter @loom/daemon guards`, committed first.
 - See "Round 3" above for the reviewer-probe verification specific to that round's own fix.

@@ -28,7 +28,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { useOwnLoomHome, registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 useOwnLoomHome("loom-e7652e06b1-");
@@ -54,6 +54,7 @@ const hashKey = (key) => createHash("sha256").update(key).digest("hex").slice(0,
 function makeRepo(tag) {
   const repo = path.join(os.tmpdir(), `loom-e7652e06b1-${tag}-${sfx()}`);
   fs.mkdirSync(repo, { recursive: true });
+  registerForCleanup(repo); // belt-and-suspenders exit-time backstop; each scenario also cleans up directly
   fs.writeFileSync(path.join(repo, "a"), "x");
   execFileSync("git", ["init", "-q"], { cwd: repo });
   commitAll(repo, "init", GIT_ID);
@@ -86,7 +87,21 @@ function runScenario(order, older) {
     fs.rmSync(yCand, { recursive: true, force: true });
   }
   if (!F) throw new Error(`${tag}: could not find an F/Y pair sorting as ${order} within 50 tries`);
+  try {
+    runScenarioBody(tag, order, older, F, Y, kF, kY);
+  } finally {
+    // *** CODE REVIEW fb1580b8, NIT *** — each scenario shares ONE LOOM_HOME/MERGE_QUARANTINE_DIR across
+    // all 18 scenarios by design (cheap, matches this test family's own convention) — without this,
+    // earlier scenarios' latches bleed into later boots and ~36 tmp repos leak per run. Clean up this
+    // scenario's own repos and reset the quarantine dir before the next one starts.
+    fs.rmSync(F, { recursive: true, force: true });
+    fs.rmSync(Y, { recursive: true, force: true });
+    fs.rmSync(MERGE_QUARANTINE_DIR, { recursive: true, force: true });
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  }
+}
 
+function runScenarioBody(tag, order, older, F, Y, kF, kY) {
   const now = Date.now();
   const age = (n) => now + (older === n ? -100_000 : 0);
   const fTok = `${tag}-f-${sfx()}`;
