@@ -312,6 +312,9 @@ check("the Atlas findings surface takes the RESOLVED edition as a prop, never an
 // refactor and a silently re-opened trust boundary, because the gate is a prop thread: every hop is a
 // place it can be dropped on ONE layout and stay green on every test that walks the other.
 const promptEditorSrc = readFileSync(new URL("../src/components/AgentPromptEditor.tsx", import.meta.url), "utf8");
+// The shared ⌘/Ctrl+Enter handler the prompt editor's textarea delegates to — read here because the
+// readOnly gate below is only as strong as what the helper does with the `enabled` it is handed.
+const modEnterSrc = readFileSync(new URL("../src/lib/modEnter.ts", import.meta.url), "utf8");
 const sessionTileSrc = readFileSync(new URL("../src/components/PlatformSessionTile.tsx", import.meta.url), "utf8");
 const terminalCardSrc = readFileSync(new URL("../src/components/TerminalCard.tsx", import.meta.url), "utf8");
 const runHistorySrc = readFileSync(new URL("../src/components/RunHistory.tsx", import.meta.url), "utf8");
@@ -399,8 +402,14 @@ check("AgentPromptEditor's readOnly holds the TEXTAREA, so Ctrl/Cmd+Enter cannot
     "the textarea itself must be readOnly — not just the Save button");
   assert.match(promptEditorSrc, /const dirty = !readOnly && draft !== saved/,
     "dirty must fold in readOnly — it is what gates the Ctrl/Cmd+Enter save path");
-  assert.match(promptEditorSrc, /e\.key === "Enter" && \(e\.metaKey \|\| e\.ctrlKey\) && dirty/,
+  // The handler itself is now the SHARED one (src/lib/modEnter.ts, card c6b80cf7) — the project-agent
+  // editor had drifted without it. So this claim takes two reads rather than one: the textarea must
+  // still pass `dirty` as the enabling condition, AND the helper it passes it to must be the thing that
+  // honours it. Asserting only the call site would pass against a helper that ignored `enabled`.
+  assert.match(textareas[0], /onKeyDown=\{modEnterSubmit\(dirty && !save\.isPending,/,
     "the Ctrl/Cmd+Enter handler must still be gated on dirty, or the fold above buys nothing");
+  assert.match(modEnterSrc, /e\.key !== "Enter" \|\| !\(e\.metaKey \|\| e\.ctrlKey\) \|\| !enabled/,
+    "modEnterSubmit must refuse unless it is Enter WITH a modifier AND enabled is true");
 });
 
 check("RunHistory's Resume button is held by previewOnly, and the row receives the flag", () => {

@@ -16,6 +16,7 @@ import { profileRoleBindsAsPlainSession, type Agent, type SessionRole } from "@l
 import { api } from "../lib/api";
 import { Button, Input, Select } from "./ui";
 import { isDevLayerRole } from "../lib/roleDisplay";
+import { modEnterSubmit } from "../lib/modEnter";
 import { useFormSync } from "../lib/useFormSync";
 import { color, font } from "../theme";
 
@@ -200,7 +201,10 @@ export function AgentEditor(
         <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>Startup prompt</span>
         <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>injected as the first turn of each new session</span>
       </div>
+      {/* ⌘/Ctrl+Enter saves, from the one shared handler AgentPromptEditor uses (lib/modEnter.ts) — the
+          same gate as the Save button beside it, so the keyboard can never write what the button won't. */}
       <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} spellCheck={false}
+        onKeyDown={modEnterSubmit(dirty && !saving, () => onSavePrompt(prompt))}
         data-testid={`agent-prompt-${agent.id}`}
         style={{
           flex: 1, minHeight: 0, width: "100%", boxSizing: "border-box", resize: "none",
@@ -209,6 +213,7 @@ export function AgentEditor(
         }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} data-testid={`agent-save-${agent.id}`}
+          title="Save the startup prompt (⌘/Ctrl+Enter)"
           onClick={() => onSavePrompt(prompt)}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setPrompt(seed)}>Reset</Button>

@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { Button } from "./ui";
 import { color, font, radius } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
+import { modEnterSubmit } from "../lib/modEnter";
 
 // Reserved-home agent prompt editor (card 7cffd759) — the view/edit surface for a reserved-home agent's
 // `startupPrompt`: the kickoff injected as the FIRST turn of that agent's NEXT new session (never on
@@ -82,11 +83,12 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
           </p>
           <textarea value={draft} rows={10} spellCheck={false} readOnly={readOnly}
             onChange={(e) => { if (!readOnly) setDraft(e.target.value); }}
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && dirty && !save.isPending) { e.preventDefault(); save.mutate(); } }}
+            onKeyDown={modEnterSubmit(dirty && !save.isPending, () => save.mutate())}
             placeholder="The kickoff prompt this agent boots with…"
             className="loom-field" style={textareaStyle} />
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+            <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}
+              title="Save the startup prompt (⌘/Ctrl+Enter)">
               {save.isPending ? "Saving…" : "Save prompt"}
             </Button>
             <Button disabled={!dirty || save.isPending} onClick={() => setDraft(saved)}
