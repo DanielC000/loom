@@ -444,12 +444,31 @@ try {
 
   const clearIdResult = clearMergeQuarantineLatchFile(Krhash);
   if (variant === "p") inject.restore();
-  check(`*** THE FIX (tp:clearid-${variant}) *** clearMergeQuarantineLatchFile(<Kr hash>) does not destroy D's tmp residue`, fs.existsSync(dTmpFile));
+  // @decision 656fdf39 (CR 66fad7ed round 2, B3) — re-baselined for "t" only. `reenterMergeQuarantinesAtBoot([])`
+  // (above, before any injection) already READ dTmpFile successfully and armed D as a genuine, non-placeholder
+  // PENDING entry (real branch/tokens, a `resolvedKey` — never card 702b4241's own synthetic placeholder
+  // shape) self-referencing dTmpFile as its own sourceFile — confirmed directly via listActiveMergeQuarantines()
+  // right before this call. So `clearMergeQuarantineLatchFile`'s own matched-pending branch finds D's REAL
+  // tokens already in memory; once the injected failure lifts ("t"), the pre-existing coverage proof
+  // (markedFinalFullyCoveredByClear) reads dTmpFile fresh, finds its on-disk tokens an EXACT match for D's
+  // already-known tokens, and correctly lifts + discharges — this is 656fdf39's own fix working as intended on
+  // a GENUINELY, already-fully-known entry, never an adopt-from-disk shortcut (reconcileClearedEntryIfPlaceholder
+  // is a no-op here: D's entry was never placeholder-shaped). "p" is UNCHANGED: the injection is still active
+  // during this exact call, so the fresh read fails and the file correctly stays kept.
+  if (variant === "p") {
+    check(`*** THE FIX (tp:clearid-${variant}) *** clearMergeQuarantineLatchFile(<Kr hash>) does not destroy D's tmp residue`, fs.existsSync(dTmpFile));
+  } else {
+    check(`*** THE FIX (tp:clearid-${variant}) *** clearMergeQuarantineLatchFile(<Kr hash>) genuinely lifts D — its own tmp residue is removed, fully covered`, !fs.existsSync(dTmpFile));
+  }
   check(`(tp:clearid-${variant}) clearMergeQuarantineLatchFile reports ok (never throws)`, clearIdResult?.ok === true);
 
   const fresh = await freshBootModule();
   fresh.reenterMergeQuarantinesAtBoot([]);
-  check(`*** THE FIX (tp:clearid-${variant}, reboot) *** D's own token SURVIVES`, new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(`d-token-tp-clearid-${variant}`));
+  if (variant === "p") {
+    check(`*** THE FIX (tp:clearid-${variant}, reboot) *** D's own token SURVIVES`, new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(`d-token-tp-clearid-${variant}`));
+  } else {
+    check(`*** THE FIX (tp:clearid-${variant}, reboot) *** D is NOT re-quarantined — the genuine lift stays lifted`, !new Set(fresh.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(`d-token-tp-clearid-${variant}`));
+  }
   }
 
   // ---- tp:reraise2 — clear(r); enterMergeQuarantine(r) twice; the SECOND (existing-branch) write's own

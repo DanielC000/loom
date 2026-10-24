@@ -1459,7 +1459,7 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, droppedTokens: R
     // itself unresolvable.
     // @decision 21ec39e5 — `entry.tokens` as `candidateTokens`: this write's own superset argument (see
     // the comment above) now PROVES, rather than assumes, that no older tmp for this key is destroyed.
-    if (sweepOtherTmpsOnSuccess) sweepTmpResidueForHashIfUnreferenced(targetKey ? quarantineHashForKey(targetKey) : quarantineHashFor(entry.repoPath), { mode: "content-checked", candidateTokens: entry.tokens });
+    if (sweepOtherTmpsOnSuccess) sweepTmpResidueForHashIfUnreferenced(targetKey ? quarantineHashForKey(targetKey) : quarantineHashFor(entry.repoPath), { mode: "content-checked", candidateTokens: entry.tokens }, undefined, false);
     return true;
   } catch (e) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already broken; nothing more to close */ } }
@@ -1835,6 +1835,64 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
   return onDiskTokens.every((t) => candidateTokens.includes(t) || clearedTokens.has(t));
 }
 
+/**
+ * @decision 656fdf39 (CR 66fad7ed round 2) — before a clear decides anything, re-ingest a marked
+ * basename's real content as a successful boot read would (reusing {@link latchEntryFromParsedRecord}/
+ * {@link detectUnknownProvenance}); the decision record's "Round 2" has the full rationale.
+ *
+ * Gated on {@link isUnreadablePlaceholderEntry}: a bare placeholder was never independently verified, so
+ * adopting disk's content wholesale is safe. A NON-placeholder entry is returned UNCHANGED — touching its
+ * tokens could adopt a degraded-key co-occupant's own token (CR 66fad7ed's B1 adversarial probe); see the
+ * record for why the pre-existing coverage check, not this function, must be what refuses that shape.
+ *
+ * @decision 656fdf39 (CR d1e02886 round 3) — ONLY called from the three identity-wide human clear routes
+ * (gated via `identityWideHumanClear:true`, never a token-scoped clear). Every disk field is now UNIONED
+ * into `entry`'s own, never overwritten either direction.
+ */
+function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physicalPath: string): MergeQuarantineEntry {
+  if (!isUnreadablePlaceholderEntry(entry)) return entry;
+  let raw: string;
+  try { raw = fs.readFileSync(physicalPath, "utf8"); } catch { return entry; }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return entry; } // corrupt — nothing usable to re-ingest
+  if (!isReadableLatchRecord(parsed)) return entry; // e.g. the bare literal `null`
+  if (typeof parsed.repoPath !== "string" || directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) return entry; // a different identity — never ours to adopt
+  if (isPlaceholderEntryShape(parsed) || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return entry; // still not genuine content
+  const reingested = latchEntryFromParsedRecord(parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string });
+  const finalOwnHash = path.basename(physicalPath, ".json");
+  // @decision db0a9db0 (round 4) — run the SAME detector every other re-parse site uses, on the
+  // REINGESTED record's own disk-sourced keys, mirroring reconcileMarkedBasenameBeforeWrite's own
+  // identical call — never force `provenanceTracked: true` here either.
+  const reingestedUnknownProvenance = detectUnknownProvenance(reingested, finalOwnHash);
+  // @decision 656fdf39 (CR d1e02886 round 3) — same `positivelyForeignKey` filter as the sibling fold
+  // branch in `reconcileMarkedBasenameBeforeWrite`: drop a key ONLY when a live, different-identity
+  // occupant owns it right now — never merely unprovable. Live `activeQuarantines` is correct here.
+  const onDiskKeys = informativeKeysFor(reingested).filter((k) => quarantineHashForKey(k) !== finalOwnHash && !positivelyForeignKey(k, entry, activeQuarantines));
+  const orphanLatchFiles = entry.orphanLatchFiles || reingested.orphanLatchFiles
+    ? [...new Set([...(entry.orphanLatchFiles ?? []), ...(reingested.orphanLatchFiles ?? [])])]
+    : undefined;
+  const contributorRepoPaths = entry.contributorRepoPaths || reingested.contributorRepoPaths
+    ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])]
+    : undefined;
+  return {
+    ...reingested,
+    // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too (it can already carry a REAL
+    // raiser's own token, unioned in before this basename ever became readable), filtering OUT every
+    // {@link unreadablePlaceholderTokens} member — the SAME two rules reconcileMarkedBasenameBeforeWrite's
+    // own placeholder branch already applies.
+    tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingested.tokens])],
+    resolvedKey: entry.resolvedKey,
+    resolvedKeys: onDiskKeys.length > 0
+      ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeys, `reconcileClearedEntryIfPlaceholder(${entry.repoPath})`)
+      : entry.resolvedKeys,
+    armedKeys: entry.armedKeys,
+    orphanLatchFiles,
+    contributorRepoPaths,
+    // @decision 4913e721 — OR in `entry`'s own (caller's live) mark too, never disk-only.
+    provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
+  };
+}
+
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
  *  residue for KEY — a failed write DELIBERATELY leaves its tmp behind (round 2: it's the only durable
  *  record of an active quarantine until resolved) — HERE, at clear time, is where it gets swept.
@@ -1873,7 +1931,7 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
  * claimant ({@link survivingSharedClaimRepoPaths}) that kept `final` on disk (empty if none) — a check
  * that never yields to `provenCoverage`. See the decision record.
  */
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string | undefined, liftedKeys: ReadonlySet<string>): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; unattributed?: true } {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string | undefined, liftedKeys: ReadonlySet<string>, identityWideHumanClear: boolean): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; unattributed?: true } {
   const final = quarantinePathForKey(key);
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — every key THIS clear is itself touching, never
   // `key` alone — the caller computes it (via `ownedKeysIncluding`/`keysToLift`) and must pass it
@@ -1980,7 +2038,11 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   //
   // @decision 21ec39e5 (round 2) — `unconditional-owner-protected`: already content-protected above,
   // via `protectForeignTmpResidueBeforeSweep` — a second, redundant check here would only rot alone.
-  sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key), { mode: "unconditional-owner-protected" });
+  //
+  // @decision 656fdf39 (CR 66fad7ed round 2) — pass `clearedEntry`: a marked same-hash tmp residue can
+  // now be re-ingested (iff still a bare placeholder) and discharged once proven covered, never kept forever.
+  // @decision 656fdf39 (CR d1e02886 round 3) — and pass `identityWideHumanClear` straight through, unmodified.
+  sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key), { mode: "unconditional-owner-protected" }, clearedEntry, identityWideHumanClear);
   // @decision 182c01cc (round 2/4) — two SEPARATE buckets, never merged: `kept` (never unlinked) and
   // `relocated` (moved to its own new sourceFile) are genuinely different physical outcomes.
   return {
@@ -3620,7 +3682,8 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       for (const k of plan.ownedArmedKeys) {
         activeQuarantines.delete(k);
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        const { relocated } = deleteMergeQuarantineLatchByKey(k, undefined, live.entry, identity, L);
+        // @decision 656fdf39 (CR d1e02886 round 3) — `false`: a token-scoped clear is never identity-wide.
+        const { relocated } = deleteMergeQuarantineLatchByKey(k, undefined, live.entry, identity, L, false);
         // @decision 182c01cc (round 2, item 4) — clearMergeQuarantineByToken has no human route to report
         // a relocation through; LOG it (disclosure-safe: repoPath + pending id, never content) rather than
         // silently discarding it, same as clearActiveEntryTokenAtKey's own full-lift call below.
@@ -3755,7 +3818,8 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     //
     // @decision 8db913e2 (Follow-up d6efbc9b) — the delegated call's own touchedFinalBasenames-gated
     // tombstone can leave a RELEASED token un-tombstoned; tombstone it unconditionally here too.
-    const result = clearMergeQuarantineByKey(key, entry.repoPath);
+    // @decision 656fdf39 (CR d19f0490 round 4, nit 2) — `false` explicit: a token-scoped clear is never identity-wide.
+    const result = clearMergeQuarantineByKey(key, entry.repoPath, undefined, false);
     // @decision 182c01cc (round 2, item 4) — same disclosure-safe logging as clearTokenFromPendingIndices
     // above; clearMergeQuarantineByToken has no human route to report a relocation through otherwise.
     const { relocated } = splitCoOccupants(result?.stillBlockedCoOccupants, result?.referencingRepoPaths);
@@ -3815,7 +3879,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       //
       // @decision 21ec39e5 — `updated.tokens` as `candidateTokens`: the reduced set this write just made
       // durable at key `k`; a same-hash tmp holding anything outside it is never blindly deleted.
-      sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(k), { mode: "content-checked", candidateTokens: updated.tokens });
+      sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(k), { mode: "content-checked", candidateTokens: updated.tokens }, undefined, false);
     } else {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath} at key ${k} after a partial clear — the PRE-EXISTING durable state (this repo's own latch file, final or tmp) is left UNTOUCHED there, so a restart before this is fixed may re-arm with the just-cleared token still counted as outstanding at THAT key (delays the eventual full lift; never a false lift).`);
@@ -4225,7 +4289,13 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
 // (additive; see the decision record's "Round 4" section for why `referencingRepoPaths` alone can't
 // build a real `{id}` route).
 type TmpSweepPolicy = { mode: "unconditional-owner-protected" } | { mode: "content-checked"; candidateTokens: string[] };
-function sweepTmpResidueForHashIfUnreferenced(hash: string, policy: TmpSweepPolicy): { kept: boolean; referencingRepoPaths: string[]; keptEntries: Array<{ repoPath: string; sourceFile: string }>; contentKeptEntries: Array<{ repoPath: string; sourceFile: string }>; anyUnattributed: boolean } {
+// @decision 656fdf39 (CR 66fad7ed round 2) — `clearedEntry`, when passed, lets a marked same-hash tmp
+// residue re-ingest (iff it is still a bare placeholder — see reconcileClearedEntryIfPlaceholder's own
+// doc) and discharge once its own content is proven fully covered — never an identity-only shortcut.
+// @decision 656fdf39 (CR d1e02886 round 3/4) — `identityWideHumanClear`: the re-ingest below only ever
+// fires when the caller is one of the three identity-wide human clear routes. REQUIRED (round 4) —
+// mirrors `deleteMergeQuarantineLatchByKey`'s own required param; every caller decides explicitly.
+function sweepTmpResidueForHashIfUnreferenced(hash: string, policy: TmpSweepPolicy, clearedEntry: MergeQuarantineEntry | undefined, identityWideHumanClear: boolean): { kept: boolean; referencingRepoPaths: string[]; keptEntries: Array<{ repoPath: string; sourceFile: string }>; contentKeptEntries: Array<{ repoPath: string; sourceFile: string }>; anyUnattributed: boolean } {
   const prefix = `${hash}.json.tmp-`;
   let files: string[];
   try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [], keptEntries: [], contentKeptEntries: [], anyUnattributed: false }; }
@@ -4237,7 +4307,18 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, policy: TmpSweepPoli
   let anyUnattributed = false;
   for (const f of files) {
     if (!f.startsWith(prefix)) continue;
-    if (keptUnreadableLatchFiles.has(f)) { anyUnattributed = true; continue; }
+    if (keptUnreadableLatchFiles.has(f)) {
+      // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest THIS tmp's own content into `clearedEntry`
+      // and let markedFinalFullyCoveredByClear decide, same posture as every other chokepoint this card
+      // touches. Falls through to the ordinary checks below only when genuinely covered.
+      const tmpPath = path.join(MERGE_QUARANTINE_DIR, f);
+      // @decision 656fdf39 (CR d1e02886 round 3, BLOCKING 1) — gated on `identityWideHumanClear`: a
+      // token-scoped clear reaches this same sweep via `deleteMergeQuarantineLatchByKey` and must never
+      // re-ingest a placeholder, or a stale mark discharges on a tautological coverage proof.
+      const reconciled = clearedEntry && identityWideHumanClear ? reconcileClearedEntryIfPlaceholder(clearedEntry, tmpPath) : undefined;
+      const dischargeable = reconciled !== undefined && markedFinalFullyCoveredByClear(tmpPath, reconciled.tokens);
+      if (!dischargeable) { anyUnattributed = true; continue; }
+    }
     const owners = new Set<string>();
     for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
     for (const p of pendingUnresolvedQuarantines) if (p.entry.orphanLatchFiles?.includes(f)) owners.add(p.entry.repoPath);
@@ -4246,7 +4327,11 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, policy: TmpSweepPoli
       continue;
     }
     if (policy.mode === "unconditional-owner-protected") {
-      try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort */ }
+      let unlinkConfirmed = true;
+      try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") unlinkConfirmed = false; }
+      if (keptUnreadableLatchFiles.has(f)) {
+        if (unlinkConfirmed) keptUnreadableLatchFiles.delete(f); else anyUnattributed = true;
+      }
       continue;
     }
     const safety = orphanSweepSafeToDelete(f, policy.candidateTokens);
@@ -4290,6 +4375,10 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
   // @decision 8db913e2 (Follow-up 95ea8d3f) — a stale mark must not outlive the resolved read failure that set it; see the
   // decision record for the pending-sweep-vs-deleteMergeQuarantineLatchByKey gap this closes. Omitting
   // `candidateTokens` (every pre-existing caller) keeps this byte-identical to before.
+  //
+  // @decision 656fdf39 (CR 66fad7ed round 2) — every caller now passes a RE-INGESTED `candidateTokens`
+  // (see reconcileClearedEntryIfPlaceholder) when its own entry was still a bare boot placeholder, so a
+  // once-unreachable coverage proof can now genuinely succeed — never an identity-only shortcut here.
   if (keptUnreadableLatchFiles.has(filename)) {
     const provenCoverage = !!candidateTokens && markedFinalFullyCoveredByClear(path.join(MERGE_QUARANTINE_DIR, filename), candidateTokens);
     if (!provenCoverage) return { kept: true, referencingRepoPaths: [] };
@@ -4382,6 +4471,17 @@ export function setActiveQuarantineTestOnly(key: string, entry: MergeQuarantineE
  *  {@link setActiveQuarantineTestOnly}'s own doc for why the `TestOnly` suffix is load-bearing. */
 export function markLatchFileUnreadableTestOnly(basename: string): void {
   keptUnreadableLatchFiles.add(basename);
+}
+
+/** TEST-ONLY: directly pushes `{entry, sourceFile}` into the REAL, module-global
+ *  {@link pendingUnresolvedQuarantines} array — the pending-array twin of
+ *  {@link setActiveQuarantineTestOnly}. Lets a test construct a pending entry without having to route
+ *  it through a real raise/divert/boot sequence — including a genuine `883e29bc`-style dual-tracked
+ *  twin (the SAME `entry` object reference also armed via `setActiveQuarantineTestOnly`) or a
+ *  structurally-tied-but-distinct pending record, on demand. Never imported by `index.ts` — see
+ *  {@link setActiveQuarantineTestOnly}'s own doc for why the `TestOnly` suffix is load-bearing. */
+export function pushPendingQuarantineTestOnly(entry: MergeQuarantineEntry, sourceFile: string): void {
+  pendingUnresolvedQuarantines.push({ entry, sourceFile });
 }
 
 /**
@@ -4477,8 +4577,18 @@ export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | un
  * `c9114934` it still durably PROTECTS a foreign degraded occupant's content before the unconditional
  * unlink destroys it; see `deleteMergeQuarantineLatchByKey`.
  */
-export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys?: ReadonlySet<string>): { wasQuarantined: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; unattributed?: true; stillBlockedCoOccupants: BlockedCoOccupant[] } | void {
-  const entry = activeQuarantines.get(key);
+// @decision 656fdf39 (CR d1e02886 round 3/4) — `identityWideHumanClear` gates the re-ingest below:
+// `true` ONLY from the three identity-wide human clear routes, NEVER a token-scoped clear. REQUIRED
+// (round 4) — mirrors `deleteMergeQuarantineLatchByKey`'s own required param.
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: boolean): { wasQuarantined: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; unattributed?: true; stillBlockedCoOccupants: BlockedCoOccupant[] } | void {
+  let entry = activeQuarantines.get(key);
+  // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest BEFORE anything below reads `entry.tokens`, so
+  // a stale boot placeholder's own synthetic token never feeds a coverage decision in its place; see
+  // reconcileClearedEntryIfPlaceholder's own doc for why this is safe only for a still-placeholder entry.
+  if (entry && identityWideHumanClear) {
+    const reconciled = reconcileClearedEntryIfPlaceholder(entry, quarantinePathForKey(key));
+    if (reconciled !== entry) { replaceEntryEverywhere(activeQuarantines, entry, reconciled); entry = reconciled; }
+  }
   // @decision 8db913e2 (round 4) — candidate tokens for the ONE tombstone call at the end of this
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
   // FOREIGN occupant (d2582692's shape) this clear ends up PROTECTING, not destroying.
@@ -4524,6 +4634,15 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     // key/orphan-file reference (decisions d4b25feb round 2, 1922be3a round 5, 882d6cff multi-claimant),
     // or a proven token subset.
     if (directPathIdentity(p.entry.repoPath) !== identity) continue;
+    // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest THIS twin's own sourceFile too, before its
+    // tokens/armedKeys are read below. An 883e29bc twin shares this object with `activeQuarantines` by
+    // reference — re-point every slot, never just this wrapper's own field.
+    // @decision 656fdf39 (CR d1e02886 round 3) — gated on `identityWideHumanClear`, same as the entry
+    // reconcile above — a token-scoped clear must never re-ingest this twin either.
+    if (identityWideHumanClear) {
+      const reconciledPending = reconcileClearedEntryIfPlaceholder(p.entry, path.join(MERGE_QUARANTINE_DIR, p.sourceFile));
+      if (reconciledPending !== p.entry) { replaceEntryEverywhere(activeQuarantines, p.entry, reconciledPending); p.entry = reconciledPending; }
+    }
     const subsetOfClearedTokens = !!entry && p.entry.tokens.length > 0 && p.entry.tokens.every((t) => entry.tokens.includes(t));
     const tiedViaKeyOrOrphanRef = !!entry && (keysToLift.some((k) => p.entry.armedKeys?.includes(k)) || !!entry.orphanLatchFiles?.includes(p.sourceFile));
     const tiedToThisEntity = !entry || p.entry === entry || tiedViaKeyOrOrphanRef || subsetOfClearedTokens;
@@ -4579,7 +4698,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // rather than a `keysToLift`-only set, so a key only a tied pending twin owns is still correctly
   // recognised as already lifted by this call (round-2 MAJOR 2 — this active loop used to miss it).
   for (const k of keysToLift) {
-    const r = deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, L);
+    const r = deleteMergeQuarantineLatchByKey(k, clearingRepoPath, entry, identity, L, identityWideHumanClear);
     for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, kc.sourceFile);
     for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, rc.sourceFile);
     // @decision 702b4241 (round 2) — fold an UNATTRIBUTED keep (card 702b4241's own basename-only
@@ -4588,7 +4707,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     if (r.unattributed) anyKeptUnattributed = true;
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
-  const sourceFilesToSweep: string[] = [];
+  // @decision 656fdf39 (CR 66fad7ed round 2) — paired with each pushed entry's OWN (already-reconciled)
+  // tokens, so the sweep below can pass a real `candidateTokens` instead of none at all.
+  const sourceFilesToSweep: Array<{ sourceFile: string; tokens: string[] }> = [];
   // @decision 07e3ad30 — never reassign this array via `.filter(cb)` here: the "remove" branch's own
   // protect call can push a fresh entry onto it mid-callback, and `.filter`'s reassigned return value
   // silently drops anything pushed past its own length snapshot. See the decision record.
@@ -4670,13 +4791,13 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       activeQuarantines.delete(k);
       touchedFinalBasenames.push(path.basename(quarantinePathForKey(k)));
       // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-      const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L);
+      const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L, identityWideHumanClear);
       for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, kc.sourceFile);
       for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, rc.sourceFile);
       // @decision 702b4241 (round 2) — same fold as the active loop above.
       if (r.unattributed) anyKeptUnattributed = true;
     }
-    sourceFilesToSweep.push(p.sourceFile);
+    sourceFilesToSweep.push({ sourceFile: p.sourceFile, tokens: p.entry.tokens });
     // @decision 07e3ad30 — resolve `p`'s own CURRENT index fresh, right now, never a precomputed one —
     // a push from the protect calls above lands at the tail and must never be disturbed by this splice.
     // See the decision record for why `p`'s own wrapper is never itself replaced-by-index by this.
@@ -4703,8 +4824,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — `kept` with an EMPTY `referencingRepoPaths` (an unconfirmed
   // EPERM/EBUSY unlink, or a marked-but-unprovable-coverage keep) still means something was kept — track
   // it via `anyKeptUnattributed` so it surfaces as `latchKept:true` too, never as plain success.
-  for (const f of sourceFilesToSweep) {
-    const result = sweepOwnLatchFileUnlessOwnedElsewhere(f);
+  // @decision 656fdf39 (CR 66fad7ed round 2) — pass each entry's OWN reconciled tokens as
+  // `candidateTokens`, so a genuinely-covered sourceFile can discharge via the pre-existing proof —
+  // never an identity-only shortcut.
+  for (const { sourceFile: f, tokens } of sourceFilesToSweep) {
+    const result = sweepOwnLatchFileUnlessOwnedElsewhere(f, tokens);
     if (result.kept) {
       if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.set(rp, f);
       else anyKeptUnattributed = true;
@@ -4727,7 +4851,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
-  tombstoneIfNotSurviving(candidateTokens, [...touchedFinalBasenames, ...sourceFilesToSweep]);
+  tombstoneIfNotSurviving(candidateTokens, [...touchedFinalBasenames, ...sourceFilesToSweep.map((s) => s.sourceFile)]);
   // @decision 2dd97aaa — a content-kept claimant whose own file no longer exists BY THE TIME this clear
   // returns (e.g. swept by a later step of this same call) is a ghost, never a real claim — drop it here,
   // right before this function's own result is built, rather than report a keep nothing backs any more.
@@ -4839,7 +4963,8 @@ export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolea
   if (!isRepoPathCurrentlyResolvable(repoPath)) {
     return clearMergeQuarantineByRecordedPath(repoPath);
   }
-  return clearMergeQuarantineByKey(canonicalRepoLockKey(repoPath), repoPath);
+  // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
+  return clearMergeQuarantineByKey(canonicalRepoLockKey(repoPath), repoPath, undefined, true);
 }
 
 /**
@@ -4901,6 +5026,10 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   const L = new Set<string>(activeLiftedKeys);
   for (const p of pendingUnresolvedQuarantines) {
     if (directPathIdentity(p.entry.repoPath) !== identity) continue;
+    // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest NOW, once, so BOTH this pass and the
+    // `matchedPending` pass below (the SAME wrapper objects) see the reconciled entry.
+    const reconciledPending = reconcileClearedEntryIfPlaceholder(p.entry, path.join(MERGE_QUARANTINE_DIR, p.sourceFile));
+    if (reconciledPending !== p.entry) { replaceEntryEverywhere(activeQuarantines, p.entry, reconciledPending); p.entry = reconciledPending; }
     // @decision 1fc3a561 — widened to {@link liveArmedKeysOf}, same reason as the sibling site in
     // `clearMergeQuarantineByKey`. See the decision record.
     const ownedArmedKeys = liveArmedKeysOf(p.entry).filter((k) => entryStillOwnsKey(k, p.entry));
@@ -4925,7 +5054,8 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   if (matched.length > 0) {
     wasQuarantined = true;
     for (const m of matched) {
-      const result = clearMergeQuarantineByKey(m.key, m.repoPath, L);
+      // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
+      const result = clearMergeQuarantineByKey(m.key, m.repoPath, L, true);
       // @decision 182c01cc (round 2) — split EVERY result's own stillBlockedCoOccupants by whether it's
       // also named in referencingRepoPaths (kept) or not (relocated) — never assume "has latchKept" means
       // "every entry here is kept"; a single delegated call can carry BOTH kinds at once.
@@ -4973,7 +5103,8 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
         activeQuarantines.delete(k);
         pendingTouchedBasenames.push(path.basename(quarantinePathForKey(k)));
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
-        const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L);
+        // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
+        const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L, true);
         for (const kc of r.kept) keptReferencingRepoPaths.set(kc.repoPath, blockedCoOccupant(kc.repoPath, kc.sourceFile));
         for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, blockedCoOccupant(rc.repoPath, rc.sourceFile));
         // @decision 702b4241 (round 2) — same fold as clearMergeQuarantineByKey's own two loops.
@@ -4984,8 +5115,8 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
       // pendingUnresolvedQuarantines above, so this correctly checks whether a SURVIVING entry (e.g. a
       // fresh raise reusing the freed key) now physically owns this exact filename.
       //
-      // @decision 8db913e2 (Follow-up 95ea8d3f) — `p.entry.tokens` as `candidateTokens`, so a stale keptUnreadableLatchFiles
-      // mark set by an unrelated identity's own earlier read failure can't outlive it forever here either.
+      // @decision 8db913e2 (Follow-up 95ea8d3f) — `p.entry.tokens` as `candidateTokens`, so a stale mark
+      // can't outlive it forever. `p.entry` was already re-ingested above (656fdf39) when still placeholder-shaped.
       const sweepResult = sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile, p.entry.tokens);
       if (sweepResult.kept) {
         if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(rp, blockedCoOccupant(rp, p.sourceFile));
@@ -5506,9 +5637,21 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   for (const [key, matchedEntry] of activeQuarantines) {
     if (quarantineHashForKey(key) === id) { activeMatch = { key, entry: matchedEntry }; break; }
   }
+  // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest BEFORE the ambiguity checks below ever read
+  // `provenanceUnknown`/`contributorRepoPaths`, or a boot placeholder's own blank provenance can let an
+  // ambiguous union's refusal never fire (CR 66fad7ed's B2).
+  if (activeMatch) {
+    const reconciled = reconcileClearedEntryIfPlaceholder(activeMatch.entry, quarantinePathForKey(activeMatch.key));
+    if (reconciled !== activeMatch.entry) { replaceEntryEverywhere(activeQuarantines, activeMatch.entry, reconciled); activeMatch = { key: activeMatch.key, entry: reconciled }; }
+  }
   // @decision 6237bef6 (round 2, item 1) — collect EVERY pending entry sharing this id, never just the
   // first found — see the decision record for the multi-pending-entries-per-id repro this closes.
   const matchedPending = pendingUnresolvedQuarantines.filter((p) => pendingLatchIdFor(p.sourceFile) === id);
+  // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest EVERY matched pending entry too, same reason.
+  for (const p of matchedPending) {
+    const reconciled = reconcileClearedEntryIfPlaceholder(p.entry, path.join(MERGE_QUARANTINE_DIR, p.sourceFile));
+    if (reconciled !== p.entry) { replaceEntryEverywhere(activeQuarantines, p.entry, reconciled); p.entry = reconciled; }
+  }
   if (activeMatch) {
     // @decision 9a55fb90 — a bare id cannot tell "clear the entry armed here" apart from "clear by the
     // id a DIFFERENT, currently-resolvable canonical owner's own refusal happened to name" — both
@@ -5547,7 +5690,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
           `refusing to guess which one you meant. Clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify(candidates)}.`,
       };
     }
-    const activeClearResult = clearMergeQuarantineByKey(activeMatch.key, activeMatch.entry.repoPath);
+    // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
+    const activeClearResult = clearMergeQuarantineByKey(activeMatch.key, activeMatch.entry.repoPath, undefined, true);
     // @decision 64283e06 (CR 3439677b, item 3) — surface clearMergeQuarantineByKey's OWN latchKept/
     // referencingRepoPaths too, the same way the pending branch below already does, instead of discarding
     // the return value.
@@ -5640,7 +5784,9 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       pendingCandidateTokens.push(...pending.entry.tokens);
       pendingTouchedBasenames.push(pending.sourceFile);
       for (const f of pending.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
-      const ownFolded = foldOrphanSweepResult(sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile), pending.sourceFile, new Map());
+      // @decision 656fdf39 (CR 66fad7ed round 2) — `pending.entry` was already re-ingested at the top of
+      // this function when still placeholder-shaped, so `.tokens` here is the real, reconciled set.
+      const ownFolded = foldOrphanSweepResult(sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile, pending.entry.tokens), pending.sourceFile, new Map());
       for (const rp of ownFolded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupant(rp, pending.sourceFile)); }
       if (ownFolded.unattributed) anyKeptUnattributed = true;
     }
@@ -5664,9 +5810,11 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision be79f4d5 — `${id}.json` is check-2-only (9cabd143 unchanged) ONLY when it's actually one
     // of the entries matched/removed above; otherwise it may be a DIFFERENT surviving entry's own
     // orphan reference sharing this hash prefix, so route it through the full check-1-AND-2 sweep.
-    const idJsonIsMatchedSourceFile = matchedPending.some((p) => p.sourceFile === `${id}.json`);
+    const matchedSourceFileEntry = matchedPending.find((p) => p.sourceFile === `${id}.json`);
+    const idJsonIsMatchedSourceFile = matchedSourceFileEntry !== undefined;
     const finalSweep = idJsonIsMatchedSourceFile
-      ? sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`)
+      // @decision 656fdf39 (CR 66fad7ed round 2) — the matched entry's OWN (already-reconciled) tokens.
+      ? sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`, matchedSourceFileEntry.entry.tokens)
       // @decision 8db913e2 (Follow-up f2cc5f18) — same `pendingCandidateTokens`, still in scope.
       : sweepOrphanLatchFileIfUnreferenced(`${id}.json`, pendingCandidateTokens, matchedIdentities);
     // @decision 182c01cc (round 5, MAJOR) — `blockedCoOccupantForReferencer`, never the bare
@@ -5683,7 +5831,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     //
     // @decision 21ec39e5 — `content-checked`, `pendingCandidateTokens` as `candidateTokens`, same as the
     // sibling `.json` sweep above.
-    const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, { mode: "content-checked", candidateTokens: pendingCandidateTokens });
+    const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, { mode: "content-checked", candidateTokens: pendingCandidateTokens }, undefined, false);
     // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — deliberately INLINE, never through
     // `foldOrphanSweepResult`: its multi-entry shape doesn't fit that helper's one-sourceFile-per-call form.
     if (tmpSweep.referencingRepoPaths.length > 0) for (const ke of tmpSweep.keptEntries) { keptRepoPaths.add(ke.repoPath); keptCoOccupants.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile)); }
@@ -5731,7 +5879,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // @decision be79f4d5 — the tmp-residue twin of the `.json` sweep just above: ownership-checked, never
   // an unconditional-by-hash delete. `content-checked`, `[]` as `candidateTokens` (same as the sibling
   // `.json` sweep above) — nothing is being lifted here, so nothing is already accounted for.
-  const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, { mode: "content-checked", candidateTokens: [] });
+  const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, { mode: "content-checked", candidateTokens: [] }, undefined, false);
   const keptRepoPaths = new Set<string>([...ownFolded.referencingRepoPaths, ...tmpSweep.referencingRepoPaths]);
   // @decision 182c01cc (round 4, CR3 finding 4) — a real `BlockedCoOccupant[]`, never a hard-coded `[]`
   // — see the decision record's "Round 4" section.

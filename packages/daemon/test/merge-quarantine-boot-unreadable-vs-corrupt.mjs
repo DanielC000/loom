@@ -57,6 +57,40 @@ const SCENARIOS = [
   // synthetic-placeholder-token leak via `divertRaiseEntry`'s hand-rolled merge, caught WITHOUT the
   // in-process query that would otherwise graduate/reingest it away first).
   "raise-while-unreadable-no-query-exact-token-set",
+  // Card 656fdf39 — once a `keptUnreadableLatchFiles` mark is set at boot, a human full clear used to
+  // leave the marked file on disk even after it became readable again (the coverage proof can never
+  // match a boot-time placeholder's own synthetic token against the real on-disk token), so the NEXT
+  // boot re-armed the exact identity the clear believed it had lifted. Fix: a marked file that is
+  // readable right now and genuinely belongs to the identity being cleared discharges the mark instead
+  // of staying kept forever (mirrors 702b4241 round 7's writePendingDivertFile re-read discharge).
+  "human-clear-after-unreadable-final-readable-does-not-rearm",
+  "human-clear-after-unreadable-tmp-readable-does-not-rearm",
+  // Code Review 66fad7ed (NOT-MERGEABLE on round 1): round 1's identity-only discharge destroyed an
+  // uncovered token (B1) and let an ambiguous union's own refusal never fire (B2). Round 2 replaced it
+  // with re-ingest-then-let-the-existing-checks-decide; B1 is covered by merge-quarantine-raise-protect-
+  // failure.mjs's own pre-existing `95ea8d3f-adversarial`/`25f6a7dc-l1318` scenarios (which round 1
+  // regressed and round 2 restores green). This is B2, as a committed scenario.
+  "human-clear-by-id-reingested-ambiguous-union-refuses",
+  // Code Review d1e02886 (round 3, NOT-MERGEABLE on round 2 — commit 56934e55). Round 2's re-ingest at
+  // the top of clearMergeQuarantineByKey (a SHARED unit a TOKEN-scoped clear also reaches via
+  // clearMergeQuarantineByToken -> clearActiveEntryTokenAtKey's full-lift) made the coverage proof
+  // TAUTOLOGICAL for a token-scoped clear, and reconcileClearedEntryIfPlaceholder's own field merge
+  // OVERWROTE (never unioned) resolvedKey(s)/orphanLatchFiles/contributorRepoPaths. Fix: thread an
+  // explicit `identityWideHumanClear` flag from only the three genuinely identity-wide human clear
+  // routes, and merge every field forward instead of overwriting.
+  "656fdf39-round3-b1y-token-clear-old-tok-survives",
+  "656fdf39-round3-orphan-collision-never-silently-dropped",
+  "656fdf39-round3-contributor-repo-paths-placeholder-clear-by-id-refuses",
+  // Code Review d19f0490 (round 4, MERGEABLE-WITH-NITS on round 3 — commit 2bec865d). MINOR: three of
+  // round 3's own gates (sweepTmpResidueForHashIfUnreferenced's own `&& identityWideHumanClear` and
+  // clearTokenFromPendingIndices' own `false`) were removable with every EXISTING test still green —
+  // the round-3 coverage proved the FINAL-file/active-token shape, never the TMP-residue shape or a
+  // genuinely pending (non-twin) entry's own full-lift.
+  "656fdf39-round4-m6-tmp-shape-active-token-clear-old-tok-survives",
+  "656fdf39-round4-m2-pending-entry-token-clear-old-tok-survives",
+  // M8 (clearMergeQuarantineByKey's own pending-loop reconcile gate) was investigated but deliberately
+  // NOT added here — see the decision record's "Round 4" section for why a discriminating test could not
+  // be constructed, and do not re-attempt one without reading that section first.
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -95,6 +129,7 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   enterMergeQuarantine, reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, clearMergeQuarantineReporting,
+  clearMergeQuarantineLatchFile,
   MERGE_QUARANTINE_DIR, PLACEHOLDER_BRANCH_UNREADABLE, PLACEHOLDER_BRANCH_CORRUPT,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
@@ -790,6 +825,357 @@ try {
       const filesAfterBoot2 = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => !beforeFiles.has(f));
       check(`*** THE FIX (boot2, ${label}) *** no orphan/collision file remains for X after a second boot`, filesAfterBoot2.length === 0);
     }
+
+  } else if (scenarioName === "human-clear-after-unreadable-final-readable-does-not-rearm") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 656fdf39. D's real FINAL latch is marked unreadable at boot (the main 702b4241 repro). The
+    // glitch clears BEFORE a human full clear runs (`clearMergeQuarantineReporting`, the same helper
+    // `POST /internal/merge-quarantine/clear` calls) — final is genuinely readable right now. Pre-fix,
+    // the clear's own coverage proof (`markedFinalFullyCoveredByClear`) can never match: the in-memory
+    // entry being cleared is boot's own PLACEHOLDER (a synthetic token), never the real on-disk token, so
+    // the file stayed on disk, still marked kept — and a second boot re-read it and re-armed D's real
+    // quarantine, even though the human clear had reported success.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("humanclearfinal");
+    const realToken = enterMergeQuarantine(d, "real-branch", "D's real reason — must not re-arm after a readable human clear");
+    const kd = canonicalRepoLockKey(d);
+    const dFinal = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kd)}.json`);
+    check("(precondition) D's own final latch file exists", fs.existsSync(dFinal));
+
+    const inject = injectReadFailure(dFinal, "EACCES");
+    const boot1 = await freshBootModule();
+    boot1.reenterMergeQuarantinesAtBoot([d]);
+    check("(precondition) the injected read failure was actually hit at least once", inject.count() >= 1);
+    check("(precondition) D is pending/fail-closed after the unreadable boot", !!boot1.listActiveMergeQuarantines().find((e) => e.repoPath === d));
+    inject.restore(); // the glitch clears BEFORE the human clear runs — final is genuinely readable now.
+
+    const clearResult = boot1.clearMergeQuarantineReporting(d);
+    check("the human full clear reports D no longer quarantined", clearResult?.wasQuarantined === true);
+    check("*** THE FIX *** the clear does NOT report latchKept (the stale mark discharged, not just lifted in memory)", !clearResult?.latchKept);
+    check("*** THE FIX *** D's final latch file is actually REMOVED by the clear (not left on disk, still marked kept)", !fs.existsSync(dFinal));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    check("*** THE FIX (boot2) *** D is NOT re-quarantined — the real human clear stays stuck", !boot2.activeMergeQuarantineFor(d));
+    check("(sanity) D's real raise token is not resurrected anywhere on disk", !fs.existsSync(MERGE_QUARANTINE_DIR) || !fs.readdirSync(MERGE_QUARANTINE_DIR).some((f) => {
+      try { return JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).tokens?.includes(realToken); } catch { return false; }
+    }));
+
+  } else if (scenarioName === "human-clear-after-unreadable-tmp-readable-does-not-rearm") {
+    // The TMP-residue twin of the scenario above: PASS 1b's own `.json.tmp-<pid>` residue (D never wrote a
+    // clean FINAL at all) is what's marked unreadable at boot, so the identity's own pending placeholder
+    // self-references the TMP file as `sourceFile` — the same `sweepOwnLatchFileUnlessOwnedElsewhere`
+    // chokepoint this card fixes, reached via `clearMergeQuarantineByKey`'s pending "remove" sweep instead
+    // of `deleteMergeQuarantineLatchByKey`'s own final-file check (which never even runs here — D's
+    // canonical `.json` never existed).
+    const d = makeRealRepo("humancleartmp");
+    const kd = canonicalRepoLockKey(d);
+    const dTmp = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kd)}.json.tmp-999002`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const realToken = "real-tmp-token-656fdf39";
+    const realEntry = {
+      repoPath: d, branch: "real-tmp-branch", reason: "D's real tmp reason — must not re-arm after a readable human clear",
+      enteredAt: Date.now(), tokens: [realToken],
+    };
+    fs.writeFileSync(dTmp, JSON.stringify(realEntry, null, 2) + "\n");
+
+    const inject = injectReadFailure(dTmp, "EMFILE");
+    const boot1 = await freshBootModule();
+    boot1.reenterMergeQuarantinesAtBoot([d]);
+    check("(precondition, tmp) the injected read failure was actually hit", inject.count() >= 1);
+    // @decision 702b4241 (round 2) — read via listActiveMergeQuarantines (a pure read), NEVER
+    // activeMergeQuarantineFor here: the latter GRADUATES the pending placeholder (attempting, and here
+    // failing, a durable write while the tmp is still injected-unreadable) as a side effect, which would
+    // leave D's in-memory state in a DIFFERENT shape than the plain pending-only one this scenario means
+    // to exercise through clearMergeQuarantineByKey's pending sweep.
+    check("(precondition, tmp) D is pending/fail-closed (tmp shape) after the unreadable boot", !!boot1.listActiveMergeQuarantines().find((e) => e.repoPath === d));
+    inject.restore(); // the glitch clears BEFORE the human clear runs — the tmp residue is readable now.
+
+    const clearResult = boot1.clearMergeQuarantineReporting(d);
+    check("the human full clear reports D no longer quarantined (tmp shape)", clearResult?.wasQuarantined === true);
+    check("*** THE FIX (tmp) *** the clear does NOT report latchKept (the stale mark discharged, not just lifted in memory)", !clearResult?.latchKept);
+    check("*** THE FIX (tmp) *** D's tmp residue file is actually REMOVED by the clear (not left on disk, still marked kept)", !fs.existsSync(dTmp));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    check("*** THE FIX (boot2, tmp) *** D is NOT re-quarantined — the real human clear stays stuck", !boot2.activeMergeQuarantineFor(d));
+    check("(sanity, tmp) D's real raise token is not resurrected anywhere on disk", !fs.existsSync(MERGE_QUARANTINE_DIR) || !fs.readdirSync(MERGE_QUARANTINE_DIR).some((f) => {
+      try { return JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).tokens?.includes(realToken); } catch { return false; }
+    }));
+
+  } else if (scenarioName === "human-clear-by-id-reingested-ambiguous-union-refuses") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review 66fad7ed, B2. D's final latch is a genuine, pre-existing AMBIGUOUS UNION on disk
+    // (repoPath D, BOTH tokenA and tokenB, provenanceUnknown:true — exactly the shape db0a9db0's own
+    // clear-by-id refusal exists to protect) — but it is marked unreadable at boot, so the in-memory
+    // record self-referencing it is boot's own blank PLACEHOLDER (no provenanceUnknown of its own at
+    // all). Round 1's identity-only discharge would have unlinked this the moment it became readable,
+    // silently losing tokenB. The fix: reconcile the placeholder with the real on-disk content BEFORE
+    // the clear-by-id ambiguity check runs, so the real provenanceUnknown marker is visible to it, and
+    // the EXISTING db0a9db0 refusal fires correctly instead.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("b2union");
+    const tokenA = "token-a-b2union";
+    const tokenB = "token-b-b2union";
+    const kd = canonicalRepoLockKey(d);
+    const idHash = hashForKey(kd);
+    const dFinal = path.join(MERGE_QUARANTINE_DIR, `${idHash}.json`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(dFinal, JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "D's own genuine union with a second raiser, pre-existing on disk",
+      enteredAt: Date.now(), tokens: [tokenA, tokenB], provenanceUnknown: true,
+    }, null, 2) + "\n");
+
+    const inject = injectReadFailure(dFinal, "EACCES");
+    const boot1 = await freshBootModule();
+    boot1.reenterMergeQuarantinesAtBoot([d]);
+    check("(precondition) the injected read failure was actually hit", inject.count() >= 1);
+    check("(precondition) D is pending/fail-closed after the unreadable boot", !!boot1.listActiveMergeQuarantines().find((e) => e.repoPath === d));
+    inject.restore(); // the glitch clears BEFORE the clear-by-id call runs — final is genuinely readable now.
+
+    const clearIdResult = boot1.clearMergeQuarantineLatchFile(idHash);
+    check("*** THE FIX (B2) *** clear-by-id is REFUSED (ambiguous union), never a silent unlink", clearIdResult?.ok === false);
+    check("*** THE FIX (B2) *** the refusal names the incomplete-provenance reason", typeof clearIdResult?.reason === "string" && clearIdResult.reason.includes("provenance"));
+    const afterBytes = fs.readFileSync(dFinal, "utf8");
+    check("*** THE FIX (B2) *** D's final latch file is BYTE-IDENTICAL (never unlinked)", JSON.parse(afterBytes).tokens.includes(tokenA) && JSON.parse(afterBytes).tokens.includes(tokenB));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    const freshTokens = new Set(boot2.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (B2, reboot) *** tokenA SURVIVES", freshTokens.has(tokenA));
+    check("*** THE FIX (B2, reboot) *** tokenB SURVIVES (never destroyed as collateral)", freshTokens.has(tokenB));
+
+  } else if (scenarioName === "656fdf39-round3-b1y-token-clear-old-tok-survives") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review d1e02886 (round 3), BLOCKING 1 / reviewer probe-b1y. Round 2 put the re-ingest at the
+    // TOP of clearMergeQuarantineByKey — a SHARED unit a TOKEN-scoped clear also reaches
+    // (clearMergeQuarantineByToken -> clearActiveEntryTokenAtKey's own full-lift ->
+    // clearMergeQuarantineByKey). F is a genuine, pre-existing final latch holding OLD-TOK. A fresh raise
+    // (t2) for the SAME identity is still placeholder-shaped (as `divertRaiseEntry`'s own merge — and a
+    // later lazy-graduation attempt whose write to F fails while F is marked unreadable — would leave it:
+    // `branch`/`placeholder` still carry the boot placeholder's own shape even though it now holds t2 as
+    // a REAL token, round 5 of 702b4241's own documented behavior) by the time F becomes readable again.
+    // A TOKEN-scoped clear of t2 reduces that entry to zero tokens and reaches clearMergeQuarantineByKey's
+    // own full-lift path. Pre-fix (round 2), the unconditional re-ingest adopted OLD-TOK from F into the
+    // entry being cleared, made the coverage proof pass TRIVIALLY, and F was unlinked — losing OLD-TOK.
+    // *** THE FIX (round 3) *** — `identityWideHumanClear` is `false` on this path (never threaded from a
+    // token-scoped clear), so F is never re-ingested; the pre-existing coverage proof correctly refuses
+    // (OLD-TOK is not one of t2's own tokens), F survives on disk, and OLD-TOK is still outstanding after
+    // a reboot.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("b1y");
+    const kd = canonicalRepoLockKey(d);
+    const oldTok = "OLD-TOK-b1y-656fdf39";
+    const dFinal = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kd)}.json`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(dFinal, JSON.stringify({
+      repoPath: d, branch: "rb", reason: "old", enteredAt: Date.now() - 30000, tokens: [oldTok], resolvedKey: kd,
+    }, null, 2) + "\n");
+
+    const boot1 = await freshBootModule();
+    boot1.markLatchFileUnreadableTestOnly(path.basename(dFinal));
+    const t2 = "t2-fresh-raise-656fdf39";
+    // Directly arms the shape a fresh raise + lazy-graduation attempt leaves while F is marked
+    // unreadable: still placeholder-shaped (branch/placeholder unchanged — the durable write to F never
+    // succeeded), but holding t2 as a REAL, already-outstanding token.
+    boot1.setActiveQuarantineTestOnly(kd, {
+      repoPath: d, branch: boot1.PLACEHOLDER_BRANCH_UNREADABLE, reason: "fresh", enteredAt: Date.now(),
+      tokens: [t2], placeholder: true,
+    });
+    check("(precondition) F still carries OLD-TOK on disk right before the token clear", JSON.parse(fs.readFileSync(dFinal, "utf8")).tokens.includes(oldTok));
+
+    boot1.clearMergeQuarantineByToken(d, t2);
+
+    check("*** THE FIX (round 3) *** F still EXISTS on disk after the token-scoped clear (never unlinked)", fs.existsSync(dFinal));
+    check("*** THE FIX (round 3) *** F's own OLD-TOK is UNCHANGED (never lost as collateral)", fs.existsSync(dFinal) && JSON.parse(fs.readFileSync(dFinal, "utf8")).tokens.includes(oldTok));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    const freshTokens2 = new Set(boot2.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 3, reboot) *** OLD-TOK is STILL outstanding after a reboot", freshTokens2.has(oldTok));
+
+  } else if (scenarioName === "656fdf39-round3-orphan-collision-never-silently-dropped") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review d1e02886 (round 3), BLOCKING 2. reconcileClearedEntryIfPlaceholder's own `...reingested`
+    // spread OVERWROTE (never unioned) orphanLatchFiles/contributorRepoPaths with disk's (which has
+    // neither) — so a genuinely outstanding pending-divert "collision" file this identity's own in-memory
+    // placeholder still references via orphanLatchFiles was silently dropped from the reconciled entry
+    // BEFORE clearMergeQuarantineByKey ever reads it to build its own `orphanFilesToSweep` set. A human
+    // full clear then reported CLEAN SUCCESS while the collision file survived on disk, unswept, still
+    // holding a real outstanding token — and the NEXT boot re-armed this identity from it.
+    // *** THE FIX (round 3) *** — orphanLatchFiles is now UNIONED (entry's own retained, never dropped),
+    // so the collision file is correctly swept as part of this SAME clear (its own token is already one
+    // of the entry's own, now-unioned tokens) — never clean success with the file surviving.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("orphancollision");
+    const kd = canonicalRepoLockKey(d);
+    const oldTok = "OLD-TOK-orphancollision-656fdf39";
+    const collisionTok = "COLLISION-TOK-orphancollision-656fdf39";
+    const dFinal = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kd)}.json`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(dFinal, JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "old-raise", enteredAt: Date.now() - 30000, tokens: [oldTok],
+    }, null, 2) + "\n");
+    const collisionFile = `pending-${hashForKey(`${d}-collision`)}.json`;
+    const collisionPath = path.join(MERGE_QUARANTINE_DIR, collisionFile);
+    fs.writeFileSync(collisionPath, JSON.stringify({
+      repoPath: d, branch: "d-branch-2", reason: "collision-raise", enteredAt: Date.now(), tokens: [collisionTok],
+    }, null, 2) + "\n");
+
+    const boot1 = await freshBootModule();
+    boot1.markLatchFileUnreadableTestOnly(path.basename(dFinal));
+    // Directly arms the shape a fresh raise + lazy-graduation attempt leaves while F is marked
+    // unreadable: still placeholder-shaped, holding the collision raise's own REAL token, and still
+    // referencing its own diverted collision file via orphanLatchFiles (the write-fails-folds-to-orphan
+    // shape 188b145f/8a1bc2ef's own decision records describe).
+    boot1.setActiveQuarantineTestOnly(kd, {
+      repoPath: d, branch: boot1.PLACEHOLDER_BRANCH_UNREADABLE, reason: "collision-raise", enteredAt: Date.now(),
+      tokens: [collisionTok], placeholder: true, orphanLatchFiles: [collisionFile],
+    });
+    check("(precondition) the collision file exists on disk right before the clear", fs.existsSync(collisionPath));
+
+    const clearResult = boot1.clearMergeQuarantineReporting(d);
+    const cleanSuccess = clearResult?.wasQuarantined === true && !clearResult?.latchKept;
+    const collisionSurvives = fs.existsSync(collisionPath);
+    check(
+      "*** THE FIX (round 3) *** never clean success WITH the collision file surviving (either swept, or reported latchKept)",
+      !(cleanSuccess && collisionSurvives),
+    );
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    check("*** THE FIX (round 3, reboot) *** D is NOT re-armed from a surviving, unswept collision file", !boot2.activeMergeQuarantineFor(d));
+
+  } else if (scenarioName === "656fdf39-round3-contributor-repo-paths-placeholder-clear-by-id-refuses") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review d1e02886 (round 3), SHOULD-FIX. reconcileClearedEntryIfPlaceholder's own `...reingested`
+    // spread also OVERWROTE (never unioned) `contributorRepoPaths` — an in-memory-only marker (another
+    // raiser's own identity folded into this union at RUNTIME, 82032b5c) that the on-disk bytes never
+    // carried, and that db0a9db0/82032b5c's own clear-by-id ambiguity refusal depends on seeing.
+    // *** THE FIX (round 3) *** — contributorRepoPaths is now UNIONED (entry's own retained), so the
+    // refusal still fires correctly even though disk itself carries no such marker.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("contribplaceholder");
+    const kd = canonicalRepoLockKey(d);
+    const idHash = hashForKey(kd);
+    const tokenA = "token-a-contribplaceholder";
+    const dFinal = path.join(MERGE_QUARANTINE_DIR, `${idHash}.json`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(dFinal, JSON.stringify({
+      repoPath: d, branch: "d-branch", reason: "old-raise", enteredAt: Date.now() - 30000, tokens: [tokenA],
+    }, null, 2) + "\n");
+
+    const boot1 = await freshBootModule();
+    boot1.markLatchFileUnreadableTestOnly(path.basename(dFinal));
+    // Directly arms the shape a SECOND, different identity's own raise folded into at RUNTIME while F was
+    // marked unreadable (82032b5c's `existing`-branch absorb) leaves: still placeholder-shaped, but
+    // carrying the OTHER identity's own repoPath in contributorRepoPaths — a marker disk itself never had.
+    boot1.setActiveQuarantineTestOnly(kd, {
+      repoPath: d, branch: boot1.PLACEHOLDER_BRANCH_UNREADABLE, reason: "folded-sibling", enteredAt: Date.now(),
+      tokens: [tokenA], placeholder: true, contributorRepoPaths: ["/some/other/repo-656fdf39"],
+    });
+
+    const clearIdResult = boot1.clearMergeQuarantineLatchFile(idHash);
+    check("*** THE FIX (round 3) *** clear-by-id is REFUSED (contributorRepoPaths ambiguity), never a silent unlink", clearIdResult?.ok === false);
+    check("*** THE FIX (round 3) *** D's final latch file is BYTE-IDENTICAL (never unlinked)", fs.existsSync(dFinal) && JSON.parse(fs.readFileSync(dFinal, "utf8")).tokens.includes(tokenA));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    const freshTokens3 = new Set(boot2.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 3, reboot) *** tokenA SURVIVES", freshTokens3.has(tokenA));
+
+  } else if (scenarioName === "656fdf39-round4-m6-tmp-shape-active-token-clear-old-tok-survives") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review d19f0490 (round 4), M6. The reviewer's own probe (probe-tmp-tok.mjs) found round 3's
+    // test coverage only proved the FINAL (`.json`) shape of BLOCKING 1 — a `.json.tmp-<pid>` residue
+    // reaches `sweepTmpResidueForHashIfUnreferenced`'s own `&& identityWideHumanClear` gate through a
+    // COMPLETELY DIFFERENT call path than `deleteMergeQuarantineLatchByKey`'s own final-file coverage
+    // check (`markedFinalFullyCoveredByClear`) — and no existing scenario drove that path at all. Without
+    // the gate (M6), the tmp residue's own OLD-TOK is adopted into the entry being token-cleared, the
+    // coverage proof passes trivially, and the tmp is unlinked — destroying OLD-TOK as collateral.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("m6tmp");
+    const kd = canonicalRepoLockKey(d);
+    const oldTok = "OLD-TOK-m6tmp-d19f0490";
+    const dTmp = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kd)}.json.tmp-999`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(dTmp, JSON.stringify({
+      repoPath: d, branch: "rb", reason: "old", enteredAt: Date.now() - 30000, tokens: [oldTok], resolvedKey: kd,
+    }, null, 2) + "\n");
+
+    const boot1 = await freshBootModule();
+    boot1.markLatchFileUnreadableTestOnly(path.basename(dTmp));
+    const t2 = "t2-fresh-raise-m6tmp";
+    // Same precondition shape as the round-3 B1y scenario, but the marked physical backing is a TMP
+    // residue, not a FINAL — `sweepTmpResidueForHashIfUnreferenced`'s own gate, never
+    // `deleteMergeQuarantineLatchByKey`'s final-file coverage check, is what this exercises.
+    boot1.setActiveQuarantineTestOnly(kd, {
+      repoPath: d, branch: boot1.PLACEHOLDER_BRANCH_UNREADABLE, reason: "fresh", enteredAt: Date.now(),
+      tokens: [t2], placeholder: true,
+    });
+    check("(precondition) the TMP residue still carries OLD-TOK on disk right before the token clear", JSON.parse(fs.readFileSync(dTmp, "utf8")).tokens.includes(oldTok));
+
+    boot1.clearMergeQuarantineByToken(d, t2);
+
+    check("*** THE FIX (round 4, M6) *** the TMP residue still EXISTS on disk after the token-scoped clear (never unlinked)", fs.existsSync(dTmp));
+    check("*** THE FIX (round 4, M6) *** the TMP residue's own OLD-TOK is UNCHANGED (never lost as collateral)", fs.existsSync(dTmp) && JSON.parse(fs.readFileSync(dTmp, "utf8")).tokens.includes(oldTok));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    const freshTokensM6 = new Set(boot2.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 4, M6, reboot) *** OLD-TOK is STILL outstanding after a reboot", freshTokensM6.has(oldTok));
+
+  } else if (scenarioName === "656fdf39-round4-m2-pending-entry-token-clear-old-tok-survives") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Code Review d19f0490 (round 4), M2. `clearTokenFromPendingIndices`'s own "remove" branch (reached
+    // for a genuinely PENDING, non-twin entry whose full token set is being lifted) calls
+    // `deleteMergeQuarantineLatchByKey` directly, with its own HARDCODED `false` — never threading
+    // `identityWideHumanClear` from its caller (`clearMergeQuarantineByToken` has no identity-wide
+    // authority of its own to thread). Without that `false` (M2's mutation: flip it to `true`), the SAME
+    // tautological-adoption shape as BLOCKING 1 reopens, reached through THIS branch instead of
+    // `clearActiveEntryTokenAtKey`'s.
+    //
+    // Constructs a genuinely PENDING (non-twin) entry — via the new `pushPendingQuarantineTestOnly` test
+    // seam — holding `t2` ALONE, structurally tied to a SEPARATE active entry at the same key (also
+    // holding only `t2`, so `entryStillOwnsKey`'s token-subset branch accepts the tie) — never the same
+    // object reference, so `clearMergeQuarantineByToken`'s own twin-exclusion never routes it through
+    // `clearActiveEntryTokenAtKey` instead.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("m2pending");
+    const kd = canonicalRepoLockKey(d);
+    const oldTok = "OLD-TOK-m2pending-d19f0490";
+    const dTmp = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kd)}.json.tmp-999`);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(dTmp, JSON.stringify({
+      repoPath: d, branch: "rb", reason: "old", enteredAt: Date.now() - 30000, tokens: [oldTok], resolvedKey: kd,
+    }, null, 2) + "\n");
+
+    const boot1 = await freshBootModule();
+    boot1.markLatchFileUnreadableTestOnly(path.basename(dTmp));
+    const t2 = "t2-fresh-raise-m2pending";
+    // A NORMAL (non-placeholder) active entry holding ONLY t2 — `entryStillOwnsKey`'s token-subset
+    // branch needs `occupant.tokens` (this entry's) to be a subset of the PENDING entry's own tokens.
+    boot1.setActiveQuarantineTestOnly(kd, {
+      repoPath: d, branch: "d-branch-active", reason: "t2-raise", enteredAt: Date.now(), tokens: [t2],
+    });
+    // A DIFFERENT object, still placeholder-shaped (so reconciling it, if the gate is ever removed,
+    // would adopt OLD-TOK from disk) — tied to the active entry above via `armedKeys`, never by
+    // reference, so it lands in `clearTokenFromPendingIndices`'s own non-twin set.
+    boot1.pushPendingQuarantineTestOnly({
+      repoPath: d, branch: boot1.PLACEHOLDER_BRANCH_UNREADABLE, reason: "t2-raise-pending-twin", enteredAt: Date.now(),
+      tokens: [t2], placeholder: true, armedKeys: [kd],
+    }, path.basename(dTmp));
+    check("(precondition) the TMP residue still carries OLD-TOK on disk right before the token clear", JSON.parse(fs.readFileSync(dTmp, "utf8")).tokens.includes(oldTok));
+
+    boot1.clearMergeQuarantineByToken(d, t2);
+
+    check("*** THE FIX (round 4, M2) *** the TMP residue still EXISTS on disk after the token-scoped clear (never unlinked)", fs.existsSync(dTmp));
+    check("*** THE FIX (round 4, M2) *** the TMP residue's own OLD-TOK is UNCHANGED (never lost as collateral)", fs.existsSync(dTmp) && JSON.parse(fs.readFileSync(dTmp, "utf8")).tokens.includes(oldTok));
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    const freshTokensM2 = new Set(boot2.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+    check("*** THE FIX (round 4, M2, reboot) *** OLD-TOK is STILL outstanding after a reboot", freshTokensM2.has(oldTok));
 
   } else {
     throw new Error(`unknown scenario ${scenarioName}`);
