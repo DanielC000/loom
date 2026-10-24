@@ -56,8 +56,11 @@ export type PendingOpOutcome = string;
  *  branch's content — never cache or replay it; see the docs/decisions record for the full reasoning.
  *  @decision 62c4953a — "canonical-index-lock-present": same reasoning as "quarantined" — a refusal about
  *  the canonical repo's `.git/index.lock`, not the branch; a human removing it must see a fresh
- *  re-confirm, never a stale cached refusal from before it was removed. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable", "canonical-repo-shallow"]);
+ *  re-confirm, never a stale cached refusal from before it was removed.
+ *  @decision 043d83d2 — "batch-head-moved": the batch worktree's HEAD (or uncommitted state) no longer
+ *  matched the tip assembly itself pinned — a fact about the worker-writable worktree ref at that instant,
+ *  not about the resolved candidates; a re-fire must genuinely re-assemble, never replay a stale refusal. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable", "canonical-repo-shallow", "batch-head-moved"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

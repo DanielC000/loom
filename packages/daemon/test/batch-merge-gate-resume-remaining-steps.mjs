@@ -52,17 +52,24 @@ function makeRepo(repo) {
   commitAll(repo, "init", GIT_ID);
 }
 
-async function cutBranch(repo, projId, label, file, content) {
+async function cutBranch(repo, projId, label, file, content, plant) {
   const taskId = `brrs-task-${label}-${sfx}`;
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+  // Card 043d83d2: a planted fixture file must be committed onto the WORKER's own branch, BEFORE the
+  // batch ever assembles it — mirroring merge-gate-resume-remaining-steps.mjs's own (solo) convention.
+  // Planting it lazily inside the fakeGate (this file's own prior convention) instead landed it as
+  // UNCOMMITTED content in the already-ASSEMBLED batch worktree, which the new pre/post-gate worktree
+  // stamp (`runBatchedMerge`'s `batchHeadMoved` check) correctly refuses as a tamper/dirty-tree signal —
+  // a worker's own new/changed test file is always part of ITS OWN commit in reality, never injected
+  // mid-gate, so committing it here is the faithful fixture, not a workaround for the new check.
+  if (plant) plantTestFile(worktreePath, plant);
   fs.writeFileSync(path.join(worktreePath, file), content);
   commitAll(worktreePath, `${label}`, GIT_ID);
   return { taskId, branch, worktreePath };
 }
 
-// Mirrors merge-gate-resume-remaining-steps.mjs's own `plantTestFile`, applied lazily inside the fakeGate
-// (mirrors batch-merge-gate-retry.mjs's own convention) since the BATCH worktree doesn't exist yet when
-// the test starts — mergeBatchTracked cuts it internally.
+// Plants the fixture files `identifyRetriableTestFiles` looks for. Content is irrelevant: the injected
+// `runGate` seam intercepts everything, nothing here is ever spawned.
 function plantTestFile(worktreePath, name) {
   fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "scripts"), { recursive: true });
   fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs"), "// stub\n");
@@ -76,12 +83,12 @@ function setupBatchProject(label) {
   return { projId, agentId, mgrId, repo };
 }
 
-async function seedTwoWorkers(db, P) {
+async function seedTwoWorkers(db, P, plantOnA) {
   makeRepo(P.repo);
   db.insertProject({ id: P.projId, name: `BRRS-${P.projId}`, repoPath: P.repo, vaultPath: P.repo, config: { orchestration: { gateCommand: GATE_3STEP } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: P.agentId, projectId: P.projId, name: "dev", startupPrompt: "", position: 0 });
   db.insertSession({ id: P.mgrId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: P.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
-  const a = await cutBranch(P.repo, P.projId, `${P.projId}-a`, "feature-a.txt", "work a\n");
+  const a = await cutBranch(P.repo, P.projId, `${P.projId}-a`, "feature-a.txt", "work a\n", plantOnA);
   const b = await cutBranch(P.repo, P.projId, `${P.projId}-b`, "feature-b.txt", "work b\n");
   const wA = `${P.projId}-wkr-a`, wB = `${P.projId}-wkr-b`;
   for (const [wId, w] of [[wA, a], [wB, b]]) {
@@ -116,7 +123,9 @@ try {
     const fakeGate = async (gate, worktreePath) => {
       calls++; seenGates.push(gate);
       if (calls === 1) {
-        plantTestFile(worktreePath, "flaky-batch-mid");
+        // Card 043d83d2: the fixture file is already committed on worker A's own branch (see
+        // seedTwoWorkers's `plantOnA`) — never planted here, which would land as uncommitted dirt in the
+        // already-assembled batch worktree.
         // Same specimen shape as the solo file's own (P): step 2 of 3 fails, step 3 never spawns.
         // outputTail starts with the `- <name> (exit timeout` marker at position 0 (no leading `\n` —
         // control chars incl. `\n` are stripped before storage; see the solo test's own note).
@@ -131,7 +140,7 @@ try {
       return { passed: true, outputTail: "true-final output, nothing about flaky-batch-mid here", steps: [{ step: "pnpm true-final", durationMs: 3, status: 0 }] };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
-    const { wA, wB, worktrees: wts } = await seedTwoWorkers(db, P);
+    const { wA, wB, worktrees: wts } = await seedTwoWorkers(db, P, "flaky-batch-mid");
     worktrees.push(...wts);
 
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
@@ -171,7 +180,8 @@ try {
     const fakeGate = async (gate, worktreePath) => {
       calls++; seenGates.push(gate);
       if (calls === 1) {
-        plantTestFile(worktreePath, "flaky-batch-mid2");
+        // Card 043d83d2: committed on worker A's own branch (seedTwoWorkers's `plantOnA`) — never
+        // planted here, same reasoning as scenario (P) above.
         return {
           passed: false, failedStep: "node packages/daemon/test/flaky-batch-mid2.mjs", failedStatus: 1, failedSignal: null, failedTimedOut: false,
           outputTail: "", failingTest: "FAIL  flaky-batch-mid2", failingTestCount: 1, failTierTest: "FAIL  flaky-batch-mid2", failTierTestCount: 1, failTierAll: ["FAIL  flaky-batch-mid2"],
@@ -191,7 +201,7 @@ try {
       return { passed: false, failedStep: "pnpm true-final", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "fallback also failed", failingTest: "boom" };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
-    const { wA, wB, worktrees: wts } = await seedTwoWorkers(db, Q);
+    const { wA, wB, worktrees: wts } = await seedTwoWorkers(db, Q, "flaky-batch-mid2");
     worktrees.push(...wts);
 
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(Q.mgrId, [wA, wB]));

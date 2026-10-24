@@ -2,7 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
-import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, type MergeEmptyKind } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, type MergeEmptyKind, type WorktreeGateStamp } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
@@ -153,6 +153,20 @@ export interface BatchAssembleResult {
    *  fast-forward" treatment as `quarantined` — but the canonical repo is never implicated, so the caller
    *  (`runBatchedMerge`) must NOT skip worktree removal or the per-candidate fallback on this flag. */
   rollbackUnverified?: boolean;
+  /** @decision 043d83d2 (S1) — assembly stopped early: the batch worktree's own `HEAD` moved between two
+   *  candidates (or before the first). Same stop-the-loop treatment as `quarantined`/`rollbackUnverified`;
+   *  the caller must map this to its own `batchHeadMoved` — no per-candidate fallback. */
+  headMoved?: boolean;
+  /** Set alongside {@link headMoved}: the specific mismatch text from either the `initialHead`-vs-
+   *  `baseMainSha` check (assembly's own top) or the per-candidate `expectedHeadBefore` check (inside
+   *  {@link landBranchCommitsIndividually}). */
+  headMovedReason?: string;
+  /** The batch worktree's tip, as THIS LOOP's own landing results computed it — starts at `initialHead`,
+   *  advances to a real (non-noop) candidate's own `sha` as it lands, unchanged across a `noop`. See
+   *  {@link assembleBatchBranches}'s own header doc for the full reasoning (never a late re-read).
+   *  @decision 043d83d2 — `undefined` only if even `initialHead` couldn't be read; the caller must refuse
+   *  rather than fall back to an independently re-readable ref. */
+  assembledTipSha?: string;
 }
 
 /** K = min(ready, maxWorkers) — FIXED, never adaptive. The owner ruled out an adaptive-K policy: batch
@@ -204,6 +218,10 @@ interface LandResult {
    *  transient git error), never a confirmed divergence — a normal per-candidate DROP with its own
    *  honest "could not verify, re-confirm" wording, never the divergence remedy. */
   forkPointUnverified?: boolean;
+  /** @decision 043d83d2 (S1) — `ok:false` because freshly-read `HEAD` no longer matches `expectedHeadBefore`
+   *  (the tip {@link assembleBatchBranches} itself last landed) — a worker-writable-ref fact between two
+   *  candidates. That caller stops the whole loop on this, like `quarantined`/`rollbackUnverified`. */
+  headMoved?: boolean;
 }
 
 /**
@@ -302,6 +320,10 @@ async function landBranchCommitsIndividually(
   // @decision 0eaaa693 (round 5) — same required-`string | null` posture as {@link mergeBranch}'s own
   // param (worktrees.ts) — `= null` (not a bare `?`) excludes `undefined` from the type.
   repoPath: string, batchWorktreePath: string, branch: string, deps: BatchGitDeps, pinnedTip?: string, cutBaseSha: string | null = null,
+  // @decision 043d83d2 (S1) — appended, optional: the tip {@link assembleBatchBranches}'s own loop expects
+  // `batchHeadBefore` (read fresh below) to equal, right before THIS candidate lands. `undefined` (every
+  // caller outside that one loop) skips the check entirely — unchanged behavior for every other caller.
+  expectedHeadBefore?: string,
 ): Promise<LandResult> {
   // QUARANTINE CHECK — must run before any git call, ALWAYS against the CANONICAL repo (never the
   // ephemeral batch worktree path — see merge-quarantine.ts's own doc for why). A batch's own candidates
@@ -333,6 +355,16 @@ async function landBranchCommitsIndividually(
     )).trim();
   } catch (e) {
     return { ok: false, reason: `failed to read batch worktree HEAD: ${(e as Error).message}` };
+  }
+
+  // @decision 043d83d2 (S1) — a sibling worker moving this worker-writable worktree ref BETWEEN two
+  // candidates (e.g. `reset --hard X`) would otherwise land THIS candidate's commits on top of X,
+  // unreviewed — refuse before any further git call rather than cherry-pick onto an unverified base.
+  if (expectedHeadBefore !== undefined && batchHeadBefore !== expectedHeadBefore) {
+    return {
+      ok: false, headMoved: true,
+      reason: `${branch}: the batch worktree's HEAD (${batchHeadBefore.slice(0, 8)}) no longer matches the tip this batch's own assembly last landed (${expectedHeadBefore.slice(0, 8)}) — refusing before this candidate lands; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with between candidates`,
+    };
   }
 
   // @decision 0eaaa693 — refuse (drop) a candidate whose fork point is off the batch's current lineage,
@@ -836,25 +868,62 @@ async function sortCandidatesByEarliestAuthorDate(
  */
 export async function assembleBatchBranches(
   repoPath: string, batchWorktreePath: string, candidates: BatchCandidate[], deps: BatchGitDeps = {},
+  // @decision 043d83d2 (S1) — appended, optional: when the caller (`runBatchedMerge`) knows the batch's
+  // own cut point, pass it so a HEAD swap BEFORE any candidate lands is caught here too, not just between
+  // candidates. `undefined` (every direct test caller) skips this one check — unchanged behavior.
+  baseMainSha?: string,
 ): Promise<BatchAssembleResult> {
   const landed: BatchLandedBranch[] = [];
   const dropped: BatchDroppedBranch[] = [];
   const { git: sortGit, timeoutMs: sortTimeoutMs } = boundedGit(batchWorktreePath, deps);
-  let initialHead: string | undefined;
+  // @decision 043d83d2 (S1/S2) — `hasBase`: a NON-EMPTY `baseMainSha`. Empty (both caller mainline reads
+  // failed) is treated as "not supplied" — nothing trustworthy to check, so skip rather than manufacture
+  // a false "tampered" refusal from an unrelated, already-degenerate read failure.
+  const hasBase = baseMainSha !== undefined && baseMainSha !== "";
+  let initialHeadRead: string | undefined;
   try {
-    initialHead = (await withTimeout(
+    initialHeadRead = (await withTimeout(
       sortGit.raw(["rev-parse", "HEAD"]), sortTimeoutMs, "git rev-parse HEAD (batch sort, initial)",
     )).trim();
   } catch {
-    initialHead = undefined; // extremely unlikely (the worktree was just cut) — fall back to caller order below
+    initialHeadRead = undefined; // extremely unlikely (the worktree was just cut) — see the hasBase branch below
   }
+  // @decision 043d83d2 (S2) — covers BOTH failure shapes with their OWN wording (never "tampered" for a
+  // read failure — a weaker claim). Distinct from the per-candidate chain check below, which only ever
+  // sees a mismatch starting from the SECOND candidate onward.
+  if (hasBase && initialHeadRead === undefined) {
+    return {
+      landed, dropped, headMoved: true, assembledTipSha: baseMainSha,
+      headMovedReason: `could not read the batch worktree's HEAD before any candidate has landed (expected it to match the batch's own cut point ${baseMainSha!.slice(0, 8)}) — refusing before assembly even starts`,
+    };
+  }
+  if (hasBase && initialHeadRead !== baseMainSha) {
+    return {
+      landed, dropped, headMoved: true, assembledTipSha: baseMainSha,
+      headMovedReason: `the batch worktree's HEAD (${initialHeadRead!.slice(0, 8)}) does not match the batch's own cut point (${baseMainSha!.slice(0, 8)}) before any candidate has landed — refusing before assembly even starts; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+    };
+  }
+  // @decision 043d83d2 (S2) — seed from the TRUSTED `baseMainSha` (verified above), never the fresh read
+  // alone: threads a real value into the FIRST candidate's own `expectedHeadBefore`, closing the gap
+  // where a read failure used to silently skip that candidate's chain check entirely.
+  const initialHead = hasBase ? baseMainSha : initialHeadRead;
   const orderedCandidates = initialHead
     ? await sortCandidatesByEarliestAuthorDate(sortGit, initialHead, candidates, sortTimeoutMs)
     : candidates;
+  // @decision 043d83d2 — track the assembled tip from this loop's OWN landing results; never re-derive it
+  // by a LATER `rev-parse HEAD` against the worker-writable worktree ref (a mutable pointer a sibling
+  // worker can move during the gate/queue window, landing an ungated commit on canonical main).
+  let assembledTipSha = initialHead;
   for (const cWithTip of orderedCandidates) {
     const { tip: pinnedTip, ...c } = cWithTip;
-    const r = await landBranchCommitsIndividually(repoPath, batchWorktreePath, c.branch, deps, pinnedTip, c.cutBaseSha);
+    // @decision 043d83d2 (S1) — `assembledTipSha` (this loop's own running tip) is what THIS candidate's
+    // own fresh `batchHeadBefore` read must match; a reset/move between two candidates is caught here.
+    const r = await landBranchCommitsIndividually(repoPath, batchWorktreePath, c.branch, deps, pinnedTip, c.cutBaseSha, assembledTipSha);
     if (!r.ok) {
+      // @decision 043d83d2 (NIT) — checked BEFORE pushing to `dropped`: a worker-writable-ref fact, not
+      // about this candidate's own content, must never read as a per-candidate drop (the caller would
+      // file a `batch_merge_dropped` event for a candidate never handed to a solo confirm).
+      if (r.headMoved) return { landed, dropped, headMoved: true, headMovedReason: r.reason, assembledTipSha };
       dropped.push({ ...c, reason: r.reason ?? "batch land failed", conflict: !!r.conflict });
       // A quarantining candidate STOPS assembly outright, never just a per-candidate drop: an unconfirmed
       // tree-kill means the canonical repo itself may still be under mutation, so nothing already landed
@@ -862,11 +931,11 @@ export async function assembleBatchBranches(
       // attempted against it either.
       //
       // @decision 24c0bdba (round 4)
-      if (r.quarantined) return { landed, dropped, quarantined: true };
+      if (r.quarantined) return { landed, dropped, quarantined: true, assembledTipSha };
       // @decision 0d372516 — same stop-the-whole-batch treatment, but NEVER folded into `quarantined`:
       // the mess here is confined to this one batch worktree, not the canonical repo (see
       // LandResult.rollbackUnverified's own doc) — the caller still falls back to per-candidate solo.
-      if (r.rollbackUnverified) return { landed, dropped, rollbackUnverified: true };
+      if (r.rollbackUnverified) return { landed, dropped, rollbackUnverified: true, assembledTipSha };
       continue;
     }
     if (r.noop) {
@@ -878,6 +947,7 @@ export async function assembleBatchBranches(
         // its own idempotency handling for this exact classification) sort it out rather than guessing here.
         dropped.push({ ...c, reason: `empty diff (${r.emptyKind ?? "unknown"}) — nothing to land` });
       }
+      // noop: nothing new committed — assembledTipSha stays exactly where it already was.
       continue;
     }
     if (!r.sha || !r.subject) {
@@ -885,8 +955,9 @@ export async function assembleBatchBranches(
       continue;
     }
     landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, pathSetStamped: r.pathSetStamped, assembledTip: r.branchTip });
+    assembledTipSha = r.sha;
   }
-  return { landed, dropped };
+  return { landed, dropped, assembledTipSha };
 }
 
 export interface FastForwardResult {
@@ -1174,10 +1245,10 @@ export interface RunBatchedMergeResult {
   /** Card b4080777 — true from the point `onBeforeFastForward` is invoked onward (forfeited,
    *  branchDiverted, unverified, the ff-level `quarantined`/generic-failure shapes, and `ok:true`), false/
    *  absent on every EARLIER return (pre-/mid-assembly quarantine, `rollbackUnverified`, `landed.length
-   *  === 0`, a cancelled/rejected gate, and the post-gate batch-worktree-HEAD-read failure). An explicit,
-   *  typed field BY DESIGN, never inferred from another field's incidental presence (e.g. `batchHeadSha`)
-   *  — see docs/decisions/1ac74580-merge-landing-started.md's "Known residual" section for why the
-   *  caller (`mergeBatchTracked`, sessions/service.ts) needs this at all. */
+   *  === 0`, a cancelled/rejected gate, `batchHeadMoved`, and the post-gate batch-worktree-HEAD-read
+   *  failure). An explicit, typed field BY DESIGN, never inferred from another field's incidental
+   *  presence (e.g. `batchHeadSha`) — see docs/decisions/1ac74580-merge-landing-started.md's "Known
+   *  residual" section for why the caller (`mergeBatchTracked`, sessions/service.ts) needs this at all. */
   landingStarted?: boolean;
   /** Card b4080777 (Round 2) — mirrors {@link FastForwardResult.mayHaveLanded}: true iff this refusal
    *  cannot rule out that canonical main actually advanced. The caller must exclude a `mayHaveLanded:true`
@@ -1187,6 +1258,12 @@ export interface RunBatchedMergeResult {
    *  own early check). Same no-fallback treatment as `quarantined`/`indexLockPresent` — the caller
    *  (`mergeBatchTracked`) must map it before the generic `!ok` fallthrough, never a per-candidate retry. */
   canonicalRepoShallow?: boolean;
+  /** True iff the batch worktree's HEAD (or uncommitted state) no longer matches the tip {@link
+   *  assembleBatchBranches} itself assembled (checked pre-gate and post-gate). Same no-fallback/no-cache
+   *  treatment as `quarantined`/`branchDiverted` — map it BEFORE the generic `!ok` fallthrough.
+   *  @decision 043d83d2 — never retry a per-candidate fallback on this outcome; it is a fact about the
+   *  worker-writable worktree ref, not the resolved candidates. */
+  batchHeadMoved?: boolean;
 }
 
 /**
@@ -1205,10 +1282,14 @@ export interface RunBatchedMergeResult {
  * (card 6cc803b2) is the wall time {@link assembleBatchBranches} just took, handed through so the caller's
  * own gate-settle audit event (which fires before this function knows anything about fast-forward — see
  * `RunBatchedMergeResult.fastForwardMs`'s own doc) can report the assembly phase on the SAME event.
+ *
+ * `runGate`'s FIFTH argument is the assembled tip ({@link BatchAssembleResult.assembledTipSha}).
+ * @decision 043d83d2 — a caller resolving gate-reduction eligibility MUST classify against this sha,
+ * never the bare string `"HEAD"` — mirrors decision `56c10535` on the solo path.
  */
 export async function runBatchedMerge(
   repoPath: string, batchWorktreePath: string, baseMainSha: string, candidates: BatchCandidate[],
-  runGate: (worktreePath: string, baseMainSha: string, landedCount: number, assemblyMs: number) => Promise<BatchGateResult>,
+  runGate: (worktreePath: string, baseMainSha: string, landedCount: number, assemblyMs: number, assembledTipSha: string) => Promise<BatchGateResult>,
   deps: BatchGitDeps = {},
   // @decision 1ac74580 — call ONCE, right after `gate.passed`, strictly before `fastForwardCanonicalMain`
   // — never earlier (a dropped/gate-failed candidate must never see it) or later (it must precede the
@@ -1227,7 +1308,7 @@ export async function runBatchedMerge(
     return { ok: false, landed: [], dropped: [], baseMainSha, quarantined: true, reason: quarantineCheck.reason };
   }
   const assembleStartMs = Date.now();
-  const { landed, dropped, quarantined, rollbackUnverified } = await assembleBatchBranches(repoPath, batchWorktreePath, candidates, deps);
+  const { landed, dropped, quarantined, rollbackUnverified, headMoved, headMovedReason, assembledTipSha } = await assembleBatchBranches(repoPath, batchWorktreePath, candidates, deps, baseMainSha);
   const assemblyMs = Date.now() - assembleStartMs;
   // A candidate quarantining the repo mid-assembly ABORTS THE WHOLE BATCH (round 4, ruling 1c): no gate,
   // no fast-forward, no per-candidate fallback — the caller must also skip worktree removal on this flag.
@@ -1239,10 +1320,34 @@ export async function runBatchedMerge(
   if (rollbackUnverified) {
     return { ok: false, landed, dropped, baseMainSha, assemblyMs, assemblyAborted: "rollback-unverified", reason: "batch assembly aborted: a candidate's rollback could not be verified clean" };
   }
+  // @decision 043d83d2 (S1) — checked BEFORE `landed.length === 0` (fires even when an earlier candidate
+  // already landed): a worker-writable-ref tamper DURING assembly, never a fact about any candidate —
+  // same no-fallback treatment as the pre-/post-gate `batchHeadMoved` checks further down.
+  if (headMoved) {
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, batchHeadMoved: true, reason: headMovedReason ?? "the batch worktree's HEAD moved unexpectedly during assembly" };
+  }
   if (landed.length === 0) {
     return { ok: false, landed, dropped, baseMainSha, assemblyMs, reason: "nothing landed cleanly into the batch — every candidate was dropped" };
   }
-  const gate = await runGate(batchWorktreePath, baseMainSha, landed.length, assemblyMs);
+  // @decision 043d83d2 (S2 follow-up) — now close to unreachable: assembledTipSha seeds from the trusted
+  // baseMainSha when non-empty; only an EMPTY baseMainSha AND a failed initial HEAD read (both
+  // pre-existing failure modes) can still leave it undefined. Fail-closed backstop, flagged batchHeadMoved.
+  if (!assembledTipSha) {
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, batchHeadMoved: true, reason: "assembly landed candidates but could not pin the resulting batch tip from its own results — refusing rather than trust a later, independently re-readable ref" };
+  }
+  // @decision 043d83d2 — cross-check the pin IMMEDIATELY, before the gate even runs: catches a tamper in
+  // the narrow window since assembly's own last commit, untampered for the gate's own reduction check
+  // below. (S2) ALSO refuses on a dirty tree here, mirroring the solo path's `captureGatedTip` pre-gate check.
+  const preGateStamp = await computeWorktreeGateStamp(batchWorktreePath, { timeoutMs: deps.timeoutMs, gitFactory: deps.gitFactory });
+  if (preGateStamp.head !== assembledTipSha || preGateStamp.dirty) {
+    return {
+      ok: false, landed, dropped, baseMainSha, assemblyMs, batchHeadMoved: true,
+      reason: preGateStamp.dirty
+        ? `the batch worktree carries uncommitted changes before the gate even runs (tip ${assembledTipSha.slice(0, 7)}) — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`
+        : `the batch worktree's HEAD (${preGateStamp.head ?? "unreadable"}) no longer matches the tip assembly just built (${assembledTipSha.slice(0, 7)}) — refusing before the gate even runs; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+    };
+  }
+  const gate = await runGate(batchWorktreePath, baseMainSha, landed.length, assemblyMs, assembledTipSha);
   if (!gate.passed) {
     // Card 92be634e: a reduced-gate --only-file= overflow write failure never ran any gate step at all —
     // it must never count as a merge-gate RED (recordMergeGateFailure/gateOwed), matching the solo path,
@@ -1252,24 +1357,26 @@ export async function runBatchedMerge(
     const reducedGateOnlyFileFailed = gate.detail?.reducedGateOnlyFileFailed === true;
     return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateFailed: reducedGateOnlyFileFailed ? false : isMergeGateRed(gate), ...(gate.cancelled ? { cancelled: true } : {}), gateDetail: gate, reason: gate.reason ?? "batch gate failed" };
   }
-  const { git, timeoutMs } = boundedGit(batchWorktreePath, deps);
-  let batchHeadSha: string;
-  try {
-    batchHeadSha = (await withTimeout(
-      git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch worktree, post-gate)",
-    )).trim();
-  } catch (e) {
-    return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: true, gateDetail: gate, reason: `failed to read batch worktree HEAD after a green gate: ${(e as Error).message}` };
+  // @decision 043d83d2 — re-stamp AFTER the gate (which can run for minutes) and compare against the SAME
+  // pin, never a fresh independent read: a HEAD swap during the gate, or an uncommitted edit to a tracked
+  // file with HEAD left untouched (the card 975c774b dirty-worktree shape), both fail this the same way.
+  const postGateStamp = await computeWorktreeGateStamp(batchWorktreePath, { timeoutMs: deps.timeoutMs, gitFactory: deps.gitFactory });
+  const pinnedPreStamp: WorktreeGateStamp = { head: assembledTipSha, dirty: preGateStamp.dirty, dirtyHash: preGateStamp.dirtyHash };
+  if (gateStampsDiffer(pinnedPreStamp, postGateStamp)) {
+    return {
+      ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: true, gateDetail: gate, batchHeadMoved: true,
+      reason: `the batch worktree changed during the gate — HEAD now reads ${postGateStamp.head ?? "unreadable"}, expected the gated tip ${assembledTipSha.slice(0, 7)} (or its uncommitted state changed) — refusing to fast-forward; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+    };
   }
   // @decision 1ac74580 — fire right here, immediately before the fast-forward: the one irreversible write
   // for the whole batch. `landed` (never `dropped`) is exactly who could end up with their own landing.
   onBeforeFastForward?.(landed);
   const ffStartMs = Date.now();
-  const ff = await fastForwardCanonicalMain(repoPath, baseMainSha, batchHeadSha, deps);
+  const ff = await fastForwardCanonicalMain(repoPath, baseMainSha, assembledTipSha, deps);
   const fastForwardMs = Date.now() - ffStartMs;
   if (!ff.ok) {
     return {
-      ok: false, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
+      ok: false, landed, dropped, baseMainSha, batchHeadSha: assembledTipSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
       forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha, landingStarted: true,
       ...(ff.quarantined ? { quarantined: true } : {}), ...(ff.indexLockPresent ? { indexLockPresent: true } : {}),
       ...(ff.branchDiverted ? { branchDiverted: true } : {}),
@@ -1277,5 +1384,5 @@ export async function runBatchedMerge(
       ...(ff.mayHaveLanded ? { mayHaveLanded: true } : {}),
     };
   }
-  return { ok: true, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate, landingStarted: true };
+  return { ok: true, landed, dropped, baseMainSha, batchHeadSha: assembledTipSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate, landingStarted: true };
 }

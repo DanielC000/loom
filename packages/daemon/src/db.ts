@@ -1722,7 +1722,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "build_gate", "build_gate_retry_attempt", "build_gate_retry", "build_gate_single_file_retry",
   // Card 2ec00f6a: attempt 1's own verdict, written before the retry runs (it is a link of the same admission, card 68155573) — see its types.ts doc.
   "build_gate_single_file_retry_attempt",
-  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "merge_landing_started", "merge_landing_aborted", "batch_merge_forfeited", "batch_merge_branch_diverted", "batch_merge_ff_unverified", "batch_merge_dropped", "batch_merge_branch_retained", "merge_branch_retained", "kill_switch",
+  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "merge_landing_started", "merge_landing_aborted", "batch_merge_forfeited", "batch_merge_branch_diverted", "batch_merge_head_moved", "batch_merge_ff_unverified", "batch_merge_dropped", "batch_merge_branch_retained", "merge_branch_retained", "kill_switch",
   // Incident / forensic record
   "session_died", "session_recovery_abandoned", "worker_report_undelivered", "worker_exited_without_report",
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",
@@ -2604,7 +2604,11 @@ export interface PendingGateOpVerdict {
    *  Card 0d372516 (round 2): a `merge_batch` op whose BATCH gate never ran because assembly ABORTED EARLY on a
    *  candidate's own unverified rollback settles the SAME `outcome:"skipped"` way with `skipReason:
    *  "assembly-aborted-rollback-unverified"` — distinct from `"all-candidates-dropped"` (some candidates here may
-   *  never have been attempted at all, not just dropped). */
+   *  never have been attempted at all, not just dropped).
+   *  Card 043d83d2 (S4): a `merge_batch` op whose BATCH gate never ran because a PRE-gate `batchHeadMoved`
+   *  refusal fired (a worker-writable worktree-ref tamper, or the `!assembledTipSha` refusal) settles the
+   *  SAME `outcome:"skipped"` way with `skipReason:"batch-head-moved"` — never reached for the POST-gate
+   *  shape of `batchHeadMoved`, where the gate genuinely ran and this row already carries a real verdict. */
   skipReason?: string;
   /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
    *  the `gate_status(opId)` half of the same fix DoD-1 applied to the `[loom:merge-done]` nudge text.

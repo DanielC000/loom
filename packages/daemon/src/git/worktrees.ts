@@ -5369,6 +5369,11 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // handling — one of its own regexes embeds a literal comment ("// Card 92be634e: best-effort cleanup")
   // as part of what it matches, so moving or rewording that comment alone could flip the verdict.
   "packages/daemon/test/batch-merge-reduced-gate-only-file-failure.mjs",
+  // Card 043d83d2: raw-reads real src/sessions/service.ts SOURCE, unstripped, for the batch runGate
+  // closure's own computeEmitCompareGate call-site text — asserting it passes the pinned assembledTipSha,
+  // never the literal "HEAD" (the pre-gate reduced-gate steer this card closes). A comment landing inside
+  // the call's own argument list is the same shape hazard as this sweep's other entries above.
+  "packages/daemon/test/batch-merge-head-moved-emitcompare-arg-guard.mjs",
   // Card 4319d6b1 sweep (manager ruling): raw-reads real src/git/mainline-watch.ts, src/gateway/server.ts
   // and src/pty/host.ts, but its own local `strip`/`stripL` helpers remove only whole-line `//` comments
   // by deliberate choice (the file's own inline note: a block-comment stripper would mis-pair the `/*`

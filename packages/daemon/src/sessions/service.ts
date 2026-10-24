@@ -746,6 +746,12 @@ type MergeBatchResult = {
    *  `mergeBatchTracked` (no gate, no fallback); classified `"canonical-repo-shallow"`, `NEVER_CACHED_OUTCOMES`.
    *  Mirrors `ConfirmMergeResult.canonicalRepoShallow`. */
   canonicalRepoShallow?: boolean;
+  /** The batch worktree's HEAD (or uncommitted state) no longer matched the tip assembly itself pinned —
+   *  checked pre-gate and post-gate (see `RunBatchedMergeResult.batchHeadMoved`, git/batch-merge.ts). Same
+   *  no-fallback treatment as `quarantined`/`branchDiverted`: this worktree's HEAD lives in the shared,
+   *  worker-writable `.git`, so a mismatch is a fact about possible tamper, not about the candidates.
+   *  @decision 043d83d2 — classified `"batch-head-moved"`, `NEVER_CACHED_OUTCOMES`. */
+  batchHeadMoved?: boolean;
   /** Card b801bad0 (fix round) — the fast-forward's `--ff-only` call did not throw, but the POST-ff
    *  re-read that confirms WHERE it landed could not be completed (see `FastForwardResult.unverified`) —
    *  distinct from a confirmed `branchDiverted`: the landing most likely happened, it just could not be
@@ -22578,14 +22584,17 @@ export class SessionService {
           this.markCuttingWorktree(finalRepoPath);
           let wt: Awaited<ReturnType<typeof createWorktree>>;
           try {
-            wt = await createWorktree(finalRepoPath, finalProjectId, batchTaskId);
+            // @decision 043d83d2 (S1) — cut FROM `baseMainSha`, never the repo's current HEAD at cut
+            // time: without this, an ordinary commit landing between `baseMainSha`'s resolve and this cut
+            // misreported as `batchHeadMoved`/"tampered" below. Empty `baseMainSha` falls back unchanged.
+            wt = await createWorktree(finalRepoPath, finalProjectId, batchTaskId, {}, undefined, baseMainSha);
           } finally {
             this.unmarkCuttingWorktree(finalRepoPath);
           }
           batchWorktreePath = wt.worktreePath;
           const worktreeCutMs = Date.now() - worktreeCutStartMs;
 
-          const runGate = async (worktreePath: string, gateBaseMainSha: string, landedCount: number, assemblyMs: number): Promise<BatchGateResult> => {
+          const runGate = async (worktreePath: string, gateBaseMainSha: string, landedCount: number, assemblyMs: number, assembledTipSha: string): Promise<BatchGateResult> => {
             // Card dd961cf9: reaching this closure at all means `runBatchedMerge` decided to gate for
             // real (it skips calling `runGate` entirely on a `landed.length === 0` batch) — set BEFORE
             // anything below can throw, so a real gate attempt is never misclassified as `false`.
@@ -22597,28 +22606,25 @@ export class SessionService {
             // assigning that bare name from computeEmitCompareGate (the single-branch call site, whose own
             // pre-wait branch-head-capture ordering it protects) — a second, differently-named local here avoids
             // a false collision with that guard; it protects an unrelated invariant this batch path has no
-            // equivalent of (this call classifies the ALREADY-ASSEMBLED, frozen batch worktree, not a live
-            // branch that can move during a queue wait, so — unlike the solo path's `reunionAtAdmission` —
-            // no admission-time re-derivation is needed here: nothing else writes to this private worktree
-            // during the queue wait).
-            // Card d422e279 CORRECTION (structurally closed by card fe848bfc — see below): the ref this
-            // call resolves ("HEAD") must be evaluated FROM the batch worktree, not canonical
-            // `finalRepoPath` — a batch worktree carries no named branch a caller outside it could resolve
-            // "HEAD" as (unlike the solo path's call, which passes an actual branch NAME as `ref` and can
-            // therefore safely evaluate it from canonical: a worktree branch is an ordinary ref, visible
-            // repo-wide). Passing `finalRepoPath` as a SEPARATE git-cwd argument here used to make "HEAD"
-            // resolve to CANONICAL's own checked-out ref instead — since canonical main had not yet moved
-            // past `gateBaseMainSha` at this point, that read `gateBaseMainSha..gateBaseMainSha`, an empty
-            // diff, EVERY time, regardless of what the batch actually changed (this is the real reason
-            // every historical batched `gate_history` row read `emitCompareReduced:null`, not merely "a
-            // union is unlikely to qualify" as originally diagnosed — confirmed by a real fixture run
-            // before that fix: a two-branch, test-only-added batch still reported "empty diff" here).
-            // Card fe848bfc then removed the separate git-cwd argument entirely — `computeEmitCompareGate`
-            // now resolves everything from `worktreePath` alone, so this call can no longer be handed a
-            // mismatched pair of paths the way `finalRepoPath` was: the worktree shares canonical's OWN
-            // object database (an ordinary git-worktree property), so `worktreePath` resolves
-            // `gateBaseMainSha` (a real, shared ancestor) exactly as well as `finalRepoPath` ever did.
-            const batchEmitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainSha, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => undefined);
+            // equivalent of.
+            //
+            // Card d422e279 CORRECTION (structurally closed by card fe848bfc): the ref this call resolves
+            // must be evaluated FROM the batch worktree, not canonical `finalRepoPath` — a batch worktree
+            // carries no named branch a caller outside it could resolve "HEAD" as. Passing `finalRepoPath`
+            // as a SEPARATE git-cwd argument here used to make "HEAD" resolve to CANONICAL's own checked-out
+            // ref instead, reading an empty `gateBaseMainSha..gateBaseMainSha` diff every time regardless of
+            // what the batch actually changed (the real reason every historical batched `gate_history` row
+            // read `emitCompareReduced:null`). Card fe848bfc removed that separate git-cwd argument.
+            //
+            // CORRECTED AGAIN (card 043d83d2): this closure used to then pass the literal string "HEAD",
+            // resolved fresh at call time — but that ref lives in the SHARED, worker-writable `.git`, so
+            // this comment's own prior claim ("nothing else writes to this private worktree during the
+            // queue wait") was false: a sibling worker can move it, steering this classification toward a
+            // decoy small diff while the actually-gated/landed tree is larger.
+            //
+            // @decision 043d83d2 — pass `assembledTipSha` (the sha `runBatchedMerge` itself pinned from
+            // assembly and already cross-checked against the worktree), never "HEAD" — mirrors `56c10535`.
+            const batchEmitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainSha, assembledTipSha, { timeoutMs: this.gitOpMs }).catch(() => undefined);
             // Card d422e279: substitute the SAME smaller command a solo reduced merge runs
             // (`buildReducedGateCommand`) when the WHOLE assembled batch proves eligible — never a
             // batch-specific predicate or command builder. `batchReduced` gates BOTH this substitution and
@@ -23070,6 +23076,22 @@ export class SessionService {
             ], opId, undefined, true);
             return { ok: false, opId, landed: [], fallback: notStarted, canonicalRepoShallow: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
+          if (result.batchHeadMoved) {
+            // A fact about the worker-writable worktree ref, not about any resolved candidate's content —
+            // a per-candidate fallback would just re-attempt against candidates that were never the
+            // problem, so start nothing and surface it loudly, mirroring `branchDiverted`/`quarantined`.
+            //
+            // @decision 043d83d2 — never run a per-candidate fallback on this outcome.
+            evtBatch("batch_merge_head_moved", { repoPath: finalRepoPath, baseMainSha, reason: result.reason, fastForwardMs: result.fastForwardMs });
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the batch worktree's HEAD moved unexpectedly" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
+            ], opId, undefined, "this batch worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with; re-firing merge_batch is safe and will re-cut a fresh worktree and re-assemble from the same candidates — the worktree this refusal found is NOT retained for inspection (it is removed like any other refusal, unlike a quarantine), so its own reflog is gone too; this op's own durable batch_merge_head_moved event (already recorded) is what survives");
+            return { ok: false, opId, landed: [], fallback: notStarted, batchHeadMoved: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
           if (result.branchDiverted) {
             // MAJOR fix (Code Review, fix round for card b801bad0): a branchDiverted refusal must NOT fall
             // into the ordinary per-candidate solo fallback below. The solo path (mergeBranchLocked,
@@ -23402,6 +23424,11 @@ export class SessionService {
           // human-only reset route (or fixing whatever corrupted the record), not restoring a checkout.
           : outcome.value.watermarkUnreadable
           ? `[loom:merge-batch-watermark-unreadable] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "the stored mainline watermark record is unreadable"}. The canonical checkout itself may be fine — it is the STORED RECORD this project's watermark pin relies on that could not be trusted. Ask the owner to reset this project's mainline baseline via POST /api/projects/:id/mainline-watermark/reset (loopback, human-only) if the record is genuinely stale/wrong, then retry. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
+          : outcome.value.batchHeadMoved
+          // @decision 043d83d2 — dedicated wording naming the worker-writable ref, never the generic
+          // "landed nothing" tail below: a per-candidate re-fire would re-attempt against candidates that
+          // were never the problem.
+          ? `[loom:merge-batch-head-moved] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "the batch worktree's HEAD moved unexpectedly"}. This worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with. NOTHING was started, and the batch worktree itself (and its own reflog) is already gone — not retained for inspection, removed like any other refusal; this op's own durable batch_merge_head_moved event is what survives: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : outcome.value.branchDiverted
           ? `[loom:merge-batch-diverted] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "canonical checkout diverted to an unexpected branch"}. Restore the canonical checkout to the expected mainline branch BEFORE any worker_merge_confirm — a solo confirm now would land off mainline. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : outcome.value.unverified
@@ -23475,7 +23502,9 @@ export class SessionService {
         // exactly the `"squash-refused"` reasoning that const's own doc already states for the solo path.
         // @decision 62c4953a — `quarantined`/`indexLockPresent` had NO arm here (fell to "rejected", which
         // IS replayed) — same canonical-checkout-fact reasoning as branchDiverted/unverified above.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
+        // @decision 043d83d2 — `batchHeadMoved` is a fact about the worker-writable worktree ref, same
+        // never-cached reasoning as `branchDiverted` — a human-cleared ref must never replay a stale refusal.
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.batchHeadMoved ? "batch-head-moved" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.
         //
@@ -23492,6 +23521,10 @@ export class SessionService {
             // (a candidate may have already landed before the one whose rollback failed), which is exactly why it
             // must never be shadowed by (or folded into) the `landed.length === 0` check `batchAllDropped` uses.
             else if (batchAssemblyAborted === "rollback-unverified") verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: assembly aborted early because a candidate's own rollback could not be verified clean — any remaining candidates were never attempted; the batch's own candidates each went to their own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "assembly-aborted-rollback-unverified", batchBranchCount: 0, batchLanded: false, ...timing } };
+            // @decision 043d83d2 (B1) — checked BEFORE `batchAllDropped` (record 0d372516's Do-not (2)):
+            // a PRE-gate `batchHeadMoved` also sets `landed.length === 0`, so `batchAllDropped` would
+            // otherwise win and claim fallback ops that were never started. Unreached post-gate (verdict already set).
+            else if (outcome.value.batchHeadMoved) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "the batch worktree's HEAD moved unexpectedly before the gate ran", skipReason: "batch-head-moved", batchBranchCount: 0, batchLanded: false, ...timing } };
             else if (batchAllDropped) verdict = { kind: "skipped", payload: { reason: "the batch gate never ran: every candidate was dropped at assembly and handed to its own worker_merge_confirm (read that op's own gate_status for whether it landed); totalDurationMs includes those fallback runs", skipReason: "all-candidates-dropped", batchBranchCount: 0, batchLanded: false, ...timing } };
             // Card ba663984's own early refusal (before any worktree cut) — same no-gate-ran shape as batchAllDropped above.
             else if (outcome.value.watermarkUnreadable) verdict = { kind: "skipped", payload: { reason: outcome.value.reason ?? "the stored mainline watermark record is unreadable", skipReason: "watermark-unreadable", batchBranchCount: 0, batchLanded: false, ...timing } };

@@ -42,7 +42,10 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   `build_gate_single_file_retry_attempt` (card 2ec00f6a — attempt 1's own verdict, written before the
   retry re-queues; the only durable record of attempt 1 while the retry waits),
   `merge_request`, `merge_done`, `merge_rejected`, `merge_cancelled`, `batch_merge_forfeited`,
-  `batch_merge_branch_diverted`, `batch_merge_ff_unverified` (card b801bad0, fix round — a security-
+  `batch_merge_branch_diverted`, `batch_merge_head_moved` (card 043d83d2 — the batch worktree's own HEAD
+  (or uncommitted state) no longer matched the tip assembly itself pinned, a trust-boundary refusal naming
+  a possible worker-writable ref tamper; same durability reasoning as its `batch_merge_branch_diverted`
+  sibling immediately above), `batch_merge_ff_unverified` (card b801bad0, fix round — a security-
   relevant refusal/unverified-landing outcome on the batch fast-forward; a human reading it later, after
   the manager/workers involved are long gone, is the whole point), `kill_switch`,
   `merge_landing_started` (card `1ac74580` — the only durable trace that a confirm reached its own

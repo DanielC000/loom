@@ -1930,6 +1930,14 @@ export type OrchestrationEventKind =
   // baseMainSha, reason, fastForwardMs, branches }. Like a forfeit/quarantine, NO per-candidate fallback
   // runs for this outcome — see `mergeBatchTracked`'s own handling.
   | "batch_merge_branch_diverted"
+  // Card 043d83d2 — the batch worktree's own HEAD (or its uncommitted state) no longer matched the tip
+  // `runBatchedMerge` itself pinned from its own assembly results, checked once before the gate runs and
+  // once more right after it passes — see `RunBatchedMergeResult.batchHeadMoved`'s own doc, git/batch-
+  // merge.ts. This worktree's HEAD lives in the shared, worker-writable `.git`, so a mismatch is a fact
+  // about possible tamper on that ref, not about the resolved candidates. Filed under the confirming
+  // MANAGER; `detail` carries { opId, repoPath, baseMainSha, reason, fastForwardMs }. Like a branch
+  // divert/forfeit, NO per-candidate fallback runs for this outcome.
+  | "batch_merge_head_moved"
   // Card b801bad0 (fix round) — the batch fast-forward's `--ff-only` call did not throw, but the POST-ff
   // re-read that confirms WHERE it landed could not be completed (e.g. a transient timeout) — see
   // `FastForwardResult.unverified`'s own doc, git/batch-merge.ts. Distinct from `batch_merge_branch_diverted`:
@@ -2133,7 +2141,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
-  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
