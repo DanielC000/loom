@@ -126,7 +126,10 @@ function scenarioA_removeSitesOneAndThree() {
   check("*** A *** kTwinA's own physical latch was lifted (twin fully lifted)", !fs.existsSync(kTwinALatchPath));
   check("*** A *** kTwinB's own physical latch was lifted (twin fully lifted)", !fs.existsSync(kTwinBLatchPath));
   check("*** A *** T is FULLY unquarantined after the clear", !stillBlocked);
-  check("*** A *** the return value is a CLEAN success (no stillBlockedCoOccupants/latchKept)", !result);
+  // @decision 4b6c8d24 — clearMergeQuarantineByKey no longer returns void on a clean success (it always
+  // discloses liftedRepoPaths now); a clean success is `latchKept` absent + an empty
+  // stillBlockedCoOccupants, never a bare falsy return.
+  check("*** A *** the return value is a CLEAN success (no stillBlockedCoOccupants/latchKept)", !!result && !result.latchKept && (result.stillBlockedCoOccupants ?? []).length === 0);
   check("*** A *** no remaining in-memory T entry still carries tokenShared", !tEntriesAfter.some((e) => e.tokens.includes(tokenShared)));
 }
 

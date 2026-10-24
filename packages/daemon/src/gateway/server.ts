@@ -3263,9 +3263,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const { wasQuarantined, reason, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
+    const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
     return {
       ok: true, wasQuarantined, repoPath: repo.path, ...(reason ? { reason } : {}),
+      // @decision 4b6c8d24 — name every identity this clear actually lifted, unconditionally (same
+      // field-consistency rule `stillBlockedCoOccupants` already follows below), plus a provenance
+      // notice when the lifted union was marked — see the decision record.
+      liftedRepoPaths, ...(provenanceUnknown ? { provenanceUnknown } : {}),
       // @decision 182c01cc (round 2) — spread UNCONDITIONALLY, never gated on `latchKept`: a RELOCATED
       // co-occupant never sets latchKept, so gating here would silently drop it at the REST boundary.
       stillBlockedCoOccupants,
@@ -3302,9 +3306,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
       // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
       // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
-      const { wasQuarantined, reason, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
       return {
         ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}),
+        // @decision 4b6c8d24 — same disclosure as `/clear` above.
+        liftedRepoPaths, ...(provenanceUnknown ? { provenanceUnknown } : {}),
         // @decision 182c01cc (round 2) — see the matching note on `/clear` above: unconditional, never
         // gated on `latchKept`.
         stillBlockedCoOccupants,
