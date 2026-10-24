@@ -14,12 +14,17 @@ export type VaultPathCheck =
  * @decision b709113e — never drop this win32 check: a POSIX-root path (e.g. "/tmp") passes
  * `path.isAbsolute` on win32 with no drive letter/UNC root, so it silently resolves against whichever
  * drive the process happens to be on instead of the directory the caller meant.
+ *
+ * @decision f45821a2 — exclude a network/device form (e.g. the NT native namespace prefix `\??\...`) from
+ * THIS check; it is still refused, just by the more specific device-form refusal downstream, never this
+ * check's generic drive-less message.
  */
 function isWin32DriveLessRootedPath(p: string): boolean {
   if (process.platform !== "win32") return false;
   if (!path.isAbsolute(p)) return false;
   if (/^[A-Za-z]:[\\/]/.test(p)) return false; // drive-qualified, e.g. "C:\..." / "C:/..."
   if (p.startsWith("\\\\") || p.startsWith("//")) return false; // UNC, e.g. "\\server\share\..."
+  if (isUnsafeToCanonicalize(p)) return false; // network/device form, e.g. the NT native namespace prefix `\??\...`
   return true;
 }
 
