@@ -306,6 +306,50 @@ appending a third-person clause (the audience is the LEAD, never the dropped ses
 `clearKickoffConfirmRecheckTimer` behavior (decision `8882e2ca`), not a round-4 addition — round 4 (via
 round 3) only widened WHICH sessions can hold a timer entry there; the clearing mechanism itself is older.
 
+## Round 6 — Follow-up (card `6bf44ecc`): the "held nudge" shape is the SAME rejected SF-4 move, reapplied
+
+Code Review `58d52c66` of round 5 (card `3d72900f`) filed a follow-up asking whether a manager-kickoff
+drop filed during boot — where `notifyLeadOfParentlessManagerIssue`'s `isLiveAndPreBoot` gate suppresses
+the live nudge because the Lead itself was just resumed and hasn't reached SessionStart yet — is an
+instance of this card's own SF-4 hazard (the Lead possibly stuck on the same blocking dialog), and
+proposed a fix: after the boot loop, send ONE held durable Lead notice via `enqueueDurableNudge` for each
+drop filed with `leadNotified:false` during that boot, relying on `enqueueStdin`'s own internal
+`live.ready`-gated hold/drain to deliver it once the Lead is "safe."
+
+**Ruling: YES, and the proposed fix is wrong.** The hazard lives entirely in the RECIPIENT's (the Lead's)
+state, not in what triggered the call — `notifyLeadOfParentlessManagerIssue` is the ONE shared helper both
+`notifyLeadOfStuckManager` (dialog-stuck) and `notifyLeadOfDroppedManagerKickoff` (kickoff-drop) funnel
+through, and its `isLiveAndPreBoot` gate protects the Lead identically regardless of `dedupEventKind`. The
+proposed fix is functionally the SAME move SF-4 above already tried and reverted for breaking scenario
+(M4): it bypasses the call-site `isLiveAndPreBoot` precondition and instead trusts `enqueueStdin`'s
+internal `live.ready`-gated hold to defer delivery until "safe." But `live.ready` is NOT the same signal
+as genuine SessionStart/`isPastBoot` — decision `01160ae3` documents exactly this gap ("Do not treat
+`live.ready`/`busy` as a reliable hold against this — `READY_FALLBACK_MS` already forces `ready` true...
+well before this detector's own timeout can fire"), which is why `850eb55c` had to invent a SEPARATE
+`startupCycleInFlight` flag rather than trust `live.ready`-adjacent signals for its own, first-party
+kickoff delivery. A nudge "held until `live.ready`" can drain and get typed into the Lead's pty during the
+exact window it might still be sitting on an unconfirmed/unrecognized dialog — reopening the hazard SF-4
+already closed for this helper, via a new code path instead of the old one.
+
+**What the Lead gets instead: nothing new.** It already unconditionally gets the durable board task
+(`leadBoardTaskId`, filed regardless of Lead liveness) and the owner-attention alert
+(`companion/attention-push.ts`'s `classify()` fires on `detail.parentNudged === false` unconditionally —
+see the comment above `notifyLeadOfParentlessManagerIssue`'s own `if (parentNudged)` check). This mirrors
+the posture already accepted for the Platform Lead's OWN dropped kickoff (card `5c2f8108`: `leadNotified`
+stays permanently `false` for a Lead's own drop — no Lead-escalation exists or is needed, owner-attention
+alone is the backstop) and the accepted residuals already on record in this file (the round-3/round-4
+"any non-kickoff turn start permanently suppresses the drop" residual) and in `b03e636c`'s worker-side
+twin. Whether the Lead itself notices a given episode promptly, versus only via its own next unrelated
+nudge/board check, is an accepted residual — not a gap to mechanically close with a new timer/retry that
+reintroduces the hazard this record exists to document.
+
+Regression-locked by scenario (GG) in `manager-kickoff-giveup-dropped.mjs`: a manager's kickoff drop fires
+while the live Lead is `isLiveAndPreBoot` — `leadNotified:false`, `leadBoardTaskId` still a string,
+`parentNudged:false`, and ZERO `enqueueStdin` calls to the Lead. RED-before-GREEN proof (not committed):
+temporarily removing the `isLiveAndPreBoot` conjunct from `notifyLeadOfParentlessManagerIssue`'s `if`
+check reproduces exactly the proposed fix's hazard — (GG) goes RED on `leadNotified`/zero-enqueue; restoring
+the conjunct returns it to GREEN.
+
 ## Do not
 
 - Do not re-mint a manager's kickoff inside `handleKickoffGiveUpExhausted` without first proving the
@@ -370,6 +414,12 @@ round 3) only widened WHICH sessions can hold a timer entry there; the clearing 
   deliberate hazard test (`claude-boot-dialog-stuck-no-self-nudge.mjs` scenario M4) protecting against the
   Lead itself being stuck on the same blocking dialog as the session it's being notified about. Switching
   the dispatch call to `enqueueDurableNudge` is safe and shipped; removing the precondition is not.
+- Do not implement a "held durable Lead notice (`enqueueDurableNudge`, deferred until `live.ready`)" as a
+  substitute for `isLiveAndPreBoot`'s own call-site precondition, for the kickoff-drop caller or any other
+  (Round 6, card `6bf44ecc`) — it is the SAME move the bullet above already rejects, just reapplied via a
+  new code path; `live.ready` is not genuine SessionStart/`isPastBoot` (see `01160ae3`), so a nudge held on
+  it can still drain into the Lead's pty before it's actually safe. The durable board task plus the
+  owner-attention alert (`parentNudged:false`) are the accepted backstop; see Round 6's own section above.
 - Do not set `leadNotified = true` unconditionally right after calling `enqueueDurableNudge` — that method
   never throws (it swallows internally and reports via `onOutcome`), so a line immediately following the
   call runs regardless of whether the dispatch actually succeeded (Round 5, SF-3's own

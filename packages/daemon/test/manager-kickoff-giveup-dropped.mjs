@@ -1314,6 +1314,37 @@ try {
       workerEscalatedEvents === 1);
   }
 
+  // ===================== (GG) Card 6bf44ecc: REGRESSION LOCK — a Lead that is itself isLiveAndPreBoot at
+  // the moment a manager's kickoff drop fires must NOT get a live nudge: same hazard 850eb55c/M4 already
+  // guards against for the dialog-stuck caller, and notifyLeadOfParentlessManagerIssue is the ONE shared
+  // helper both callers funnel through. The durable board task AND the owner-attention backstop
+  // (parentNudged:false) still fire regardless — the accepted shape, not a gap this scenario is proving
+  // still needs closing.
+  //
+  // @decision ab3c965d — see that record's own "Round 6 — Follow-up (card 6bf44ecc)" section for why a
+  // held/deferred nudge (enqueueDurableNudge, gated on live.ready) is NOT the fix here.
+  // =====================================================================================================
+  {
+    process.env.LOOM_DEV = "1";
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `mkgd-gg-mgr-${sfx}`, lead = `mkgd-gg-lead-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: lead, role: "platform" });
+    pty.setLive(mgr); pty.setLive(lead); // deliberately do NOT setPastBoot(lead) — it is itself pre-boot
+
+    sessions.handleKickoffGiveUpExhausted(mgr, `msg-gg-${sfx}`, `root-gg-${sfx}`, `kickoff-gg-${sfx}`);
+
+    const events = db.listEventsForWorker(mgr).filter((e) => e.kind === "manager_kickoff_dropped");
+    check("(GG) a durable manager_kickoff_dropped event is still recorded", events.length === 1);
+    check("(GG) leadNotified:false — the Lead is itself live-and-pre-boot, suppress the live nudge", events[0]?.detail?.leadNotified === false);
+    check("(GG) a leadBoardTaskId is still carried — the durable task is unaffected by the live-nudge suppression", typeof events[0]?.detail?.leadBoardTaskId === "string");
+    check("(GG) parentNudged:false — the owner-attention backstop still fires regardless of Lead liveness", events[0]?.detail?.parentNudged === false);
+    check("(GG) ZERO enqueueStdin calls to the Lead — it may itself be stuck on the same dialog", pty.sent.filter((s) => s.id === lead).length === 0);
+    check("(GG) ZERO enqueueStdin calls anywhere (the dropped manager itself never gets a self-nudge either)", pty.sent.length === 0);
+    db.setProcessState(lead, "exited"); // hygiene — see (C)'s own comment on why this matters for the next scenario
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
