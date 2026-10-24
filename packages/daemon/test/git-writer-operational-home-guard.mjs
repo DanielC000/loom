@@ -129,7 +129,19 @@ try {
   check("(d) negative control: an ordinary repo with its own top-level worktrees/ folder is NOT refused",
     branchOrdinaryWT.ok === true && branchOrdinaryWT.branch === "feature-wt");
 
-  // ===== (e) NEGATIVE CONTROL: a REAL linked git worktree under WORKTREES_DIR (sibling of LOOM_HOME) =====
+  // ===== (e) a REAL linked git worktree under WORKTREES_DIR (sibling of LOOM_HOME) =====
+  // @decision 3a5c5d4a (S1, card c056c607) — this is NO LONGER a negative control proving the shape is
+  // accepted outright. After c056c607, a `repoPath` that is itself a linked worktree is refused BY
+  // DESIGN on the canonical git path — "the project's bound repo genuinely IS a linked worktree
+  // (unsupported on this path — card ec4afbe9 tracks deriving the real main checkout once, at
+  // project-bind time)" (see docs/decisions/3a5c5d4a-canonical-git-commondir-trust.md's own "S1" section).
+  // There is no supported pin-based way to make this call succeed today — `ec4afbe9`'s own mechanism
+  // does not exist yet, and the commondir-trust pin table is project-scoped (keyed on a project's bound
+  // MAIN repoPath), never per-worktree, so there is nothing this test could register to satisfy it.
+  // This case still has a job: prove the OPERATIONAL-HOME guard — the ONE guard this file is actually
+  // about — stays narrowly scoped and does NOT ALSO refuse this for its OWN reason, while separately
+  // pinning that the (intended, different) bound-worktree refusal fires instead — so a future change that
+  // makes the operational-home guard start swallowing this shape too is caught here (card 7557fac7).
   const sourceRepo = path.join(fixturesRoot, "source-repo");
   initRepo(sourceRepo);
   fs.mkdirSync(WORKTREES_DIR, { recursive: true });
@@ -138,8 +150,10 @@ try {
   const wWorker = new GitWriter(workerWorktree);
   fs.writeFileSync(path.join(workerWorktree, "worker-file.txt"), "worker wrote this\n");
   const commitWorker = await wWorker.commit("feat(test): worker commit in its own worktree");
-  check("(e) negative control: a real linked worktree under WORKTREES_DIR (a sibling of LOOM_HOME) is NOT refused",
-    commitWorker.ok === true && typeof commitWorker.hash === "string");
+  check("(e) a real linked worktree under WORKTREES_DIR is NOT refused by the OPERATIONAL-HOME guard specifically (this file's own invariant stays narrowly scoped)",
+    commitWorker.ok === false && !/operational home directory/i.test(commitWorker.error ?? ""));
+  check("(e) …it IS refused instead by the commondir-trust bound-worktree check (card ec4afbe9, @decision 3a5c5d4a S1) — intended behavior, pinned here so a regression away from it is caught",
+    commitWorker.ok === false && /linked git worktree/i.test(commitWorker.error ?? "") && /ec4afbe9/.test(commitWorker.error ?? ""));
 
   // ===== (f) round 3 (card f9360c84): a toplevel-PROBE TIMEOUT on a non-git descendant of LOOM_HOME
   // must FAIL CLOSED — refused, never fall through as if the probe had proven "not a git repository".
@@ -228,6 +242,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GitWriter itself refuses every write op (checkout/createBranch/commit/push) whose RAW repoPath, or whose git-resolved TOPLEVEL, is LOOM_HOME or an ancestor of it — including a non-git descendant of LOOM_HOME (the round-2 critical bypass), a hung toplevel probe (round 3, fail-closed), and a win32 junction alias (round 3, realpathSync.native coverage) — while an ordinary repo with its own worktrees/ folder and a real Loom worker worktree (sibling of LOOM_HOME) are both completely unaffected."
+  ? "\n✅ ALL PASS — GitWriter itself refuses every write op (checkout/createBranch/commit/push) whose RAW repoPath, or whose git-resolved TOPLEVEL, is LOOM_HOME or an ancestor of it — including a non-git descendant of LOOM_HOME (the round-2 critical bypass), a hung toplevel probe (round 3, fail-closed), and a win32 junction alias (round 3, realpathSync.native coverage) — while an ordinary repo with its own worktrees/ folder stays completely unaffected, and a real Loom worker worktree (sibling of LOOM_HOME) is refused instead by the intended, DIFFERENT commondir-trust bound-worktree check (card ec4afbe9, @decision 3a5c5d4a), never by this file's own operational-home guard."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

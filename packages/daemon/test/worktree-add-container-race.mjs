@@ -31,6 +31,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil, deferred } from "./_wait.mjs";
+import { gitSubSubcommand } from "./_git-argv.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wacr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -94,6 +95,7 @@ console.log(`[wacr] installed git: ${execSync("git --version").toString().trim()
   const DELAY_OFFSETS_MS = [20, 30, 40, 50, 60, 80];
   let addFailures = 0;
   let removeFailures = 0;
+  let addSignalFiredCount = 0;
   for (let i = 0; i < N; i++) {
     const repo = makeRepo(`internal-${i}`);
     const projectId = `wacr-internal-proj-${i}`;
@@ -101,14 +103,16 @@ console.log(`[wacr] installed git: ${execSync("git --version").toString().trim()
     const addAboutToFire = deferred();
     const addGitFactory = (repoPath, ms) => ({
       raw: async (args) => {
-        if (args[0] === "worktree" && args[1] === "add") addAboutToFire.resolve(); // signal only — never waits
+        const { sub, subSub } = gitSubSubcommand(args);
+        if (sub === "worktree" && subSub === "add") { addSignalFiredCount++; addAboutToFire.resolve(); } // signal only — never waits
         return canonicalGit(repoPath, ms).raw(args);
       },
     });
     const offsetMs = DELAY_OFFSETS_MS[i % DELAY_OFFSETS_MS.length];
     const removeGitFactory = (repoPath, ms) => ({
       raw: async (args) => {
-        if (args[0] === "worktree" && args[1] === "prune") {
+        const { sub, subSub } = gitSubSubcommand(args);
+        if (sub === "worktree" && subSub === "prune") {
           // TIMING-GUARD-SAFE: non-gating-settle-pause — neither wait below decides this scenario's own
           // check() outcome; that outcome is the REAL, directly-observed settlement of the real
           // `createWorktree` promise (rejected vs resolved), read via `Promise.allSettled` further down.
@@ -140,6 +144,8 @@ console.log(`[wacr] installed git: ${execSync("git --version").toString().trim()
       console.log(`[internal ${i}] remove REJECTED (unexpected — removeWorktree's contract is never-throws): ${removeRes.reason instanceof Error ? removeRes.reason.message : String(removeRes.reason)}`);
     }
   }
+  check(`(1) the add-about-to-fire stub signal actually fired on every iteration (${addSignalFiredCount}/${N} — card 7557fac7: a silent argv-shape mismatch would leave this stuck at 0, degrading the whole scenario to a bare 500ms wait that may no longer land inside the real race window)`,
+    addSignalFiredCount === N);
   check(`(1) the Loom-internal (removeWorktree, createWorktree) pairing never fails the ADD across ${N} FORCED-overlap iterations (add failures: ${addFailures})`, addFailures === 0);
   check(`(1) removeWorktree itself never rejected across ${N} iterations (its own established contract)`, removeFailures === 0);
 }

@@ -40,6 +40,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { gitSubSubcommand, argsAfterConfig } from "./_git-argv.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wtbn-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -64,14 +65,17 @@ try {
 
   // ── (A) real add succeeds on disk, but the wrapper throws pure benign-progress text ──────────────────
   {
-    let capturedWtPath, capturedBranch;
+    let capturedWtPath, capturedBranch, stubFired = false;
     const benignNoiseFactory = (repoPathArg) => {
       const real = realSimpleGit(repoPathArg);
       return {
         raw: async (args) => {
-          if (args[0] === "worktree" && args[1] === "add") {
-            capturedWtPath = args[2];
-            capturedBranch = args.includes("-b") ? args[args.indexOf("-b") + 1] : args[3];
+          const { sub, subSub } = gitSubSubcommand(args);
+          if (sub === "worktree" && subSub === "add") {
+            stubFired = true;
+            const rest = argsAfterConfig(args);
+            capturedWtPath = rest[2];
+            capturedBranch = rest.includes("-b") ? rest[rest.indexOf("-b") + 1] : rest[3];
             await real.raw(args); // the REAL add — genuinely lands on disk
             throw new Error(benignMessage(capturedBranch));
           }
@@ -84,6 +88,7 @@ try {
       result = await createWorktree(repo, "projBenignA", "task-benign-a", {}, undefined, undefined, { gitFactory: benignNoiseFactory, timeoutMs: 5000 });
     } catch (e) { thrown = e; }
     if (result?.worktreePath) extraDirs.push(result.worktreePath);
+    check("(A) the stub's intended benign-throw path was actually taken (card 7557fac7 — not a silent fall-through to real git)", stubFired === true);
     check("(A) createWorktree does NOT reject on pure benign worktree-add progress text",
       thrown === null && !!result?.worktreePath);
     check("(A) returned worktreePath matches the real add's path",
@@ -101,13 +106,15 @@ try {
 
   // ── (B) NEGATIVE CONTROL: benign text PLUS a real fatal line — must still reject ─────────────────────
   {
-    let capturedWtPath;
+    let capturedWtPath, stubFired = false;
     const mixedFactory = (repoPathArg) => {
       const real = realSimpleGit(repoPathArg);
       return {
         raw: async (args) => {
-          if (args[0] === "worktree" && args[1] === "add") {
-            capturedWtPath = args[2];
+          const { sub, subSub } = gitSubSubcommand(args);
+          if (sub === "worktree" && subSub === "add") {
+            stubFired = true;
+            capturedWtPath = argsAfterConfig(args)[2];
             await real.raw(args); // still a real add underneath — proves the message, not the disk state, is what's checked
             throw new Error(`${benignMessage("loom-benign-b")}\nfatal: something genuinely went wrong`);
           }
@@ -118,6 +125,7 @@ try {
     let rejected = false, rejectMessage = null;
     await createWorktree(repo, "projBenignB", "task-benign-b", {}, undefined, undefined, { gitFactory: mixedFactory, timeoutMs: 5000 })
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
+    check("(B) the stub's intended mixed-message-throw path was actually taken (card 7557fac7 — not a silent fall-through to real git)", stubFired === true);
     check("(B) [negative control] a fatal line alongside benign text is NOT swallowed — createWorktree rejects",
       rejected === true && /fatal: something genuinely went wrong/.test(rejectMessage ?? ""));
     if (capturedWtPath) extraDirs.push(capturedWtPath);
@@ -125,11 +133,14 @@ try {
 
   // ── (C) NEGATIVE CONTROL: benign-shaped message but NO real add ever ran — must still reject ─────────
   {
+    let stubFired = false;
     const neverAddedFactory = (repoPathArg) => {
       const real = realSimpleGit(repoPathArg);
       return {
         raw: async (args) => {
-          if (args[0] === "worktree" && args[1] === "add") {
+          const { sub, subSub } = gitSubSubcommand(args);
+          if (sub === "worktree" && subSub === "add") {
+            stubFired = true;
             throw new Error(benignMessage("loom-benign-c")); // no real().raw(args) call — nothing lands on disk
           }
           return real.raw(args);
@@ -139,6 +150,7 @@ try {
     let rejected = false, rejectMessage = null;
     await createWorktree(repo, "projBenignC", "task-benign-c", {}, undefined, undefined, { gitFactory: neverAddedFactory, timeoutMs: 5000 })
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
+    check("(C) the stub's intended never-added-throw path was actually taken (card 7557fac7 — not a silent fall-through to real git)", stubFired === true);
     check("(C) [negative control] benign-shaped text with no real worktree behind it is NOT trusted on message alone",
       rejected === true);
   }

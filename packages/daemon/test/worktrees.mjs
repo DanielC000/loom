@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
+import { gitSubcommand, gitSubSubcommand } from "./_git-argv.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -716,18 +717,14 @@ try {
   {
     const { simpleGit: realSimpleGit } = await import("simple-git");
     const tinyMs = 250;
-    /** Card 805f04cd: the real subcommand a `git.raw(args)` call names, skipping any leading `-c
-     *  <key>=<value>` pairs (e.g. `["-c", "core.quotePath=false", "status", ...]`) — some call sites
-     *  (the porcelain-status reads) prepend one of these for lossless non-ASCII path handling, which
-     *  shifts the subcommand off `args[0]`. A hang-matcher keyed on bare `args[0]` silently stops
-     *  matching the moment a site picks up such a prefix, degrading a deliberate-hang sub-test into one
-     *  that races real, unhung git subprocess timing instead — see (r5)'s own note below for the
-     *  incident this caused. */
-    const gitSubcommand = (args) => {
-      let i = 0;
-      while (args[i] === "-c") i += 2;
-      return args[i];
-    };
+    // Card 805f04cd: `gitSubcommand` (imported from ./_git-argv.mjs) finds the real subcommand a
+    // `git.raw(args)` call names, skipping any leading `-c <key>=<value>` pairs (e.g. `["-c",
+    // "core.quotePath=false", "status", ...]`) — some call sites (the porcelain-status reads) prepend
+    // one of these for lossless non-ASCII path handling, which shifts the subcommand off `args[0]`. A
+    // hang-matcher keyed on bare `args[0]` silently stops matching the moment a site picks up such a
+    // prefix, degrading a deliberate-hang sub-test into one that races real, unhung git subprocess
+    // timing instead — see (r5)'s own note below for the incident this caused, and card 7557fac7 for the
+    // SAME shape biting (r7)/(s1) below via a hardcoded `args[1]` instead of a bare `args[0]`.
     /** A gitFactory that delegates every command NOT in `hangOn` to REAL simple-git against whatever path
      *  createWorktree's own boundedGit call was made with (repoPath or worktreePath, depending on site),
      *  and hangs (never settles) any command whose subcommand ({@link gitSubcommand}) IS in `hangOn`. */
@@ -939,19 +936,23 @@ try {
     //      (no hang) so the assertion stays hermetic and doesn't pay a real wait of either duration — a
     //      NEW instance is constructed per real killableCanonicalRaw/boundedGit call (verified: every git
     //      op this fresh-cut path makes is its own single raw() call), so recording `ms` at construction
-    //      time and keying by subcommand (`args[1]` too, for "worktree <sub>") correctly attributes each
-    //      value to the call that actually used it, not just whichever ran last.
+    //      time and keying by subcommand (via {@link gitSubSubcommand}'s own neighbour index, never a
+    //      hardcoded `args[1]` — card 7557fac7, see this file's own `_git-argv.mjs` import) correctly
+    //      attributes each value to the call that actually used it, not just whichever ran last.
     {
       const tR7 = "bounded-default-timeout-mainsha";
       const seenMsBySubcommand = {};
       const gitFactoryR7 = (p, ms) => ({
         raw: (args) => {
-          const key = args[0] === "worktree" ? `worktree ${args[1]}` : args[0];
+          const { sub, subSub } = gitSubSubcommand(args);
+          const key = sub === "worktree" ? `worktree ${subSub}` : sub;
           seenMsBySubcommand[key] = ms;
           return realSimpleGit(p).raw(args);
         },
       });
       const seededR7 = await createWorktree(repo, "projWT", tR7, {}, undefined, undefined, { gitFactory: gitFactoryR7 });
+      check("(r7) every expected subcommand key was actually recorded by the stub (no silent argv-shape mismatch letting a key go unset)",
+        ["rev-parse", "worktree prune", "branch", "worktree add"].every((k) => k in seenMsBySubcommand));
       check("(r7) mainSha rev-parse keeps the default 15000ms ref-op bound (GIT_OP_TIMEOUT_MS)",
         seenMsBySubcommand["rev-parse"] === GIT_OP_TIMEOUT_MS);
       check("(r7) worktree prune keeps the default 15000ms ref-op bound (GIT_OP_TIMEOUT_MS)",
@@ -996,8 +997,8 @@ try {
         const real = realSimpleGit(repoPathArg);
         return {
           raw: (args) => {
-            const sub = gitSubcommand(args);
-            if (sub === "worktree" && args[1] === "add") {
+            const { sub, subSub } = gitSubSubcommand(args);
+            if (sub === "worktree" && subSub === "add") {
               s1Reached.add("worktree add");
               return new Promise((resolve, reject) => setTimeout(() => real.raw(args).then(resolve, reject), addDelayMs));
             }
@@ -1009,8 +1010,8 @@ try {
               s1Reached.add("rev-parse HEAD");
               return Promise.resolve(`${realHeadShaS1}\n`);
             }
-            if (sub === "worktree" && args[1] === "prune") { s1Reached.add("worktree prune"); return Promise.resolve(""); }
-            if (sub === "branch" && args[1] === "--list") { s1Reached.add("branch --list"); return Promise.resolve(""); }
+            if (sub === "worktree" && subSub === "prune") { s1Reached.add("worktree prune"); return Promise.resolve(""); }
+            if (sub === "branch" && subSub === "--list") { s1Reached.add("branch --list"); return Promise.resolve(""); }
             throw new Error(`(s1) stubbedAddFactory: unrecognised git call ${JSON.stringify(args)} — this stub must explicitly handle every pre-"worktree add" call createWorktree makes, or it silently reintroduces a real-spawn timing race`);
           },
         };

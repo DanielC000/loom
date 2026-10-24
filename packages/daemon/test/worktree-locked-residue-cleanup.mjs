@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { gitSubSubcommand, argsAfterConfig } from "./_git-argv.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-lock-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -82,13 +83,15 @@ try {
   //     wiring (not just the standalone git calls above) recovers it, and still rejects with the ORIGINAL
   //     error — cleanup never masks or replaces it.
   {
-    let capturedWtPath;
+    let capturedWtPath, stubFired = false;
     const killingAddFactory = (repoPathArg) => {
       const real = realSimpleGit(repoPathArg);
       return {
         raw: async (args) => {
-          if (args[0] === "worktree" && args[1] === "add") {
-            capturedWtPath = args[2];
+          const { sub, subSub } = gitSubSubcommand(args);
+          if (sub === "worktree" && subSub === "add") {
+            stubFired = true;
+            capturedWtPath = argsAfterConfig(args)[2];
             await real.raw(args);
             fs.writeFileSync(path.join(adminDirFor(repoPathArg, capturedWtPath), "locked"), "initializing");
             throw new Error("git worktree add exceeded 250ms (git child killed)");
@@ -100,6 +103,7 @@ try {
     let rejected = false, rejectMessage = null;
     await createWorktree(repo, "projLockB", "task-lock-b", {}, undefined, undefined, { gitFactory: killingAddFactory, timeoutMs: 5000 })
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
+    check("(b) the stub's intended killed-add-throw path was actually taken (card 7557fac7 — not a silent fall-through to real git)", stubFired === true);
     check("(b) createWorktree REJECTS — the add genuinely failed; cleanup does not swallow it into a success", rejected === true);
     check(`(b) rejection carries the ORIGINAL add error, unchanged by cleanup (got: "${rejectMessage}")`,
       /git child killed/.test(rejectMessage ?? ""));
@@ -114,12 +118,14 @@ try {
   // (c) BEST-EFFORT, BOUNDED: the cleanup call ITSELF also fails — createWorktree must still reject with
   //     the ORIGINAL add error (never a masking/different one), and must not hang.
   {
+    let addStubFired = false, removeStubFired = false;
     const doubleFailFactory = (repoPathArg) => {
       const real = realSimpleGit(repoPathArg);
       return {
         raw: async (args) => {
-          if (args[0] === "worktree" && args[1] === "add") throw new Error("git worktree add exceeded 250ms (git child killed)");
-          if (args[0] === "worktree" && args[1] === "remove") throw new Error("simulated cleanup failure — e.g. a second kill");
+          const { sub, subSub } = gitSubSubcommand(args);
+          if (sub === "worktree" && subSub === "add") { addStubFired = true; throw new Error("git worktree add exceeded 250ms (git child killed)"); }
+          if (sub === "worktree" && subSub === "remove") { removeStubFired = true; throw new Error("simulated cleanup failure — e.g. a second kill"); }
           return real.raw(args);
         },
       };
@@ -129,6 +135,8 @@ try {
     await createWorktree(repo, "projLockC", "task-lock-c", {}, undefined, undefined, { gitFactory: doubleFailFactory, timeoutMs: 5000 })
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
     const elapsed = performance.now() - t0;
+    check("(c) both the add-throw AND the cleanup-throw stub paths were actually taken (card 7557fac7 — not a silent fall-through to real git)",
+      addStubFired === true && removeStubFired === true);
     check("(c) createWorktree still REJECTS when the cleanup call itself also fails", rejected === true);
     check(`(c) rejection is the ORIGINAL add error, NOT the cleanup failure (got: "${rejectMessage}")`,
       /git child killed/.test(rejectMessage ?? "") && !/simulated cleanup failure/.test(rejectMessage ?? ""));
@@ -144,11 +152,14 @@ try {
     extraDirs.push(sibling);
     git(repo, `worktree add -q -b loom-lock-sibling "${sibling}"`);
 
+    let stubFired = false;
     const neverCreatedFactory = (repoPathArg) => {
       const real = realSimpleGit(repoPathArg);
       return {
         raw: async (args) => {
-          if (args[0] === "worktree" && args[1] === "add") {
+          const { sub, subSub } = gitSubSubcommand(args);
+          if (sub === "worktree" && subSub === "add") {
+            stubFired = true;
             throw new Error(`fatal: 'loom-lock-d' is already used by worktree at '${sibling}'`);
           }
           return real.raw(args);
@@ -158,6 +169,7 @@ try {
     let rejected = false, rejectMessage = null;
     await createWorktree(repo, "projLockD", "task-lock-d", {}, undefined, undefined, { gitFactory: neverCreatedFactory, timeoutMs: 5000 })
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
+    check("(d) the stub's intended already-used-throw path was actually taken (card 7557fac7 — not a silent fall-through to real git)", stubFired === true);
     check("(d) createWorktree rejects with the real 'already used by worktree' error",
       rejected === true && /already used by worktree/.test(rejectMessage ?? ""));
     check("(d) the sibling worktree named in that error is UNTOUCHED (still on disk, still listed)",
@@ -171,13 +183,15 @@ try {
   //     asserting it. The locked admin record AND the partial worktree directory must both SURVIVE,
   //     unlike (b) where the identical residue is cleaned.
   {
-    let capturedWtPath;
+    let capturedWtPath, stubFired = false;
     const path2Factory = (repoPathArg) => {
       const real = realSimpleGit(repoPathArg);
       return {
         raw: async (args) => {
-          if (args[0] === "worktree" && args[1] === "add") {
-            capturedWtPath = args[2];
+          const { sub, subSub } = gitSubSubcommand(args);
+          if (sub === "worktree" && subSub === "add") {
+            stubFired = true;
+            capturedWtPath = argsAfterConfig(args)[2];
             await real.raw(args);
             fs.writeFileSync(path.join(adminDirFor(repoPathArg, capturedWtPath), "locked"), "initializing");
             throw new Error("git worktree add exceeded 250ms, killed, but did not die within 250ms — giving up (hung git child?)");
@@ -189,6 +203,7 @@ try {
     let rejected = false, rejectMessage = null;
     await createWorktree(repo, "projLockE", "task-lock-e", {}, undefined, undefined, { gitFactory: path2Factory, timeoutMs: 5000 })
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
+    check("(e) the stub's intended PATH-2 give-up-throw path was actually taken (card 7557fac7 — not a silent fall-through to real git)", stubFired === true);
     check("(e) createWorktree still REJECTS with the original PATH-2 add error", rejected === true);
     check(`(e) rejection carries the PATH-2 give-up suffix, unchanged by any cleanup (got: "${rejectMessage}")`,
       /giving up \(hung git child\?\)/.test(rejectMessage ?? ""));
