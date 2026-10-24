@@ -7199,8 +7199,20 @@ export class Db {
     // still roll it back), so queue the notification; runInTransaction flushes it on a real commit.
     if (this.db.inTransaction) {
       this.pendingEventNotifications.push(evt);
-    } else if (this.eventListener) {
-      try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
+    } else {
+      // @decision 87b1c8a1 — runtime tripwire: the queue must already be empty outside any
+      // transaction (the last runInTransaction call either flushed or truncated it); a non-empty queue
+      // here is a leaked raw-transaction notification — log loudly, never throw.
+      if (this.pendingEventNotifications.length > 0) {
+        console.warn(
+          `[db] appendEvent: ${this.pendingEventNotifications.length} pending event notification(s) found ` +
+          "queued while OUTSIDE any transaction — a prior raw db.transaction(...) call likely bypassed " +
+          "runInTransaction's flush/truncate discipline (see docs/decisions/87b1c8a1-defer-pin-events-until-commit.md)",
+        );
+      }
+      if (this.eventListener) {
+        try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
+      }
     }
     return seq;
   }
@@ -8534,6 +8546,16 @@ export class Db {
    */
   runInTransaction<T>(fn: () => T): T {
     const nested = this.db.inTransaction;
+    // @decision 87b1c8a1 — runtime tripwire: a non-empty queue at a FRESH outermost entry means some
+    // EARLIER raw db.transaction(...) call already leaked a notification that no runInTransaction call
+    // ever flushed/truncated — log loudly, never throw (diagnostic backstop, not a correctness gate).
+    if (!nested && this.pendingEventNotifications.length > 0) {
+      console.warn(
+        `[db] runInTransaction: entering a fresh outermost transaction with ${this.pendingEventNotifications.length} ` +
+        "already-pending event notification(s) — an earlier raw db.transaction(...) call likely bypassed this " +
+        "method's own flush/truncate discipline (see docs/decisions/87b1c8a1-defer-pin-events-until-commit.md)",
+      );
+    }
     const snapshotLen = this.pendingEventNotifications.length;
     try {
       const result = this.db.transaction(fn)();

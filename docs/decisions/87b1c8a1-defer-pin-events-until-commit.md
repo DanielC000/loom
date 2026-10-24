@@ -130,8 +130,33 @@ inspection. The existing conflict-path cases in both `commondir-trust-pin-rest-r
 `reached` flag, asserted true, so a bare `statusCode === 500` can't pass vacuously against some unrelated
 500; a second, narrowed case (`PATCH /api/projects/:id` / `updateProject`) was added alongside it.
 
+## (5) Card `18689f24` — a static guard proves no raw transaction reaches `appendEvent`, plus a cheap runtime tripwire
+
+Follow-up: nothing EXECUTED the "Do not" rule below — it relied on a human/reviewer re-deriving, by hand,
+which of the ~34-38 raw `this.db.transaction(` sites in `db.ts` could reach `appendEvent` (directly or
+transitively), every time a NEW raw site was added. Converting every raw site to `runInTransaction` was
+considered and rejected: the blast radius isn't uniform (several sites are on hot paths, and a bare
+`this.db.transaction(fn)()` passthrough — `runInTransaction`'s OWN implementation — can never itself be
+converted). Instead, `packages/daemon/test/raw-tx-appendevent-reach-guard.mjs` is a static source-text
+scanner: it strips comments from `db.ts` (so comment PROSE naming `appendEvent`/`db.transaction` is never
+mistaken for a real call — immune to a comment-only diff by construction, so this file is deliberately NOT
+added to `CHANGED_TS_TEXT_SCANNER_REPO_PATHS` in `git/worktrees.ts`), splits the `Db` class into named
+methods via brace-depth matching, builds a `this.<name>(` call graph, computes the transitive closure of
+"reaches `appendEvent`", and fails if any raw `this.db.transaction(...)` callback's own direct calls
+intersect that closure. Verified against the REAL call graph (not just a synthetic fixture) by splicing an
+extra call to a real appendEvent-reaching method (`unpinCommondirTrustIfOwned`) into an in-memory copy of
+`migrateTopicsToAgents`'s own existing, today-safe raw transaction — this must turn RED, and does; removing
+the splice (the real file, untouched) is GREEN. Also added a cheap, log-only runtime tripwire (never
+throws): `appendEvent` warns if the queue is non-empty while OUTSIDE a transaction, and `runInTransaction`
+warns if the queue is already non-empty at a fresh OUTERMOST entry — either shape means some raw
+transaction already leaked a notification nothing ever flushed or truncated.
+
 ## Do not
 
+- Do not add a NEW raw `this.db.transaction(` call site in `db.ts` whose callback calls `appendEvent`
+  (directly or transitively) — run `packages/daemon/test/raw-tx-appendevent-reach-guard.mjs` (card
+  `18689f24`); it fails exactly this case, with a real-corpus-verified positive control, not just a
+  synthetic one.
 - Do not fire `appendEvent`'s listener notification immediately while `this.db.inTransaction` is true — a
   later statement in the SAME transaction can still roll the event's own INSERT back; queue it and flush
   only after `runInTransaction`'s own real, non-nested commit.
