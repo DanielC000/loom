@@ -64,6 +64,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${process.pid}`);
 useOwnLoomHome("loom-smwp-home-");
 
@@ -456,8 +457,8 @@ const rejectedEvents = (db, workerId, reason) => db.listEventsForWorker(workerId
   const w = await addWorker(db, I, "i");
   const preSha = git(I.repo, "rev-parse", "HEAD");
   check("(I) precondition: canonical is genuinely on MAIN (no divert in effect)", git(I.repo, "symbolic-ref", "--short", "HEAD") === MAIN);
-  const result = await sessions.confirmWorkerMergeTracked(I.mgrId, w.workerId);
-  const confirm = result.settled && result.ok ? result.value : { __unsettled: result };
+  const result = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(I.mgrId, w.workerId), { label: "(I) confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
+  const confirm = result.ok ? result.value : { __unsettled: result };
   check("(I) an unparseable watermark row REFUSES outright — never falls back to the live read", confirm.merged === false && confirm.branchDiverted === true && confirm.watermarkUnreadable === true);
   check("(I) mainline's own ref was NOT advanced", git(I.repo, "rev-parse", MAIN) === preSha);
   check("(I) the worktree is retained (not finalized)", fs.existsSync(w.worktreePath));
@@ -484,8 +485,8 @@ const rejectedEvents = (db, workerId, reason) => db.listEventsForWorker(workerId
   const w = await addWorker(db, J, "j");
   const preSha = git(J.repo, "rev-parse", "HEAD");
   try {
-    const result = await sessions.confirmWorkerMergeTracked(J.mgrId, w.workerId);
-    const confirm = result.settled && result.ok ? result.value : { __unsettled: result };
+    const result = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(J.mgrId, w.workerId), { label: "(J) confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
+    const confirm = result.ok ? result.value : { __unsettled: result };
     check("(J) a watermark read that THROWS REFUSES outright — never treated as \"no watermark\"", confirm.merged === false && confirm.branchDiverted === true && confirm.watermarkUnreadable === true);
     check("(J) mainline's own ref was NOT advanced", git(J.repo, "rev-parse", MAIN) === preSha);
     check("(J) the worktree is retained (not finalized)", fs.existsSync(w.worktreePath));

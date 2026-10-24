@@ -76,8 +76,8 @@ async function addWorker(db, tag) {
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
   return { taskId, workerId, worktreePath, branch, tip: git(worktreePath, "rev-parse", "HEAD") };
 }
-const batch = async (d, ws) => { const r = await awaitTrackedSettle(() => d.sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)), { label: "mergeBatchTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
-const confirm = async (d, w) => { const r = await awaitTrackedSettle(() => d.sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
+const batch = async (d, ws) => { const r = await awaitTrackedSettle(() => d.sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: d.sessions.pendingOps }); return r.ok ? r.value : { __unsettled: r }; };
+const confirm = async (d, w) => { const r = await awaitTrackedSettle(() => d.sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: d.sessions.pendingOps }); return r.ok ? r.value : { __unsettled: r }; };
 const mwEvents = (d) => d.db.listEventsSince(0, 100000).filter((e) => e.kind === "mainline_moved_outside_loom" && e.detail?.projectId === P.projId);
 const watermark = (d) => MW.parseMainlineWatermark(d.db.getMeta(MW.mainlineWatermarkKey(P.projId, "primary")));
 const bypass = (w) => { git(w.worktreePath, "update-ref", MAINREF, w.tip); git(P.repo, "reset", "-q", "--hard"); };

@@ -159,7 +159,7 @@ async function addWorkerUncommitted(tag) {
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
   return { taskId, workerId, worktreePath, branch, tip: git(worktreePath, "rev-parse", "HEAD") };
 }
-const confirm = async (w) => { const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000 }); return r.ok ? r.value : { __unsettled: r }; };
+const confirm = async (w) => { const r = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(P.mgrId, w.workerId), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps }); return r.ok ? r.value : { __unsettled: r }; };
 const evFor = (w) => db.listEventsForWorker(w.workerId).filter((e) => e.kind === "mainline_moved_outside_loom");
 const watermark = () => MW.parseMainlineWatermark(db.getMeta(MW.mainlineWatermarkKey(P.projId, "primary")));
 const canonHead = () => git(P.repo, "rev-parse", "HEAD");

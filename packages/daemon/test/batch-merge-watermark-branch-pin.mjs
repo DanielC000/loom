@@ -39,6 +39,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");
 useOwnLoomHome("loom-bmwp-home-");
 
@@ -91,7 +92,7 @@ async function addWorker(tag) {
   db.insertSession({ id: workerId, projectId: P.projId, agentId: P.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: P.mgrId, taskId, worktreePath, branch });
   return { taskId, workerId, worktreePath, branch };
 }
-const batch = async (ws) => { const r = await sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)); return r.settled && r.ok ? r.value : { __unsettled: r }; };
+const batch = async (ws) => { const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, ws.map((w) => w.workerId)), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps }); return r.ok ? r.value : { __unsettled: r }; };
 
 try {
   // ── seed the watermark with a real, ordinary first landing (branch = MAIN) ─────────────────────────────
@@ -141,8 +142,8 @@ try {
   check("(P1) precondition: canonical is on the stray branch BEFORE the batch is even dispatched", canonBranch() === strayBranch && canonHead() === preCutSha);
 
   const w1 = await addWorker("p1a"), w2 = await addWorker("p1b");
-  const r1 = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
-  const v1 = r1.settled && r1.ok ? r1.value : { __unsettled: r1 };
+  const r1 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "(P1) mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
+  const v1 = r1.ok ? r1.value : { __unsettled: r1 };
   check("(ba663984) (P1) the batch now REFUSES — the watermark-preferred pin catches a divert that predates the cut", v1.ok === false && v1.branchDiverted === true);
   check("(ba663984) (P1) mainline's own ref was NOT advanced", git(P.repo, "rev-parse", MAINREF) === preCutSha);
   check("(ba663984) (P1) the stray branch was ALSO untouched — the refusal fires at the PRE-ff check, before anything is cherry-picked or merged", git(P.repo, "rev-parse", `refs/heads/${strayBranch}`) === preCutSha);
@@ -168,8 +169,8 @@ try {
     runGate: async () => { if (!divertedDuringGate) { git(P.repo, "checkout", "-q", "-b", strayBranch2); divertedDuringGate = true; } return PASS; },
   });
   const w3 = await addWorker("p2a"), w4 = await addWorker("p2b");
-  const r2 = await sessions2.mergeBatchTracked(P.mgrId, [w3.workerId, w4.workerId]);
-  const v2 = r2.settled && r2.ok ? r2.value : { __unsettled: r2 };
+  const r2 = await awaitTrackedSettle(() => sessions2.mergeBatchTracked(P.mgrId, [w3.workerId, w4.workerId]), { label: "(P2) mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions2.pendingOps });
+  const v2 = r2.ok ? r2.value : { __unsettled: r2 };
   check("(P2) a divert DURING the gate run is still caught: branchDiverted", v2.ok === false && v2.branchDiverted === true);
   check("(P2) mainline's own ref is untouched", git(P.repo, "rev-parse", MAINREF) === preCutSha2);
   check("(P2) the stray branch was NOT advanced (refused pre-mutation)", git(P.repo, "rev-parse", `refs/heads/${strayBranch2}`) === preCutSha2);
@@ -253,8 +254,8 @@ try {
   try {
     const warnedBefore = warned.length;
     const w1 = await addWorker3("p3a"), w2 = await addWorker3("p3b");
-    const r3 = await sessions3.mergeBatchTracked(P3.mgrId, [w1.workerId, w2.workerId]);
-    const v3 = r3.settled && r3.ok ? r3.value : { __unsettled: r3 };
+    const r3 = await awaitTrackedSettle(() => sessions3.mergeBatchTracked(P3.mgrId, [w1.workerId, w2.workerId]), { label: "(P3) mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions3.pendingOps });
+    const v3 = r3.ok ? r3.value : { __unsettled: r3 };
     check("(P3) no live branch (detached HEAD): this is LOGGED (not silent)", warned.slice(warnedBefore).some((w) => /no mainline branch available to pin/.test(w)));
     // No branch pin at all ⇒ fastForwardCanonicalMain's branch-divert check never runs (same as the
     // pre-card, unpinned behavior) — only the sha-only forfeit check applies, and nothing diverted here, so
