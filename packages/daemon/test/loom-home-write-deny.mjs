@@ -94,6 +94,18 @@ requireHermeticEnv();
 const { ensureDirs, LOOM_HOME_WRITE_DENY_REGISTRY, LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY, SCRATCH_ROOT_DIR, WORKSPACE_ROOT, RUNS_DIR } = await import("../dist/paths.js");
 const { loomHomeWriteDenyRules, withLoomHomeWriteDenyForSpawn, toClaudeAbsoluteGlob, LOOM_HOME_REAL } = await import("../dist/pty/loom-home-deny.js");
 
+// Card eefbbe61 — the exact resolved //-absolute glob for each root the registries must NEVER deny.
+// Matching against these exact absolute paths (never a bare "/tmp/scratch"/"/workspaces"/"/runs"
+// substring) keeps this check correct regardless of where LOOM_HOME itself lives — including a LOOM_HOME
+// nested under a path that ITSELF contains "/tmp/scratch/" (e.g. a worker's own $LOOM_SCRATCH_DIR-rooted
+// temp home), which previously made every emitted rule's absolute path match the bare substring whether or
+// not scratch/workspaces/runs were ever actually denied. Mirrors `ruleForEntries`'s own
+// `path.join(LOOM_HOME_REAL, relPath)` + `toClaudeAbsoluteGlob` construction below, using the same
+// relPaths production code joins onto LOOM_HOME for SCRATCH_ROOT_DIR/WORKSPACE_ROOT/RUNS_DIR (paths.ts).
+const scratchNeverDeniedGlob = toClaudeAbsoluteGlob(path.join(LOOM_HOME_REAL, "tmp", "scratch"));
+const workspacesNeverDeniedGlob = toClaudeAbsoluteGlob(path.join(LOOM_HOME_REAL, "workspaces"));
+const runsNeverDeniedGlob = toClaudeAbsoluteGlob(path.join(LOOM_HOME_REAL, "runs"));
+
 // Delta security review, nitpick: pin a few LITERAL registry entries directly, rather than relying only
 // on the "exact map over the registry" comparison below (which derives its expectation FROM the registry
 // itself — a registry bug that dropped/renamed one of these would still pass that comparison).
@@ -191,9 +203,9 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
 {
   for (const role of ["worker", "manager", "platform", "setup", "auditor", "workspace-auditor", "assistant", "operator", "run", null]) {
     const rules = loomHomeWriteDenyRules({ role, sessionId: "s-excl" });
-    check(`role '${String(role)}': scratch/ is never denied`, !rules.some((r) => r.includes("/tmp/scratch")));
-    check(`role '${String(role)}': workspaces/ is never denied`, !rules.some((r) => r.includes("/workspaces")));
-    check(`role '${String(role)}': runs/ is never denied`, !rules.some((r) => r.includes("/runs")));
+    check(`role '${String(role)}': scratch/ is never denied`, !rules.some((r) => r.includes(scratchNeverDeniedGlob)));
+    check(`role '${String(role)}': workspaces/ is never denied`, !rules.some((r) => r.includes(workspacesNeverDeniedGlob)));
+    check(`role '${String(role)}': runs/ is never denied`, !rules.some((r) => r.includes(runsNeverDeniedGlob)));
   }
 }
 
@@ -533,7 +545,7 @@ if (process.platform !== "win32") {
     check("(real) WRITTEN settings.json permissions.deny includes a LOOM_HOME rule, in the documented //-absolute form (e.g. the skill-provenance.json registry entry)",
       written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/skill-provenance.json)`));
     check("(real) WRITTEN settings.json permissions.deny does NOT include a Write(...) rule", !written.some((r) => r.startsWith("Write(")));
-    check("(real) WRITTEN settings.json permissions.deny does NOT deny scratch/ or workspaces/", !written.some((r) => r.includes("/tmp/scratch") || r.includes("/workspaces")));
+    check("(real) WRITTEN settings.json permissions.deny does NOT deny scratch/ or workspaces/", !written.some((r) => r.includes(scratchNeverDeniedGlob) || r.includes(workspacesNeverDeniedGlob)));
     check("(real) WRITTEN settings.json permissions.deny ALSO includes the instruction registry's CLAUDE.md rule (worker is non-exempt)",
       written.includes(`Edit(${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/CLAUDE.md)`));
     check("(real) WRITTEN settings.json permissions.deny ALSO includes CLAUDE.local.md (card d332c969)",
