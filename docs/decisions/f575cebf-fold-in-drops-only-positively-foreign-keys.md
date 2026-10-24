@@ -96,7 +96,10 @@ concept at all (it only ever deals with secondary candidates being retained), wh
 predicate with fold time" section for why unifying the two would either add a boot-only input here for no
 fold-time benefit, or weaken boot's own discriminator and reopen a real regression. Shape 1 (empty slot)
 and shape 3 (an already-wrong winning identity) remain genuinely open, named rather than silently assumed
-closed — `e7652e06`'s own record states the same boundary from its own side.
+closed — `e7652e06`'s own record states the same boundary from its own side. (Shape 2's closure rests on
+`e7652e06`'s FRESHNESS discriminator for CASE 2/3, not on its `provenanceUnknown` marking mechanism — the
+marking mechanism's own order-dependence, found and fixed in `e7652e06`'s own "Round 4," does not affect
+this claim.)
 
 ## Do not
 

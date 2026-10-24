@@ -1,5 +1,11 @@
 # e7652e06 — boot-time collision resolution: freshness for the both-resolvable gate, provenance-marking for the rest
 
+**Round 4 (below) fixed a real gap in Round 3's own marking mechanism — read it before trusting any
+"order-independent" claim elsewhere in this record (including this card's own earlier text, the Verification
+section's "the fix is order-independent" line, and the "CLOSED by e7652e06" claims in `d69a6744`/`f575cebf`)
+as proven for every shape.** Round 3's marking was itself order-DEPENDENT for a specific three-party shape —
+see "Round 4" below.
+
 **Round 3 (below) changed the shipped mechanism again — read it before trusting any "declined"/"evicted"
 claim elsewhere in this record as still true for every shape.** Rounds 1-2 (kept below for the regression
 history) used FRESHNESS to DECLINE/EVICT a stale secondary claim whenever it collided with a different,
@@ -230,6 +236,129 @@ All 5 files Round 3's own DECLINE attempt regressed (`58957b1e-armed-latch-stale
 provenance-marking addition never changes WHETHER a union forms, only whether it carries the
 `provenanceUnknown` mark, and none of those files' own assertions depend on that mark being absent.
 
+## Round 4 (Code Review e594e641, finding B1) — Round 3's own marking predicate was itself order-dependent
+
+Round 3's `secondaryArmClaimsADifferentRegisteredIdentitysKey` tests only the INCOMING `entry` at the
+moment of a union — never the STANDING `prior`. A reproduced vector (reviewer e594e641, probes `probe5.mjs`/
+`probe7.mjs`) shows this is order-dependent for a THREE-party shape the Round-3 vectors didn't exercise:
+readdir order `Y, Z, F` (Y's own contaminated secondary read first, then a ghost `Z`, then `F`'s own
+genuine primary last) produces an UNMARKED `F`+`Y` union, and `clearMergeQuarantineLatchFile` on EITHER
+`F`'s or `Y`'s own latch id then silently lifts both — the exact headline bug this card exists to close,
+reopened through a different read order:
+
+1. Y's own secondary arm at `kF` lands on an EMPTY slot (`prior` is `undefined` — nothing to test the
+   predicate against yet, so no union forms and nothing is marked).
+2. `Z` (unresolvable — `isRepoPathCurrentlyResolvable(Z)` is false, since it never exists on disk) unions
+   into Y next. The entry-side predicate requires `entry` to be resolvable — `Z` fails it.
+3. `F`'s own tautological primary arm unions in last. The entry-side predicate requires
+   `!entryClaimIsTautological` — `F`'s own primary arm fails it.
+
+Every individual union-forming step passes Round 3's own predicate on its OWN incoming `entry`; the
+contamination sitting as `prior` (Y's own non-fresh claim at `kF`, from step 1) is never itself tested,
+because nothing in Round 3's code ever asks that question of `prior`. Reproduced 3/3 runs, confirmed
+specifically on readdir order `Y,Z,F` across all three `older` ages, both env states; every OTHER order
+(including the reviewer's own two original vectors from Round 3) was already correctly marked, because in
+those orders the predicate's own entry-side test happens to catch SOME party along the way.
+
+### The fix
+
+`priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(prior, key)` — the SAME foreignness test as
+`secondaryArmClaimsADifferentRegisteredIdentitysKey`, applied to `prior` instead of `entry`, using
+`isKeyVerifiedFor(prior.repoPath, key)` directly in place of a tautological-claim flag (`prior` has no
+such flag — it is already sitting at `key`, not being newly armed there in this call). Checked at EVERY
+union (OR'd with the existing entry-side check), so a contamination already sitting as `prior` — including
+one already folded into an EARLIER union, since the mark is sticky via `unionQuarantineEntries`'s own OR —
+is caught the moment ANY later party collides with it, regardless of which party that is or how it got
+there. This makes the headline Y/Z/F vector mark correctly in ALL 6 readdir orders over `{Y, Z, F}` and all
+3 relative ages, not just the orders Round 3 happened to already cover.
+
+**Order-independence, verified, not merely argued**: all 6 orders × 3 ages were run against both the
+pre-Round-4 parent (RED — exactly the 3 YZF-order checks fail, all 3 ages, 21 individual assertions) and
+the Round-4 fix (GREEN, all 18 scenarios). See "Verification" below.
+
+### A deliberate, verified side effect: the fix also marks the pre-existing `9a55fb90`/`d163aef5` x/z/sub shape
+
+Testing `prior` as well as `entry` means a union that Round 3 left UNMARKED can now be marked —
+specifically, the `third-party-backed-case4-unchanged` scenario (the `x`/`z`/`sub` shape:  `x`'s own
+secondary claim at `sub`'s key is non-fresh, backed only by `sub`'s own not-yet-processed registered
+identity) now carries `provenanceUnknown: true` where it previously did not, because `x` (as `prior`) is
+exactly as "non-fresh at this key, backed by a different registered identity" as the Y/F bug's own `Y`.
+This is judged CORRECT, not a regression: the shape is substantively the same ambiguous-provenance pattern
+`db0a9db0` already marks for, and the scenario's own name/assertions describe the UNION FORMING and staying
+queryable — never that it stays unmarked. The full `merge-quarantine*.mjs` corpus (see "Verification") is
+what actually proves no existing test asserts the OPPOSITE (that this shape must stay unmarked); CASE 1
+(the legit, both-fresh R/S union) is NOT affected — `priorFresh` is true there by definition, so
+`priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity` short-circuits false on its own `!isKeyVerifiedFor(...)`
+guard.
+
+**S3 — are legit unions now ALWAYS marked? No; it is shape-specific, measured rather than argued.** Three
+distinct legit shapes checked directly:
+- CASE 1 (the genuine toplevel-recompute R/S union, `legit-r-s-union`) — NEVER marked; `priorFresh` is
+  true by definition.
+- The `9a55fb90`/`d163aef5` x/z/sub shape (`third-party-backed-case4-unchanged`) — NOW ALWAYS marked
+  (measured directly, not reasoned: a standalone repro against this exact fixture shows
+  `provenanceUnknown:true` on the resulting union). The sticky consequence IS real:
+  `clearMergeQuarantineLatchFile` on this union now refuses by id forever once a build carrying this fix
+  has persisted it (same `db0a9db0` mechanism as every other marked union) — the human recovery path is
+  the SAME as any other marked union: clear by the union's own RECORDED repoPath (`clear-by-path`, or the
+  project `/clear` when that recorded identity is itself a real, resolvable registered repo), never
+  clear-by-id. This is `db0a9db0`'s own accepted-false-positive framing, applied to one more shape it
+  reaches now that it didn't before — not a new kind of cost.
+- The `8bff3cae` shared-ancestor-sibling shape (`shared-ancestor-sibling-survives-divergence`) — marking is
+  NEVER REACHED at all, for a structural reason: `R` in that scenario never raises its own latch file and
+  never contributes its own `entry`/`prior` object to `armKeyUnlessDegradedCollision` — it is blocked
+  purely because its OWN fresh canonical key happens to equal a key `teamA`'s entry already occupies (a
+  RETAINED historical secondary, `resolvedKeys`), with no second, competing entry for `armKeyUnlessDegradedCollision`
+  to ever collide `teamA`'s entry against. No union, no collision, no marking decision — round 3's
+  predicate rejection text in this record already explains this shape is about `canDECLINE` safety, not
+  about marking; round 4 changes nothing here either way, confirmed by the full corpus.
+
+### Re-scoping prior claims (S4, Code Review e594e641)
+
+Every "the fix is order-independent" statement elsewhere in this record (Rounds 1-3's own text, and the
+"CLOSED by e7652e06" / order-independence claims in `docs/decisions/d69a6744-live-occupancy-closes-the-last-two-armedkeys-consumers.md`
+~:123-130 and `docs/decisions/f575cebf-fold-in-drops-only-positively-foreign-keys.md` ~:91-99, and project
+memory note `e7652e06-boot-freshness-discriminator`) was true only of Round 3's freshness-based
+decline/evict mechanism for CASE 2/3 (the plain, no-third-party shape) — proven order-independent by that
+round's own `reverse-order-case3` scenario, and still true, unchanged, after Round 4. It was NOT yet true
+of Round 3's own `provenanceUnknown` marking mechanism, which is what Round 4 fixes. Read any such older
+statement as scoped to CASE 2/3's decline/evict behavior specifically, not to the marking mechanism added
+alongside it in the same round.
+
+### The project `/clear` route's own behavior is NOT "lifts F only" — it is identity-dependent, same family as clear-by-path
+
+`clearMergeQuarantineReporting`/`clearMergeQuarantineByKey` (the `POST /internal/merge-quarantine/clear`
+route) was EMPIRICALLY verified (probe5.mjs, all 3 ages, readdir order `YZF`) to lift the WHOLE union —
+both `F` and `Y` — whenever the union's own recorded `repoPath` (whichever party was "older" by
+`enteredAt`, kept as the base identity by `unionQuarantineEntries`) is `F` or `Y` themselves (i.e. one of
+the two REAL colliding identities). It lifts ONLY the key matching the identity passed in, leaving the
+OTHER key's own physical latch file content-protected (hence the other party stays blocked), ONLY when the
+union's own recorded `repoPath` is a THIRD identity (here, the ghost `Z`) neither real party — because
+`deleteMergeQuarantineLatchByKey`'s own per-key content-identity protection then has something to
+discriminate against that genuinely differs from both. **There is no single uniform rule
+("`/clear(F)` always lifts F only" or "`/clear` always lifts the whole union") — the outcome depends on
+which identity the union happens to be recorded under, which in turn depends on relative `enteredAt`
+ages, not on anything a caller controls or can predict from the identity it names.** `clear-by-id` is the
+one uniform, identity-blind enforcement point (refuses on `provenanceUnknown`, every order, every age,
+verified in the new committed test) — this is exactly why `db0a9db0`'s own design relies on clear-by-id's
+refusal as "the real work," not on `/clear`'s or clear-by-path's own per-key mechanics. Treat `/clear` and
+clear-by-path (S2, below) as the SAME family: both are identity-ADDRESSED recovery routes that can lift
+more than the caller's own claim when the union's recorded identity isn't the caller's own — correct
+usage is to first consult `GET /internal/merge-quarantine/list` (or the refusal text) for the union's own
+RECORDED identity before clearing by path or project resolution, never to assume either route is scoped to
+"my own repo's claim only."
+
+### S2 correction: "clear-by-path lifts the whole union" needs the RECORDED identity, not either party's own
+
+Round 3's own Verification section states plainly that "clear-by-path correctly lifts the whole union
+afterward" — true, but only when called with the union's own RECORDED `repoPath` (above), never
+unconditionally with either colliding party's own path. Verified: in readdir order `YZF`, with `Z` (not
+`F`) as the union's own recorded identity (`older=Z`), `clearMergeQuarantineByRecordedPath(F)` reports
+`wasQuarantined: false` — a miss, not a lift — because nothing is recorded under `F`'s own path; the union
+is filed under `Z`'s. The real recovery path is: read the union's own recorded `repoPath` (from
+`GET /internal/merge-quarantine/list` or a refusal's own text) and clear-by-path (or the project `/clear`)
+THAT, not blindly either collision party's own repoPath.
+
 ## Shared predicate with fold time — deliberately NOT unified (Lead ruling)
 
 Boot time and fold time (`f575cebf`'s `reconcileMarkedBasenameBeforeWrite`/`positivelyForeignKey`)
@@ -336,10 +465,31 @@ silent assumption that none exists.
   they look — run the FULL `merge-quarantine*.mjs` corpus, individually, before reporting done. Both of
   Round 2's regression waves, AND Round 3's own three regressed files, were invisible to the new
   scenarios alone and were caught only by running every pre-existing file.
+- **SUPERSEDED BY ROUND 4** — do not test ONLY the incoming `entry` when deciding whether a union about to
+  form needs the `provenanceUnknown` mark — a contamination can already be sitting as the STANDING `prior`
+  with nothing earlier to have tested it against (B1's own headline shape: a secondary arm landing on an
+  empty key). Test `prior` too, via `priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity`, at every
+  union, OR'd with the existing entry-side check — see "Round 4" above.
+- Do not read "order-independent" anywhere in Rounds 1-3's own text (including this record's own
+  Verification bullets below, written before Round 4) as proven for the `provenanceUnknown` MARKING
+  mechanism specifically — it was proven only for CASE 2/3's freshness-based decline/evict. See "Round 4 —
+  Re-scoping prior claims" above.
 
 ## Verification
 
-- `packages/daemon/test/merge-quarantine-e7652e06-boot-freshness-discriminator.mjs` — five scenarios:
+- `packages/daemon/test/merge-quarantine-e7652e06-b1-ghost-order-independent-mark.mjs` (Round 4) — all 6
+  readdir orders over `{Y, Z, F}` × all 3 relative ages (18 scenarios, 156 checks): asserts the union forms
+  and is marked `provenanceUnknown` in every order where a union forms at all (the two orders where F's own
+  tautological primary arm reaches/evicts `kF` before the ghost ever interferes, `YFZ`/`FYZ`, correctly form
+  no union at all — CASE 3, unchanged); that `clearMergeQuarantineLatchFile` on EITHER `F`'s or `Y`'s own
+  latch id REFUSES (never silently lifts the other), symmetrically, in every marked scenario. RED/GREEN via
+  `pnpm --filter @loom/daemon negative-control --ref HEAD^ --file packages/daemon/src/git/merge-quarantine.ts
+  --test packages/daemon/test/merge-quarantine-e7652e06-b1-ghost-order-independent-mark.mjs` — exactly the 21
+  checks in readdir order `YZF` (all 3 ages) fail on the Round-3 parent (the union forms but is unmarked,
+  and both clear-by-id directions succeed and silently lift the other party); all 156 checks pass after the
+  Round-4 fix; tree restored byte-identical.
+- `packages/daemon/test/merge-quarantine-e7652e06-boot-freshness-discriminator.mjs` — FOUR scenarios (not
+  five — the kickoff's own card body named five by mistake; this file has always had four):
   - `forward-order-bug-fixed` (CASE 2) — F read before Y; Y stays blocked by its own identity, F's entry
     never carries Y's token, F unblocks cleanly after clearing its own token.
   - `reverse-order-case3` (CASE 3) — Y read before F; F's tautological primary arm evicts Y from `kF`; Y

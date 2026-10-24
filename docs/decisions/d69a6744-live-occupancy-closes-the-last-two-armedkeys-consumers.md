@@ -125,9 +125,11 @@ parity, but via TWO complementary mechanisms inside `armKeyUnlessDegradedCollisi
 discriminator (`entryFresh`/`priorFresh`) for the plain, no-third-party shape (declines/evicts the stale
 secondary outright), and (Round 3, after a Code Review found the freshness decline itself regressed
 OTHER established precedents) `provenanceUnknown` marking — reusing `db0a9db0`'s own existing field and
-clear-by-id refusal — for the shape where a ghost third party reaches the collision first. See
-`docs/decisions/e7652e06-boot-freshness-not-resolvability-parity.md`, especially its own "Round 3"
-section, before trusting a shortened restatement of this (including this one).
+clear-by-id refusal — for the shape where a ghost third party reaches the collision first. **Round 3's own
+marking was itself order-dependent for a specific three-party read order (fixed in Round 4 — the marking
+check now tests the STANDING prior too, not just the incoming entry).** See
+`docs/decisions/e7652e06-boot-freshness-not-resolvability-parity.md`, especially its own "Round 3" AND
+"Round 4" sections, before trusting a shortened restatement of this (including this one).
 
 ## Do not
 
