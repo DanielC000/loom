@@ -346,26 +346,41 @@ function detectComposerAccumulationOverDivergedPrior(
   return { confirmed: true, priorGen: priorReported.gen, sumOfLens: sum };
 }
 
+/** @decision fce93534 — never widen past outer trailing whitespace, never promote a match to
+ *  confirmed/benign, and never trimEnd() the full-framing shape without restoring its one mandatory
+ *  trailing "\n" — blindly trimming it breaks the full regex's own `$`-anchored requirement outright. */
+function isPureWrapFramingOfEntry(reported: string, entryText: string): boolean {
+  if (isRecognizedBarePastedContentWrapOfCurrent(reported, entryText) || isRecognizedPastedContentWrap(reported, entryText)) return true;
+  const trimmed = reported.trimEnd();
+  if (isRecognizedBarePastedContentWrapOfCurrent(trimmed, entryText)) return true;
+  return isRecognizedPastedContentWrap(`${trimmed}\n`, entryText);
+}
+
 /** @decision d005f55b — names a recognized write, confirms nothing (§2); never pass the current gen's own
  *  just-pushed entry inside `window` — it would trivially self-match — and never treat a hit (or a
- *  miss) as confirmation. */
+ *  miss) as confirmation.
+ *  @decision fce93534 — scans every substring candidate, preferring a framing-explained one
+ *  (newest-first); falls back to the old newest-first hit, byte-identical, when none qualify. */
 function findRecognizedSubstring(
   reported: string,
   window: ReadonlyArray<{ gen: number; text: string }>,
 ): { gen: number; matchedLen: number; leadingRemainder: string; trailingRemainder: string } | null {
+  let fallback: { gen: number; matchedLen: number; leadingRemainder: string; trailingRemainder: string } | null = null;
   for (let idx = window.length - 1; idx >= 0; idx--) {
     const entry = window[idx];
     if (!entry || entry.text.length === 0 || entry.text.length >= reported.length) continue;
     const at = reported.indexOf(entry.text);
     if (at === -1) continue;
-    return {
+    const candidate = {
       gen: entry.gen,
       matchedLen: entry.text.length,
       leadingRemainder: reported.slice(0, at),
       trailingRemainder: reported.slice(at + entry.text.length),
     };
+    if (fallback === null) fallback = candidate; // card fce93534: today's pre-fix newest-first result, preserved verbatim as the fallback
+    if (isPureWrapFramingOfEntry(reported, entry.text)) return candidate; // card fce93534: a framing-explained candidate always wins, regardless of recency
   }
-  return null;
+  return fallback;
 }
 
 /** @decision 78e4b3f2 — marks a re-delivery only, NEVER a first-time directive: applying it to genuine
