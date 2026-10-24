@@ -435,8 +435,9 @@ const rejectedEvents = (db, workerId, reason) => db.listEventsForWorker(workerId
   check("(H) precondition: the trailer commit exists on the stray branch", git(H.repo, "log", "strayH", `--grep=Loom-Worker-Branch: ${w.branch}`, "--format=%H") === strayTrailerSha);
   check("(H) precondition: the trailer commit is NOT reachable from mainline", git(H.repo, "log", MAIN, `--grep=Loom-Worker-Branch: ${w.branch}`, "--format=%H") === "");
 
-  const result = await sessions.confirmWorkerMergeTracked(H.mgrId, w.workerId);
-  const settledOk = result?.settled === true && result?.ok === true;
+  const result = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(H.mgrId, w.workerId), { label: "(H) confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
+  check("(H) confirmWorkerMergeTracked actually settled (a non-settle must fail loudly, never pass the negative check vacuously)", result?.settled === true);
+  const settledOk = result.ok === true;
   check("(H) the catch path did NOT finalize as merged (the stray-only commit must not count as landed)", !(settledOk && result.value?.merged === true));
   check("(H) the worktree was NOT removed", fs.existsSync(w.worktreePath));
   check("(H) the task was NOT moved to a terminal column", db.getTask(w.taskId)?.columnKey === "in_progress");
@@ -538,8 +539,9 @@ const rejectedEvents = (db, workerId, reason) => db.listEventsForWorker(workerId
     return pinReadsSeen === 1 ? realGetMeta(k) : "this is not json at all";
   };
   try {
-    const result = await sessions.confirmWorkerMergeTracked(K.mgrId, w.workerId);
-    const settledOk = result?.settled === true && result?.ok === true;
+    const result = await awaitTrackedSettle(() => sessions.confirmWorkerMergeTracked(K.mgrId, w.workerId), { label: "(K) confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
+    check("(K) confirmWorkerMergeTracked actually settled (a non-settle must fail loudly, never pass the negative check vacuously)", result?.settled === true);
+    const settledOk = result.ok === true;
     // Code Review f578bbfb Minor: >= 2 (not >= 1) actually proves the catch path's OWN read ran — >=1 is
     // satisfied by the pin-read alone and would pass even if the catch path never read the key at all.
     check("(K) setup control: the pin-read's own early refusal did NOT short-circuit, AND the catch path's own read ran (>=2 reads of this key)", pinReadsSeen >= 2);
