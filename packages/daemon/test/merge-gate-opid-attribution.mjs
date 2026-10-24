@@ -30,7 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -116,7 +116,12 @@ try {
     const pB = sessions.confirmWorkerMergeTracked(B.mgrId, B.workerId);
     // Wait until BOTH gate children have genuinely started — the precondition that makes this a real
     // concurrency proof rather than an accidentally-serialized one.
-    await waitUntil(() => (calls.length === 2 ? true : undefined), { timeoutMs: 10_000, label: "both A and B gate children to start" });
+    // Card a7b93d00: this fixed 10_000ms budget (daemon-per-file-timing.ndjson) was observed arriving
+    // LATE at 10,751ms under real full-gate load (op 9759c91f, the run this card was filed from) — the
+    // only one of 12 real full-gate observations of this file to cross it. Scale it by this process's
+    // OWN measured ambient contention instead of a guessed larger constant (mirrors card
+    // 926c178d/commit bb86e7c0e's merge-gate-attempt1-trace.mjs fix for the identical shape).
+    await waitUntil(() => (calls.length === 2 ? true : undefined), { timeoutMs: ambientScaledBudget(10_000, 3), label: "both A and B gate children to start" });
     check("(A precondition) both children are genuinely CO-LIVE at the same instant (cap raised to 2)", calls.length === 2);
 
     holds.get(A.worktreePath).release();

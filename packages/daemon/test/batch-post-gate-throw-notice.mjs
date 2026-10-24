@@ -13,7 +13,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
 useOwnLoomHome("loom-bgrot-home-");
@@ -121,7 +121,13 @@ async function repro(label, { inject, patchSvc, budget, expectMoved, moveMain })
   if (budget) {
     check(`(${label}) the caller degraded past the attach budget (settled:false)`, r.value?.settled === false);
     releaseGate();
-    await waitUntil(() => msgs.some((m) => m.includes("[loom:merge-batch-")), { timeoutMs: ADMIT_BUDGET_MS, label: "the batch settle notice" });
+    // Card a7b93d00: this fixed 20_000ms budget (daemon-per-file-timing.ndjson) was observed arriving
+    // LATE under real full-gate load — 24,392ms at op 9759c91f (the run this card was filed from) and,
+    // worse, 30,642ms at an earlier run (op a2b36b58) — two of 12 real full-gate observations of this
+    // file. A bigger fixed number just moves the same failure mode further out, so scale it by this
+    // process's OWN measured ambient contention instead (never a guessed larger constant — mirrors card
+    // 926c178d/commit bb86e7c0e's merge-gate-attempt1-trace.mjs fix for the identical shape).
+    await waitUntil(() => msgs.some((m) => m.includes("[loom:merge-batch-")), { timeoutMs: ambientScaledBudget(20_000, 3), label: "the batch settle notice" });
     const note = msgs.find((m) => m.includes("[loom:merge-batch-")) ?? "";
     check(`(${label}) the settle notice is [loom:merge-batch-unknown], says AFTER its gate passed, and names main state (not "landed nothing")`, note.includes("[loom:merge-batch-unknown]") && note.includes("AFTER its gate passed") && note.includes(expectMoved) && !note.includes("landed nothing"));
     check(`(${label}) the notice says the candidates were NOT started`, /2 candidate\(s\) NOT started/.test(note));
