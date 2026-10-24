@@ -62,6 +62,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (H2) THE DISCRIMINATING NEGATIVE CONTROL: a kickoff that gives up ONCE, requeues, and then the second
 //        attempt actually LANDS (a real confirming hook arrives) must NEVER exhaust — proving the hook only
 //        fires on genuine exhaustion, not on every give-up.
+//   (H3) Card 2cf1cbe4 — the id-identity chain this card closes a test gap for: after a REAL two-cycle
+//        exhaustion (same shape as H1), a late content-matched UserPromptSubmit hook arrives and
+//        `onGiveUpConfirmed`'s own `logicalId` must equal the EXACT `rootMsgId` `onKickoffGiveUpExhausted`
+//        reported for that same exhaustion — driven end to end through the REAL PtyHost (never a
+//        SessionService-level stub), for both a manager-role and a platform-role session.
 //   (S1) SessionService.handleKickoffGiveUpExhausted, driven directly against a temp .db + a recording
 //        PtyStub (mirrors worker-kickoff-guarantee.mjs's own (S) section): a worker with a live, idle
 //        manager gets a durable `[loom:worker-spawn-broken]` notice naming worker_stop + worker_spawn and
@@ -147,20 +152,31 @@ const HOLD_WAIT = HOLD_MS + 20;
 // The kickoff delivery itself gates on logLandedMode's footer-read poll settling first — shrink it so this
 // suite's silent fake pty (which never paints a footer) doesn't wait out the ~4s production default.
 process.env.LOOM_MODE_LOG_POLL_MS = "5";
+// Card 2cf1cbe4 (H3): a manager-role spawn gates scheduleKickoffGuarantee's direct submit() on
+// waitForMcpSeen (usesOrchestrationMcp) — nothing in this fake-pty rig ever marks it seen, so shrink the
+// timeout rather than wait it out. Harmless for every existing (H1)/(H2)/(S) scenario, which spawn with
+// no role at all (usesOrchestrationMcp(null) === false, never gated regardless of this value).
+process.env.LOOM_MCP_READY_TIMEOUT_MS = "25";
 
-const { PtyHost } = await import("../dist/pty/host.js");
+const { PtyHost, framePossibleDuplicate } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakes = [];
 const busyLog = {};
 const exhaustedLog = {};
+// Card 2cf1cbe4 (H3): the late content-matched confirmation this card drives end to end.
+const confirmedLog = {};
 const events = {
   onEngineSessionId() {},
   onBusy(id, busy) { (busyLog[id] ??= []).push(busy); },
   onContextStats() {},
   onRateLimited() {},
   onExit() {},
-  onKickoffGiveUpExhausted(id) { (exhaustedLog[id] ??= []).push(true); },
+  // Card 2cf1cbe4: capture the FULL args (not just a bare `true`) — (H3) needs the real `rootMsgId`
+  // PtyHost reports here to assert the identity chain against what `onGiveUpConfirmed` later reports.
+  // Existing (H1)/(H2) checks only read `exhaustedLog[id]?.length`/truthiness, so this is additive.
+  onKickoffGiveUpExhausted(id, msgId, rootMsgId, kickoffText) { (exhaustedLog[id] ??= []).push({ msgId, rootMsgId, kickoffText }); },
+  onGiveUpConfirmed(id, logicalId, latencyMs) { (confirmedLog[id] ??= []).push({ logicalId, latencyMs }); },
 };
 
 /** A fake pty that never emits output — every give-up this drives is a genuine drop (mirrors
@@ -176,11 +192,11 @@ class SilentTestPtyHost extends createSeamHost(PtyHost) {
 }
 const host = new SilentTestPtyHost(events);
 
-function spawnReady(sessionId, startupPrompt) {
+function spawnReady(sessionId, startupPrompt, role) {
   host.spawn({
     sessionId, cwd: tmpHome, startupPrompt,
     permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
-    geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role,
   });
   host.deliverHook(sessionId, { hook_event_name: "SessionStart" });
   const fake = fakes[fakes.length - 1];
@@ -252,6 +268,75 @@ try {
     check("(H2) NEGATIVE CONTROL: a give-up that requeues once then genuinely lands NEVER exhausts",
       !exhaustedLog[SID]);
     check("(H2) nothing left pending after a clean finish", host.getPendingEntries(SID).length === 0);
+    try { host.stop(SID, "hard"); } catch { /* ignore */ }
+  }
+
+  // ================ (H3) Card 2cf1cbe4: drive a dropped kickoff's late CONTENT-MATCHED confirmation =======
+  // ================ through the REAL PtyHost end to end — `onGiveUpConfirmed`'s `logicalId` must equal ====
+  // ================ the EXACT `rootMsgId` `onKickoffGiveUpExhausted` reported for the SAME exhaustion, =====
+  // ================ for both a manager-role AND a platform-role session (the id chain the card names: ====
+  // ================ buildKickoffGiveUpOptions' kickoffLogicalId -> requeueGiveUpOrigin's ambiguousDispatches
+  // ================ seed -> the late hook's onGiveUpConfirmed(sessionId, logicalId) -> SessionService's =====
+  // ================ handleGiveUpConfirmed -> handleKickoffDroppedResolved; this test proves the PtyHost ====
+  // ================ half of that chain, end to end — manager mounts loom-orchestration and so gates ========
+  // ================ scheduleKickoffGuarantee's direct submit() on waitForMcpSeen (usesOrchestrationMcp); ===
+  // ================ platform does not, so this exercises both the gated and the ungated path). ============
+  // Reuses H1's own two-cycle exhaustion shape (cycle 1 gives up and requeues; cycle 2's redelivery is an
+  // Enter-only retry — card b9b8f8db — that ALSO never confirms, exceeding GIVE_UP_REQUEUE_LIMIT and
+  // exhausting for real). The late confirming hook's `prompt` must be the EXACT text cycle 2's own give-up
+  // seeded into `Live.ambiguousDispatches` — `framePossibleDuplicate(KICKOFF, rootMsgId)`, never the raw
+  // KICKOFF text — mirrors `kickoff-giveup-remint-purge.mjs`'s own `driveToExhaustionAndCaptureCycle2Text`
+  // reconstruction verbatim (that file's own doc explains why: `annotatedMessageText` tags a redelivery
+  // with `framePossibleDuplicate` once `m.giveUpGen` is set, and that tagged signature — not the original
+  // raw text, which is archived into `retiredGiveUpSignatures` once cycle 2 overwrites the CURRENT entry —
+  // is what the still-live `ambiguousDispatches` entry actually holds). Confirming against the stale raw
+  // text instead would match only the RETIRED signature (a different `batchId` than `live.lastWriteGeneration`),
+  // which trips `purgeConfirmedGiveUpRequeueCore`'s own DECLINE branch (card 7a64f16b) — content-matched,
+  // but attributed away as "the current generation's own confirmation", so `onGiveUpConfirmed` would never
+  // fire at all. Verified by MUTATION (see this card's own worker_report): temporarily making
+  // `buildKickoffGiveUpOptions` report a DIFFERENT random id than the one it actually seeds turns the
+  // identity-chain assertion below RED; restoring the source turns it GREEN again.
+  for (const ROLE of ["manager", "platform"]) {
+    const SID = `kickoff-exhaust-confirm-${ROLE}`;
+    const KICKOFF = `orchestrate task tk-confirm-${ROLE} — a dropped kickoff's late confirmation must report the SAME rootMsgId`;
+    const { bodyCount } = spawnReady(SID, KICKOFF, ROLE);
+    await sharedWaitUntil(() => bodyCount(KICKOFF) >= 1, { timeoutMs: 10_000, intervalMs: 2 });
+    check(`(H3-${ROLE}) setup: kickoff delivered via direct submit()`, bodyCount(KICKOFF) === 1);
+
+    // Cycle 1: never confirmed -> give-up #1 -> within budget (GIVE_UP_REQUEUE_LIMIT=1) -> REQUEUED.
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
+    check(`(H3-${ROLE}) cycle 1 gave up: requeued, not yet exhausted`, !exhaustedLog[SID]);
+
+    // TIMING-GUARD-SAFE: non-gating-settle-pause — this sleep only lets the known-fixed GIVE_UP_HOLD_MS
+    // precondition elapse before reconcile() is even allowed to act; the check() below is anchored to
+    // host.reconcile()'s own synchronous effect on busyLog, never to this sleep's own duration (mirrors
+    // prompt-mismatch-notice-giveup-loop-breaker.mjs's own identical STEP 4 comment verbatim).
+    await sleep(HOLD_WAIT);
+    host.reconcile(); // drains the requeued kickoff — cycle 2 begins (Enter-only, per card b9b8f8db)
+    check(`(H3-${ROLE}) reconcile drained the requeued kickoff: busy re-armed`, busyLog[SID].at(-1) === true);
+
+    // Cycle 2 ALSO never confirms — this SECOND give-up exceeds GIVE_UP_REQUEUE_LIMIT(1) -> EXHAUSTS.
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
+    await sharedWaitUntil(() => (exhaustedLog[SID]?.length ?? 0) === 1,
+      { timeoutMs: 10_000, intervalMs: 2, label: `${SID} onKickoffGiveUpExhausted fires (deferred off-stack)` });
+    const exhaustedEntry = exhaustedLog[SID][0];
+    const rootMsgId = exhaustedEntry.rootMsgId;
+    check(`(H3-${ROLE}) setup: the kickoff genuinely exhausted and reported a real rootMsgId`,
+      typeof rootMsgId === "string" && rootMsgId.length > 0);
+    check(`(H3-${ROLE}) setup: the kickoff is gone from pending — dropped for real, nothing left to redeliver`,
+      host.getPendingEntries(SID).length === 0);
+    check(`(H3-${ROLE}) setup: no confirmation has arrived yet — onGiveUpConfirmed has NOT fired`, !confirmedLog[SID]);
+
+    // THE LATE CONFIRMATION: a content-matched UserPromptSubmit hook arrives AFTER exhaustion, reporting
+    // the SAME text cycle 2's own give-up seeded (see this block's own header comment for why this is
+    // `framePossibleDuplicate(KICKOFF, rootMsgId)`, never the raw KICKOFF text).
+    const lateConfirmText = framePossibleDuplicate(KICKOFF, rootMsgId);
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: lateConfirmText });
+
+    check(`(H3-${ROLE}) THE FIX: onGiveUpConfirmed fired exactly once for the late content-matched hook`,
+      confirmedLog[SID]?.length === 1);
+    check(`(H3-${ROLE}) THE IDENTITY CHAIN: onGiveUpConfirmed's logicalId === the EXACT rootMsgId onKickoffGiveUpExhausted reported`,
+      confirmedLog[SID]?.[0]?.logicalId === rootMsgId);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -707,6 +792,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands). Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion (chainDepth at the terminal limit) still records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10). Card 7772176d: the FIRST exhaustion (chainDepth 0, the real production entry point) now RE-MINTS instead of parking immediately — no manager notice, a held re-mint dispatched to the worker itself carrying the possible-duplicate tag (S11) — and only the re-mint's OWN subsequent exhaustion produces the terminal [loom:worker-spawn-broken] park+notify, unchanged in shape, naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge (S12), scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session. Card ba9225f0 (DoD-6): this park site now reuses 085d9422's moot-suppression shape — two independently-parking chains sharing one rootMsgId produce exactly ONE notice, the second's own parked event tagged noticeSuppressed:true/duplicate-parked (S13), while a single genuinely-lost kickoff is still reported, unsuppressed (S14). Card 8882e2ca: a kickoff above the size-aware plausible-confirm-window threshold now draws the distinct, non-terminal [loom:kickoff-confirm-pending] notice instead, with the durable parked event unchanged (S15); an ordinary-sized kickoff's terminal notice stays byte-for-byte identical to pre-card production wording (S16)."
+  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands). Card 2cf1cbe4: a late content-matched hook arriving AFTER that same real two-cycle exhaustion drives onGiveUpConfirmed's logicalId to equal the EXACT rootMsgId onKickoffGiveUpExhausted reported, end to end through the REAL PtyHost, for both a manager-role and a platform-role session (H3). Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion (chainDepth at the terminal limit) still records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10). Card 7772176d: the FIRST exhaustion (chainDepth 0, the real production entry point) now RE-MINTS instead of parking immediately — no manager notice, a held re-mint dispatched to the worker itself carrying the possible-duplicate tag (S11) — and only the re-mint's OWN subsequent exhaustion produces the terminal [loom:worker-spawn-broken] park+notify, unchanged in shape, naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge (S12), scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session. Card ba9225f0 (DoD-6): this park site now reuses 085d9422's moot-suppression shape — two independently-parking chains sharing one rootMsgId produce exactly ONE notice, the second's own parked event tagged noticeSuppressed:true/duplicate-parked (S13), while a single genuinely-lost kickoff is still reported, unsuppressed (S14). Card 8882e2ca: a kickoff above the size-aware plausible-confirm-window threshold now draws the distinct, non-terminal [loom:kickoff-confirm-pending] notice instead, with the durable parked event unchanged (S15); an ordinary-sized kickoff's terminal notice stays byte-for-byte identical to pre-card production wording (S16)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
