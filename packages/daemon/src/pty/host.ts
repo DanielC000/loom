@@ -525,6 +525,27 @@ function escapeNestedPastedContentTag(s: string): string {
   return s.replace(/<(\/?)pasted_content/g, "<\\$1pasted_content");
 }
 
+/** Card 3c8db740 — the unwrap half of `purgeConfirmedGiveUpRequeueCore`'s `matchesSig`, factored out so
+ *  the read-only `ambiguousMatch` diagnostic (UserPromptSubmit handler) can share it instead of
+ *  reimplementing its own narrower copy. Exact whole-inner equality only, via `PASTED_CONTENT_WRAP_RE`. */
+function giveUpSignatureUnwrap(text: string): { len: number; hash: string } | null {
+  const wrapMatch = PASTED_CONTENT_WRAP_RE.exec(text);
+  return wrapMatch !== null ? textSignature(wrapMatch[2]!) : null;
+}
+
+/** Card 3c8db740 — the THREE-arm match: raw signature, the unwrapped pasted-content inner, or (card
+ *  aeb62a82) the unwrapped inner against the entry's own precomputed `escapedSig`. Both the purge path's
+ *  `matchesSig` and the diagnostic must call this exact function, never a narrower subset of these arms. */
+function giveUpSignatureMatches(
+  entry: { len: number; hash: string; escapedSig: { len: number; hash: string } },
+  sig: { len: number; hash: string },
+  unwrappedSig: { len: number; hash: string } | null,
+): boolean {
+  return (entry.len === sig.len && entry.hash === sig.hash) ||
+    (unwrappedSig !== null && entry.len === unwrappedSig.len && entry.hash === unwrappedSig.hash) ||
+    (unwrappedSig !== null && entry.escapedSig.len === unwrappedSig.len && entry.escapedSig.hash === unwrappedSig.hash);
+}
+
 /** Card b1cc4f01 — sibling diagnostic to `isRecognizedPastedContentWrap`: the wrap FRAMING matches the
  *  SAME id-backreferenced shape byte-for-byte, but the wrapped body is missing exactly ONE character
  *  relative to `intended`. Measured, not guessed: 6/6 of this card's own residual specimens showed this
@@ -9335,8 +9356,16 @@ export class PtyHost {
             // @decision dbc7ffea — also sweep `retiredGiveUpSignatures`, or this can report
             // `ambiguousMatch=false` on the same hook a retired-cycle match already resolved, reading as a
             // contradiction against the CONFIRMED line just above it in the log.
-            const ambiguousMatch = [...live.ambiguousDispatches.values()].some((e) => e.len === sigReported.len && e.hash === sigReported.hash)
-              || [...live.retiredGiveUpSignatures.values()].some((sigs) => sigs.some((e) => e.len === sigReported.len && e.hash === sigReported.hash));
+            //
+            // Card 3c8db740 — this used to compare the RAW signature only, so a wrapped (or escaped-tag)
+            // late echo could report `ambiguousMatch=false` next to a CONFIRMED that matched by content —
+            // the same contradiction class the dbc7ffea comment above was written to prevent. Now unwraps
+            // and checks `escapedSig` exactly like `purgeConfirmedGiveUpRequeueCore`'s own `matchesSig`, via
+            // the shared `giveUpSignatureMatches`/`giveUpSignatureUnwrap` — diagnostic-only: this value has
+            // no consumer besides the `[prompt-echo]` log line just below (grep confirms no other reads).
+            const ambiguousUnwrappedSig = giveUpSignatureUnwrap(hook.prompt);
+            const ambiguousMatch = [...live.ambiguousDispatches.values()].some((e) => giveUpSignatureMatches(e, sigReported, ambiguousUnwrappedSig))
+              || [...live.retiredGiveUpSignatures.values()].some((sigs) => sigs.some((e) => giveUpSignatureMatches(e, sigReported, ambiguousUnwrappedSig)));
             // Card 374c21b2: the PRINTED reportedHash/writtenHash used to inline sigReported.hash/
             // sigWritten.hash directly — an un-gated fnv1a32 of the FULL prompt text, brute-forcible for a
             // short prompt (card 8b13a61e). Routed the DISPLAY only through the same redactedExcerpt
@@ -13381,15 +13410,14 @@ export class PtyHost {
       // only, never a substring, never trimEnd()-compensated).
       // @decision aeb62a82 — the third candidate compares `unwrappedSig` against each entry's own
       // precomputed `escapedSig`; never reverse-escape `wrapMatch[2]` here instead.
-      const wrapMatch = PASTED_CONTENT_WRAP_RE.exec(reportedPrompt);
-      const unwrappedSig = wrapMatch !== null ? textSignature(wrapMatch[2]!) : null;
+      const unwrappedSig = giveUpSignatureUnwrap(reportedPrompt);
       // Card ee56a894: deliberately checks `entry.len`/`entry.hash` (the joined `submittedSig`) only, never
       // `entry.memberSig` — that field is `hasAmbiguousMatch`'s own narrower-scoped addition, not a general
       // substitute for this, the engine-echo purge path's, own signature check.
+      // Card 3c8db740 — shared with the read-only `ambiguousMatch` diagnostic (UserPromptSubmit handler)
+      // via `giveUpSignatureMatches`, so the two can never disagree on what counts as a match.
       const matchesSig = (entry: { len: number; hash: string; escapedSig: { len: number; hash: string } }): boolean =>
-        (entry.len === sig.len && entry.hash === sig.hash) ||
-        (unwrappedSig !== null && entry.len === unwrappedSig.len && entry.hash === unwrappedSig.hash) ||
-        (unwrappedSig !== null && entry.escapedSig.len === unwrappedSig.len && entry.escapedSig.hash === unwrappedSig.hash);
+        giveUpSignatureMatches(entry, sig, unwrappedSig);
       // @decision 7a64f16b — CONTENT ANCESTRY, not a bare generation-number comparison: does
       // `reportedPrompt` ALSO equal `live.lastPrompt` (the currently-outstanding write's own text)? See
       // the decline check below, and the record, for why this is the discriminator.
