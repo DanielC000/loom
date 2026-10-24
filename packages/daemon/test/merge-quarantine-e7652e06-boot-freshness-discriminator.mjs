@@ -61,18 +61,50 @@ function makeToplevelRepo(tag) {
   return repo;
 }
 
+// card 63254a4e: the OLD search materialized (mkdir + git init + commit) a REAL repo on every one of its
+// 25 tries just to read its hash back, so the loop was both EXPENSIVE (capping it low) and, because the
+// floor is a real repo's own hash (effectively uniform over the hash space), fails at P = 1/(N+1) for N
+// tries — 1/26 (~3.8%) per call, ~2 calls/run. Verified at source (repo-lock.ts's resolveGitToplevelSync):
+// canonicalRepoLockKey walks UP looking for a `.git` entry and, finding none anywhere (true of a bare,
+// not-yet-created path exactly as it is of a freshly mkdir'd, not-yet-git-init'd one), falls back to the
+// existence-independent realpath of the input itself — so the key for a PROSPECTIVE path that does not
+// exist on disk at all is IDENTICAL to the key that same path will have once actually created and
+// `git init`'d (empirically confirmed: all three of {non-existent, bare mkdir'd, post-`git init`} produced
+// the byte-identical key for the same path). That makes the search itself nearly free — no mkdir, no git,
+// no commit per try — so the bound can be raised by orders of magnitude at negligible cost, bringing the
+// per-call failure probability down to 1/(MAX_SORT_SEARCH_TRIES+1) = 1/10_001 (~0.01%), and the search
+// still only ever materializes the ONE candidate that actually wins.
+const MAX_SORT_SEARCH_TRIES = 10_000;
+
+function prospectiveToplevelRepoPath(tag) {
+  return path.join(os.tmpdir(), `loom-e7652e06-repo-${tag}-${freshSfx()}`);
+}
+
 // Same technique merge-quarantine-d69a6744-liveoccupancy-ambiguity-and-write.mjs's own Scenario 2
 // established: retry a fresh candidate until ITS OWN hash sorts strictly on the desired side of a fixed
 // floor hash, so fs.readdirSync's own (plain alphabetical) boot order is forced deterministically rather
-// than assumed.
+// than assumed. Unlike that sibling (which hashes a bare STRING, never a repo), this one needs a REAL
+// repo's REAL canonicalRepoLockKey — but only the WINNING candidate is ever actually created on disk; see
+// MAX_SORT_SEARCH_TRIES's own comment above for why a not-yet-existing path's key is safe to trust here.
 function makeToplevelRepoSortingAfter(tagPrefix, floorHash) {
-  for (let i = 0; i < 25; i++) {
-    const candidate = makeToplevelRepo(`${tagPrefix}-${i}`);
+  for (let i = 0; i < MAX_SORT_SEARCH_TRIES; i++) {
+    const candidate = prospectiveToplevelRepoPath(`${tagPrefix}-${i}`);
     const k = canonicalRepoLockKey(candidate);
-    if (hashKey(k) > floorHash) return { repo: candidate, key: k };
-    fs.rmSync(candidate, { recursive: true, force: true });
+    if (hashKey(k) > floorHash) {
+      fs.mkdirSync(candidate, { recursive: true });
+      fs.writeFileSync(path.join(candidate, "README.md"), `# e7652e06 fixture (${tagPrefix}-${i})\n`);
+      execFileSync("git", ["init", "-q"], { cwd: candidate });
+      commitAll(candidate, "init", GIT_ID);
+      // Guard the load-bearing assumption above: the materialized repo's REAL key must equal the
+      // prospectively-computed one, or the whole cheap-search premise is unsound for this candidate.
+      const realKey = canonicalRepoLockKey(candidate);
+      if (realKey !== k) {
+        throw new Error(`prospective key diverged from the materialized repo's real key for ${candidate}: expected ${k}, got ${realKey}`);
+      }
+      return { repo: candidate, key: realKey };
+    }
   }
-  throw new Error(`could not find a ${tagPrefix} candidate sorting after ${floorHash} within 25 tries`);
+  throw new Error(`could not find a ${tagPrefix} candidate sorting after ${floorHash} within ${MAX_SORT_SEARCH_TRIES} tries`);
 }
 
 fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
