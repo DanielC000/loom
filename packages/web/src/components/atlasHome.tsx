@@ -93,7 +93,15 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
 
   const activeIdx = tabs.findIndex((t) => t.key === active);
   const measuring = layout.measure;
-  const fit = measuring ? tabs.length : Math.max(0, Math.min(layout.fit, tabs.length));
+  // TWO fits, deliberately. The ROW's goes to `tabs.length` during a measuring pass, because drawing
+  // every tab is how the widths get captured. The MENU's does not: `layout.fit` survives a re-measure
+  // (`setLayout(cur => ({ ...cur, measure: true }))` never clears it), so the menu keeps rendering the
+  // last settled overflow instead of briefly computing [] and tearing its own DOM down.
+  //
+  // @decision 485d67b4 — an OPEN menu must never lose its DOM, or its focus, to a measuring pass.
+  // Never collapse these two back into one `fit`, and never gate the menu's own list on `measuring`.
+  const settledFit = Math.max(0, Math.min(layout.fit, tabs.length));
+  const fit = measuring ? tabs.length : settledFit;
   // ⭐ THE ACTIVE TAB STAYS ON THE ROW, swapping out whichever tab its width displaces — it is never
   // represented by the trigger instead. The phosphor underline IS this row's entire selected-state
   // affordance, so a row with nothing underlined and the current tab shut inside a closed menu
@@ -101,14 +109,21 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
   // More active and showing the active label on it — also gives the trigger a per-tab width this
   // very computation would have to re-derive, in an inline-flex chip that cannot ellipsise
   // (card f76b89b9). Consequence worth knowing: the menu therefore NEVER holds the active tab.
+  // What the row holds once a pass has SETTLED — the menu's half of the split above. Identical to
+  // `rowTabs` below whenever `measuring` is false, so nothing about a settled render moves.
+  const settledPinned = activeIdx >= settledFit ? tabs[activeIdx] : undefined;
+  const settledRow = settledPinned
+    ? [...tabs.slice(0, settledFit), settledPinned]
+    : tabs.slice(0, settledFit);
+  const settledKeys = new Set(settledRow.map((t) => t.key));
+  // Declaration order, so the menu reads as the rest of the row rather than a reshuffled list.
+  const overflow = tabs.filter((t) => !settledKeys.has(t.key));
+
   const pinActive = !measuring && activeIdx >= fit;
   const pinned = pinActive ? tabs[activeIdx] : undefined;
   const rowTabs: NodeTab[] = measuring
     ? tabs
     : pinned ? [...tabs.slice(0, fit), pinned] : tabs.slice(0, fit);
-  const rowKeys = new Set(rowTabs.map((t) => t.key));
-  // Declaration order, so the menu reads as the rest of the row rather than a reshuffled list.
-  const overflow = tabs.filter((t) => !rowKeys.has(t.key));
   const showMore = measuring || overflow.length > 0;
 
   const chip = (t: NodeTab) => (
@@ -205,7 +220,21 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
   };
   // The menu opens focused: a menu button that opens and leaves focus behind is unusable by keyboard.
   // Always item 0 — the active tab is pinned to the row, so the menu has no "current" item to land on.
-  useEffect(() => { if (open) focusItem(0); }, [open]);
+  //
+  // Keyed on the ITEM LIST as well as `open`, never on `open` alone: a genuine relayout while the
+  // menu is open (a real resize, not the measuring pass the split above already neutralises) unmounts
+  // the item holding focus, and the browser drops focus to <body> with nothing to put it back.
+  // The second pass RECLAIMS focus only from <body> — focus the reader moved somewhere deliberate is
+  // never stolen, which is why this is not simply `if (open) focusItem(0)` on every list change.
+  const overflowKeys = overflow.map((t) => t.key).join("\u0001");
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (!open) { wasOpen.current = false; return; }
+    const justOpened = !wasOpen.current;
+    wasOpen.current = true;
+    const a = document.activeElement;
+    if (justOpened || !a || a === document.body) focusItem(0);
+  }, [open, overflowKeys]);
 
   const onMoreKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     // Enter and Space already fire `click` on a native <button>; these are the extra menu-button keys.

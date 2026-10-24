@@ -155,15 +155,18 @@ test.describe("Atlas tree drawer at narrow widths", () => {
       expect(t.box.top, "the drawer covers the frame from the top edge").toBeLessThanOrEqual(0);
       await expect(scrim).toHaveCount(1);
       // Focus moved INTO the drawer, so a keyboard reader is not left behind on the topbar.
-      expect(await page.evaluate(() => document.activeElement?.classList.contains("loom-atlas-tree"))).toBe(true);
+      // ⛔ Web-first, never a bare `document.activeElement` read: AtlasTree moves focus from a
+      // PASSIVE effect (`useEffect(() => { ... nav.focus(...) }, [open])`), which React runs after
+      // the commit `toBeVisible()` above resolves on — the same race card 485d67b4 measured at 4 in
+      // 20 runs on the tab-overflow menu's own open.
+      await expect(treeEl, "focus moved into the drawer").toBeFocused();
     };
     const expectClosedAndRefocused = async (via: string) => {
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(treeEl, `closed via ${via}`).toBeHidden();
       await expect(scrim).toHaveCount(0);
       // Focus RETURNED to the toggle — every close path removes the element focus was on from view.
-      expect(await page.evaluate(() => document.activeElement?.getAttribute("data-testid")),
-        `focus returns to the toggle after closing via ${via}`).toBe("atlas-tree-toggle");
+      await expect(toggle, `focus returns to the toggle after closing via ${via}`).toBeFocused();
     };
 
     await open();

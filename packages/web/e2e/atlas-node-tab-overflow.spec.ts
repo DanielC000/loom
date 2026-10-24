@@ -142,6 +142,32 @@ async function allReachableKeys(page: Page): Promise<{ row: string[]; menu: stri
   return { row, menu };
 }
 
+/**
+ * The focused element's `data-testid` (`""` when it has none), read only once focus has SETTLED on
+ * something matching `want`.
+ *
+ * ⛔ NEVER read `document.activeElement` bare after a visibility assertion here. The menu moves focus
+ * from a PASSIVE effect (`atlasHome.tsx`: `useEffect(() => { if (open) focusItem(0); }, [open])`),
+ * which React runs AFTER the commit that paints the menu — so `toBeVisible()` can resolve a frame
+ * before focus has moved anywhere. MEASURED on card 485d67b4: the bare read failed 4 of 20 runs at
+ * the Enter-open site, reading back the still-focused trigger ("atlas-node-tabs-more") three times
+ * and `document.body` (no testid) once. This RETRIES the read rather than waiting a fixed time, so no
+ * timeout is lengthened and the settled path still costs one evaluate.
+ *
+ * Use it only where the test must DISCOVER which element holds focus. Where the expected element is
+ * already a locator, `await expect(locator).toBeFocused()` says the same thing — that is what the
+ * sibling keyboard specs (atlas-board-dialog, atlas-keyboard-shortcuts, atlas-switch) use.
+ */
+async function focusedTestId(page: Page, want: RegExp | string, message: string): Promise<string> {
+  const read = () => page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? "");
+  const poll = expect.poll(read, { message });
+  // `""` rather than null so a focus-on-body read FAILS the matcher and is retried, instead of
+  // throwing a TypeError out of `toMatch` on the very first poll.
+  if (typeof want === "string") await poll.toBe(want);
+  else await poll.toMatch(want);
+  return read();
+}
+
 /** The visible panel's own rendered text, clipped — a fingerprint a testid flip alone cannot fake. */
 async function panelFingerprint(page: Page): Promise<string> {
   return page.locator(".loom-atlas-content").evaluate((el) =>
@@ -272,7 +298,6 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await expect(more).toBeVisible();
     await expect(more).toHaveAttribute("aria-haspopup", "menu");
     await expect(more).toHaveAttribute("aria-expanded", "false");
-    const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? null);
 
     // ENTER opens, and focus moves INTO the menu — a menu button that opens and leaves focus behind
     // is unreachable by keyboard, which no presence assertion on the panel would catch.
@@ -280,35 +305,68 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await page.keyboard.press("Enter");
     await expect(menu).toBeVisible();
     await expect(more).toHaveAttribute("aria-expanded", "true");
-    const first = await focused();
-    expect(first, "focus lands on the first menu item").toMatch(/^atlas-more-item-/);
+    const first = await focusedTestId(page, /^atlas-more-item-/, "focus lands on the first menu item");
 
     // ARROWS move, and they move to a DIFFERENT item (not merely "still focused somewhere").
     await page.keyboard.press("ArrowDown");
-    const second = await focused();
-    expect(second, "ArrowDown moves to the next item").toMatch(/^atlas-more-item-/);
-    expect(second).not.toBe(first);
+    const second = await focusedTestId(page, /^atlas-more-item-/, "ArrowDown moves to the next item");
+    expect(second, "ArrowDown moves to a DIFFERENT item").not.toBe(first);
     await page.keyboard.press("ArrowUp");
-    expect(await focused(), "ArrowUp comes back").toBe(first);
+    await expect(page.getByTestId(first), "ArrowUp comes back").toBeFocused();
     await page.keyboard.press("End");
-    const last = await focused();
-    expect(last, "End jumps to the last item").toMatch(/^atlas-more-item-/);
+    await focusedTestId(page, /^atlas-more-item-/, "End jumps to the last item");
 
     // ESCAPE closes AND hands focus back to the trigger.
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
     await expect(more).toHaveAttribute("aria-expanded", "false");
-    expect(await focused(), "Escape returns focus to the trigger").toBe("atlas-node-tabs-more");
+    await expect(more, "Escape returns focus to the trigger").toBeFocused();
 
     // SPACE opens it too, and Enter on an item navigates exactly like clicking the tab would.
     await page.keyboard.press(" ");
     await expect(menu).toBeVisible();
-    const target = (await focused())!.replace(/^atlas-more-item-/, "");
+    const target = (await focusedTestId(page, /^atlas-more-item-/, "Space opens the menu focused"))
+      .replace(/^atlas-more-item-/, "");
     const beforeUrl = new URL(page.url()).pathname;
     await page.keyboard.press("Enter");
     await expect(menu).toHaveCount(0);
     await expect(page.getByTestId(`atlas-tab-${target}`)).toHaveAttribute("aria-selected", "true");
     expect(new URL(page.url()).pathname, "a keyboard selection navigates").not.toBe(beforeUrl);
+  });
+
+  test("switch ON: an open menu keeps keyboard focus across a relayout", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const seeded = await seedProjectWithBoard(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(loomDaemon.baseURL + "/board");
+
+    const more = page.getByTestId("atlas-node-tabs-more");
+    const menu = page.getByTestId("atlas-node-tabs-menu");
+    await expect(more).toBeVisible();
+    await more.focus();
+    await page.keyboard.press("Enter");
+    await expect(menu).toBeVisible();
+    const landed = await focusedTestId(page, /^atlas-more-item-/, "the menu opens focused");
+    const itemsAt1440 = await menu.locator('[role="menuitem"]').count();
+
+    // A GENUINE relayout, not the measuring pass the fit split already neutralises: a narrower
+    // viewport really changes which tabs overflow, so React unmounts the item holding focus and the
+    // browser drops focus to <body> with nothing to put it back (MEASURED 3/3 before the fix).
+    await page.setViewportSize({ width: 700, height: 1000 });
+    await expect(menu, "the menu is still open across the resize").toBeVisible();
+    // ⭐ The control that makes the focus claim below non-vacuous: if the overflow list did NOT
+    // change, nothing unmounted and "focus survived" would prove nothing.
+    await expect(menu.locator('[role="menuitem"]'), "the overflow list really changed")
+      .not.toHaveCount(itemsAt1440);
+    const after = await focusedTestId(page, /^atlas-more-item-/, "focus is never stranded on <body>");
+    expect(after, `focus moved off ${landed} but stayed inside the menu`).toMatch(/^atlas-more-item-/);
+
+    // And the menu is still operable from there — a focused item that no longer responds to the
+    // arrow keys would satisfy every assertion above and still be unusable.
+    await page.keyboard.press("ArrowDown");
+    await focusedTestId(page, /^atlas-more-item-/, "the arrow keys still work after the relayout");
   });
 
   test("switch ON: a typed draft survives a trip out through the menu and back", async ({ page, loomDaemon }) => {
