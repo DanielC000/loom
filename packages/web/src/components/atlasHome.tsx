@@ -5,7 +5,7 @@
 // ⛔ Nothing here fetches. The home pages do the reading (lib/atlasHome.ts composes it off existing
 // `api.*` calls) and hand these components finished values, so a figure and the pop-over detail
 // behind it are derived once, in one place, and cannot disagree.
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import type { UsageLimitsStatus } from "@loom/shared";
@@ -28,6 +28,48 @@ export interface NodeTab {
   count?: ReactNode;
 }
 
+/** The overflow trigger's word. A constant so the measuring pass and the painted chip agree. */
+const MORE_LABEL = "More";
+
+/**
+ * How many leading tabs the row has room for, given what else is on its line.
+ *
+ * @decision d4350286 — Do not budget the tabs against the container's full width when the row has
+ * trailing content: the strip's line is what this collapse exists to reclaim.
+ */
+function computeFit(a: {
+  widths: number[]; moreW: number; availW: number; sideW: number; sideCount: number;
+  rowGap: number; wrapGap: number; activeIdx: number;
+}): number {
+  const n = a.widths.length;
+  const total = a.widths.reduce((s, w) => s + w, 0) + a.rowGap * Math.max(0, n - 1);
+  const activeW = (a.activeIdx >= 0 ? a.widths[a.activeIdx] : 0) ?? 0;
+  // The trailing content (the home nodes' KPI strip) gets its place on the line reserved only while
+  // that still leaves the row the active tab AND the trigger. Below that it cannot: at phone width
+  // the strip is as wide as the whole column, so reserving it would collapse every single tab into
+  // the menu. There the strip keeps the line of its own it already takes (`.loom-kpistrip
+  // { margin-left: 0 }`, the <=820px rule) and the row budgets against the full width instead.
+  const beside = a.availW - a.sideW - a.wrapGap * a.sideCount;
+  const need = activeW + (activeW > 0 ? a.rowGap : 0) + a.moreW;
+  const budget = a.sideCount > 0 && beside >= need ? beside : a.availW;
+  if (total <= budget) return n;
+  const room = budget - a.moreW - a.wrapGap;
+  // Greedy from the front, stopping at `stopAt` so a pinned active tab's own slot is never also
+  // filled by one of the tabs ahead of it.
+  const greedy = (limit: number, stopAt: number) => {
+    let used = 0, count = 0;
+    for (let i = 0; i < n && i !== stopAt; i++) {
+      const step = (count === 0 ? 0 : a.rowGap) + (a.widths[i] ?? 0);
+      if (used + step > limit) break;
+      used += step; count++;
+    }
+    return count;
+  };
+  const plain = greedy(room, -1);
+  if (a.activeIdx < 0 || a.activeIdx < plain) return plain;
+  return greedy(room - activeW - a.rowGap, a.activeIdx);
+}
+
 export function NodeTabs({ tabs, active, hrefFor, children }: {
   tabs: NodeTab[];
   active: string;
@@ -35,18 +77,202 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
   /** Trailing content on the same row — the Deck tab's compact KPI strip sits here. */
   children?: ReactNode;
 }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<(HTMLAnchorElement | null)[]>([]);
+  /** Per-chip widths, captured once from the REAL row while it held every tab (see `measure`). */
+  const metrics = useRef<{ widths: number[]; more: number } | null>(null);
+  // `measure: true` draws every tab AND the trigger, which is what the layout effect below reads its
+  // widths off. It runs before the browser paints, so the complete row is never seen — and it is the
+  // reason there is no hidden mirror of the row in the DOM: a second copy of every tab label would
+  // make each one an ambiguous page-wide text match (the trap [[atlas-nav-labels-collide-with-
+  // exact-text-locators]] records), for widths the real row can hand over directly.
+  const [layout, setLayout] = useState<{ fit: number; measure: boolean }>({ fit: tabs.length, measure: true });
+  const [open, setOpen] = useState(false);
+
+  const activeIdx = tabs.findIndex((t) => t.key === active);
+  const measuring = layout.measure;
+  const fit = measuring ? tabs.length : Math.max(0, Math.min(layout.fit, tabs.length));
+  // ⭐ THE ACTIVE TAB STAYS ON THE ROW, swapping out whichever tab its width displaces — it is never
+  // represented by the trigger instead. The phosphor underline IS this row's entire selected-state
+  // affordance, so a row with nothing underlined and the current tab shut inside a closed menu
+  // leaves "which tab am I on" unreadable at a glance. The alternative the card allowed — marking
+  // More active and showing the active label on it — also gives the trigger a per-tab width this
+  // very computation would have to re-derive, in an inline-flex chip that cannot ellipsise
+  // (card f76b89b9). Consequence worth knowing: the menu therefore NEVER holds the active tab.
+  const pinActive = !measuring && activeIdx >= fit;
+  const pinned = pinActive ? tabs[activeIdx] : undefined;
+  const rowTabs: NodeTab[] = measuring
+    ? tabs
+    : pinned ? [...tabs.slice(0, fit), pinned] : tabs.slice(0, fit);
+  const rowKeys = new Set(rowTabs.map((t) => t.key));
+  // Declaration order, so the menu reads as the rest of the row rather than a reshuffled list.
+  const overflow = tabs.filter((t) => !rowKeys.has(t.key));
+  const showMore = measuring || overflow.length > 0;
+
+  const chip = (t: NodeTab) => (
+    <>
+      {t.label}
+      {t.count !== undefined && <span className="loom-atlas-tabcount">{t.count}</span>}
+    </>
+  );
+
+  const recompute = useCallback(() => {
+    const wrap = wrapRef.current, row = rowRef.current;
+    if (!wrap || !row) return;
+    if (!metrics.current) {
+      // Only a pass that is currently drawing every tab plus the trigger can be measured.
+      const chips = [...row.querySelectorAll<HTMLElement>("[data-nt-chip]")];
+      const more = moreRef.current;
+      if (chips.length !== tabs.length || !more) return;
+      metrics.current = {
+        widths: chips.map((el) => el.getBoundingClientRect().width),
+        more: more.getBoundingClientRect().width,
+      };
+    }
+    const rowStyle = getComputedStyle(row);
+    const wrapStyle = getComputedStyle(wrap);
+    // Everything else sharing the wrap's line — today the KPI strip the home nodes pass as children.
+    // Measured rather than assumed, so a node that passes none reserves nothing.
+    let sideW = 0, sideCount = 0;
+    for (const el of [...wrap.children] as HTMLElement[]) {
+      if (el === row || el.dataset.ntSlot === "more") continue;
+      sideW += el.getBoundingClientRect().width;
+      sideCount++;
+    }
+    const next = computeFit({
+      widths: metrics.current.widths,
+      moreW: metrics.current.more,
+      // Shaded by a pixel: the row keeps its own `flex-wrap` as a safety net, so a sub-pixel
+      // over-estimate only wraps instead of clipping — but wrapping still costs the line this
+      // whole collapse exists to reclaim.
+      availW: wrap.clientWidth - 1,
+      sideW, sideCount,
+      rowGap: parseFloat(rowStyle.columnGap) || 0,
+      wrapGap: parseFloat(wrapStyle.columnGap) || 0,
+      activeIdx,
+    });
+    setLayout((cur) => (cur.fit === next && !cur.measure ? cur : { fit: next, measure: false }));
+  }, [tabs.length, activeIdx]);
+
+  // Deps-free on purpose: a parent re-render is also how a count ticks or the strip's own width
+  // moves, and neither shows up in a dependency list. `setLayout` returns the identical object when
+  // nothing changed, so React bails out rather than looping.
+  const recomputeRef = useRef(recompute);
+  recomputeRef.current = recompute;
+  useLayoutEffect(() => { recomputeRef.current(); });
+
+  // A label, a count's digit width or a late webfont all invalidate the captured widths. The
+  // signature covers the first two; `document.fonts.ready` covers the third.
+  const signature = tabs.map((t) => `${t.key}\u0000${t.label}\u0000${String(t.count ?? "")}`).join("\u0001");
+  useEffect(() => {
+    metrics.current = null;
+    setLayout((cur) => ({ ...cur, measure: true }));
+  }, [signature]);
+  useEffect(() => {
+    let live = true;
+    document.fonts?.ready.then(() => {
+      if (!live) return;
+      metrics.current = null;
+      setLayout((cur) => ({ ...cur, measure: true }));
+    }).catch(() => { /* no font API — the captured widths stand */ });
+    return () => { live = false; };
+  }, []);
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => recomputeRef.current());
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, []);
+  // A collapse that re-absorbed every tab must not leave an orphaned menu open over nothing.
+  useEffect(() => { if (open && !measuring && overflow.length === 0) setOpen(false); },
+    [open, measuring, overflow.length]);
+
+  const slotRef = useDismissable<HTMLDivElement>(open, () => {
+    // Escape arrives on the document with focus still inside the menu, so the trigger has to take
+    // it back or the keyboard user is left on a node that is about to stop existing. An outside
+    // CLICK has already put focus somewhere deliberate — pulling it back there would fight the user.
+    const inside = !!slotRef.current?.contains(document.activeElement);
+    setOpen(false);
+    if (inside) moreRef.current?.focus();
+  });
+
+  const focusItem = (i: number) => {
+    const items = itemRefs.current.filter((el): el is HTMLAnchorElement => !!el);
+    if (items.length > 0) items[((i % items.length) + items.length) % items.length]?.focus();
+  };
+  // The menu opens focused: a menu button that opens and leaves focus behind is unusable by keyboard.
+  // Always item 0 — the active tab is pinned to the row, so the menu has no "current" item to land on.
+  useEffect(() => { if (open) focusItem(0); }, [open]);
+
+  const onMoreKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    // Enter and Space already fire `click` on a native <button>; these are the extra menu-button keys.
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    if (open) focusItem(e.key === "ArrowDown" ? 0 : -1);
+    else setOpen(true);
+  };
+  const onMenuKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const items = itemRefs.current.filter((el): el is HTMLAnchorElement => !!el);
+    const cur = items.indexOf(document.activeElement as HTMLAnchorElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); focusItem(cur + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); focusItem(cur - 1); }
+    else if (e.key === "Home") { e.preventDefault(); focusItem(0); }
+    else if (e.key === "End") { e.preventDefault(); focusItem(-1); }
+    else if (e.key === "Escape") {
+      // Handled here as well as by useDismissable's document listener so the focus return happens
+      // on the keystroke itself; both closes are idempotent.
+      e.preventDefault(); e.stopPropagation();
+      setOpen(false); moreRef.current?.focus();
+    } else if (e.key === "Tab") setOpen(false);
+  };
+
+  const menuId = "atlas-node-tabs-menu";
   return (
-    <div className="loom-atlas-tabs" data-testid="atlas-node-tabs">
-      <div className="loom-atlas-tabrow" role="tablist" aria-label="Node tabs">
-        {tabs.map((t) => (
+    <div className="loom-atlas-tabs" data-testid="atlas-node-tabs" ref={wrapRef}>
+      <div className="loom-atlas-tabrow" role="tablist" aria-label="Node tabs" ref={rowRef}>
+        {rowTabs.map((t) => (
           <Link key={t.key} to={hrefFor(t.key)} role="tab" aria-selected={t.key === active}
-            data-testid={`atlas-tab-${t.key}`}
+            data-testid={`atlas-tab-${t.key}`} data-nt-chip=""
             className={`loom-navtab${t.key === active ? " is-active" : ""}`}>
-            {t.label}
-            {t.count !== undefined && <span className="loom-atlas-tabcount">{t.count}</span>}
+            {chip(t)}
           </Link>
         ))}
       </div>
+      {/* ⛔ OUTSIDE the tablist: a `role="tablist"` takes `role="tab"` children, and a menu button is
+          not one — so the trigger is its own flex item of `.loom-atlas-tabs`, beside the row. */}
+      {showMore && (
+        <div className="loom-atlas-tabmore-slot" data-nt-slot="more" ref={slotRef}>
+          <button type="button" ref={moreRef} className="loom-navtab loom-atlas-tabmore"
+            data-testid="atlas-node-tabs-more"
+            aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
+            onClick={() => setOpen((o) => !o)} onKeyDown={onMoreKeyDown}
+            title={`${overflow.length} more ${overflow.length === 1 ? "tab" : "tabs"}`}>
+            {MORE_LABEL}
+            <span className="loom-atlas-tabmore-dots" aria-hidden="true">⋯</span>
+          </button>
+          {/* Rendered only while open, never parked with `hidden`: a closed copy would put every
+              overflowed tab's label back in the document as a second text match. The tab BODIES stay
+              mounted regardless — that is the panels' own contract at each call site, and nothing
+              here unmounts one. */}
+          {open && overflow.length > 0 && (
+            <div className="loom-atlas-tabmenu" role="menu" id={menuId} aria-label="More node tabs"
+              data-testid="atlas-node-tabs-menu" onKeyDown={onMenuKeyDown}>
+              {overflow.map((t, i) => (
+                <Link key={t.key} to={hrefFor(t.key)} role="menuitem" tabIndex={-1}
+                  ref={(el) => { itemRefs.current[i] = el; }}
+                  data-testid={`atlas-more-item-${t.key}`}
+                  className="loom-atlas-tabmenu-item"
+                  onClick={() => setOpen(false)}>
+                  {chip(t)}
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {children}
     </div>
   );

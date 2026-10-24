@@ -40,6 +40,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { nodeTabKeys, openNodeTab } from "./helpers/nodeTabs";
 import type { Locator } from "@playwright/test";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
@@ -245,6 +246,13 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
 
       // ── 1. THE TAB SET, in order, with the declared labels. ──
       await expect(tabRow(page)).toBeVisible();
+      // Read off the ROW, which is the whole set HERE and only here: Overview is the one tab with no
+      // KPI strip (card 7874e8c2), so at this width nothing folds into a More menu (card d4350286).
+      // Pinned explicitly rather than assumed — otherwise the day Overview grows a strip this
+      // becomes a partial check that still reads like a complete one.
+      await expect(page.getByTestId("atlas-node-tabs-more"),
+        "the Overview tab's row overflowed, so the row alone is no longer the declared tab set")
+        .toHaveCount(0);
       const rendered = await tabRow(page).locator('[role="tab"]').evaluateAll((els) =>
         els.map((el) => ({
           key: (el.getAttribute("data-testid") ?? "").replace(/^atlas-tab-/, ""),
@@ -273,7 +281,10 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
 
       // ── 3. EVERY TAB IS A REAL ADDRESS. ──
       for (const t of rows) {
-        await tabLink(page, t.key).click();
+        // Through whichever half of the row holds it: landing on a strip-carrying tab collapses the
+        // row (card d4350286), so the tabs after the first few live in the More menu by the time the
+        // loop reaches them. Every one of the ten is still exercised — that is this section's claim.
+        await openNodeTab(page, t.key);
         // The click navigated to exactly the address the declaration names — query included, since a
         // home tab's `?tab=` IS its address.
         await expect(page, `clicking the ${t.key} tab did not land on ${t.to}`)
@@ -318,26 +329,63 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       await expect(page.getByTestId("atlas-project-name")).toHaveText(project.name);
       await expect(tabRow(page)).toBeVisible();
 
-      // Every tab's box is inside the viewport — the discriminating form. A bare `toBeVisible()` is
-      // satisfied by an element that is laid out and unhidden but sitting past the right edge, which is
-      // exactly the state this asserts against.
-      for (const t of rows) {
-        const box = await tabLink(page, t.key).boundingBox();
-        expect(box, `the ${t.key} tab is not laid out at 420px`).not.toBeNull();
-        expect(box!.x, `the ${t.key} tab starts off the left of a 420px viewport`).toBeGreaterThanOrEqual(0);
+      // Since card d4350286 the tail of the set lives in a More menu at this width rather than on a
+      // second and third wrapped line. "Every tab is laid out inside the viewport" is therefore no
+      // longer the whole measurement — a folded tab has no box at all — but the CLAIM is unchanged
+      // and is checked in three parts, none of them weaker than the single loop they replace:
+      //   (a) nothing the row shows runs off either edge,
+      //   (b) row + menu together are still the whole declared set, so nothing is simply lost,
+      //   (c) the menu, where the tail now is, is itself inside the viewport, item boxes included.
+      // ⛔ Do NOT shrink this back to "the tabs that happen to be in the row fit" — that passes on a
+      // row which silently dropped half its tabs, which is the defect this leg exists to catch.
+      const rowKeys = await tabRow(page).locator('[role="tab"]').evaluateAll((els) =>
+        els.map((el) => (el.getAttribute("data-testid") ?? "").replace(/^atlas-tab-/, "")));
+      for (const key of rowKeys) {
+        const box = await tabLink(page, key).boundingBox();
+        expect(box, `the ${key} tab is not laid out at 420px`).not.toBeNull();
+        expect(box!.x, `the ${key} tab starts off the left of a 420px viewport`).toBeGreaterThanOrEqual(0);
         expect(box!.x + box!.width,
-          `the ${t.key} tab runs past the right edge of a 420px viewport (x=${Math.round(box!.x)},`
+          `the ${key} tab runs past the right edge of a 420px viewport (x=${Math.round(box!.x)},`
           + ` w=${Math.round(box!.width)}) — the tab row is clipping its tail`).toBeLessThanOrEqual(420);
       }
-      // EXERCISED, not merely measured: the LAST tab — the one a clipped row loses first — really
-      // navigates from this width.
+      // (b) Nothing is lost: the two halves together are exactly the ten declared tabs.
+      expect((await nodeTabKeys(page)).sort(), "a declared tab is in neither the row nor the menu")
+        .toEqual(rows.map((t) => t.key).sort());
+
+      // (c) The menu panel and every item in it sit inside the viewport — the same discriminating
+      // form as (a), applied to where the tail actually went. A menu hanging off the right edge at
+      // phone width is the original defect in a new costume.
+      await page.getByTestId("atlas-node-tabs-more").click();
+      const menu = page.getByTestId("atlas-node-tabs-menu");
+      await expect(menu).toBeVisible();
+      const menuBoxes = await menu.evaluate((el) => {
+        const own = el.getBoundingClientRect();
+        return {
+          panel: { l: own.left, r: own.right },
+          items: [...el.querySelectorAll('[role="menuitem"]')].map((it) => {
+            const r = it.getBoundingClientRect();
+            return { key: (it.getAttribute("data-testid") ?? "").replace(/^atlas-more-item-/, ""), l: r.left, r: r.right };
+          }),
+        };
+      });
+      expect(menuBoxes.items.length, "the More menu is empty at 420px").toBeGreaterThan(0);
+      for (const b of [{ key: "the menu panel", ...menuBoxes.panel }, ...menuBoxes.items]) {
+        expect(b.l, `${b.key} starts off the left of a 420px viewport`).toBeGreaterThanOrEqual(0);
+        expect(b.r, `${b.key} runs past the right edge of a 420px viewport`).toBeLessThanOrEqual(420);
+      }
+      await page.keyboard.press("Escape");
+
+      // EXERCISED, not merely measured: the LAST tab — the one a clipped row loses first, and the
+      // one that is now folded away — really navigates from this width.
       const last = rows[rows.length - 1]!;
-      await tabLink(page, last.key).click();
+      await openNodeTab(page, last.key);
       await expect(page, `the last tab did not navigate at 420px`).toHaveURL(loomDaemon.baseURL + last.to);
       await expect(tabLink(page, last.key)).toHaveAttribute("aria-selected", "true");
 
-      // CONTRAST CASE: the same ten tabs at 1440 sit on ONE line, so the wrap above is the narrow
-      // viewport's answer and not a layout this card imposed on every width.
+      // CONTRAST CASE: the same ten tabs at 1440 sit on ONE line with NO menu at all, so the fold
+      // above is the narrow viewport's answer and not a layout imposed on every width. (This is the
+      // Overview tab, the one tab with no KPI strip — a strip-carrying tab folds at 1440 too, by
+      // design, and card d4350286's own spec is where that is measured.)
       await page.setViewportSize(VIEWPORT);
       await page.goto(loomDaemon.baseURL + "/project");
       await expect(tabRow(page)).toBeVisible();

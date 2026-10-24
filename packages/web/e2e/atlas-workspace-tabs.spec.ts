@@ -32,6 +32,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PAGE_SUB_TAB, expect, test, type Page } from "./fixtures/daemon";
+import { openNodeTab } from "./helpers/nodeTabs";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
@@ -274,7 +275,7 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
 
       // A real draft, in a real field: the companion name input is unsaved user input, and a tab click
       // is not consent to discard it (the owner's standing rule).
-      await page.getByTestId("atlas-tab-companion").click();
+      await openNodeTab(page, "companion");
       await expect(page.getByTestId("atlas-tabpanel-companion")).toBeVisible();
       const draft = `half-typed-${Date.now()}`;
       const nameField = page.getByTestId("atlas-tabpanel-companion").locator("input").first();
@@ -282,9 +283,10 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
       await nameField.fill(draft);
       await expect(nameField).toHaveValue(draft);
 
-      // Away to a sibling tab, and back.
-      await page.getByTestId("atlas-tab-usage").click();
-      await expect(page.getByTestId("atlas-tab-usage")).toHaveAttribute("aria-selected", "true");
+      // Away to a sibling tab, and back. Through `openNodeTab` because the Companion tab carries a
+      // KPI strip, which collapses the row behind it (card d4350286) — Usage is in the More menu by
+      // the time we get here, and it asserts the tab reads selected afterwards either way.
+      await openNodeTab(page, "usage");
       // STILL MOUNTED, and hidden rather than destroyed — asserted both ways, because "not visible" is
       // equally true of a panel that was unmounted outright.
       await expect(page.getByTestId("atlas-tabpanel-companion"),
@@ -297,7 +299,9 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
       expect(await page.getByTestId("atlas-tabpanel-companion").evaluate((el) =>
         (el as HTMLElement).style.display), "a panel wrapper carries an inline display").toBe("");
 
-      await page.getByTestId("atlas-tab-companion").click();
+      // Back again, likewise through whichever half now holds it: landing on Usage collapsed the row
+      // around ITS own strip, so Companion has in turn moved into the menu.
+      await openNodeTab(page, "companion");
       await expect(nameField, "the draft typed into the Companion tab did not survive a tab round trip")
         .toHaveValue(draft);
 

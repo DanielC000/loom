@@ -22,6 +22,7 @@
 // ⛔ NOTHING HERE EVER CLICKS A SPAWN CONTROL. The fixture's no-spawn guard forbids it, and the
 // dialog's rows are read, never pressed.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { nodeTabKeys, openNodeTab } from "./helpers/nodeTabs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -110,11 +111,15 @@ async function seedFleet(loomDaemon: LoomDaemon, project: { id: string; name: st
   return { working: 2, live: 3, fleetTile: "1/2", managerSessionId: mgr.sessionId };
 }
 
-/** Every tab key the node actually rendered, in row order, read off the live tab row. */
+/**
+ * Every tab key the node actually offers, read off the live node — the row's, plus the ones folded
+ * into its More menu since card d4350286. It used to read the row alone, which stopped being the
+ * whole set the moment a tab's row could overflow: the keys here are collected on Overview (no KPI
+ * strip, so nothing folds there) and then walked, and the row collapses under the loop as soon as a
+ * strip-carrying tab is selected. "On EVERY tab" means every DECLARED tab, so both halves count.
+ */
 async function renderedTabKeys(page: Page): Promise<string[]> {
-  await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
-  return page.locator('[data-testid="atlas-node-tabs"] [role="tab"]').evaluateAll((els) =>
-    els.map((el) => (el.getAttribute("data-testid") ?? "").replace(/^atlas-tab-/, "")).filter(Boolean));
+  return nodeTabKeys(page);
 }
 
 /** The node head's pills, keyed by their own `key`. `textContent`, not `innerText`: nothing here is
@@ -168,8 +173,9 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     // expect aborts at the first offender and hides every one after it (card a7f23a2f's lesson).
     const offenders: string[] = [];
     for (const key of keys) {
-      await page.getByTestId(`atlas-tab-${key}`).click();
-      await expect(page.getByTestId(`atlas-tab-${key}`)).toHaveAttribute("aria-selected", "true");
+      // Through whichever half holds it — a folded tab has no `atlas-tab-` element until selected.
+      // `openNodeTab` asserts it reads selected afterwards, so the claim below is unchanged.
+      await openNodeTab(page, key);
       await expect(page.getByTestId("atlas-nodehead-pills")).toBeVisible();
       const pills = await headPills(page);
       // The pill SET is exactly the two this node declares — a head that picked up a seventh KPI

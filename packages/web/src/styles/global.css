@@ -1741,6 +1741,94 @@ button.loom-atlas-node.is-branch.is-open {
   font-variant-numeric: tabular-nums;
 }
 
+/* The overflow trigger and its menu (card d4350286). The tabs that do not fit BESIDE whatever else
+   is on the row's line — on the two home nodes, the KPI strip card 7874e8c2 put on every tab — fold
+   into this one chip, which is what returns the whole block to a single line at 1440 and recovers
+   the 39px the strip's own wrapped line costs there. The row's `flex-wrap` above stays as a safety
+   net under a sub-pixel mis-measure, not as the primary behaviour it was for cards 25c08fba/41eab0eb.
+   Everything here is a token the app already reads: the chip is `.loom-navtab` with a button's
+   defaults stripped, and the panel is the same chrome vocabulary as `.loom-kpi-pop`. */
+.loom-atlas-tabmore-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.loom-atlas-tabmore {
+  background: none;
+  /* `.loom-navtab`'s own `border-bottom` is the underline channel every tab reserves; a blanket
+     `border: none` would collapse it and leave this chip 2px shorter than its neighbours. */
+  border: 0;
+  border-bottom: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+/* Deliberately NOT the phosphor underline: on this row phosphor means "the tab you are on", and the
+   active tab is never in this menu (components/atlasHome.tsx › NodeTabs). Open is a neutral state. */
+.loom-atlas-tabmore[aria-expanded="true"] {
+  color: var(--loom-text);
+  border-bottom-color: var(--loom-border-strong);
+}
+.loom-atlas-tabmore-dots {
+  color: var(--loom-text-muted);
+  letter-spacing: 0;
+}
+.loom-atlas-tabmenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  /* Right-anchored to the trigger: the trigger sits mid-row with the strip to its right, so a
+     left-anchored panel would run off the content column at the widths where it collapses most. */
+  right: 0;
+  z-index: 60;
+  min-width: 184px;
+  max-width: min(280px, 86vw);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--loom-panel);
+  border: 1px solid var(--loom-border-strong);
+  border-top: 2px solid var(--loom-phosphor);
+  border-radius: var(--loom-radius);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
+}
+.loom-atlas-tabmenu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 40px;
+  padding: 9px 11px;
+  font-family: var(--loom-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--loom-text-dim);
+  border-radius: var(--loom-radius-sm);
+  transition:
+    background 80ms linear,
+    color 80ms linear;
+}
+.loom-atlas-tabmenu-item:hover {
+  background: var(--loom-panel-2);
+  color: var(--loom-text);
+}
+/* Inset, unlike the row's own 3px offset ring: the panel's 4px padding is all the room there is, so
+   an outset ring would be clipped by the panel's border and read as a broken focus state. */
+.loom-atlas-tabmenu-item:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
+  color: var(--loom-text);
+}
+/* The count keeps the row's muted treatment but loses its left margin — in the menu it is pushed to
+   the far edge by `justify-content`, not trailing the label. */
+.loom-atlas-tabmenu-item .loom-atlas-tabcount {
+  margin-left: 0;
+}
+
 /* ── Atlas session node (card 525c8ad9 — P2-7, owner decision "B · Inline") ───────────
    One flowing column: the real pane tabs, the active pane, then the inline strips the owner chose to
    keep adjacent to the terminal rather than promote to tabs — bound task, wakes, the queue ledger and
@@ -2791,7 +2879,10 @@ details[open] > .loom-atlas-unhomed-summary .loom-atlas-unhomed-caret {
   .loom-kpi,
   .loom-projcard,
   /* The Atlas tree's quick-spawn `＋` (card c6160c7d). */
-  .loom-atlas-plus {
+  .loom-atlas-plus,
+  /* The overflow menu's rows (card d4350286). The trigger itself needs no entry — it wears
+     `.loom-navtab`, which is already the second selector in this list. */
+  .loom-atlas-tabmenu-item {
     transition: none;
   }
   .loom-mic-pulse {

@@ -19,6 +19,7 @@
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { nodeTabKeys, openNodeTab } from "./helpers/nodeTabs";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
 // one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
@@ -60,11 +61,14 @@ async function seedProjectWithBoard(loomDaemon: LoomDaemon) {
   return { project, open: 3, inReview: 1 };
 }
 
-/** Every tab key the node actually rendered, in row order, read off the live tab row. */
+/**
+ * Every tab key the node actually offers, read off the live node — the row's, plus the ones folded
+ * into its More menu since card d4350286. ⛔ Reading the ROW alone would quietly shrink this spec's
+ * population to whatever currently fits, which is the same defect in a new costume as the hardcoded
+ * list the header above refuses: the node whose nineteen tabs needed a readout still has nineteen.
+ */
 async function renderedTabKeys(page: Page): Promise<string[]> {
-  await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
-  return page.locator('[data-testid="atlas-node-tabs"] [role="tab"]').evaluateAll((els) =>
-    els.map((el) => (el.getAttribute("data-testid") ?? "").replace(/^atlas-tab-/, "")).filter(Boolean));
+  return nodeTabKeys(page);
 }
 
 /** Every destination the rendered tree links to, as a pathname — the second, independent collection. */
@@ -118,8 +122,8 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     // expect aborts at the first offender and hides every one after it (card a7f23a2f's own lesson).
     const offenders: string[] = [];
     for (const key of keys) {
-      await page.getByTestId(`atlas-tab-${key}`).click();
-      await expect(page.getByTestId(`atlas-tab-${key}`)).toHaveAttribute("aria-selected", "true");
+      // Through whichever half holds it (card d4350286); it asserts the tab reads selected after.
+      await openNodeTab(page, key);
 
       if (key === "overview") {
         // Overview's readout is the DECK, not the strip — asserted, not excused. `toHaveText`
@@ -169,8 +173,7 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
 
     const offenders: string[] = [];
     for (const key of keys) {
-      await page.getByTestId(`atlas-tab-${key}`).click();
-      await expect(page.getByTestId(`atlas-tab-${key}`)).toHaveAttribute("aria-selected", "true");
+      await openNodeTab(page, key);
       if (key === "overview") {
         if (await page.getByTestId("atlas-kpi-strip").count() !== 0) offenders.push(`${key}: strip present`);
         continue;

@@ -20,7 +20,7 @@
 //      against a compromised boot.
 //   5. Teardown via `POST /internal/shutdown` (the same loopback-only hook `loom stop` uses), then a
 //      hard-kill backstop, then remove the scratch dirs.
-import { test as base, type Page } from "@playwright/test";
+import { test as base, type Locator, type Page } from "@playwright/test";
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -30,7 +30,9 @@ import { fileURLToPath } from "node:url";
 
 // Re-exported so a spec can `import { type Page } from "./fixtures/daemon"` without a second import
 // from "@playwright/test" — several specs already did this even though it was never actually exported.
-export type { Page };
+// `Locator` joins it for the same reason (a helper that takes a scope locator needs it, card d4350286);
+// both are type-only, so this adds nothing to what the fixture actually runs.
+export type { Locator, Page };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // packages/web/e2e/fixtures -> repo root is 4 levels up.
