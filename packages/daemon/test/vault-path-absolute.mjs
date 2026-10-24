@@ -13,7 +13,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves the DoD:
 //   PART A — human REST create (POST /api/projects) + update (PATCH /api/projects/:id): a relative
 //            vaultPath is REJECTED (400, named error) on BOTH the code-project and vault-only branches;
-//            an absolute one still works; an explicit "" (unbind) is UNAFFECTED by the new guard.
+//            an absolute one still works; an explicit "" (unbind) is UNAFFECTED by the new guard. (A8,
+//            card b709113e, win32 only): a win32 drive-less rooted vaultPath (e.g. "/tmp" — absolute per
+//            Node's path.isAbsolute, but no drive letter/UNC root) is ALSO rejected at create time.
 //   PART B — loom-setup's project_create (both branches) + project_update reject a relative vaultPath;
 //            "" still no-ops/unbinds.
 //   PART C — the elevated loom-platform's project_create + project_update reject a relative vaultPath.
@@ -134,6 +136,26 @@ try {
       const patchUnbind = await app.inject({ method: "PATCH", url: `/api/projects/${target.id}`, payload: { vaultPath: "" } });
       check("(A7) PATCH vaultPath:\"\" (unbind) still → 200 (unregressed)", patchUnbind.statusCode === 200);
       check("(A7) vaultPath actually cleared", db.getProject(target.id)?.vaultPath === "");
+
+      // (A8) card b709113e, win32 ONLY: a POSIX-root-style vaultPath (e.g. "/tmp") passes Node's
+      // path.isAbsolute on win32 with no drive letter/UNC root, resolving unpredictably (to whatever
+      // drive the process happens to be on) instead of a real directory the caller meant — exactly the
+      // shape that let a real incident row land a git commit into an unintended drive-root folder. Must
+      // be REJECTED at create time, same as a relative vaultPath. Non-win32 hosts skip: there, a bare
+      // POSIX-root path is a perfectly legitimate absolute path with no such ambiguity.
+      if (process.platform === "win32") {
+        const beforeCountDriveless = db.listAllProjects().length;
+        const drivelessVaultPath = "/b709113e-driveless-root-marker";
+        const drivelessCode = await app.inject({
+          method: "POST", url: "/api/projects",
+          payload: { name: "DrivelessCode", repoPath: primary, vaultPath: drivelessVaultPath },
+        });
+        check("(A8) POST with a win32 drive-less rooted vaultPath → 400", drivelessCode.statusCode === 400);
+        check("(A8) error names the drive-less-rooted hazard", /drive-less rooted path on Windows/.test(drivelessCode.json().error ?? ""));
+        check("(A8) no project row was created on rejection", db.listAllProjects().length === beforeCountDriveless);
+      } else {
+        console.log("SKIP  (A8) win32 drive-less rooted vaultPath check (this hazard is win32-specific; not applicable on this platform)");
+      }
     } finally {
       db.close();
     }

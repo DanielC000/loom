@@ -137,6 +137,14 @@ db.insertProject({ id: "pGood", name: "ZZgood", repoPath: vaultD, vaultPath: vau
 const pRel = path.join(root, "ZZrel"); // a real, distinct project so a caught bug can't hide as "no watcher anyway"
 fs.mkdirSync(pRel, { recursive: true });
 db.insertProject({ id: "pRel", name: "ZZrel", repoPath: pRel, vaultPath: "relative/not-a-real-path", config: {}, archivedAt: null, createdAt: now });
+// card b709113e: a win32 DRIVE-LESS ROOTED vaultPath (a bare POSIX-root-style path, e.g. "/tmp") passes
+// Node's path.isAbsolute on win32 with no drive letter/UNC root, so it must ALSO be diagnosed loudly and
+// SKIPPED, never handed to resolveVaultRepoContext/git init, where it would resolve against whatever
+// drive the daemon process happens to be on and could land a real git commit in an unintended directory.
+// A deliberately synthetic path (never the literal "/tmp") — validateVaultPath refuses it before any
+// filesystem access, so no real directory is ever touched regardless of platform.
+const drivelessVaultPath = "/b709113e-driveless-root-marker";
+db.insertProject({ id: "pDriveless", name: "ZZdriveless", repoPath: root, vaultPath: drivelessVaultPath, config: {}, archivedAt: null, createdAt: now });
 
 const versioners = [];
 try {
@@ -153,13 +161,24 @@ try {
   versioners.push(...booted);
   check(
     "a relative vaultPath is named loudly and specifically (not left to an opaque downstream throw)",
-    warningsBoot.some((w) => w.includes("[vault-versioner]") && w.includes("pRel") && w.includes("vaultPath is not absolute") && w.includes("relative/not-a-real-path")),
+    warningsBoot.some((w) => w.includes("[vault-versioner]") && w.includes("pRel") && w.includes("vaultPath must be an absolute path") && w.includes("relative/not-a-real-path")),
   );
+  if (process.platform === "win32") {
+    check(
+      "a win32 drive-less rooted vaultPath (POSIX-root-style, e.g. a bare \"/…\") is named loudly and specifically, never handed to git init (card b709113e)",
+      warningsBoot.some((w) => w.includes("[vault-versioner]") && w.includes("pDriveless") && w.includes("drive-less rooted path on Windows") && w.includes(drivelessVaultPath)),
+    );
+  } else {
+    console.log("SKIP  win32 drive-less rooted vaultPath check (this hazard is win32-specific; not applicable on this platform)");
+  }
 
   // (a)+(c)+(e): exactly 4 watchers — vaultA (deduped p1+p2) + vaultB + plainRepo ROOT (deduped p6+p7
   // subfolders) + vaultD (pGood, started DESPITE the earlier-iterating pBad throwing). Empty (p4),
   // archived (p5), Obsidian-Git-managed (p8), the operational/daemon-home vaults (op1 loom.db / op2
-  // worktrees/ / op3 == LOOM_HOME), the throwing pBad, and the relative-vaultPath pRel are all skipped.
+  // worktrees/ / op3 == LOOM_HOME), the throwing pBad, the relative-vaultPath pRel, and the win32
+  // drive-less-rooted pDriveless (refused by validateVaultPath on win32; on a non-win32 host it instead
+  // throws inside resolveVaultRepoContext against its non-existent path, caught the same way pBad is —
+  // either way it never becomes a watcher) are all skipped.
   check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git/operational)", versioners.length === 4);
   check("each started handle is a VaultVersioner", versioners.every((v) => v instanceof VaultVersioner));
 

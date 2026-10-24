@@ -11,6 +11,19 @@ export type VaultPathCheck =
   | { ok: false; error: string };
 
 /**
+ * @decision b709113e — never drop this win32 check: a POSIX-root path (e.g. "/tmp") passes
+ * `path.isAbsolute` on win32 with no drive letter/UNC root, so it silently resolves against whichever
+ * drive the process happens to be on instead of the directory the caller meant.
+ */
+function isWin32DriveLessRootedPath(p: string): boolean {
+  if (process.platform !== "win32") return false;
+  if (!path.isAbsolute(p)) return false;
+  if (/^[A-Za-z]:[\\/]/.test(p)) return false; // drive-qualified, e.g. "C:\..." / "C:/..."
+  if (p.startsWith("\\\\") || p.startsWith("//")) return false; // UNC, e.g. "\\server\share\..."
+  return true;
+}
+
+/**
  * The SHARED absolute-path guard for a project's `vaultPath` — mirrors `validateReferenceRepos`
  * (reference-repos.ts), which already enforces this for the structurally identical `referenceRepos`
  * field.
@@ -26,11 +39,18 @@ export type VaultPathCheck =
  *
  * @decision 96c4b245 — reject a non-absolute vaultPath here; there's no recoverable base to resolve it against, so never guess one at render/boot time instead.
  * @decision d867e478 — "" is the legitimate no-vault/unbind case, not a validation failure; every call site must guard it, never route it through this check.
+ * @decision b709113e — also reject a win32 drive-less rooted path (e.g. "/tmp") here, never just a plain non-absolute check; it passes `path.isAbsolute` yet is unsafe.
  */
 export function validateVaultPath(raw: string): VaultPathCheck {
   const expanded = expandTilde(raw);
   if (!path.isAbsolute(expanded)) {
     return { ok: false, error: `vaultPath must be an absolute path: ${expanded}` };
+  }
+  if (isWin32DriveLessRootedPath(expanded)) {
+    return {
+      ok: false,
+      error: `vaultPath is a drive-less rooted path on Windows (no drive letter or UNC prefix) and would resolve unpredictably against whatever drive this process happens to be on: ${expanded}`,
+    };
   }
   return { ok: true, value: expanded };
 }

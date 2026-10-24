@@ -2235,17 +2235,17 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
     if (project.archivedAt) continue;
     const vaultPath = project.vaultPath?.trim();
     if (!vaultPath) continue;
-    // A non-absolute vaultPath (card 78dc99e3) can only be a LEGACY row that predates the write-time
-    // guard (`validateVaultPath`, card 96c4b245 — every create/rebind path has rejected a relative value
-    // since 2026-07-22). It resolves against whatever the daemon PROCESS's cwd happens to be — unstable
-    // across restart mechanisms (tsx watch vs. the supervisor vs. the packaged CLI) — so letting it fall
-    // through to `resolveVaultRepoContext`/`git init` produces an opaque, cwd-dependent failure (or worse,
-    // a silent write into the wrong place via `resolveInVault`'s `path.resolve`, which happily treats a
-    // missing root as "not yet scaffolded" rather than "misconfigured"). Name the real cause loudly here,
-    // once, instead of leaving it to surface as an unexplained "failed to start" below.
+    // A vaultPath that fails `validateVaultPath` (card 78dc99e3: a non-absolute LEGACY row that predates
+    // the write-time guard, card 96c4b245; or card b709113e: a win32 drive-less rooted path like "/tmp",
+    // which a pre-existing row can carry regardless of what create/rebind rejects today) resolves
+    // unpredictably — against whatever the daemon PROCESS's cwd/drive happens to be, unstable across
+    // restart mechanisms (tsx watch vs. the supervisor vs. the packaged CLI) — so letting it fall through
+    // to `resolveVaultRepoContext`/`git init` produces an opaque, cwd-dependent failure (or worse, a real
+    // git-init+commit into an unintended directory). Name the real cause loudly here, once, instead of
+    // leaving it to surface as an unexplained "failed to start" below.
     const check = validateVaultPath(vaultPath);
     if (!check.ok) {
-      console.warn(`[vault-versioner] project ${project.id} (${project.name}) vaultPath is not absolute: "${vaultPath}" — it will never reliably resolve (depends on the daemon process's own cwd) and is skipped here; rebind it via PATCH /api/projects/:id or the web UI.`);
+      console.warn(`[vault-versioner] project ${project.id} (${project.name}) has an invalid vaultPath ("${vaultPath}"): ${check.error} — skipped here; rebind it via PATCH /api/projects/:id or the web UI.`);
       continue;
     }
     // Per-project isolation: resolve+construct+start() can THROW on a bad/inaccessible vaultPath
