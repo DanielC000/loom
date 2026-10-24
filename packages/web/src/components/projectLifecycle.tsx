@@ -64,7 +64,10 @@ export function useProjectLifecycleWrites(
 }
 
 // The strong-confirm body for a PERMANENT project delete — names the irreversible cascade and asks the
-// human to type the project name back. Shared by the manage panel + the archived-projects list.
+// human to type the project name back. The copy for `ArchivedProjects`' native prompt, in both of its
+// frames. (`ProjectManage` below states the same cascade in its own INLINE reveal instead, because it
+// has a panel to render one in; an archived row does not.) Exported so a spec can assert the copy
+// rather than re-typing it.
 export function deletePrompt(name: string): string {
   return `PERMANENTLY delete "${name}" and ALL of it — its agents, sessions, tasks, schedules, API keys, runs and saved transcripts. This CANNOT be undone.\n\nType the project name (${name}) to confirm:`;
 }
@@ -153,6 +156,67 @@ export function ProjectManage(
           background: "transparent", border: "none", padding: "2px 0",
           fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
         <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>Manage project
+      </button>
+      {body}
+    </div>
+  );
+}
+
+// Soft-archived projects — restore one back into the live project list, or destroy it permanently.
+// The archived LIST is the host's read (both hosts already poll `["archivedProjects"]`); the two writes
+// are the host's too, so the invalidations stay in `useProjectLifecycleWrites` above and this component
+// owns neither.
+//
+// Moved here from pages/Projects.tsx by card baca1835, for the reason ProjectManage moved on c9b78d80:
+// the Atlas design retires /projects (card 5afd71bd), and this tier was the LAST thing living only
+// there — without a second home, a soft-archived project under Atlas would be invisible AND
+// unrestorable, which turns a reversible archive into an effective delete.
+//
+// `collapsible` is the FRAME, exactly as it is for ProjectManage above, and defaults to the classic
+// Projects rail's shape — a "▸ Archived · N" disclosure, closed on mount — so that call site renders as
+// it always did. The Workspace Settings section passes `false`: that section already carries its own
+// heading inside a Panel, so a disclosure there would be a header under a header.
+//
+// @decision baca1835 — the type-the-name confirm lives HERE, never in a host. Two hosts asking their
+// own confirm over the same irreversible cascade is exactly the second permanent-delete site c9b78d80
+// forbids, and the one that drifts is the one nobody is looking at.
+export function ArchivedProjects(
+  { projects, onRestore, onDelete, collapsible = true }:
+  { projects: Project[]; onRestore: (id: string) => void; onDelete: (id: string) => void; collapsible?: boolean },
+) {
+  const [open, setOpen] = useState(!collapsible);
+  // The gate: type the project's name back, exactly. A MISMATCH is told so, because silently doing
+  // nothing is indistinguishable from a delete that failed; a dismissed prompt (null) is a cancel and
+  // deserves no message at all.
+  const confirmDelete = (p: Project) => {
+    const typed = window.prompt(deletePrompt(p.name));
+    if (typed === p.name) onDelete(p.id);
+    else if (typed !== null) window.alert("name did not match — not deleted");
+  };
+  // The empty line is only reachable in the un-collapsed frame: the classic rail mounts this component
+  // at all only while the archived list is non-empty, whereas a Settings section is a fixed address and
+  // has to say that nothing is there.
+  const body = open && (
+    <div data-testid="archived-projects-list" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+      {projects.length === 0 ? (
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>No archived projects.</span>
+      ) : projects.map((p) => (
+        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 12, color: color.textDim }}>{p.name}</span>
+          <Button onClick={() => onRestore(p.id)} aria-label={`Restore ${p.name}`}>Restore</Button>
+          <Button variant="danger" onClick={() => confirmDelete(p)} aria-label={`Delete ${p.name} permanently`}>Delete</Button>
+        </div>
+      ))}
+    </div>
+  );
+  if (!collapsible) return <>{body}</>;
+  return (
+    <div style={{ marginTop: 2, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
+          background: "transparent", border: "none", padding: "2px 0",
+          fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
+        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>Archived · {projects.length}
       </button>
       {body}
     </div>

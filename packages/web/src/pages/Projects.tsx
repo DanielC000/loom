@@ -11,8 +11,9 @@ import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots
 import { AgentEditor, AgentForm, PLAIN_BIND_GROUP_LABEL, useAgentWrites } from "../components/agentEditor";
 // The project lifecycle panel, the two repo-list editors and the four project writes left for
 // components/projectLifecycle.tsx on card c9b78d80, for the same reason — the Atlas project node's
-// Settings tab mounts the SAME ones. This page keeps its rail/column frame and the archived footer.
-import { ProjectManage, deletePrompt, useProjectLifecycleWrites } from "../components/projectLifecycle";
+// Settings tab mounts the SAME ones. The archived-projects footer followed on card baca1835, which gave
+// it a Workspace Settings home. This page keeps its rail/column frame and supplies the callbacks.
+import { ArchivedProjects, ProjectManage, useProjectLifecycleWrites } from "../components/projectLifecycle";
 import { color, font, radius } from "../theme";
 import { roleDisplay, roleColor } from "../lib/roleDisplay";
 import type { SessionRole } from "@loom/shared";
@@ -194,7 +195,7 @@ export default function Projects() {
           {(archivedProjects.data?.length ?? 0) > 0 && (
             <ArchivedProjects projects={archivedProjects.data!}
               onRestore={(id) => restoreProject.mutate(id)}
-              onDelete={(p) => { const t = window.prompt(deletePrompt(p.name)); if (t === p.name) deleteProject.mutate(p.id); else if (t !== null) window.alert("name did not match — not deleted"); }} />
+              onDelete={(id) => deleteProject.mutate(id)} />
           )}
         </Panel>
 
@@ -384,35 +385,6 @@ function EmptyPane({ project }: { project: boolean }) {
           ? "Select an agent to view and edit its startup prompt, or ＋ New agent to define one."
           : "Select a project on the left to manage its agents, or ＋ New project to create one."}
       </div>
-    </div>
-  );
-}
-
-// Soft-archived projects — restore back to the picker, or permanently delete (strong type-the-name
-// confirm via deletePrompt). Collapsed by default so it never crowds the live project list.
-function ArchivedProjects(
-  { projects, onRestore, onDelete }: { projects: Project[]; onRestore: (id: string) => void; onDelete: (p: Project) => void },
-) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div style={{ marginTop: 2, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
-      <button onClick={() => setOpen((o) => !o)}
-        style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
-          background: "transparent", border: "none", padding: "2px 0",
-          fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
-        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>Archived · {projects.length}
-      </button>
-      {open && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
-          {projects.map((p) => (
-            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 12, color: color.textDim }}>{p.name}</span>
-              <Button onClick={() => onRestore(p.id)}>Restore</Button>
-              <Button variant="danger" onClick={() => onDelete(p)}>Delete</Button>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

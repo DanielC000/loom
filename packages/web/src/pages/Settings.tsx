@@ -51,8 +51,9 @@ import {
 } from "../lib/msUnits";
 import { MergeGateCadencePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
 // The project lifecycle controls (rename / vaultPath / reference repos / registered repos / archive /
-// permanent delete) and their four writes — ONE implementation, shared with the classic Projects page.
-import { ProjectManage, useProjectLifecycleWrites } from "../components/projectLifecycle";
+// permanent delete), the archived-projects tier (restore / permanent delete) and their four writes —
+// ONE implementation, shared with the classic Projects page.
+import { ArchivedProjects, ProjectManage, useProjectLifecycleWrites } from "../components/projectLifecycle";
 import { cadenceConfigWrite, intervalError } from "../lib/mergeGate";
 import { type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
@@ -161,6 +162,20 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   // peer_message cross-project channel. Daemon-global, cross-project (not scoped to the active
   // project above), HUMAN-only — like Connections/Capabilities, there is no agent MCP path.
   { key: "project-links", label: "Project Links", scope: "workspace", render: () => <ProjectLinksPanel /> },
+
+  // The soft-archive tier — every archived project on this daemon, with Restore back into the tree and
+  // the same permanent delete. WORKSPACE by row 2's rule and not a judgement call: the list is
+  // `GET /api/projects/archived`, a daemon-global read taking no project id, and both writes name a row
+  // OF that list, never the active project. ATLAS-ONLY, the second row ever to be — the classic shell
+  // reaches these same controls from the `/projects` rail's own "Archived · N" footer.
+  //
+  // @decision baca1835 — never put this section on the classic Settings page, and never give the
+  // archived list its own confirm: both would stand up a second permanent-delete site in front of a
+  // reader who already has one.
+  {
+    key: "archived-projects", label: "Archived projects", scope: "workspace", atlasOnly: true,
+    render: () => <ArchivedProjectsPanel />,
+  },
 
   // node_modules reclaim (card 08ac5925) — daemon-global disk housekeeping over card 1008e305's two
   // human-only loopback routes. Deliberately LAST: it is the only panel on this page whose primary
@@ -396,6 +411,35 @@ function ProjectLifecyclePanel({ project }: { project: Project | null }) {
         // check a warning from saving project A would keep rendering under project B (the same trap the
         // classic Projects page documents at its own call site).
         staleStartupPrompts={update.isSuccess && update.data?.id === project.id ? update.data.staleStartupPrompts : undefined} />
+    </Panel>
+  );
+}
+
+// The Workspace tier's archived-projects section (card baca1835) — the last surface that lived ONLY on
+// the classic Projects page, and the one whose loss would have been worst: under Atlas a soft-archived
+// project would be invisible AND unrestorable, which silently turns a reversible archive into a delete.
+//
+// The CONTROLS are `ArchivedProjects`, mounted un-collapsed (the section already has its own heading
+// inside this Panel). This component is the frame: the archived-list read, and the two writes off the
+// shared hook. No `onArchived`/`onDeleted` hook is passed, unlike the project-lifecycle section above —
+// nothing here can act on the ACTIVE project, because an archived project is by construction not it,
+// and `ActiveProjectProvider` has already resolved elsewhere by the time a row reaches this list.
+//
+// ⛔ No inner `SectionLabel`: `SettingsColumn` already draws this section's heading, and a second copy
+// of that text would be a header under a header — and would break `atlas-settings-scope.spec.ts`, which
+// asserts a section's own label appears exactly ONCE inside its wrapper.
+function ArchivedProjectsPanel() {
+  const archived = useQuery({ queryKey: ["archivedProjects"], queryFn: api.archivedProjects });
+  const { restore, remove } = useProjectLifecycleWrites();
+  return (
+    <Panel>
+      <p style={{ color: color.textMuted, fontSize: 12, margin: "0 0 2px", fontFamily: font.mono, lineHeight: 1.5 }}>
+        An archived project has only left the tree — its agents, sessions, board and runs are all still
+        there. Restore puts it back. Delete destroys all of it, permanently.
+      </p>
+      <ArchivedProjects collapsible={false} projects={archived.data ?? []}
+        onRestore={(id) => restore.mutate(id)}
+        onDelete={(id) => remove.mutate(id)} />
     </Panel>
   );
 }
