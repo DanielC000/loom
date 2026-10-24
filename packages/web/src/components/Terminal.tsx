@@ -178,11 +178,40 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     // Pending one-shot repaint timer (Claude attach), cleared on unmount so it can't fire late.
     let repaintTimer: ReturnType<typeof setTimeout> | undefined;
 
+    /** The renderer's CURRENT measured css cell box, or undefined before the first paint. */
+    const readCell = () => (term as unknown as {
+      _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } };
+    })._core?._renderService?.dimensions?.css?.cell;
+
+    /**
+     * One solver pass: the largest fontSize whose grid fits `cw`×`ch`, derived from the cell box the
+     * renderer measured for the CURRENT font. The 1-decimal floor is the quantum we step in.
+     */
+    const solveFontSize = (cw: number, ch: number) => {
+      const curFont = term.options.fontSize ?? 13;
+      // Prefer the renderer's measured cell size; fall back to typical monospace ratios if the
+      // render service isn't ready yet (e.g. very first frame before a paint).
+      const cell = readCell();
+      const cellWPerPx = cell?.width ? cell.width / curFont : 0.6;
+      const cellHPerPx = cell?.height ? cell.height / curFont : 1.2;
+      return Math.max(6, Math.floor(Math.min(cw / (cols * cellWPerPx), ch / (rows * cellHPerPx)) * 10) / 10);
+    };
+
     /**
      * Claude mode: scale fontSize so the pinned cols×rows grid just fills the container without
-     * overflow. Cell size is linear in fontSize for a monospace font, so we read the renderer's current
-     * cell dimensions, derive the per-pixel cell ratio, and solve for the largest fontSize that fits
-     * both axes. Single pass is exact; the floor + clamp keep it from overflowing.
+     * overflow, then (HUG only) size the element to the grid it actually rendered.
+     *
+     * @decision ebbc4a70 — never reduce this to a single solver pass, and never derive the pane height
+     * from a cell ratio measured at a DIFFERENT font: one pass is not a fixed point, and the pair
+     * oscillated at ~62 fontSize changes/second forever, one of whose states clipped ~2 terminal rows.
+     *
+     * A pass is not exact because `cell.height / curFont` is NOT a constant: xterm rounds the cell box
+     * to whole CSS pixels (DomRenderer._updateDimensions), so the ratio moves with the font it was
+     * measured at (11/9.1 = 1.2088 vs 10/8.7 = 1.1494 — a 5.2% swing against a 0.1 font quantum). The
+     * map font → next is therefore non-contractive and, whenever the budget binds, has a 2-cycle rather
+     * than a fixed point. So we ITERATE to a settled font (bounded, with revisit detection) and then
+     * verify the grid we ACTUALLY rendered fits, stepping down if it does not — never trusting the
+     * pre-change ratio to predict the post-change grid.
      */
     const applyFontSize = () => {
       if (!cols || !rows) return;
@@ -194,28 +223,49 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       const ch = budget != null ? budget : el.clientHeight;
       if (cw <= 0 || ch <= 0) return;
 
-      const curFont = term.options.fontSize ?? 13;
-      // Prefer the renderer's measured cell size; fall back to typical monospace ratios if the
-      // render service isn't ready yet (e.g. very first frame before a paint).
-      const cell = (term as unknown as {
-        _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } };
-      })._core?._renderService?.dimensions?.css?.cell;
-      const cellWPerPx = cell?.width ? cell.width / curFont : 0.6;
-      const cellHPerPx = cell?.height ? cell.height / curFont : 1.2;
+      // SETTLE. Each applied font re-measures the cell box synchronously (the options setter fires
+      // CharSizeService.measure + the renderer's own resize before it returns), so the next pass solves
+      // against the ratio this font really renders at. Stop on a fixed point, or on a REVISITED value —
+      // a cycle — taking its smallest member, since a smaller font can only render a smaller grid.
+      const seen: number[] = [];
+      for (let pass = 0; pass < 3; pass++) {
+        const curFont = term.options.fontSize ?? 13;
+        const next = solveFontSize(cw, ch);
+        if (next === curFont) break;
+        if (seen.includes(next)) {
+          const smallest = Math.min(next, curFont, ...seen);
+          if (smallest !== curFont) term.options.fontSize = smallest;
+          break;
+        }
+        seen.push(curFont);
+        term.options.fontSize = next;
+      }
 
-      const fitW = cw / (cols * cellWPerPx);
-      const fitH = ch / (rows * cellHPerPx);
-      // Largest font that fits both axes; 1-decimal floor so we never round up into overflow.
-      const next = Math.max(6, Math.floor(Math.min(fitW, fitH) * 10) / 10);
-      if (next !== curFont) term.options.fontSize = next;
+      // Then VERIFY against the grid we REALLY rendered rather than a predicted one, and DESCEND until
+      // it fits. This — not the settle above — is what guarantees we never land on a font whose rendered
+      // rows are clipped by the pane's `overflow:hidden`. The settle can exit on its pass budget without
+      // reaching a fixed point (a true fixed point cannot overflow, since its ratio was measured at the
+      // very font it returns), and such an exit was measured leaving 40 rows of 11px inside a 421px
+      // budget — a ~2-row clip. Monotone by construction: each pass re-solves from the realized ratio
+      // but is clamped BELOW the current font, so the font strictly decreases and this always terminates.
+      for (let pass = 0; pass < 4; pass++) {
+        const cell = readCell();
+        if (!cell?.height || !cell?.width) break;
+        if (rows * cell.height <= ch && cols * cell.width <= cw) break;
+        const font = term.options.fontSize ?? 13;
+        const down = Math.max(6, Math.min(solveFontSize(cw, ch), Math.round((font - 0.1) * 10) / 10));
+        if (down >= font) break;
+        term.options.fontSize = down;
+      }
 
       // HUG mode: shrink the pane to the grid it actually renders, so a stacked composer sits FLUSH
       // beneath it instead of below a letterbox band (a width-bound 120×40 grid is shorter than the
-      // pane). Height is derived from the (now current) font — never exceeds the budget — so the tile
-      // hugs the terminal on narrow/width-bound layouts and is a no-op when it already fills height.
+      // pane). Measured from the CURRENT cell box (never a stale ratio × the new font, which is what
+      // made the pane 419px tall around a 440px screen), so the pane is never shorter than its grid.
       if (budget != null) {
-        const gridH = Math.min(budget, Math.ceil(rows * cellHPerPx * (term.options.fontSize ?? next)));
-        el.style.height = `${gridH}px`;
+        const cell = readCell();
+        const realH = cell?.height ? rows * cell.height : rows * 1.2 * (term.options.fontSize ?? 13);
+        el.style.height = `${Math.min(budget, Math.ceil(realH))}px`;
       }
     };
     // Publish for the heightBudget-change effect (below), which re-scales grow-back explicitly.
@@ -452,7 +502,29 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     });
 
     // On a tile resize: shells re-fit (and tell the pty); Claude re-scales the font (never the grid).
-    const ro = new ResizeObserver(() => { if (resizable) fitAndReport(); else applyFontSize(); });
+    //
+    // @decision ebbc4a70 — in HUG mode never re-run applyFontSize for a HEIGHT-only entry: the height
+    // it reacts to is the one applyFontSize itself just wrote, so reacting re-enters the function
+    // through its own output.
+    //
+    // Observing an ancestor instead does NOT fix that (measured: the pane's parent and the panel both
+    // content-size to the pane, tracking it 419px↔421px through the oscillation).
+    //
+    // Width is the only box dimension that is an INPUT here: in HUG mode applyFontSize reads
+    // `el.clientWidth` and `budgetRef.current` and never `el.clientHeight`, and a budget change already
+    // arrives on its own path (the heightBudget effect below). So a height-only entry carries no new
+    // input by construction — this is exact, not a heuristic. FILL mode is the opposite case: there
+    // `ch` IS `el.clientHeight` and nothing writes it, so every entry is real and must be honored.
+    let lastWidth = -1;
+    const ro = new ResizeObserver((entries) => {
+      if (resizable) { fitAndReport(); return; }
+      if (budgetRef.current != null) {
+        const w = entries[entries.length - 1]?.contentRect.width ?? el.clientWidth;
+        if (w === lastWidth) return;
+        lastWidth = w;
+      }
+      applyFontSize();
+    });
     ro.observe(el);
 
     connect();
@@ -490,14 +562,15 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // this never fires there). The budget GROWS when below-terminal chrome is reclaimed — most visibly
   // when a queued-message strip DRAINS (SessionQueue → null) and TerminalCard hands the terminal back
   // its space. The attach effect's ResizeObserver(el) only re-scales when the pane element's own box
-  // changes; on a grow-back the pane sat pinned at its shrunk grid height, so RO(el) never re-fired and
+  // WIDTH changes (card ebbc4a70 — a height-only entry is this component's own write); on a grow-back the
+  // pane sat pinned at its shrunk grid height with no width change at all, so RO(el) never re-fired and
   // the font LATCHED shrunk until an unrelated re-render forced a re-measure (the bug this fixes). Driving
   // applyFontSize directly off the prop makes grow-back EXPLICIT + deterministic. budgetRef.current is
   // already the new value (assigned during render, above), so applyFontSize reads the grown budget.
   //
-  // This does NOT reopen the 5b89fae/ff002d9 oscillation: it fires on a PROP change (fed by TerminalCard's
-  // belowRef-only measure, never by the pane's own resize), and applyFontSize is idempotent at a fixed
-  // budget — RO(el) re-fires once from the height it sets, recomputes the same font, and settles.
+  // This does NOT reopen the 5b89fae/ff002d9 oscillation — but NOT because applyFontSize is idempotent
+  // in one pass (card ebbc4a70: it is not, and that was itself an at-rest oscillation). It is safe
+  // structurally: this fires on a PROP change, and applyFontSize now settles before it returns.
   useLayoutEffect(() => {
     applyFontSizeRef.current?.();
   }, [heightBudget]);
