@@ -1102,6 +1102,7 @@ const TEST_TIMEOUT_OVERRIDES = {
   "mainline-watch-trust-ledger": 450_000, // card 99f5f0cd, censored sizing — see the decision note above this entry.
   "mainline-watch-landing-trust-freeze": 450_000, // card 99f5f0cd, censored sizing — see the decision note above this entry.
   "mainline-watch-own-commit-verify": 450_000, // card 99f5f0cd, censored sizing — see the decision note above this entry.
+  "merge-confirm-dirty-gate-verdict-cache-retry-and-guard": 280_000, // card 0bfd9b7c: measured by a taskless QA check (worker 35626365, gen 442) — no prior override (blanket 120s ceiling). Per-file history (daemon-per-file-timing.ndjson): 8 passes 59,600-110,100ms (max 0.917x of the ceiling) and 2 SIGTERM kills at ~120,000ms (one at 13:13Z predating commit 6d13a03f, the other inside 6d13a03f's dist-importer check at 20:10Z on a loaded host). Traced: 6d13a03f's appendEvent change is NOT on a blocking path here (no open transaction, no listener wired in this test) — load/timing, not a hang, so per cc595ca7 the fix is an override, not a blanket raise. Direct solo re-runs on main: 53s/90s/94s (LOOM_DEV unset) and 98s (LOOM_DEV=1), all pass. 280k gives ~2.544x the observed max pass (110,100ms), matching this family's ~2.5x-of-max-pass convention for a file with an OBSERVED kill (a9119abf).
 };
 // Card fc53ea74: codex-doctrine-real-spawn's own 300_000 override moved to
 // `_codex-real-spawn-lock.mjs`'s `CODEX_OWN_WORK_BUDGET_MS` (that file's own doc carries card 3791b14e's
