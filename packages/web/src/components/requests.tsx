@@ -6,6 +6,7 @@ import { PERMISSION_SCOPES } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { isRemoteOrigin } from "../lib/gatewayCredential";
+import { usePreviewOnly } from "../lib/previewOnly";
 import { viewBlobType } from "../lib/vaultAsset";
 import { Panel, Button, Dot, SectionLabel, Badge, Select } from "./ui";
 import { DecisionStateChip } from "./decisions";
@@ -693,10 +694,28 @@ export function RequestModalProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// A module-level identity so the inert opener is referentially stable across renders, exactly as the
+// provider's own `useCallback` opener is — a consumer may legitimately list it in a hook dependency array.
+const INERT_OPEN: (questionId: string) => void = () => { /* held — see useOpenRequest below */ };
+
+// @decision b472645a — an opener reached from inside the dev End-user preview must open NOTHING: the
+// modal's answer / permission / credential controls and this provider's own mark-read-on-open write all
+// act on the previewed home's own session, which is inside that gate's criterion (card edfd8295).
+//
+// This is the STRUCTURAL half of the pair, and it is here rather than at the call site for the reason
+// `lib/previewOnly.tsx` sets out: the modal is mounted at the app root, so no prop from Platform.tsx can
+// reach the controls themselves — the only place to stop them is the funnel every in-app affordance
+// already goes through. Holding it here means a NEW open-request control added anywhere inside the
+// preview is inert even if its author never reads the flag, which is the same property the cadence form's
+// disabled `<fieldset>` buys structurally rather than per-control. The visible per-control gate (a
+// disabled button that says why, `pages/Board.tsx` › ConnectedRequestRow) sits on top and is what a user
+// actually reads; removing it would re-open nothing.
 export function useOpenRequest(): (questionId: string) => void {
   const open = useContext(RequestModalContext);
+  // Read before the throw: both hooks must run on every render, in the same order, whatever the outcome.
+  const previewOnly = usePreviewOnly();
   if (!open) throw new Error("useOpenRequest must be used within a RequestModalProvider");
-  return open;
+  return previewOnly ? INERT_OPEN : open;
 }
 
 // ── RequestDetail — the reusable detail/response body (4 affordances) ──────────────

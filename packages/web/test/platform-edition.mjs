@@ -12,7 +12,7 @@
 // use for assertions that aren't extractable pure functions. Run standalone:
 //   node --experimental-strip-types packages/web/test/platform-edition.mjs
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 // The api read/write classifier is an AST walk, not a pattern match — see its own note below for the
@@ -833,12 +833,14 @@ const SWEEP_BOUNDARIES = new Map(Object.entries({
   // `lib/activeProject.tsx`'s own note), so on a dev install this preview is the ONLY UI route to the
   // setup home's board. The decision did not change; its justification did.
   "pages/Board.tsx":
-    "UNGATED by decision b472645a on R2's CRITERION, not on reachability: card CRUD writes TASKS, and a"
-    + " task is not one of the previewed home's agents/schedules/sessions. ⚠️ NAMED RESIDUAL: this"
-    + " subtree includes components/requests.tsx, whose answer/dismiss/credential actions and NudgeMgr's"
-    + " sendInput WOULD act on a session. They are unreachable today only because no role the setup home"
-    + " hosts on a DEV install registers question_ask — see the record for the verified reason and the"
-    + " follow-up trigger.",
+    "UNGATED FOR CARD CRUD by decision b472645a on R2's CRITERION, not on reachability: card CRUD writes"
+    + " TASKS, and a task is not one of the previewed home's agents/schedules/sessions. Its subtree's"
+    + " REQUEST actions were this card's NAMED RESIDUAL and are no longer ungated (card edfd8295): the"
+    + " rail's \"Open request\" button is disabled by the preview CONTEXT, and useOpenRequest itself"
+    + " returns an inert opener under it — which is what also holds the APP-ROOT modal's answer /"
+    + " permission / credential controls and the provider's own mark-read-on-open write, none of which"
+    + " any prop from Platform.tsx could reach. Section 8 checks that gate control by control; this"
+    + " boundary's reason now covers the card CRUD alone.",
   "pages/PlatformFindings.tsx":
     "UNGATED by decision b472645a — the preset-suggestion store is daemon-GLOBAL, not home-scoped, so"
     + " Adopt/Dismiss here is identical to doing it from any composer popover.",
@@ -1144,6 +1146,153 @@ check("the gate is never derived from the toggle below Platform.tsx — 8adccd37
     assert.ok(!src.includes("loom.platformViewAs"), `${name} must not reference the preview toggle key`);
     assert.ok(!src.includes("localStorage"), `${name} must not read browser storage`);
   }
+});
+
+// ── 8. card edfd8295 — the Board subtree's REQUEST actions in the dev End-user preview. ───────────────
+//
+// `pages/Board.tsx` is a SWEEP BOUNDARY above, so section 7's transitive walk never descends into it and
+// cannot see these controls at all — which is exactly how they stayed open while every other write in the
+// preview was closed. That boundary's reason is now narrowed to the card CRUD; the request actions get
+// their own checks, here.
+//
+// The gate is a CONTEXT rather than another prop hop, and that is NOT a stylistic preference: the writes
+// it has to hold are rendered by the APP-ROOT `RequestModalProvider`, outside any Platform subtree, so no
+// prop from Platform.tsx can reach them however many hops it takes (src/lib/previewOnly.tsx states both
+// reasons). A context moves the READ, never the DECISION — so the checks below are mostly about keeping
+// that distinction true: one provider, in Platform.tsx, around the preview mount and nothing else.
+const previewCtxSrc = readFileSync(new URL("../src/lib/previewOnly.tsx", import.meta.url), "utf8");
+const boardSrc = readFileSync(new URL("../src/pages/Board.tsx", import.meta.url), "utf8");
+const requestsSrc = readFileSync(new URL("../src/components/requests.tsx", import.meta.url), "utf8");
+
+/**
+ * Every file under `src/` whose text contains `needle`, as src-relative paths, sorted.
+ *
+ * A whole-tree scan rather than the section-7 import walk, deliberately: the properties below are
+ * ABSENCE claims about the rest of the app ("only Platform.tsx mounts the provider", "the opener context
+ * never leaves its module"), and an absence proven over a graph rooted at PlatformView.tsx would be an
+ * absence over the wrong population. Each caller asserts an exact expected list, so a broken walk
+ * returning `[]` fails the caller rather than passing it vacuously.
+ */
+function srcFilesContaining(needle) {
+  const srcDir = fileURLToPath(new URL("../src/", import.meta.url));
+  const out = [];
+  (function walk(dir) {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(abs); continue; }
+      if (!/\.tsx?$/.test(e.name)) continue;
+      if (readFileSync(abs, "utf8").includes(needle)) out.push(path.relative(srcDir, abs).split(path.sep).join("/"));
+    }
+  })(srcDir);
+  return out.sort();
+}
+
+check("the preview context is PROVIDED in Platform.tsx only, and only around the end-user preview", () => {
+  // The "Platform.tsx decides, everything below receives" invariant, as a check rather than as prose. A
+  // provider mounted anywhere else is a SECOND decider; one mounted around the Developer or the shipping
+  // mount would gate a REAL surface — the over-gate direction, which is what the e2e contrast leg catches
+  // behaviourally and this catches structurally.
+  const mounts = mountAttrs(platformSrc, "PreviewOnlyProvider");
+  assert.equal(mounts.length, 1,
+    `expected exactly one <PreviewOnlyProvider> mount in Platform.tsx, found ${mounts.length}`);
+  const open = platformSrc.indexOf("<PreviewOnlyProvider>");
+  const close = platformSrc.indexOf("</PreviewOnlyProvider>");
+  assert.ok(open >= 0 && close > open,
+    "the provider must be an element WITH children — a self-closing one would wrap nothing");
+  const wrapped = platformSrc.slice(open, close);
+  assert.match(wrapped, /<PlatformView\b[^>]*\bpreviewOnly\b/,
+    "the provider must wrap the previewOnly <PlatformView> mount — the two halves of one gate");
+  assert.ok(!/<PlatformView\b[^>]*developerEdition/.test(wrapped),
+    "the provider must NOT wrap the Developer mount — that would hold the dev surface's own board");
+  const providers = srcFilesContaining("<PreviewOnlyProvider");
+  assert.deepEqual(providers, ["pages/Platform.tsx"],
+    `<PreviewOnlyProvider> is mounted in ${providers.join(", ")} — only Platform.tsx may decide a preview`);
+});
+
+check("the preview context RECEIVES the decision — it never re-derives one", () => {
+  assert.ok(!previewCtxSrc.includes("localStorage"), "previewOnly.tsx must not read browser storage");
+  // No caller-supplied `value`: being inside the provider IS the statement. A boolean prop would let a
+  // caller mount it with `false` and believe they had gated something.
+  assert.match(previewCtxSrc, /function PreviewOnlyProvider\(\{ children \}: \{ children: ReactNode \}\)/,
+    "PreviewOnlyProvider must take children only — never a caller-supplied boolean");
+  // The toggle key may be NAMED in a comment (previewOnly.tsx's own prohibition does exactly that, and a
+  // prohibition that cannot name what it forbids is a worse comment) — what is forbidden is CODE reading
+  // it. So the rule is per LINE, not per file: every line carrying the key must be a comment line.
+  //
+  // ⚠️ Deliberately NOT a general comment-stripper. A stripper that over-matched (a `//` inside a string)
+  // would HIDE a real code occurrence — fail-open, in the one direction that matters here. This shape
+  // fails closed instead: a code line naming the key fails whatever else is on it.
+  //
+  // The CONSUMERS may touch storage for their own unrelated reasons (Board persists the rail's collapsed
+  // preference; requests.tsx keeps answer drafts), so `localStorage` is only forbidden in the context
+  // module above — asserting its absence in either consumer would be asserting something false.
+  for (const [name, src] of [["previewOnly.tsx", previewCtxSrc], ["Board.tsx", boardSrc],
+    ["requests.tsx", requestsSrc]]) {
+    const codeLines = src.split("\n").filter((l) => l.includes("loom.platformViewAs") && !/^\s*(?:\/\/|\*|\/\*)/.test(l));
+    assert.deepEqual(codeLines, [],
+      `${name} reads the preview toggle key in CODE, not just in prose: ${codeLines.join(" / ")}`);
+  }
+});
+
+check("useOpenRequest is INERT under the preview context — the structural half of the gate", () => {
+  // Two legs, and asserting only the first would pass against a hook that read the flag and then handed
+  // back the live opener anyway. This half is what holds a control added inside the preview LATER, whose
+  // author never reads the flag at all — the same property the cadence form's disabled <fieldset> buys.
+  assert.match(requestsSrc, /const previewOnly = usePreviewOnly\(\);/,
+    "useOpenRequest must consult the preview context");
+  assert.match(requestsSrc, /return previewOnly \? INERT_OPEN : open;/,
+    "useOpenRequest must RETURN the inert opener in a preview, not merely know it is in one");
+  // And the inert opener must genuinely do nothing. Comments are stripped before the emptiness check, so
+  // the assertion is about code rather than about how the placeholder happens to be documented.
+  const inert = /const INERT_OPEN: \(questionId: string\) => void = \(\) => \{([^}]*)\};/.exec(requestsSrc);
+  assert.ok(inert, "INERT_OPEN must be declared with the opener's own signature");
+  assert.equal(inert[1].replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "").trim(), "",
+    `INERT_OPEN's body must be empty — found: ${inert[1]}`);
+});
+
+check("the modal opener has exactly ONE consumer, and its context never leaves the module", () => {
+  // Gating `useOpenRequest` is sufficient only because it is the ONE funnel every in-app "open this
+  // request" affordance goes through (the inbox, the attention rows, the fleet hints, the command
+  // palette, the Board rail). A second `useContext(RequestModalContext)`, or an exported context, would
+  // be a live opener the gate never sees — so the sufficiency claim is checked, not asserted.
+  const consumers = [...requestsSrc.matchAll(/useContext\s*\(\s*RequestModalContext\s*\)/g)];
+  assert.equal(consumers.length, 1,
+    `RequestModalContext has ${consumers.length} consumer(s) — the gate only holds the one in useOpenRequest`);
+  assert.ok(!/\bexport\b[^\n]*\bRequestModalContext\b/.test(requestsSrc),
+    "RequestModalContext must stay module-private, or another module could consume it past the gate");
+  const namers = srcFilesContaining("RequestModalContext");
+  assert.deepEqual(namers, ["components/requests.tsx"],
+    `RequestModalContext is named in ${namers.join(", ")} — it must stay inside its own module`);
+});
+
+check("Board's \"Open request\" button is held, and reads the context itself", () => {
+  // No prop thread into this row by design (see previewOnly.tsx), so the read is local — which is the
+  // thing to pin, because a future refactor "tidying" it into a prop would reintroduce three hops that
+  // can each drop it.
+  assert.match(boardSrc, /const previewOnly = usePreviewOnly\(\);/,
+    "ConnectedRequestRow must read the preview context itself");
+  const openers = mountAttrs(boardSrc, "Button").filter((m) => /openRequest\(q\.id\)/.test(m));
+  assert.equal(openers.length, 1,
+    `expected exactly one request-opening <Button> in Board.tsx, found ${openers.length}`
+    + " — renamed or removed? this check cannot pass vacuously");
+  assert.match(openers[0], /\bdisabled=\{previewOnly\}/,
+    "the Open-request button must carry the preview gate");
+  assert.match(openers[0], /\btitle=\{previewOnly \? PREVIEW_REQUEST_HELD_TITLE :/,
+    "a held control must say WHY — same register as the shell's own PREVIEW_DISABLED_TITLE");
+});
+
+check("Board imports NO request write from components/requests beyond the gated opener", () => {
+  // The same technique as the `{ api }`-only check above, for the same reason. The gate holds the OPENER,
+  // so a direct import of an answer/dismiss control — or of a second opener — would be a write reachable
+  // from the preview with nothing holding it. requests.tsx keeps those controls module-private today;
+  // this is what keeps the claim true from Board's side, where a new import would actually be added.
+  const imports = [...boardSrc.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'][^"']*components\/requests["']/g)];
+  assert.equal(imports.length, 1,
+    `expected exactly one import from components/requests in Board.tsx, found ${imports.length}`);
+  const named = imports[0][1].split(",").map((s) => s.trim()).filter(Boolean).sort();
+  assert.deepEqual(named, ["RequestProvenance", "RequestTypeTag", "useOpenRequest"],
+    `Board.tsx imports ${named.join(", ")} from components/requests. The two tags are pure presentation`
+    + " and useOpenRequest is the gated funnel; a new symbol here needs its own decision.");
 });
 
 console.log(`\n${pass} passed`);

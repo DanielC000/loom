@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { PlatformView } from "./PlatformView";
 import { developerEdition, endUserEdition } from "./platformEdition";
+import { PreviewOnlyProvider } from "../lib/previewOnly";
 import { color, font, radius } from "../theme";
 
 // The single consolidated Platform page — ONE nav tab → one /platform route. It renders ONE of two
@@ -64,7 +65,17 @@ export default function Platform() {
         //
         // It does NOT hold the board's card CRUD, Findings' Adopt/Dismiss or guided setup — those are
         // DECIDED exemptions with their reasons in the record, not gaps.
-        : <PlatformView key={endUserEdition.kind} edition={endUserEdition} previewOnly />}
+        //
+        // The PROVIDER is the second half of the same gate, for the one write surface a prop cannot reach
+        // (card edfd8295): the Board's connected-requests rail, and the app-root request modal it opens —
+        // which is mounted beside the router in App.tsx, not inside this tree. It is mounted HERE, beside
+        // the prop, so this file remains the ONE place that decides a preview is in view; see
+        // lib/previewOnly.tsx for why that surface takes a context where every other one takes a prop.
+        : (
+          <PreviewOnlyProvider>
+            <PlatformView key={endUserEdition.kind} edition={endUserEdition} previewOnly />
+          </PreviewOnlyProvider>
+        )}
     </div>
   );
 }

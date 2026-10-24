@@ -896,6 +896,160 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   });
   }
 
+  // ── 9b. card edfd8295 — the Board subtree's REQUEST actions, card b472645a's named residual ────────
+  //
+  // The preview's `<Board>` stays UNGATED for card CRUD by that card's ruling (a task is not one of the
+  // previewed home's agents / schedules / sessions). Its connected-requests rail is a different matter:
+  // "Open request ↗" reaches the APP-ROOT request modal, whose answer / permission / credential controls —
+  // and the provider's own mark-read-on-open write — all act on the PREVIEWED home's own session, which
+  // is inside the gate's criterion.
+  //
+  // Those actions were unreachable when b472645a shipped, for an accidental reason: no role that home
+  // hosts on a dev install reaches `question_ask`'s registration, so no request could exist on it to act
+  // on. SEEDING one is what makes the control reachable at all — which is why this leg could not have
+  // been written as part of that card, and why `seedReservedHomeRequest` writes the row straight through
+  // the daemon's own question writer instead of waiting for that reachability to change.
+  //
+  // ⚠️ A ZERO IS ONLY AS GOOD AS THE INSTRUMENT, and this page's counter had never been exercised with a
+  // seeded question on it. So each preview leg ends by driving a write that MUST fire — the board's own
+  // card create, i.e. the ruled exemption itself — and the silence is asserted only once THAT write has
+  // been recorded. Two things ride on that ordering: the create proves the counter is recording here
+  // (a broken route handler produces the same empty array as a perfect gate), and it establishes that the
+  // held click's own window has elapsed, since `page.route` sees requests in the order they are issued.
+  // It is also DoD-2 — card CRUD in the preview stays ungated — asserted rather than assumed.
+  for (const atlas of [true, false]) {
+    const shell = atlas ? "switch ON" : "switch OFF";
+
+    test(`${shell}: the preview's board rail cannot open or answer a request`, async ({ page, loomDaemon }) => {
+      const home = await serveDevPlatformHome(page, loomDaemon);
+      const seed = await seedReservedHomeRequest(loomDaemon, home);
+      if (atlas) await seedAtlasOn(page);
+      await seedViewAsEndUser(page);
+      const sent = await blockMutations(page);
+      // Wide enough that the two-column dossier renders its rail as a column rather than wrapping, and
+      // that the row's controls sit well clear of the attention toast stack in the bottom-right corner.
+      await page.setViewportSize({ width: 1280, height: 900 });
+      // `?task=` is Board's own deep link into a card's drawer. Under Atlas the board panel is `hidden`
+      // until its tab is active, so the tab is carried in the SAME navigation rather than clicked after:
+      // a tab <Link> builds its address fresh and drops `?task=`, so clicking across first would race the
+      // deep link away before the board data had loaded to consume it.
+      await page.goto(`${loomDaemon.baseURL}/platform?${atlas ? "tab=board&" : ""}task=${encodeURIComponent(seed.task.id)}`);
+
+      // The right shell AND the right view — every reading below is worthless on the real end-user
+      // edition (which carries no previewOnly) or in the Developer view (a different home entirely).
+      await expect(page.getByTestId("atlas-shell")).toHaveCount(atlas ? 1 : 0);
+      await expect(viewAs(page, "End-user")).toHaveAttribute("aria-pressed", "true");
+      if (atlas) await expect(tab(page, "Board")).toHaveAttribute("aria-selected", "true");
+
+      // The fixture's own identity, asserted rather than assumed: this rail must carry THIS seeded ask.
+      // A drawer that opened on the wrong card, or a rail that silently rendered empty, would make every
+      // disabled-and-zero reading below true and meaningless.
+      const rail = page.getByTestId("task-requests-rail");
+      await expect(rail).toBeVisible();
+      await expect(rail.getByText("1 pending", { exact: true })).toBeVisible();
+      await expect(rail.getByText(seed.askTitle, { exact: true })).toBeVisible();
+
+      // Expand the row — "Open request ↗" renders only once a row is open (clicking the title toggles it).
+      await rail.getByText(seed.askTitle, { exact: true }).click();
+      const opener = rail.getByRole("button", { name: /open request/i });
+      await expect(opener).toBeVisible();
+      await expect(opener).toBeDisabled();
+      // A held control must SAY why. Asserted on the real attribute, not on the component's intent.
+      await expect(opener).toHaveAttribute("title", /answering this home's requests here is disabled/i);
+
+      // `force` dispatches the click past the disabled attribute, straight at the handler — so a control
+      // that is merely STYLED disabled, or whose opener is still wired, is caught here rather than
+      // passing on appearance.
+      await opener.click({ force: true }).catch(() => { /* a held control may refuse the click */ });
+
+      // SYNCHRONISATION for the silence below, and the reason it is a claim rather than a tautology.
+      // `toHaveCount(0)` on the modal passes INSTANTLY — before a broken gate could even have rendered it
+      // — and a fixed sleep would be an unbounded guess. So wait for the board's own next poll instead:
+      // the writes this click would otherwise issue go out synchronously inside its handler, i.e. strictly
+      // before this later GET, and `page.route` sees requests in issue order. Once this has landed, the
+      // click's own window has provably elapsed. (MEASURED on broken code: the modal is up, and its
+      // mark-read POST recorded, well inside one poll.)
+      await page.waitForResponse((r) => r.url().includes(`/api/projects/${home.project.id}/board`),
+        { timeout: 15_000 });
+
+      expect(sent.filter((r) => r.includes("/api/questions")),
+        "no request action in the preview's board rail may reach the daemon").toEqual([]);
+      // The modal is a SIBLING of the drawer at the app root, so its own header is the only thing that
+      // tells the two `role="dialog"` overlays apart.
+      await expect(page.getByText(`Request · ${seed.questionId.slice(0, 8)}`)).toHaveCount(0);
+
+      // DoD-2 + THE INSTRUMENT CONTROL (see the note above the loop). Close the drawer, then file a card:
+      // card CRUD is the ruled exemption, so this write MUST land — which is also what rules out the
+      // zero above having come from a counter that records nothing on this page.
+      //
+      // ⚠️ The ✕ is located THROUGH the drawer, not page-wide: the request modal carries a `Close (Esc)`
+      // of its own, so a page-wide `getByTitle` is unique only while the gate under test is holding. On
+      // broken code it resolved to two elements and failed as a strict-mode violation — a red, but from
+      // the locator rather than from the assertion the leg exists to make.
+      const drawer = page.getByRole("dialog").filter({ has: page.getByTestId("task-requests-rail") });
+      await drawer.getByTitle("Close (Esc)").click();
+      await expect(rail).toHaveCount(0);
+      const cardTitle = uniq("preview-crud");
+      await page.getByPlaceholder("new task title").fill(cardTitle);
+      await page.getByRole("button", { name: /^add to inbox$/i }).click();
+      const createPath = `POST /api/projects/${home.project.id}/tasks`;
+      await expect.poll(() => sent.includes(createPath),
+        { message: `card CRUD stays UNGATED in the preview — expected ${createPath} in ${JSON.stringify(sent)}` })
+        .toBe(true);
+
+      // And that create is the ONLY write this page made at all, so the gate held everything else too.
+      expect(sent, "the preview sent a write beyond the ruled card-CRUD exemption").toEqual([createPath]);
+    });
+  }
+
+  // THE CONTRAST CASE for 9b — the same rail, the same card, the same request row, on a REAL end-user
+  // install, where both writes MUST fire. Without it, "zero requests" is also what a gate that disabled
+  // the shipping UI would produce.
+  //
+  // ONE shell, deliberately, where test 9 runs two: that pair exists because `previewOnly` is threaded
+  // once PER LAYOUT, so an over-gate there is per-layout too. This gate is not threaded at all — it is a
+  // single `<PreviewOnlyProvider>` in Platform.tsx, ABOVE both layouts, and the rail reads it directly —
+  // so a layout cannot differ from the other on it. That provider being mounted in exactly one place,
+  // around exactly the preview mount, is pinned structurally in test/platform-edition.mjs section 8;
+  // a second leg here would re-measure the same boolean rather than cover a second way to get it wrong.
+  test("switch OFF: the same board rail on a REAL end-user install DOES open and answer", async ({ page, loomDaemon }) => {
+    const home = await readSetupHome(loomDaemon);
+    const seed = await seedReservedHomeRequest(loomDaemon, home);
+    const sent = await blockMutations(page);
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${loomDaemon.baseURL}/platform?task=${encodeURIComponent(seed.task.id)}`);
+
+    // No mock ⇒ the shipping end-user edition, with no preview toggle at all — and it resolves the SAME
+    // reserved home, so this is the same board, the same card and the same request row as the legs above.
+    await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
+    await expect(page.getByText(/your cross-project workspace agent/i).first()).toBeVisible();
+
+    const rail = page.getByTestId("task-requests-rail");
+    await expect(rail).toBeVisible();
+    await expect(rail.getByText(seed.askTitle, { exact: true })).toBeVisible();
+    await rail.getByText(seed.askTitle, { exact: true }).click();
+    const opener = rail.getByRole("button", { name: /open request/i });
+    await expect(opener).toBeEnabled();
+    await opener.click();
+
+    // (a) The modal opens, and the provider's mark-read-on-open fires — the first of the two writes the
+    // preview legs assert silent, and one no per-control `disabled` would ever have covered.
+    const modal = page.getByRole("dialog")
+      .filter({ has: page.getByText(`Request · ${seed.questionId.slice(0, 8)}`) });
+    await expect(modal).toBeVisible();
+    await expect.poll(() => sent.includes("POST /api/questions/mark-read"),
+      { message: `opening a request should mark it read — got ${JSON.stringify(sent)}` }).toBe(true);
+
+    // (b) The answer control itself — the write that acts on the asking session, which is what put these
+    // controls inside the gate's criterion in the first place.
+    await modal.getByPlaceholder("type your answer…").fill("contrast-case-answer");
+    await modal.getByRole("button", { name: /^submit answer$/i }).click();
+    const answerPath = `POST /api/questions/${seed.questionId}/answer`;
+    await expect.poll(() => sent.includes(answerPath),
+      { message: `the shipping rail must be able to answer — expected ${answerPath} in ${JSON.stringify(sent)}` })
+      .toBe(true);
+  });
+
   // ── 10. card f76b89b9 — ONE tab affordance across the nodes ───────────────────────────────────────
   //
   // The node used to carry a boxed `Segmented` while every other node wore the underlined `NodeTabs`
@@ -1131,6 +1285,45 @@ async function seedWorkspaceAuditorSchedule(d: LoomDaemon, agentId: string, name
 /** Cleanup for the above. 404 is the state this wants (the test's own Remove click may have landed). */
 async function deleteSchedule(d: LoomDaemon, id: string) {
   await fetch(`${d.baseURL}/api/schedules/${id}`, { method: "DELETE" }).catch(() => {});
+}
+
+/**
+ * Seed a board card on the RESERVED home plus one PENDING request soft-linked to it (card edfd8295).
+ *
+ * This fixture is what makes the Board rail's request actions reachable AT ALL. On a dev install no role
+ * that home hosts reaches `question_ask`'s registration, so no request can exist on it to act on — the
+ * accident card b472645a could only name as a residual rather than test. The row is written straight
+ * through the daemon's own question writer (`seedQuestion` → `db.insertQuestion`, the same writer a real
+ * ask uses), so nothing here waits on that reachability changing.
+ *
+ * The asking session is seeded EXITED on purpose. A LIVE session on this home flips the operator go-live
+ * card's own label and disabled state — readings the sibling preview tests in this file take — and these
+ * controls do not depend on liveness: the one that does, `NudgeMgrButton`, renders in the INBOX row, never
+ * in this rail, so it is not reachable from a board at all.
+ *
+ * `type: "input"` so the modal renders a real ANSWER control (a free-text submit) rather than an
+ * answered-state readout: the contrast leg has to be able to drive the write, not merely open the dialog.
+ *
+ * No cleanup helper: `autoIsolation` archives every seeded session and ANSWERS every seeded question
+ * after each test (a pending one would keep pushing a global attention toast onto later specs), and the
+ * card lives on the reserved home's own board, which no other spec reads.
+ */
+async function seedReservedHomeRequest(d: LoomDaemon, home: SetupHome) {
+  const operator = home.agents.find((a) => a.name === "Platform");
+  expect(operator, "the reserved home's operator agent, to own the asking session").toBeTruthy();
+  const tag = uniq("edfd8295");
+  const session = await d.seedLiveSession({
+    project: home.project, agentId: operator!.id, role: "platform", id: `ask-${tag}`, processState: "exited",
+  });
+  // No `columnKey`: the reserved home's board resolves its own default landing lane, and the drawer is
+  // reached by `?task=<id>` rather than by finding the card in a named column.
+  const task = await d.createTask(home.project.id, { title: `card-${tag}` });
+  const askTitle = `ask-${tag}`;
+  const questionId = await d.seedQuestion({
+    sessionId: session.sessionId, projectId: home.project.id, taskId: task.id,
+    title: askTitle, type: "input", body: "Which region should the bucket live in?", state: "pending",
+  });
+  return { task, askTitle, questionId };
 }
 
 async function dismissSuggestion(d: LoomDaemon, id: string) {

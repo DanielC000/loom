@@ -22,6 +22,7 @@ import { taskMatchesSearch } from "../lib/taskFilter";
 import { PRIORITY_META, PriorityChip, prio, byPriorityThenPosition } from "../components/priority";
 import { errorText } from "../lib/loopbackCredential";
 import { submitDraft } from "../lib/draftSubmit";
+import { usePreviewOnly, PREVIEW_REQUEST_HELD_TITLE } from "../lib/previewOnly";
 
 const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
 // Everything the detail drawer can write, in ONE place — the drawer's `onSave` prop, the mutation that
@@ -1381,6 +1382,16 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
 // an inline answer readout; "Open request ↗" opens the shared Request detail modal for the full view.
 function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) {
   const openRequest = useOpenRequest();
+  // @decision b472645a — in a dev install's "View as: End-user" Platform preview this rail renders the
+  // PREVIEWED home's own requests, and opening one reaches writes that act on that home's session; the
+  // button must be held there (card edfd8295).
+  //
+  // Read from the context, not a prop: this row is three hops inside a component with five mount sites,
+  // only one of which is the preview — `lib/previewOnly.tsx` has the full reasoning, including why the
+  // writes themselves (the app-root modal) are out of any prop's reach. This is the VISIBLE half of the
+  // gate; `useOpenRequest` is itself inert under the same context, so a `disabled` lost in a later
+  // tidy-up re-opens nothing — it only costs the user the explanation.
+  const previewOnly = usePreviewOnly();
   const [open, setOpen] = useState(false);
   const edge = tone[REQUEST_TYPE_TONE[q.type]];
   return (
@@ -1403,7 +1414,9 @@ function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) 
       {open && (
         <div style={{ borderTop: `1px solid ${color.border}`, padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
           <ConnectedRequestAnswer q={q} />
-          <Button variant="ghost" onClick={() => openRequest(q.id)} style={{ padding: "0 6px", alignSelf: "flex-start" }}>Open request ↗</Button>
+          <Button variant="ghost" disabled={previewOnly} onClick={() => openRequest(q.id)}
+            title={previewOnly ? PREVIEW_REQUEST_HELD_TITLE : "Open the full request"}
+            style={{ padding: "0 6px", alignSelf: "flex-start" }}>Open request ↗</Button>
         </div>
       )}
     </div>
