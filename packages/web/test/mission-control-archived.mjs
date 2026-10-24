@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   archivedOnlyProjects, ARCHIVED_ONLY_CAP, fleetProjectNames, replayRoots, GLOBAL_ACTIVITY_CAP,
+  pulseExitedManagers, PULSE_EXITED_MANAGER_CAP, PULSE_EXITED_REFETCH_MS,
 } from "../src/lib/fleet.ts";
 
 let pass = 0;
@@ -172,6 +173,79 @@ check("GLOBAL_ACTIVITY_CAP is ONE number, and both cross-project feeds read it i
   const projectHome = readFileSync(new URL("../src/pages/ProjectHome.tsx", import.meta.url), "utf8");
   assert.ok(/slice\(0,\s*40\)/.test(projectHome),
     "positive control: the hardcoded-cap pattern matches nothing anywhere, so the absences above are vacuous");
+});
+
+// ── The Pulse band's EXITED manager tier (card ef86b089) ──────────────────────────────────────────────
+// Card 5afd71bd left one measured gap when it retired Mission Control: the band fanned out over LIVE
+// managers only, so an exited-but-unarchived manager's events were reachable nowhere in Atlas. These
+// assert the derivation that closes it AND the two numbers that keep its cost flat in N.
+
+const pulseMgr = (id, processState, lastActivity, role = "manager") =>
+  ({ id, projectId: "p", projectName: "P", role, processState, lastActivity });
+
+check("pulseExitedManagers is the LIVE set's complement — so live ∪ it is Mission Control's own set", () => {
+  const sessions = [
+    pulseMgr("live", "live", "2026-06-05T00:00:00.000Z"),
+    pulseMgr("starting", "starting", "2026-06-04T00:00:00.000Z"),
+    pulseMgr("exited", "exited", "2026-06-03T00:00:00.000Z"),
+    pulseMgr("none", "none", "2026-06-02T00:00:00.000Z"),
+    pulseMgr("worker", "exited", "2026-06-01T00:00:00.000Z", "worker"),
+    pulseMgr("companion", "exited", "2026-05-31T00:00:00.000Z", "assistant"),
+  ];
+  const exited = pulseExitedManagers(sessions);
+  assert.deepEqual(exited.map((m) => m.id), ["exited", "none"],
+    "the tier is every NON-live manager: `starting` is live (isLiveSession), a worker is not a manager");
+  // The parity claim itself, asserted rather than described: the live tier the band already had, plus
+  // this one, is exactly every manager in the non-archived list — which is what Mission Control read.
+  const liveTier = sessions.filter((s) => s.role === "manager" && (s.processState === "live" || s.processState === "starting"));
+  assert.deepEqual(
+    [...liveTier, ...exited].map((m) => m.id).sort(),
+    sessions.filter((s) => s.role === "manager").map((m) => m.id).sort(),
+    "live ∪ exited must leave no manager unread, or the retired page is still reachable in a way Atlas is not");
+  // A companion can never reach this tier, which is why the derivation carries no companion predicate.
+  assert.ok(!exited.some((m) => m.role === "assistant"), "a companion's role is `assistant`, never `manager`");
+});
+
+check("pulseExitedManagers is CAPPED, most-recently-active first, and mutates nothing", () => {
+  // Deliberately out of order on input: the cap only bounds cost usefully if it keeps the FRESHEST rows.
+  const sessions = [
+    pulseMgr("m-oldest", "exited", "2026-01-01T00:00:00.000Z"),
+    pulseMgr("m-newest", "exited", "2026-06-01T00:00:00.000Z"),
+    pulseMgr("m-middle", "exited", "2026-03-01T00:00:00.000Z"),
+  ];
+  assert.deepEqual(pulseExitedManagers(sessions, 2).map((m) => m.id), ["m-newest", "m-middle"],
+    "the cap keeps the most recently active, not the input's own order");
+  assert.deepEqual(sessions.map((m) => m.id), ["m-oldest", "m-newest", "m-middle"],
+    "the input is a shared react-query cache array and must not be sorted in place");
+  assert.equal(pulseExitedManagers(sessions, 0).length, 0, "a zero cap reads nothing");
+  // The real cap is what bounds the request count: 20 exited managers can only ever cost CAP polls.
+  assert.equal(pulseExitedManagers(Array.from({ length: 20 },
+    (_, i) => pulseMgr(`m${i}`, "exited", `2026-06-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`))).length,
+    PULSE_EXITED_MANAGER_CAP,
+    "the default cap must bound the tier regardless of how many exited managers a workspace accumulated");
+});
+
+check("the exited tier polls far more slowly than the live tier, and WorkspaceHome reads both constants", () => {
+  assert.equal(PULSE_EXITED_MANAGER_CAP, 8);
+  assert.equal(PULSE_EXITED_REFETCH_MS, 60_000);
+  // The whole bound, stated as arithmetic rather than prose: the tier's worst case in requests/minute
+  // must stay under ONE live manager's, whatever N is. Live is 3000ms ⇒ 20/min.
+  const exitedPerMinute = PULSE_EXITED_MANAGER_CAP * (60_000 / PULSE_EXITED_REFETCH_MS);
+  assert.ok(exitedPerMinute <= 60_000 / 3000,
+    `the exited tier costs ${exitedPerMinute} req/min at its cap — more than the single live manager it must stay under`);
+  // The anti-drift half: WorkspaceHome must REFERENCE the slow interval, never re-type it. A second
+  // `refetchInterval: 3000` in that file would be the naive widening this card exists to avoid.
+  const src = readFileSync(new URL("../src/pages/WorkspaceHome.tsx", import.meta.url), "utf8");
+  assert.ok(src.includes("pulseExitedManagers("),
+    "WorkspaceHome no longer reads the exited tier — the 5afd71bd gap is reopened");
+  assert.ok(src.includes("refetchInterval: PULSE_EXITED_REFETCH_MS"),
+    "WorkspaceHome must poll the exited tier through the shared constant, not a literal of its own");
+  assert.equal((src.match(/refetchInterval:\s*3000/g) ?? []).length, 1,
+    "exactly one 3s pulse fan-out may exist in WorkspaceHome — a second is the unbounded widening");
+  // POSITIVE CONTROL on that last count: the pattern must be shown capable of matching the file it is
+  // asserted against, so a renamed option can never make the count pass by matching nothing.
+  assert.ok(/refetchInterval:\s*\d+/.test(src),
+    "positive control: the refetchInterval pattern matches nothing in WorkspaceHome, so the count above is vacuous");
 });
 
 console.log(`\n${pass} passed`);

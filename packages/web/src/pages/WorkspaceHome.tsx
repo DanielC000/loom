@@ -22,7 +22,7 @@ import {
   boardRollup, gateLanes, isLiveSession, lastMergeByProject, liveCountsByProject, mergeThroughput,
   plural, relativeTime, useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
-import { GLOBAL_ACTIVITY_CAP } from "../lib/fleet";
+import { GLOBAL_ACTIVITY_CAP, PULSE_EXITED_REFETCH_MS, pulseExitedManagers } from "../lib/fleet";
 import { WorkspaceReplay } from "../components/workspaceReplay";
 import { isCompanionSession } from "../lib/sessions";
 import { color, font, type Tone } from "../theme";
@@ -120,15 +120,31 @@ export default function WorkspaceHome() {
   const boards = new Map(projects.map((p, i) => [p.id, boardRollup(boardQs[i]?.data?.columns, boardQs[i]?.data?.tasks)]));
   const openCards = [...boards.values()].reduce((n, b) => n + b.open, 0);
 
-  // The cross-project pulse, from the SAME per-manager event queries Mission Control runs (same keys
+  // The cross-project pulse, from the SAME per-manager event queries Mission Control ran (same keys
   // ⇒ one shared cache entry, not a second poll of the same endpoint).
+  //
+  // TWO TIERS, because this feed is the only place an exited manager's stream is still reachable once
+  // card 5afd71bd retired Mission Control (card ef86b089). The LIVE tier keeps the 3s interval that
+  // makes the band read as live. The EXITED tier is capped and polled far more slowly — see
+  // `pulseExitedManagers` (lib/fleet.ts) for the whole policy and why the cap and the interval are
+  // BOTH load-bearing. Same `["orchEvents", id]` keys either way, so a manager crossing between the
+  // tiers keeps its cache entry and only changes how often it is refetched.
+  const exitedManagers = useMemo(() => pulseExitedManagers(sessions), [sessions]);
   const eventQs = useQueries({
-    queries: managers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
+    queries: [
+      ...managers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
+      ...exitedManagers.map((m) => ({
+        queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id),
+        refetchInterval: PULSE_EXITED_REFETCH_MS,
+      })),
+    ],
   });
   const events = eventQs
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
-  const projectByManager = new Map(managers.map((m) => [m.id, m.projectName]));
+  // Over BOTH tiers: a row whose manager is missing here renders with no project chip, and an exited
+  // manager's rows are exactly the ones this card added.
+  const projectByManager = new Map([...managers, ...exitedManagers].map((m) => [m.id, m.projectName]));
 
   // ── The re-homed tabs' counts (card 41eab0eb) ────────────────────────────────────────────────────
   // The mockup gives a count to three of the seven: `Inbox 4`, `Gates 1·2`, `Automation 9`. The other

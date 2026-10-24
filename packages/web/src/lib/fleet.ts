@@ -269,6 +269,36 @@ export function replayRoots(
  */
 export const GLOBAL_ACTIVITY_CAP = 100;
 
+// ── The cross-project pulse's EXITED manager tier (card ef86b089) ─────────────────────────────────────
+// @decision ef86b089 — these two numbers are what keeps this tier's cost FLAT in the number of exited
+// managers. Never fold either into the live tier's 3s interval, and never drop the cap: the per-manager
+// read (`db.listEvents`) has no LIMIT of its own, so each extra manager costs a whole event stream.
+export const PULSE_EXITED_MANAGER_CAP = 8;
+export const PULSE_EXITED_REFETCH_MS = 60_000;
+
+/**
+ * The exited-but-unarchived managers whose event streams the cross-project pulse should ALSO read —
+ * capped, most-recently-active first. Closes the one gap card `5afd71bd` recorded when it retired
+ * Mission Control: that page fanned out over EVERY non-archived manager, so live ∪ this ≡ its set.
+ *
+ * `sessions` is the non-archived session list (`GET /api/sessions`), so "unarchived" is the input's own
+ * property, not a filter here. The complement taken is the LIVE predicate alone.
+ *
+ * ⚠️ No companion exclusion, deliberately, even though the band's own `fleet` carries one: a companion's
+ * role is `"assistant"` (lib/sessions.ts's `COMPANION_ROLE`), so `role === "manager"` already excludes
+ * every one — the predicate would read as a second guard while being dead code. `lastActivity` is inlined
+ * rather than imported for the same reason `replayRoots` above inlines it (no relative RUNTIME imports).
+ */
+export function pulseExitedManagers(
+  sessions: readonly SessionListItem[],
+  cap = PULSE_EXITED_MANAGER_CAP,
+): SessionListItem[] {
+  return sessions
+    .filter((s) => s.role === "manager" && s.processState !== "live" && s.processState !== "starting")
+    .sort((a, b) => +new Date(b.lastActivity) - +new Date(a.lastActivity))
+    .slice(0, Math.max(0, cap));
+}
+
 // ── BOOT STUCK pairing (card b1da256d round 2, item 3b) ─────────────────────────────────────────────────
 // Extracted out of lib/attention.ts's useAttention so it's unit-testable without React/react-query: given
 // a boot-dialog-stuck candidate's event stream (claude_boot_dialog_stuck/claude_boot_dialog_resolved,
