@@ -105,7 +105,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const voiceCluster = speech.supported ? (
     // Voice + language picker share ONE row so adding the selector doesn't grow the footprint (the
     // terminal pane is flex:1 — extra height here would resize/rescale the xterm).
-    <div style={{ display: "flex", gap: 4, alignItems: "stretch" }}>
+    <div data-testid="composer-voice-row" style={{ display: "flex", gap: 4, alignItems: "stretch" }}>
       <MicButton speech={speech} />
       <VoiceLangSelect
         lang={voiceLang}
@@ -116,12 +116,19 @@ export function Composer({ sessionId }: { sessionId: string }) {
   ) : null;
 
   return (
-    <div style={{ marginTop: 3 }}>
-      <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
+    <div data-testid="composer" style={{ marginTop: 3 }}>
+      {/* The box and the controls share ONE row until it can no longer hold both, then the controls drop
+          to their own line beneath it. Three properties, each load-bearing and each separately witnessed
+          by e2e/composer-narrow-width.spec.ts: `flexWrap` lets the line break at all; the columns' flex
+          BASES decide where (once the box would be squeezed under ~220px); `minWidth: 0` on each column
+          lets them shrink below that rather than overflow again. Don't drop any one of them — without
+          the wrap this row was a fixed 414px whatever it was given (176px controls against the
+          textarea's own ~232px intrinsic floor) and simply ran off the end of a narrow card. */}
+      <div data-testid="composer-row" style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "stretch" }}>
         {/* Relative left column: the textarea + the bottom-right icon cluster + the Spark popover. The
             useDismissable ref wraps all three so an outside-click / Esc closes the popover while a click
             on the trigger or inside the overlay does not (the overlay covers the textarea when open). */}
-        <div ref={presetsWrapRef} style={{ flex: 1, position: "relative", display: "flex" }}>
+        <div ref={presetsWrapRef} style={{ flex: "1 1 220px", minWidth: 0, position: "relative", display: "flex" }}>
           <textarea
             ref={inlineTaRef}
             value={text}
@@ -132,7 +139,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
             // height is pinned to ~2 lines via minHeight while flex-stretch matches the controls column.
             // Constant height ⇒ the flex:1 terminal pane never rescales (Terminal.tsx's ResizeObserver).
             // The 52px right gutter clears the bottom-right two-icon cluster (presets + expand).
-            style={{ flex: 1, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: 13 }}
+            // `minWidth: 0` overrides the UA's intrinsic textarea width (~232px at this font), which is
+            // otherwise a hard floor this flex item cannot shrink past — the column's own basis above
+            // is what picks the wrap point, not this floor.
+            style={{ flex: 1, minWidth: 0, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: 13 }}
           />
           {/* Two-icon cluster in the bottom-right corner: the presets (Spark) trigger + the expand
               button, both ghost, absolutely positioned so they add ZERO height to the composer.
@@ -157,7 +167,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
               padding for the corner cluster above, which paints over it (see the cluster's own note). */}
           {presetsOpen && <PresetPromptsPopover onInsert={insertPreset} />}
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, justifyContent: "flex-end", width: 176 }}>
+        <div data-testid="composer-controls" style={{ display: "flex", flexDirection: "column", gap: 4, justifyContent: "flex-end", flex: "0 1 176px", minWidth: 0 }}>
           {voiceCluster}
           <Button variant="primary" disabled={!text.trim() || send.isPending} onClick={submit}>Send turn</Button>
         </div>
@@ -403,7 +413,7 @@ function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionA
   // Nothing to say → render nothing, so the composer sits flush against the card's bottom edge.
   if (!node) return null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 16 }}>
+    <div data-testid="composer-status" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 16 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
     </div>
   );
