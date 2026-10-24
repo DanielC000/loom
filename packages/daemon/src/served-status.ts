@@ -25,6 +25,7 @@ import {
   type ScratchLargestDirEntry,
 } from "./sessions/scratch-largest-dirs.js";
 import { listStaleAsideWorktrees, repoKeysByProjectFromProjects, staleAsideRepoKeysByProject } from "./git/worktrees.js";
+import { getCachedOrphanedProjectWorkDirs, kickOrphanedProjectWorkDirsRefresh } from "./sessions/orphaned-project-work-dirs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -148,6 +149,12 @@ export interface ServedStatus {
    * `oldestStaleSinceMs` is `null` when `count` is 0.
    */
   staleWorktreeLeftovers: { count: number; oldestStaleSinceMs: number | null };
+  /**
+   * @decision 3b65028c — VISIBILITY ONLY: never add an automatic re-delete/removal sweep for these; that
+   * is its own worktree-deletion-class card + Code Review, not an extension of this one. See
+   * `sessions/orphaned-project-work-dirs.ts`'s own doc for the full mechanism.
+   */
+  orphanedProjectWorkDirs: { count: number; entries: { dirName: string }[]; truncated: boolean };
 }
 
 /**
@@ -210,6 +217,12 @@ export function buildServedStatus(db: Db): ServedStatus {
     }
   }
   const staleAside = listStaleAsideWorktrees(WORKTREES_DIR, repoKeysByProject);
+  // Card 3b65028c — same cached/background-refreshed discipline as projectsWorkRootUsage/scratchLargestDirs
+  // above: NEVER a fresh scan on this read. Degrades on the same partial-stub guard as those two siblings.
+  const orphanedProjectWorkDirs = getCachedOrphanedProjectWorkDirs();
+  if (typeof db.listAllProjects === "function" && typeof db.listArchivedProjects === "function") {
+    kickOrphanedProjectWorkDirsRefresh(db);
+  }
   return {
     version: loomVersion(),
     webBundle,
@@ -232,6 +245,11 @@ export function buildServedStatus(db: Db): ServedStatus {
     staleWorktreeLeftovers: {
       count: staleAside.length,
       oldestStaleSinceMs: staleAside.length ? Math.min(...staleAside.map((e) => e.staleSinceMs)) : null,
+    },
+    orphanedProjectWorkDirs: {
+      count: orphanedProjectWorkDirs.count,
+      entries: orphanedProjectWorkDirs.entries,
+      truncated: orphanedProjectWorkDirs.truncated,
     },
   };
 }

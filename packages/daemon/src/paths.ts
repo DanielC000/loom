@@ -120,8 +120,11 @@ export function projectWorkDir(projectId: string): string {
   return path.join(PROJECTS_WORK_ROOT, projectId);
 }
 
-/** Matches a v4-ish UUID string shape — used only as a REFUSAL predicate below, never for parsing. */
-const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Matches a v4-ish UUID string shape — used as a REFUSAL predicate below, and (card 3b65028c) as the
+ *  one shared "does this dir name look like a Loom-assigned project id at all" check — never for parsing.
+ *  Exported so a second module never writes its own independently-drifting copy (same discipline as
+ *  `isRegisteredRepoKeyName`, decision 98039b36). */
+export const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * True iff `dir` is a single UUID-shaped path segment directly under `root` AND `projectId` is itself

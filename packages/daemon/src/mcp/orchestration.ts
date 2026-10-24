@@ -5535,7 +5535,18 @@ export class OrchestrationMcpRouter {
           "that no session row names, so nothing else would surface them — `{count, oldestStaleSinceMs}` " +
           "(`oldestStaleSinceMs` is `null` when `count` is 0). COUNT-ONLY, deliberately: this field is " +
           "read on every call, so it never measures byte totals — see `GET /api/worktrees/stale-" +
-          "leftovers` for that, called deliberately rather than on this hot path.",
+          "leftovers` for that, called deliberately rather than on this hot path. `orphanedProjectWorkDirs` " +
+          "(card 3b65028c) is the analogous visibility fix for `PROJECTS_WORK_ROOT` itself: `{count, " +
+          "entries, truncated}` where `entries` is a BOUNDED list of `{dirName}` (card 3b65028c's own " +
+          "`ORPHANED_PROJECT_WORK_DIRS_LIST_MAX`) for a top-level directory under `PROJECTS_WORK_ROOT` whose " +
+          "name matches NO real project row (active OR archived) — e.g. a permanent project delete whose " +
+          "work-dir removal failed and was never revisited. `count` is the TRUE total and can exceed " +
+          "`entries.length`; `truncated:true` means the scan itself hit its own entry bound, so even " +
+          "`count` may be a partial figure. VISIBILITY ONLY — nothing here is ever auto-deleted; see " +
+          "`sessions/orphaned-project-work-dirs.ts`'s own doc. Like `scratchLargestDirs`/" +
+          "`projectsWorkRootBytes`, this is a cached, background-refreshed figure (never a fresh scan on " +
+          "this read) — may read `{count:0, entries:[], truncated:false}` before the first background " +
+          "refresh has landed, an honest \"not computed yet\", never fabricated.",
         inputSchema: strictShape({}),
       },
       async () => ok(buildServedStatus(db)),
