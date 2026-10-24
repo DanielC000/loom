@@ -234,26 +234,60 @@ check("(P3) NO spurious handoff event to the repoKey being removed in the SAME p
 check("(P3) exactly one lost event", p3EventCount("lost") === p3LostBefore + 1);
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────────────
+// M-2-insert (card 87b1c8a1, item 1): insertProject's OWN transaction wrapper had ZERO coverage before
+// this — the M-2 (update) test below only ever exercised updateProject's rebind path. A 2-repoKey project;
+// throw from Db.prototype.pinCommondirTrust on the SECOND call (the "x" repoKey's pin, after "primary"'s
+// has already run inside the SAME transaction) — the WHOLE insert must roll back: getProject(id) is
+// undefined, and the FIRST candidate ("primary") has neither a pin nor an index entry surviving.
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
+{
+  const repoM2IPrimary = initRepo("m2-insert-primary");
+  const repoM2IX = initRepo("m2-insert-x");
+  const idM2I = `cgcr-m2i-${sfx}`;
+  const origPin = Db.prototype.pinCommondirTrust;
+  let pinCalls = 0;
+  Db.prototype.pinCommondirTrust = function (...args) {
+    pinCalls++;
+    if (pinCalls === 2) throw new Error("M-2-insert injected failure");
+    return origPin.apply(this, args);
+  };
+  let m2iThrew = null;
+  try { db.insertProject(freshProject(idM2I, repoM2IPrimary, { repos: [{ key: "x", path: repoM2IX, gateCommand: null }] })); }
+  catch (e) { m2iThrew = e; }
+  Db.prototype.pinCommondirTrust = origPin;
+  check("(M2-insert) the injected throw propagates", m2iThrew !== null && /M-2-insert injected failure/.test(m2iThrew.message));
+  check("(M2-insert) the WHOLE insert rolled back — getProject(id) is undefined (was: row committed, pin state only partly updated)", db.getProject(idM2I) === undefined);
+  check("(M2-insert) the FIRST candidate (\"primary\") has NO pin surviving either", db.getCommondirTrustPin(repoM2IPrimary) === null);
+  check("(M2-insert) …AND no index entry for it either", db.getMeta(`commondir-trust-pin-index:${idM2I}:primary`) === undefined);
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
 // M-2 (Code Review e242c754, round 4, MINOR but fixed now): insertProject/updateProject must be
 // TRANSACTIONAL — a throw partway through the pin/unpin pass must never strand a half-applied write (the
 // project row committed, the pin state only partly updated) — the SAME permanent dead end M-1 was about,
 // reachable with no stale row at all. Inject a throw into unpinCommondirTrustIfOwned and assert the WHOLE
 // update rolls back: the project's repoPath is unchanged, and the old pin is untouched (not moved/handed
-// off/deleted).
+// off/deleted). Card 87b1c8a1 (item 3) widened this to also assert the NEW path: PASS 1 of
+// resetMainlineBaselinesForRepoChange pins the new target BEFORE pass 2 retires the old one, so a real bug
+// could have left the new path's pin surviving a rollback — and the index entry must still name the OLD
+// path, never the new one, after the rollback.
 // ────────────────────────────────────────────────────────────────────────────────────────────────────────
 const repoW = initRepo("m2-w");
 const idM2E = `cgcr-m2e-${sfx}`;
 db.insertProject(freshProject(idM2E, repoW));
 const pinWBefore = db.getCommondirTrustPin(repoW);
 check("(M2, setup) E is pinned at W", pinWBefore?.projectId === idM2E);
+const repoM2New = initRepo("m2-new");
 const origUnpin = Db.prototype.unpinCommondirTrustIfOwned;
 Db.prototype.unpinCommondirTrustIfOwned = function () { throw new Error("M-2 injected failure"); };
 let m2Threw = null;
-try { db.updateProject(idM2E, { repoPath: initRepo("m2-new") }); } catch (e) { m2Threw = e; }
+try { db.updateProject(idM2E, { repoPath: repoM2New }); } catch (e) { m2Threw = e; }
 Db.prototype.unpinCommondirTrustIfOwned = origUnpin;
 check("(M2) the injected throw propagates", m2Threw !== null && /M-2 injected failure/.test(m2Threw.message));
 check("(M2) the WHOLE update rolled back — repoPath is unchanged (was: stranded on the NEW path)", db.getProject(idM2E)?.repoPath === repoW);
 check("(M2) …and the OLD pin at W is untouched — not moved, handed off, or deleted", JSON.stringify(db.getCommondirTrustPin(repoW)) === JSON.stringify(pinWBefore));
+check("(M2, item 3) the NEW path's pin was ALSO rolled back (pass 1 pinned it before pass 2 threw)", db.getCommondirTrustPin(repoM2New) === null);
+check("(M2, item 3) the index entry still names the OLD path, never the new one, after rollback", db.getMeta(`commondir-trust-pin-index:${idM2E}:primary`) === repoW);
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────────────
 // overwrite case: a bind/rebind onto a literal path someone else owns, where a live walk does NOT confirm

@@ -8,7 +8,7 @@ import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, 
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
 import { BROWSER_NOTIFICATION_KINDS, MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, redactAlertWebhookInConfig, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
+import { MAX_EVENTS_SEARCH_PAGE, CommondirPinConflictError } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
@@ -1353,7 +1353,7 @@ export class PlatformMcpRouter {
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, even on this elevated surface
           vaultOnly: false, // this tool requires repoPath — never vault-only
         };
-        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
+        try { db.insertProject(project); } catch (e) { if (e instanceof CommondirPinConflictError) return ok({ error: e.message }); throw e; }
         return ok(project);
       },
     );
@@ -1403,7 +1403,7 @@ export class PlatformMcpRouter {
         };
         // Backstop (S-3): a race between the pre-flight above and this write, never the common case —
         // see the pin-conflict pre-flight note.
-        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
+        try { db.insertProject(project); } catch (e) { if (e instanceof CommondirPinConflictError) return ok({ error: e.message }); throw e; }
         return ok(project);
       },
     );
@@ -2854,9 +2854,10 @@ export class PlatformMcpRouter {
         const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
         // @decision 3a5c5d4a (round 6, S-3) — updateProject refuses (throws) on a pin conflict; surface
         // that as the SAME ok({error}) shape every other refusal in this tool already uses.
+        // @decision 87b1c8a1 — narrowed to CommondirPinConflictError; any other throw is a real fault.
         try {
           db.updateProject(projectId, { name, vaultPath, repoPath, repos, vaultOnly: vaultOnlyPatch });
-        } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
+        } catch (e) { if (e instanceof CommondirPinConflictError) return ok({ error: e.message }); throw e; }
         // STALE-PROMPT LINT (card 0597e092): `project` is the PRE-update row (fetched above, before the
         // write), so this compares old-vs-new correctly — the SAME shared lint the REST PATCH path uses,
         // so a rename produces identical warnings regardless of which surface performed it.

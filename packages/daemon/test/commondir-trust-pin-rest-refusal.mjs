@@ -150,4 +150,49 @@ function plantOwnGit(nested) {
   }
 }
 
+// ===================== (4) card 87b1c8a1 (Code Review R3): a NON-conflict throw becomes a real 500, not a false 409 =====================
+// insertProject's catch is narrowed to CommondirPinConflictError (card 87b1c8a1) — a genuine internal
+// fault (here: a plain Error with nothing to do with a pin conflict) must propagate as a real 500, never
+// be laundered into the SAME 409 shape the three cases above use for an actual conflict. A bare
+// `statusCode === 500` alone would stay green for ANY unrelated 500 (e.g. a route-level bug), so the
+// monkey-patch also sets a `reached` flag — asserted TRUE — proving the 500 we're checking really did
+// come from insertProject's own narrowed catch, not from somewhere else in the handler.
+{
+  const db = new Db(path.join(TMP, "loom-4.db"));
+  const app = await buildApp(db);
+  let reached = false;
+  const origInsertProject = Db.prototype.insertProject;
+  Db.prototype.insertProject = function () { reached = true; throw new Error("injected non-conflict internal fault"); };
+  try {
+    const res = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Fourth", repoPath: initRepo("r4") } });
+    check("(4) insertProject's injected throw was actually reached", reached === true);
+    check("(4) a non-conflict throw from insertProject returns 500, NOT 409", res.statusCode === 500);
+  } finally {
+    Db.prototype.insertProject = origInsertProject;
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
+// ===================== (4b) card 87b1c8a1 (Code Review R3): the SAME narrowing on PATCH /api/projects/:id =====================
+{
+  const db = new Db(path.join(TMP, "loom-4b.db"));
+  const app = await buildApp(db);
+  let reached = false;
+  const origUpdateProject = Db.prototype.updateProject;
+  Db.prototype.updateProject = function () { reached = true; throw new Error("injected non-conflict internal fault"); };
+  try {
+    const owner = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "FourthB", repoPath: initRepo("r4b") } });
+    check("(4b, setup) owner bind succeeds (201)", owner.statusCode === 201);
+    const ownerId = owner.json().id;
+    const res = await app.inject({ method: "PATCH", url: `/api/projects/${ownerId}`, payload: { name: "renamed" } });
+    check("(4b) updateProject's injected throw was actually reached", reached === true);
+    check("(4b) a non-conflict throw from updateProject returns 500, NOT 409", res.statusCode === 500);
+  } finally {
+    Db.prototype.updateProject = origUpdateProject;
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 await finishAndExit(failures === 0 ? 0 : 1);

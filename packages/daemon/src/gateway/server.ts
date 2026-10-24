@@ -21,7 +21,7 @@ import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archi
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
 import type { Db, StoredQuestionAttachment } from "../db.js";
-import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS } from "../db.js";
+import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS, CommondirPinConflictError } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -4246,10 +4246,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
     };
     // @decision 3a5c5d4a (round 6, S-3) — backstop: the pre-flight above closes the common case, but
-    // insertProject re-checks internally (fail-closed against a race between the two); surface that as
-    // the SAME 409 shape rather than an uncaught 500. A stray dir in this narrow race window is an
-    // accepted residual — see the round-6 record section.
-    try { deps.db.insertProject(project); } catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }); }
+    // insertProject re-checks internally (fail-closed against a race between the two). A stray dir in
+    // this narrow race window is an accepted residual — see the round-6 record section.
+    // @decision 87b1c8a1 — the catch below narrows on CommondirPinConflictError (409); any other throw
+    // is a real internal fault and propagates as a real 500.
+    try { deps.db.insertProject(project); } catch (e) { if (e instanceof CommondirPinConflictError) return reply.code(409).send({ error: e.message }); throw e; }
     // Card ce9a3a91: redact sessionEnv on BOTH exits below like the other project-returning WRITE routes
     // (0c5d6851) — nothing in the setup wizard reads config.sessionEnv back out of this response.
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
@@ -5094,7 +5095,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       repos,
       vaultOnly: !repoPath, // the vault-only branch above — no separate repo was ever given
     };
-    try { deps.db.insertProject(project); } catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }); }
+    try { deps.db.insertProject(project); } catch (e) { if (e instanceof CommondirPinConflictError) return reply.code(409).send({ error: e.message }); throw e; }
     const projectRead = redactSessionEnvForRead(project);
     return reply.code(201).send(repoGateWarning ? { ...projectRead, warning: repoGateWarning } : projectRead);
   });
@@ -5245,8 +5246,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
     const namePatch = b.name === undefined ? undefined : (b.name as string).trim();
     // @decision 3a5c5d4a (round 6, S-3) — updateProject refuses (throws) on a commondir-trust-pin
-    // conflict; surface that as the SAME 409 shape every other refusal in this handler already uses,
-    // rather than an uncaught 500.
+    // conflict; surface that as the SAME 409 shape every other refusal in this handler already uses.
+    // @decision 87b1c8a1 — narrowed to CommondirPinConflictError; any OTHER throw is a real internal
+    // fault and propagates as a real 500, not a false 409.
     try {
       deps.db.updateProject(id, {
         name: namePatch,
@@ -5258,7 +5260,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         repos,
         vaultOnly: vaultOnlyPatch,
       });
-    } catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }); }
+    } catch (e) { if (e instanceof CommondirPinConflictError) return reply.code(409).send({ error: e.message }); throw e; }
     // STALE-PROMPT LINT (card 0597e092): `p` is the PRE-update row (fetched at the top of this handler,
     // before the write above), so this compares old-vs-new correctly. Read BEFORE the notify block below
     // so a rename note and a stale-prompt warning are computed from the exact same write.

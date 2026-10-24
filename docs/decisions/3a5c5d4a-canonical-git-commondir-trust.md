@@ -1002,6 +1002,20 @@ can trust a STALE index row) — all closed in the SAME round, below.
    end M-1 was about, reached with no stale row involved at all. `resolveTrustedToplevel` (the only work
    `pinCommondirTrust` does beyond synchronous `app_meta`/`projects` reads+writes) is itself synchronous
    fs I/O, so wrapping it inside a `better-sqlite3` transaction is safe (no await inside the callback).
+   **Card `87b1c8a1` correction:** the transaction wrap above closed the DB-state half of this dead end,
+   but `appendEvent`'s own listener dispatch (the outbound alert webhook) still fired SYNCHRONOUSLY the
+   moment each event's INSERT ran — i.e. DURING this same transaction, before it had actually committed.
+   A later throw in the same pin/unpin pass could still roll that INSERT back after the webhook had
+   already announced it as having happened (though NOT for `insertProject`'s own pin loop specifically —
+   `pinCommondirTrust` never calls `appendEvent` at all, so `insertProject`'s transaction never reaches
+   this failure mode; `updateProject`/`deleteProject` do, via `unpinCommondirTrustIfOwned`). Closed by
+   `87b1c8a1`: `appendEvent` now queues its notification while `this.db.inTransaction`, and `Db`'s
+   EXISTING PUBLIC `runInTransaction` (card `ccd373cc` — not a new helper; its 8 pre-existing external
+   callers all inherit this for free) flushes the queue only after its own REAL, non-nested commit, and
+   drops it entirely on a throw at ANY nesting level (a caught, swallowed nested throw — e.g. `setup.ts`'s
+   `project_update`, already nesting `updateProject`'s own call before this card — must not leak the
+   nested call's own rolled-back notifications into the outer commit's later flush) — see that card's own
+   record.
 
 **Residual, accepted, not closed by this round:** the pre-flight in bullet 5 closes the COMMON case for
 every create route, but a genuine RACE between two concurrent requests — one passes the pre-flight, a

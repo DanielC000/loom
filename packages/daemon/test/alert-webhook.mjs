@@ -159,6 +159,64 @@ const evt = (kind, managerSessionId, extra = {}) => ({ id: `e-${kind}-${managerS
     events ? events.some((e) => e.id === "ev-throw") : true);
 }
 
+// --- (5b) card 87b1c8a1: inside a transaction the listener is DEFERRED until a REAL commit, and
+// DROPPED entirely on rollback — a rolled-back event must never have already told the webhook it
+// happened. ----------------------------------------------------------------------------------------
+{
+  let calls = 0;
+  db.setEventListener(() => { calls++; });
+
+  // (i) a transaction that files an event and then THROWS: the listener must never fire, even though
+  // appendEvent's own INSERT ran before the throw (that INSERT is rolled back along with everything else).
+  let threw = null;
+  try {
+    db.runInTransaction(() => {
+      db.appendEvent({ id: "ev-tx-rollback", ts: now, managerSessionId: "mWH", kind: "merge_done" });
+      throw new Error("tx rollback injected");
+    });
+  } catch (e) { threw = e; }
+  check("(5b) the injected throw propagates", threw !== null && /tx rollback injected/.test(threw.message));
+  check("(5b) a rolled-back transaction's event listener is NEVER called (was: fired mid-transaction, before the rollback)", calls === 0);
+  const rolledBackEvents = db.listEvents("mWH").filter((e) => e.id === "ev-tx-rollback");
+  check("(5b) …and the event row itself did not land either (same rollback)", rolledBackEvents.length === 0);
+
+  // (ii) a transaction that files an event and COMMITS: the listener fires exactly once.
+  let received = null;
+  db.setEventListener((e) => { calls++; received = e; });
+  db.runInTransaction(() => {
+    db.appendEvent({ id: "ev-tx-commit", ts: now, managerSessionId: "mWH", kind: "merge_done", detail: { n: 2 } });
+  });
+  check("(5b) a committed transaction's listener fires exactly once", calls === 1 && received?.id === "ev-tx-commit");
+  const committedEvents = db.listEvents("mWH").filter((e) => e.id === "ev-tx-commit");
+  check("(5b) …and the event row landed", committedEvents.length === 1);
+}
+
+// --- (5c) Code Review R2: a NESTED runInTransaction's rolled-back notification must never leak into
+// the OUTER commit's flush. better-sqlite3 runs the nested call as a SAVEPOINT (this.db.inTransaction
+// stays true throughout), so a caller that catches the nested throw and continues must still never see
+// the nested call's own queued-then-rolled-back event fire later. ------------------------------------
+{
+  let calls = 0;
+  let received = null;
+  db.setEventListener((e) => { calls++; received = e; });
+  db.runInTransaction(() => {
+    db.appendEvent({ id: "ev-outer-b", ts: now, managerSessionId: "mWH", kind: "merge_done", detail: { leg: "outer-before" } });
+    try {
+      db.runInTransaction(() => {
+        db.appendEvent({ id: "ev-nested-rollback", ts: now, managerSessionId: "mWH", kind: "merge_done" });
+        throw new Error("nested rollback injected");
+      });
+    } catch { /* the outer caller swallows the nested throw and continues — exactly the leak shape */ }
+    db.appendEvent({ id: "ev-outer-c", ts: now, managerSessionId: "mWH", kind: "merge_done", detail: { leg: "outer-after" } });
+  });
+  check("(5c) the outer commit's listener fires exactly twice (outer-before + outer-after), never for the nested rollback", calls === 2);
+  check("(5c) the nested event never fired", received?.id !== "ev-nested-rollback");
+  const nestedRow = db.listEvents("mWH").filter((e) => e.id === "ev-nested-rollback");
+  check("(5c) …and its row never landed either (the SAVEPOINT rollback)", nestedRow.length === 0);
+  const outerRows = db.listEvents("mWH").filter((e) => e.id === "ev-outer-b" || e.id === "ev-outer-c");
+  check("(5c) …while BOTH outer events landed", outerRows.length === 2);
+}
+
 db.close();
 
 // --- (6) SECURITY: the validator boundary — human ACCEPTS, agent REJECTS ----------------------------

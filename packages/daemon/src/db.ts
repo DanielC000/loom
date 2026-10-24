@@ -1603,6 +1603,14 @@ const commondirTrustPinKey = (repoPath: string): string => `commondir-trust-pin:
 const commondirTrustPinIndexKey = (projectId: string, repoKey: string): string => `commondir-trust-pin-index:${projectId}:${repoKey}`;
 
 /**
+ * @decision 87b1c8a1 — a caller must catch THIS type only, mapping it to its usual 409/`ok({error})`;
+ * never a bare `catch (e)` that would also hide a real internal fault as a false "conflict" refusal.
+ */
+export class CommondirPinConflictError extends Error {
+  constructor(message: string) { super(message); this.name = "CommondirPinConflictError"; }
+}
+
+/**
  * app_meta key for the wedged-worktree tracking set (task dea6728e — the threadpool-safe redo of
  * bd9fc808). A single JSON array of {@link WedgedWorktreeEntry}, daemon-GLOBAL, mirroring
  * getCompanionHome's single-JSON-key pattern (NO new table for what is expected to stay a handful of
@@ -2728,11 +2736,17 @@ export class Db {
   private db: Database.Database;
   /**
    * Optional post-write listener for appended orchestration events — the chokepoint the outbound
-   * alert-webhook emitter hooks (wired at boot). Invoked AFTER the audit row is committed, in a
-   * try/catch, so a listener fault NEVER breaks the event path (best-effort by contract). Single
-   * listener by design (one emitter); not an event-bus.
+   * alert-webhook emitter hooks (wired at boot). Invoked in a try/catch, so a listener fault NEVER
+   * breaks the event path (best-effort by contract). Single listener by design (one emitter); not an
+   * event-bus.
+   * @decision 87b1c8a1 — fires immediately only outside a transaction; inside one it is queued (see
+   * {@link Db.prototype.appendEvent}/{@link Db.prototype.runInTransaction}) and flushed only on commit,
+   * never while a later statement could still roll this event's own INSERT back.
    */
   private eventListener?: (evt: OrchestrationEvent) => void;
+  /** @decision 87b1c8a1 — notifications queued by `appendEvent` while a transaction is open; flushed by
+   *  {@link Db.prototype.runInTransaction} after its OWN (non-nested) commit, dropped on rollback. */
+  private pendingEventNotifications: OrchestrationEvent[] = [];
   /**
    * Post-commit session change-feed hook (C3 of the WS delta-push umbrella, 1efde4ba) — the gateway
    * wires this with a direct assignment (`db.sessionChangeListener = (id) => fleetHub.markSessionDirty(id)`
@@ -3496,7 +3510,7 @@ export class Db {
     // @decision 3a5c5d4a (round 6) — refuse the WHOLE insert, before any write, on a pin conflict.
     const repoCandidates: Array<[string, string]> = [["primary", p.repoPath], ...(p.repos ?? []).map((r): [string, string] => [r.key, r.path])];
     this.assertNoCommondirPinConflicts(p.id, repoCandidates.map(([repoKey, repoPath]) => ({ repoKey, repoPath })));
-    this.db.transaction(() => {
+    this.runInTransaction(() => {
       this.db.prepare(
         `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos,no_gate_by_design,deny_globs,repos,vault_only)
          VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos,@noGateByDesign,@denyGlobs,@repos,@vaultOnly)`,
@@ -3517,7 +3531,7 @@ export class Db {
       for (const [repoKey, repoPath] of repoCandidates) {
         this.pinCommondirTrust(p.id, repoKey, repoPath, "bind");
       }
-    })();
+    });
   }
   /**
    * PUBLIC pre-flight: for every (repoKey, repoPath) candidate, does an existing commondir-trust pin at
@@ -3556,7 +3570,7 @@ export class Db {
    *  its own host-mutating step should call the non-throwing public method FIRST instead (see its doc). */
   private assertNoCommondirPinConflicts(projectId: string, candidates: Array<{ repoKey: string; repoPath: string }>): void {
     const check = this.checkCommondirPinConflicts(projectId, candidates);
-    if (!check.ok) throw new Error(check.error);
+    if (!check.ok) throw new CommondirPinConflictError(check.error);
   }
   /**
    * fs-only, best-effort: walks `repoPath` via {@link resolveTrustedToplevel} and, on success, records
@@ -3823,10 +3837,10 @@ export class Db {
     const set = names.map((c) => `${c} = ?`).join(", ");
     // @decision 3a5c5d4a (round 6, M-2) — the UPDATE and resetMainlineBaselinesForRepoChange's pin/unpin
     // passes run inside ONE transaction — see insertProject's own M-2 note for why.
-    this.db.transaction(() => {
+    this.runInTransaction(() => {
       this.db.prepare(`UPDATE projects SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
       if (before) this.resetMainlineBaselinesForRepoChange(id, before, patch);
-    })();
+    });
   }
   /** The shared (oldPaths, newPaths) map construction `assertNoCommondirPinConflictsForRepoChange` and
    *  `resetMainlineBaselinesForRepoChange` both key off of, so the two can never enumerate a different
@@ -4305,7 +4319,7 @@ export class Db {
   deleteProject(id: string): { sessionIds: string[] } {
     const sessionIds = (this.db.prepare("SELECT id FROM sessions WHERE project_id = ?").all(id) as Row[]).map((r) => r.id as string);
     const agentIds = (this.db.prepare("SELECT id FROM agents WHERE project_id = ?").all(id) as Row[]).map((r) => r.id as string);
-    this.db.transaction(() => {
+    this.runInTransaction(() => {
       for (const sid of sessionIds) {
         this.cascadeSessionForeignKeyChildren(sid); // card e152014c
         // orchestration_events is session-keyed (manager OR worker) with no project_id — drop per session id.
@@ -4351,7 +4365,7 @@ export class Db {
       this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM agents WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
-    })();
+    });
     for (const sid of sessionIds) this.notifySessionChanged(sid);
     return { sessionIds };
   }
@@ -6779,16 +6793,16 @@ export class Db {
   /** @decision 5a56bb0a — atomic: archiveSession + setResumability("dead") + the retirement marker event,
    *  in ONE transaction, so a hard kill between them can never leave a dead+archived row with no marker
    *  (unrefusable by resume()'s chokepoint, and un-retried — nothing re-derives "dead" for this reason). */
-  // The listeners (markSessionDirty, the alert-webhook emitter) fire mid-transaction here, not post-commit
-  // as their own docs describe — safe: markSessionDirty is pure in-memory bookkeeping (its own DB read
-  // fires ~200ms later, well after commit), and the webhook listener's synchronous prefix reads via this
-  // SAME connection (consistent with the transaction's own writes) before its first real `await`.
+  // markSessionDirty fires mid-transaction (pure in-memory bookkeeping; its own DB read fires ~200ms
+  // later, well after commit — safe either way). The alert-webhook listener does NOT: appendEvent now
+  // queues its notification and runInTransaction flushes it only once this call's own commit lands.
+  // @decision 87b1c8a1
   archiveDeadRecycleSuccessor(id: string, event: OrchestrationEvent): void {
-    this.db.transaction(() => {
+    this.runInTransaction(() => {
       this.archiveSession(id);
       this.setResumability(id, "dead");
       this.appendEvent(event);
-    })();
+    });
   }
   /**
    * Set ONLY the human-readable lastError (without touching the rate-limit park, unlike
@@ -7181,12 +7195,24 @@ export class Db {
       workerSessionId: evt.workerSessionId ?? null, taskId: evt.taskId ?? null,
       kind: evt.kind, detailJson: detail === undefined ? null : JSON.stringify(detail), seq,
     });
-    // Notify the (optional) listener AFTER the row is committed. Best-effort: a listener fault must
-    // never propagate into the orchestration event path, so swallow it.
-    if (this.eventListener) {
+    // @decision 87b1c8a1 — inside a transaction this INSERT isn't durable yet (a later statement can
+    // still roll it back), so queue the notification; runInTransaction flushes it on a real commit.
+    if (this.db.inTransaction) {
+      this.pendingEventNotifications.push(evt);
+    } else if (this.eventListener) {
       try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
     }
     return seq;
+  }
+  /** Fire every queued listener notification, in order, then clear the queue — called ONLY by
+   *  {@link Db.prototype.runInTransaction} after its own real commit. */
+  private flushPendingEventNotifications(): void {
+    const pending = this.pendingEventNotifications;
+    this.pendingEventNotifications = [];
+    if (!this.eventListener) return;
+    for (const evt of pending) {
+      try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
+    }
   }
   /**
    * The next value from the never-reused `orchestration_event_seq` AUTOINCREMENT counter — see the
@@ -7521,10 +7547,10 @@ export class Db {
    *  marker still set, duplicating it on retry. Caller skips this (clears the marker alone instead) when
    *  a completion event for this (predecessorId, freshId) pair already exists. */
   finishHaltedRecyclePending(predecessorId: string, event: OrchestrationEvent): void {
-    this.db.transaction(() => {
+    this.runInTransaction(() => {
       this.appendEvent(event);
       this.clearHaltedRecyclePendingStatement(predecessorId);
-    })();
+    });
     this.notifySessionChanged(predecessorId);
   }
   /**
@@ -8497,9 +8523,26 @@ export class Db {
     return this.db.prepare("DELETE FROM task_relations WHERE from_task_id = ? AND to_task_id = ? AND type = ?")
       .run(fromTaskId, toTaskId, type).changes > 0;
   }
-  /** Run `fn` in ONE transaction (structure writes touch tasks + task_relations together). */
+  /**
+   * Run `fn` in ONE transaction (structure writes touch tasks + task_relations together). Every
+   * `appendEvent` call `fn` makes (directly or transitively) queues its listener notification instead of
+   * firing immediately (see appendEvent's own doc) — this is what flushes that queue, once, only after
+   * the OUTERMOST (non-nested) call's own real commit, and drops it entirely if `fn` throws.
+   * @decision 87b1c8a1 — every call snapshots the queue length on entry, truncating back to it on ITS
+   * OWN throw, so a caught nested throw (nesting already exists — `setup.ts`'s `project_update` wraps
+   * `updateProject`) never lets that nested call's rolled-back notifications reach the outer flush.
+   */
   runInTransaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)();
+    const nested = this.db.inTransaction;
+    const snapshotLen = this.pendingEventNotifications.length;
+    try {
+      const result = this.db.transaction(fn)();
+      if (!nested) this.flushPendingEventNotifications();
+      return result;
+    } catch (e) {
+      this.pendingEventNotifications.length = snapshotLen;
+      throw e;
+    }
   }
   /** Set a card's parent (null clears). Validation lives in tasks/relations.ts; this is a plain persist that
    *  deliberately does NOT bump updatedAt/version (a structure edit is not a title/body edit). */
@@ -9556,11 +9599,11 @@ export class Db {
       detail: { deliveredCredentialId: string; projectId: string; credentialEnvVar: string; reason: "reserved-name" };
     },
   ): boolean {
-    return this.db.transaction(() => {
+    return this.runInTransaction(() => {
       const marked = this.markCredentialUndeliverableNotified(id);
       if (marked) this.appendEvent(evt as OrchestrationEvent);
       return marked;
-    })();
+    });
   }
   /**
    * Card af08f7e8, REVISED by Code Review (the rotation blocker): revoke every LIVE row sharing `id`'s own

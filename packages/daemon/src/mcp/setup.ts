@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { Project, ProjectConfigOverride, Agent, Profile } from "@loom/shared";
 import { redactAlertWebhookInConfig } from "@loom/shared";
 import type { Db } from "../db.js";
+import { CommondirPinConflictError } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
@@ -262,7 +263,7 @@ export class SetupMcpRouter {
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, see project_update
           vaultOnly: !isCodeRepo, // the vault-only branch above — no separate repo was ever given
         };
-        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
+        try { db.insertProject(project); } catch (e) { if (e instanceof CommondirPinConflictError) return ok({ error: e.message }); throw e; }
         // Bind-time commit-identity assert (CODE repos only — a vault-only notes folder takes no commits):
         // surface a NON-blocking advisory if no resolvable identity (a later worker/merge commit would
         // FAIL) or one inappropriate for the origin host (the GitHub-vs-Forgejo rule, reused from the git
@@ -320,7 +321,7 @@ export class SetupMcpRouter {
           vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
         };
         // Backstop (S-3): a race between the pre-flight above and this write, never the common case.
-        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
+        try { db.insertProject(project); } catch (e) { if (e instanceof CommondirPinConflictError) return ok({ error: e.message }); throw e; }
         // Same bind-time identity assert as project_create, for the git kind (a vault folder takes no
         // commits). A fresh `git init` repo usually has no LOCAL identity, so this surfaces (non-blocking)
         // whether a global identity is even resolvable before a worker ever tries to commit here.
