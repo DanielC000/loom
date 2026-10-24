@@ -130,12 +130,14 @@ try {
     git(fx.repo, "branch", "feat");
     fx.trustBranch("feat");
     const featShaBefore = git(fx.repo, "rev-parse", "feat");
+    git(fx.repo, "pack-refs", "--all");
     git(fx.repo, "update-ref", "refs/remotes/feat/HEAD", featShaBefore);
     check("(R13-REMOTEHEAD-CREATE) setup control: git's own ambiguous shortening is really present", git(fx.repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/feat") !== "feat");
     const r = await fx.call("project_checkout_branch", { branch: "FEAT", create: true });
     check("(R13-REMOTEHEAD-CREATE) create:true \"FEAT\" over a remote-HEAD-shadowed \"feat\" is refused", r.ok === false);
     check("(R13-REMOTEHEAD-CREATE) the refusal names the real existing branch \"feat\"", /"feat"/.test(r.error));
     check("(R13-REMOTEHEAD-CREATE) feat's own sha is unchanged", git(fx.repo, "rev-parse", "feat") === featShaBefore);
+    check("(R13-REMOTEHEAD-CREATE) no local \"FEAT\" ref was ever created", (() => { try { git(fx.repo, "rev-parse", "--verify", "--quiet", "refs/heads/FEAT"); return false; } catch { return true; } })());
   }
 
 } finally {

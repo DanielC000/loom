@@ -1281,10 +1281,18 @@ before landing: an earlier draft of this test used it and failed GREEN-proof for
 is why that helper is now avoided here specifically). RED at `997f9591` ("no local branch exists").
 **(R13-REMOTEHEAD-SWITCH / -CREATE)** a `refs/remotes/feat/HEAD` ref (no `git remote add` — the bare ref
 alone reproduces the ambiguity) is a second, independent trigger for the identical bug: switching to
-`"feat"` succeeds (RED at `997f9591`), and `create:true "FEAT"` is refused, naming `feat` (RED at
-`997f9591` on the "names feat" assertion specifically — the bare "is refused" assertion happened to pass
-at `997f9591` too, for an unrelated reason, since the create path's exact-name check also failed to find
-`feat` and fell through to a different refusal; the naming assertion is what actually isolates this bug).
+`"feat"` succeeds (RED at `997f9591`), and `create:true "FEAT"` is refused, naming `feat`; `feat`'s own
+sha is unchanged; no local `FEAT` ref is ever created. **Card `e3c8a908`** corrected this scenario to
+`git pack-refs --all` before adding the remote-HEAD ref, matching R13-TAG-CREATE: without packing first,
+`refs/heads/feat` stays a LOOSE ref, and at `997f9591` the create path's exact-name check (then reading
+the ambiguity-prone `%(refname:short)`) fails to find `feat` at all and lets the gate through with no
+refusal — on Windows/NTFS, git's own `checkout -b FEAT` then collides with the existing loose `feat` file
+at the filesystem level and refuses on its own (`fatal: a branch named 'FEAT' already exists`), so only
+the `/"feat"/` text assertion discriminated RED from GREEN there; on case-sensitive Linux there is no such
+filesystem accident, so the RED run at `997f9591` really creates `FEAT` as a sibling branch. Packing first
+removes the NTFS loose-ref collision, so "is refused" and "no FEAT ref created" now go genuinely RED at
+`997f9591` on both platforms, isolating the real application-level bug rather than relying on an
+incidental filesystem refusal.
 Setup controls in every scenario assert git's own ambiguous shortening is genuinely present
 (`for-each-ref --format=%(refname:short)` on the manufactured fixture returns something other than
 `"feat"`) before trusting the scenario's own RED/GREEN result — without it, a scenario that happened not
