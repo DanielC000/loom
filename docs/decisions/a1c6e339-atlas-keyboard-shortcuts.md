@@ -62,9 +62,11 @@ A key that "works" is easy to assert falsely: a box that empties, a bar that app
 - **No discoverability affordance was added.** The card is parity, and parity is "the same keys still fire." Worth knowing for whoever picks that up, though: the session composer already advertises its own shortcut in its placeholder — `Send a turn to this session…  (Ctrl/Cmd+Enter)` — so one of the four editors is already discoverable and the other three (preset form, queue editor, startup-prompt editor) are not. Eyeballed at 1600×1000 under the Atlas Platform node.
 - **`docs/plans/atlas-ui/01-parity-checklist.md` was not edited.** Its §F rows still read `⚠️ NOT IN MOCKUPS`, which is a true statement about the mockups. P3-sign-off is the card that produces a signed-off copy of the checklist against the *built* Atlas; the corrections in §1 above are written here for it to pick up, the same way P2-5 recorded its "the Workspace node has no board" correction rather than editing the row.
 
-## 5 · Found while measuring: ⌘/Ctrl+C copies and clears the model, but the selection HIGHLIGHT stays painted
+## 5 · Found while measuring: ⌘/Ctrl+C copied and cleared the model, but the selection HIGHLIGHT stayed painted
 
-`Terminal.tsx`'s smart-copy branch is `writeText(term.getSelection())` followed by `term.clearSelection()`. The copy is correct and the model really is cleared — but the selection the user can see is **not** repainted away.
+**FIXED since, by card `6b8ff4a2` — root cause and the current contract: `docs/decisions/6b8ff4a2-terminal-selection-repaint-after-copy.md`.** This section is kept as the measurement that found it; its own prohibitions are superseded below.
+
+At the time of this card, `Terminal.tsx`'s smart-copy branch was `writeText(term.getSelection())` followed by `term.clearSelection()`. The copy was correct and the model really was cleared — but the selection the user could see was **not** repainted away.
 
 Measured on this build, with a throwaway diagnostic driving the real canned-pty terminal (`.xterm-selection`'s child elements, and whether the wrapped `navigator.clipboard.writeText` fired):
 
@@ -81,5 +83,6 @@ It is **identical under both shells**, so Atlas introduced nothing here — it i
 
 ### Do not
 
-- **Do not assert "the selection highlight is gone" after a copy.** It is not, on this build. Witness the clear through the app's own logic instead — a second ⌘/Ctrl+C must now fall through as SIGINT and copy nothing, which is only possible if `hasSelection()` went false.
-- **Do not "fix" this inside a parity card.** Changing `Terminal.tsx`'s repaint behaviour is a behavioural change to a component every session mounts, and it needs its own card and its own verification.
+- **Do not restore this section's old prohibition.** It read "do not assert the selection highlight is gone after a copy," and card `6b8ff4a2` made that assertion true and required: the spec's clipboard leg now asserts a painted area of 0, twice, 400ms apart. The live prohibitions live in that card's own record.
+- **Do not witness the MODEL's clear through the DOM either way.** A second ⌘/Ctrl+C falling through as SIGINT and copying nothing is still the only thing that proves `hasSelection()` went false; the painted-area check is a separate claim about the highlight, not a substitute for it.
+- **Do not "fix" a defect like this inside a parity card.** Changing `Terminal.tsx`'s repaint behaviour is a behavioural change to a component every session mounts, and it needed its own card and its own verification — which is what `6b8ff4a2` was.

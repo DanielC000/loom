@@ -498,18 +498,30 @@ for (const shell of SHELLS) {
       expect((await stdinFrames(page)).slice(beforeCopy).join(""),
         "a copy must not also emit the interrupt byte").not.toContain("\x03");
 
-      // (e) THE SELECTION WAS REALLY CLEARED — witnessed through the app's own logic rather than the
-      // DOM. A SECOND Ctrl+C now falls through as SIGINT and copies nothing, which is only possible if
-      // `term.hasSelection()` went false. This is the behaviour the clear exists FOR: without it a
-      // terminal would keep re-copying the same stale text and could never be interrupted again.
+      // (e) THE PAINTED HIGHLIGHT IS GONE — AND STAYS GONE (card 6b8ff4a2, the fix for the defect
+      // a1c6e339 measured here and could not assert). `term.select(0, 0, 0)` collapses the selection
+      // to an empty range instead of calling `clearSelection()`, which is what makes xterm's DOM
+      // renderer drop its own cached selection coordinates rather than repainting them on the pane's
+      // next resize.
       //
-      // ⚠️ Deliberately NOT asserted on the DOM, because the DOM does not agree. MEASURED on this
-      // build: `.xterm-selection` holds 0 child elements at rest, 2 after the double-click, and still
-      // 2 (painted, non-zero area) after the copy — while an ordinary click elsewhere does take it
-      // back to 0. So `clearSelection()` clears the MODEL but the selection HIGHLIGHT stays on screen
-      // until some later event repaints it. That is a real, small, pre-existing defect — identical
-      // under both shells, so nothing Atlas introduced and nothing this parity card may quietly
-      // assert away. Carded separately; see docs/decisions/a1c6e339-atlas-keyboard-shortcuts.md §5.
+      // Measured in AREA, never in element count: an empty range still appends zero- and
+      // negative-geometry ghost children for the frame it lands in, so a count check is
+      // timing-dependent while "nothing is painted" is not. And ⛔ never drop the SECOND reading: the
+      // defect's signature was RESURRECTION (the area came back on the pane's very next resize, ~60
+      // times a second), and the negative control for this leg proved the first `expect.poll` alone is
+      // vacuous — reverting the fix left it GREEN, because the area really does touch 0 in the frame
+      // between the clear and the stale repaint. Both shells failed on the delayed read, and only it.
+      await expect.poll(() => selectionArea(page)).toBe(0);
+      await page.waitForTimeout(400); // many resize frames: the stale repaint had every chance to return
+      expect(await selectionArea(page),
+        "the copied selection must not be repainted from xterm's cached render model").toBe(0);
+
+      // …and the MODEL was really cleared too, witnessed through the app's own logic: a SECOND Ctrl+C
+      // falls through as SIGINT and copies nothing, which is only possible if `term.hasSelection()`
+      // went false. This is the behaviour the clear exists FOR — without it a terminal would keep
+      // re-copying the same stale text and could never be interrupted again. It is also the leg that
+      // keeps the fix honest: an "un-paint" that lost the empty-range's `hasSelection() === false`
+      // property would break the interrupt, and this is what would catch it.
       const beforeSecond = (await stdinFrames(page)).length;
       const clipsBeforeSecond = (await clipboardWrites(page)).length;
       await page.keyboard.press("Control+c");
@@ -568,9 +580,9 @@ async function recordClipboardWrites(page: Page) {
 
 const clipboardWrites = (page: Page) => page.evaluate(() => (window as unknown as { __loomClip: string[] }).__loomClip ?? []);
 
-/** The xterm selection's total painted area in px². Non-zero iff something is actually selected — the
- *  DOM renderer keeps its selection elements across a clear and zeroes their geometry instead of
- *  removing them, so counting elements cannot tell a live selection from a cleared one. */
+/** The xterm selection's total painted area in px². Non-zero iff something is actually painted — the
+ *  DOM renderer can hold selection elements whose geometry is zero (or negative) while nothing is
+ *  selected, so counting elements cannot tell a live selection from a cleared one. Area can. */
 const selectionArea = (page: Page) => page.evaluate(() =>
   Array.from(document.querySelectorAll<HTMLElement>(".xterm-selection div")).reduce((sum, el) => {
     const r = el.getBoundingClientRect();

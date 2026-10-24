@@ -159,7 +159,11 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       if (mod && key === "c") {
         if (term.hasSelection()) {
           navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
-          term.clearSelection();
+          // Collapse the selection to an EMPTY RANGE rather than calling term.clearSelection().
+          // @decision 6b8ff4a2 — never swap this back for clearSelection(): both leave hasSelection()
+          // false, but only an empty range also un-paints the highlight (it is the same shape xterm's
+          // own plain-click path uses, and the reason a click clears what a copy did not).
+          term.select(0, 0, 0);
           return false; // copied — don't also send SIGINT
         }
         return true; // nothing selected → pass through as interrupt (\x03)
