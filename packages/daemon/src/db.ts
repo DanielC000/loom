@@ -3662,6 +3662,68 @@ export class Db {
     try { return JSON.parse(raw) as CommondirTrustPin; } catch { return null; }
   }
   /**
+   * HUMAN-ONLY: refresh THIS (project, repoKey)'s own commondir-trust pin from a fresh live walk of
+   * `repoPath` — the only way to refresh an EXISTING pin (a same-path `updateProject` is a no-op; the boot
+   * backfill skips anything already pinned). Reuses {@link checkCommondirPinConflicts} for ownership —
+   * never crosses a DIFFERENT (project, repoKey)'s pin. `expectedToplevel` must match a fresh live walk or
+   * this refuses (TOCTOU guard); `alsoAffects` discloses every OTHER (project, repoKey) sharing this path.
+   * @decision a8bc0404 — never skip the expectedToplevel check or write without it matching live; never
+   * overwrite a pin owned by a different (project, repoKey) without going through checkCommondirPinConflicts.
+   */
+  repinCommondirTrust(
+    projectId: string, repoKey: string, repoPath: string, expectedToplevel: string,
+  ): { ok: true; oldToplevel: string | null; newToplevel: string; alsoAffects: Array<{ projectId: string; repoKey: string }> }
+   | { ok: false; kind: "conflict" | "walk-failed" | "expected-mismatch"; error: string } {
+    const conflict = this.checkCommondirPinConflicts(projectId, [{ repoKey, repoPath }]);
+    if (!conflict.ok) return { ok: false, kind: "conflict", error: conflict.error };
+    const walk = resolveTrustedToplevel(repoPath);
+    if (!walk.ok) return { ok: false, kind: "walk-failed", error: `cannot re-pin repoKey "${repoKey}" at "${repoPath}": ${walk.reason}` };
+    const caseFold = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+    if (caseFold(walk.toplevel) !== caseFold(expectedToplevel)) {
+      console.warn(`[db] commondir-trust-pin repin refused (expected-mismatch): project=${projectId} repoKey=${repoKey} repoPath=${repoPath} expected=${expectedToplevel} live=${walk.toplevel}`);
+      return {
+        ok: false, kind: "expected-mismatch",
+        error: `cannot re-pin repoKey "${repoKey}" at "${repoPath}": the live toplevel right now is "${walk.toplevel}", which does not match the expectedToplevel "${expectedToplevel}" passed in — refusing rather than trusting whatever may have changed between when you read the refusal and now; re-check and pass the CURRENT live toplevel if this is still the right path.`,
+      };
+    }
+    const oldToplevel = this.getCommondirTrustPin(repoPath)?.toplevel ?? null;
+    // A2: every OTHER index entry naming this literal path shares the trust anchor this write is about to
+    // change — collected BEFORE the write (keyed off the index, independent of the pin row itself).
+    const alsoAffects = this.listOtherCommondirPinIndexHolders(repoPath, projectId, repoKey);
+    this.pinCommondirTrust(projectId, repoKey, repoPath, "human-repin");
+    this.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "commondir_trust_pinned",
+      detail: { event: "human-repin", projectId, repoKey, repoPath, oldToplevel, newToplevel: walk.toplevel, alsoAffects },
+    });
+    return { ok: true, oldToplevel, newToplevel: walk.toplevel, alsoAffects };
+  }
+  /**
+   * ALL other (project, repoKey) index entries whose own value is this literal path, for DISCLOSURE on a
+   * human re-pin — never a trust decision, unlike {@link findOtherCommondirPinHolder} (ONE handoff
+   * candidate). Mirrors that method's own live-validate-and-clean-stale-rows shape, collecting every match.
+   */
+  private listOtherCommondirPinIndexHolders(repoPath: string, excludeProjectId: string, excludeRepoKey: string): Array<{ projectId: string; repoKey: string }> {
+    const target = literalRepoPathKey(repoPath);
+    const prefix = "commondir-trust-pin-index:";
+    const out: Array<{ projectId: string; repoKey: string }> = [];
+    for (const row of this.listMetaByPrefix(prefix)) {
+      const rest = row.key.slice(prefix.length);
+      const sep = rest.lastIndexOf(":");
+      if (sep < 0) continue;
+      const rowProjectId = rest.slice(0, sep);
+      const rowRepoKey = rest.slice(sep + 1);
+      if (rowProjectId === excludeProjectId && rowRepoKey === excludeRepoKey) continue;
+      if (literalRepoPathKey(row.value) !== target) continue;
+      const currentPath = this.currentRepoPathForKey(rowProjectId, rowRepoKey);
+      if (currentPath === undefined || literalRepoPathKey(currentPath) !== target) {
+        this.deleteMeta(row.key); // stale — mirrors findOtherCommondirPinHolder's own M-1a cleanup
+        continue;
+      }
+      out.push({ projectId: rowProjectId, repoKey: rowRepoKey });
+    }
+    return out;
+  }
+  /**
    * A one-time (idempotent — safe to call every boot) pass over every project's own `repoPath` + `repos[]`
    * entry, pinning any (project, repoKey) that has no pin yet. Trust-on-first-use for a binding that
    * predates this feature: the walk at THIS boot cannot prove the repo was untouched by a worker before

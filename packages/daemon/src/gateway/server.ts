@@ -4976,6 +4976,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } catch { /* best-effort — see doc above */ }
     return deps.db.resetMainlineWatermark(p.id, repoKey, adopt);
   });
+  // @decision a8bc0404 — the ONLY way to refresh an EXISTING commondir-trust pin; same trust class as the
+  // writes above: loopback, human-only, never an MCP tool. `expectedToplevel` is required — a prior
+  // pinMismatch refusal names the live toplevel to pass back; never relax this to an optional field.
+  app.post("/api/projects/:id/commondir-trust-pin/repin", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const body = (req.body ?? {}) as { repoKey?: string; expectedToplevel?: string };
+    const repoKey = body.repoKey ?? "primary";
+    if (!deps.db.projectHasRepoKey(p, repoKey)) return reply.code(404).send({ error: "repo not found" });
+    if (!body.expectedToplevel || typeof body.expectedToplevel !== "string") {
+      return reply.code(400).send({ error: "expectedToplevel (string) is required — pass the live toplevel a prior refusal named" });
+    }
+    let repoPath = p.repoPath;
+    if (repoKey !== "primary") { const r = resolveRepoByKey(p, repoKey); repoPath = r.path; }
+    const result = deps.db.repinCommondirTrust(p.id, repoKey, repoPath, body.expectedToplevel);
+    if (!result.ok) return reply.code(result.kind === "walk-failed" ? 400 : 409).send({ error: result.error });
+    return reply.send(result);
+  });
 
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {

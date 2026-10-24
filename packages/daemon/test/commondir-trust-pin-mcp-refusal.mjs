@@ -193,5 +193,19 @@ const setupRouter = new SetupMcpRouter(db, {});
   check("(5) no new project was written", db.listAllProjects().length === before);
 }
 
+// ===================== (6) card a8bc0404 — the re-pin route is NEVER reachable from MCP =====================
+// A real tools/list sweep on BOTH routers, not an assumption: the repin capability is REST-only
+// (gateway/server.ts's POST /api/projects/:id/commondir-trust-pin/repin) and was never registered as an
+// MCP tool on either router — proven directly rather than inferred from "I didn't add one".
+{
+  const { client: platformClient } = await connectedClient(platformRouter, platformSid);
+  const { client: setupClient } = await connectedClient(setupRouter, setupSid);
+  const platformTools = (await platformClient.listTools()).tools.map((t) => t.name);
+  const setupTools = (await setupClient.listTools()).tools.map((t) => t.name);
+  const suspicious = (names) => names.filter((n) => /commondir|repin/i.test(n));
+  check("(6) platform MCP surface has no commondir/repin-named tool", suspicious(platformTools).length === 0);
+  check("(6) setup MCP surface has no commondir/repin-named tool", suspicious(setupTools).length === 0);
+}
+
 try { db.close(); } catch { /* best-effort — never let cleanup fail the test */ }
 await finishAndExit(failures === 0 ? 0 : 1);

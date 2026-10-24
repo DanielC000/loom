@@ -26,7 +26,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 useOwnLoomHome("loom-cgcr-home-");
 
-const { canonicalGit, killableCanonicalRaw, canonicalRaw, spawnCanonicalGitTree, checkCommondirTrust, CanonicalGitRefusal, CanonicalGitCommondirRefusal, CanonicalGitBoundWorktreeRefusal, CanonicalGitUnpinnedRefusal, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, resolveTrustedToplevel, defaultTrustedMainRoot, registerCommondirTrustPinLookup } = await import("../dist/git/bounded.js");
+const { canonicalGit, killableCanonicalRaw, canonicalRaw, spawnCanonicalGitTree, checkCommondirTrust, CanonicalGitRefusal, CanonicalGitCommondirRefusal, CanonicalGitBoundWorktreeRefusal, CanonicalGitUnpinnedRefusal, CanonicalGitPinMismatchRefusal, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, resolveTrustedToplevel, defaultTrustedMainRoot, registerCommondirTrustPinLookup, prepareCanonicalEnv } = await import("../dist/git/bounded.js");
 const { literalRepoPathKey } = await import("../dist/git/repo-lock.js");
 
 // @decision 3a5c5d4a (round 5) — the ONE in-process pin store every test below shares, backing the SAME
@@ -446,12 +446,44 @@ if (process.platform === "win32") {
   check("(12d) canonicalGit throws CanonicalGitUnpinnedRefusal end to end for the unpinned decoy-parent shape", decoyThrew instanceof CanonicalGitUnpinnedRefusal);
 
   // (12e) a pin exists, but no longer matches the LIVE toplevel (simulated directly here; (19)/(20)/(21)
-  // below reproduce the real tampering shapes that would actually cause this) — refuses as a "redirect",
-  // never silently accepted just because SOME pin happens to be on file.
+  // below reproduce the real tampering shapes that would actually cause this) — card a8bc0404: now its
+  // OWN distinct kind:"pinMismatch" (never the generic "redirect" wording, which misdescribes a stale
+  // anchor as an attack), still a CanonicalGitCommondirRefusal (manager amendment A3 — inheritance, not a
+  // sibling) so every pre-existing commondirRedirect-keyed consumer still matches it.
   pinMap.set(literalRepoPathKey(boundSub), { toplevel: B, pinnedAt: new Date().toISOString(), source: "bind", projectId: "x", repoKey: "primary" });
   const check12e = checkCommondirTrust(boundSub, undefined);
-  check("(12e) refuses when a pin exists but does not match the live toplevel", check12e.ok === false && check12e.kind === "redirect");
+  check("(12e) refuses when a pin exists but does not match the live toplevel, with kind:\"pinMismatch\"", check12e.ok === false && check12e.kind === "pinMismatch");
+  check("(12e) the reason names BOTH the pinned toplevel and the live toplevel it found", check12e.reason.includes(A) && check12e.reason.includes(B));
+  let mismatchThrew;
+  try { await canonicalGit(boundSub, 5_000).raw(["rev-parse", "HEAD"]); mismatchThrew = null; } catch (e) { mismatchThrew = e; }
+  check("(12e) canonicalGit throws CanonicalGitPinMismatchRefusal end to end", mismatchThrew instanceof CanonicalGitPinMismatchRefusal);
+  check("(12e) a pinMismatch refusal is ALSO a CanonicalGitCommondirRefusal (A3 — inheritance, not a sibling)", mismatchThrew instanceof CanonicalGitCommondirRefusal);
+  const d12e = describeGitFailure(mismatchThrew);
+  check("(12e) describeGitFailure sets BOTH pinMismatch AND commondirRedirect", d12e.pinMismatch === true && d12e.commondirRedirect === true);
+  const msg12e = canonicalFailureMessage(d12e, "fallback");
+  check("(12e) canonicalFailureMessage picks the pinMismatch wording (names the repin route), not the generic redirect wording", /commondir-trust-pin\/repin/.test(msg12e) && !/remove the planted commondir pointer/.test(msg12e));
   unpinFor(boundSub);
+
+  // (12f) card a8bc0404, reviewer N-1 — prepareCanonicalEnv's GIT_CEILING_DIRECTORIES, for a subdir-bound
+  // repoPath, must use the PIN's own recorded toplevel directly once it matches live, never discard it and
+  // re-walk. The two can only be shown to literally diverge on win32: checkCommondirTrust's own match test
+  // is CASE-FOLDED, so a pin recorded in a DIFFERENT case than the real OS casing still "matches" — a bare
+  // walk (the pre-fix behaviour) always returns the OS's real casing, never the pin's literal value, so
+  // the two approaches produce two different STRINGS for the identical directory. SKIP on non-win32:
+  // caseFold is a no-op there, so a "matching" pin is already byte-identical to the walk — nothing to tell apart.
+  if (process.platform === "win32") {
+    const upperA = A.toUpperCase();
+    pinMap.set(literalRepoPathKey(boundSub), { toplevel: upperA, pinnedAt: new Date().toISOString(), source: "bind", projectId: "x", repoKey: "primary" });
+    const matched12f = checkCommondirTrust(boundSub, undefined);
+    check("(12f) sanity: the upper-cased pin still case-fold-matches the live walk", matched12f.ok === true);
+    const env12f = prepareCanonicalEnv(undefined, boundSub);
+    const ceiling12f = (env12f.GIT_CEILING_DIRECTORIES ?? "").split(path.delimiter);
+    check("(12f) the ceiling uses the PIN's own recorded (upper-cased) toplevel, not a re-walk's real-cased result", ceiling12f.includes(path.dirname(upperA)));
+    check("(12f) the ceiling does NOT carry the real-cased toplevel's own parent (that would be the pre-fix bare-walk behaviour)", !ceiling12f.includes(path.dirname(A)));
+    unpinFor(boundSub);
+  } else {
+    console.log("SKIP  (12f) win32-only: caseFold is a no-op on POSIX, so there is nothing to distinguish pin.toplevel from a bare walk's own result");
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -672,7 +704,7 @@ if (process.platform !== "win32") {
   pinFor(sub19);
   fs.mkdirSync(path.join(sub19, ".git")); // plant: a bare directory, no internal commondir
   const check19 = checkCommondirTrust(sub19, undefined);
-  check("(19) refuses when a .git is planted AT an already-pinned subdir (pin now disagrees with the live toplevel)", check19.ok === false && check19.kind === "redirect");
+  check("(19) refuses when a .git is planted AT an already-pinned subdir (pin now disagrees with the live toplevel)", check19.ok === false && check19.kind === "pinMismatch");
   unpinFor(sub19);
 
   // (20) a .git planted at an INTERMEDIATE ancestor between the pinned subdir and the real toplevel.
@@ -683,7 +715,7 @@ if (process.platform !== "win32") {
   pinFor(sub20);
   fs.mkdirSync(path.join(mid20, ".git")); // plant: a bare directory, no internal commondir, BETWEEN sub20 and A20
   const check20 = checkCommondirTrust(sub20, undefined);
-  check("(20) refuses when a .git is planted at an INTERMEDIATE ancestor between a pinned subdir and its real toplevel", check20.ok === false && check20.kind === "redirect");
+  check("(20) refuses when a .git is planted at an INTERMEDIATE ancestor between a pinned subdir and its real toplevel", check20.ok === false && check20.kind === "pinMismatch");
   unpinFor(sub20);
 }
 
@@ -713,7 +745,7 @@ if (process.platform !== "win32") {
   }
   if (swapOk21) {
     const check21 = checkCommondirTrust(sub21, undefined);
-    check("(21) refuses when a PINNED subdir is later swapped (symlink/junction) for a decoy repo", check21.ok === false && check21.kind === "redirect");
+    check("(21) refuses when a PINNED subdir is later swapped (symlink/junction) for a decoy repo", check21.ok === false && check21.kind === "pinMismatch");
     const defaulted21 = defaultTrustedMainRoot(sub21);
     check("(21) defaultTrustedMainRoot falls back to the bare path too — never vouches for the decoy via the stale pin", defaulted21 === sub21);
   }
@@ -736,7 +768,7 @@ if (process.platform !== "win32") {
   fs.rmSync(sub22, { recursive: true, force: true });
   fs.symlinkSync(decoy22, sub22, process.platform === "win32" ? "junction" : "dir"); // now resolves to an UNRELATED decoy toplevel
   const check22 = checkCommondirTrust(sub22, undefined, { commondirCheck: "advisory-read" });
-  check("(22) S-4(a): advisory-read does NOT bypass a mismatch against an EXISTING pin", check22.ok === false && check22.kind === "redirect");
+  check("(22) S-4(a): advisory-read does NOT bypass a mismatch against an EXISTING pin", check22.ok === false && check22.kind === "pinMismatch");
   unpinFor(sub22);
 }
 
@@ -776,7 +808,7 @@ if (process.platform !== "win32") {
   const commondirFile23 = path.join(A23, ".git", "commondir");
   fs.writeFileSync(commondirFile23, path.join(initRepo("23-decoy"), ".git") + "\n");
   const check23b = checkCommondirTrust(A23, undefined);
-  check("(23) a planted .git/commondir inside a PINNED ordinary repo is still refused", check23b.ok === false && check23b.kind === "redirect");
+  check("(23) a planted .git/commondir inside a PINNED ordinary repo is still refused", check23b.ok === false && check23b.kind === "pinMismatch");
   fs.rmSync(commondirFile23);
   unpinFor(A23);
 }
