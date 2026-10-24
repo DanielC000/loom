@@ -93,9 +93,22 @@ interface Block {
   docOverflow: boolean;
 }
 
-/** Everything about the tab block's geometry, read off the live document in one pass. */
+/**
+ * Everything about the tab block's geometry, read off the live document in one pass — once the row
+ * is out of its MEASURING state.
+ *
+ * @decision 885e7a49 — Never read this geometry on a bare `toBeVisible()`: a measuring pass draws
+ * every tab, so the strip wraps and the block reads 74px against a 35px line. Wait on
+ * `data-nt-measuring`, the component's own pass flag — never on the geometry under test, which
+ * would make these legs unfalsifiable.
+ */
 async function blockGeometry(page: Page): Promise<Block> {
-  await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
+  const block = page.getByTestId("atlas-node-tabs");
+  await expect(block).toBeVisible();
+  await expect
+    .poll(() => block.evaluate((el) => el.hasAttribute("data-nt-measuring")),
+      { message: "the tab row is still in a measuring pass, so its geometry is mid-flight" })
+    .toBe(false);
   return page.evaluate(() => {
     const wrap = document.querySelector<HTMLElement>(".loom-atlas-tabs");
     const row = document.querySelector<HTMLElement>(".loom-atlas-tabrow");

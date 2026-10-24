@@ -259,8 +259,12 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
   };
 
   const menuId = "atlas-node-tabs-menu";
+  // @decision 885e7a49 — `data-nt-measuring` has no runtime consumer by design; don't delete it as
+  // unused. It marks a pass that is drawing every tab to capture widths, and is ABSENT once settled,
+  // which is what a geometry read in e2e waits for rather than sampling one mid-measure.
   return (
-    <div className="loom-atlas-tabs" data-testid="atlas-node-tabs" ref={wrapRef}>
+    <div className="loom-atlas-tabs" data-testid="atlas-node-tabs" ref={wrapRef}
+      data-nt-measuring={measuring ? "" : undefined}>
       <div className="loom-atlas-tabrow" role="tablist" aria-label="Node tabs" ref={rowRef}>
         {rowTabs.map((t) => (
           <Link key={t.key} to={hrefFor(t.key)} role="tab" aria-selected={t.key === active}
