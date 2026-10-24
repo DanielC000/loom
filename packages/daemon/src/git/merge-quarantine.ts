@@ -1193,6 +1193,18 @@ function survivingTokenHolderRepoPaths(tokens: string[], excludeIdentity: string
   return [...owners];
 }
 
+/** `true` iff `key`'s live occupant right now is PROVEN to be a different repo than `entry` — an empty
+ *  slot or a same-identity occupant both read `false`. Deliberately NOT {@link entryStillOwnsKey}: that
+ *  predicate's own empty-slot `false` means "not provably owned", which is the wrong polarity for a
+ *  fold-in filter — an entry freshly evicted (e.g. by the 150aed7b EACCES-during-clear path) has nothing
+ *  armed yet, so a legitimate secondary's slot reads empty too; dropping it on that basis would be a
+ *  fail-open in the OTHER direction (the entry never re-arms there after reboot). This predicate only
+ *  ever drops a key POSITIVELY proven foreign right now — never one merely unprovable. */
+function positivelyForeignKey(key: string, entry: MergeQuarantineEntry, map: ReadonlyMap<string, MergeQuarantineEntry>): boolean {
+  const occupant = map.get(key);
+  return occupant !== undefined && directPathIdentity(occupant.repoPath) !== directPathIdentity(entry.repoPath);
+}
+
 /**
  * THE chokepoint for a MARKED basename ({@link keptUnreadableLatchFiles}) about to be renamed over by
  * ANY call to {@link writeMergeQuarantineLatch} — a raise, a lazy-graduation, a sibling-consume, or a
@@ -1222,8 +1234,12 @@ function survivingTokenHolderRepoPaths(tokens: string[], excludeIdentity: string
  * @decision 2dd97aaa (Follow-up 58957b1e) — `droppedTokens` (REQUIRED, same posture as
  * {@link writePendingDivertFile}'s own parameter): this union only consulted the global `clearedTokens`
  * tombstone before. See the decision record.
+ *
+ * @decision f575cebf — `ownershipMap` (REQUIRED, same precedent as `58957b1e`'s `droppedTokens`): every
+ * newly-folded on-disk key must be filtered through {@link positivelyForeignKey} BEFORE the union below —
+ * an unfiltered fold re-persists a foreign key d69a6744's own write-time filter already excluded.
  */
-function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): MergeQuarantineEntry | "unreadable" {
+function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, ownershipMap: ReadonlyMap<string, MergeQuarantineEntry>): MergeQuarantineEntry | "unreadable" {
   let raw: string;
   try {
     raw = fs.readFileSync(final, "utf8");
@@ -1254,7 +1270,9 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
     // REINGESTED record (its own disk-sourced keys), before anything below overrides them — never force
     // `provenanceTracked: true` here; see db0a9db0's own "only writeMergeQuarantineLatch stamps it" rule.
     const reingestedUnknownProvenance = detectUnknownProvenance(reingested, finalOwnHashForReingest);
-    const onDiskKeysForReingest = informativeKeysFor(reingested).filter((k) => quarantineHashForKey(k) !== finalOwnHashForReingest);
+    // @decision f575cebf — drop a candidate ONLY when positivelyForeignKey proves it belongs to another
+    // repo right now; an empty slot or a same-identity occupant both survive the filter unchanged.
+    const onDiskKeysForReingest = informativeKeysFor(reingested).filter((k) => quarantineHashForKey(k) !== finalOwnHashForReingest && !positivelyForeignKey(k, entry, ownershipMap));
     // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too, never drop them wholesale:
     // `entry` can ALREADY carry a REAL raiser's own token (unioned in via `divertRaiseEntry` before this
     // basename ever became readable), not just the placeholder's bare synthetic one — see "Round 5" below.
@@ -1281,10 +1299,12 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
   // a recomputed `canonicalRepoLockKey(entry.repoPath)` (82032b5c/97cff6db's own rule: this write may
   // target a SECONDARY key via `targetKey`, which can differ from entry's own repoPath-derived key).
   const finalOwnHash = path.basename(final, ".json");
+  // @decision f575cebf — same positivelyForeignKey filter as the reingest branch above; see that
+  // call's own comment.
   const onDiskKeys = informativeKeysFor({
     resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
     resolvedKeys: parseResolvedKeysField(parsed),
-  } as MergeQuarantineEntry).filter((k) => quarantineHashForKey(k) !== finalOwnHash);
+  } as MergeQuarantineEntry).filter((k) => quarantineHashForKey(k) !== finalOwnHash && !positivelyForeignKey(k, entry, ownershipMap));
   if (resurrectable.length === 0 && onDiskKeys.length === 0) return entry;
   // @decision 702b4241 (round 4) — the genuine on-disk record's identity wins when OLDER than `entry`'s
   // own (mirrors `unionQuarantineEntries`'s longest-outstanding-raise rule) — see "Round 4" below.
@@ -1329,10 +1349,13 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
  *
  * @decision 2dd97aaa (Follow-up 58957b1e) — `droppedTokens` (REQUIRED) is forwarded straight to
  * {@link reconcileMarkedBasenameBeforeWrite}; see that function's own doc.
+ *
+ * @decision f575cebf — `ownershipMap` (REQUIRED) is forwarded straight to
+ * {@link reconcileMarkedBasenameBeforeWrite} too; see that function's own doc.
  */
-function foldInOnDiskTokensIfMarked(final: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): MergeQuarantineEntry | "unreadable" {
+function foldInOnDiskTokensIfMarked(final: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, ownershipMap: ReadonlyMap<string, MergeQuarantineEntry>): MergeQuarantineEntry | "unreadable" {
   if (!keptUnreadableLatchFiles.has(path.basename(final))) return entry;
-  return reconcileMarkedBasenameBeforeWrite(final, entry, droppedTokens);
+  return reconcileMarkedBasenameBeforeWrite(final, entry, droppedTokens, ownershipMap);
 }
 
 /**
@@ -1383,7 +1406,7 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, droppedTokens: R
     const final = targetKey ? quarantinePathForKey(targetKey) : quarantinePathFor(entry.repoPath);
     if (!skipDegradedOccupantGuard && wouldOverwriteDifferentUnresolvableOccupant(final, entry)) return false;
     if (!reconciledAlready && keptUnreadableLatchFiles.has(path.basename(final))) {
-      const reconciled = reconcileMarkedBasenameBeforeWrite(final, entry, droppedTokens);
+      const reconciled = reconcileMarkedBasenameBeforeWrite(final, entry, droppedTokens, ownershipMap);
       if (reconciled === "unreadable") {
         if (!skipDegradedOccupantGuard) return false;
         // @decision 8db913e2 (round 3) — defensive fallback (every current raise call site already
@@ -1650,7 +1673,7 @@ function consumeMatchedPendingsIntoArmedEntry(
   // here sets an in-memory record matching the durable bytes.
   // @decision 2dd97aaa (Follow-up 58957b1e) — this union only ever ADDS matched pendings' tokens, never
   // drops any — `droppedTokens` is empty.
-  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), armed, new Set());
+  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), armed, new Set(), activeQuarantines);
   if (folded === "unreadable") {
     if (skipDegradedOccupantGuard) {
       // @decision 8db913e2 (Follow-up 6c04633d) — a divert union keeps the RAISER's own identity for the raiser's own tokens;
@@ -3207,7 +3230,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     }
     // @decision 2dd97aaa (Follow-up 58957b1e) — `baseEntry` only ever APPENDS the fresh token; a raise
     // never drops a token, so `droppedTokens` is empty.
-    const folded = foldInOnDiskTokensIfMarked(finalForKey, baseEntry, new Set());
+    const folded = foldInOnDiskTokensIfMarked(finalForKey, baseEntry, new Set(), activeQuarantines);
     if (folded === "unreadable") {
       // @decision 8db913e2 (round 3) — a transient failure discovered HERE (after resolveRaiseOverwrite's
       // own earlier read said "proceed") is the CR2 B2 shape — divert now rather than let the later write
@@ -3345,7 +3368,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     resolvedKey: key, armedKeys: [key], provenanceTracked: true,
   };
   // @decision 2dd97aaa (Follow-up 58957b1e) — a brand-new raise mints `fresh` with nothing to drop.
-  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), fresh, new Set());
+  const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), fresh, new Set(), activeQuarantines);
   if (folded === "unreadable") {
     // @decision 8db913e2 (round 3) — same CR2 B2 TOCTOU as the existing-branch above: resolveRaiseOverwrite
     // said "proceed" earlier; this later, independent read disagrees — divert rather than overwrite blind.
@@ -7011,7 +7034,9 @@ function reenterMergeQuarantinesAtBootImpl(
     // @decision 2dd97aaa (Follow-up 58957b1e) — a boot write only ever reconciles/arms; it never drops a
     // token on this entry's own behalf.
     if (keptUnreadableLatchFiles.has(targetBasename)) {
-      const reconciled = foldInOnDiskTokensIfMarked(quarantinePathForKey(targetKey), entry, new Set());
+      // @decision d69a6744 — pass this boot function's OWN local byRepoKey, never activeQuarantines
+      // (structurally stale here, not synced until this whole function's end-of-function loop runs).
+      const reconciled = foldInOnDiskTokensIfMarked(quarantinePathForKey(targetKey), entry, new Set(), byRepoKey);
       if (reconciled === "unreadable") {
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] refusing to write ${targetBasename} for ${entry.repoPath} — it is STILL unreadable right now; the kept mark and the in-memory entry both stay unchanged, to be retried on a later write/boot.`);

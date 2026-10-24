@@ -103,18 +103,25 @@ closure-captured `byRepoKey`). Caught by this card's own DoD (the full `merge-qu
 run), not by code review — see `merge-quarantine-pass1-migrate-resolvedkey-8bff3cae.mjs`'s own
 `shared-ancestor-sibling` scenario, the one that went red.
 
-## The resolvedKeys-retention residual — OUT OF SCOPE, tracked on `f575cebf`
+## The resolvedKeys-retention residual — CLOSED at the fold-in by `f575cebf`; the PASS1 upgrade case stays open on `e7652e06`
 
 `unionResolvedKeysRetaining(entry.resolvedKeys, freshSecondaryKeys, ...)` unions TWO sources. This card's
-fix only cleans the SECOND (`freshSecondaryKeys`, now ownership-filtered). The FIRST, `entry.resolvedKeys`
+own fix only cleaned the SECOND (`freshSecondaryKeys`, ownership-filtered). The FIRST, `entry.resolvedKeys`
 itself (the in-memory field), is retained FOREVER by design (`8db913e2`/`43cf3b26`'s own union-never-drop
-rule) — if an EARLIER write already durably persisted a foreign key into `resolvedKeys`, and a LATER
-reconcile path (`reconcileMarkedBasenameBeforeWrite`/`foldInOnDiskTokensIfMarked`) folds that bad on-disk
-value back into memory, this card's own fix does not purge it; the contaminated key could keep being
-retained forward via the union regardless. The Lead's ruling: do **not** filter `entry.resolvedKeys`/
-`resolvedKey` in this card — dropping from that union risks reopening exactly what the union-never-drop
-rule prevents, and the propagation path (a pre-existing contaminated on-disk file plus a kept-unreadable-
-basename reconcile) is unproven, not merely unfixed. Filed as card `f575cebf` (p2, reproduce first).
+rule) — `f575cebf` proved the gap this left open was real and reproducible: an EARLIER write persisting a
+foreign key into `resolvedKeys`, folded back into memory by `reconcileMarkedBasenameBeforeWrite`/
+`foldInOnDiskTokensIfMarked` (card `150aed7b`), re-persisted the contamination and caused a confirmed
+cross-repo identity/token bleed and stranding on the very next reboot. **`f575cebf` closed this AT THE
+FOLD-IN** — every newly-folded on-disk key is now filtered through `positivelyForeignKey` (drop ONLY a key
+with a live, different-identity occupant; never a merely-unprovable one, which would reopen the
+union-never-drop rule in the other direction) before it ever reaches `entry.resolvedKeys`.
+`f575cebf`'s own investigation ALSO confirmed a SEPARATE, still-open "upgrade case" the fold-in fix cannot
+reach: a latch already contaminated on disk before ANY fold-in runs is unioned by PASS1's own
+`armKeyUnlessDegradedCollision` ("legitimate same-toplevel union" fallthrough, which has NO identity check
+when both colliding sides are resolvable — it DOES compare `directPathIdentity` between two
+resolvable-but-different repos, ~:6131, but only reaches that comparison when exactly one side is
+unresolvable) — independent of how the contamination got there. That is tracked on the Lead's separate
+card `e7652e06`, not this one or `f575cebf`.
 
 ## Do not
 
@@ -130,12 +137,15 @@ basename reconcile) is unproven, not merely unfixed. Filed as card `f575cebf` (p
   as "the" fix for this shape — same prohibition `1fc3a561`/`c52b290e` already state, for the same reason
   (it covers only one of 20+ `replaceEntryEverywhere` sites in this file). This card never unions an OLD
   object's list forward either — every site here derives fresh from LIVE occupancy.
-- Do not filter `entry.resolvedKeys`/`entry.resolvedKey` through `entryStillOwnsKey` before the
-  `unionResolvedKeysRetaining` call in `writeMergeQuarantineLatch` — that is the residual this card
-  deliberately left open; see card `f575cebf`. Fixing `freshSecondaryKeys` alone is this card's full scope.
+- Do not filter `entry.resolvedKeys`/`entry.resolvedKey` through `entryStillOwnsKey` at the
+  `unionResolvedKeysRetaining` call in `writeMergeQuarantineLatch` itself — `f575cebf` deliberately closed
+  this residual one step EARLIER instead, at the fold-in (`reconcileMarkedBasenameBeforeWrite`), via a
+  narrower `positivelyForeignKey` predicate; see that card's own record for why `entryStillOwnsKey` here
+  would itself be a fail-open (it treats an empty slot as unowned, dropping a legitimate secondary).
 - Do not read "site 2 is now safe" as "a stale `armedKeys` member can never again reach a persisted latch"
   — only the live-occupancy-derived, ownership-filtered secondary set is clean; an already-contaminated
-  `entry.resolvedKeys` (the residual above) is a separate, still-open path.
+  `entry.resolvedKeys` is now filtered at the fold-in (`f575cebf`), but the PASS1 boot-time "upgrade case"
+  (an already-contaminated disk file, independent of any fold-in) stays open on card `e7652e06`.
 - Do not assume Scenario 3's (the pending-twin) own "the twin stays blocked regardless" outcome
   generalizes to every reduce-shape twin — it depends on `writePendingDivertFile`'s own, UNRELATED
   backstop write (which durably keeps the twin blocked via an independent pending record, no matter what
