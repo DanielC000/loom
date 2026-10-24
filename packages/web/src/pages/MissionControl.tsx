@@ -214,8 +214,12 @@ export default function MissionControl() {
         <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "orchestration: paused" : "orchestration: running"}</Badge>
         {/* These counts derive from the LIVE session feed (api.allSessions excludes archived rows, and
             sessions auto-archive on exit), so they read ACTIVE orchestration only — labelled as such so
-            the number reads as correct-scope, not broken. Finished runs stay reachable via Run Replay. */}
-        <div style={{ display: "flex", gap: 10 }}>
+            the number reads as correct-scope, not broken. Finished runs stay reachable via Run Replay.
+            The four tiles WRAP (and the group may shrink), like the strip that holds them: each Stat is a
+            self-contained labelled tile, so re-flowing them to 2x2 at phone width costs nothing, whereas
+            a fixed 364px row of them was the whole of this page's horizontal overflow at 420 (card
+            a7957bde — measured; it was NOT the activity row it had been attributed to). */}
+        <div data-testid="mc-stat-strip" style={{ display: "flex", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
           <Stat label="active projects" value={projectNames.length} />
           <Stat label="active managers" value={managers.length} />
           <Stat label="active workers" value={workers.length} />
@@ -248,8 +252,11 @@ export default function MissionControl() {
         ))}
       </div>
 
-      {/* Fleet + activity */}
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr)", gap: 16 }}>
+      {/* Fleet + activity. The two columns collapse to one at phone width (styles/global.css, the same
+          820px fold `.loom-bandpanel`/`.loom-kpideck` already use): holding the split at 420 left the
+          Activity track 101px wide — narrower than the event row's own timestamp — so every row rendered
+          as a bare time with its kind ellipsized to zero. Read in sequence, both columns get full width. */}
+      <div className="loom-mc-split">
         <div>
           <SectionLabel>Fleet</SectionLabel>
           {projectNames.length === 0 && <Panel><span style={{ color: color.textMuted }}>No active sessions.</span></Panel>}

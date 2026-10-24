@@ -638,19 +638,32 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
 // Overview feed omits it (all its rows already belong to the one project on screen), so that surface stays
 // byte-identical. Rendered as a small muted chip in a stable second column so it reads as scannable
 // attribution, truncating instead of shoving the event kind off the row.
+//
+// @decision a7957bde — the columns give in a fixed order (detail, then project chip, then kind) and the
+// timestamp never gives at all. Do not flatten the flexShrink weights, do not drop any column's
+// minWidth + overflow + textOverflow trio, and do not make the row wrap.
 export function EventRow({ e, projectName }: { e: OrchestrationEvent; projectName?: string }) {
+  const detail = `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : ""}${e.taskId ? ` t:${e.taskId.slice(0, 8)}` : ""}`;
   return (
-    <div style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: 12, padding: "2px 0", borderBottom: `1px solid ${color.border}` }}>
-      <span style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0 }}>{new Date(e.ts).toLocaleTimeString()}</span>
+    <div data-testid="activity-event"
+      style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: 12, padding: "2px 0", borderBottom: `1px solid ${color.border}` }}>
+      <span data-testid="activity-event-time" style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0 }}>
+        {new Date(e.ts).toLocaleTimeString()}
+      </span>
       {projectName && (
-        <span title={projectName} style={{ flexShrink: 0, maxWidth: 116, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          fontSize: 10, color: color.textMuted, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 5px" }}>
+        <span title={projectName} data-testid="activity-event-project"
+          style={{ flexShrink: 1000, minWidth: 0, maxWidth: 116, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            fontSize: 10, color: color.textMuted, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 5px" }}>
           {projectName}
         </span>
       )}
-      <span style={{ color: color.cyan, whiteSpace: "nowrap", flexShrink: 0 }}>{e.kind}</span>
-      <span style={{ color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : ""}{e.taskId ? ` t:${e.taskId.slice(0, 8)}` : ""}
+      <span title={e.kind} data-testid="activity-event-kind"
+        style={{ color: color.cyan, whiteSpace: "nowrap", flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        {e.kind}
+      </span>
+      <span title={detail || undefined} data-testid="activity-event-detail"
+        style={{ color: color.textDim, whiteSpace: "nowrap", flexShrink: 100000, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        {detail}
       </span>
     </div>
   );
