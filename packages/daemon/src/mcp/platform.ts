@@ -15,7 +15,7 @@ import type { PtyHost } from "../pty/host.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
-import { bootstrapProjectDir } from "../setup/bootstrap.js";
+import { bootstrapProjectDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
 import { expandTilde, PORT, isLoomDev, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
 import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
@@ -1338,8 +1338,13 @@ export class PlatformMcpRouter {
         // otherwise looks like a path escape) — only when a real vaultPath was actually given (mirrors
         // the setup.ts project_create fix, card a247ab11).
         if (vault) ensureVaultRoot(vault);
+        const projectId = randomUUID();
+        // @decision 3a5c5d4a (round 6, S-2/S-3) — pin-conflict pre-flight before anything is written;
+        // insertProject's own catch below is the backstop (a race between the two, never the common case).
+        const pinCheck = db.checkCommondirPinConflicts(projectId, [{ repoKey: "primary", repoPath }]);
+        if (!pinCheck.ok) return ok({ error: pinCheck.error });
         const project: Project = {
-          id: randomUUID(), name, repoPath, vaultPath: vault,
+          id: projectId, name, repoPath, vaultPath: vault,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],
@@ -1348,7 +1353,7 @@ export class PlatformMcpRouter {
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, even on this elevated surface
           vaultOnly: false, // this tool requires repoPath — never vault-only
         };
-        db.insertProject(project);
+        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
         return ok(project);
       },
     );
@@ -1374,13 +1379,20 @@ export class PlatformMcpRouter {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         const isGit = (kind ?? "git") === "git";
+        // @decision 3a5c5d4a (round 6, S-2) — pin-conflict check over the PREDICTED target, BEFORE
+        // bootstrapProjectDir creates (and `git init`s) anything.
+        const targetCheck = resolveProjectInitTarget({ name, dirName });
+        if (!targetCheck.ok) return ok({ error: targetCheck.error });
+        const projectId = randomUUID();
+        const pinCheck = db.checkCommondirPinConflicts(projectId, [{ repoKey: "primary", repoPath: targetCheck.target }]);
+        if (!pinCheck.ok) return ok({ error: pinCheck.error });
         const boot = await bootstrapProjectDir({ name, dirName, git: isGit });
         if (!boot.ok) return ok({ error: boot.error });
         const project: Project = {
           // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the
           // vault auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir
           // IS the vault.
-          id: randomUUID(), name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
+          id: projectId, name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],
@@ -1389,7 +1401,9 @@ export class PlatformMcpRouter {
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, even on this elevated surface
           vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
         };
-        db.insertProject(project);
+        // Backstop (S-3): a race between the pre-flight above and this write, never the common case —
+        // see the pin-conflict pre-flight note.
+        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
         return ok(project);
       },
     );
@@ -2838,7 +2852,11 @@ export class PlatformMcpRouter {
         const vaultOnlyCheck = checkVaultOnlyOnUpdate(project, { repoPath, vaultPath });
         if (!vaultOnlyCheck.ok) return ok({ error: vaultOnlyCheck.error });
         const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
-        db.updateProject(projectId, { name, vaultPath, repoPath, repos, vaultOnly: vaultOnlyPatch });
+        // @decision 3a5c5d4a (round 6, S-3) — updateProject refuses (throws) on a pin conflict; surface
+        // that as the SAME ok({error}) shape every other refusal in this tool already uses.
+        try {
+          db.updateProject(projectId, { name, vaultPath, repoPath, repos, vaultOnly: vaultOnlyPatch });
+        } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
         // STALE-PROMPT LINT (card 0597e092): `project` is the PRE-update row (fetched above, before the
         // write), so this compares old-vs-new correctly — the SAME shared lint the REST PATCH path uses,
         // so a rename produces identical warnings regardless of which surface performed it.

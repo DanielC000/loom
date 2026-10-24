@@ -845,4 +845,291 @@ a new case.
   single instant, and that instant can be any boot, not just the first one after this feature shipped.
 - Do not read `pinCommondirTrust`'s write as a verify-then-write (S-3) — it is an unconditional overwrite
   of whatever pin already existed at that literal key; a rebind onto a path carrying an unrelated prior
-  pin replaces it with no comparison at all.
+  pin replaces it with no comparison at all. **ROUND 6 CORRECTION: this bullet, and the S-2 residual named
+  in round 5's own narrative above (owner B overwriting A's pin; a rebind-away unpinning a sibling), are
+  CLOSED by card `4d60366b` — see "Round 6" below.** `pinCommondirTrust` is no longer an unconditional
+  overwrite: a pin already owned by a DIFFERENT (project, repoKey) is left untouched, and the write is
+  gated by a pre-flight verify-or-refuse check (`assertNoCommondirPinConflict{,s}`) run BEFORE the
+  caller's bind/rebind SQL, not after.
+
+## Round 6 (card `4d60366b` — handoff-on-retire + a pre-write conflict refusal closes round 5's own S-2/S-3 residuals)
+
+Follow-up from `3a5c5d4a`'s fifth Code Review (`cdf967fc`, S-2, MEASURED): the pin is keyed per LITERAL
+path but owned/deleted per PROJECT, so a routine human bind/rebind/delete can silently drop or overwrite
+an UNRELATED project's pin, reopening trust-on-first-use (TOFU) with no notice. Three measured cases, plus
+the overwrite case round 5 already named as a residual, plus a SIXTH Code Review (`ec8816e4`) of the first
+fix attempt that found it still left a BLOCKING gap (B1) and four non-blocking ones (S1-S3, N1-N2), plus a
+SEVENTH Code Review (`33b9c061`) of the handoff fix itself that found a SECOND blocking gap (M-1: a handoff
+can trust a STALE index row) — all closed in the SAME round, below.
+
+- **(a) Overwrite-then-delete:** project B binding the SAME literal path project A already pinned used to
+  overwrite the pin (owner becomes B); deleting B then left A refused (unpinned).
+- **(b) Rebind-away:** project C binding that same shared path, then rebinding its OWN primary away from
+  it, used to unconditionally delete the pin at the OLD path — which, if C was never really the recorded
+  owner (a benign shared-path bind, not an overwrite), could still be A's.
+- **(c) Dangling index:** removing a repoKey via `updateProject({repos: []})` deleted the pin but left
+  `commondir-trust-pin-index:<projectId>:<repoKey>` dangling; a LATER `deleteProject` of that same project
+  would walk the stale entry and could delete an unrelated project's NEWER pin that had since taken over
+  the same (reused) literal path.
+- **(B1, BLOCKING, found by the SIXTH Code Review) Mirror of (a)/(b):** a benign shared bind (the fix's
+  own "leave the existing owner's pin untouched" behavior, below) leaves the FIRST owner holding the real
+  pin and every sibling with only an index entry. The first attempt at this round's fix used a plain
+  owner-check before deleting — correct for refusing to delete SOMEONE ELSE's pin, but it still let the
+  OWNER's own delete/rebind-away retire a pin a surviving sibling was relying on, because the owner-check
+  only verifies WHO may retire the pin, never WHETHER anyone else still needs it. Reopens the exact
+  TOFU-on-reboot gap (a)/(b) were meant to close, just via the owner's OWN exit instead of someone else's.
+- **(S1) Intra-project repoKey swap:** `{primary:p1, x:p2} → {primary:p2, x:p1}` on the SAME project could
+  still lose a pin, order-dependently, in the first attempt's single interleaved pass (pin new target for
+  repoKey A, immediately retire repoKey A's old target, THEN move to repoKey B — repoKey B's own new-target
+  index entry doesn't exist yet when repoKey A's retirement runs its handoff lookup).
+- **(M-1, BLOCKING, found by the SEVENTH Code Review) A handoff trusts a STALE index row.** The HANDOFF fix
+  (bullet 1 below) still had one gap: `pinCommondirTrust` returned on a walk FAILURE *before* writing the
+  index, so rebinding a repoKey to a non-walkable path left its OLD index row pointing at the OLD path —
+  and `findOtherCommondirPinHolder` trusted ANY row whose value matched the target literal path, with no
+  check that the row still reflects what that (project, repoKey) is CURRENTLY bound to. Reviewer's measured
+  sequence: A binds X; A rebinds "primary" to a missing dir (walk fails, A's OLD index row for X survives);
+  C binds X fresh; C is deleted ⇒ handed off to A (a STALE row — A is no longer actually bound to X at
+  all); X's directory is later re-created with a DIFFERENT toplevel ⇒ every future bind of X is refused,
+  naming A, forever; A is eventually deleted too ⇒ with zero projects left anywhere, pin(X) is still
+  "owned" by a deleted project and no REST/MCP route can ever clear it again.
+
+**The fix, final form:**
+
+1. **Handoff, not a plain owner-check, on every retirement.** `unpinCommondirTrustIfOwned(projectId,
+   repoKey, repoPath)` still verifies the caller is the pin's CURRENT recorded owner before touching it —
+   but when it is, it now calls `findOtherCommondirPinHolder(repoPath, excludeProjectId, excludeRepoKey)`,
+   a reverse lookup over the (small, admin-rate) `commondir-trust-pin-index:` namespace for ANY OTHER
+   `(project, repoKey)` entry naming the SAME literal path (compared via `literalRepoPathKey`, never a raw
+   string match). If one exists, the pin is HANDED OFF — the SAME `{toplevel, pinnedAt, source}` object,
+   just with `projectId`/`repoKey` repointed to the survivor — never re-walked, so a handoff can never
+   itself become a fresh, unverified TOFU moment. Only when NO survivor exists does the pin actually get
+   deleted (a genuine, correctly-detected loss). Both outcomes file a durable `commondir_trust_pinned`
+   event immediately (`detail.event: "handoff"` or `"lost"`, carrying `repoPath`/`toplevel`/`from`/`to` —
+   N2, below) — auditable at the moment it happens, not only discoverable later via the boot backfill.
+   Wired into both call sites that used to retire unconditionally: `resetMainlineBaselinesForRepoChange`'s
+   path-changed branch (closes (b)/B1-rebind) and `deleteProject`'s index walk (closes (a)/B1-delete, and
+   is the backstop that closes (c) even against a dangling/stale index row from before this fix).
+   `deleteProject`'s walk parses the repoKey out of each index row's own key (never assumes it may blindly
+   act on whatever the row's value names) so the handoff lookup has something to exclude per repoKey, not
+   just per path.
+2. **Two FULL PASSES, never interleaved (closes S1).** `resetMainlineBaselinesForRepoChange` now runs PASS
+   1 — pin every NEW/changed target, for every repoKey in the patch — completely, BEFORE PASS 2 — retire
+   every OLD/changed source. This guarantees every (repoKey, path) index entry the patch is CREATING is
+   already written by the time any handoff reverse-lookup in pass 2 runs, regardless of which repoKey's
+   source happens to be retired first. `assertNoCommondirPinConflictsForRepoChange` (the pre-write check,
+   below) and `resetMainlineBaselinesForRepoChange` both derive their repoKey enumeration from the SAME
+   `repoPathMaps(before, patch)` helper, so the two can never disagree on which repoKeys are changing.
+3. **Index cleanup on repoKey removal AND on a walk failure (two separate dangling-row sources, both
+   closed at the point they're created).** When a repoKey is REMOVED outright (`to === undefined`), pass 2
+   deletes `commondir-trust-pin-index:<projectId>:<repoKey>` — pass 1 had no fresh `to` to overwrite it
+   with, so without this the row survives as a permanent dangling reference. Closes (c) at its source. The
+   SECOND source, found by M-1: `pinCommondirTrust` ALSO now clears `(projectId, repoKey)`'s own index
+   entry whenever the walk FAILS (not just when `to === undefined`) — a rebind to a non-walkable path used
+   to leave the OLD index value sitting there, stale, pointing at a path this binding no longer reflects.
+   Closes M-1 at ITS source; bullet 7 below is the matching defense-in-depth for a stale row from ANY
+   OTHER cause.
+4. **Never silently overwrite a pin another project holds (the overwrite case round 5 already named as a
+   residual) — now a PUBLIC pre-flight, not only an internal throw.** `checkCommondirPinConflicts(projectId,
+   candidates)` is a non-throwing, PUBLIC `Db` method: for every `{repoKey, repoPath}` candidate, when an
+   existing pin at that literal path belongs to a DIFFERENT `(project, repoKey)`, a live walk from
+   `repoPath` must confirm the SAME toplevel the pin recorded (N1: this covers BOTH a walk FAILURE and a
+   walk that SUCCEEDS but resolves to a genuinely DIFFERENT toplevel — the first attempt's own test only
+   ever exercised the failure case) — anything else returns the FIRST conflict found, naming the owning
+   project and the way out (delete/rebind it away, restoring it from the archive first if archived). The
+   private, throwing `assertNoCommondirPinConflicts` wraps it for `insertProject` (before the INSERT) and,
+   via the diff-aware `assertNoCommondirPinConflictsForRepoChange`, for `updateProject` (before the
+   UPDATE) — both refuse the WHOLE write before anything is persisted. `pinCommondirTrust` is the
+   complementary half: when an existing different-owner pin's walk DID agree (the benign shared-path case
+   — the physically same repo bound under two project/repoKey pairs), it leaves that pin row completely
+   untouched (ownership included) and only writes the CALLER's own index entry.
+5. **S-2/S-3: every REST/MCP bind/rebind surface calls the public pre-flight BEFORE any host-mutating
+   step, and catches the internal throw as a backstop.** Eight call sites across
+   `gateway/server.ts` (`POST /api/setup/project-init`, `POST /api/projects`, `PATCH /api/projects/:id`),
+   `mcp/platform.ts` (`project_create`, `project_init`, `project_update`), and `mcp/setup.ts`
+   (`project_create`, `project_init`) — `mcp/setup.ts`'s OWN `updateProject` call never passes
+   `repoPath`/`repos`, so it is structurally unreachable and was left alone. For the THREE
+   `project_init`-shaped routes (gateway REST + both MCP routers) that call `bootstrapProjectDir` — which
+   creates, and `git init`s, a fresh directory — the pre-flight runs over the PREDICTED target
+   (`resolveProjectInitTarget`, the SAME pure leaf/confinement resolver `bootstrapProjectDir` uses
+   internally) BEFORE that call, so a refused init never leaves a stray directory behind (closing S-2,
+   named originally only for the REST route but the identical defect shape on the two MCP mirrors too —
+   fixed in the same round rather than left for a future reviewer to re-find). Every one of the eight call
+   sites ALSO wraps its `insertProject`/`updateProject` call in try/catch, converting the backstop throw
+   into the SAME refusal shape the route already uses for every other validation failure (REST: 409
+   `{error}`; MCP: `ok({error})`) — closing S-3. The project id is minted BEFORE the pre-flight at every
+   create site (never inside the `project` object literal afterward) so the SAME id is both what the
+   pre-flight reasons about and what the write's own backstop re-check sees.
+6. **N1(b): a detectable re-pin still fires a durable event, and is still just ONE per boot pass.**
+   `backfillCommondirTrustPins` flags `hadPinBefore` per (project, repoKey) — true when its
+   `commondir-trust-pin-index` entry already existed with NO matching active pin — and the event's
+   `detail.rePinnedCount` summarizes how many of the pass's pins carry it. **M-1c correction:** the FIRST
+   attempt's claim that "the index is only ever written alongside a pin" is FALSE once non-owner,
+   index-only rows exist (every benign shared-bind sibling is exactly this shape, by design, since round
+   5) — so `hadPinBefore` cannot just check whether the index KEY exists; it now compares the index entry's
+   own VALUE against THIS `repoPath` (via `literalRepoPathKey`), so a key that exists but points at a
+   DIFFERENT (stale) path is never miscounted as a re-pin of this one. What is genuinely NOT detectable: an
+   INTENTIONAL, correct unpin (the sole owner's own project or repoKey going away with no survivor) looks
+   identical in the index to a LOST one — this fix does not and cannot distinguish "lost by bug" from
+   "correctly removed", and does not build a dedicated tombstone store to do so (out of scope for this card
+   — see "Do not" below).
+7. **M-1: a handoff candidate is validated against the LIVE `projects` table, not trusted from the index
+   alone (closes M-1).** `findOtherCommondirPinHolder` now calls a new `currentRepoPathForKey(projectId,
+   repoKey)` helper (reads `Db.getProject` — live OR archived, `getProject` filters neither — then the
+   project's CURRENT `repoPath`/`repos[]` entry for that repoKey) for every candidate row it finds, and
+   compares the result to the target literal path via `literalRepoPathKey`. A row that fails — the project
+   no longer exists, or no longer configures that repoKey at that path — is SKIPPED and DELETED on the
+   spot (never handed a pin), rather than trusted. This is deliberately independent, defense-in-depth
+   validation on top of bullet 3's source-level fix (clearing the index on a walk failure): bullet 3
+   prevents THIS round's specific stale-row shape from ever being created going forward, while this bullet
+   protects against ANY stale INDEX row offered as a handoff candidate, regardless of how it arose (a
+   pre-this-fix row already on disk — the exact shape an UPGRADED DB can still carry, round-4 Code Review
+   `e242c754`'s P1/P2 — or a future bug elsewhere that leaves one). **Round-4 correction: it does NOT
+   protect against a stale OWNER** — a throw partway through the pin/unpin pass that commits the
+   project's own row but strands the pin/index state (no stale row involved at all, P4/M-2) is a DIFFERENT
+   failure mode this bullet cannot see, because nothing here is stale by the time it runs; see bullet 8
+   (M-2, the transaction wrap) for what actually closes THAT one. **M-1-dedupe:** `findOtherCommondirPinHolder`/`unpinCommondirTrustIfOwned` take an
+   `opts.excludeWholeProject` flag — `deleteProject`'s own index walk passes it so NONE of the project
+   being deleted's own OTHER repoKeys are ever offered back to it as a "handoff" (the whole project is
+   going away, so none of its own repoKeys is a valid survivor) — unlike an ordinary rebind (the default,
+   `excludeWholeProject` unset), where a DIFFERENT repoKey of the SAME project legitimately IS a valid
+   survivor (the S-1 swap case depends on exactly this).
+8. **M-2 (round-4 Code Review `e242c754`, MINOR but fixed in the same round): `insertProject`/
+   `updateProject` are now TRANSACTIONAL.** Neither the INSERT+pin loop nor the UPDATE+
+   `resetMainlineBaselinesForRepoChange` pass was ever wrapped in `this.db.transaction()` — a throw
+   partway through the pin/unpin pass (ANY cause; the reviewer's own P4 injects one directly) committed
+   the project row's own write but left the pin/index state only partly updated, stranding a pin "owned"
+   by a project that, per its own now-committed row, is no longer actually there — the SAME permanent dead
+   end M-1 was about, reached with no stale row involved at all. `resolveTrustedToplevel` (the only work
+   `pinCommondirTrust` does beyond synchronous `app_meta`/`projects` reads+writes) is itself synchronous
+   fs I/O, so wrapping it inside a `better-sqlite3` transaction is safe (no await inside the callback).
+
+**Residual, accepted, not closed by this round:** the pre-flight in bullet 5 closes the COMMON case for
+every create route, but a genuine RACE between two concurrent requests — one passes the pre-flight, a
+SECOND request takes the same conflicting path before the first's `insertProject` call runs, so the
+first's OWN backstop throw fires AFTER `bootstrapProjectDir` already created the directory — still leaves
+a stray directory in that narrow window. These are human/elevated-only, rare admin operations; no lock or
+transaction was added to close this race, and no rollback-the-bootstrap mechanism exists elsewhere in the
+codebase to model one on. Named here rather than silently accepted.
+
+**A SECOND accepted, practically-unreachable residual (seventh Code Review, `33b9c061`): the two
+reserved-home boot seeds call `insertProject` unwrapped.** `platform/seed.ts` (~:239) and `setup/seed.ts`
+(~:259) each mint the ONE reserved/system home project at fresh-boot time, with no pre-flight check and no
+try/catch around the call — deliberately left this way, not an oversight. A conflict here would require
+some OTHER project to have ALREADY pinned the exact literal path of a brand-new, LOOM-owned, just-created
+reserved-home folder — a path no ordinary user-bound project can ever alias by construction. Wrapping
+these two calls in a catch was considered and rejected: it would hide a genuine boot-time failure (the
+daemon failing to seed its own reserved home is a real, loud problem a human needs to see, not a quietly
+swallowed `ok({error})`) to guard against a conflict that cannot occur in practice. Left unwrapped,
+deliberately, and recorded here rather than silently left for a future reviewer to flag as a missed site.
+
+**Tests:** `packages/daemon/test/commondir-trust-pin-ownership.mjs` — (a), (b), (c), B1 (both the delete
+and the rebind-away shape, each with a surviving sibling), S1 (the intra-project swap), the overwrite-
+refusal case for both `insertProject` and `updateProject` (including N1's walk-succeeds-different-toplevel
+shape, not just a walk failure), N1(b)'s backfill `hadPinBefore`/`rePinnedCount` (now also covering the
+key-exists-but-value-differs case M-1c closes), M-1's exact reviewer-measured sequence (A binds X; A
+rebinds to a non-walkable path; C binds X; C is deleted — asserts pin(X) is DELETED, never handed off to
+A, since A's own index entry was cleared at rebind time) reproduced through PRODUCTION calls (`insertProject`/
+`updateProject`/`deleteProject`), never a direct `setMeta`/`deleteMeta` shortcut, and a dedicated assertion
+on `detail.event:"lost"` (the first attempt's own tests only ever asserted `"handoff"`). **Round-4 Code
+Review `e242c754` additions (M-1a had ZERO coverage until these — a prior pass that disabled the
+`currentRepoPathForKey` check left all 6 test files green):** P1 (a round-5-shaped stale INDEX row seeded
+directly via `setMeta` — legitimate because production code wrote exactly this row shape before M-1b
+existed — simulating an UPGRADED DB; deleting the real owner must lose the pin, never hand it to the
+stale row's project); P2 (the same residue shape for a REMOVED repoKey); P3 (a LIVE-path, no-residue
+case: one `updateProject` patch that both rebinds `primary` away from a path AND removes a different
+repoKey at that SAME path — exactly one `"lost"` event, no spurious `"handoff"` to the repoKey being
+removed in the same call); and M-2 (injects a throw into `unpinCommondirTrustIfOwned` via
+`Db.prototype`, asserts the WHOLE `updateProject` call rolls back — the project's `repoPath` unchanged AND
+the old pin untouched — proven RED by temporarily removing the transaction wrapper).
+`packages/daemon/test/commondir-trust-pin-rest-refusal.mjs` — the SAME conflict, constructed via a real
+HTTP `app.inject` against `buildServer`, for `POST /api/projects` (409), `PATCH /api/projects/:id` (409,
+atomic), and `POST /api/setup/project-init` (409, AND — the actual S-2 invariant — no stray directory, no
+project row). `packages/daemon/test/commondir-trust-pin-mcp-refusal.mjs` — the same 3 shapes again, over
+the REAL `PlatformMcpRouter`/`SetupMcpRouter` through an in-process MCP `InMemoryTransport`, for all 5
+remaining agent-facing sites named in S-2/S-3 (`platform.ts`'s `project_create`/`project_init`/
+`project_update`, `setup.ts`'s `project_create`/`project_init`) — `ok({error})`, never a thrown/uncaught
+MCP error, and (for the two init tools) no stray directory. Its `call()` helper is deliberately TOLERANT
+(round-4 Code Review): it catches a thrown MCP protocol error or non-JSON tool content and turns it into
+THAT site's own `{error}` result, so one site's pre-flight/catch being entirely removed can never abort
+the file and hide every LATER site's own checks. **Honest scope note (round-4 Code Review):** every one of
+these 5+3 sites' tests exercises the CONFLICT path, which the pre-flight catches before the write is ever
+attempted — so what's proven is that the pre-flight-and-catch PAIR together produce the right refusal
+shape at each site, never that the catch alone (with the pre-flight hypothetically absent) would also
+produce it; the two were never independently isolated per site. Every case in all three files is shown
+RED against the relevant pre-fix source (a captured diff + `git checkout HEAD --` + rebuild, or — for
+M-1a/M-2 specifically — a targeted in-place disable of just that one check/wrapper) before being shown
+GREEN again with the fix restored.
+
+## Do not (round 6)
+
+- Do not read a plain owner-check as sufficient before deleting a pin — B1 is exactly this mistake: owner-
+  check alone correctly refuses to delete SOMEONE ELSE's pin, but says nothing about whether a SURVIVING
+  SIBLING still needs the pin the OWNER itself is retiring. Always attempt a handoff
+  (`findOtherCommondirPinHolder`) first; only delete when no survivor exists.
+- Do not interleave "pin the new target" and "retire the old source" per repoKey in
+  `resetMainlineBaselinesForRepoChange` — S1 is exactly this mistake. Run it as two full passes (pin
+  everything new/changed, THEN retire everything old/changed), or an intra-project swap can lose a pin
+  depending on iteration order.
+- Do not read `pinCommondirTrust` as performing an unconditional overwrite — a pin already owned by a
+  DIFFERENT (project, repoKey) is left completely untouched; only the caller's OWN index entry is written.
+- Do not call `pinCommondirTrust`/`resetMainlineBaselinesForRepoChange`'s pin/rebind branches without
+  first calling `checkCommondirPinConflicts`/`assertNoCommondirPinConflicts{,ForRepoChange}` — the
+  refusal only prevents a half-applied write if it runs BEFORE the caller's INSERT/UPDATE SQL, never after.
+- Do not test ONLY a walk FAILURE for the overwrite-refusal case — N1 is exactly this gap. A walk that
+  SUCCEEDS but resolves to a genuinely DIFFERENT toplevel must refuse too; both are "never confirmed",
+  neither is "confirmed, so allow".
+- Do not add a NEW create/rebind surface that calls `insertProject`/`updateProject` without ALSO calling
+  the public `checkCommondirPinConflicts` pre-flight first (BEFORE any host-mutating step the surface
+  performs) and catching the internal throw as a backstop — S2/S3 found this missing at EIGHT existing
+  call sites at once; a ninth would silently reopen the same gap for its own route.
+- Do not delete a pin by literal path alone anywhere this card touches (`deleteProject`,
+  `resetMainlineBaselinesForRepoChange`) — always route through `unpinCommondirTrustIfOwned`, which
+  checks the recorded `{projectId, repoKey}` first AND attempts a handoff before ever deleting. A direct
+  `deleteMeta(commondirTrustPinKey(...))` reopens exactly the (a)/(b)/B1 vacuity this round closes.
+- Do not duplicate the `(oldPaths, newPaths)` map construction a third time — both
+  `assertNoCommondirPinConflictsForRepoChange` and `resetMainlineBaselinesForRepoChange` must read it from
+  the shared `repoPathMaps` helper, or the two can silently diverge on which repoKeys are "changing" for
+  the SAME patch.
+- Do not build a dedicated tombstone/history store for commondir-trust pins as part of this card — the
+  `hadPinBefore` signal is deliberately derived from the EXISTING index-without-pin shape rather than a
+  new persistence mechanism; a true loss-vs-intentional-removal distinction is a bigger, separate design
+  (named but not built here).
+- Do not build the human-initiated re-pin route or per-project pin OWNERSHIP tracking here — both are
+  round 5's own named follow-ups (filed separately by the manager, no ids assigned at round 5's writing);
+  this round's handoff/conflict-refusal fix is deliberately the narrower, structural fix for the measured
+  (a)/(b)/(c)/B1/S1/overwrite cases, not those two broader features.
+- Do not treat the accepted create-route race (two concurrent requests, see the residual paragraph above)
+  as closed — it is a named, accepted gap, not a false "fixed" claim.
+- Do not trust an index row as a handoff candidate without validating it against the LIVE `projects`
+  table (`currentRepoPathForKey`) — M-1 is exactly this mistake: an index value can go stale (e.g. a walk
+  failure leaving the OLD value in place) and still match the target path by coincidence of string
+  content, with nothing left recorded that distinguishes "still true" from "true when it was written".
+- Do not let `pinCommondirTrust` leave `(projectId, repoKey)`'s OLD index entry in place on a walk
+  FAILURE — clear it (M-1's source-level fix), or the next handoff lookup trusts a value this binding no
+  longer reflects.
+- Do not pass the DEFAULT (single-repoKey) exclusion to `findOtherCommondirPinHolder`/
+  `unpinCommondirTrustIfOwned` from `deleteProject`'s own index walk — use `excludeWholeProject: true`,
+  or the project being deleted can be offered its OWN other repoKey back as a spurious "handoff" to
+  itself. The default (repoKey-only exclusion) is still correct, and required, for an ORDINARY rebind —
+  do not "fix" deleteProject by changing the default instead of passing the option.
+- Do not read `hadPinBefore` as "the index key exists" — M-1c is exactly this mistake. Compare the index
+  entry's own VALUE to the repoPath being backfilled (via `literalRepoPathKey`); a key that exists but
+  names a DIFFERENT path must never be miscounted as a re-pin of this one.
+- Do not wrap `platform/seed.ts`/`setup/seed.ts`'s boot-seed `insertProject` calls in a try/catch to
+  "match" the other 8 call sites — see the dedicated residual paragraph above for why: a real boot-time
+  seed failure must stay loud, and the conflict this would guard against cannot occur in practice at that
+  call site.
+- Do not trust that a check has coverage just because a test FILE exercises the code path it lives in —
+  M-1a is exactly this mistake: the M-1 reproduction test ran the handoff path but never put a genuinely
+  stale row in front of `findOtherCommondirPinHolder`'s own live-table validation (M-1b's source-level fix
+  already removed the stale row first), so disabling M-1a left all 6 test files green. When adding a
+  defense-in-depth check, write a test that defeats the OTHER layer first (seed the exact residue
+  directly) so the check under test is the ONLY thing standing between the input and a wrong answer.
+- Do not assume `insertProject`/`updateProject` are atomic just because each individual statement/method
+  call inside them is — M-2 is exactly this mistake. Wrap the write + the pin/unpin pass in ONE
+  `this.db.transaction()`, or a throw anywhere in the pass (any cause, not just a stale row) strands a
+  committed project row against an only-partly-updated pin/index state.
+- Do not let a test harness's `call()` (or equivalent per-site helper) propagate an uncaught exception
+  from one site's call — in a file testing N independent sites in sequence, one site throwing uncaught
+  aborts the process before any LATER site's own checks even run, which can read as "all green" if the
+  failure happens to be the LAST site, or hide real failures in every site after the one that throws.

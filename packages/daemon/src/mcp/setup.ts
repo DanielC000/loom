@@ -8,7 +8,7 @@ import { redactAlertWebhookInConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
-import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
+import { bootstrapProjectDir, isExistingDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
 import { expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { recordProfileGrantReach, recordAgentProfileRebindReach, grantFieldsOf, setupVisibleGrantReach, rebindWideningFields } from "../profiles/grantReach.js";
@@ -247,8 +247,13 @@ export class SetupMcpRouter {
           repo = vaultPath;
           vault = vaultPath;
         }
+        const projectId = randomUUID();
+        // @decision 3a5c5d4a (round 6, S-2/S-3) — pin-conflict pre-flight before anything is written;
+        // insertProject's own catch below is the backstop (a race between the two, never the common case).
+        const pinCheck = db.checkCommondirPinConflicts(projectId, [{ repoKey: "primary", repoPath: repo }]);
+        if (!pinCheck.ok) return ok({ error: pinCheck.error });
         const project: Project = {
-          id: randomUUID(), name, repoPath: repo, vaultPath: vault,
+          id: projectId, name, repoPath: repo, vaultPath: vault,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],
@@ -257,7 +262,7 @@ export class SetupMcpRouter {
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, see project_update
           vaultOnly: !isCodeRepo, // the vault-only branch above — no separate repo was ever given
         };
-        db.insertProject(project);
+        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
         // Bind-time commit-identity assert (CODE repos only — a vault-only notes folder takes no commits):
         // surface a NON-blocking advisory if no resolvable identity (a later worker/merge commit would
         // FAIL) or one inappropriate for the origin host (the GitHub-vs-Forgejo rule, reused from the git
@@ -292,13 +297,20 @@ export class SetupMcpRouter {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         const isGit = (kind ?? "git") === "git";
+        // @decision 3a5c5d4a (round 6, S-2) — pin-conflict check over the PREDICTED target, BEFORE
+        // bootstrapProjectDir creates (and `git init`s) anything.
+        const targetCheck = resolveProjectInitTarget({ name, dirName });
+        if (!targetCheck.ok) return ok({ error: targetCheck.error });
+        const projectId = randomUUID();
+        const pinCheck = db.checkCommondirPinConflicts(projectId, [{ repoKey: "primary", repoPath: targetCheck.target }]);
+        if (!pinCheck.ok) return ok({ error: pinCheck.error });
         const boot = await bootstrapProjectDir({ name, dirName, git: isGit });
         if (!boot.ok) return ok({ error: boot.error });
         const project: Project = {
           // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the
           // vault auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir
           // IS the vault.
-          id: randomUUID(), name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
+          id: projectId, name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],
@@ -307,7 +319,8 @@ export class SetupMcpRouter {
           repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, see project_update
           vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
         };
-        db.insertProject(project);
+        // Backstop (S-3): a race between the pre-flight above and this write, never the common case.
+        try { db.insertProject(project); } catch (e) { return ok({ error: e instanceof Error ? e.message : String(e) }); }
         // Same bind-time identity assert as project_create, for the git kind (a vault folder takes no
         // commits). A fresh `git init` repo usually has no LOCAL identity, so this surfaces (non-blocking)
         // whether a global identity is even resolvable before a worker ever tries to commit here.

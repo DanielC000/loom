@@ -4224,12 +4224,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // repoPath and vaultPath by construction, never a user-supplied alias.
     const tripleCheck = await checkVaultRepoTripleContainment({ repoPath: targetCheck.target, vaultPath, repos }, { pairingIsIntentional: !isGit });
     if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
+    // @decision 3a5c5d4a (round 6, S-2) — pin-conflict check over the PREDICTED paths, BEFORE
+    // bootstrapProjectDir creates (and `git init`s) anything — a refusal must never leave a stray dir
+    // behind, same invariant the triple-containment check above already honors.
+    const projectId = randomUUID();
+    const pinCandidates = [{ repoKey: "primary", repoPath: targetCheck.target }, ...repos.map((r) => ({ repoKey: r.key, repoPath: r.path }))];
+    const pinCheck = deps.db.checkCommondirPinConflicts(projectId, pinCandidates);
+    if (!pinCheck.ok) return reply.code(409).send({ error: pinCheck.error });
     const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
     if (!boot.ok) return reply.code(400).send({ error: boot.error });
     const project: Project = {
       // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the vault
       // auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir IS the vault.
-      id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath,
+      id: projectId, name: b.name, repoPath: boot.dir, vaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
       referenceRepos,
@@ -4238,7 +4245,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       repos,
       vaultOnly: !isGit, // kind "vault": the created dir IS the vault, no separate repo
     };
-    deps.db.insertProject(project);
+    // @decision 3a5c5d4a (round 6, S-3) — backstop: the pre-flight above closes the common case, but
+    // insertProject re-checks internally (fail-closed against a race between the two); surface that as
+    // the SAME 409 shape rather than an uncaught 500. A stray dir in this narrow race window is an
+    // accepted residual — see the round-6 record section.
+    try { deps.db.insertProject(project); } catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }); }
     // Card ce9a3a91: redact sessionEnv on BOTH exits below like the other project-returning WRITE routes
     // (0c5d6851) — nothing in the setup wizard reads config.sessionEnv back out of this response.
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
@@ -5050,8 +5061,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       { pairingIsIntentional: !repoPath },
     );
     if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
+    const projectId = randomUUID();
+    // @decision 3a5c5d4a (round 6, S-2/S-3) — pin-conflict pre-flight before anything is written; the
+    // insertProject catch below is the backstop (a race between the two, never the common case).
+    const pinCheck = deps.db.checkCommondirPinConflicts(projectId, [{ repoKey: "primary", repoPath: finalRepoPath }, ...repos.map((r) => ({ repoKey: r.key, repoPath: r.path }))]);
+    if (!pinCheck.ok) return reply.code(409).send({ error: pinCheck.error });
     const project: Project = {
-      id: randomUUID(), name: b.name, repoPath: finalRepoPath, vaultPath: finalVaultPath,
+      id: projectId, name: b.name, repoPath: finalRepoPath, vaultPath: finalVaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
       referenceRepos,
@@ -5060,7 +5076,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       repos,
       vaultOnly: !repoPath, // the vault-only branch above — no separate repo was ever given
     };
-    deps.db.insertProject(project);
+    try { deps.db.insertProject(project); } catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }); }
     const projectRead = redactSessionEnvForRead(project);
     return reply.code(201).send(repoGateWarning ? { ...projectRead, warning: repoGateWarning } : projectRead);
   });
@@ -5210,16 +5226,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!vaultOnlyCheck.ok) return reply.code(400).send({ error: vaultOnlyCheck.error });
     const vaultOnlyPatch = vaultOnlyCheck.vaultOnlyPatch;
     const namePatch = b.name === undefined ? undefined : (b.name as string).trim();
-    deps.db.updateProject(id, {
-      name: namePatch,
-      vaultPath,
-      repoPath,
-      referenceRepos,
-      noGateByDesign: b.noGateByDesign as boolean | undefined,
-      denyGlobs,
-      repos,
-      vaultOnly: vaultOnlyPatch,
-    });
+    // @decision 3a5c5d4a (round 6, S-3) — updateProject refuses (throws) on a commondir-trust-pin
+    // conflict; surface that as the SAME 409 shape every other refusal in this handler already uses,
+    // rather than an uncaught 500.
+    try {
+      deps.db.updateProject(id, {
+        name: namePatch,
+        vaultPath,
+        repoPath,
+        referenceRepos,
+        noGateByDesign: b.noGateByDesign as boolean | undefined,
+        denyGlobs,
+        repos,
+        vaultOnly: vaultOnlyPatch,
+      });
+    } catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }); }
     // STALE-PROMPT LINT (card 0597e092): `p` is the PRE-update row (fetched at the top of this handler,
     // before the write above), so this compares old-vs-new correctly. Read BEFORE the notify block below
     // so a rename note and a stale-prompt warning are computed from the exact same write.
