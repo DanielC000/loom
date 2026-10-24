@@ -7,7 +7,7 @@ import { ATLAS_TREE_ID, AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
 import {
   ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
-  isRehomedProjectTab, projectNodeTabAt, projectTabPath, workspaceNodeTabFor,
+  atlasRetirementFor, isRehomedProjectTab, projectNodeTabAt, projectTabPath, workspaceNodeTabFor,
   type AtlasHome, type NavPage, type ParamPage,
 } from "../nav";
 import { AtlasNodeHeadContext } from "../lib/atlasNodeHead";
@@ -38,7 +38,15 @@ import { color, font } from "../theme";
 // match exactly, hence `end` straight off the page — never swallows everything). `end` is the same
 // flag the Instrument Rail's NavLinks and the tree's own nodes consume, so all three agree on which
 // destination a URL belongs to by construction.
-const BY_SPECIFICITY: NavPage[] = [...NAV_PAGES].sort((a, b) => b.to.length - a.to.length);
+//
+// A RETIRED destination (card 5afd71bd) is excluded, so the frame never NAMES one. Its route below
+// redirects, but a redirect is a navigation the router performs on the first render AFTER this match
+// — so leaving it in would put "Mission Control" in the node head and the crumb trail for that one
+// frame, naming a node the tree no longer holds. The tree drops the row and the frame drops the name
+// together, from the same declaration.
+const BY_SPECIFICITY: NavPage[] = [...NAV_PAGES]
+  .filter((p) => !atlasRetirementFor(p.to))
+  .sort((a, b) => b.to.length - a.to.length);
 
 function currentPage(pathname: string): NavPage | undefined {
   return BY_SPECIFICITY.find((p) => matchPath({ path: p.to, end: p.end ?? false }, pathname));
@@ -404,15 +412,23 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 minus the eight card 25c08fba re-homed onto the PROJECT node, which are mounted at the
                 bottom of this table pointing at the node instead — and unless card 41eab0eb re-homed
                 it as a WORKSPACE node tab, in which case this address redirects into that tab and the
-                component is mounted there instead. (The two sets are disjoint: a destination is at
-                one depth.) The CLASSIC shell still mounts the page at this same path, unchanged. */}
+                component is mounted there instead — or unless card 5afd71bd RETIRED it, in which case
+                the address redirects to the node that absorbed it and the component is not mounted by
+                this shell at all. (The three sets are disjoint: a destination is at one depth, and a
+                retired one is at none.) The CLASSIC shell still mounts the page at this same path,
+                unchanged — which is why the path is still a <Route> here rather than simply absent:
+                dropping it would hand the address to the catch-all, and "Nothing here yet" is a worse
+                answer than the node that actually holds what the reader came for. */}
             {NAV_PAGES.filter((p) => !REHOMED_TAB_PATHS.has(p.to)).map((p) => {
               const tab = workspaceNodeTabFor(p.to);
+              const retired = atlasRetirementFor(p.to);
               return (
                 <Route key={p.to} path={p.to}
-                  element={tab
-                    ? <RehomedToNodeTab to={workspaceTabHref(tab.key)} subKey={WORKSPACE_SUB_KEY} />
-                    : p.element} />
+                  element={retired
+                    ? <Navigate to={retired.to} replace />
+                    : tab
+                      ? <RehomedToNodeTab to={workspaceTabHref(tab.key)} subKey={WORKSPACE_SUB_KEY} />
+                      : p.element} />
               );
             })}
             {/* The parameterized addresses (P1-2), from the SAME declaration LegacyShell mounts —

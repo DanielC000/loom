@@ -50,12 +50,14 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   // card's eight re-homed paths any redirect targets, and this map's own positive control above
   // rejects a path that none does.
   "/repository": "25c08fba — a tab on the project node, under its tab row and counts",
-  // Card a7f23a2f — /workspace is the redirect that lands here. Inside the frame the Projects page
-  // drops its own "Projects" label + description, because the crumbs and the node head already name
-  // the node; the classic shell still renders both. It is the only one of that card's four pages any
-  // declared redirect targets, and this map's own positive control above rejects a path that none
-  // does.
-  "/projects": "a7f23a2f — the frame names the node, so the page drops its own label + description",
+  // Card 5afd71bd — /workspace is the redirect that lands here. /projects is RETIRED under Atlas, so
+  // the address renders no page of its own at all: it redirects on to the Workspace node, and what
+  // this walk fingerprints is that node's content. The divergence is therefore total rather than the
+  // dropped-header one card a7f23a2f gave this row before. The redirect and landed-node halves are
+  // asserted in the walk's own retired branch; this row is only the CONTENT half, which is all this
+  // map can express. (It is still the only one of either card's pages any declared redirect targets,
+  // and this map's own positive control above rejects a path that none does.)
+  "/projects": "5afd71bd — retired, so the address renders the Workspace node rather than this page",
 };
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
@@ -133,6 +135,31 @@ function nodeTabsUnderTest(): Map<string, string> {
   return new Map(rows.map((r) => [r.from, r.key]));
 }
 
+/**
+ * The RETIRED destinations (card 5afd71bd), `from` → the node that absorbed them. Parsed from the real
+ * `ATLAS_RETIREMENTS` declaration with the same raw-marker control as the tab parse above, for the
+ * same reason: a regex that quietly stopped matching a row hands back a plausible SUBSET.
+ *
+ * This file needs them because one declared redirect targets a retired destination, so the Atlas
+ * landing for that row is two hops rather than one.
+ */
+function retirementsUnderTest(): Map<string, string> {
+  const src = readFileSync(NAV_SOURCE, "utf8");
+  const start = src.indexOf("export const ATLAS_RETIREMENTS");
+  if (start < 0) throw new Error(`no ATLAS_RETIREMENTS declaration found in ${NAV_SOURCE}`);
+  const end = src.indexOf("\n];", start);
+  if (end < 0) throw new Error(`ATLAS_RETIREMENTS in ${NAV_SOURCE} has no closing "];"`);
+  const block = src.slice(start, end);
+  const rawMarkers = (block.match(/\bfrom:\s*"/g) ?? []).length;
+  const rows = [...block.matchAll(/\bfrom:\s*"([^"]+)",\s*to:\s*"([^"]+)"/g)]
+    .map((m) => ({ from: m[1] ?? "", to: m[2] ?? "" }));
+  expect(rows.length, `the ATLAS_RETIREMENTS parse found no rows. Block:\n${block}`).toBeGreaterThan(0);
+  expect(rows.length,
+    `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} entries`
+    + ` — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
+  return new Map(rows.map((r) => [r.from, r.to]));
+}
+
 /** The host's sub-key for a guest's own tab — components/AtlasShell.tsx's `WORKSPACE_SUB_KEY`. */
 const SUB_KEY = "sub";
 
@@ -143,6 +170,12 @@ const SUB_KEY = "sub";
  * dropped sub-tab would silently land `/skills` on Profiles under one shell and Skills under the other.
  */
 function atlasLandingFor(to: string, nodeTabs: Map<string, string>): string {
+  // A RETIRED target (card 5afd71bd) is checked FIRST and resolves to the node that absorbed it. One
+  // declared redirect targets a retired destination — `/workspace` → `/projects` — so under Atlas that
+  // row chains two hops and settles on `/home`. Dropping the incoming query is unchanged behaviour:
+  // the retirement's own `<Navigate>` takes a plain path string, exactly as LEGACY_REDIRECTS' does.
+  const retired = retirementsUnderTest().get(pathOf(to));
+  if (retired) return retired;
   const key = nodeTabs.get(pathOf(to));
   if (!key) return to;
   const sub = tabOf(to);
@@ -381,8 +414,12 @@ async function treeNodeAddress(page: Page, to: string, nodeTabs: Map<string, str
   }
   const node = page.getByTestId(`atlas-node-${to}`);
   const homed = (await node.count()) > 0;
-  const row = homed ? node : page.getByTestId(`atlas-unhomed-${to}`);
-  await expect(row, `the tree has neither a node nor a "not yet re-homed" entry for ${to}`).toHaveCount(1);
+  // There is no second place left to look: card 5afd71bd deleted the escape hatch, so a target that
+  // is neither a node nor a tab is one whose placement was never decided. A RETIRED target never
+  // reaches this helper — its caller answers it before calling, since it has no row to read.
+  await expect(node, `the tree has no node for ${to}, and it is neither a Workspace node tab nor`
+    + ` retired — the escape hatch that used to hold such a destination is gone`).toHaveCount(1);
+  const row = node;
   const label = (await row.locator(".loom-atlas-lbl").innerText()).trim();
   expect(label, `the tree's ${to} row renders no label`).not.toBe("");
   const underProject = homed && await row.evaluate((el) => !!el.closest("ul.loom-atlas-nodes.is-kids"));
@@ -399,6 +436,10 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
 
     // ── The table under test, parsed from the real declaration ──
     const nodeTabs = nodeTabsUnderTest();
+    // One declared redirect targets a destination card 5afd71bd RETIRED, so its Atlas landing is the
+    // node that absorbed that destination rather than the declared target. Derived, so the next card
+    // to retire or un-retire something moves this row's expectation by editing src/nav.tsx alone.
+    const retirements = retirementsUnderTest();
     const { rows, rawMarkers, block } = parseLegacyRedirects();
     // POSITIVE CONTROLS on the parse. (a) it found something at all; (b) it found EVERY row the
     // block declares, so a quietly-narrowed regex cannot hand back a plausible subset; (c) it
@@ -484,8 +525,30 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       }
 
       // ── The right NODE: the tree marks it, the heading names it, the crumbs lead to it. ──
-      const { label, underProject, homed, tabKey } = await treeNodeAddress(page, pathOf(r.to), nodeTabs);
-      if (tabKey) {
+      // A RETIRED target (card 5afd71bd) is answered FIRST and separately: it has no tree row and no
+      // tab, so `treeNodeAddress` has nothing to resolve for it. What it lands on is the node that
+      // absorbed the retired destination — today always the Workspace node, which is its tier's head,
+      // so the trail stops at "Workspace" and the heading is that same word.
+      const retiredTarget = retirements.get(pathOf(r.to));
+      const address = retiredTarget ? null : await treeNodeAddress(page, pathOf(r.to), nodeTabs);
+      const { label, underProject, homed, tabKey } = address
+        ?? { label: "", underProject: false, homed: false, tabKey: undefined as string | undefined };
+      if (retiredTarget) {
+        expect(retiredTarget,
+          `this leg only knows how to check a retirement onto /home, not ${retiredTarget}`).toBe("/home");
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${r.from} chained through a retired target, so exactly one node may read as landed`).toHaveCount(1);
+        await expect(page.getByTestId("atlas-home-workspace")).toHaveClass(/is-active/);
+        await expect(nodeHeading(page)).toHaveText("Workspace");
+        expect(await crumbTrail(page), `${r.from} produced the wrong breadcrumb trail`).toEqual(["Workspace"]);
+        // The node's OWN canonical first tab is selected, not one of the seven re-homed guests: a
+        // retirement lands on the node, not on a tab of it. The same `aria-selected` reading is taken
+        // on a guest tab in the branch below, which is the control that this attribute is really read.
+        await expect(page.getByTestId("atlas-tab-overview"),
+          `${r.from} reached the Workspace node without its own Overview tab selected`)
+          .toHaveAttribute("aria-selected", "true");
+        // The page-content claim still runs below, through REBUILT_IN_PHASE_2's inversion.
+      } else if (tabKey) {
         // A node TAB lives on the Workspace node, so that node — and only it — reads as landed, and
         // the frame is headed for the NODE, not the tab. That is the approved design's own shape:
         // every `ROOT_TABS` view declares `node: "root"` and `title: "Workspace"`.
@@ -504,14 +567,15 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
           await expect(page.locator("a.loom-atlas-node.is-active"),
             `${r.from} marked more than one tree node`).toHaveCount(1);
         } else {
-          // Card 0d0c6cee: this destination has no node, so NO node may read as landed — marking the
-          // nearest-looking row would be the tree lying about where you are. The hatch entry's own
-          // weaker `is-here` mark is asserted too, so this is not a bare absence a blank tree passes.
-          await expect(page.locator("a.loom-atlas-node.is-active"),
-            `${r.from} lands on ${pathOf(r.to)}, which has no tree node, yet a node reads as landed`)
-            .toHaveCount(0);
-          await expect(page.getByTestId(`atlas-unhomed-${pathOf(r.to)}`),
-            `${r.from} landed without marking the ${pathOf(r.to)} escape-hatch entry`).toHaveClass(/is-here/);
+          // UNREACHABLE as of card 5afd71bd, which deleted the escape hatch — `treeNodeAddress` above
+          // already throws for a target that is neither a node nor a tab, so this branch can only be
+          // reached by a hatch being re-added. Kept as an explicit failure rather than deleted: a
+          // destination with no node is a real state the walk must never silently accept, and the
+          // message is what tells the next reader which of the four placements is missing.
+          expect(homed,
+            `${r.from} lands on ${pathOf(r.to)}, which has no tree node, no Workspace node tab and no`
+            + ` retirement — the escape hatch that used to hold such a destination was deleted with`
+            + ` card 5afd71bd, so this address is unreachable. Give it one of the four placements.`).toBe(true);
         }
         await expect(nodeHeading(page)).toHaveText(label);
         // Depth comes from the tree itself: a project-level node hangs under the project crumb.
@@ -707,10 +771,9 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     if (landed.tabKey) {
       await expect(page.getByTestId(`atlas-tab-${landed.tabKey}`)).toHaveAttribute("aria-selected", "true");
     } else {
-      await expect(page.getByTestId(landed.homed
-        ? `atlas-node-${pathOf(target.to)}`
-        : `atlas-unhomed-${pathOf(target.to)}`))
-        .toHaveClass(landed.homed ? /is-active/ : /is-here/);
+      // `treeNodeAddress` already required a node to exist for a non-tab target (the escape hatch it
+      // used to fall back to went with card 5afd71bd), so this is the node's own landed mark.
+      await expect(page.getByTestId(`atlas-node-${pathOf(target.to)}`)).toHaveClass(/is-active/);
     }
   });
 });

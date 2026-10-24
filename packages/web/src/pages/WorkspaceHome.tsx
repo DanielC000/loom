@@ -254,14 +254,18 @@ export default function WorkspaceHome() {
     </BandPanel>
   );
   // The cap is `GLOBAL_ACTIVITY_CAP` (lib/fleet.ts), the SAME constant Mission Control's Activity column
-  // reads — this band was 40 against that page's 100, and that page is the one card 5afd71bd retires, so
-  // the shortfall was 60 rows about to become unreachable rather than merely summarised. The band owns a
+  // read — this band was 40 against that page's 100, and card 5afd71bd then retired that page, so the
+  // shortfall would have been 60 rows made unreachable rather than merely summarised. The band owns a
   // fixed 320px scroll by design, so a deeper list changes scroll depth, not layout.
   //
   // ⚠️ The project-scoped pulse (pages/ProjectHome.tsx) keeps its OWN, narrower cap: different
   // population, and its `Runs` exit survives. Don't fold the two onto one number.
+  //
+  // @decision 5afd71bd — this band is the DEEPEST cross-project view of the orchestration stream, so
+  // it carries no `action`. Never point one at the Replay tab (wave replay, a different corpus),
+  // `/runs` (a project tab, the wrong tier) or a session's Timeline (one slice of it).
   const pulsePanel = (
-    <BandPanel label="Pulse" action={{ to: "/", label: "Mission" }} testId="atlas-band-pulse">
+    <BandPanel label="Pulse" testId="atlas-band-pulse">
       {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}
       {events.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
     </BandPanel>
@@ -326,7 +330,14 @@ export default function WorkspaceHome() {
               <span className="loom-atlas-primarylbl">Projects</span>
               <span className="loom-bandcount">{projects.length}</span>
               <span style={{ flex: 1 }} />
-              <Link to="/projects" className="loom-btn loom-btn-default loom-bandlink">New project <span aria-hidden>↗</span></Link>
+              {/* The Platform node, not the retired Projects page (card 5afd71bd): project creation's
+                  Atlas home is that node's guided setup wizard (`GuidedSetupLauncher` →
+                  `SetupWizard`, pages/PlatformView.tsx's `home` panel), which collects the same
+                  repo/vault binding this grid's own cards are built from and seeds a templated team
+                  on top. The LABEL stays "New project" — it names what the control does, which the
+                  retirement did not change; only where it lands did. */}
+              <Link to="/platform" className="loom-btn loom-btn-default loom-bandlink"
+                title="Create a project with guided setup on the Platform node">New project <span aria-hidden>↗</span></Link>
             </div>
             {grid}
           </section>
@@ -339,7 +350,9 @@ export default function WorkspaceHome() {
               <span className="loom-atlas-primarylbl">Projects</span>
               <span className="loom-bandcount">{projects.length}</span>
               <span style={{ flex: 1 }} />
-              <Link to="/projects" className="loom-btn loom-btn-default loom-bandlink">New project <span aria-hidden>↗</span></Link>
+              {/* Same control, same target, same reasoning as the Overview tab's above. */}
+              <Link to="/platform" className="loom-btn loom-btn-default loom-bandlink"
+                title="Create a project with guided setup on the Platform node">New project <span aria-hidden>↗</span></Link>
             </div>
             {grid}
             <p className="loom-bandempty" style={{ marginTop: 10 }}>
@@ -566,8 +579,11 @@ function ProjectGrid({ projects, boards, liveByProject, lastMerge, sessions, onO
   if (projects.length === 0) {
     return (
       <Panel data-testid="atlas-project-grid" style={{ padding: 16 }}>
+        {/* Names the node that actually holds project creation now that the Projects page is retired
+            (card 5afd71bd) — and the "New project ↗" control directly above this panel is the link,
+            so the copy points at it by name rather than repeating it as a second anchor. */}
         <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12.5 }}>
-          No projects yet — create one from the Projects node.
+          No projects yet — create one with guided setup on the Platform node.
         </span>
       </Panel>
     );

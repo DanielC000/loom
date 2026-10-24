@@ -98,6 +98,41 @@ function nodeTabsUnderTest(): Map<string, string> {
   return new Map(rows.map((r) => [r.from, r.key]));
 }
 
+// ── The FOURTH home a destination can have — none at all (card 5afd71bd) ───────────────────────
+// Mission Control and the Projects page are RETIRED: the approved design dissolves them rather than
+// re-homing them, so under Atlas each address REDIRECTS to the node that absorbed its surfaces and
+// has no tree row, no tab and no hatch entry. That makes the partition below FOUR-way, and it is the
+// card that DELETED the hatch — so the hatch bucket, which used to carry a "> 0" positive control, is
+// now asserted EMPTY instead. Its disjunct is kept rather than removed so a destination that fell
+// back into a re-added hatch would still be counted somewhere and fail the "exactly one" claim.
+//
+// Parsed from the same source, the same way, with the same raw-marker control. Keyed `from` → `to`,
+// because the landing matters here: a retired address must reach the node that absorbed it, not
+// merely vanish.
+type Retirement = { from: string; to: string };
+
+function parseRetirements(): { rows: Retirement[]; rawMarkers: number; block: string } {
+  const src = readFileSync(NAV_SOURCE, "utf8");
+  const start = src.indexOf("export const ATLAS_RETIREMENTS");
+  if (start < 0) throw new Error(`no ATLAS_RETIREMENTS declaration found in ${NAV_SOURCE}`);
+  const end = src.indexOf("\n];", start);
+  if (end < 0) throw new Error(`ATLAS_RETIREMENTS in ${NAV_SOURCE} has no closing "];"`);
+  const block = src.slice(start, end);
+  const rawMarkers = (block.match(/\bfrom:\s*"/g) ?? []).length;
+  const rows = [...block.matchAll(/\bfrom:\s*"([^"]+)",\s*to:\s*"([^"]+)"/g)]
+    .map((m) => ({ from: m[1] ?? "", to: m[2] ?? "" }));
+  return { rows, rawMarkers, block };
+}
+
+function retirementsUnderTest(): Map<string, string> {
+  const { rows, rawMarkers, block } = parseRetirements();
+  expect(rows.length, `the ATLAS_RETIREMENTS parse found no rows. Block:\n${block}`).toBeGreaterThan(0);
+  expect(rows.length,
+    `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} entries`
+    + ` — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
+  return new Map(rows.map((r) => [r.from, r.to]));
+}
+
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
 // navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
 async function seedAtlasOn(page: Page) {
@@ -112,9 +147,11 @@ async function seedAtlasOn(page: Page) {
 // is a <button> with no href, so it is excluded by construction rather than by a filter.
 const RAIL_LINKS = "a.loom-rail-item, a.loom-rail-statrow";
 const TREE_NODES = "a.loom-atlas-node";
-// The escape hatch at the foot of the tree (card 0d0c6cee): the cross-project destinations that have
-// LEFT the tree pending cards 41eab0eb / 25c08fba, which re-home them as node tabs. Deliberately NOT
-// `.loom-atlas-node` — that is the whole point of the removal — so it needs its own selector here.
+// The escape hatch that stood at the foot of the tree (card 0d0c6cee): the cross-project destinations
+// that had LEFT the tree pending cards 41eab0eb / 25c08fba / 5afd71bd. The LAST of those deleted the
+// disclosure, so this collector now reads ZERO by construction — and that is exactly why it is kept:
+// it is what pins the hatch as gone, and keeps a re-added one from quietly becoming a destination's
+// "home" again. Deliberately NOT `.loom-atlas-node`, which is what it never was.
 const UNHOMED_LINKS = "a.loom-atlas-unhomed-link";
 
 // ── Destinations PHASE 2 has deliberately rebuilt ──────────────────────────────────────────────
@@ -168,7 +205,11 @@ const REBUILT_IN_PHASE_2: Record<string, string> = {
   // running·queued on that same tab row. The classic page keeps head and lamps both.)
   "/gates": "a7f23a2f + 5968d7e0 — the frame names the node and carries its occupancy, so the page drops its own <h1>, subtitle and lamps",
   "/inbox": "a7f23a2f — the frame names the node, so the page drops its own name above its tab row",
-  "/projects": "a7f23a2f — the frame names the node, so the page drops its own label + description",
+  // `/projects` was card a7f23a2f's fourth such page and had a row here. Card 5afd71bd RETIRED it, so
+  // under Atlas the address no longer renders that page AT ALL — it redirects — and the walk below
+  // takes it down its own retired branch, which makes the same inverted comparison plus the redirect
+  // and landed-node claims this map cannot express. A row left here would therefore never run, which
+  // is precisely the silent-carve-out this map's positive control exists to catch.
 };
 
 async function routesFrom(page: Page, selector: string): Promise<string[]> {
@@ -339,7 +380,11 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // Card 41eab0eb added the THIRD half: a destination may now be a Workspace node TAB instead,
     // which is neither a tree row nor a hatch entry. Derived from the declaration, then VERIFIED
     // against the rendered tab row, so a declared tab that never renders fails here too.
+    // Card 5afd71bd added the FOURTH: a destination may be RETIRED, which is no home at all — its
+    // address redirects to the node that absorbed it. Derived the same way, and VERIFIED by the
+    // redirect itself below, so a declared retirement whose address still renders a page fails here.
     const nodeTabs = nodeTabsUnderTest();
+    const retirements = retirementsUnderTest();
     // Read on the Workspace node itself — the tree renders on every Atlas route, but the tab row is
     // that node's own chrome and exists nowhere else.
     await page.goto(loomDaemon.baseURL + "/home");
@@ -357,20 +402,44 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
 
     const homedSet = new Set(treeRoutes);
     const unhomedSet = new Set(unhomedRoutes);
+    const retiredSet = new Set(retirements.keys());
     const placesFor = (route: string) =>
-      [homedSet.has(route), unhomedSet.has(route), tabbedSet.has(route)].filter(Boolean).length;
+      [homedSet.has(route), unhomedSet.has(route), tabbedSet.has(route), retiredSet.has(route)]
+        .filter(Boolean).length;
     for (const route of railRoutes) {
       expect(placesFor(route),
-        `the classic destination ${route} is in ${placesFor(route)} of the three Atlas homes — it must be`
-        + ` in EXACTLY one (a tree node, a "not yet re-homed" entry, or a Workspace node tab).`
-        + ` nodes: ${JSON.stringify(treeRoutes)}; escape hatch: ${JSON.stringify(unhomedRoutes)};`
-        + ` node tabs: ${JSON.stringify([...tabbedSet])}`).toBe(1);
+        `the classic destination ${route} is in ${placesFor(route)} of the four Atlas placements — it`
+        + ` must be in EXACTLY one (a tree node, a "not yet re-homed" entry, a Workspace node tab, or`
+        + ` retired). nodes: ${JSON.stringify(treeRoutes)}; escape hatch: ${JSON.stringify(unhomedRoutes)};`
+        + ` node tabs: ${JSON.stringify([...tabbedSet])}; retired: ${JSON.stringify([...retiredSet])}`).toBe(1);
     }
-    // Positive control on the escape-hatch collector: a reading of zero would make that disjunct dead
-    // and let a destination that fell out of the tree pass as "tabbed" without being either. When the
-    // last of cards 25c08fba / 5afd71bd lands, THIS is the assertion that tells you to delete the
-    // hatch and its third of the partition with it.
-    expect(unhomedRoutes.length, "the escape-hatch collector found no entries at all").toBeGreaterThan(0);
+    // The escape hatch is GONE (card 5afd71bd deleted the disclosure along with the last two
+    // destinations it held), so its disjunct above is now dead ON PURPOSE — and that is asserted
+    // rather than left implicit, because a dead disjunct nobody states is indistinguishable from a
+    // broken collector. The hatch bucket stays in the partition so a re-added hatch entry would still
+    // be COUNTED and would still fail the "exactly one" claim above.
+    expect(unhomedRoutes, "the escape hatch still renders entries, which card 5afd71bd deleted")
+      .toEqual([]);
+    await expect(page.getByTestId("atlas-unhomed"),
+      "the escape-hatch disclosure is still mounted").toHaveCount(0);
+    // POSITIVE CONTROL on the RETIRED bucket, which replaced the hatch's own: a reading of zero would
+    // make that disjunct dead too and let a destination that fell out of the tree pass as "retired"
+    // without being either. Derived from the declaration, so it tracks whatever is retired today.
+    expect(retiredSet.size, "the retirement declaration carries no rows at all").toBeGreaterThan(0);
+    expect([...retiredSet].filter((r) => railRoutes.includes(r)).length,
+      "no retired address is a rail destination, so that branch of the partition never runs")
+      .toBe(retiredSet.size);
+    // ...and the retirement is REAL, not just declared: the address redirects to the node named in the
+    // declaration rather than rendering a page. Checked here so the bucket is a measurement of the
+    // running app, the same way the tab bucket is verified against the rendered tab row above.
+    for (const [from, to] of retirements) {
+      await page.goto(loomDaemon.baseURL + from);
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+      await expect(page, `the retired address ${from} did not redirect to ${to}`)
+        .toHaveURL(loomDaemon.baseURL + to);
+    }
+    await page.goto(loomDaemon.baseURL + "/home");
+    await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
     // Card 0d0c6cee's own claim, stated positively rather than left implicit in the partition: a
     // cross-project destination is NOT a tree row any more.
     expect(treeRoutes, "the Inbox destination is still an Atlas tree row").not.toContain("/inbox");
@@ -395,9 +464,10 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     //     entry, or a Workspace node tab — never missing from all three. (The workspace Settings home
     //     is a `ROOT_TABS` row in the approved design, so card 41eab0eb made it the Settings tab.)
     for (const declared of homes.paths) {
-      expect(homedSet.has(declared) || unhomedSet.has(declared) || tabbedSet.has(declared),
+      expect(homedSet.has(declared) || unhomedSet.has(declared) || tabbedSet.has(declared)
+        || retiredSet.has(declared),
         `src/nav.tsx declares the Atlas home ${declared}, which the tree renders neither as a node nor`
-        + ` as a "not yet re-homed" entry, and which is not a Workspace node tab either`).toBe(true);
+        + ` as a "not yet re-homed" entry, and which is neither a Workspace node tab nor retired`).toBe(true);
     }
 
     // The tree IS navigation, not a complementary region (the P1-0 review finding this card carries).
@@ -472,21 +542,55 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     const homedSet = new Set(await routesFrom(page, TREE_NODES));
     const unhomedSet = new Set(await routesFrom(page, UNHOMED_LINKS));
     // The third home (card 41eab0eb) — a Workspace node tab, addressed by its key rather than by a
-    // pathname, so it cannot come from `routesFrom`.
+    // pathname, so it cannot come from `routesFrom`. And the fourth (card 5afd71bd) — RETIRED, which
+    // is no home at all: the address redirects, so the walk visits it to assert that rather than to
+    // compare a node's content against a page's.
     const nodeTabs = nodeTabsUnderTest();
+    const retirements = retirementsUnderTest();
     for (const route of routes) {
-      expect(homedSet.has(route) || unhomedSet.has(route) || nodeTabs.has(route),
+      expect(homedSet.has(route) || unhomedSet.has(route) || nodeTabs.has(route)
+        || retirements.has(route),
         `${route} is reachable from none of the tree, its escape hatch, or the Workspace node's tabs,`
-        + ` so this walk cannot visit it`).toBe(true);
+        + ` and it is not retired either, so this walk cannot visit it`).toBe(true);
     }
     // Positive control on the third bucket: a reading of zero would let a destination that fell out
     // of both tree halves pass the disjunct above without being anywhere.
     expect([...nodeTabs.keys()].filter((r) => routes.includes(r)).length,
       "no rail destination is a Workspace node tab, so that branch of the walk never runs")
       .toBeGreaterThan(0);
+    // The same control on the fourth, for the same reason.
+    expect([...retirements.keys()].filter((r) => routes.includes(r)).length,
+      "no rail destination is retired, so that branch of the walk never runs").toBeGreaterThan(0);
 
     let previous = "";
     for (const route of routes) {
+      const retiredTo = retirements.get(route);
+      if (retiredTo) {
+        // A RETIRED destination (card 5afd71bd) has no node to click and no content of its own to
+        // compare: the address redirects to the node that absorbed its surfaces. So this leg asserts
+        // the redirect and the landed node, and then INVERTS the identity claim — the classic capture
+        // must still be non-empty, so this cannot be satisfied by a route that rendered nothing under
+        // EITHER shell, which is how an inverted claim usually goes vacuous.
+        await page.goto(loomDaemon.baseURL + route);
+        await expect(page.getByTestId("atlas-shell")).toBeVisible();
+        await expect(page.getByTestId("atlas-empty"),
+          `the retired ${route} fell through to the Atlas catch-all instead of redirecting`).toHaveCount(0);
+        await expect(page, `the retired ${route} did not redirect to ${retiredTo}`)
+          .toHaveURL(loomDaemon.baseURL + retiredTo);
+        const landed = await settledPageSkeleton(page);
+        expect(before.get(route), `the ${route} route rendered nothing under the classic shell`).toBeTruthy();
+        expect(landed, `the retired ${route} still renders its own CLASSIC page under Atlas`)
+          .not.toBe(before.get(route));
+        // The frame agrees it is on the absorbing node, not on the retired destination: exactly one
+        // node reads as landed, and the heading is not the retired page's own label.
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `the retired ${route} landed without exactly one node reading as landed`).toHaveCount(1);
+        await expect(page.locator(".loom-atlas-nodehead h1")).not.toBeEmpty();
+        await expect(page.getByTestId(`atlas-node-${route}`),
+          `the retired ${route} is still an Atlas tree row`).toHaveCount(0);
+        previous = landed;
+        continue;
+      }
       const tabKey = nodeTabs.get(route);
       if (tabKey) {
         // A re-homed destination is reached the way a reader reaches it from anywhere that still

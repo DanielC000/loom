@@ -402,6 +402,53 @@ export const LEGACY_REDIRECTS: LegacyRedirect[] = [
   redirect("/git", "/repository?tab=git"),
 ];
 
+// ── The Atlas retirements ──────────────────────────────────────────────────────────────────────
+// Card 5afd71bd (Atlas restructure 11 of 11). The approved round-4 V2 design DISSOLVES two
+// destinations rather than re-homing them: Mission Control, whose every surface the Workspace node
+// now carries (its KPI tiles, its fleet-controls bar, its five band panels and the Replay tab), and
+// Projects, whose three panes split across the tree's own project tier, the project node's Settings
+// tab and the Agents node. Neither has anything left of its own to show, so under Atlas each
+// address redirects to the node that absorbed it instead of standing as a tree row and a full page.
+//
+// A row is the retired address plus where it lands. The ADDRESSES STAY in NAV_PAGES above — that is
+// what keeps the classic shell byte-identical for a user who never opted in, which is this card's
+// own scope boundary and the condition of the owner's sign-off (request b54c9e59).
+//
+// @decision 5afd71bd — never move a retirement into LEGACY_REDIRECTS, and never drop its `from` from
+// NAV_PAGES: either one deletes the destination from the CLASSIC shell too.
+//
+// There is deliberately no "retired" FLAG on NavPage: a flag would be read by the classic shell's own
+// mapping of that array, where it means nothing, and the pair here states the one thing a flag cannot
+// — WHERE the address goes.
+export type AtlasRetirement = {
+  /** The retired destination's own address, still a live NAV_PAGES `to`. */
+  from: string;
+  /** The Atlas node that absorbed it — where the address redirects under the Atlas shell only. */
+  to: string;
+};
+
+export const ATLAS_RETIREMENTS: AtlasRetirement[] = [
+  // Mission Control → the Workspace node. Every one of its surfaces is on that node or a tab of it:
+  // the status strip and fleet controls (card 7b893d54), the stat counters (the KPI deck/strip), the
+  // review queue and attention queue (the Needs-you band, card c2968651), the plan-usage strip, the
+  // activity feed (the Pulse band, at the same `GLOBAL_ACTIVITY_CAP`), and wave replay plus the
+  // inactive-projects tier (the Replay tab, card ff6123de).
+  { from: "/", to: "/home" },
+  // Projects → the Workspace node, which is where its own primary pane went: the "All projects" rail
+  // is the tree's project tier (card 0d0c6cee) plus that node's Projects grid. Its other panes landed
+  // deeper — project lifecycle on the project node's Settings tab (card c9b78d80), the archived tier
+  // on the Workspace node's Settings tab (card baca1835), agent definition on the Agents node (card
+  // 318b5a21) — and project creation is the Platform node's guided setup wizard. The SHALLOWEST node
+  // that contains the pane a reader came for is the honest landing, which is the same "scope is depth"
+  // rule the tree itself follows.
+  { from: "/projects", to: "/home" },
+];
+
+/** Where an address lands under Atlas, or `undefined` for one Atlas still mounts as its own node. */
+export function atlasRetirementFor(path: string): AtlasRetirement | undefined {
+  return ATLAS_RETIREMENTS.find((r) => r.from === path);
+}
+
 // The source of truth for what the rail nav (Sidebar) and the Command Palette LIST show (both call this).
 // Every nav page is always listed and always reachable in the rail's grouped nav — there is no runtime nav
 // gating left. (The dev-vs-shipping edition split that used to hide a second "Platform" tab now lives

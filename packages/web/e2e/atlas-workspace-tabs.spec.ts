@@ -232,27 +232,19 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
       // now, not a row and not an escape-hatch entry.
       await expect(page.getByTestId(`atlas-node-${row.from}`),
         `${row.from} is still an Atlas tree row`).toHaveCount(0);
-      await expect(page.getByTestId(`atlas-unhomed-${row.from}`),
-        `${row.from} is still a "not yet re-homed" entry as well as a tab`).toHaveCount(0);
     }
-    // POSITIVE CONTROL on those two absences: the same collectors DO still see a row and a hatch entry
-    // that deliberately stayed, so neither zero above came from a broken locator.
-    //
-    // The hatch specimen is READ off the rendered hatch rather than named. This control first named
-    // `/terminals`, and card 25c08fba then took it out of the hatch entirely — down to project depth
-    // as the project node's Sessions tab — which reddened the control without anything being wrong
-    // with what it was controlling for. The two entries left belong to card 5afd71bd, which retires
-    // them the same way, so any name written here is a name with a known expiry.
+    // POSITIVE CONTROL on that absence: the same collector DOES still see a row that deliberately
+    // stayed, so the zero above did not come from a broken locator.
     await expect(page.getByTestId("atlas-node-/platform"),
       "positive control: the tree-node collector cannot see the Platform node either").toHaveCount(1);
-    const hatchIds = (await page.locator("a.loom-atlas-unhomed-link")
-      .evaluateAll((els) => els.map((el) => el.getAttribute("data-testid") ?? "")))
-      .filter((id) => id.startsWith("atlas-unhomed-"));
-    expect(hatchIds,
-      "positive control: the escape hatch renders no entry at all, so the two zeros above prove nothing")
-      .not.toHaveLength(0);
-    await expect(page.getByTestId(hatchIds[0]!),
-      `positive control: the escape-hatch collector cannot see ${hatchIds[0]} either`).toHaveCount(1);
+    // The matching hatch assertion — "a tab is not ALSO an escape-hatch entry" — is gone with card
+    // 5afd71bd, which retired the last two destinations the hatch held and DELETED the disclosure. It
+    // had its own positive control read off the rendered hatch (deliberately not named, because this
+    // control had already expired once when card 25c08fba emptied its named specimen out); with
+    // nothing left to render, the control can no longer fire and the assertion it guarded can no
+    // longer fail. So the claim moved rather than weakening: "no hatch exists anywhere" is asserted
+    // document-wide by atlas-tree.spec.ts's partition and by atlas-retired-destinations.spec.ts,
+    // which is strictly stronger than this per-row zero was.
 
     // An incoming `?tab=` is a real address today — `/skills` redirects to `/actors?tab=skills` — so
     // chaining it into the tab must carry the sub-tab across rather than silently dropping it onto the

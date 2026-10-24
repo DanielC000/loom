@@ -377,7 +377,13 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     // landed node rather than the frame's old placeholder title.
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toBeVisible();
-    await expect(page.getByRole("heading", { level: 1, name: "Mission Control" })).toBeVisible();
+    // "Workspace", not "Mission Control": card 5afd71bd RETIRED `/` as an Atlas destination, so this
+    // address now redirects to the Workspace node and the frame is headed for the node it landed on.
+    // That the redirect happens at all is asserted by atlas-retired-destinations.spec.ts; what this
+    // line still pins is the FRAME's own claim — the heading names the landed node rather than the
+    // placeholder title the shell carried before card 8cbb2ac2 put real nodes in the tree.
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByRole("heading", { level: 1, name: "Workspace" })).toBeVisible();
 
     // The `banners` slot is really wired, not just declared: the same forced banner the switch-off
     // baseline pins renders INSIDE the Atlas frame too. Nothing else in this spec would notice if
@@ -397,8 +403,10 @@ test.describe("Atlas UI switch (card 757c80dd)", () => {
     //
     // It is the FRAME's claim, and this is the only route where the frame renders alone. Since card
     // 8cbb2ac2 (P1-1) every other URL mounts a real page, and a page brings its own expected network
-    // behaviour — MissionControl at "/" reads GET /api/platform/home with `retry:false`
-    // (pages/MissionControl.tsx:92-96), and a page can always log something the catch-all never does
+    // behaviour: every panel on a real page is a react-query read, and one of them can legitimately
+    // log something the bare frame never does simply by mounting more (Mission Control's own
+    // `retry:false` platform-home read was the original specimen, before card 5afd71bd retired that
+    // page and pointed "/" at the Workspace node instead), and a page can always log something the catch-all never does
     // simply by mounting more. Any such noise fires identically under the classic shell, so folding it
     // in here would redden this spec for something Atlas neither caused nor governs. Whether Atlas
     // introduces a NEW error on any REAL page is asserted in atlas-tree.spec.ts, against the classic

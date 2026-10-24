@@ -44,9 +44,14 @@ async function pinProject(page: Page, projectId: string) {
 }
 
 /**
- * Every address the Atlas frame can reach from its own chrome: the tree's rows (including the hatch)
- * plus the two node tab rows. Collected from the RENDERED app, so it tracks whatever the current set
- * of re-homed surfaces happens to be — which is the point, since cards 5-11 keep moving them.
+ * Every address the Atlas frame can reach from its own chrome: the tree's rows plus the two node tab
+ * rows. Collected from the RENDERED app, so it tracks whatever the current set of re-homed surfaces
+ * happens to be — which is the point, since cards 5-11 keep moving them.
+ *
+ * It used to include the tree's escape hatch, which card 5afd71bd deleted along with the last two
+ * destinations in it. Those two are RETIRED, so they are not addresses the frame can reach any more —
+ * which is exactly right for this collector: a retired address redirects, and the node it lands on is
+ * already in the list on its own account.
  */
 async function reachableAddresses(page: Page, baseURL: string): Promise<string[]> {
   const seen = new Set<string>();
@@ -58,8 +63,7 @@ async function reachableAddresses(page: Page, baseURL: string): Promise<string[]
       }));
     for (const h of hrefs) seen.add(h);
   };
-  // The tree is on every node; the tab rows are not, so both node heads are visited for theirs. The
-  // hatch is a <details> whose links are in the DOM whether or not it is open, so it needs no click.
+  // The tree is on every node; the tab rows are not, so both node heads are visited for theirs.
   for (const at of ["/home", "/project"]) {
     await page.goto(baseURL + at);
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
@@ -190,8 +194,14 @@ test.describe("Atlas drops the classic page header (card a7f23a2f)", () => {
         .toContain("create and manage projects and their agents");
 
       // POSITIVE CONTROL that this leg is the control the ON leg needs: the SAME locator, on the SAME
-      // build, found all four. The ON leg requires zero of them at the Atlas addresses for the same
-      // four pages, which is only meaningful because of this reading.
+      // build, found all four. The ON leg requires zero `page-identity` blocks at every address the
+      // Atlas frame can reach, which is only meaningful because of this reading.
+      //
+      // ⚠️ `/projects` is in this leg's four but is no longer among the addresses the ON leg visits:
+      // card 5afd71bd RETIRED it, so under Atlas it renders no page at all and there is nothing left
+      // to suppress. It stays HERE because this leg's own claim is about the CLASSIC shell, which the
+      // retirement deliberately left untouched — so its block must still be there, and that is worth
+      // asserting whether or not Atlas still mounts the page.
       expect([...texts.keys()].sort(),
         "the switch-OFF leg did not read all four blocks, so it cannot control the ON leg's absence claim")
         .toEqual([...classicAddresses].sort());

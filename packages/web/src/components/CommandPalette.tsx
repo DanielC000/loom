@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAttention, attentionOpenTarget, isAnswerableRequest } from "../lib/attention";
 import { useOpenRequest } from "./requests";
-import { useVisibleNavPages } from "../nav";
+import { atlasRetirementFor, useVisibleNavPages } from "../nav";
+import { useAtlasUi } from "../lib/atlasUi";
 import { color, font } from "../theme";
 
 // Ctrl/Cmd-K fuzzy launcher: jump to any page, or open the target of a pending attention item — a merge
@@ -14,7 +15,18 @@ export function CommandPalette() {
   const openRequest = useOpenRequest();
   const { items: attention } = useAttention();
   // Gated nav list — the dev "Loom Platform" entry stays out for shipping users (see useVisibleNavPages).
-  const navPages = useVisibleNavPages();
+  const allNavPages = useVisibleNavPages();
+  // This palette is CROSS-CUTTING chrome: App.tsx mounts the one instance for BOTH shells. So it is the
+  // one place outside the shells themselves that has to know a destination was RETIRED under Atlas
+  // (card 5afd71bd) — otherwise ⌘K keeps offering "Mission Control", and picking it silently lands the
+  // reader on the Workspace node, which is a worse answer than not offering it: the row promised a
+  // destination that no longer exists. With the switch OFF the list is byte-identical, which is what
+  // keeps the classic palette untouched for a user who never opted in.
+  //
+  // Read at the component's own entry, once, the way pages/Settings.tsx reads it to pick its sections —
+  // not inside the row-building map, and never by a row deciding its own visibility.
+  const [atlasOn] = useAtlasUi();
+  const navPages = atlasOn ? allNavPages.filter((p) => !atlasRetirementFor(p.to)) : allNavPages;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

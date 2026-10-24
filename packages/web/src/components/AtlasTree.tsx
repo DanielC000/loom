@@ -16,18 +16,18 @@
 
 // @decision 0d0c6cee — expansion is not selection; a non-selected branch's rows are plain <Link>s
 // with project-qualified test ids and re-scope BEFORE they navigate; no row metric may add an
-// `api.ts` member or a per-project query; the "Not yet re-homed" disclosure is never a tree row.
+// `api.ts` member or a per-project query.
 
 // @decision 3b563642 — a session/card ENTITY row carries `data-atlas-entity` and is never a
 // destination; card rows exist only on the SELECTED branch (any other project's board would be a new
 // per-project query); each sub-tier owns its own expansion state, never `openBranches`.
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link, NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CONTEXT_WARN_RATIO, contextWindowForModel, type BoardTask, type Project, type SessionListItem } from "@loom/shared";
 import {
   ATLAS_HOMES, PROJECT_NODE_TABS, isRehomedProjectTab, projectTabPath, useVisibleNavPages,
-  workspaceNodeTabFor, type AtlasHome, type NavPage,
+  type AtlasHome, type NavPage,
 } from "../nav";
 import { AgentsQuickSpawn } from "./atlasAgents";
 import { NavIcon } from "./navIcons";
@@ -84,11 +84,16 @@ function projectRowLabel(page: NavPage): string {
 // mockup (`ROOT_TABS`): card 41eab0eb built seven of them — `WORKSPACE_NODE_TABS` in src/nav.tsx, the
 // "which node tab does this become" field card 0d0c6cee could not yet guess — and card 25c08fba took
 // `/terminals` down to PROJECT depth as the project node's Sessions tab, so it is no longer an
-// unscoped destination this tier places at all. The two still in the escape hatch at the foot of the
-// tree belong to card 5afd71bd.
+// unscoped destination this tier places at all. The last two, Mission Control and Projects, are
+// RETIRED (card 5afd71bd, `ATLAS_RETIREMENTS` in src/nav.tsx), so the tier is now exactly this list
+// plus the Workspace home, and card 0d0c6cee's "Not yet re-homed" escape hatch is gone with them.
 //
 // A one-entry literal rather than a `nav.tsx` field of its own: this stays the single placement
 // judgement card 0d0c6cee made, and nothing since has needed a second entry.
+//
+// @decision 5afd71bd — the hatch is gone, so an unscoped destination named in none of this list,
+// `WORKSPACE_NODE_TABS` or `ATLAS_RETIREMENTS` is simply ABSENT from the tree. Decide its placement in
+// one of the three; never re-add a fallback row.
 const WORKSPACE_TIER_NODES = ["/platform"];
 
 // How many open cards the Board row will list before it stops and says how many it left out.
@@ -459,61 +464,6 @@ function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle,
   );
 }
 
-/**
- * Every cross-project destination that has LEFT the tree, with its own address kept alive.
- *
- * Card 5afd71bd owns the two that are left — Mission Control and Projects, which the approved design
- * dissolves outright. Card 41eab0eb took seven as Workspace node tabs, and card 25c08fba took
- * Terminals down to project depth as the PROJECT node's Sessions tab. Until the last of them lands,
- * removing these rows without this would strand real surfaces behind ⌘K alone — so they stay
- * reachable, but deliberately NOT as `.loom-atlas-node` rows: a hierarchy with a flat page list
- * bolted to its side is the "worst of both worlds" card 0d0c6cee exists to end. A disclosure, named
- * for what it is, that the last re-homing card deletes.
- *
- * It auto-opens on the destination you are actually looking at, so the tree never goes blank about
- * where you are while these addresses still exist.
- */
-function UnhomedDestinations({ pages, activeTo }: { pages: NavPage[]; activeTo?: string }) {
-  const { pathname } = useLocation();
-  const [overridden, setOverridden] = useState<boolean | null>(null);
-  const isHere = (p: NavPage) =>
-    p.to === activeTo || (p.end ? pathname === p.to : pathname === p.to || pathname.startsWith(`${p.to}/`));
-  const open = overridden ?? pages.some(isHere);
-  return (
-    <div className="loom-atlas-unhomed">
-      <details open={open} data-testid="atlas-unhomed"
-        onToggle={(e) => setOverridden(e.currentTarget.open)}>
-        <summary className="loom-atlas-unhomed-summary">
-          <span className="loom-atlas-unhomed-caret" aria-hidden>▸</span>
-          Not yet re-homed
-          <span className="loom-atlas-nodemeta">{pages.length}</span>
-        </summary>
-        <ul className="loom-atlas-unhomed-list">
-          {pages.map((p) => (
-            <li key={p.to}>
-              {/* A plain <Link>, not a NavLink: `a.loom-atlas-node.is-active` is the frame's "you are
-                  on this NODE" signal, and these are not nodes. `is-here` is a separate, weaker mark
-                  that says only "this address is the one showing". */}
-              <Link to={p.to} data-testid={`atlas-unhomed-${p.to}`}
-                className={`loom-atlas-unhomed-link${isHere(p) ? " is-here" : ""}`}>
-                <span className="loom-atlas-ico" aria-hidden><NavIcon to={p.to} /></span>
-                <span className="loom-atlas-lbl">{p.label}</span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-        {/* Inside the disclosure, not beside it: four lines of muted explanation standing open under
-            the hierarchy is exactly the kind of permanent chrome the 244px rail cannot spare. A
-            reader who opens the hatch is the one asking why these are here. */}
-        <p className="loom-atlas-unhomed-note">
-          These move onto the Workspace and project nodes as tabs. Until then they keep their own
-          addresses, here and in the command palette.
-        </p>
-      </details>
-    </div>
-  );
-}
-
 /** The id AtlasShell's drawer toggle points `aria-controls` at — one constant, so the two can't drift. */
 export const ATLAS_TREE_ID = "atlas-tree-drawer";
 
@@ -630,13 +580,6 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
   );
 
   const platformNodes = workspace.filter((p) => WORKSPACE_TIER_NODES.includes(p.to));
-  // What is left of the hatch. Card 41eab0eb re-homed seven of card 0d0c6cee's ten as Workspace node
-  // tabs — DERIVED by subtracting that declaration rather than by a second list here, so the hatch
-  // shrinks on its own as the remaining cards land. Card 25c08fba took Terminals the other way, down
-  // to project depth as the PROJECT node's Sessions tab, so `splitByDepth` no longer leaves it in
-  // `workspace` for this filter to see at all. Two are still waiting: Mission Control and Projects,
-  // which card 5afd71bd retires outright. The disclosure goes with the last of them.
-  const unhomed = workspace.filter((p) => !WORKSPACE_TIER_NODES.includes(p.to) && !workspaceNodeTabFor(p.to));
 
   /**
    * The surfaces WITHIN one project node. Built per project, so a reader can open a branch they are
@@ -864,8 +807,6 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
             })}
           </ul>
         )}
-
-        <UnhomedDestinations pages={unhomed} activeTo={activeTo} />
       </div>
     </nav>
   );

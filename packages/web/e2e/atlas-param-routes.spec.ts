@@ -422,10 +422,15 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
       if (markedTestId) await expect(page.getByTestId(markedTestId)).toHaveClass(/is-active/);
       // The contrast case for that zero — see `hatch` in the declaration above. These three
       // addresses render inside the Atlas frame but NOT on the Workspace node, so its tab row is not
-      // on the page at all, and neither is the escape hatch's own mark. Both collectors have already
-      // been shown FIRING on this same build: `atlas-tab-inbox` was read for a non-empty label on
-      // /home a few lines above, and `atlas-unhomed-*` is read positively by atlas-tree.spec.ts. So
-      // these zeros are readings, not the silence of a broken locator.
+      // on the page at all. The collector has already been shown FIRING on this same build:
+      // `atlas-tab-inbox` was read for a non-empty label on /home a few lines above. So these zeros
+      // are readings, not the silence of a broken locator.
+      //
+      // The escape hatch's own `is-here` mark used to be asserted absent here too. Card 5afd71bd
+      // DELETED the hatch, so that assertion became vacuous — a zero from a selector that can never
+      // match anything — and a vacuous assertion carrying a positive-control justification that is no
+      // longer true is worse than no assertion. "The hatch does not exist" is now claimed once,
+      // document-wide, by atlas-tree.spec.ts's partition and atlas-retired-destinations.spec.ts.
       // ⛔ NOT asserted on `atlas-node-tabs`: that test id is the SHARED one every `NodeTabs` row
       // wears, and a session address legitimately renders its own (card 525c8ad9). The Workspace
       // node's own tabs are what must be absent, and `atlas-tab-<key>` is what names one.
@@ -437,8 +442,6 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
           `the ${url} address rendered the Workspace node's ${hatch} tab, which is not where it lives`)
           .toHaveCount(0);
       }
-      await expect(page.locator("a.loom-atlas-unhomed-link.is-here"),
-        `the ${url} address marked an escape-hatch entry it has nothing to do with`).toHaveCount(0);
 
       const rebuilt = REBUILT_IN_PHASE_2[pattern];
       if (rebuilt) {

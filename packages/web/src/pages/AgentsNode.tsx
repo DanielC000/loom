@@ -18,9 +18,10 @@ import { color, font } from "../theme";
 // what a spawn actually does, which is the question a spawn button never answers on its own.
 //
 // Agent CRUD (create / re-profile / re-prompt / delete) IS here as of card 318b5a21 — the parity row
-// c6160c7d could not carry. It arrived the only way it was ever allowed to: the editor that lives on
-// the Projects node was MOVED to components/agentEditor.tsx and is mounted here, in this node's own
-// dialog frame. There is one editor, not two.
+// c6160c7d could not carry. It arrived the only way it was ever allowed to: the editor that lived on
+// the Projects page was MOVED to components/agentEditor.tsx and is mounted here, in this node's own
+// dialog frame. There is one editor, not two — which is why retiring that page (card 5afd71bd) cost
+// Atlas no agent-definition surface: it had already left.
 //
 // @decision 318b5a21 — never build a second editor here. Mount components/agentEditor.tsx's.
 
@@ -61,11 +62,15 @@ export default function AgentsNode() {
           <Button variant="primary" className="loom-bandlink" data-testid="atlas-agents-new"
             title={project ? `Define a new agent in ${project.name}` : "Define a new agent"}
             onClick={() => setEditing({ agentId: null })}>＋ New agent</Button>
-          {/* The exit SURVIVES the editor landing here: the Projects node is the three-pane surface
-              where agents are defined alongside the project itself, and this node is scoped to one
-              project's roster. Named for what it does, not for where it goes. */}
-          <Link to="/projects" className="loom-btn loom-btn-default loom-bandlink"
-            data-testid="atlas-agents-define" title="Manage every project's agents on the Projects node">
+          {/* The exit SURVIVES the editor landing here (card 318b5a21), and survived the Projects
+              page being retired (card 5afd71bd) — but its destination changed, because what it is an
+              exit TO did. This node is scoped to ONE project's roster, so the thing a reader wants
+              from here is another project's roster; the Projects page used to be the only surface
+              listing them all, and the Workspace node is now, as its Projects grid plus the tree's
+              own project tier. Opening a project there scopes to it, and this node is its Agents tab.
+              Named for what it does, not for where it goes, so the label is unchanged. */}
+          <Link to="/home" className="loom-btn loom-btn-default loom-bandlink"
+            data-testid="atlas-agents-define" title="See every project on the Workspace node">
             All projects <span aria-hidden>↗</span>
           </Link>
         </div>
