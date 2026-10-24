@@ -1,4 +1,19 @@
-# e7652e06 — boot-time collision resolution keys on FRESHNESS, not resolvability PARITY
+# e7652e06 — boot-time collision resolution: freshness for the both-resolvable gate, provenance-marking for the rest
+
+**Round 3 (below) changed the shipped mechanism again — read it before trusting any "declined"/"evicted"
+claim elsewhere in this record as still true for every shape.** Rounds 1-2 (kept below for the regression
+history) used FRESHNESS to DECLINE/EVICT a stale secondary claim whenever it collided with a different,
+currently-resolvable identity. A Code Review (round 3) found that rule itself regresses established,
+accepted over-blocks (a shared-ancestor sibling's own enforcement surviving its later divergence; a
+legacy cross-repo dual-arm partner; `db0a9db0`'s own "mark it `provenanceUnknown`, fail closed on
+clear-by-id" resolution for a manufactured collision) — turning each into a silent UNBLOCK instead. Round
+3's fix reverts the DECLINE/EVICT behavior for the shape the reviewer's own two vectors exploit (a ghost
+racing — or poisoning `degradedOccupiedKeys` ahead of — the real collision) and replaces it with: let the
+union form, mark it `provenanceUnknown` (reusing `db0a9db0`'s own existing field and clear-by-id
+refusal), never decline or evict for it. CASE 2 and CASE 3 (the both-resolvable, freshness-gated
+decline/evict below) are UNCHANGED by round 3 — they still close the plain Y/F shape (no ghost involved)
+exactly as rounds 1-2 shipped it. Round 3 only changes what happens OUTSIDE that gate, where a ghost can
+otherwise bypass it entirely. See "Round 3" below for the full mechanism and why.
 
 From `f575cebf`'s own investigation (worker `05000a50`): a latch ALREADY contaminated on disk
 (`resolvedKeys` naming another registered repo's canonical key — e.g. written by a pre-`d69a6744` build
@@ -125,6 +140,96 @@ GREEN re-confirmed, and the full 71-file `merge-quarantine*.mjs` corpus passes u
 (`env -u LOOM_DEV -u LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane, fresh `LOOM_HOME` per
 file.
 
+## Round 3 (Code Review, two reproduced vectors) — the DECLINE mechanism itself regressed established accepted over-blocks; replaced with provenance-marking
+
+Code Review found Round 2's fix (the both-resolvable freshness gate above) did not close the card — it
+left the exact OLD resolvability-MISMATCH fallthrough (kept "completely unchanged" by Round 2, by
+design) reachable by introducing a THIRD, ghost party:
+
+- **Vector 1**: a ghost `Z` (manufactured `resolvedKey = kF`) is read via the degraded-divert branch
+  BEFORE `F`'s own real latch — this both arms `Z` at `kF` AND adds `kF` to `degradedOccupiedKeys`. When
+  `F`'s own primary arm later collides with `Z` there, the gate's own `!degradedOccupiedKeys.has(key)`
+  condition EXCLUDES this collision from CASE 2/3 entirely, routing it to the unchanged mismatch
+  fallthrough — which unions `F` into the `Z` entry (backed by `F` itself) with no identity check on
+  whoever ELSE later collides there. `Y`'s own secondary arm at `kF` then hits that SAME fallthrough
+  (mismatched resolvability against whatever currently occupies `kF`) and unions in too, backed by `F`'s
+  OWN registered identity — the exact cross-contamination this card exists to close, reopened via a
+  ghost the freshness gate never gets a chance to see.
+- **Vector 2**: `Z` is named at its OWN fresh hash and made OLDER than `F` by `enteredAt` — `Z`'s PRIMARY
+  (tautological) arm claims `kF` outright (nothing there yet), never touching `degradedOccupiedKeys` at
+  all. `Y`'s secondary arm then collides with `Z` (mismatch: `Z` unresolvable) and unions in, backed by
+  `F`. `F`'s own primary arm later collides with the `Y`+`Z` union (still `Z`'s identity, "older wins")
+  and ALSO unions in, backed by itself.
+
+Both vectors confirmed, 3/3 runs, orders `Z,F,Y` and `Z,Y,F`, both env states — same contamination class
+as the card's own headline `Y`/`F` shape, just reached through a party the both-resolvable gate's own
+`priorResolvable`/`degradedOccupiedKeys` conditions never get a chance to evaluate `Y` against.
+
+### Why the ruling rejected an upfront DECLINE as the fix for this gap
+
+A first attempt (since reverted) declined ANY secondary arm meeting `(i)` entry currently resolvable,
+`(ii)` entry's own fresh key ≠ `key`, `(iii)` `key` `isKeyVerifiedFor` a different-identity registered
+repo — independent of whatever currently occupies `key`. Verified against the FULL corpus, not just new
+scenarios, and found to regress THREE separate, already-established, accepted shapes by turning each
+one's accepted OVER-block into an UNBLOCK:
+
+- `pass1-migrate-resolvedkey-8bff3cae.mjs`'s `shared-ancestor-sibling-survives-divergence` and
+  `realistic-raise-source-a-retention` — a repo's own secondary key was recorded at a moment when
+  `canonicalRepoLockKey` GENUINELY, VERIFIABLY equaled it (a real git toplevel-walk, confirmed by the
+  test's own precondition, not an injected field) and diverged only after a REAL later `git init`. The
+  predicate's `(ii)` is satisfied here for the SAME reason it's satisfied in the Y/F bug — divergence
+  looks identical to contamination from this predicate's own vantage point — so declining it un-blocked
+  the shared-ancestor sibling the SAME boot its divergence happened, a real regression of
+  `8db913e2`/`8bff3cae`'s own established "source (a) retention" ruling.
+- `pass1-migrate-union.mjs`'s `dual-armed-sibling-at-non-first-key-text-and-id-agree` (`9a55fb90` CR
+  `e31c5809` finding 2) — its own `x` needs to be genuinely dual-armed at two keys for the
+  armedKeys-order-vs-offered-latch-id disagreement to exist at all; declining `x`'s secondary arm removes
+  the dual-arm and makes the whole scenario unreachable via this fixture.
+- `unknown-provenance.mjs`'s `round2-migrate-branch-fails-closed-then-clear-by-path-lifts-both` —
+  `db0a9db0`'s OWN established resolution for a "manufactured resolvedKey collision" (its own fixture's
+  literal wording) is to ALLOW the union and mark it `provenanceUnknown`, never to decline it. Declining
+  here directly contradicts a shipped, already-tested card answering the identical shape.
+
+**The hazard in the reviewer's own two vectors is not that `Y` blocks at `kF`** — db0a9db0 already treats
+a manufactured cross-repo collision landing at a key as something to ALLOW and mark, not refuse. **The
+hazard is that `Y`'s identity merges into `F`'s entry un-marked, so a clear-by-id aimed at one can
+silently lift the other.** `db0a9db0` already has the general answer for exactly this: allow the union,
+mark it `provenanceUnknown`, let clear-by-id's own existing fail-closed refusal (`"...this union's own
+provenance is incomplete..."`) do the real work. Shipping a SECOND, contradictory answer (decline) for
+the identical shape is what this round's fix avoids.
+
+### The fix (shipped)
+
+`secondaryArmClaimsADifferentRegisteredIdentitysKey(entry, key, entryClaimIsTautological)` — the SAME
+`(i)`-`(iii)` predicate, kept exactly as a predicate, never an early return. Checked right before
+`armKeyUnlessDegradedCollision` calls `armQuarantineKey`, ONLY when a union is actually about to happen
+(`priorStillAtKey` — a DIFFERENT, still-standing identity that was neither declined nor evicted by CASE
+2/3 or the unchanged mismatch-evict branch): if the predicate holds, `entry = { ...entry,
+provenanceUnknown: true }` before the union. `unionQuarantineEntries`'s own pre-existing sticky-OR
+(`db0a9db0`) then carries that mark onto the merged result automatically — no parallel marker, no new
+field. CASE 2 and CASE 3 themselves are completely UNCHANGED: the plain Y/F shape (no ghost) still
+resolves via decline/evict exactly as Rounds 1-2 shipped it, since in that shape `Y`'s secondary arm
+reaches CASE 2/3 directly and never needs the union+mark path at all. The two mechanisms are
+complementary, not competing: whichever one a given read order's collision actually reaches is the one
+that closes it.
+
+### Verification
+
+Both reviewer probes (`probe.mjs`, `probe2.mjs`), re-expressed per the ruling's own framing (the STATED
+harm — a clear aimed at one lifts the other — not "no union at all"): assert the union forms and is
+marked `provenanceUnknown`, clear-by-id on `F`'s own latch id REFUSES (ambiguous/incomplete provenance),
+`Y` stays blocked after that refused clear, `F` stays blocked after its OWN refused clear-by-id (nothing
+silently lifted), and clear-by-path correctly lifts the whole union afterward. Confirmed across both
+`probe.mjs` orderings and all 4 `probe2.mjs` `older`/`newer` × `before`/`after` combos — in the orderings
+where CASE 2/3 already resolve the collision without any ghost interference, no union forms at all and
+clear-by-id succeeds cleanly (consistent, not a regression — the ghost never got a chance to interfere).
+
+All 5 files Round 3's own DECLINE attempt regressed (`58957b1e-armed-latch-stale-mark-union`,
+`pass1-migrate-resolvedkey-8bff3cae`, `pass1-migrate-union`, `unknown-provenance`, plus this card's own
+`merge-quarantine-e7652e06-boot-freshness-discriminator.mjs`) pass UNCHANGED under the shipped fix — the
+provenance-marking addition never changes WHETHER a union forms, only whether it carries the
+`provenanceUnknown` mark, and none of those files' own assertions depend on that mark being absent.
+
 ## Shared predicate with fold time — deliberately NOT unified (Lead ruling)
 
 Boot time and fold time (`f575cebf`'s `reconcileMarkedBasenameBeforeWrite`/`positivelyForeignKey`)
@@ -213,11 +318,24 @@ silent assumption that none exists.
 - Do not apply freshness at a key `degradedOccupiedKeys` names, even when both `prior` and `entry` are
   independently resolvable — Round 2's wave 2 is a real, reproduced regression of exactly this shape
   (evicting a resolvable union in-memory, with no write at all, still breaks `9a55fb90`'s own dual-arm
-  tracking). Fall through to the pre-existing union behaviour instead.
+  tracking). Fall through to the pre-existing union behaviour instead. **This exclusion is SCOPED to CASE
+  2/3's own decline/evict branch only** — Round 3's `provenanceUnknown` marking deliberately does NOT
+  exclude a `degradedOccupiedKeys`-protected key: marking is purely additive (a boolean field, no write,
+  no eviction, no change to which identity occupies which key), so it carries none of the in-memory/
+  on-disk-mismatch hazard the decline/evict exclusion above exists to prevent. Confirmed by the full
+  corpus still passing with marking applied unconditionally wherever a union is about to form.
+- **SUPERSEDED BY ROUND 3** — do not DECLINE (or evict) a secondary arm for colliding with a different,
+  currently-resolvable, registered identity, no matter how narrowly the predicate is written — Round 3's
+  own "why the ruling rejected an upfront DECLINE" section is the record of exactly why: the SAME
+  predicate that correctly identifies the Y/F bug ALSO, structurally, matches a real, VERIFIED
+  shared-ancestor divergence (`8bff3cae`), a legacy cross-repo dual-arm partner, and `db0a9db0`'s own
+  already-accepted "manufactured collision" resolution — there is no way to narrow the predicate itself
+  to exclude those without reintroducing a case-by-case guessing game. Mark `provenanceUnknown` and let
+  the union form instead; never decline, never evict, for this specific shape.
 - Do not trust a fix in this function verified only against its OWN new test scenarios, however thorough
   they look — run the FULL `merge-quarantine*.mjs` corpus, individually, before reporting done. Both of
-  Round 2's regression waves were invisible to the new scenarios and were caught only by running every
-  pre-existing file.
+  Round 2's regression waves, AND Round 3's own three regressed files, were invisible to the new
+  scenarios alone and were caught only by running every pre-existing file.
 
 ## Verification
 
@@ -237,7 +355,8 @@ silent assumption that none exists.
   headline forward-order fail-open AND the reverse-order stranding), all pass after the fix, tree restored
   byte-identical.
 - Full `merge-quarantine*.mjs` corpus (71 files), individually, fresh `LOOM_HOME` per file, both env
-  states (`env -u LOOM_DEV -u LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane: 71/71 pass in
-  both, after Round 2's fix (see above) — the two regression waves Round 2 describes were both caught by
-  this exact run, on the version of the fix that preceded it.
+  states (`env -u LOOM_DEV -u LOOM_SUPERVISED` / `LOOM_DEV=1 LOOM_SUPERVISED=1`), one lane — re-run clean
+  after EACH of Round 2 and Round 3's own shipped fixes; every regression either round's own intermediate
+  attempt caused was caught by this exact run, never by review or the new scenarios alone.
 - `pnpm --filter @loom/daemon guards`, committed first.
+- See "Round 3" above for the reviewer-probe verification specific to that round's own fix.

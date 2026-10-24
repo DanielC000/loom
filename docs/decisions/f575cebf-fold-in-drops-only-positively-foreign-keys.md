@@ -74,11 +74,13 @@ itself already wrong. Three shapes slip through, named here rather than widened 
 2. **F is live but PENDING** (degraded-diverted, unreadable-diverted, or not yet graduated into
    `activeQuarantines`) — `positivelyForeignKey` never consults `pendingUnresolvedQuarantines` at all, so
    a pending-tier F is just as invisible to it as an empty slot; the key survives the filter.
-   **Closed — but AT BOOT, not here (`e7652e06`, see "Do not" below): `e7652e06`'s own freshness
-   discriminator (`isKeyVerifiedFor(prior.repoPath, key)`, checked against `prior`'s repoPath directly,
-   never against whether `prior` has a live `byRepoKey` entry at fold time) makes the NEXT boot converge
-   correctly regardless of whether F's own real latch or Y's contaminated secondary is read first — F
-   "merely pending" when Y's contamination was folded in no longer matters once any boot runs.**
+   **Closed — but AT BOOT, not here (`e7652e06`, see "Do not" below): `e7652e06`'s own boot-time
+   mechanism — freshness (`isKeyVerifiedFor(prior.repoPath, key)`, checked against `prior`'s repoPath
+   directly, never against whether `prior` has a live `byRepoKey` entry at fold time) for the plain
+   same-boot case, or `provenanceUnknown` marking (Round 3) when a third, ghost party reaches the
+   collision first — makes the NEXT boot converge correctly regardless of whether F's own real latch or
+   Y's contaminated secondary is read first. F "merely pending" when Y's contamination was folded in no
+   longer matters once any boot runs, either way.**
 3. **The slot already holds a PASS1-merged union whose winning identity is Y itself** (an earlier
    boot-time union already re-pointed the occupant's own `repoPath` to Y, not F) — `positivelyForeignKey`
    correctly reads this as "same identity", because BY THE TIME it looks, the contamination has already
@@ -103,10 +105,12 @@ closed — `e7652e06`'s own record states the same boundary from its own side.
   fail-open in the OTHER direction. Use `positivelyForeignKey` (drop ONLY a key with a live,
   different-identity occupant) instead.
 - Do not widen `positivelyForeignKey` to try to catch any of the three accepted-residual shapes above —
-  `e7652e06` considered exactly this (the triage note that opened it proposed it verbatim) and REJECTED it
-  by Lead ruling: it regresses the `883e29bc`/`9a55fb90` same-toplevel-union precedent at boot time. Shape
-  2 is closed at a DIFFERENT chokepoint instead (`e7652e06`'s own freshness discriminator, boot-only);
-  shapes 1 and 3 stay open, by design, on both records.
+  `e7652e06` considered exactly this TWICE (the triage note that opened it, then again when its own
+  Round-3 fix was being chosen) and REJECTED it by Lead ruling both times: it regresses the
+  `883e29bc`/`9a55fb90` same-toplevel-union precedent at boot time. Shape 2 is closed at a DIFFERENT
+  chokepoint instead (`e7652e06`'s own boot-time mechanism — freshness for the plain case,
+  `provenanceUnknown` marking for a ghost-interfered one); shapes 1 and 3 stay open, by design, on both
+  records.
 - Do not pass `activeQuarantines` as `foldInOnDiskTokensIfMarked`'s/`reconcileMarkedBasenameBeforeWrite`'s
   `ownershipMap` from inside `reenterMergeQuarantinesAtBootImpl`'s `bootWriteLatch` closure — it is
   structurally stale there (not synced into `activeQuarantines` until the whole boot function's

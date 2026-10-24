@@ -6077,21 +6077,33 @@ function reenterMergeQuarantinesAtBootImpl(
     }
     degradedDivertsToFlush.length = 0;
   };
+  // @decision e7652e06 (round 3, Lead ruling) — never DECLINE a secondary arm for colliding with a
+  // different, registered identity — db0a9db0 already answers this (let the union form, mark it
+  // `provenanceUnknown`, rely on clear-by-id's existing refusal). See {@link armKeyUnlessDegradedCollision}.
+  const secondaryArmClaimsADifferentRegisteredIdentitysKey = (entry: MergeQuarantineEntry, key: string, entryClaimIsTautological: boolean): boolean =>
+    !entryClaimIsTautological
+    && isRepoPathCurrentlyResolvable(entry.repoPath)
+    && canonicalRepoLockKey(entry.repoPath) !== key
+    && registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key) && directPathIdentity(p) !== directPathIdentity(entry.repoPath));
   /**
    * Routes EVERY `armQuarantineKey` call in this function's read loops through here instead, never a
    * bare call — covering both a PRIMARY arm (`key` is `entry`'s own just-computed `currentKey` — pass
    * `entryClaimIsTautological: true`) and a SECONDARY arm (`key` is a persisted, trusted-but-unverified
    * `resolvedKey` — either side's — pass `false`).
    *
-   * If `key` is unoccupied, occupied by the SAME identity, or occupied by an entry whose own
-   * resolvability matches `entry`'s (both verified, or both degraded — the legitimate same-tier union
-   * 883e29bc itself still allows, e.g. two degraded entries sharing a manufactured collision), this is a
-   * plain pass-through to `armQuarantineKey`. A cross-identity, cross-resolvability collision is
-   * special-cased UNLESS `key` is genuinely backed — by SOME `registeredRepoPaths` entry's own fresh,
-   * current identity (checked via {@link isKeyVerifiedFor}, the SAME predicate `activeMergeQuarantineFor`'s
-   * own `direct` fast-path guard already uses) — in which case it's `armQuarantineKey`'s own intended
-   * same-toplevel-collapse union, unchanged (card `9a55fb90`'s own dual-armed shape: the real owner need
-   * not be `prior` or `entry` themselves, so every registered path is checked, not just these two).
+   * If `key` is unoccupied or occupied by the SAME identity, this is a plain pass-through to
+   * `armQuarantineKey`. A cross-identity collision where BOTH sides' own resolvability matches is ALSO a
+   * pass-through to union when neither side is `key`'s own fresh, live owner (two degraded entries
+   * sharing a manufactured collision, `883e29bc`'s own same-tier shape) — but when exactly one side IS
+   * fresh there and the other is merely resolvable-elsewhere (`e7652e06`'s own freshness check, below),
+   * that fresh side wins outright: the other's claim is declined or evicted, never unioned, since both
+   * sides being genuinely able to prove or disprove ownership makes a union unnecessary. A cross-identity
+   * collision where resolvability MISMATCHES is special-cased UNLESS `key` is genuinely backed — by SOME
+   * `registeredRepoPaths` entry's own fresh, current identity (checked via {@link isKeyVerifiedFor}, the
+   * SAME predicate `activeMergeQuarantineFor`'s own `direct` fast-path guard already uses) — in which
+   * case it's `armQuarantineKey`'s own intended same-toplevel-collapse union, unchanged (card `9a55fb90`'s
+   * own dual-armed shape: the real owner need not be `prior` or `entry` themselves, so every registered
+   * path is checked, not just these two).
    *
    * When NOT backed: a PRIMARY arm's `entry` claim is tautological (the caller computed `key` FROM
    * `entry.repoPath` in this exact call, a fact no persisted field could misrepresent) — it always wins,
@@ -6102,67 +6114,16 @@ function reenterMergeQuarantinesAtBootImpl(
    * and `sourceFile` for its own call site) — a primary arm never does this (always returns the armed
    * entry), since `entry` itself never loses there.
    *
-   * Evicting `prior` removes it from ONLY `key` — not blindly every key in its own `armedKeys` — so a
-   * `prior` that legitimately holds OTHER keys too (e.g. its own real primary key, while `key` here was
-   * merely its own stale secondary one) keeps them untouched, via `replaceEntryEverywhere` (which also
-   * re-points any EXISTING pending reference to `prior` onto the trimmed survivor). Only when `key` was
-   * its LAST key is it diverted to `pendingUnresolvedQuarantines` as its own standalone entry — NEVER
-   * discarded, degraded OR genuinely RESOLVABLE alike (round 3 ruling: three prior rounds each tried to
-   * keep `degradedDivertsToFlush`'s own bookkeeping re-bound across an eviction instead, and each one
-   * opened a new hole — see the decision record's "Round 3" section). Its real sourceFile is recovered
-   * from an ALREADY-FLUSHED `pendingUnresolvedQuarantines` reference when one exists (by object
-   * identity — this never reads or mutates `degradedDivertsToFlush` itself, which is flushed on its own
-   * schedule regardless), else inferred deterministically via `quarantinePathForKey` (correct only when
-   * `prior` reached `key` via its own self-consistent primary arm, degraded or resolvable). A push is
-   * skipped only when the EXACT (entry, sourceFile) pair is already present — never on entry identity
-   * alone, so a second, genuinely different sourceFile for the same entry is never silently swallowed.
-   * A duplicate pending reference is an accepted, harmless outcome; a lost one is not.
+   * @decision e7652e06 — ANY union this function allows where a SECONDARY arm with no fresh claim of
+   * its own at `key` collides with a DIFFERENT, still-standing identity is marked `provenanceUnknown` on
+   * `entry` before the union runs (never declined/evicted for it) — see the decision record below.
    *
-   * @decision d163aef5 — a degraded entry never unions into, nor overwrites, a key no registered repo's
-   * own fresh identity backs; EITHER side of this eviction — degraded or genuinely resolvable — can
-   * reach the zero-remaining-keys branch, and NEITHER is ever dropped. See the decision record.
+   * `unionQuarantineEntries`'s own sticky OR carries that mark onto the merged result automatically.
+   * This is the ONE place that distrust gets recorded for this shape; everywhere else in this function
+   * is unchanged. See the decision record for the two reproduced shapes this closes (a ghost poisoning
+   * `degradedOccupiedKeys` ahead of the real collision; a ghost racing the real owner for `key` outright)
+   * and why a freshness-only DECLINE instead regressed established precedent.
    */
-  // @decision e7652e06 — shared by every caller that decides `prior` must lose `key`, so they can
-  // never drift; evicts from THIS key only, never discards `prior`. See the decision record.
-  const evictPriorFromKey = (prior: MergeQuarantineEntry, key: string): void => {
-    const remainingKeys = (prior.armedKeys ?? [key]).filter((k) => k !== key);
-    if (remainingKeys.length > 0) {
-      const trimmedPrior: MergeQuarantineEntry = { ...prior, armedKeys: remainingKeys };
-      // replaceEntryEverywhere re-points EVERY existing byRepoKey/pendingUnresolvedQuarantines
-      // reference to `prior` (including any pending twin an EARLIER flush already pushed) onto
-      // `trimmedPrior` — so a prior already-pending entry stays correct without a separate step.
-      replaceEntryEverywhere(byRepoKey, prior, trimmedPrior);
-      byRepoKey.delete(key); // replaceEntryEverywhere re-points EVERY ref including this one; undo it
-    } else {
-      // `key` was prior's ONLY key — it's displaced entirely. NEVER discarded (card d163aef5, round
-      // 3 ruling: three prior rounds each tried to keep this re-bound across an eviction instead, and
-      // each opened a new hole) — always pushed to `pendingUnresolvedQuarantines`, degraded OR
-      // genuinely resolvable alike. This never reads or mutates `degradedDivertsToFlush` — that
-      // array is flushed on its own, independent schedule, and a duplicate push across the two is an
-      // accepted, harmless outcome (a duplicate beats a loss).
-      byRepoKey.delete(key);
-      degradedOccupiedKeys.delete(key);
-      // Recover `prior`'s own real sourceFile from an ALREADY-FLUSHED pending reference, by object
-      // identity, before ever falling back to inference.
-      const tracked = pendingUnresolvedQuarantines.find((p) => p.entry === prior);
-      let priorSourceFile: string;
-      if (tracked) {
-        priorSourceFile = tracked.sourceFile;
-      } else {
-        // No tracked reference — `prior` reached `key` via its own self-consistent primary arm
-        // (degraded or resolvable), so its real backing file, if it has one at all, is
-        // deterministically `quarantinePathForKey(key)`'s own basename.
-        priorSourceFile = path.basename(quarantinePathForKey(key));
-        // eslint-disable-next-line no-console
-        console.error(`[merge-quarantine] evicting ${prior.repoPath} from ${key} with no tracked pending reference of its own — inferring its real source file as ${priorSourceFile} (card d163aef5, round 3 ruling: never discarding it either way).`);
-      }
-      // Dedup on the EXACT (entry, sourceFile) pair only, never on entry identity alone — a second,
-      // genuinely different sourceFile for the same entry must still get its own reference.
-      if (!pendingUnresolvedQuarantines.some((p) => p.entry === prior && p.sourceFile === priorSourceFile)) {
-        pendingUnresolvedQuarantines.push({ entry: prior, sourceFile: priorSourceFile });
-      }
-    }
-  };
   const armKeyUnlessDegradedCollision = (
     key: string,
     entry: MergeQuarantineEntry,
@@ -6209,6 +6170,12 @@ function reenterMergeQuarantinesAtBootImpl(
     // whenever we reach this point with it non-empty: a same-identity match, a same-tier union, or a
     // registered-backed collision all fall through without ever deleting it.
     const priorStillAtKey = prior && byRepoKey.get(key) === prior ? prior : undefined;
+    // @decision e7652e06 (round 3) — about to union a secondary arm with no fresh claim of its own into
+    // a DIFFERENT, still-standing identity — mark it. Never a same-identity re-arm or an evicted prior.
+    if (priorStillAtKey && directPathIdentity(priorStillAtKey.repoPath) !== directPathIdentity(entry.repoPath)
+      && secondaryArmClaimsADifferentRegisteredIdentitysKey(entry, key, entryClaimIsTautological)) {
+      entry = { ...entry, provenanceUnknown: true };
+    }
     const result = armQuarantineKey(byRepoKey, key, entry);
     // @decision d163aef5 (round 3) — rebind a degradedDivertsToFlush record still naming the PRE-union
     // object onto the fresh `result`, on a real union — else its later flush pushes a stale snapshot
@@ -6219,6 +6186,68 @@ function reenterMergeQuarantinesAtBootImpl(
       }
     }
     return result;
+  };
+  /**
+   * @decision d163aef5 — a degraded entry never unions into, nor overwrites, a key no registered repo's
+   * own fresh identity backs; EITHER side of this eviction — degraded or genuinely resolvable — can
+   * reach the zero-remaining-keys branch, and NEITHER is ever dropped. See the decision record.
+   *
+   * Evicting `prior` removes it from ONLY `key` — not blindly every key in its own `armedKeys` — so a
+   * `prior` that legitimately holds OTHER keys too (e.g. its own real primary key, while `key` here was
+   * merely its own stale secondary one) keeps them untouched, via `replaceEntryEverywhere` (which also
+   * re-points any EXISTING pending reference to `prior` onto the trimmed survivor). Only when `key` was
+   * its LAST key is it diverted to `pendingUnresolvedQuarantines` as its own standalone entry — NEVER
+   * discarded, degraded OR genuinely RESOLVABLE alike (round 3 ruling: three prior rounds each tried to
+   * keep `degradedDivertsToFlush`'s own bookkeeping re-bound across an eviction instead, and each one
+   * opened a new hole — see the decision record's "Round 3" section). Its real sourceFile is recovered
+   * from an ALREADY-FLUSHED `pendingUnresolvedQuarantines` reference when one exists (by object
+   * identity — this never reads or mutates `degradedDivertsToFlush` itself, which is flushed on its own
+   * schedule regardless), else inferred deterministically via `quarantinePathForKey` (correct only when
+   * `prior` reached `key` via its own self-consistent primary arm, degraded or resolvable). A push is
+   * skipped only when the EXACT (entry, sourceFile) pair is already present — never on entry identity
+   * alone, so a second, genuinely different sourceFile for the same entry is never silently swallowed.
+   * A duplicate pending reference is an accepted, harmless outcome; a lost one is not.
+   */
+  // @decision e7652e06 — shared by every caller that decides `prior` must lose `key`, so they can
+  // never drift; evicts from THIS key only, never discards `prior`. See the decision record.
+  const evictPriorFromKey = (prior: MergeQuarantineEntry, key: string): void => {
+    const remainingKeys = (prior.armedKeys ?? [key]).filter((k) => k !== key);
+    if (remainingKeys.length > 0) {
+      const trimmedPrior: MergeQuarantineEntry = { ...prior, armedKeys: remainingKeys };
+      // replaceEntryEverywhere re-points EVERY existing byRepoKey/pendingUnresolvedQuarantines
+      // reference to `prior` (including any pending twin an EARLIER flush already pushed) onto
+      // `trimmedPrior` — so a prior already-pending entry stays correct without a separate step.
+      replaceEntryEverywhere(byRepoKey, prior, trimmedPrior);
+      byRepoKey.delete(key); // replaceEntryEverywhere re-points EVERY ref including this one; undo it
+    } else {
+      // `key` was prior's ONLY key — it's displaced entirely. NEVER discarded (card d163aef5, round
+      // 3 ruling: three prior rounds each tried to keep this re-bound across an eviction instead, and
+      // each opened a new hole) — always pushed to `pendingUnresolvedQuarantines`, degraded OR
+      // genuinely resolvable alike. This never reads or mutates `degradedDivertsToFlush` — that
+      // array is flushed on its own, independent schedule, and a duplicate push across the two is an
+      // accepted, harmless outcome (a duplicate beats a loss).
+      byRepoKey.delete(key);
+      degradedOccupiedKeys.delete(key);
+      // Recover `prior`'s own real sourceFile from an ALREADY-FLUSHED pending reference, by object
+      // identity, before ever falling back to inference.
+      const tracked = pendingUnresolvedQuarantines.find((p) => p.entry === prior);
+      let priorSourceFile: string;
+      if (tracked) {
+        priorSourceFile = tracked.sourceFile;
+      } else {
+        // No tracked reference — `prior` reached `key` via its own self-consistent primary arm
+        // (degraded or resolvable), so its real backing file, if it has one at all, is
+        // deterministically `quarantinePathForKey(key)`'s own basename.
+        priorSourceFile = path.basename(quarantinePathForKey(key));
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] evicting ${prior.repoPath} from ${key} with no tracked pending reference of its own — inferring its real source file as ${priorSourceFile} (card d163aef5, round 3 ruling: never discarding it either way).`);
+      }
+      // Dedup on the EXACT (entry, sourceFile) pair only, never on entry identity alone — a second,
+      // genuinely different sourceFile for the same entry must still get its own reference.
+      if (!pendingUnresolvedQuarantines.some((p) => p.entry === prior && p.sourceFile === priorSourceFile)) {
+        pendingUnresolvedQuarantines.push({ entry: prior, sourceFile: priorSourceFile });
+      }
+    }
   };
   /** A PRIMARY arm (`key` freshly computed from `entry.repoPath` in this exact call) — `entry`'s own
    *  claim is tautological, so this never diverts `entry` itself; see {@link armKeyUnlessDegradedCollision}. */

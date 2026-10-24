@@ -120,9 +120,14 @@ latch already contaminated on disk before ANY fold-in runs was unioned by PASS1'
 `armKeyUnlessDegradedCollision` ("legitimate same-toplevel union" fallthrough, which had NO identity check
 when both colliding sides were resolvable — it DID compare `directPathIdentity` between two
 resolvable-but-different repos, but only reached that comparison when exactly one side was unresolvable)
-— independent of how the contamination got there. **`e7652e06` closed this** by replacing the
-resolvability-parity gate with a freshness discriminator (`entryFresh`/`priorFresh`) inside
-`armKeyUnlessDegradedCollision` itself — see `docs/decisions/e7652e06-boot-freshness-not-resolvability-parity.md`.
+— independent of how the contamination got there. **`e7652e06` closed this** — not by resolvability
+parity, but via TWO complementary mechanisms inside `armKeyUnlessDegradedCollision` itself: a freshness
+discriminator (`entryFresh`/`priorFresh`) for the plain, no-third-party shape (declines/evicts the stale
+secondary outright), and (Round 3, after a Code Review found the freshness decline itself regressed
+OTHER established precedents) `provenanceUnknown` marking — reusing `db0a9db0`'s own existing field and
+clear-by-id refusal — for the shape where a ghost third party reaches the collision first. See
+`docs/decisions/e7652e06-boot-freshness-not-resolvability-parity.md`, especially its own "Round 3"
+section, before trusting a shortened restatement of this (including this one).
 
 ## Do not
 
