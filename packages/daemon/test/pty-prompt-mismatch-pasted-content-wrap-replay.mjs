@@ -61,6 +61,49 @@
 //      elsewhere in the window); the real check must NOT confirm, and the manager push must STILL fire
 //      for generation 3's own, genuine (unrelated-to-A) loss.
 //
+// CARD 1c7a5e12 — two follow-ups from 437daade's second Code Review (reviewer a2df1914), both confirmed by
+// hermetic probe before any fix: (1) THE DETECTOR ABOVE RECOGNIZED FULL FRAMING ONLY — a BARE-wrapped
+// tagged re-mint fell through entirely to 437daade's tag-FREE ring scan (`identicalContentPriorEntryBare`),
+// which has no visibility into the CURRENT generation's own possible-duplicate tag (tag-stripping only
+// happens here), leaving the CURRENT generation's own unresolved timer armed — a measured FALSE ALARM,
+// loud, even though its content fully arrived. FIX: `findRecognizedBarePastedContentWrapOfPriorWrite`, a
+// BARE-framing twin sharing the SAME core (parameterized by `wrapRe`), wired at the identical precedence
+// tier; `lastMismatchPastedContentWrapReplay` gained a `bare: boolean` field (mirrors `lastMismatchReplay`'s
+// own `wrapped`) — severity/recovery semantics are IDENTICAL either way. (2) NO RESOLVED-ENTRY FILTER —
+// the original scan returned the first (newest) matching ring entry regardless of whether it was already
+// resolved, so an already-resolved, NEWER entry could shadow a genuinely-pending, OLDER one sharing
+// identical content, wasting the one chance to clear the older entry's own real unresolved timer — another
+// measured false alarm (scenario 8 below). FIX: prefer an UNRESOLVED match (newest-first), falling back to
+// a RESOLVED match only when no unresolved one exists (never a hard skip-if-resolved filter like 437daade's
+// sibling — that would regress scenario 9's own existing coverage: when EVERY matching entry is already
+// resolved, the CURRENT generation must still be confirmed silently). Marking the CURRENT generation
+// unconditionally (dc92f4b6's original "resolve both" ruling) is UNCHANGED and stands: the tag ties its
+// content identity to whichever entry matched, so there is no 37acd59f/437daade-style two-lineage
+// ambiguity to defer here — only the entry-SELECTION step needed the fix.
+//   7. POSITIVE CONTROL (card 1c7a5e12, point 1) — the real shape with a BARE-wrapped echo instead of
+//      FULL: generation 1 writes a kickoff; generation 2 re-mints it; the engine's late echo is a BARE
+//      pasted-content wrap (no outer `\n\n`) of generation 1's own write. Must confirm with `bare=true`,
+//      mark BOTH generations resolved, arm NO follow-up timer, and never fire `onPromptMismatchUnresolved`.
+//   8. POSITIVE CONTROL (card 1c7a5e12, point 2) — a tagged re-mint echo where TWO prior ring entries
+//      share identical content: the OLDER one ("genA") is genuinely unresolved with its own pending
+//      unresolved timer already armed (from an earlier, unrelated replay); the NEWER one ("genB") is
+//      already resolved (via a real clean echo, `echoConfirmedGens`). The detector must prefer the
+//      UNRESOLVED older entry, clearing its real timer so it never fires loud — not the resolved newer one.
+//   9. CONTROL, no regression (card 1c7a5e12) — every ring entry sharing the wrapped content is ALREADY
+//      resolved (no unresolved candidate exists at all). The detector must still fall back to that
+//      resolved match and confirm the current generation silently, exactly as before this card's fix.
+//
+// CODE REVIEW FOLLOW-UP (reviewer 514cae2a, no Critical/Major findings — three test-only additions):
+//   10. POSITIVE CONTROL — a VARIANT of scenario 8 where the already-resolved candidate is resolved via
+//       `mismatchResolvedGens` (a real lag-by-one plain replay) instead of `echoConfirmedGens`, so the
+//       `resolvedGens.has(...)` half of the shared core's prefer-unresolved predicate is actually
+//       exercised (RED-proven by mutating that half out — see the decision record's own verification log).
+//   11. NEGATIVE CONTROL, BARE twin of scenario 4 — pins the record's own Do-not #4 (the BARE twin must
+//       apply the SAME tag-stripping discipline as FULL, never a looser one).
+//   12. NEGATIVE CONTROL, BARE twin of scenario 6 (decoupled pairing) — same Do-not #4.
+//
+// Full root-cause narrative for card 1c7a5e12: docs/decisions/1c7a5e12-pasted-content-wrap-of-prior-write-bare-framing-and-resolved-entry-preference.md
+//
 // Mirrors pty-prompt-mismatch-wrapper-aware-fusion.mjs's own harness: the REAL PtyHost state machine + a
 // FAKE pty (createPty seam) — NO real claude/daemon/network.
 // RUN (no daemon needed): node test/pty-prompt-mismatch-pasted-content-wrap-replay.mjs (build first: from
@@ -135,6 +178,8 @@ function captureLog(fn) {
 // Builds the engine's own paste-composer wrap exactly as `PASTED_CONTENT_WRAP_RE` requires it
 // (host.ts): `\n\n<pasted_content id="ID">\n<inner>\n</pasted_content id="ID">\n`.
 const pastedContentWrap = (id, inner) => `\n\n<pasted_content id="${id}">\n${inner}\n</pasted_content id="${id}">\n`;
+// Card 1c7a5e12 — the BARE-framing twin (no outer `\n\n`), exactly `PASTED_CONTENT_BARE_WRAP_RE`'s shape.
+const bareContentWrap = (id, inner) => `<pasted_content id="${id}">\n${inner}\n</pasted_content id="${id}">`;
 
 const ROOT_MSG_ID = "dc92f4b6-aaaa-aaaa-aaaa-aaaaaaaaaaaa"; // an 8-hex-prefixed id, mirrors the real give-up re-mint's own root
 
@@ -429,12 +474,312 @@ try {
     const fired6 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
     check("6: REQUIRED (round 3 \"also do\") — onPromptMismatchUnresolved actually FIRES once the window elapses with nothing to resolve it", fired6);
   }
+
+  // ===== 7. POSITIVE CONTROL (card 1c7a5e12, point 1) — the real shape with a BARE-wrapped echo instead
+  // of FULL framing: the detector must recognize this too, never fall through to 437daade's tag-FREE ring
+  // scan (which cannot see this generation's own tag and used to leave its timer armed — a measured false
+  // alarm, RED on the pre-fix detector). =====
+  {
+    const sid = newSession("BareTaggedRemint"); SIDS.push(sid);
+    const kickoffText = "K".repeat(500);
+    const remint = framePossibleDuplicate(kickoffText, ROOT_MSG_ID); // generation 2's own `intended`
+
+    host.enqueueStdin(sid, kickoffText); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, remint); // gen=2, now current
+    const reported = bareContentWrap("q7bare", kickoffText);
+    const lines = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+
+    const replayLines = lines.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] "));
+    check("7: POSITIVE CONTROL — fires for a BARE-wrapped tagged re-mint too (not full-wrap-only)",
+      replayLines.length === 1);
+    check("7: names recognizedGen=1, matchedLen=500, bare=true",
+      /recognizedGen=1\b/.test(replayLines[0] ?? "") && /matchedLen=500\b/.test(replayLines[0] ?? "") && /\bbare=true\b/.test(replayLines[0] ?? ""));
+
+    const armLines = lines.filter((l) => l.startsWith("[prompt-mismatch-arm] "));
+    check("7: the [prompt-mismatch-arm] log names arm=confirmed-pasted-content-wrap-replay (never the loud fallback-wrapped-replay-awaiting-resolution arm)",
+      armLines.length === 1 && /\barm=confirmed-pasted-content-wrap-replay\b/.test(armLines[0] ?? ""));
+    check("7: RED-PROOF — NO LONGER classified as unmatchable", host.getLastMismatchUnmatched(sid) === null);
+
+    const live7 = host.live.get(sid);
+    check("7: generation 1 (the matched prior write) IS marked resolved", live7.mismatchResolvedGens.has(1));
+    check("7: generation 2 (the current re-mint, content-identical mod tag) IS ALSO marked resolved", live7.mismatchResolvedGens.has(2));
+    check("7: REQUIRED — NO follow-up unresolved timer is armed for generation 2 (the point-1 false alarm is closed)",
+      live7.pendingMismatchUnresolvedTimers.size === 0);
+
+    const replay7 = host.getLastMismatchPastedContentWrapReplay(sid);
+    check("7: REQUIRED — lastMismatchPastedContentWrapReplay carries bare:true", replay7 !== null && replay7.bare === true);
+    check("7: REQUIRED — [prompt-mismatch-unmatched-pushed] does NOT fire",
+      lines.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
+
+    const fired7 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid), WINDOW_MS * 2).catch(() => false);
+    check("7: REQUIRED — onPromptMismatchUnresolved never fires for generation 2 (RED on the pre-fix detector, the exact false alarm this card closes)", !fired7);
+
+    const fake7 = fakesById.get(sid);
+    const writesBefore7 = fake7.writes.length;
+    const enqueued7 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7: the notice enqueues (not suppressed)", enqueued7);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitUntil(() => fake7.writes.slice(writesBefore7).join("").includes("acting on it twice."));
+    const noticeText7 = fake7.writes.slice(writesBefore7).join("");
+    check("7: REQUIRED — the notice explicitly says NOT A LOSS OF CONTENT", /NOT A LOSS OF CONTENT/.test(noticeText7));
+    check("7: disclosure-safe — no raw content leaks", !noticeText7.includes(kickoffText));
+  }
+
+  // ===== 8. POSITIVE CONTROL (card 1c7a5e12, point 2) — two prior ring entries share identical content:
+  // "genA" (older) is genuinely UNRESOLVED with its own pending unresolved timer already armed (from an
+  // earlier, unrelated plain replay); "genB" (newer) is ALREADY RESOLVED via a real clean echo
+  // (`echoConfirmedGens`). A tagged re-mint of that shared content, FULL-wrapped, must prefer the
+  // UNRESOLVED genA over the already-resolved, newer genB — clearing genA's real timer so it never fires
+  // loud, rather than wasting the match on genB (RED on the pre-fix blind-newest-first scan). =====
+  {
+    const sid = newSession("ShadowedResolvedCandidate"); SIDS.push(sid);
+    const sharedContent = "X".repeat(500);
+
+    // gen=1: unrelated content, never confirmed.
+    const genZeroText = "W".repeat(300);
+    host.enqueueStdin(sid, genZeroText);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=2 ("genA"): intends sharedContent; its own hook plain-replays gen=1's content verbatim (card
+    // 201d0d95) — genA's own intended ("X"s) differs from what was replayed ("W"s), so this ARMS genA's
+    // OWN unresolved timer (isRecognizedReplayAwaitingResolution) while marking gen=1 resolved. genA's own
+    // ring entry (text=sharedContent) now sits in the window, UNRESOLVED, with a real pending timer.
+    host.enqueueStdin(sid, sharedContent); // gen=2
+    captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genZeroText });
+    });
+    const liveAfterA = host.live.get(sid);
+    check("SETUP 8: gen=1 marked resolved by genA's own plain-replay match", liveAfterA.mismatchResolvedGens.has(1));
+    check("SETUP 8: genA (gen=2) itself is unresolved and HAS its own pending timer armed",
+      !liveAfterA.mismatchResolvedGens.has(2) && liveAfterA.pendingMismatchUnresolvedTimers.size === 1);
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // ends genA's turn WITHOUT confirming it
+
+    // gen=3 ("genB"): ALSO sharedContent (an ordinary coincidental resend). Its own hook is a CLEAN,
+    // byte-identical echo (hook.prompt === live.lastPrompt) — resolved via the REAL `echoConfirmedGens`
+    // mechanism (card 437daade round 3), never an internal poke.
+    host.enqueueStdin(sid, sharedContent); // gen=3
+    captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: sharedContent });
+    });
+    const liveAfterB = host.live.get(sid);
+    check("SETUP 8: genB (gen=3) is resolved via a REAL clean echo (echoConfirmedGens), not mismatchResolvedGens",
+      liveAfterB.echoConfirmedGens.has(3) && !liveAfterB.mismatchResolvedGens.has(3));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=4: the TAGGED RE-MINT, current — re-mints sharedContent. Engine's late echo is a FULL wrap of it.
+    const remint8 = framePossibleDuplicate(sharedContent, ROOT_MSG_ID);
+    host.enqueueStdin(sid, remint8); // gen=4, now current
+    const reported8 = pastedContentWrap("q8full", sharedContent);
+    const lines8 = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported8 });
+    });
+
+    const replayLine8 = lines8.find((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] "));
+    check("8: dc92f4b6's own detector fires (both inner and strippedCurrent equal sharedContent)", !!replayLine8);
+    check("8: REQUIRED — THE FIX: it prefers genA (gen=2, unresolved), never genB (gen=3, already resolved, newer)",
+      /recognizedGen=2\b/.test(replayLine8 ?? ""));
+
+    const live8 = host.live.get(sid);
+    check("8: genA (gen=2) is NOW marked resolved — its real pending timer will stay silent", live8.mismatchResolvedGens.has(2));
+    check("8: generation 4 (the current re-mint) is ALSO marked resolved", live8.mismatchResolvedGens.has(4));
+
+    const fired8 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid && e.info.gen === 2), WINDOW_MS * 2).catch(() => false);
+    check("8: REQUIRED — genA's own onPromptMismatchUnresolved does NOT fire (RED on the pre-fix blind scan, the exact false alarm this card closes)", !fired8);
+  }
+
+  // ===== 9. CONTROL, NO REGRESSION (card 1c7a5e12) — every ring entry sharing the wrapped content is
+  // ALREADY resolved (no unresolved candidate exists at all). The detector must still fall back to that
+  // resolved match and confirm the current generation silently — a hard skip-if-resolved filter would
+  // wrongly push this into a louder/weaker arm instead. =====
+  {
+    const sid = newSession("AllCandidatesAlreadyResolved"); SIDS.push(sid);
+    const sharedContent9 = "Y".repeat(500);
+
+    // gen=1: sharedContent, resolved via a REAL clean echo immediately.
+    host.enqueueStdin(sid, sharedContent9); // gen=1
+    captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: sharedContent9 });
+    });
+    const liveAfter1 = host.live.get(sid);
+    check("SETUP 9: gen=1 is resolved via a REAL clean echo before the tagged re-mint ever arrives",
+      liveAfter1.echoConfirmedGens.has(1));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=2: the TAGGED RE-MINT, current — the ONLY matching candidate (gen=1) is already resolved.
+    const remint9 = framePossibleDuplicate(sharedContent9, ROOT_MSG_ID);
+    host.enqueueStdin(sid, remint9); // gen=2, now current
+    const reported9 = pastedContentWrap("q9full", sharedContent9);
+    const lines9 = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported9 });
+    });
+
+    const replayLine9 = lines9.find((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] "));
+    check("9: NO REGRESSION — still fires via the RESOLVED fallback (never returns null just because the only candidate is resolved)", !!replayLine9);
+    check("9: names recognizedGen=1", /recognizedGen=1\b/.test(replayLine9 ?? ""));
+
+    const armLine9 = lines9.find((l) => l.startsWith("[prompt-mismatch-arm] "));
+    check("9: the resulting arm is STILL confirmed-pasted-content-wrap-replay (never a louder fallback arm)",
+      !!armLine9 && /\barm=confirmed-pasted-content-wrap-replay\b/.test(armLine9));
+
+    const live9 = host.live.get(sid);
+    check("9: generation 2 (the current re-mint) is silently confirmed, exactly as pre-1c7a5e12 behaviour", live9.mismatchResolvedGens.has(2));
+    check("9: NO new follow-up unresolved timer is armed", live9.pendingMismatchUnresolvedTimers.size === 0);
+  }
+
+  // ===== 10. POSITIVE CONTROL (card 1c7a5e12, Code Review follow-up — reviewer 514cae2a): a VARIANT of
+  // scenario 8 where "genB" (the already-resolved, newer candidate) is resolved via `mismatchResolvedGens`
+  // (a real lag-by-one PLAIN REPLAY, card 201d0d95) rather than a clean echo — so the
+  // `resolvedGens.has(entry.gen)` half of the shared core's prefer-unresolved predicate (host.ts ~661) is
+  // actually exercised, not only the `echoConfirmedGens.has(entry.gen)` half scenario 8 covers. =====
+  {
+    const sid = newSession("ShadowedResolvedCandidateViaMismatchResolvedGens"); SIDS.push(sid);
+    const sharedContent10 = "Q".repeat(500);
+
+    // gen=1: unrelated content, never confirmed.
+    const genZeroText10 = "V".repeat(300);
+    host.enqueueStdin(sid, genZeroText10);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=2 ("genA"): intends sharedContent10; its own hook plain-replays gen=1's content verbatim — ARMS
+    // genA's OWN unresolved timer while marking gen=1 resolved (same technique as scenario 8).
+    host.enqueueStdin(sid, sharedContent10); // gen=2
+    captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genZeroText10 });
+    });
+    const liveAfterA10 = host.live.get(sid);
+    check("SETUP 10: gen=1 marked resolved by genA's own plain-replay match", liveAfterA10.mismatchResolvedGens.has(1));
+    check("SETUP 10: genA (gen=2) itself is unresolved and HAS its own pending timer armed",
+      !liveAfterA10.mismatchResolvedGens.has(2) && liveAfterA10.pendingMismatchUnresolvedTimers.size === 1);
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // ends genA's turn WITHOUT confirming it
+
+    // gen=3 ("genB"): ALSO sharedContent10 (an ordinary coincidental resend), left UNCONFIRMED for now
+    // (no hook delivered for its own turn at all — mirrors gen=1's own setup above).
+    host.enqueueStdin(sid, sharedContent10); // gen=3
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=4: a short, UNRELATED write whose own hook plain-replays genB's raw text verbatim.
+    // `replayedEntry = recentWrittenTurns.findLast(text === reported)` picks the NEWEST exact match — genB
+    // (gen=3), since genA (gen=2) shares the SAME text but is older — so this marks genB resolved via the
+    // REAL `mismatchResolvedGens` path (card dc92f4b6's own unconditional `replayedEntry` marking), never
+    // `echoConfirmedGens`, and never an internal poke.
+    host.enqueueStdin(sid, "R".repeat(10)); // gen=4
+    captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: sharedContent10 });
+    });
+    const liveAfterB10 = host.live.get(sid);
+    check("SETUP 10: genB (gen=3) is resolved via mismatchResolvedGens (a real plain replay), NOT echoConfirmedGens",
+      liveAfterB10.mismatchResolvedGens.has(3) && !liveAfterB10.echoConfirmedGens.has(3));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=5: the TAGGED RE-MINT, current — re-mints sharedContent10. Engine's late echo is a FULL wrap.
+    const remint10 = framePossibleDuplicate(sharedContent10, ROOT_MSG_ID);
+    host.enqueueStdin(sid, remint10); // gen=5, now current
+    const reported10 = pastedContentWrap("q10full", sharedContent10);
+    const lines10 = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported10 });
+    });
+
+    const replayLine10 = lines10.find((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] "));
+    check("10: dc92f4b6's own detector fires", !!replayLine10);
+    check("10: REQUIRED — prefers genA (gen=2, unresolved), never genB (gen=3, resolved via mismatchResolvedGens)",
+      /recognizedGen=2\b/.test(replayLine10 ?? ""));
+
+    const live10 = host.live.get(sid);
+    check("10: genA (gen=2) is NOW marked resolved — its real pending timer will stay silent", live10.mismatchResolvedGens.has(2));
+    check("10: generation 5 (the current re-mint) is ALSO marked resolved", live10.mismatchResolvedGens.has(5));
+
+    const fired10 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid && e.info.gen === 2), WINDOW_MS * 2).catch(() => false);
+    check("10: REQUIRED — genA's own onPromptMismatchUnresolved does NOT fire", !fired10);
+  }
+
+  // ===== 11. NEGATIVE CONTROL, BARE twin of scenario 4 (card 1c7a5e12, Code Review follow-up — reviewer
+  // 514cae2a, pins the record's own Do-not #4: the BARE twin must apply the SAME tag-stripping discipline,
+  // never a looser one): generation 2 is an UNRELATED new message (no re-mint tag at all), and the engine
+  // happens to echo back a stale, unconfirmed generation 1 wrapped in BARE pasted-content framing. Must
+  // NOT confirm via `findRecognizedBarePastedContentWrapOfPriorWrite` (generation 2 carries no tag to
+  // strip) — falls to 437daade's own pre-existing, tag-free `identicalContentPriorEntryBare` ring scan
+  // instead, exactly as the FULL twin falls to `identicalContentPriorEntryFull` in scenario 4. =====
+  {
+    const sid = newSession("BareUnrelatedCurrentGenCounterSpecimen"); SIDS.push(sid);
+    const genOneText11 = "A".repeat(500); // gen=1, never confirmed
+    host.enqueueStdin(sid, genOneText11);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    const unrelatedNewMessage11 = "B".repeat(500);
+    host.enqueueStdin(sid, unrelatedNewMessage11); // gen=2, now written and current, no tag at all
+
+    const reported11 = bareContentWrap("q11bare", genOneText11);
+    const lines11 = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported11 });
+    });
+
+    check("11: NEGATIVE CONTROL — the BARE tagged detector does NOT fire for an unrelated current generation (no tag to strip)",
+      lines11.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] ")).length === 0);
+    check("11: generation 2's own genuine loss is classified via the PRE-EXISTING bare-wrap-of-prior arm (never unmatchable, never silently confirmed either)",
+      host.getLastMismatchUnmatched(sid) === null &&
+      lines11.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-wrapped-replay-awaiting-resolution\b/.test(l)));
+    check("11: REQUIRED — the generic manager push does NOT fire for this NAMED shape",
+      lines11.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
+    const live11 = host.live.get(sid);
+    check("11: generation 1 (the matched entry) IS marked resolved", live11.mismatchResolvedGens.has(1));
+    check("11: generation 2 is NOT marked resolved by an echo that has nothing to do with it", !live11.mismatchResolvedGens.has(2));
+    check("11: REQUIRED — the follow-up unresolved-timer IS armed for generation 2 (never silent)",
+      live11.pendingMismatchUnresolvedTimers.size === 1);
+    const fired11 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("11: REQUIRED — onPromptMismatchUnresolved actually FIRES once the window elapses with nothing to resolve it", fired11);
+  }
+
+  // ===== 12. NEGATIVE CONTROL, BARE twin of scenario 6 (card 1c7a5e12, Code Review follow-up — reviewer
+  // 514cae2a, pins the record's own Do-not #4): gen1=A (unconfirmed), gen2=B (an ORDINARY, UNRELATED new
+  // message, no tag), gen3=a tagged re-send of B SPECIFICALLY (never A) — current. Engine echoes a BARE
+  // wrap of A. The decoupled-pairing hazard (inner matches gen1=A, `strippedCurrent` separately matches
+  // gen2=B) must NOT confirm via the BARE tagged detector — falls to 437daade's own pre-existing,
+  // tag-free `identicalContentPriorEntryBare` ring scan instead, exactly as the FULL twin in scenario 6. =====
+  {
+    const sid = newSession("BareSameEntryPairingCounterSpecimen"); SIDS.push(sid);
+    const genOneText12 = "A".repeat(500);
+    const genTwoText12 = "B".repeat(500);
+
+    host.enqueueStdin(sid, genOneText12); // gen=1, never confirmed
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, genTwoText12); // gen=2 — an ORDINARY, UNRELATED new message, no tag
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    const remintOfB12 = framePossibleDuplicate(genTwoText12, ROOT_MSG_ID);
+    host.enqueueStdin(sid, remintOfB12); // gen=3, now written and current — re-mints gen=2 (B), not gen=1 (A)
+    check("SETUP 12: gen=3 is the re-mint of gen=2 (B), not gen=1 (A)", remintOfB12.includes(genTwoText12) && !remintOfB12.includes(genOneText12));
+
+    const reported12 = bareContentWrap("q12bare", genOneText12);
+    const lines12 = captureLog(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported12 });
+    });
+
+    check("12: NEGATIVE CONTROL (decoupled-pairing counter-specimen) — the BARE tagged detector does NOT fire (wrong entry pairing)",
+      lines12.filter((l) => l.startsWith("[prompt-mismatch-pasted-content-wrap-replay] ")).length === 0);
+    check("12: generation 3's own genuine loss is classified via the PRE-EXISTING bare-wrap-of-prior arm",
+      host.getLastMismatchUnmatched(sid) === null &&
+      lines12.some((l) => l.startsWith("[prompt-mismatch-arm] ") && /\barm=fallback-wrapped-replay-awaiting-resolution\b/.test(l)));
+    check("12: REQUIRED — the generic manager push does NOT fire for this NAMED shape",
+      lines12.filter((l) => l.startsWith("[prompt-mismatch-unmatched-pushed] ")).length === 0);
+    const live12 = host.live.get(sid);
+    check("12: generation 1 (the matched entry) IS marked resolved", live12.mismatchResolvedGens.has(1));
+    check("12: generation 3 is NOT marked resolved by an echo that matches the WRONG entry", !live12.mismatchResolvedGens.has(3));
+    check("12: REQUIRED — the follow-up unresolved-timer IS armed for generation 3 (never silent)",
+      live12.pendingMismatchUnresolvedTimers.size === 1);
+    const fired12 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("12: REQUIRED — onPromptMismatchUnresolved actually FIRES once the window elapses with nothing to resolve it", fired12);
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card dc92f4b6's own gap is closed: a late engine echo wrapping an EARLIER generation's own recorded write in pasted-content paste-composer framing is now fully confirmed ONLY when the wrap's inner content AND the current generation's own (tag-stripped) intended text both match the SAME prior entry (paired per-entry, never decoupled — the round-2 Code Review counter-specimen, scenario 6, proves this; and a wrap-only match against any stale entry regardless of the current generation, the round-1 counter-specimen, scenario 4, stays refused too), no longer falsely classified as unmatchable for the real shape, no longer pushes a false `[loom:prompt-mismatch-unmatched]` \"possible LOSS\" alarm to the manager for it, marks BOTH the matched prior generation (a real effect) and the current generation (state hygiene, no observable effect) resolved, and its session-facing notice states CONTENT identity plainly (never lineage) while naming the current generation's own pending tagged write — not the already-confirmed one — as the duplicate-check risk; a genuinely different wrapped body and a superset match still push the old generic manager alarm exactly as before, and the trimEnd() allowance holds independently on the wrap side and the current-generation side. UPDATED by card 437daade: the unrelated-current-generation and decoupled-pairing counter-specimens (scenarios 4/6) no longer fall through to the generic alarm — a NEW, tag-free detector now names each as its own full-wrapped-replay arm (loud, an individually-armed follow-up timer, strictly more informative for the same underlying fact), never confirming the wrong generation either way."
+  ? "\n✅ ALL PASS — card dc92f4b6's own gap is closed: a late engine echo wrapping an EARLIER generation's own recorded write in pasted-content paste-composer framing is now fully confirmed ONLY when the wrap's inner content AND the current generation's own (tag-stripped) intended text both match the SAME prior entry (paired per-entry, never decoupled — the round-2 Code Review counter-specimen, scenario 6, proves this; and a wrap-only match against any stale entry regardless of the current generation, the round-1 counter-specimen, scenario 4, stays refused too), no longer falsely classified as unmatchable for the real shape, no longer pushes a false `[loom:prompt-mismatch-unmatched]` \"possible LOSS\" alarm to the manager for it, marks BOTH the matched prior generation (a real effect) and the current generation (state hygiene, no observable effect) resolved, and its session-facing notice states CONTENT identity plainly (never lineage) while naming the current generation's own pending tagged write — not the already-confirmed one — as the duplicate-check risk; a genuinely different wrapped body and a superset match still push the old generic manager alarm exactly as before, and the trimEnd() allowance holds independently on the wrap side and the current-generation side. UPDATED by card 437daade: the unrelated-current-generation and decoupled-pairing counter-specimens (scenarios 4/6) no longer fall through to the generic alarm — a NEW, tag-free detector now names each as its own full-wrapped-replay arm (loud, an individually-armed follow-up timer, strictly more informative for the same underlying fact), never confirming the wrong generation either way. UPDATED by card 1c7a5e12: a BARE-wrapped tagged re-mint (scenario 7) is now ALSO recognized (bare=true), closing the false alarm where its own unresolved timer used to fire loud despite the content having fully arrived; and when two ring entries share identical content, the detector now PREFERS an unresolved match over an already-resolved one (scenario 8, and its mismatchResolvedGens-variant twin, scenario 10), so an already-resolved, newer entry can no longer shadow a genuinely-pending older one and strand its real timer — while a resolved-only fallback (scenario 9, no unresolved candidate at all) still confirms silently exactly as before, so that existing coverage is preserved, never regressed. Scenarios 11/12 pin the BARE twin's own Do-not #4 — the SAME tag-stripping and entry-pairing discipline as FULL, never a looser one, for the unrelated-current-generation and decoupled-pairing counter-specimens respectively."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -12,6 +12,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // the createPty() seam, wired into a REAL OrchestrationMcpRouter — no real claude, no daemon) and reuses
 // pty-prompt-mismatch-pasted-content-wrap-replay.mjs's own scenario-1/scenario-2 fixtures for the positive
 // and negative cases respectively.
+//
+// CODE REVIEW FOLLOW-UP (card 1c7a5e12, reviewer 514cae2a): cases (1)/(1b) additionally assert `bare` on
+// the worker_list/worker_status ROW itself (not only via the host getter) — (1) reuses the FULL-wrap
+// fixture (bare:false) and (1b) adds a BARE-wrap fixture (bare:true, mirrors the pty test's own scenario
+// 7), so both polarities are pinned on the actual MCP response, not just PtyHost's own internal state.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/worker-mismatch-pasted-content-wrap-replay-signal.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -48,7 +53,7 @@ const agentId = "agent-pcwr-signal";
 db.insertProject({ id: projId, name: "PcwrSignal", repoPath: projId, vaultPath: projId, config: {}, createdAt: seededActivity, archivedAt: null });
 db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
 db.insertSession({ id: "mgr", projectId: projId, agentId, engineSessionId: "eng-mgr", title: null, cwd: projId, processState: "live", resumability: "resumable", busy: false, createdAt: seededActivity, lastActivity: seededActivity, lastError: null, role: "manager", ctxInputTokens: null, ctxTurns: null, model: null });
-for (const id of ["w-replay", "w-unrelated", "w-not-in-pty"]) {
+for (const id of ["w-replay", "w-unrelated", "w-not-in-pty", "w-replay-bare"]) {
   db.insertSession({ id, projectId: projId, agentId, engineSessionId: `eng-${id}`, title: null, cwd: projId, processState: "live", resumability: "unknown", busy: false, createdAt: seededActivity, lastActivity: seededActivity, lastError: null, role: "worker", parentSessionId: "mgr", taskId: `task-${id}` });
 }
 
@@ -70,6 +75,8 @@ function spawnReady(targetHost, sessionId) {
 }
 
 const pastedContentWrap = (id, inner) => `\n\n<pasted_content id="${id}">\n${inner}\n</pasted_content id="${id}">\n`;
+// Card 1c7a5e12 — the BARE-framing twin (no outer `\n\n`), exactly `PASTED_CONTENT_BARE_WRAP_RE`'s shape.
+const bareContentWrap = (id, inner) => `<pasted_content id="${id}">\n${inner}\n</pasted_content id="${id}">`;
 const ROOT_MSG_ID = "79999395-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub), {}, host);
@@ -126,12 +133,49 @@ try {
     check("(1) reportedLen/intendedLen are carried through (same shape as lastMismatchFusion)",
       row.lastMismatchPastedContentWrapReplay.reportedLen === reported.length
       && row.lastMismatchPastedContentWrapReplay.intendedLen === remint.length);
+    // Card 1c7a5e12 (Code Review follow-up, reviewer 514cae2a): `bare` must surface on the ROW itself,
+    // not only via the host getter — this fixture is a FULL wrap, so `bare` must read false here.
+    check("(1) REQUIRED (card 1c7a5e12) — worker_list's own row carries bare:false for this FULL-wrap fixture",
+      row.lastMismatchPastedContentWrapReplay.bare === false);
 
     const status = await mgrClient.call("worker_status", { workerSessionId: SID });
     check("(1) worker_status: same shape, same values",
       status?.lastMismatchPastedContentWrapReplay?.gen === 2
       && status.lastMismatchPastedContentWrapReplay.recognizedGen === 1
       && status.lastMismatchPastedContentWrapReplay.detectedAt === row.lastMismatchPastedContentWrapReplay.detectedAt);
+    check("(1) REQUIRED (card 1c7a5e12) — worker_status's own row carries bare:false too",
+      status.lastMismatchPastedContentWrapReplay.bare === false);
+  }
+
+  // ============== (1b) POSITIVE, card 1c7a5e12 — the BARE-wrap fixture must surface bare:true on BOTH
+  // the worker_list and worker_status ROW, not only via the host getter (Code Review follow-up, reviewer
+  // 514cae2a). Mirrors pty-prompt-mismatch-pasted-content-wrap-replay.mjs's own scenario 7. ==============
+  {
+    const SID = "w-replay-bare";
+    spawnReady(host, SID);
+    const kickoffText = "P".repeat(500);
+    const remint = framePossibleDuplicate(kickoffText, ROOT_MSG_ID);
+
+    host.enqueueStdin(SID, kickoffText); // gen=1, never confirmed
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(SID, remint); // gen=2, now written and current
+    const reported = bareContentWrap("pcwrbare", kickoffText);
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: reported });
+
+    check("(1b) sanity — the confirmed-pasted-content-wrap-replay class at the PtyHost level, bare",
+      host.getLastMismatchPastedContentWrapReplay(SID)?.bare === true);
+
+    const list = await mgrClient.call("worker_list");
+    const row = list.find((w) => w.workerSessionId === SID);
+    check("(1b) REQUIRED (card 1c7a5e12) — worker_list's own row carries bare:true for this BARE-wrap fixture",
+      row?.lastMismatchPastedContentWrapReplay?.gen === 2
+      && row.lastMismatchPastedContentWrapReplay.recognizedGen === 1
+      && row.lastMismatchPastedContentWrapReplay.bare === true);
+
+    const status = await mgrClient.call("worker_status", { workerSessionId: SID });
+    check("(1b) REQUIRED (card 1c7a5e12) — worker_status's own row carries bare:true too",
+      status?.lastMismatchPastedContentWrapReplay?.bare === true);
   }
 
   // ============== (2) NEGATIVE CONTROL — an unrelated, genuinely-lost mismatch must NOT set this field ====
@@ -181,11 +225,11 @@ try {
     const client = new Client({ name: "pcwr-signal-nopty-test", version: "0" });
     await client.connect(clientT);
     const list = JSON.parse((await client.callTool({ name: "worker_list", arguments: {} })).content[0].text);
-    check("(4) a router with no PtyHost wired still returns worker_list without throwing", Array.isArray(list) && list.length === 3);
+    check("(4) a router with no PtyHost wired still returns worker_list without throwing", Array.isArray(list) && list.length === 4);
     check("(4) every row reads lastMismatchPastedContentWrapReplay:null when no PtyHost was wired", list.every((w) => w.lastMismatchPastedContentWrapReplay === null));
   }
 } finally {
-  for (const sid of ["w-replay", "w-unrelated"]) {
+  for (const sid of ["w-replay", "w-unrelated", "w-replay-bare"]) {
     try { host.stop(sid, "hard"); } catch { /* ignore */ }
   }
   db.close();
@@ -194,6 +238,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — `lastMismatchPastedContentWrapReplay` (card 79999395) exposes worker_list/worker_status's own NAMED pull surface for the `confirmed-pasted-content-wrap-replay` arm (card dc92f4b6), mirroring lastMismatchFusion's shape/contract: the real confirmed shape (a late engine echo wrapping an earlier generation's own recorded write) surfaces gen/recognizedGen/reportedLen/intendedLen/detectedAt correctly on both tools, a genuinely unrelated/unmatchable loss reads null (never a false positive for this arm), a worker not live in this process reads null, and a router built without a PtyHost stays byte-compatible."
+  ? "\n✅ ALL PASS — `lastMismatchPastedContentWrapReplay` (card 79999395) exposes worker_list/worker_status's own NAMED pull surface for the `confirmed-pasted-content-wrap-replay` arm (card dc92f4b6), mirroring lastMismatchFusion's shape/contract: the real confirmed shape (a late engine echo wrapping an earlier generation's own recorded write) surfaces gen/recognizedGen/reportedLen/intendedLen/detectedAt correctly on both tools, a genuinely unrelated/unmatchable loss reads null (never a false positive for this arm), a worker not live in this process reads null, and a router built without a PtyHost stays byte-compatible. UPDATED by card 1c7a5e12: the `bare` field surfaces correctly on BOTH worker_list's and worker_status's own ROW — bare:false for the existing FULL-wrap fixture (1), bare:true for a new BARE-wrap fixture (1b)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

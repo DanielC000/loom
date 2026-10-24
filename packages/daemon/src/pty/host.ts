@@ -633,26 +633,61 @@ function detectPastedContentWrapContentDivergence(reported: string, intended: st
 
 /** @decision dc92f4b6 — proves CONTENT identity, never lineage: requires BOTH the wrap's inner content
  *  AND `currentIntendedText` (possible-duplicate tag stripped) to exactly match the SAME prior entry,
- *  never a wrap-only match (confirms on any stale entry regardless of the CURRENT gen) or a substring. */
-function findRecognizedPastedContentWrapOfPriorWrite(
+ *  never a wrap-only match (confirms on any stale entry regardless of the CURRENT gen) or a substring.
+ *
+ *  @decision 1c7a5e12 — shared body for BOTH framings (parameterized by `wrapRe`); prefers an UNRESOLVED
+ *  match over an already-resolved one (never let a resolved, newer entry shadow a pending older one with
+ *  identical content), falling back to resolved only when none is unresolved (never a hard skip). */
+function findRecognizedPastedContentWrapOfPriorWriteCore(
   reported: string,
   currentIntendedText: string,
   window: ReadonlyArray<{ gen: number; text: string }>,
+  wrapRe: RegExp,
+  resolvedGens: ReadonlySet<number>,
+  echoConfirmedGens: ReadonlySet<number>,
 ): { gen: number; matchedLen: number } | null {
   const strippedCurrent = stripPossibleDuplicateFrame(currentIntendedText);
   if (strippedCurrent === currentIntendedText) return null; // current gen carries no tag to strip — nothing to prove content-identity against
-  const m = PASTED_CONTENT_WRAP_RE.exec(reported);
+  const m = wrapRe.exec(reported);
   if (m === null) return null;
   const inner = m[2]!;
+  let resolvedFallback: { gen: number; matchedLen: number } | null = null;
   for (let idx = window.length - 1; idx >= 0; idx--) {
     const entry = window[idx];
     if (!entry || entry.text.length === 0) continue;
     const matchesEntry = (s: string) => s === entry.text || s === entry.text.trimEnd();
-    if (matchesEntry(inner) && matchesEntry(strippedCurrent)) {
-      return { gen: entry.gen, matchedLen: entry.text.length };
+    if (!matchesEntry(inner) || !matchesEntry(strippedCurrent)) continue;
+    const candidate = { gen: entry.gen, matchedLen: entry.text.length };
+    if (resolvedGens.has(entry.gen) || echoConfirmedGens.has(entry.gen)) {
+      if (resolvedFallback === null) resolvedFallback = candidate; // first (newest) resolved match seen so far
+      continue; // keep scanning — an unresolved match, if one exists, always wins
     }
+    return candidate; // first (newest) UNRESOLVED match wins outright
   }
-  return null;
+  return resolvedFallback;
+}
+
+/** @decision dc92f4b6 — the FULL-framing entry point into the shared core above (`PASTED_CONTENT_WRAP_RE`). */
+function findRecognizedPastedContentWrapOfPriorWrite(
+  reported: string,
+  currentIntendedText: string,
+  window: ReadonlyArray<{ gen: number; text: string }>,
+  resolvedGens: ReadonlySet<number>,
+  echoConfirmedGens: ReadonlySet<number>,
+): { gen: number; matchedLen: number } | null {
+  return findRecognizedPastedContentWrapOfPriorWriteCore(reported, currentIntendedText, window, PASTED_CONTENT_WRAP_RE, resolvedGens, echoConfirmedGens);
+}
+
+/** @decision 1c7a5e12 — the BARE-framing twin; without it a bare-wrapped tagged re-mint fell through to
+ *  437daade's tag-FREE ring scan, which cannot see this generation's own tag — a measured false alarm. */
+function findRecognizedBarePastedContentWrapOfPriorWrite(
+  reported: string,
+  currentIntendedText: string,
+  window: ReadonlyArray<{ gen: number; text: string }>,
+  resolvedGens: ReadonlySet<number>,
+  echoConfirmedGens: ReadonlySet<number>,
+): { gen: number; matchedLen: number } | null {
+  return findRecognizedPastedContentWrapOfPriorWriteCore(reported, currentIntendedText, window, PASTED_CONTENT_BARE_WRAP_RE, resolvedGens, echoConfirmedGens);
 }
 
 // Round 2 (Code Review BLOCKING, card 437daade, verified by probe): the PREDECESSOR of this function (a
@@ -3523,7 +3558,9 @@ interface Live {
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
   // @decision 79999395 — never word this as an established loss; CONTENT identity against `recognizedGen`
   // only, never lineage (dc92f4b6's own posture). NOT one of e1ac691b's four worker_merge_confirm candidates.
-  lastMismatchPastedContentWrapReplay: { gen: number; recognizedGen: number; reportedLen: number; intendedLen: number; detectedAt: number } | null;
+  // @decision 1c7a5e12 — `bare` discriminates FULL vs BARE framing (mirrors `lastMismatchReplay`'s own
+  // `wrapped` field) — attribution only, never a different severity/recovery tier either way.
+  lastMismatchPastedContentWrapReplay: { gen: number; recognizedGen: number; reportedLen: number; intendedLen: number; detectedAt: number; bare: boolean } | null;
   // Card f9b1ea00 — CONSUMED by `checkPromptMismatchUnresolved`'s bounded-window follow-up, NOT a reader-
   // facing pull surface like its siblings above. Every gen a CONFIRMED fusion's own `spanGens` has ever
   // named (i.e. every gen `lastMismatchFusion` above has ever explained, across the session's whole life —
@@ -9468,10 +9505,19 @@ export class PtyHost {
               // @decision dc92f4b6 — a LATE engine echo of an EARLIER generation's own write, paste-
               // wrapped, where the CURRENT generation's own intended text (tag stripped) is CONTENT-
               // IDENTICAL to that same entry — never lineage (see the function's own doc).
-              const pastedContentWrapOfPriorWrite = findRecognizedPastedContentWrapOfPriorWrite(reported, intended, live.recentWrittenTurns.slice(0, -1));
+              //
+              // @decision 1c7a5e12 — tries FULL framing first, then BARE (the two anchored wrap shapes
+              // can never both match `reported`) — a bare-wrapped tagged re-mint must be recognized too,
+              // never left to 437daade's tag-free ring scan alone (see each function's own doc).
+              const pastedContentWrapOfPriorWriteFull = findRecognizedPastedContentWrapOfPriorWrite(reported, intended, live.recentWrittenTurns.slice(0, -1), live.mismatchResolvedGens, live.echoConfirmedGens);
+              const pastedContentWrapOfPriorWriteBare = pastedContentWrapOfPriorWriteFull === null
+                ? findRecognizedBarePastedContentWrapOfPriorWrite(reported, intended, live.recentWrittenTurns.slice(0, -1), live.mismatchResolvedGens, live.echoConfirmedGens)
+                : null;
+              const pastedContentWrapOfPriorWriteIsBare = pastedContentWrapOfPriorWriteFull === null && pastedContentWrapOfPriorWriteBare !== null;
+              const pastedContentWrapOfPriorWrite = pastedContentWrapOfPriorWriteFull ?? pastedContentWrapOfPriorWriteBare;
               if (pastedContentWrapOfPriorWrite) {
                 // eslint-disable-next-line no-console
-                console.log(`[prompt-mismatch-pasted-content-wrap-replay] ${sessionId} gen=${live.submitGeneration} recognizedGen=${pastedContentWrapOfPriorWrite.gen} matchedLen=${pastedContentWrapOfPriorWrite.matchedLen} reportedLen=${reported.length} — the engine's report is EXACTLY generation ${pastedContentWrapOfPriorWrite.gen}'s own recorded write, wrapped in the engine's own pasted-content paste-composer framing (card dc92f4b6). NOT A LOSS OF CONTENT — that content arrived, and THIS generation's own (tag-stripped) intended text is content-identical to it. THIS generation's OWN tagged write has not itself been independently confirmed and may still surface later as a separate possible-duplicate-labelled copy.`);
+                console.log(`[prompt-mismatch-pasted-content-wrap-replay] ${sessionId} gen=${live.submitGeneration} recognizedGen=${pastedContentWrapOfPriorWrite.gen} matchedLen=${pastedContentWrapOfPriorWrite.matchedLen} reportedLen=${reported.length} bare=${pastedContentWrapOfPriorWriteIsBare} — the engine's report is EXACTLY generation ${pastedContentWrapOfPriorWrite.gen}'s own recorded write, wrapped in the engine's own pasted-content paste-composer framing (card dc92f4b6). NOT A LOSS OF CONTENT — that content arrived, and THIS generation's own (tag-stripped) intended text is content-identical to it. THIS generation's OWN tagged write has not itself been independently confirmed and may still surface later as a separate possible-duplicate-labelled copy.`);
               }
               // @decision 201d0d95 — Q1: SURFACE the mismatch to the session (report OBSERVED FIELDS ONLY —
               // never assert a CLI-internal cause) and use `findLast`, not `find`, when matching the replay
@@ -9822,7 +9868,11 @@ export class PtyHost {
                   // @decision 79999395 — this arm wrote `mismatchResolvedGens` only, with no
                   // worker_status/worker_list pull surface at all; mirrors `lastMismatchFusion`'s own
                   // write-at-detection shape (card f5f6515a) for the same reason.
-                  live.lastMismatchPastedContentWrapReplay = { gen: live.submitGeneration, recognizedGen: confirmedPastedContentWrapOfPriorWrite.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
+                  //
+                  // @decision 1c7a5e12 — `bare` discriminates which framing matched (mirrors
+                  // `lastMismatchReplay`'s own `wrapped` convention); severity/recovery semantics are
+                  // identical either way — this is attribution only, never a different handling tier.
+                  live.lastMismatchPastedContentWrapReplay = { gen: live.submitGeneration, recognizedGen: confirmedPastedContentWrapOfPriorWrite.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now(), bare: pastedContentWrapOfPriorWriteIsBare };
                 }
                 // @decision d0952a73 — threads the already-computed `confirmed*` classification into
                 // `explainedBenign` instead of discarding it; `null` leaves this exactly as loud as
