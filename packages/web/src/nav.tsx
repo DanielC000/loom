@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import ReviewPanel from "./pages/ReviewPanel";
 import QuestionAnswer from "./pages/QuestionAnswer";
 import SessionView from "./pages/SessionView";
@@ -20,6 +20,7 @@ import Automation from "./pages/Automation";
 import Usage from "./pages/Usage";
 import Platform from "./pages/Platform";
 import Settings, { WorkspaceSettings } from "./pages/Settings";
+import { mergeRedirectQuery } from "./lib/redirectQuery";
 import WorkspaceHome from "./pages/WorkspaceHome";
 import ProjectHome from "./pages/ProjectHome";
 import AgentsNode from "./pages/AgentsNode";
@@ -372,17 +373,25 @@ export type LegacyRedirect = {
   element: ReactNode;
 };
 
-// The `<Navigate>` is built HERE, once per row, rather than in each shell's route table: `replace`
+/**
+ * A redirect that carries the INCOMING query through to `to`, so a deep link issued at a renamed
+ * address still arrives with its params.
+ *
+ * @decision 260fb29a — on a key collision the ROW'S OWN target wins, replaced whole: never let an
+ * incoming query re-point a redirect at a sub-tab the old address never named. A component, never a
+ * precomputed element — the incoming search is only knowable at render time.
+ */
+export function QueryPreservingRedirect({ to }: { to: string }) {
+  const { search } = useLocation();
+  return <Navigate to={mergeRedirectQuery(to, search)} replace />;
+}
+
+// The redirect element is built HERE, once per row, rather than in each shell's route table: `replace`
 // (keep the dead URL out of the history stack, so Back leaves the page rather than bouncing through
 // the redirect) is part of the redirect's behaviour, and a flag spelled out in two route tables is a
 // flag that can end up spelled differently in two route tables.
-//
-// `to` is a plain path string, so react-router resolves it as given: the INCOMING query and hash are
-// dropped, and a target's own `?tab=` always wins. That is exactly what these redirects have always
-// done — carrying a stale page's query onto a different page is not parity, and nothing links to
-// these paths WITH a query — so it stays the behaviour under both shells.
 function redirect(from: string, to: string): LegacyRedirect {
-  return { from, to, element: <Navigate to={to} replace /> };
+  return { from, to, element: <QueryPreservingRedirect to={to} /> };
 }
 
 export const LEGACY_REDIRECTS: LegacyRedirect[] = [

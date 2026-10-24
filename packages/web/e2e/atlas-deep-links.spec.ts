@@ -25,13 +25,23 @@
 //                                          panels all stay MOUNTED (PlatformView.tsx) — so its board is
 //                                          live even on a different tab and could consume the param
 //                                          where nobody can see the dialog.
+//   4b. `/platform?task=` with NO tab=board      the invisible-consumption case (card 260fb29a): the
+//                                          node's hidden Board used to eat the param and open its
+//                                          dialog where nobody can see it. The address now normalizes
+//                                          onto the Board tab.
+//   4c. the same, with a WARM board cache  the other half of that fix, and the only leg that can see
+//                                          it: a hidden panel's board must not CONSUME the param.
+//                                          Unreachable by a fresh load — see the leg's own note.
 //   5. `/actors?tab=profiles&profile=&grant=`  the profile deep link, on the Actors node.
-//   6. a LEGACY REDIRECT (`/profiles?...`) — parity, not function: `nav.tsx`'s `redirect()` builds a
-//                                          plain path `<Navigate>`, so the incoming query is DROPPED.
-//                                          That is what it has always done; the row asserts BOTH
-//                                          shells still drop it identically, so nobody later "fixes"
-//                                          one side into a divergence. (`?task=` has no legacy
-//                                          redirect at all — no LEGACY_REDIRECTS row targets /board.)
+//   6. a LEGACY REDIRECT (`/profiles?...`) — FUNCTION, not parity, since card 260fb29a: `nav.tsx`'s
+//                                          `redirect()` now carries the incoming query through, so
+//                                          the deep link ARRIVES and pre-selects the profile under
+//                                          both shells. It used to build a plain path `<Navigate>`
+//                                          and drop it, which this row asserted as parity; that
+//                                          reading is retired — a redirect is a rename, so the params
+//                                          were always meant for the page they land on.
+//   6b. `/setup?task=`                     the two fixes composing: the redirect carries `task=` to
+//                                          /platform, which then normalizes onto its Board tab.
 //
 // Every leg is FRESHLY LOADED: a real `page.goto` of the deep link itself, never a click-through from
 // a page that already holds the state. Each test gets its own browser context, so there is no prior
@@ -220,6 +230,164 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     }
   });
 
+  // ── 4b + 6b. The Platform node WITHOUT tab=board — and the same link through a legacy redirect ──
+  test("switch ON: ?task= on the Platform node with no tab=board switches to the Board tab and opens the card", async ({ page, loomDaemon }) => {
+    // Card 260fb29a. The Platform node keeps all five panels MOUNTED and hides the inactive ones
+    // (PlatformView.tsx — the owner's rule that a tab click is not consent to discard unfinished
+    // input), so its <Board> is live on every tab. `?task=` arriving without `tab=board` was therefore
+    // consumed by a board inside a HIDDEN panel: the dialog opened where nobody could see it, and the
+    // param was cleared on the way out, so no visible board ever got a chance at it.
+    //
+    // Everything below is the OBSERVABLE of that fix, not a render check: the Board tab is what is
+    // showing, the Home tab is not, and the dialog on it is the deep-linked card's rather than
+    // whichever card the board found first.
+    const res = await fetch(`${loomDaemon.baseURL}/api/setup/home`, { headers: { authorization: `Bearer ${loomDaemon.loopbackSecret}` } });
+    expect(res.ok, `GET /api/setup/home -> ${res.status}`).toBe(true);
+    const home = (await res.json()) as { project: { id: string; name: string } };
+    expect(home.project.name, "the reserved home this leg seeds into").toBe("Platform");
+
+    const { decoy, target } = await seedDecoyAndTarget(loomDaemon, home.project.id);
+    // A second project, pinned active, so "the Platform board's card opened" cannot be satisfied by
+    // the active project's board having been rendered here instead.
+    const other = await loomDaemon.createProject(uniq("atlasdeep-platform-notab"));
+
+    try {
+      await seedAtlasOn(page);
+      await pinProject(page, other.id);
+      await page.setViewportSize(VIEWPORT);
+
+      // ── The bare node address: no tab at all, so Home is what it would otherwise resolve to. ──
+      await page.goto(`${loomDaemon.baseURL}/platform?task=${encodeURIComponent(target.id)}`);
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+
+      // PRESENCE first (card 625d791c): the Board panel is the one SHOWING. `platform-panel-home` is
+      // the contrast case — both are in the document either way, since none of the five is ever
+      // unmounted, so "the board is visible" only means something beside "home is not".
+      await expect(page.getByTestId("platform-panel-board"), "the node switched to its Board tab").toBeVisible();
+      await expect(page.getByTestId("platform-panel-home"), "…and off the Home tab it would otherwise default to")
+        .toBeHidden();
+      await expect(page.getByTestId("atlas-tab-board"), "the tab row agrees with the panel")
+        .toHaveAttribute("aria-selected", "true");
+
+      // THE DIALOG — the whole point. Before this card it opened inside the hidden Home-tab render
+      // pass and was never visible at all.
+      await assertDialogIsCard(page, target, decoy);
+
+      // The address was REWRITTEN, not merely derived: `tab=board` is really in the URL, which is what
+      // keeps the panel visible after Board clears the param it consumed. A derived tab would re-hide
+      // the dialog on that very next render.
+      await expect(page).toHaveURL(/\/platform\?tab=board$/);
+      expect(page.url(), "the consumed ?task= is cleared").not.toContain("task=");
+
+      // Still on the node, still on the Board tab, after the dialog closes — the normalization is a
+      // one-shot address rewrite, not a loop that re-fires once the param is gone.
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(page).toHaveURL(/\/platform\?tab=board$/);
+      await expect(page.getByTestId("platform-panel-board")).toBeVisible();
+
+      // ── An EXPLICIT other tab loses to the card param, and that is deliberate: a URL naming both is
+      //    self-contradictory, and only the Board tab can serve either half of it. ──
+      await page.goto(`${loomDaemon.baseURL}/platform?tab=cadence&task=${encodeURIComponent(target.id)}`);
+      await expect(page.getByTestId("platform-panel-board"), "?task= wins over an explicit tab=cadence").toBeVisible();
+      await expect(page.getByTestId("platform-panel-cadence")).toBeHidden();
+      await assertDialogIsCard(page, target, decoy);
+      await expect(page).toHaveURL(/\/platform\?tab=board$/);
+
+      // ── 6b. THE TWO FIXES COMPOSING. /setup is a declared LEGACY_REDIRECTS row onto /platform, so
+      //    this one URL exercises both halves of the card: the redirect has to carry `task=` through
+      //    (it used to drop it), and the node then has to normalize onto its Board tab. Asserted
+      //    against the real declaration so this can never quietly test a dead URL.
+      const navSrc = readFileSync(NAV_SOURCE, "utf8");
+      const block = navSrc.slice(navSrc.indexOf("export const LEGACY_REDIRECTS"),
+        navSrc.indexOf("\n];", navSrc.indexOf("export const LEGACY_REDIRECTS")));
+      expect(block, "the row this leg chains through").toContain(`redirect("/setup", "/platform")`);
+      expect(block, "positive control: the parse reaches the declaration's other rows")
+        .toContain(`redirect("/vault", "/repository")`);
+
+      await page.goto(`${loomDaemon.baseURL}/setup?task=${encodeURIComponent(target.id)}`);
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+      await expect(page.getByTestId("platform-panel-board"), "the redirect carried ?task= and the node switched")
+        .toBeVisible();
+      await assertDialogIsCard(page, target, decoy);
+      await expect(page).toHaveURL(/\/platform\?tab=board$/);
+    } finally {
+      await fetch(`${loomDaemon.baseURL}/api/tasks/${target.id}`, { method: "DELETE" }).catch(() => {});
+      await fetch(`${loomDaemon.baseURL}/api/tasks/${decoy.id}`, { method: "DELETE" }).catch(() => {});
+    }
+  });
+
+  // ── 4c. The hidden panel's board must not CONSUME the param — the half no fresh load can see ────
+  test("switch ON: a hidden Platform panel's board does not eat ?task= when the board cache is already warm", async ({ page, loomDaemon }) => {
+    // Card 260fb29a's fix is two halves, and this leg exists because the OTHER half's legs cannot
+    // discriminate this one. MEASURED, both polarities, on a real build: with `Board`'s `deepLinks`
+    // gate REMOVED but the normalization <Navigate> kept, every other leg in this file still passes.
+    // The reason is timing, not correctness — a fresh `page.goto` starts with a COLD board cache, so
+    // `board.data` is undefined on the first render and the hidden board's effect no-ops until after
+    // the <Navigate> has landed.
+    //
+    // Warm that cache and the race is real. Same measurement, same build, warm + client-side arrival:
+    //   gate ON  → url /platform?tab=board, board panel visible, 1 visible dialog
+    //   gate OFF → url /platform (tab=board WIPED), board panel hidden, 0 dialogs
+    // The hidden board's effect fires in the SAME flush as the <Navigate> and its `setSearchParams`
+    // is computed from the pre-navigation closure, so its "delete task" writes back a query that
+    // never had `tab=board` in it. Without this leg the gate is untested machinery.
+    //
+    // THE ARRIVAL IS SYNTHETIC, deliberately and with the reason stated: a warm cache plus a
+    // client-side arrival at this address is a state no in-app link produces TODAY — every route to
+    // `/platform?task=` is a full document load, which is cold. It is one small change away from
+    // being live, though: `components/requests.tsx`'s own linked-task chip already does exactly this
+    // shape (`navigate("/board?task=" + id)`) from inside the app. A pushState + popstate is what
+    // react-router's own history listener responds to, so this drives the real client-side path.
+    const res = await fetch(`${loomDaemon.baseURL}/api/setup/home`, { headers: { authorization: `Bearer ${loomDaemon.loopbackSecret}` } });
+    expect(res.ok, `GET /api/setup/home -> ${res.status}`).toBe(true);
+    const home = (await res.json()) as { project: { id: string; name: string } };
+    expect(home.project.name, "the reserved home this leg seeds into").toBe("Platform");
+
+    const { decoy, target } = await seedDecoyAndTarget(loomDaemon, home.project.id);
+    const other = await loomDaemon.createProject(uniq("atlasdeep-platform-warm"));
+
+    try {
+      await seedAtlasOn(page);
+      await pinProject(page, other.id);
+      await page.setViewportSize(VIEWPORT);
+
+      // ── Warm the board cache by sitting on the Board tab, and WAIT for the read that warms it. ──
+      await page.goto(`${loomDaemon.baseURL}/platform?tab=board`);
+      await expect(page.getByTestId("platform-panel-board")).toBeVisible();
+      await page.waitForResponse((r) => r.url().includes(`/api/projects/${home.project.id}/board`) && r.ok());
+      // PRESENCE/ABSENCE control on the starting state: nothing is open yet, so a dialog found at the
+      // end cannot be one that was already there.
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+
+      // ── Move off the Board tab client-side (a real tab link), so its board stays MOUNTED and warm
+      //    while hidden — which is the whole condition under test. ──
+      await page.getByTestId("atlas-tab-cadence").click();
+      await expect(page.getByTestId("platform-panel-cadence")).toBeVisible();
+      await expect(page.getByTestId("platform-panel-board"), "the board is hidden but still mounted").toBeHidden();
+
+      // ── Arrive at ?task= with NO document load. ──
+      await page.evaluate((id) => {
+        history.pushState({}, "", `/platform?task=${id}`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, target.id);
+
+      // The normalization survived the hidden board: the address really carries `tab=board`, the panel
+      // is showing, and the dialog on it is the deep-linked card's.
+      await expect(page, "the hidden board's clear wiped the normalized tab=board out of the address")
+        .toHaveURL(/\/platform\?tab=board$/);
+      await expect(page.getByTestId("platform-panel-board"), "…so the Board panel is what is showing").toBeVisible();
+      await expect(page.getByTestId("platform-panel-cadence")).toBeHidden();
+      await assertDialogIsCard(page, target, decoy);
+      // Exactly ONE dialog: a hidden board that ALSO consumed the param would open a second one inside
+      // its own panel, which no visibility assertion above would notice.
+      await expect(page.getByRole("dialog"), "only the visible panel's board opened a dialog").toHaveCount(1);
+    } finally {
+      await fetch(`${loomDaemon.baseURL}/api/tasks/${target.id}`, { method: "DELETE" }).catch(() => {});
+      await fetch(`${loomDaemon.baseURL}/api/tasks/${decoy.id}`, { method: "DELETE" }).catch(() => {});
+    }
+  });
+
   // ── 5. The profile + grant deep link ────────────────────────────────────────────────────────────
   test("switch ON: ?profile=&grant= pre-selects that profile with the connection unsaved, and Save confirms rather than grants", async ({ page, loomDaemon }) => {
     const base = loomDaemon.baseURL;
@@ -297,8 +465,8 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     }
   });
 
-  // ── 6. The legacy redirect — a PARITY row, not a working deep link ───────────────────────────────
-  test("both shells: a legacy redirect drops the deep-link query identically", async ({ page, loomDaemon }) => {
+  // ── 6. The legacy redirect — a WORKING deep link since card 260fb29a ─────────────────────────────
+  test("both shells: a legacy redirect carries the deep-link query through identically", async ({ page, loomDaemon }) => {
     // Asserted against the REAL declaration so this leg can never quietly test a dead URL: if
     // /profiles stops redirecting to /actors, this fails here rather than passing on a 404 page.
     const src = readFileSync(NAV_SOURCE, "utf8");
@@ -312,48 +480,97 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     // …and no legacy row targets /board, which is why `?task=` has no redirect leg of its own.
     expect(block, "nothing redirects into /board").not.toContain(`"/board"`);
 
+    // A DECOY profile alongside the target, for the same reason every other leg seeds one: "the editor
+    // opened" is not the claim — "it opened the one the URL named" is, and only a second profile can
+    // tell those apart.
+    const decoyProfile = await apiJson<{ id: string; name: string }>(`${loomDaemon.baseURL}/api/profiles`, {
+      method: "POST", body: JSON.stringify({ name: uniq("Deeplink Redirect Decoy") }),
+    });
     const profile = await apiJson<{ id: string; name: string }>(`${loomDaemon.baseURL}/api/profiles`, {
       method: "POST", body: JSON.stringify({ name: uniq("Deeplink Redirect Rig") }),
     });
-    const deadLink = `/profiles?profile=${encodeURIComponent(profile.id)}&grant=does-not-matter`;
-    // `nav.tsx`'s `redirect()` builds `<Navigate to="/actors" replace/>` from a plain path string, so
-    // react-router drops the incoming search entirely. That has always been the behaviour; the point
-    // of this row is that the ATLAS shell did not change it in either direction.
+    const connection = await apiJson<{ id: string; name: string }>(`${loomDaemon.baseURL}/api/connections`, {
+      method: "POST",
+      body: JSON.stringify({ name: uniq("E2E Redirect Conn"), host: "api.example-redirect.test", authScheme: "api-key", secret: `sk_${Date.now()}` }),
+    });
+    const legacyLink = `/profiles?profile=${encodeURIComponent(profile.id)}&grant=${encodeURIComponent(connection.id)}`;
+    // Card 260fb29a: `nav.tsx`'s `redirect()` renders `QueryPreservingRedirect`, which merges the
+    // incoming search into the target's own. So the deep link ARRIVES at the renamed address and
+    // pre-selects the profile — where before it landed on a bare Actors page with the placeholder up.
+    // The row's own `?tab=` still wins any key collision; `/profiles` pins none, so there is nothing
+    // here for the carried query to collide with.
     //
     // Card 41eab0eb added a SECOND hop under Atlas alone: /actors is now the Workspace node's
     // `actors` tab, so the Atlas landing is that tab's address while the classic one is unchanged.
-    // The DROP — which is this test's whole subject — must still happen identically on both, so both
-    // legs below still assert `profile=` is gone; only the path each one lands on differs, and the
-    // per-shell constant is what records that it is a deliberate divergence and not a drift.
-    const ATLAS_URL = /\/home\?tab=actors$/;
-    const CLASSIC_URL = /\/actors$/;
+    // That hop has to carry the query too, which is what these two legs together measure — the
+    // per-shell constants are what record the path divergence as deliberate rather than a drift.
+    const ATLAS_URL = /\/home\?tab=actors&/;
+    const CLASSIC_URL = /\/actors\?/;
     const PLACEHOLDER = "Select a profile to edit it";
 
     try {
       // Switch ON.
       await seedAtlasOn(page);
       await page.setViewportSize(VIEWPORT);
-      await page.goto(`${loomDaemon.baseURL}${deadLink}`);
+
+      // THE ADDRESS FIRST, on a plain goto, before the functional half below. `gotoActorsReady` awaits
+      // the editor's own `GET /api/agents`, and that request only fires once the editor MOUNTS — which
+      // a dropped query prevents — so against the pre-card behaviour the helper dies on a 30s
+      // `waitForResponse` timeout that names nothing. MEASURED: reverting the fix turned this leg red
+      // at exactly that timeout. Checking the landed URL on its own navigation first makes the red land
+      // on the discriminating claim instead.
+      await page.goto(`${loomDaemon.baseURL}${legacyLink}`);
+      await page.waitForURL((u) => u.pathname !== "/profiles");
+      expect(page.url(), "the redirect dropped ?profile= instead of carrying it through").toContain("profile=");
+      expect(page.url(), "…and dropped ?grant= with it").toContain("grant=");
+
+      // Now the functional half. `gotoActorsReady` for the same reason leg 5 needs it: without the
+      // editor's own GET /api/agents resolved, `planGrantSave` fails CLOSED (@decision 3c4e0df6) and
+      // the pre-selection would be reached for the wrong reason.
+      await gotoActorsReady(page, loomDaemon.baseURL, legacyLink);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
-      await expect(page.getByText(PLACEHOLDER, { exact: false }), "no profile pre-selected: the query was dropped").toBeVisible();
+
+      // PRESENCE first: the editor mounted on the profile the URL named. The decoy's name is the
+      // discriminator — "an editor opened" would pass against either.
+      const nameField = page.getByLabel("Name", { exact: true });
+      await expect(nameField, "the carried ?profile= pre-selected its profile").toHaveValue(profile.name);
+      expect(profile.name).not.toBe(decoyProfile.name);
+      await expect(nameField).not.toHaveValue(decoyProfile.name);
+      // …and the `?grant=` half arrived too, which is the editor's own statement that it did.
+      await expect(page.getByText(/is pre-selected below/)).toBeVisible();
+      // The CONTRAST CASE for the assertion above: the placeholder is what this address showed before
+      // the query survived the redirect, so its absence is the measured difference.
+      await expect(page.getByText(PLACEHOLDER, { exact: false }),
+        "the editor is open, so the no-selection placeholder must be gone").toHaveCount(0);
       await expect(page).toHaveURL(ATLAS_URL);
-      expect(page.url()).not.toContain("profile=");
+      expect(page.url(), "the redirect carried ?profile= through").toContain("profile=");
+      expect(page.url(), "…and ?grant= with it").toContain("grant=");
 
       // Switch OFF — a second context, so the seeded flag cannot carry over.
       const classic = await page.context().browser()!.newPage();
       try {
         await classic.setViewportSize(VIEWPORT);
-        await classic.goto(`${loomDaemon.baseURL}${deadLink}`);
+        await gotoActorsReady(classic, loomDaemon.baseURL, legacyLink);
         await expect(classic.locator(".loom-rail"), "the classic shell really mounted").toBeVisible();
         await expect(classic.getByTestId("atlas-shell")).toHaveCount(0);
-        await expect(classic.getByText(PLACEHOLDER, { exact: false })).toBeVisible();
+        await expect(classic.getByLabel("Name", { exact: true })).toHaveValue(profile.name);
+        await expect(classic.getByText(/is pre-selected below/)).toBeVisible();
+        await expect(classic.getByText(PLACEHOLDER, { exact: false })).toHaveCount(0);
         await expect(classic).toHaveURL(CLASSIC_URL);
-        expect(classic.url()).not.toContain("profile=");
+        expect(classic.url()).toContain("profile=");
+        expect(classic.url()).toContain("grant=");
       } finally {
         await classic.close();
       }
+
+      // Arriving on the deep link still GRANTS nothing — read back over REST, not inferred from the
+      // UI. Making the link work must not have made it write (card 12dc7fc9's own rule).
+      const atRest = await apiJson<{ connections?: string[] }>(`${loomDaemon.baseURL}/api/profiles/${profile.id}`);
+      expect(atRest.connections ?? [], "arriving on the carried deep link grants nothing").not.toContain(connection.id);
     } finally {
       await fetch(`${loomDaemon.baseURL}/api/profiles/${profile.id}`, { method: "DELETE" }).catch(() => {});
+      await fetch(`${loomDaemon.baseURL}/api/profiles/${decoyProfile.id}`, { method: "DELETE" }).catch(() => {});
+      await fetch(`${loomDaemon.baseURL}/api/connections/${connection.id}`, { method: "DELETE" }).catch(() => {});
     }
   });
 

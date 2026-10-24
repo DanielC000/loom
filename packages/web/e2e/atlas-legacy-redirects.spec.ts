@@ -101,6 +101,27 @@ function parseLegacyRedirects(): { rows: Redirect[]; rawMarkers: number; block: 
 const pathOf = (to: string) => to.split("?")[0] ?? to;
 /** The `?tab=` value a target pins, when it pins one. */
 const tabOf = (to: string) => new URLSearchParams(to.split("?")[1] ?? "").get("tab");
+/** A target's own params as a sorted `key=value` list. */
+const paramsOf = (to: string) =>
+  [...new URLSearchParams(to.split("?")[1] ?? "")].map(([k, v]) => `${k}=${v}`).sort();
+
+/**
+ * A landed URL reduced to pathname + SORTED params + hash — card 260fb29a.
+ *
+ * Order-insensitive on purpose: a carried query is MERGED with the target's own, and where each key
+ * lands in the resulting string is an implementation detail of that merge (and of the second Atlas hop
+ * that re-keys a sub-tab). Comparing raw strings would make this walk fail over param ORDER, which is
+ * not a claim anybody wants to pin. The hash is kept as its own field so the walk can still say
+ * something about it rather than quietly folding it in.
+ */
+function addressOf(url: string): { pathname: string; params: string[]; hash: string } {
+  const u = new URL(url);
+  return {
+    pathname: u.pathname,
+    params: [...u.searchParams].map(([k, v]) => `${k}=${v}`).sort(),
+    hash: u.hash,
+  };
+}
 
 // ── Where a target lives under ATLAS, which is no longer always its own path (card 41eab0eb) ───
 // Seven cross-project destinations became WORKSPACE NODE TABS, so under Atlas their addresses chain
@@ -172,8 +193,9 @@ const SUB_KEY = "sub";
 function atlasLandingFor(to: string, nodeTabs: Map<string, string>): string {
   // A RETIRED target (card 5afd71bd) is checked FIRST and resolves to the node that absorbed it. One
   // declared redirect targets a retired destination — `/workspace` → `/projects` — so under Atlas that
-  // row chains two hops and settles on `/home`. Dropping the incoming query is unchanged behaviour:
-  // the retirement's own `<Navigate>` takes a plain path string, exactly as LEGACY_REDIRECTS' does.
+  // row chains two hops and settles on `/home`. That second hop carries the incoming query too (card
+  // 260fb29a): it renders the same `QueryPreservingRedirect` the LEGACY_REDIRECTS row does, so the row
+  // chaining through it cannot preserve under one shell and drop under the other.
   const retired = retirementsUnderTest().get(pathOf(to));
   if (retired) return retired;
   const key = nodeTabs.get(pathOf(to));
@@ -648,64 +670,112 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       .toEqual([]);
   });
 
-  test("an incoming query string is dropped on redirect, identically under both shells", async ({ page, loomDaemon }) => {
-    // These redirects target a plain path string, so react-router resolves it as given: the incoming
-    // query and hash go, and a target's own `?tab=` survives. That is what they have always done, so
-    // PARITY here means dropping it under Atlas too — the point of this test is that the two shells
-    // agree, not that either behaviour is independently desirable.
+  test("every declared redirect carries an incoming query through, identically under both shells", async ({ page, loomDaemon }) => {
+    // Card 260fb29a. These redirects USED to resolve a plain path string, which drops the incoming
+    // search — so every deep link ever issued at a renamed address landed with nothing selected, in
+    // both shells. A legacy redirect is a RENAME, not a hop to a different page, so the params a user
+    // pasted at the old address were always meant for the page they land on; they now ride along.
     //
-    // Measured, not assumed: the classic shell's landing URL is captured first and the Atlas shell is
-    // then required to reproduce it. If today's behaviour were in fact to preserve the query, this
-    // test would still be the right test — it would just record a different URL.
-    test.setTimeout(120_000);
-    const { rows } = parseLegacyRedirects();
+    // ONE LEG PER DECLARED ROW, derived from the parse — not the two polarity cases this test checked
+    // while the behaviour was a drop. A row is covered the day it is declared, with no edit here.
+    //
+    // Measured, not asserted from memory: the classic shell's landing is CAPTURED first and the Atlas
+    // shell is then required to agree with it, so "identically under both shells" stays a measurement.
+    test.setTimeout(300_000);
+    const { rows, rawMarkers, block } = parseLegacyRedirects();
+    // The same three positive controls the walk above runs on this parse — this test iterates every
+    // row, so a quietly-narrowed regex here would silently shrink the population it checks.
+    expect(rows.length, `the LEGACY_REDIRECTS parse found no rows. Block:\n${block}`).toBeGreaterThan(0);
+    expect(rows.length,
+      `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} redirect( marker(s)`
+      + ` — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
+    expect(rows, "positive control: the parse did not resolve /git, a row the declaration is known to carry")
+      .toContainEqual({ from: "/git", to: "/repository?tab=git" });
+
     const nodeTabs = nodeTabsUnderTest();
     const project = await loomDaemon.createProject(`atlas-redirect-query-${Date.now()}`);
     await pinProject(page, project.id);
 
-    // Both polarities, so neither outcome can pass by accident: a target that pins its OWN `?tab=`
-    // (where a carried query would also have to lose a collision) and one that pins none (where
-    // there is nothing for an incoming query to collide WITH, so preserving it would be invisible to
-    // a tab assertion). Picked from the parsed rows, never named here.
-    const withTab = rows.find((r) => tabOf(r.to));
-    const withoutTab = rows.find((r) => !tabOf(r.to));
-    expect(withTab, "no declared redirect pins a ?tab=, so the collision case cannot be exercised").toBeDefined();
-    expect(withoutTab, "every declared redirect pins a ?tab=, so the bare case cannot be exercised").toBeDefined();
-
-    const QUERY = "?from=legacy&keep=0";
+    // Namespaced sentinel keys, so no page can plausibly read one and act on it — the claim is that
+    // the params ARRIVE, never that anything consumes them. A collision probe rides along on a row
+    // that pins its own `?tab=`: `tab=deeplinkprobe-loses` must NOT survive, because the row's own tab
+    // is the row's whole meaning (`/skills` means "the Skills tab of /actors").
+    const KEPT = ["deeplinkprobe=kept", "deeplinkprobe2=also-kept"];
+    const COLLIDING_TAB = "tab=deeplinkprobe-loses";
     const HASH = "#section";
-    const cases = [withTab!, withoutTab!];
+    const queryFor = (r: Redirect) =>
+      "?" + [...KEPT, ...(tabOf(r.to) ? [COLLIDING_TAB] : [])].join("&");
 
-    const classic = new Map<string, string>();
-    for (const r of cases) {
-      await page.goto(loomDaemon.baseURL + r.from + QUERY + HASH);
+    // Both polarities are present ACROSS the rows, and that is checked rather than assumed: a run in
+    // which every row happened to pin a tab (or none did) would leave one half of the merge rule
+    // unexercised while still reporting a full sweep.
+    expect(rows.some((r) => tabOf(r.to)),
+      "no declared redirect pins a ?tab=, so the collision half of the merge rule is unexercised").toBe(true);
+    expect(rows.some((r) => !tabOf(r.to)),
+      "every declared redirect pins a ?tab=, so the bare-carry half is unexercised").toBe(true);
+
+    /** What the landing must carry: the target's own params (which WIN) plus the sentinels. */
+    const expectedParams = (landing: string) => [...paramsOf(landing), ...KEPT].sort();
+
+    // ── Phase 1: the CLASSIC shell ──
+    const classic = new Map<string, ReturnType<typeof addressOf>>();
+    for (const r of rows) {
+      await page.goto(loomDaemon.baseURL + r.from + queryFor(r) + HASH);
       await expect(page.locator(".loom-rail")).toBeVisible();
-      // Wait for the redirect to have HAPPENED without saying where to — `goto` resolves on load,
-      // and the history write lands on the first render after it. A predicate on "no longer the old
-      // path" settles it while still letting the captured URL be whatever the app chose.
+      // `goto` resolves on LOAD; the redirect is a client-side history write on the first render
+      // after it. Settle on "no longer the old path" rather than on a predicted destination, so the
+      // captured address is whatever the app actually chose.
       await page.waitForURL((u) => u.pathname !== r.from);
-      classic.set(r.from, page.url());
+      const landed = addressOf(page.url());
+      expect(landed.params, `${r.from} dropped the incoming query under the classic shell`)
+        .toEqual(expectedParams(r.to));
+      expect(landed.pathname, `${r.from} did not land on its declared target under the classic shell`)
+        .toBe(pathOf(r.to));
+      classic.set(r.from, landed);
     }
 
+    // ── Phase 2: the ATLAS shell, same old URLs ──
     await seedAtlasOn(page);
-    for (const r of cases) {
-      await page.goto(loomDaemon.baseURL + r.from + QUERY + HASH);
+    for (const r of rows) {
+      await page.goto(loomDaemon.baseURL + r.from + queryFor(r) + HASH);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
       await expect(page.getByTestId("atlas-empty")).toHaveCount(0);
-      // The DROP is what this test pins, and it is pinned the same way under either shell: the
-      // landing carries no `from=legacy`/`keep=0`/`#section`. Where card 41eab0eb re-homed the target
-      // into a Workspace node tab the Atlas landing is that tab's address rather than the classic
-      // one — `atlasLandingFor` derives which — so the claim stays "the two shells agree about what
-      // is DROPPED", which is this test's subject, rather than "the two shells agree about the path",
-      // which is the previous test's.
+
+      // Where card 41eab0eb re-homed the target into a Workspace node tab, or card 5afd71bd RETIRED
+      // it, the Atlas landing chains one hop further — `atlasLandingFor` derives which. BOTH extra
+      // hops have to carry the query too, or the row that chains through one would preserve under the
+      // classic shell and drop under Atlas: a per-shell divergence in the one place both shells are
+      // declared from the same row.
       const landing = atlasLandingFor(r.to, nodeTabs);
-      if (landing === r.to) {
-        await expect(page,
-          `${r.from}${QUERY}${HASH} landed on a different URL under Atlas than under the classic shell`)
-          .toHaveURL(classic.get(r.from) ?? "");
+      await expect(page, `${r.from} did not reach its Atlas landing`)
+        .toHaveURL(new RegExp(`^${loomDaemon.baseURL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}${pathOf(landing)}\\?`));
+      const landed = addressOf(page.url());
+      expect(landed.params, `${r.from} dropped the incoming query under the ATLAS shell`)
+        .toEqual(expectedParams(landing));
+
+      // THE COLLISION RULE, where the row pins a tab: the target's own value is what survives, and
+      // the incoming one is gone. Read off whichever key actually carries a sub-tab at the landing —
+      // `tab=` normally, `sub=` once a Workspace node tab hosts the page and takes `tab=` for itself.
+      const pinned = tabOf(r.to);
+      if (pinned) {
+        const key = atlasLandingFor(r.to, nodeTabs) === r.to ? "tab" : SUB_KEY;
+        expect(landed.params, `${r.from}'s own ?tab=${pinned} lost its collision with the incoming one`)
+          .toContain(`${key}=${pinned}`);
+        expect(landed.params.join("&"), `the incoming ${COLLIDING_TAB} re-pointed ${r.from} at a tab it never named`)
+          .not.toContain("deeplinkprobe-loses");
       }
-      await expect(page, `${r.from}${QUERY}${HASH} did not land on its declared target`)
-        .toHaveURL(loomDaemon.baseURL + landing);
+
+      // Identical to the classic landing, except for the hop the two cards above deliberately added.
+      if (landing === r.to) {
+        expect(landed, `${r.from} landed differently under Atlas than under the classic shell`)
+          .toEqual(classic.get(r.from));
+      }
+
+      // The HASH is NOT part of this card's change, and both shells still drop it. Stated as a parity
+      // claim only — that the two agree — never that dropping it is independently desirable.
+      expect(landed.hash, `${r.from} started carrying ${HASH} under Atlas alone`)
+        .toBe(classic.get(r.from)?.hash ?? "");
+      expect(landed.hash, `${r.from} carried ${HASH} through; this card changed the SEARCH only`).toBe("");
     }
   });
 

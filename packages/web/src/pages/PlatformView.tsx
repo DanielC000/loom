@@ -1,5 +1,5 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Navigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent, Project, SessionListItem, SessionRole, Schedule } from "@loom/shared";
 import { api } from "../lib/api";
@@ -268,6 +268,25 @@ function AtlasPlatformLayout({
   const raw = params.get("tab") ?? "";
   const tab: PlatformTab = PLATFORM_TAB_KEYS.has(raw) ? (raw as PlatformTab) : "home";
 
+  // A `?task=<id>` card deep link arriving WITHOUT `tab=board` normalizes the address onto the Board
+  // tab, which is the only tab that can show the dialog it asks for. The alternative — honour the tab
+  // the URL named and leave the param sitting there — looks tidier and is a dead link: nothing on any
+  // other tab ever opens it. So the more specific intent wins, and it wins over an EXPLICIT
+  // `tab=<other>` too, because a URL carrying both is self-contradictory and only one half of it can
+  // be served.
+  //
+  // @decision 260fb29a — rewrite the ADDRESS, never just derive the tab: Board clears the param it
+  // consumes, and a tab derived from a param that is about to vanish re-hides the dialog it opened.
+  const taskParam = params.get("task");
+  let normalized: string | null = null;
+  if (taskParam && tab !== "board") {
+    // `tab` first, then every other incoming key, so the interim address reads `?tab=board&task=<id>`
+    // rather than depending on where a stale `tab=` happened to sit in the query.
+    const next = new URLSearchParams([["tab", "board"]]);
+    for (const [key, value] of params) if (key !== "tab") next.append(key, value);
+    normalized = `/platform?${next.toString()}`;
+  }
+
   // @decision f76b89b9 — the identity this node states lives in the node head and NOWHERE below it.
   // Re-adding a title/description strip under the tab row is the duplication this card removed.
   //
@@ -286,6 +305,11 @@ function AtlasPlatformLayout({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* Rendered BESIDE the panels, never instead of them: returning this on its own would unmount all
+          five and take a half-written prompt or cron with them, which is the one thing this node's panel
+          rule exists to prevent. <Navigate> renders nothing, so the cost is an element that no reader
+          ever sees — and it unmounts itself on the next render, once the address it asked for has landed. */}
+      {normalized && <Navigate to={normalized} replace />}
       {/* The frame states this node's identity once — crumbs, the one <h1>, these pills and the tab row —
           so the page starts on its content, exactly as every other re-homed surface does (card a7f23a2f).
           The edition's explainer PARAGRAPH does not come up here (a node head is a row); it renders at
@@ -343,7 +367,10 @@ function AtlasPlatformLayout({
             ? <AuditorCadenceListSection edition={edition} auditor={auditor} />
             : <AuditorCadenceFormSection edition={edition} previewOnly={previewOnly} auditor={auditor} />,
           history: <PlatformHistorySections edition={edition} previewOnly={previewOnly} project={project} homeSessions={homeSessions} />,
-          board: <PlatformBoardSection edition={edition} project={project} />,
+          // `deepLinks` only while this panel is the VISIBLE one: it stays mounted on every other tab,
+          // and a mounted-but-hidden board that consumed `?task=` would open its dialog where nobody
+          // can see it and clear the param on the way (card 260fb29a).
+          board: <PlatformBoardSection edition={edition} project={project} deepLinks={tab === "board"} />,
           findings: <PlatformFindings edition={edition} projectId={project.id} />,
         }}
       </Panels>
@@ -528,7 +555,8 @@ function PlatformHistorySections({ edition, previewOnly, project, homeSessions }
 // setup home hosts on a dev install registers `question_ask` — see the record for the verified check and
 // the follow-up trigger. PlatformFindings' Adopt/Dismiss (daemon-GLOBAL suggestion store, not
 // home-scoped) and GuidedSetupLauncher (edition-agnostic; creates a NEW project) are separate decisions.
-function PlatformBoardSection({ edition, project }: Pick<PlatformSurface, "edition" | "project">) {
+function PlatformBoardSection({ edition, project, deepLinks }:
+  Pick<PlatformSurface, "edition" | "project"> & { deepLinks?: boolean }) {
   return (
     <section>
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -537,7 +565,7 @@ function PlatformBoardSection({ edition, project }: Pick<PlatformSurface, "editi
           {edition.copy.board.hint}
         </span>
       </SectionLabel>
-      <Board projectId={project.id} />
+      <Board projectId={project.id} deepLinks={deepLinks} />
     </section>
   );
 }

@@ -7,7 +7,8 @@ import { ATLAS_TREE_ID, AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
 import {
   ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
-  atlasRetirementFor, isRehomedProjectTab, projectNodeTabAt, projectTabPath, workspaceNodeTabFor,
+  QueryPreservingRedirect, atlasRetirementFor, isRehomedProjectTab, projectNodeTabAt, projectTabPath,
+  workspaceNodeTabFor,
   type AtlasHome, type NavPage, type ParamPage,
 } from "../nav";
 import { AtlasNodeHeadContext } from "../lib/atlasNodeHead";
@@ -425,7 +426,12 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
               return (
                 <Route key={p.to} path={p.to}
                   element={retired
-                    ? <Navigate to={retired.to} replace />
+                    // Query-preserving (card 260fb29a) because one LEGACY_REDIRECTS row chains THROUGH
+                    // a retirement: /workspace → /projects → /home. A plain <Navigate> here would drop
+                    // the query this second hop inherited, so that row's deep link would survive the
+                    // classic shell's single hop and die on Atlas's two — a per-shell divergence in the
+                    // one place both shells are meant to agree.
+                    ? <QueryPreservingRedirect to={retired.to} />
                     : tab
                       ? <RehomedToNodeTab to={workspaceTabHref(tab.key)} subKey={WORKSPACE_SUB_KEY} />
                       : p.element} />

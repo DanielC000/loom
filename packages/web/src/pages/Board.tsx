@@ -46,7 +46,15 @@ const byRecentlyDone = (a: BoardTask, b: BoardTask) =>
 // Scoped to the header's active project by default; an explicit `projectId` prop points it at a
 // specific project instead — the Platform section reuses it pointed at the reserved "Loom Platform"
 // home so its board (the findings + escalations backlog) renders + triages with the same component.
-export default function Board({ projectId: propProjectId }: { projectId?: string } = {}) {
+// `deepLinks` says whether THIS mount is the one that consumes `?task=` (default: it is, so every
+// existing mount is unchanged). A node that parks its inactive tab bodies with `hidden` rather than
+// unmounting them has a LIVE but invisible board, and whichever board consumed the param first used to
+// open its dialog inside a panel nobody can see — then cleared the param, so no visible board ever got
+// it. A hidden panel passes `false` and stays out of it.
+//
+// @decision 260fb29a — never consume or clear `?task=` from a mount that cannot show the dialog.
+export default function Board({ projectId: propProjectId, deepLinks = true }:
+  { projectId?: string; deepLinks?: boolean } = {}) {
   const qc = useQueryClient();
   const active = useActiveProject();
   const projectId = propProjectId ?? active.projectId;
@@ -123,10 +131,10 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const [searchParams, setSearchParams] = useSearchParams();
   const taskParam = searchParams.get("task");
   useEffect(() => {
-    if (!taskParam || !board.data) return;
+    if (!deepLinks || !taskParam || !board.data) return;
     if (board.data.tasks.some((t) => t.id === taskParam)) setOpenTaskId(taskParam);
     setSearchParams((p) => { p.delete("task"); return p; }, { replace: true });
-  }, [taskParam, board.data, setSearchParams]);
+  }, [deepLinks, taskParam, board.data, setSearchParams]);
 
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
   // The open card's resolved lane, for the modal header's state/lane chip (dossier header).
