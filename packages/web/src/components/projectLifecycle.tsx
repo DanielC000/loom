@@ -19,6 +19,10 @@ import { api } from "../lib/api";
 import { Button, Input, SectionLabel, StaleStartupPromptWarning } from "./ui";
 import { color, font } from "../theme";
 
+// A field's visible label, same shape as the one pages/EventTriggers.tsx and pages/Profiles.tsx each
+// declare for their own forms (and mergeGate.tsx's `FieldLabel`) — no new type scale, no new tokens.
+const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
+
 /**
  * The FOUR project lifecycle writes, wired once: the structural rename/vaultPath PATCH, the reversible
  * archive, the restore back out of it, and the PERMANENT delete.
@@ -110,9 +114,22 @@ export function ProjectManage(
     <>
       {open && (
         <div data-testid="project-manage-fields" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
-          <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
-          <Input placeholder={isVaultOnly ? "vault path" : "vault path (clear + Save to unbind)"}
-            value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+          {/* A WRAPPING <label>, not an id + htmlFor pair: this component mounts in two frames and has no
+              page-unique id to hand out, and a duplicated id silently points every later label at the
+              first input. The hint span below stays OUTSIDE both labels on purpose — a wrapping label's
+              accessible name is its whole text content, so nesting the hint would pollute the name and
+              break getByLabel (the same trap atlas-settings-scope.spec.ts documents for config fields).
+              Placeholders are kept as they were: with the fields seeded from the project they are rarely
+              visible, and they are what two existing specs locate these inputs by. */}
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Name</span>
+            <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Vault path</span>
+            <Input placeholder={isVaultOnly ? "vault path" : "vault path (clear + Save to unbind)"}
+              value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+          </label>
           {isVaultOnly && vaultTrim === "" && (
             <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
               This project has no separate repo — its vault can't be unbound. Archive it instead.
@@ -125,25 +142,35 @@ export function ProjectManage(
           <StaleStartupPromptWarning warnings={staleStartupPrompts} />
           <ReferenceReposEditor project={project} />
           <RepoRegistryEditor project={project} />
-          <Button disabled={live || archiving} title={liveTitle}
-            onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
-            {archiving ? "Archiving…" : "Archive (reversible)"}
-          </Button>
-          {!showDelete
-            ? <Button variant="danger" disabled={live} title={liveTitle} onClick={() => { setShowDelete(true); setConfirmText(""); }}>Delete permanently…</Button>
-            : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.red}`, borderRadius: 4, padding: 8 }}>
-                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>
-                  Permanently delete this project and ALL of it — agents, sessions, tasks, schedules, keys, runs, transcripts. Cannot be undone. Type <strong>{project.name}</strong> to confirm:
-                </span>
-                <Input autoFocus placeholder={project.name} value={confirmText} onChange={(e) => setConfirmText(e.target.value)} />
-                <div style={{ display: "flex", gap: 6 }}>
-                  <Button variant="danger" disabled={confirmText !== project.name || live || deleting} title={liveTitle}
-                    onClick={onDelete}>{deleting ? "Deleting…" : "Delete forever"}</Button>
-                  <Button onClick={() => setShowDelete(false)}>Cancel</Button>
+          {/* RETIRE — its own group, behind the same divider + SectionLabel the two repo editors above
+              already use. Archive and the permanent delete used to sit bare at the end of the fields
+              column, which read as two more controls belonging to "Registered repos"; a destructive
+              pair must not inherit a heading it has nothing to do with. */}
+          <div data-testid="project-retire" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+            <div>
+              <SectionLabel style={{ margin: 0 }}>Retire</SectionLabel>
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>archive is reversible · delete is not</span>
+            </div>
+            <Button disabled={live || archiving} title={liveTitle}
+              onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
+              {archiving ? "Archiving…" : "Archive (reversible)"}
+            </Button>
+            {!showDelete
+              ? <Button variant="danger" disabled={live} title={liveTitle} onClick={() => { setShowDelete(true); setConfirmText(""); }}>Delete permanently…</Button>
+              : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.red}`, borderRadius: 4, padding: 8 }}>
+                  <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>
+                    Permanently delete this project and ALL of it — agents, sessions, tasks, schedules, keys, runs, transcripts. Cannot be undone. Type <strong>{project.name}</strong> to confirm:
+                  </span>
+                  <Input autoFocus placeholder={project.name} value={confirmText} onChange={(e) => setConfirmText(e.target.value)} />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <Button variant="danger" disabled={confirmText !== project.name || live || deleting} title={liveTitle}
+                      onClick={onDelete}>{deleting ? "Deleting…" : "Delete forever"}</Button>
+                    <Button onClick={() => setShowDelete(false)}>Cancel</Button>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+          </div>
         </div>
       )}
     </>

@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test, type Page } from "./fixtures/daemon";
+import { expect, test, type Locator, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
@@ -376,5 +376,107 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
       "the classic Settings page still shows the Project Lifecycle label").toHaveCount(0);
     await expect(page.locator("main").getByTestId("project-manage-fields"),
       "the classic Settings page grew a second project-lifecycle control body").toHaveCount(0);
+  });
+});
+
+// Card 196d951a — two defects in the SAME shared body c9b78d80 moved here, so each is one component
+// seen through two frames rather than two implementations: (1) the name and vaultPath inputs were
+// labelled by PLACEHOLDER ONLY, which no accessible-name computation reads; (2) Archive and the
+// permanent delete sat bare at the end of the fields column, visually inside the "Registered repos"
+// group and under its heading.
+//
+// Each frame is driven in the switch state where it is actually REACHABLE, measured not assumed: with
+// the switch ON, /projects redirects to /home (card 5afd71bd), so the classic disclosure exists only
+// with it OFF; the Atlas project node's Settings tab exists only with it ON.
+test.describe("project lifecycle: labelled fields and a separated Retire group (card 196d951a)", () => {
+  // getByLabel matches an accessible NAME, so a label wrapping the WRONG input satisfies it just as
+  // well — each field's matched VALUE is pinned too, which is what makes this an assertion about that
+  // field rather than "a labelled input exists somewhere in here".
+  async function assertLabelledFields(scope: Locator, name: string, vaultPath: string) {
+    const nameInput = scope.getByLabel("Name", { exact: true });
+    await expect(nameInput, "the project name input has no accessible label").toHaveCount(1);
+    await expect(nameInput, 'the "Name" label resolves to a different input').toHaveValue(name);
+    const vaultInput = scope.getByLabel("Vault path", { exact: true });
+    await expect(vaultInput, "the vault path input has no accessible label").toHaveCount(1);
+    await expect(vaultInput, 'the "Vault path" label resolves to a different input').toHaveValue(vaultPath);
+    // The hint below the fields is deliberately OUTSIDE both labels: a wrapping label's accessible name
+    // is its whole text content, so nesting it would pollute the name and defeat the exact matches
+    // above (the trap atlas-settings-scope.spec.ts documents for the config fields).
+    await expect(nameInput, "the Name label's accessible name picked up neighbouring text")
+      .toHaveAccessibleName("Name");
+    await expect(vaultInput, "the Vault path label's accessible name picked up neighbouring text")
+      .toHaveAccessibleName("Vault path");
+  }
+
+  async function assertRetireGroup(scope: Locator) {
+    const retire = scope.getByTestId("project-retire");
+    await expect(retire, "the retire actions are not grouped on their own").toHaveCount(1);
+    await expect(retire.getByText("Retire", { exact: true }),
+      "the retire group carries no sub-heading").toHaveCount(1);
+    // The divider, read off the RENDERED box rather than inferred from the source.
+    await expect(retire, "the retire group has no divider above it").toHaveCSS("border-top-width", "1px");
+    // Both destructive controls are INSIDE it — the whole point of the group. Asserted as descendants,
+    // so a heading added above two still-loose buttons would not satisfy this.
+    await expect(retire.getByRole("button", { name: /Archive \(reversible\)/ }),
+      "Archive is still outside the retire group").toHaveCount(1);
+    await expect(retire.getByRole("button", { name: /Delete permanently/ }),
+      "Delete permanently is still outside the retire group").toHaveCount(1);
+  }
+
+  test("switch ON: the Atlas Settings tab labels both fields and separates the retire actions", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`lifecycle-a11y-on-${Date.now()}`);
+    const seeded = await restProject(loomDaemon.baseURL, project.id);
+    expect(seeded?.vaultPath, "the seeded project has no vaultPath to assert against").toBeTruthy();
+    await pinProject(page, project.id);
+    await seedAtlasOn(page);
+
+    await openSettingsTab(page, loomDaemon.baseURL);
+    // Identity: this is the pinned project's own panel, not whichever project the surface found first.
+    await expect(nameField(page), "the panel is not scoped to the pinned project").toHaveValue(project.name);
+
+    await assertLabelledFields(fields(page), project.name, seeded?.vaultPath ?? "");
+    await assertRetireGroup(fields(page));
+
+    // Archive still works exactly as before — same window.confirm, same observable.
+    page.once("dialog", (d) => void d.accept());
+    await fields(page).getByTestId("project-retire").getByRole("button", { name: /Archive \(reversible\)/ }).click();
+    await expect.poll(() => restArchivedIds(loomDaemon.baseURL),
+      { message: "Archive stopped working once it moved into the retire group" }).toContain(project.id);
+  });
+
+  test("switch OFF: the classic Manage project disclosure labels both fields and separates the retire actions", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`lifecycle-a11y-off-${Date.now()}`);
+    const seeded = await restProject(loomDaemon.baseURL, project.id);
+    expect(seeded?.vaultPath, "the seeded project has no vaultPath to assert against").toBeTruthy();
+    await pinProject(page, project.id);
+    // No seedAtlasOn: OFF is the default, and it is the only state /projects is reachable in.
+
+    await page.goto(loomDaemon.baseURL + "/projects");
+    await expect(page.locator(".loom-rail"), "the classic shell did not render").toBeVisible();
+    await expect(page.getByTestId("atlas-shell"),
+      "the Atlas shell mounted, so this leg is not testing the classic frame").toHaveCount(0);
+    const manage = page.getByRole("button", { name: /Manage project/ });
+    await manage.click();
+    const body = page.getByTestId("project-manage-fields");
+    await expect(body, "the classic disclosure rendered no control body").toHaveCount(1);
+    await expect(body.getByPlaceholder("name", { exact: true }),
+      "the classic disclosure is not scoped to the pinned project").toHaveValue(project.name);
+
+    await assertLabelledFields(body, project.name, seeded?.vaultPath ?? "");
+    await assertRetireGroup(body);
+
+    // The permanent-delete reveal still arms the same way behind the type-the-name gate — the confirm
+    // input is NOT one of the two labelled fields, so the exact matches above must still hold with it
+    // on screen.
+    await body.getByTestId("project-retire").getByRole("button", { name: /Delete permanently/ }).click();
+    const deleteForever = body.getByRole("button", { name: "Delete forever" });
+    await expect(deleteForever, "Delete forever is live before the name was typed").toBeDisabled();
+    await assertLabelledFields(body, project.name, seeded?.vaultPath ?? "");
+    await body.getByPlaceholder(project.name, { exact: true }).fill(project.name);
+    await expect(deleteForever, "typing the exact project name did not arm Delete forever").toBeEnabled();
+    // Nothing is destroyed here: the armed button is never clicked, and the store still has the project.
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
+    expect((await restProject(loomDaemon.baseURL, project.id))?.id,
+      "the project was destroyed by a leg that only meant to arm the confirm").toBe(project.id);
   });
 });
