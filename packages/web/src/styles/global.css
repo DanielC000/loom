@@ -357,11 +357,21 @@ body {
   outline-offset: 2px;
 }
 
-/* Segmented option (components/ui `Segmented`): the same phosphor ring, drawn INSET. The segments sit
-   flush inside a rounded `overflow: hidden` track, which clips anything painted outside a segment's
-   border box — so the positive offset above would be invisible here. Same reason the rail items and
-   Atlas tree nodes below use a negative offset. */
-.loom-segment:focus-visible {
+/* Segmented option (components/ui `Segmented`) and the Companion mode toggle (pages/Companion.tsx
+   `ModeToggle`): the same phosphor ring, drawn INSET. Both sit flush inside a rounded `overflow: hidden`
+   track, which clips anything painted outside a segment's border box — so the positive offset above
+   would be invisible here. Same reason the rail items and Atlas tree nodes below use a negative offset.
+
+   `.loom-modetoggle` is its own class rather than a second `.loom-segment` so that class keeps naming
+   EXACTLY the kit primitive: `PAGE_SUB_TAB` (e2e/fixtures/daemon.ts) leans on `.loom-segment` to tell a
+   page's own sub-tabs apart from every other radiogroup on the page.
+
+   ⚠️ Order matters: a mode-toggle button also carries `.loom-toggle` (for its hover + transitions), so
+   this rule only wins the +2px one above by coming LATER at equal specificity. Moving either block past
+   the other silently re-clips the ring — `segmented-focus-ring.spec.ts` asserts the resolved `-2px`,
+   which is what catches that. */
+.loom-segment:focus-visible,
+.loom-modetoggle:focus-visible {
   outline: 2px solid var(--loom-phosphor);
   outline-offset: -2px;
 }

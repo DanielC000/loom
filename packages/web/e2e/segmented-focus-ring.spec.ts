@@ -21,6 +21,13 @@
 // Selection is on `button[role="radio"]`, markup card 3f28f1c3 settled on — never on `.loom-segment` —
 // so a full revert of the fix still reaches the discriminating assertion instead of dying earlier on a
 // missing selector (see the project-memory note on weak negative controls for new testids).
+//
+// Card 95453b80 adds the Companion mode toggle (pages/Companion.tsx `ModeToggle`) to this file. It is NOT
+// the kit `Segmented` — it keeps role="tablist"/"tab" because its three modes drive real `role="tabpanel"`
+// bodies — but it is the same control SHAPE (flush segments inside a rounded `overflow: hidden` track) and
+// so had the same clipped ring, for the same reason. The helpers above are the whole reason it lives here
+// rather than in a file of its own: the discriminating claim ("the ring paints inside the border box") is
+// worth stating once.
 import { expect, test } from "./fixtures/daemon";
 import type { Locator, Page } from "@playwright/test";
 
@@ -63,8 +70,13 @@ function readRing(el: Locator): Promise<Ring> {
  * BACKWARD onto the segment that is ALREADY active re-selects the same value — a no-op for `onChange`'s
  * caller, so nothing unmounts — which is what lets this prove the ring on a real keyboard focus without
  * racing a remount.
+ *
+ * Pass "Tab" for a plain tablist like the Companion mode toggle (card 95453b80): it has no roving
+ * tabindex, so every tab IS a Tab stop and Tab is the key a real user presses to reach the next one —
+ * and, unlike an arrow key in a radiogroup, it moves focus WITHOUT selecting, so no panel swaps under
+ * the in-flight focus call.
  */
-async function tabOnto(page: Page, from: Locator, target: Locator, key: "ArrowRight" | "ArrowLeft" = "ArrowRight"): Promise<Ring> {
+async function tabOnto(page: Page, from: Locator, target: Locator, key: "ArrowRight" | "ArrowLeft" | "Tab" = "ArrowRight"): Promise<Ring> {
   await from.evaluate((n: HTMLElement) => n.focus());
   await page.keyboard.press(key);
   await expect(target).toBeFocused();
@@ -140,4 +152,31 @@ test("the Runs and Actors switches ring on keyboard focus and stay clean on clic
   await expect(actorsTabs).toHaveCount(2);
   expectPhosphorRing(await tabOnto(page, actorsTabs.nth(0), actorsTabs.nth(1)), "actors");
   await expectNoRingOnMouseClick(actorsTabs.nth(0), "actors");
+});
+
+test("the Companion mode toggle rings on keyboard focus and stays clean on click", async ({ page, loomDaemon }) => {
+  test.setTimeout(120_000);
+  // One seeded companion so the page renders a CompanionDetail (and therefore the mode toggle) rather
+  // than the empty create-box. WHICH companion is focused is deliberately NOT pinned: the claim here is
+  // about the CONTROL's ring, which is identical for every companion, so clicking the picker to pin one
+  // would buy nothing and import that picker's own auto-focus race for free.
+  await loomDaemon.seedCompanion();
+  await page.goto(loomDaemon.baseURL + "/companion");
+
+  const tabs = page.getByRole("tablist", { name: "Companion view" }).locator('button[role="tab"]');
+  await expect(tabs).toHaveCount(3);
+  const chat = tabs.nth(0);
+  const manage = tabs.nth(1);
+  // The detail pane has settled on a companion (the tablist only renders inside it) and Chat is its
+  // default mode — so the click below lands on the ALREADY-active tab and swaps no panel.
+  await expect(chat).toHaveAttribute("aria-selected", "true");
+
+  // Mouse check first, while nothing in the toggle is focused yet — the same ordering reason as the
+  // Settings switch above: a click that does not MOVE focus gives `:focus-visible` nothing to
+  // re-evaluate, so doing this after the keyboard check would read the keyboard ring back.
+  await expectNoRingOnMouseClick(chat, "companion/mode-toggle");
+
+  // Tab (not an arrow key) from Chat onto Manage: a plain tablist with no roving tabindex. Tab moves
+  // focus without selecting, so the Manage panel never mounts mid-focus-call.
+  expectPhosphorRing(await tabOnto(page, chat, manage, "Tab"), "companion/mode-toggle");
 });

@@ -695,7 +695,9 @@ function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: Compani
             aria-selected={on}
             aria-controls={`companion-panel-${o.key}`}
             onClick={() => onMode(o.key)}
-            className="loom-toggle"
+            // `loom-modetoggle` draws the keyboard focus ring INSET (global.css) — the shared
+            // `.loom-toggle` ring sits at +2px, which this track's `overflow: hidden` clips away.
+            className="loom-toggle loom-modetoggle"
             style={{
               background: on ? color.phosphorDim : "transparent",
               color: on ? color.text : color.textDim,
