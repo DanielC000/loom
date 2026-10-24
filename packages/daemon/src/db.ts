@@ -3570,16 +3570,23 @@ export class Db {
    * @decision 3a5c5d4a (round 6, M-1b) — a walk FAILURE also clears THIS (projectId, repoKey)'s own index
    * entry — a REBIND's OLD, no-longer-current value left dangling there is what let a handoff be granted
    * to a project that had actually moved away (M-1).
+   * @decision a8bc0404 (Code Review M2) — `resolvedToplevel`, when passed, is used DIRECTLY, never
+   * re-walked: a second, independent walk could diverge from a caller's own prior walk under a genuine
+   * TOCTOU race, silently no-op'ing the write while that caller still reports the FIRST walk's value.
    */
-  private pinCommondirTrust(projectId: string, repoKey: string, repoPath: string, source: CommondirTrustPin["source"]): void {
-    const toplevel = resolveTrustedToplevel(repoPath);
-    if (!toplevel.ok) {
+  private pinCommondirTrust(projectId: string, repoKey: string, repoPath: string, source: CommondirTrustPin["source"], resolvedToplevel?: string): void {
+    let toplevelValue: string | undefined = resolvedToplevel;
+    if (toplevelValue === undefined) {
+      const walk = resolveTrustedToplevel(repoPath);
+      toplevelValue = walk.ok ? walk.toplevel : undefined;
+    }
+    if (toplevelValue === undefined) {
       this.deleteMeta(commondirTrustPinIndexKey(projectId, repoKey));
       return;
     }
     const existing = this.getCommondirTrustPin(repoPath);
     if (!existing || (existing.projectId === projectId && existing.repoKey === repoKey)) {
-      const pin: CommondirTrustPin = { toplevel: toplevel.toplevel, pinnedAt: new Date().toISOString(), source, projectId, repoKey };
+      const pin: CommondirTrustPin = { toplevel: toplevelValue, pinnedAt: new Date().toISOString(), source, projectId, repoKey };
       this.setMeta(commondirTrustPinKey(repoPath), JSON.stringify(pin));
     }
     this.setMeta(commondirTrustPinIndexKey(projectId, repoKey), repoPath);
@@ -3672,13 +3679,22 @@ export class Db {
    */
   repinCommondirTrust(
     projectId: string, repoKey: string, repoPath: string, expectedToplevel: string,
-  ): { ok: true; oldToplevel: string | null; newToplevel: string; alsoAffects: Array<{ projectId: string; repoKey: string }> }
+  ): { ok: true; changed: boolean; oldToplevel: string | null; newToplevel: string; alsoAffects: Array<{ projectId: string; repoKey: string }> }
    | { ok: false; kind: "conflict" | "walk-failed" | "expected-mismatch"; error: string } {
+    const caseFold = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
     const conflict = this.checkCommondirPinConflicts(projectId, [{ repoKey, repoPath }]);
-    if (!conflict.ok) return { ok: false, kind: "conflict", error: conflict.error };
+    if (!conflict.ok) {
+      // @decision a8bc0404 (Code Review m4) — checkCommondirPinConflicts' own error names the bind/
+      // rebind remedy ("delete or rebind X away"), wrong for a REPIN attempt — name the real owner and
+      // the actual remedy (repin via THEIR project id) instead of reusing that text.
+      const existingPin = this.getCommondirTrustPin(repoPath);
+      const error = existingPin
+        ? `cannot re-pin repoKey "${repoKey}" at "${repoPath}" from project ${projectId}: this path's commondir-trust pin is owned by a DIFFERENT project (${existingPin.projectId}, repoKey "${existingPin.repoKey}") and a live walk does not confirm it belongs to ${projectId} instead — ask that project's owner, or call this SAME route with projectId=${existingPin.projectId}, to re-pin it.`
+        : conflict.error; // defensive: checkCommondirPinConflicts only ever fails when a different-owner pin exists
+      return { ok: false, kind: "conflict", error };
+    }
     const walk = resolveTrustedToplevel(repoPath);
     if (!walk.ok) return { ok: false, kind: "walk-failed", error: `cannot re-pin repoKey "${repoKey}" at "${repoPath}": ${walk.reason}` };
-    const caseFold = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
     if (caseFold(walk.toplevel) !== caseFold(expectedToplevel)) {
       console.warn(`[db] commondir-trust-pin repin refused (expected-mismatch): project=${projectId} repoKey=${repoKey} repoPath=${repoPath} expected=${expectedToplevel} live=${walk.toplevel}`);
       return {
@@ -3690,12 +3706,18 @@ export class Db {
     // A2: every OTHER index entry naming this literal path shares the trust anchor this write is about to
     // change — collected BEFORE the write (keyed off the index, independent of the pin row itself).
     const alsoAffects = this.listOtherCommondirPinIndexHolders(repoPath, projectId, repoKey);
-    this.pinCommondirTrust(projectId, repoKey, repoPath, "human-repin");
+    // @decision a8bc0404 (Code Review m5) — a benign no-op (the pin already matches live) is never
+    // audited as a real repin: no write, no event, just an honest `changed:false`.
+    if (oldToplevel !== null && caseFold(oldToplevel) === caseFold(walk.toplevel)) {
+      return { ok: true, changed: false, oldToplevel, newToplevel: walk.toplevel, alsoAffects };
+    }
+    // Code Review M2 — pass THIS walk's own result straight through; pinCommondirTrust must never re-walk.
+    this.pinCommondirTrust(projectId, repoKey, repoPath, "human-repin", walk.toplevel);
     this.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "commondir_trust_pinned",
       detail: { event: "human-repin", projectId, repoKey, repoPath, oldToplevel, newToplevel: walk.toplevel, alsoAffects },
     });
-    return { ok: true, oldToplevel, newToplevel: walk.toplevel, alsoAffects };
+    return { ok: true, changed: true, oldToplevel, newToplevel: walk.toplevel, alsoAffects };
   }
   /**
    * ALL other (project, repoKey) index entries whose own value is this literal path, for DISCLOSURE on a

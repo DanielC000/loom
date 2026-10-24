@@ -119,7 +119,9 @@ function plantRealRepoInPlace(dir) {
     // (B) SIBLING (not the recorded owner) tries to repin ⇒ 409 conflict.
     const bRes = await app.inject({ method: "POST", url: `/api/projects/${siblingId}/commondir-trust-pin/repin`, payload: { expectedToplevel: nested } });
     check("(B) a non-owner's repin attempt is refused with 409", bRes.statusCode === 409);
-    check("(B) the 409 body names the conflict", typeof bRes.json().error === "string" && /commondir-trust pin/i.test(bRes.json().error));
+    // Code Review m4 — the WRONG remedy ("delete or rebind X away") must NOT appear; the right remedy
+    // (repin via the OWNER's own project id) must.
+    check("(B) the 409 body names the OWNER's project id as the remedy (m4), not the bind/rebind-away wording", typeof bRes.json().error === "string" && bRes.json().error.includes(ownerId) && !/delete or rebind/i.test(bRes.json().error));
     check("(B) OWNER's pin is untouched by the refused attempt", db.getCommondirTrustPin(nested)?.toplevel === ancestor);
 
     const eventsSoFar = db.listEventsSince(0, 100000).filter((e) => e.kind === "commondir_trust_pinned" && e.detail?.event === "human-repin");
@@ -137,6 +139,7 @@ function plantRealRepoInPlace(dir) {
     const dRes = await app.inject({ method: "POST", url: `/api/projects/${ownerId}/commondir-trust-pin/repin`, payload: { expectedToplevel: nested } });
     check("(D) the correct expectedToplevel succeeds (200)", dRes.statusCode === 200);
     const dBody = dRes.json();
+    check("(D) changed:true on a real repin", dBody.changed === true);
     check("(D) the response names the old and new toplevel", dBody.oldToplevel === ancestor && dBody.newToplevel === nested);
     check("(D, A2) SIBLING is disclosed in alsoAffects", Array.isArray(dBody.alsoAffects) && dBody.alsoAffects.some((a) => a.projectId === siblingId && a.repoKey === "primary"));
     check("(D) the pin NOW records the new (nested) toplevel", db.getCommondirTrustPin(nested)?.toplevel === nested);
@@ -144,9 +147,50 @@ function plantRealRepoInPlace(dir) {
     check("(D) exactly ONE human-repin event is filed", eventsAfterD.length === 1);
     check("(D) the event names old+new toplevel and the disclosed sibling", eventsAfterD[0].detail.oldToplevel === ancestor && eventsAfterD[0].detail.newToplevel === nested && eventsAfterD[0].detail.alsoAffects?.some((a) => a.projectId === siblingId));
 
+    // (D2) Code Review m5 — OWNER repins AGAIN with the SAME (now-current) expectedToplevel: a benign
+    // no-op, since nothing is actually stale. Must still succeed (200) but report changed:false and file
+    // NO new event — never audited as if a real repin happened.
+    const d2Res = await app.inject({ method: "POST", url: `/api/projects/${ownerId}/commondir-trust-pin/repin`, payload: { expectedToplevel: nested } });
+    check("(D2) a no-op repin still succeeds (200)", d2Res.statusCode === 200);
+    const d2Body = d2Res.json();
+    check("(D2) changed:false on a no-op repin", d2Body.changed === false);
+    check("(D2) oldToplevel === newToplevel on a no-op", d2Body.oldToplevel === nested && d2Body.newToplevel === nested);
+    const eventsAfterD2 = db.listEventsSince(0, 100000).filter((e) => e.kind === "commondir_trust_pinned" && e.detail?.event === "human-repin");
+    check("(D2) STILL exactly ONE human-repin event — no new event filed for the no-op", eventsAfterD2.length === 1);
+
     // (E) the DoD's own explicit check — the SAME canonical call now succeeds, post-repin.
     const postRepinHead = await canonicalGit(nested, 5_000).raw(["rev-parse", "HEAD"]);
     check("(E) the SAME canonicalGit call that was refused in (A) now succeeds, post-repin", typeof postRepinHead === "string" && /^[0-9a-f]{40}$/.test(postRepinHead.trim()));
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
+// ===================== Code Review M2 — pinCommondirTrust honors resolvedToplevel directly =====================
+// A second, independent walk inside pinCommondirTrust could diverge from repinCommondirTrust's OWN prior
+// walk under a genuine TOCTOU race; the fix threads that FIRST walk's result straight through instead of
+// re-walking. Proven directly (TS `private` has no runtime effect on compiled JS — `db.pinCommondirTrust`
+// is a plain, callable method here) rather than simulating a race: pass a value NO real walk of `repo2`
+// could ever produce, and confirm the write reflects EXACTLY that value, never a fresh walk's own answer.
+{
+  const db = openDb(path.join(TMP, "loom-m2.db"));
+  const app = await buildApp(db);
+  try {
+    const repo2 = initRepo("m2-repo");
+    const ownerRes2 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "M2Owner", repoPath: repo2 } });
+    check("(M2, setup) bind succeeds (201)", ownerRes2.statusCode === 201);
+    const ownerId2 = ownerRes2.json().id;
+    check("(M2, setup) the bind-time pin records repo2's own real toplevel", db.getCommondirTrustPin(repo2)?.toplevel === repo2);
+
+    const fakeToplevel = "Z:\\this-value-no-real-walk-of-repo2-could-ever-produce";
+    db.pinCommondirTrust(ownerId2, "primary", repo2, "human-repin", fakeToplevel);
+    check("(M2) a passed resolvedToplevel is written VERBATIM, never overridden by a fresh internal walk", db.getCommondirTrustPin(repo2)?.toplevel === fakeToplevel);
+
+    // Control: every EXISTING caller (bind/rebind/backfill) omits resolvedToplevel — confirm that path
+    // still falls back to a real walk, restoring repo2's own correct toplevel.
+    db.pinCommondirTrust(ownerId2, "primary", repo2, "human-repin");
+    check("(M2, control) omitting resolvedToplevel still falls back to a real walk (restores repo2's own toplevel)", db.getCommondirTrustPin(repo2)?.toplevel === repo2);
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     db.close();

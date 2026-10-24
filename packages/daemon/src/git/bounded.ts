@@ -1387,7 +1387,13 @@ export class CanonicalGitCommondirRefusal extends CanonicalGitRefusal {
  * existing `instanceof CanonicalGitCommondirRefusal`/`commondirRedirect` consumer keeps matching it.
  */
 export class CanonicalGitPinMismatchRefusal extends CanonicalGitCommondirRefusal {
-  constructor(message: string) { super(message); this.name = "CanonicalGitPinMismatchRefusal"; }
+  // @decision a8bc0404 (Code Review M1) — carried as structured fields, never derived from `message`
+  // alone: describeGitFailure's `.text` caps at 400 chars, and repoPath/pin metadata ahead of the live
+  // toplevel in the raw reason can push it past that cap on an ordinary ~100-char path.
+  constructor(message: string, public readonly pinnedToplevel: string, public readonly liveToplevel: string) {
+    super(message);
+    this.name = "CanonicalGitPinMismatchRefusal";
+  }
 }
 
 /**
@@ -1416,18 +1422,22 @@ export class CanonicalGitUnpinnedRefusal extends CanonicalGitRefusal {
 }
 
 /** One shared way to describe a git failure in a result `reason`: the first line of the message (capped), whether it was a {@link CanonicalGitRefusal} (nothing changed), and three narrower flags nested inside that — whether it was specifically a {@link CanonicalGitCommondirRefusal} (a commondir redirect, not a merge-driver refusal), a {@link CanonicalGitBoundWorktreeRefusal} (the bound repo is itself a linked worktree), or a {@link CanonicalGitUnpinnedRefusal} (a subdir-bound repo with no durable pin yet) — so a caller can render each case distinctly rather than the generic "refused, nothing changed". */
-export function describeGitFailure(e: unknown): { text: string; refusal: boolean; commondirRedirect: boolean; boundRepoIsWorktree: boolean; unpinned: boolean; pinMismatch: boolean } {
+export function describeGitFailure(e: unknown): { text: string; refusal: boolean; commondirRedirect: boolean; boundRepoIsWorktree: boolean; unpinned: boolean; pinMismatch: boolean; pinnedToplevel?: string; liveToplevel?: string } {
   const text = String((e as Error)?.message ?? e).split(/\r?\n/, 1)[0]!.slice(0, 400);
+  // @decision a8bc0404 — a CanonicalGitPinMismatchRefusal IS-A CanonicalGitCommondirRefusal (manager
+  // amendment A3), so `commondirRedirect` below is also true for it; `pinMismatch` exists for
+  // canonicalFailureMessage to pick the sharper wording, never to replace commondirRedirect elsewhere.
+  const asPinMismatch = e instanceof CanonicalGitPinMismatchRefusal ? e : undefined;
   return {
     text,
     refusal: e instanceof CanonicalGitRefusal,
     commondirRedirect: e instanceof CanonicalGitCommondirRefusal,
     boundRepoIsWorktree: e instanceof CanonicalGitBoundWorktreeRefusal,
     unpinned: e instanceof CanonicalGitUnpinnedRefusal,
-    // @decision a8bc0404 — a CanonicalGitPinMismatchRefusal IS-A CanonicalGitCommondirRefusal (manager
-    // amendment A3), so `commondirRedirect` above is also true for it; this narrower field exists for
-    // canonicalFailureMessage to pick the sharper wording, never to replace commondirRedirect elsewhere.
-    pinMismatch: e instanceof CanonicalGitPinMismatchRefusal,
+    pinMismatch: asPinMismatch !== undefined,
+    // Code Review M1 — structured, never-truncated fields; canonicalFailureMessage leads with these
+    // rather than relying on `.text` (capped at 400 chars) to still contain the live toplevel intact.
+    ...(asPinMismatch ? { pinnedToplevel: asPinMismatch.pinnedToplevel, liveToplevel: asPinMismatch.liveToplevel } : {}),
   };
 }
 
@@ -1452,11 +1462,14 @@ export function describeGitFailure(e: unknown): { text: string; refusal: boolean
  * sentence off mid-word there.
  * @decision 3a5c5d4a (round 3, S4) — the escalation sentence lives in the fixed template, never the raw reason.
  */
-export function canonicalFailureMessage(d: { text: string; refusal: boolean; commondirRedirect: boolean; boundRepoIsWorktree: boolean; unpinned: boolean; pinMismatch: boolean }, fallbackText: string): string {
-  // @decision a8bc0404 — checked BEFORE d.commondirRedirect: a pinMismatch is also commondirRedirect
-  // (subclass), so this branch must win first or the sharper wording would never be reached.
+export function canonicalFailureMessage(d: { text: string; refusal: boolean; commondirRedirect: boolean; boundRepoIsWorktree: boolean; unpinned: boolean; pinMismatch: boolean; pinnedToplevel?: string; liveToplevel?: string }, fallbackText: string): string {
+  // @decision a8bc0404 (Code Review C1/M1) — checked BEFORE d.commondirRedirect (subclass, also true);
+  // only reached for a VALID repo at a DIFFERENT toplevel — never presents re-pinning as the default
+  // remedy, since a worker running `git init` in a pinned subdir looks identical.
   if (d.pinMismatch) {
-    return `refused, nothing changed: ${d.text}. If this change was intended (the repo moved, a junction was left behind, or \`git init\` ran inside this path), ask a human to re-pin it — POST /api/projects/:id/commondir-trust-pin/repin, passing the live toplevel this refusal named as expectedToplevel — do not retry until that happens. If you did not expect this, treat this as a possible redirect instead and escalate to the Platform Lead to inspect the project's shared .git.`;
+    const live = d.liveToplevel ?? "(unknown — see raw reason below)";
+    const pinned = d.pinnedToplevel ?? "(unknown — see raw reason below)";
+    return `refused, nothing changed — live toplevel is now "${live}" (was pinned to "${pinned}"). A worker can cause this (e.g. running \`git init\` inside a pinned subdir) — verify ON DISK that the change was made by a human and is intended BEFORE re-pinning (POST /api/projects/:id/commondir-trust-pin/repin, expectedToplevel="${live}"); if unsure, escalate to the Platform Lead and do not re-pin. Raw: ${d.text}`;
   }
   if (d.commondirRedirect) {
     return `canonical repo redirected — refusing, nothing changed: ${d.text}. A worker-plantable .git/commondir pointed this call away from the trusted repo; this needs HUMAN escalation (ask the Platform Lead to inspect the project's shared .git and remove the planted commondir pointer) — do not retry.`;
@@ -1588,7 +1601,8 @@ export function checkCommondirTrust(
   repoPath: string,
   trustedMainRoot?: string,
   opts?: CheckCommondirTrustOpts,
-): { ok: true } | { ok: false; reason: string; kind: "redirect" | "boundRepoIsWorktree" | "unpinned" | "pinMismatch" } {
+): { ok: true } | { ok: false; reason: string; kind: "redirect" | "boundRepoIsWorktree" | "unpinned" }
+  | { ok: false; reason: string; kind: "pinMismatch"; pinnedToplevel: string; liveToplevel: string } {
   const gitPath = path.join(repoPath, ".git");
   const caseFold = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
   const normalizeExisting = (p: string): string => caseFold(findExistingAncestorRealpath(p));
@@ -1601,20 +1615,29 @@ export function checkCommondirTrust(
   // @decision 3a5c5d4a (round 5) — consult the pin WHENEVER ONE EXISTS for repoPath, unconditionally,
   // before any shape dispatch below: a worker who plants a .git AT (or an intermediate ancestor of) a
   // pinned path must not slip past this into the DIRECTORY/missing branches below by changing the shape.
-  // @decision a8bc0404 — the walk is done inline (not via liveToplevelMatchesPin) so a mismatch can name
-  // the LIVE toplevel it actually found (or the walk failure), not just report a bare boolean.
+  // @decision a8bc0404 (Code Review C1) — a FAILED walk (`!live.ok`) is the exact shape every attack
+  // takes (a planted commondir, a .git FILE, a .git symlink) and stays kind:"redirect" with the alarm
+  // wording; only a VALID walk at a genuinely DIFFERENT toplevel is "pinMismatch" (see below).
   const pin = commondirTrustPinLookup?.(repoPath);
   if (pin) {
     const live = resolveTrustedToplevel(repoPath);
     if (live.ok && caseFold(live.toplevel) === caseFold(pin.toplevel)) return { ok: true };
+    if (!live.ok) {
+      return {
+        ok: false,
+        kind: "redirect",
+        reason: `canonicalGit: refusing — "${repoPath}" has a durable commondir-trust pin (toplevel "${pin.toplevel}", pinned ${pin.pinnedAt}, source "${pin.source}") and a live walk right now fails to confirm it: ${live.reason} — refusing rather than trusting a repo that no longer resolves cleanly, which is exactly the shape a worker-planted commondir/.git takes (docs/decisions/3a5c5d4a round 5, card a8bc0404).`,
+      };
+    }
+    // @decision a8bc0404 (C1 wording, M1) — LEADS the raw reason with the LIVE toplevel (survives the
+    // 400-char cap on a long path); pinned value/repoPath/metadata all come after. Never presents
+    // re-pinning as the default remedy — a worker's `git init` in a pinned subdir (19/20) looks identical.
     return {
       ok: false,
       kind: "pinMismatch",
-      reason: `canonicalGit: refusing — "${repoPath}" is pinned to toplevel "${pin.toplevel}" (pinned ${pin.pinnedAt}, source "${pin.source}") but ` +
-        (live.ok
-          ? `a live walk right now resolves to a DIFFERENT toplevel: "${live.toplevel}"`
-          : `a live walk right now fails to confirm it: ${live.reason}`) +
-        ` — refusing rather than trusting a repo that no longer matches what was pinned before any worker could have tampered with it (docs/decisions/3a5c5d4a round 5, card a8bc0404).`,
+      pinnedToplevel: pin.toplevel,
+      liveToplevel: live.toplevel,
+      reason: `canonicalGit: refusing — live toplevel is now "${live.toplevel}" (was pinned to "${pin.toplevel}" at ${pin.pinnedAt}, source "${pin.source}") for "${repoPath}". A worker can cause this (e.g. running "git init" inside a pinned subdir) — verify on disk that the change was made by a human and is intended BEFORE re-pinning (POST /api/projects/:id/commondir-trust-pin/repin, expectedToplevel="${live.toplevel}"); if unsure, escalate to the Platform Lead and do not re-pin (docs/decisions/3a5c5d4a round 5, card a8bc0404).`,
     };
   }
 
@@ -1946,7 +1969,7 @@ export async function canonicalRaw(
       : commondirCheck.kind === "unpinned"
       ? new CanonicalGitUnpinnedRefusal(commondirCheck.reason)
       : commondirCheck.kind === "pinMismatch"
-      ? new CanonicalGitPinMismatchRefusal(commondirCheck.reason)
+      ? new CanonicalGitPinMismatchRefusal(commondirCheck.reason, commondirCheck.pinnedToplevel, commondirCheck.liveToplevel)
       : new CanonicalGitCommondirRefusal(commondirCheck.reason);
   }
   let prefix: string[] = [];
@@ -2046,9 +2069,9 @@ export function prepareCanonicalEnv(env: Record<string, string | undefined> | un
     if (hasOwnGit) {
       ceilingParent = path.dirname(repoPath);
     } else {
-      // @decision a8bc0404 (reviewer N-1) — consult the durable pin first (mirrors defaultTrustedMainRoot);
-      // a bare resolveTrustedToplevel walk is never itself a trust source (round 5's own rule). Falls back
-      // to the walk only with no pin, which stays inert — checkCommondirTrust refuses that call anyway.
+      // @decision a8bc0404 (N-1, Code Review m7) — consult the pin first (mirrors defaultTrustedMainRoot);
+      // falls back to a bare walk with NO pin OR a pin that doesn't match live — inert either way, since
+      // checkCommondirTrust refuses that same call regardless of this ceiling.
       const pin = commondirTrustPinLookup?.(repoPath);
       const toplevel = pin && liveToplevelMatchesPin(repoPath, pin)
         ? { ok: true as const, toplevel: pin.toplevel }

@@ -8222,10 +8222,9 @@ export async function mergeMainIntoWorktree(
     let mergeThrew = false;
     let mergeErr = "";
     let mergeRefused = false;
-    let mergeCommondirRedirect = false;
-    let mergeBoundRepoIsWorktree = false;
-    let mergeUnpinned = false;
-    let mergePinMismatch = false;
+    // @decision a8bc0404 (Code Review m6) — the WHOLE describeGitFailure() result, never per-field
+    // copies (why mergePinMismatch had to be added by hand) — a future field reaches the site below free.
+    let mergeDescribe: ReturnType<typeof describeGitFailure> | undefined;
     // @decision 8c3d6c04 — the raw error object, kept alongside `mergeErr`'s extracted text so a later
     // spawn-error-code check (`isTransientSpawnErrorCode`) can read its structured `.code`.
     let mergeErrObj: unknown;
@@ -8241,10 +8240,7 @@ export async function mergeMainIntoWorktree(
       const d = describeGitFailure(e); // surfaced in the reason: a canonicalGit refusal (unblankable merge driver) must not read as a bare "failed"
       mergeErr = d.text;
       mergeRefused = d.refusal;
-      mergeCommondirRedirect = d.commondirRedirect;
-      mergeBoundRepoIsWorktree = d.boundRepoIsWorktree;
-      mergeUnpinned = d.unpinned;
-      mergePinMismatch = d.pinMismatch;
+      mergeDescribe = d;
       mergeErrObj = e;
     }
 
@@ -8344,7 +8340,9 @@ export async function mergeMainIntoWorktree(
         /* otherwise best-effort, as before: expected when there's nothing to abort */
       }
       if (abortQuarantined) return { ok: false, quarantined: true, reason: abortQuarantineReason };
-      if (mergeRefused) return { ok: false, reason: canonicalFailureMessage({ text: mergeErr, refusal: mergeRefused, commondirRedirect: mergeCommondirRedirect, boundRepoIsWorktree: mergeBoundRepoIsWorktree, unpinned: mergeUnpinned, pinMismatch: mergePinMismatch }, mergeErr) };
+      // mergeDescribe is always set alongside mergeRefused (same catch block, same assignment) — the `!`
+      // mirrors the same guaranteed-together invariant mergeErr/mergeRefused already relied on.
+      if (mergeRefused) return { ok: false, reason: canonicalFailureMessage(mergeDescribe!, mergeErr) };
 
       // @decision 8c3d6c04 round 3 — `!isConfirmedKillTimeout` is load-bearing: a confirmed-kill timeout on
       // an already-dirty tree must fall through to the ordinary residue/transient handling below, unchanged

@@ -445,24 +445,46 @@ if (process.platform === "win32") {
   try { await canonicalGit(boundSub, 5_000).raw(["rev-parse", "HEAD"]); decoyThrew = null; } catch (e) { decoyThrew = e; }
   check("(12d) canonicalGit throws CanonicalGitUnpinnedRefusal end to end for the unpinned decoy-parent shape", decoyThrew instanceof CanonicalGitUnpinnedRefusal);
 
-  // (12e) a pin exists, but no longer matches the LIVE toplevel (simulated directly here; (19)/(20)/(21)
-  // below reproduce the real tampering shapes that would actually cause this) — card a8bc0404: now its
-  // OWN distinct kind:"pinMismatch" (never the generic "redirect" wording, which misdescribes a stale
-  // anchor as an attack), still a CanonicalGitCommondirRefusal (manager amendment A3 — inheritance, not a
-  // sibling) so every pre-existing commondirRedirect-keyed consumer still matches it.
+  // (12e) a pin exists, and a VALID live walk resolves to a genuinely DIFFERENT toplevel (simulated
+  // directly here; (19)/(20)/(21) below reproduce the real tampering shapes that would actually cause
+  // this) — card a8bc0404: its OWN distinct kind:"pinMismatch" (never the generic "redirect" wording,
+  // which would misdescribe a stale-but-valid anchor as an attack), still a CanonicalGitCommondirRefusal
+  // (manager amendment A3 — inheritance, not a sibling) so every pre-existing commondirRedirect-keyed
+  // consumer still matches it. Code Review C1/M1: pinnedToplevel/liveToplevel ride as STRUCTURED fields
+  // (never truncated), and the human-facing wording never presents re-pinning as the default remedy.
   pinMap.set(literalRepoPathKey(boundSub), { toplevel: B, pinnedAt: new Date().toISOString(), source: "bind", projectId: "x", repoKey: "primary" });
   const check12e = checkCommondirTrust(boundSub, undefined);
-  check("(12e) refuses when a pin exists but does not match the live toplevel, with kind:\"pinMismatch\"", check12e.ok === false && check12e.kind === "pinMismatch");
-  check("(12e) the reason names BOTH the pinned toplevel and the live toplevel it found", check12e.reason.includes(A) && check12e.reason.includes(B));
+  check("(12e) refuses when a pin exists but a VALID live walk resolves elsewhere, with kind:\"pinMismatch\"", check12e.ok === false && check12e.kind === "pinMismatch");
+  check("(12e) the returned object carries pinnedToplevel/liveToplevel as structured fields", check12e.pinnedToplevel === B && check12e.liveToplevel === A);
+  check("(12e) the raw reason names BOTH the pinned toplevel and the live toplevel it found", check12e.reason.includes(A) && check12e.reason.includes(B));
   let mismatchThrew;
   try { await canonicalGit(boundSub, 5_000).raw(["rev-parse", "HEAD"]); mismatchThrew = null; } catch (e) { mismatchThrew = e; }
   check("(12e) canonicalGit throws CanonicalGitPinMismatchRefusal end to end", mismatchThrew instanceof CanonicalGitPinMismatchRefusal);
   check("(12e) a pinMismatch refusal is ALSO a CanonicalGitCommondirRefusal (A3 — inheritance, not a sibling)", mismatchThrew instanceof CanonicalGitCommondirRefusal);
+  check("(12e) the thrown exception itself carries pinnedToplevel/liveToplevel", mismatchThrew.pinnedToplevel === B && mismatchThrew.liveToplevel === A);
   const d12e = describeGitFailure(mismatchThrew);
   check("(12e) describeGitFailure sets BOTH pinMismatch AND commondirRedirect", d12e.pinMismatch === true && d12e.commondirRedirect === true);
+  check("(12e) describeGitFailure carries pinnedToplevel/liveToplevel through too", d12e.pinnedToplevel === B && d12e.liveToplevel === A);
   const msg12e = canonicalFailureMessage(d12e, "fallback");
-  check("(12e) canonicalFailureMessage picks the pinMismatch wording (names the repin route), not the generic redirect wording", /commondir-trust-pin\/repin/.test(msg12e) && !/remove the planted commondir pointer/.test(msg12e));
+  check("(12e) canonicalFailureMessage LEADS with the live toplevel, naming the repin route, never the generic redirect wording", msg12e.indexOf(A) < msg12e.indexOf("commondir-trust-pin/repin") && !/remove the planted commondir pointer/.test(msg12e));
+  check("(12e) the wording tells the human to VERIFY intent first, never presenting re-pin as the default", /verify/i.test(msg12e) && /escalate to the Platform Lead/i.test(msg12e));
   unpinFor(boundSub);
+
+  // (12e-2) Code Review M1 — a LONG (~100+ char) path's full live toplevel must survive
+  // describeGitFailure().text's 400-char cap intact: leading with the toplevel CHANGE, not repoPath/pin
+  // metadata, is what makes this possible on an ordinary path length.
+  const longSegment = "a-very-long-directory-segment-name-that-pads-this-path-out-toward-the-hundred-character-mark-for-M1";
+  const longAncestor = initRepo("12e2-" + longSegment.slice(0, 40));
+  const longSub = path.join(longAncestor, "bound-subproj-also-long-" + longSegment);
+  fs.mkdirSync(longSub, { recursive: true });
+  pinFor(longSub); // pins to longAncestor
+  const longDecoy = initRepo("12e2-decoy-" + longSegment.slice(0, 40));
+  pinMap.set(literalRepoPathKey(longSub), { toplevel: longDecoy, pinnedAt: new Date().toISOString(), source: "bind", projectId: "x", repoKey: "primary" });
+  const check12e2 = checkCommondirTrust(longSub, undefined);
+  check("(12e-2) sanity: the live toplevel here really is long enough to risk truncation", check12e2.ok === false && check12e2.liveToplevel.length > 60);
+  const d12e2 = describeGitFailure(new CanonicalGitPinMismatchRefusal(check12e2.reason, check12e2.pinnedToplevel, check12e2.liveToplevel));
+  check("(12e-2) the FULL live toplevel survives describeGitFailure().text intact, not cut by the 400-char cap", d12e2.text.includes(check12e2.liveToplevel));
+  unpinFor(longSub);
 
   // (12f) card a8bc0404, reviewer N-1 — prepareCanonicalEnv's GIT_CEILING_DIRECTORIES, for a subdir-bound
   // repoPath, must use the PIN's own recorded toplevel directly once it matches live, never discard it and
@@ -805,10 +827,19 @@ if (process.platform !== "win32") {
 
   // Extra check (S-4(c)): a planted commondir file inside THIS (pinned, ordinary) repo's own `.git` must
   // still refuse — the pin's existence must never make a worker-planted commondir any more trustworthy.
+  // @decision a8bc0404 (Code Review C1) — this is the exact "pinned repo + planted commondir" attack
+  // shape the reviewer's C1 finding named: resolveTrustedToplevel's own commondir-file check makes the
+  // LIVE WALK ITSELF FAIL (`!live.ok`), so this must be kind:"redirect" with the alarm wording, never
+  // "pinMismatch" (which would misdescribe an active attack as a benign re-pin candidate).
   const commondirFile23 = path.join(A23, ".git", "commondir");
   fs.writeFileSync(commondirFile23, path.join(initRepo("23-decoy"), ".git") + "\n");
   const check23b = checkCommondirTrust(A23, undefined);
-  check("(23) a planted .git/commondir inside a PINNED ordinary repo is still refused", check23b.ok === false && check23b.kind === "pinMismatch");
+  check("(23) a planted .git/commondir inside a PINNED ordinary repo is still refused, with the redirect ALARM kind (not pinMismatch — C1)", check23b.ok === false && check23b.kind === "redirect");
+  let plantedThrew23;
+  try { await canonicalGit(A23, 5_000).raw(["rev-parse", "HEAD"]); plantedThrew23 = null; } catch (e) { plantedThrew23 = e; }
+  check("(23) canonicalGit throws the plain CanonicalGitCommondirRefusal end to end (not CanonicalGitPinMismatchRefusal)", plantedThrew23 instanceof CanonicalGitCommondirRefusal && !(plantedThrew23 instanceof CanonicalGitPinMismatchRefusal));
+  const msg23 = canonicalFailureMessage(describeGitFailure(plantedThrew23), "fallback");
+  check("(23) the human-facing message is the ALARM wording (remove the planted pointer), never the re-pin wording", /remove the planted commondir pointer/.test(msg23) && !/commondir-trust-pin\/repin/.test(msg23));
   fs.rmSync(commondirFile23);
   unpinFor(A23);
 }
