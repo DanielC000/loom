@@ -8,7 +8,7 @@ import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, canonicalFailureMessage, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot, type CheckCommondirTrustOpts } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -148,6 +148,10 @@ export const WORKTREE_ADD_TIMEOUT_MS = 60_000; // exported so a test can assert 
 export interface BoundedGitDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw">;
   timeoutMs?: number;
+  /** @decision 3a5c5d4a — the real canonical main checkout root, for a caller whose own `repoPath` is a
+   *  worker's own linked WORKTREE. Never defaulted. `attemptCodexAutoCommit` needs this explicitly — see
+   *  its own call sites' doc for why it can't just inherit `quarantineRepoPath`'s default here. */
+  trustedMainRoot?: string;
   /** @decision 2267e8fa — TEST SEAM ONLY, a DIFFERENT seam than `gitFactory` above (that one's 2-arg
    *  shape has no `env` to assert on) — overrides the identity probe's own git construction. Production
    *  never sets this. */
@@ -221,11 +225,23 @@ export function gitConstructFailure<T extends object>(err: unknown): T {
   });
 }
 
+// `boundedGit`'s own doc above characterizes most of its ~20+ callers as "read-mostly or worktree-scoped"
+// (never the canonical squash-merge write — see `boundedMergeGit`'s doc for that distinct path), but NOT
+// all of them equally trust-sensitive (round 3, S3: `computeEmitCompareGate` decides whether the batch
+// merge gate gets REDUCED, so IT needs the real, CHECKED path, not this opt-out — see its own call sites
+// in `sessions/service.ts`, which now thread `deps.trustedMainRoot` explicitly). This const is applied
+// ONLY when a caller does NOT supply its own `trustedMainRoot` — a caller that does gets the REAL
+// verification instead, never silenced by this opt-out. It narrows ONLY the "no trustedMainRoot at all"
+// case either way, never the DIRECTORY-shape check or the `CanonicalGitBoundWorktreeRefusal` case.
+// @decision 3a5c5d4a (round 2/3, S2/S3) — per-caller, keyed on whether `deps.trustedMainRoot` is set.
+const BOUNDED_GIT_ADVISORY_READ: CheckCommondirTrustOpts = { commondirCheck: "advisory-read" };
+
 /** Build the bounded git instance + resolve the timeout for one op, applying the seam's defaults. Never
- *  throws — see {@link gitConstructFailure}. */
+ *  throws — see {@link gitConstructFailure}. A caller that supplies `deps.trustedMainRoot` gets the REAL
+ *  checkCommondirTrust verification; one that doesn't gets the advisory-read opt-out, same as before. */
 function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, deps.trustedMainRoot, deps.trustedMainRoot === undefined ? BOUNDED_GIT_ADVISORY_READ : undefined));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(repoPath, timeoutMs);
@@ -254,7 +270,10 @@ function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleG
  */
 function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localNonInteractiveEnv()));
+  // @decision 3a5c5d4a (round 4, B-1) — thread deps.trustedMainRoot when the caller supplies one
+  // (mergeBranchLocked's own identity-fallback callers already do), else default to the REAL resolved
+  // toplevel of repoPath itself (never bare repoPath — a subdir-bound project has no .git there at all).
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localNonInteractiveEnv(), undefined, undefined, deps.trustedMainRoot ?? defaultTrustedMainRoot(repoPath)));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(repoPath, timeoutMs);
@@ -324,12 +343,21 @@ export interface DiffBranchDeps {
    * THIS sha, so two logically-identical reads can never diverge; `branch` is then display-only.
    */
   resolvedTip?: string;
+  /** @decision 3a5c5d4a — the real main checkout root, when `repoPath` is a worker's own WORKTREE
+   *  (e.g. `workerDiff`'s uncommitted-diff branch). Never defaulted to `repoPath` — that would compare
+   *  the worktree's commondir against itself. Omit when `repoPath` already IS the main checkout. */
+  trustedMainRoot?: string;
 }
 
 /** Build the bounded git instance + resolve the timeout for {@link diffBranch}'s ops, applying the seam's defaults. */
 function boundedDiffGit(repoPath: string, deps: DiffBranchDeps): { git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  // @decision 3a5c5d4a — pass `deps.trustedMainRoot` AS-IS when the caller supplies one (the WORKTREE
+  // case, never defaulted to `p` — that would compare the worktree's commondir against itself).
+  // @decision 3a5c5d4a (round 4, B-1) — when the caller omits it (the "`p` already IS the main
+  // checkout" case), default to `p`'s own resolved toplevel, never bare `p` — a subdir-bound project
+  // has no `.git` at `p` itself; a healthy main checkout resolves back to `p` immediately either way.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, deps.trustedMainRoot ?? defaultTrustedMainRoot(p)));
   let git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">;
   try {
     git = makeGit(repoPath, timeoutMs);
@@ -856,7 +884,10 @@ async function recutStaleReusedBranch(
   // @decision 356538ef — `nonInteractiveEnv()`, not `localNonInteractiveEnv()`: canonicalGit's env-less
   // transport-key strip is now unconditional, so an explicit non-stripped env keeps GIT_ASKPASS/
   // GIT_SSH_COMMAND available for an implicit LFS smudge this reset's checkout may trigger.
-  await killableCanonicalRaw(worktreePath, ["reset", "--hard", mainSha], repoTimeoutMs, "git reset --hard (recut stale reused branch)", deps.gitFactory, nonInteractiveEnv());
+  // @decision 3a5c5d4a (round 4, B-1) — `repoPath`'s resolved TOPLEVEL threaded explicitly as
+  // `trustedMainRoot` ONLY (never bare `repoPath`); `quarantineRepoPath` (position 8) stays at its own
+  // unchanged default.
+  await killableCanonicalRaw(worktreePath, ["reset", "--hard", mainSha], repoTimeoutMs, "git reset --hard (recut stale reused branch)", deps.gitFactory, nonInteractiveEnv(), undefined, undefined, undefined, defaultTrustedMainRoot(repoPath));
   // @decision 0eaaa693 — `recut:true` here is what later licenses WorktreeInfo.cutBaseAdvanced: this
   // branch's tip was just reset to mainSha, so its cut base genuinely advances to it.
   return { recut: true, discardedOnRecut };
@@ -1236,11 +1267,15 @@ export async function createWorktree(
     const exists = (await boundedLockedRaw(["branch", "--list", branch], "git branch --list")).trim() !== "";
     try {
       firePhase("worktree-add");
+      // git >= 2.48 CAN write a relative gitdir/commondir pointer (checkCommondirTrust now correctly
+      // verifies one — see that function's own doc), but Loom's OWN worktrees should keep the
+      // absolute-pointer shape already measured and trusted. Harmless on git < 2.48 (key unused there).
+      // @decision 3a5c5d4a (round 3, S1) — a defense-in-depth belt, not a requirement of the fix itself.
       await boundedLockedRaw(exists
-        ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
+        ? ["-c", "worktree.useRelativePaths=false", "worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
         : forkFrom
-          ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
-          : ["worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
+          ? ["-c", "worktree.useRelativePaths=false", "worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
+          : ["-c", "worktree.useRelativePaths=false", "worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
         "git worktree add", addTimeoutMs);
     } catch (addErr) {
       // @decision af436c99 — recognize git worktree add's own benign progress text (mistaken for failure by a
@@ -2714,7 +2749,8 @@ export async function readWorktreeUncommittedState(worktreePath: string, deps: B
   // has nothing git can lose — it must reach removal, or the re-finalize paths built for exactly this leftover would never clean it.
   if (!worktreeHasGitLink(worktreePath)) return { state: "clean" };
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: a read-only dirty check.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
   try {
     const porcelainZ = await withTimeout(
       makeGit(worktreePath, timeoutMs).raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z (finalize dirty check)",
@@ -2846,7 +2882,8 @@ export async function precheckWorkerDone(
   deps: BoundedGitDeps = {},
 ): Promise<DoneReportPrecheck> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: a read-only dirty check.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see uncommittedWorkFiles).
@@ -3076,8 +3113,10 @@ export async function attemptCodexAutoCommit(
   // @decision 967eb326 — pin LC_ALL/LANGUAGE=C at construction, never via a LATER `.env()` mutation on
   // this instance — the detached-HEAD classification below needs git's fatal text in English regardless
   // of host locale, or it silently disarms and fails safe to "not stranded"/"skip the auto-commit".
+  // @decision 3a5c5d4a — `deps.trustedMainRoot`, never defaulted to `worktreePath`: see BoundedGitDeps's
+  // own doc for why this caller specifically cannot inherit `quarantineRepoPath`'s default here.
   const makeGit = deps.gitFactory
-    ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(localNonInteractiveEnv(), { LC_ALL: "C", LANGUAGE: "C" }), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
+    ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(localNonInteractiveEnv(), { LC_ALL: "C", LANGUAGE: "C" }), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }, deps.trustedMainRoot));
   let git: Pick<SimpleGit, "raw">;
   try {
     git = makeGit(worktreePath, timeoutMs);
@@ -3173,11 +3212,19 @@ export async function attemptCodexAutoCommit(
   // SAME env the real commit will run under.
   // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into the commit's own explicit env below, never
   // spliced into argv.
-  const identityEnv = await resolveGitIdentityFallbackArgs(
-    worktreePath, timeoutMs,
-    deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
-    nonInteractiveEnv(),
-  );
+  // @decision 3a5c5d4a (round 3, B2) — thread `deps.trustedMainRoot`, same real root `makeGit` above
+  // already uses; a refusal here fails safe exactly like every other read in this function.
+  let identityEnv: Record<string, string>;
+  try {
+    identityEnv = await resolveGitIdentityFallbackArgs(
+      worktreePath, timeoutMs,
+      deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+      nonInteractiveEnv(),
+      deps.trustedMainRoot,
+    );
+  } catch {
+    return { attempted: false, committed: false }; // FAIL SAFE — same posture as every earlier read
+  }
 
   try {
     // Code Review "S2": `--literal-pathspecs` is a GLOBAL flag (before the subcommand, alongside the
@@ -3202,12 +3249,15 @@ export async function attemptCodexAutoCommit(
   // @decision bde5d1fe — DELIBERATE EXEMPTION from "always pass the real canonical repo as
   // `quarantineRepoPath`": `24c0bdba` already disables hooks here (core.hooksPath=devNull, unrelated
   // reason — see this function's own factory), so there's no hook-escape vector to close; left at default.
+  // @decision 3a5c5d4a — `trustedMainRoot` is passed EXPLICITLY (`deps.trustedMainRoot`), never left to
+  // inherit `quarantineRepoPath`'s own default above — that default is `worktreePath` itself (the above
+  // exemption), which would make checkCommondirTrust compare the worktree's commondir against itself.
   const messageArgs = body ? ["-m", subject, "-m", body] : ["-m", subject];
   const commitArgs = [...cfg, "commit", "--no-verify", ...messageArgs];
   const commitLabel = "codex-auto-commit commit";
   let commitThrew: unknown;
   try {
-    await killableCanonicalRaw(worktreePath, commitArgs, timeoutMs, commitLabel, deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv });
+    await killableCanonicalRaw(worktreePath, commitArgs, timeoutMs, commitLabel, deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, undefined, undefined, undefined, deps.trustedMainRoot);
   } catch (e) {
     commitThrew = e;
   }
@@ -3264,7 +3314,8 @@ export async function worktreeHasWork(
   // whose methods reject instead), so the ops below already see that as an ordinary bounded failure and
   // fail safe through their own catches; no separate wrap is needed here.
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: a read-only dirty check.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see worktreeStatusHasWork).
@@ -3323,7 +3374,8 @@ export async function detectStrandedWork(
   // @decision 967eb326 — pin LC_ALL/LANGUAGE=C at construction so the detached-HEAD classification
   // below matches git's fatal text under any locale — an unpinned read would otherwise silently fail
   // safe to stranded:false even for a worktree genuinely stranded on a detached HEAD.
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" })));
+  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: `wt` below is read-only.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" }), undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
   try {
     const mainSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD")).trim();
 
@@ -7068,7 +7120,10 @@ export async function workerDiff(
     try {
       const { git, timeoutMs } = boundedDiffGit(repoPath, deps);
       const base = (await withTimeout(git.raw(["merge-base", "HEAD", `refs/heads/${branch}`]), timeoutMs, "git merge-base (workerDiff uncommitted)")).trim();
-      const { git: wt } = boundedDiffGit(worktreePath, deps);
+      // @decision 3a5c5d4a (round 4, B-1) — `worktreePath` is a worker's own linked worktree; pass the
+      // real main's resolved TOPLEVEL, never bare `repoPath` (which may itself be subdir-bound), or a
+      // rewritten worktree commondir pointer would redirect this review-facing diff to a decoy.
+      const { git: wt } = boundedDiffGit(worktreePath, { ...deps, trustedMainRoot: defaultTrustedMainRoot(repoPath) });
       const summary = await withTimeout(wt.diffSummary([base]), timeoutMs, "git diff --stat (workerDiff uncommitted)"); // <base> with one arg = base..WORKING-TREE
       const patch = await withTimeout(wt.diff([base]), timeoutMs, "git diff (workerDiff uncommitted)");
       return {
@@ -7947,7 +8002,12 @@ export async function mergeMainIntoWorktree(
   // this function (the cheap reads above/below, and computeOwedLanding's own merge-tree probes) keeps the
   // plain `timeoutMs` — see this constant's own doc for why.
   const mergeTimeoutMs = Math.max(timeoutMs, deps.unionMergeTimeoutFloorMs ?? UNION_MERGE_TIMEOUT_FLOOR_MS);
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms));
+  // `wtGit` below is read-only (rev-parse/status/ls-files post-merge/post-abort inspection) — the actual
+  // mutating merge calls thread `repoPath` as `trustedMainRoot` explicitly via `killableCanonicalRaw`
+  // further down. `repoGit` reads `repoPath` itself (a DIRECTORY-shaped `.git`), which this opt-out never
+  // affects either way.
+  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
   const repoGit = makeGit(repoPath, timeoutMs);
   // @decision c30952c1 — a missing worktree makes this constructor THROW SYNCHRONOUSLY (simple-git's own
   //  `GitConstructError`); every caller of this function assumes a `{ok:false,...}` result, never a thrown
@@ -7999,10 +8059,20 @@ export async function mergeMainIntoWorktree(
   // rules, not just `user.name`/`user.email` config) is unaffected.
   // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into each commit call's own explicit env below,
   // never a shared `-c user.*` pair spliced into argv.
-  const identityEnv = await resolveGitIdentityFallbackArgs(
-    worktreePath, timeoutMs,
-    deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
-  );
+  // @decision 3a5c5d4a (round 3, B2; round 4, B-1) — thread the probe's own `trustedMainRoot` as
+  // `repoPath`'s resolved TOPLEVEL (never bare `repoPath`, which may itself be subdir-bound); a refusal
+  // must fail this attempt closed, same posture as the main-tip resolve's own failure return above.
+  let identityEnv: Record<string, string>;
+  try {
+    identityEnv = await resolveGitIdentityFallbackArgs(
+      worktreePath, timeoutMs,
+      deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+      undefined,
+      defaultTrustedMainRoot(repoPath),
+    );
+  } catch (e) {
+    return { ok: false, reason: `identity-fallback probe refused: ${describeGitFailure(e).text}` };
+  }
 
   // @decision 7e5b23e7 — every mutating call below pins `quarantineRepoPath` to the CANONICAL `repoPath`,
   // never this worktree: a linked worktree shares the canonical repo's hooks dir + object database, so an
@@ -8037,8 +8107,12 @@ export async function mergeMainIntoWorktree(
       // it (scrubs editor/pager keys only, never the transport family) — an ambient `GIT_ASKPASS` (e.g.
       // VS Code's terminal) would throw "not permitted without allowUnsafeAskPass" otherwise.
       // `commit-tree` never touches a remote, so stripping the transport family here is safe.
+      // Same advisory-read posture as `wtGit` above: `commit-tree` writes a dangling object only (no ref
+      // moves), and a forged commondir here would just land the object in the wrong store, making the
+      // later `--ff-only` land (trustedMainRoot-protected, below) fail loudly on a missing object.
+      // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site.
       const commitTreeGit = (Object.keys(identityEnv).length > 0 && !deps.gitFactory)
-        ? canonicalGit(worktreePath, timeoutMs, localReadGitEnv(nonInteractiveEnv(), identityEnv))
+        ? canonicalGit(worktreePath, timeoutMs, localReadGitEnv(nonInteractiveEnv(), identityEnv), undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ)
         : wtGit;
       commit = (await withTimeout(
         commitTreeGit.raw(["commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`]),
@@ -8050,7 +8124,7 @@ export async function mergeMainIntoWorktree(
       // (nothing lands: no ref moves, no working-tree mutation), so the SAME "nothing lands, retry is
       // always safe" reasoning as the main-tip resolve above applies to a timeout here too.
       const transient = !d.refusal && (TIMEOUT_SHAPED_RE.test(d.text) || isTransientSpawnErrorCode(e));
-      return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}`, ...(transient ? { transient: true } : {}) };
+      return { ok: false, reason: canonicalFailureMessage(d, `late-range union of main into the worktree failed: ${d.text}`), ...(transient ? { transient: true } : {}) };
     }
 
     // `--ff-only` either lands instantly or fails with NO merge in progress (no MERGE_HEAD, no partial
@@ -8106,7 +8180,7 @@ export async function mergeMainIntoWorktree(
         // internal retry above) still describes momentary host/process conditions, not the branch's or
         // main's content; same for a transient spawn-error code. Never set alongside a refusal.
         const transient = isConfirmedKillTimeout || (!d.refusal && isTransientSpawnErrorCode(e));
-        return { ok: false, reason: d.refusal ? `refused, nothing changed: ${d.text}` : `late-range union of main into the worktree failed: ${d.text}`, ...(transient ? { transient: true } : {}) };
+        return { ok: false, reason: canonicalFailureMessage(d, `late-range union of main into the worktree failed: ${d.text}`), ...(transient ? { transient: true } : {}) };
       }
     }
   }
@@ -8148,6 +8222,9 @@ export async function mergeMainIntoWorktree(
     let mergeThrew = false;
     let mergeErr = "";
     let mergeRefused = false;
+    let mergeCommondirRedirect = false;
+    let mergeBoundRepoIsWorktree = false;
+    let mergeUnpinned = false;
     // @decision 8c3d6c04 — the raw error object, kept alongside `mergeErr`'s extracted text so a later
     // spawn-error-code check (`isTransientSpawnErrorCode`) can read its structured `.code`.
     let mergeErrObj: unknown;
@@ -8163,6 +8240,9 @@ export async function mergeMainIntoWorktree(
       const d = describeGitFailure(e); // surfaced in the reason: a canonicalGit refusal (unblankable merge driver) must not read as a bare "failed"
       mergeErr = d.text;
       mergeRefused = d.refusal;
+      mergeCommondirRedirect = d.commondirRedirect;
+      mergeBoundRepoIsWorktree = d.boundRepoIsWorktree;
+      mergeUnpinned = d.unpinned;
       mergeErrObj = e;
     }
 
@@ -8262,7 +8342,7 @@ export async function mergeMainIntoWorktree(
         /* otherwise best-effort, as before: expected when there's nothing to abort */
       }
       if (abortQuarantined) return { ok: false, quarantined: true, reason: abortQuarantineReason };
-      if (mergeRefused) return { ok: false, reason: `refused, nothing changed: ${mergeErr}` };
+      if (mergeRefused) return { ok: false, reason: canonicalFailureMessage({ text: mergeErr, refusal: mergeRefused, commondirRedirect: mergeCommondirRedirect, boundRepoIsWorktree: mergeBoundRepoIsWorktree, unpinned: mergeUnpinned }, mergeErr) };
 
       // @decision 8c3d6c04 round 3 — `!isConfirmedKillTimeout` is load-bearing: a confirmed-kill timeout on
       // an already-dirty tree must fall through to the ordinary residue/transient handling below, unchanged
@@ -9007,7 +9087,7 @@ async function mergeBranchLocked(
     let rawError = false;
     let rawErrorMessage: string | undefined;
     let rawErrorObject: unknown;
-    let squashRefusal: string | undefined;
+    let squashRefusalDetail: ReturnType<typeof describeGitFailure> | undefined;
     try {
       // @decision 24c0bdba — kill-confirmed: stages into the same canonical index the commit below lands
       // from; an orphaned squash child must never survive past the lock releasing.
@@ -9023,11 +9103,11 @@ async function mergeBranchLocked(
       // Round 3 (Code Review B-1): the REAL error object, not just its message — `treeDeathUnconfirmed`
       // checks a typed marker on it first, which a `{ message }` reconstruction below would lose.
       rawErrorObject = e;
-      squashRefusal = e instanceof CanonicalGitRefusal ? describeGitFailure(e).text : undefined;
+      squashRefusalDetail = e instanceof CanonicalGitRefusal ? describeGitFailure(e) : undefined;
     }
     // A canonicalGit refusal is thrown BEFORE any git process runs: the squash never started, so the canonical repo is exactly as it entered. Say so — and do NOT
     // run the reset/probes below (they are exec-capable and would be refused too, dressing a clean refusal up as "the canonical repo needs recovery").
-    if (squashRefusal !== undefined) return { ok: false, reason: `refused, nothing changed: ${squashRefusal}` };
+    if (squashRefusalDetail !== undefined) return { ok: false, reason: canonicalFailureMessage(squashRefusalDetail, squashRefusalDetail.text) };
     // Conflict? Unmerged index entries are the reliable signal. Under --squash there is no MERGE_HEAD, so
     // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
     // This probe used to be bare/uncaught (card 9e77050f): a throw here rejected mergeBranchLocked with no
@@ -9194,11 +9274,20 @@ async function mergeBranchLocked(
     // the commit, so this must not sit between them either.
     // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into the commit's own explicit env at the call
     // below — a pure JS object merge, never a git call, so the adjacency rule above still holds.
-    const identityEnv = await resolveGitIdentityFallbackArgs(
-      repoPath, timeoutMs,
-      deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
-      nonInteractiveEnv(),
-    );
+    // @decision 3a5c5d4a (round 3, B2; round 4, B-1) — `repoPath` IS `cwd` here (the real canonical
+    // main); thread its resolved TOPLEVEL as `trustedMainRoot`, never bare `repoPath` — a subdir-bound
+    // project path has no `.git` of its own, and a healthy main checkout resolves right back to it.
+    let identityEnv: Record<string, string>;
+    try {
+      identityEnv = await resolveGitIdentityFallbackArgs(
+        repoPath, timeoutMs,
+        deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+        nonInteractiveEnv(),
+        defaultTrustedMainRoot(repoPath),
+      );
+    } catch (e) {
+      return { ok: false, reason: `identity-fallback probe refused: ${describeGitFailure(e).text}` };
+    }
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
     // capture and the commit below, or it breaks the tree-identity the byte-identical-digest proof rests on.

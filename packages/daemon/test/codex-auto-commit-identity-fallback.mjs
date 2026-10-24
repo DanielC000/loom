@@ -108,7 +108,10 @@ function lastCommitCommitter(repo) {
     tmpDirs.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feature-a.txt"), `a-content-${sfx}\n`);
 
-    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "verify auto-commit fallback identity (A)" });
+    // @decision 3a5c5d4a (round 3, second review, B3-class) — every real caller threads a real
+    // trustedMainRoot; without it the function's own default makeGit/identity-probe construction now
+    // refuses this FILE-shaped worktree .git outright, before the identity fallback this test proves.
+    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "verify auto-commit fallback identity (A)" }, { trustedMainRoot: repo });
 
     check(`(A) attemptCodexAutoCommit succeeds despite no configured identity anywhere (error: ${ac.error ?? "n/a"})`, ac.committed === true);
     if (ac.committed) {
@@ -143,7 +146,8 @@ function lastCommitCommitter(repo) {
   tmpDirs.push(worktreePath);
   fs.writeFileSync(path.join(worktreePath, "feature-b.txt"), `b-content-${sfx}\n`);
 
-  const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "verify configured identity kept (B)" });
+  // @decision 3a5c5d4a (round 3, second review, B3-class) — same fix as block (A) above.
+  const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "verify configured identity kept (B)" }, { trustedMainRoot: repo });
 
   check(`(B) attemptCodexAutoCommit succeeds with a configured identity (error: ${ac.error ?? "n/a"})`, ac.committed === true);
   if (ac.committed) {

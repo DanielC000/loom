@@ -151,7 +151,9 @@ const savedAskpass = process.env.GIT_ASKPASS;
   process.env.GIT_ASKPASS = FAKE_ASKPASS;
   let ac;
   try {
-    ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "verify auto-commit under ambient GIT_ASKPASS (B)" });
+    // @decision 3a5c5d4a — `trustedMainRoot: repo` mirrors what a real caller (sessions/service.ts)
+    // now threads explicitly; without it checkCommondirTrust would compare the worktree against itself.
+    ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "verify auto-commit under ambient GIT_ASKPASS (B)" }, { trustedMainRoot: repo });
   } finally {
     if (savedAskpass === undefined) delete process.env.GIT_ASKPASS; else process.env.GIT_ASKPASS = savedAskpass;
   }

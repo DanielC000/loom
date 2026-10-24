@@ -226,8 +226,14 @@ function makeDirtyWorktreeFactory() {
   execFileSync("git", ["-c", "user.email=mcvcumt@loom", "-c", "user.name=mcvcumt", "commit", "-q", "-m", "main pre-advance"], { cwd: repo });
 
   const admState = { mergeCalls: 0 };
+  // Code Review round 3 (B3): `p` here is the worker's own WORKTREE (a FILE-shaped .git) — card
+  // 3a5c5d4a's round-2 fix flipped checkCommondirTrust's default to fail-closed for that shape with no
+  // trustedMainRoot, so a bare `canonicalGit(p, ms)` would now refuse the FIRST (pass-through, "clean")
+  // merge call too, not just the injected SECOND-call failure below. Threading the real `repo` (already
+  // in scope — the fixture's own trusted main) restores this fixture's pass-through intent via the SAME
+  // real verification path `mergeMainIntoWorktree`'s own merge calls use in production.
   const proxyFailSecondMergeCall = (p, ms) => {
-    const real = canonicalGit(p, ms);
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, repo);
     return {
       async raw(args) {
         const a = Array.isArray(args) ? args : [args];

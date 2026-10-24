@@ -85,9 +85,13 @@ function initRepo(repo) {
 // killed/transient-child shape: a successful exit with nothing captured) or throws a message that does
 // NOT match NOT_A_SYMBOLIC_REF (mode "throw-unrelated" — a genuine, unrelated read failure). Every
 // OTHER call delegates to a real canonicalGit instance, so the rest of the function behaves normally.
-function gitFactoryWithSymbolicRefFailure(mode, extraUnsafe) {
+// @decision 3a5c5d4a (round 3, B3-class) — both callers invoke this factory with `p` = the worktree's
+// own worktreePath (a FILE-shaped .git); a bare `canonicalGit(p, ms)` with no trustedMainRoot now REFUSES
+// every delegated call post-round-2/3, not just the injected symbolic-ref one. Factory-of-a-factory,
+// closing over the caller's own real trusted main root, same pattern as the B3 fixtures this card fixed.
+function gitFactoryWithSymbolicRefFailure(mode, trustedMainRoot, extraUnsafe) {
   return (p, ms) => {
-    const real = extraUnsafe ? canonicalGit(p, ms, undefined, undefined, extraUnsafe) : canonicalGit(p, ms);
+    const real = extraUnsafe ? canonicalGit(p, ms, undefined, undefined, extraUnsafe, trustedMainRoot) : canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
     return {
       raw: async (args) => {
         if (Array.isArray(args) && args.includes("symbolic-ref")) {
@@ -173,13 +177,13 @@ try {
     // the SAME genuinely-stranded worktree (repo2/wt2, still on "my-own-branch" with its stray commit)
     // must fail safe to stranded:false — RED at 1466710a (that revision's empty-string fallback to
     // branch "HEAD" let this report stranded:true instead, an unreliable signal masquerading as proof).
-    const readFailEmpty = await detectStrandedWork(repo2, wt2, branch2, { gitFactory: gitFactoryWithSymbolicRefFailure("empty") });
+    const readFailEmpty = await detectStrandedWork(repo2, wt2, branch2, { gitFactory: gitFactoryWithSymbolicRefFailure("empty", repo2) });
     check("(S1-READFAIL-EMPTY) empty-but-resolved read ⇒ stranded:false (fail safe)", readFailEmpty.stranded === false);
 
     // (S1-READFAIL-THROW) a genuinely unrelated thrown error must ALSO fail safe, and must NEVER be
     // treated as detached — already correct at 1466710a (the NOT_A_SYMBOLIC_REF mismatch already
     // re-threw to the outer catch); kept as a forward regression guard, not a RED proof.
-    const readFailThrow = await detectStrandedWork(repo2, wt2, branch2, { gitFactory: gitFactoryWithSymbolicRefFailure("throw-unrelated") });
+    const readFailThrow = await detectStrandedWork(repo2, wt2, branch2, { gitFactory: gitFactoryWithSymbolicRefFailure("throw-unrelated", repo2) });
     check("(S1-READFAIL-THROW) genuine read failure ⇒ stranded:false (fail safe, not treated as detached)", readFailThrow.stranded === false);
   }
 
@@ -221,7 +225,11 @@ try {
     execSync(`git config user.email bia@loom && git config user.name bia`, { cwd: worktreePath });
 
     fs.writeFileSync(path.join(worktreePath, "base.txt"), "untracked\n");
-    const base = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia baseline" });
+    // @decision 3a5c5d4a (round 3, B2) — every real caller of attemptCodexAutoCommit threads a real
+    // trustedMainRoot (service.ts's own call site does); thread it here too, or the function's own
+    // default makeGit/identity-probe construction now refuses a bare FILE-shaped .git with none at all —
+    // a fixture gap, not a production one, caught by (S3-baseline) itself going RED with no deps change.
+    const base = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia baseline" }, { trustedMainRoot: repo });
     check("(S3-baseline) no ambiguity ⇒ committed:true", base.committed === true);
     check("(S3-baseline) no headMismatch reported", base.headMismatch === undefined);
 
@@ -230,7 +238,7 @@ try {
     // auto-commit-on-done was silently skipped even though HEAD really was the assigned branch.
     fs.writeFileSync(path.join(worktreePath, "tag-case.txt"), "untracked\n");
     git(repo, `tag ${branch} HEAD`);
-    const tagAmbig = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia tag case" });
+    const tagAmbig = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia tag case" }, { trustedMainRoot: repo });
     check("(S3-TAG) same-named tag ⇒ still committed:true (no false headMismatch)", tagAmbig.committed === true);
     check("(S3-TAG) no headMismatch reported", tagAmbig.headMismatch === undefined);
     git(repo, `tag -d ${branch}`);
@@ -238,7 +246,7 @@ try {
     // (S3-REMOTEHEAD) the second, independent trigger.
     fs.writeFileSync(path.join(worktreePath, "remotehead-case.txt"), "untracked\n");
     git(repo, `update-ref refs/remotes/${branch}/HEAD refs/heads/main`);
-    const remoteheadAmbig = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia remotehead case" });
+    const remoteheadAmbig = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia remotehead case" }, { trustedMainRoot: repo });
     check("(S3-REMOTEHEAD) refs/remotes/<branch>/HEAD ⇒ still committed:true (no false headMismatch)", remoteheadAmbig.committed === true);
     check("(S3-REMOTEHEAD) no headMismatch reported", remoteheadAmbig.headMismatch === undefined);
     git(repo, `update-ref -d refs/remotes/${branch}/HEAD`);
@@ -248,7 +256,7 @@ try {
     // a detached checkout.
     git(worktreePath, `checkout -q ${git(repo, "rev-parse main")}`);
     fs.writeFileSync(path.join(worktreePath, "detached-case.txt"), "untracked\n");
-    const detached = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia detached case" });
+    const detached = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia detached case" }, { trustedMainRoot: repo });
     check("(S3-detached) detached HEAD ⇒ attempted:true, committed:false", detached.attempted === true && detached.committed === false);
     check("(S3-detached) headMismatch names the literal \"HEAD\"", detached.headMismatch && detached.headMismatch.head === "HEAD");
 
@@ -257,13 +265,13 @@ try {
     // revision's empty-string fallback reported {attempted:true, committed:false,
     // headMismatch:{head:"HEAD"}} instead, an unreliable signal masquerading as a real head mismatch).
     const extraUnsafe = { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true };
-    const readFailEmpty = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia read-fail empty" }, { gitFactory: gitFactoryWithSymbolicRefFailure("empty", extraUnsafe) });
+    const readFailEmpty = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia read-fail empty" }, { gitFactory: gitFactoryWithSymbolicRefFailure("empty", repo, extraUnsafe) });
     check("(S3-READFAIL-EMPTY) empty-but-resolved read ⇒ attempted:false, committed:false (fail safe)", readFailEmpty.attempted === false && readFailEmpty.committed === false);
     check("(S3-READFAIL-EMPTY) no headMismatch reported", readFailEmpty.headMismatch === undefined);
 
     // (S3-READFAIL-THROW) a genuinely unrelated thrown error must ALSO fail safe — already correct at
     // 1466710a; kept as a forward regression guard, not a RED proof.
-    const readFailThrow = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia read-fail throw" }, { gitFactory: gitFactoryWithSymbolicRefFailure("throw-unrelated", extraUnsafe) });
+    const readFailThrow = await attemptCodexAutoCommit(worktreePath, branch, { summary: "bia read-fail throw" }, { gitFactory: gitFactoryWithSymbolicRefFailure("throw-unrelated", repo, extraUnsafe) });
     check("(S3-READFAIL-THROW) genuine read failure ⇒ attempted:false, committed:false (fail safe)", readFailThrow.attempted === false && readFailThrow.committed === false);
     check("(S3-READFAIL-THROW) no headMismatch reported", readFailThrow.headMismatch === undefined);
   }

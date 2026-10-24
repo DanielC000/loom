@@ -1,5 +1,5 @@
 import type { SimpleGit } from "simple-git";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo } from "./bounded.js";
+import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, type MergeEmptyKind, type WorktreeGateStamp } from "./worktrees.js";
@@ -61,11 +61,15 @@ export interface BatchGitDeps {
    *  shape has no `env` to assert on) — overrides the identity probe's own git construction. Production
    *  never sets this. */
   identityProbeGitFactory?: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw">;
+  /** @decision 3a5c5d4a — the real canonical repo, when `repoPath` passed to {@link boundedGit}/
+   *  {@link boundedMergeGit} is the ephemeral `batchWorktreePath` rather than the canonical repo itself.
+   *  Never defaulted — see `canonicalGit`'s own doc for why defaulting it to `repoPath` would be wrong. */
+  trustedMainRoot?: string;
 }
 
 function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs);
+  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs, undefined, undefined, undefined, deps.trustedMainRoot);
   return { git, timeoutMs };
 }
 
@@ -78,7 +82,7 @@ function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit
  *  worktree, which never touches a remote — the transport family must be stripped, not left blocked. */
 function boundedMergeGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs, localNonInteractiveEnv());
+  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : canonicalGit(repoPath, timeoutMs, localNonInteractiveEnv(), undefined, undefined, deps.trustedMainRoot);
   return { git, timeoutMs };
 }
 
@@ -332,7 +336,10 @@ async function landBranchCommitsIndividually(
   // in effect from an entirely separate solo/batch attempt against this repo.
   const quarantineCheck = assertRepoNotQuarantined(repoPath);
   if (!quarantineCheck.ok) return { ok: false, quarantined: true, reason: `${branch}: ${quarantineCheck.reason}` };
-  const { git, timeoutMs } = boundedMergeGit(batchWorktreePath, deps);
+  // @decision 3a5c5d4a — `batchWorktreePath` is an ephemeral worktree, never the canonical repo; pass
+  // `repoPath` as the trusted root so a rewritten commondir pointer can't redirect this read.
+  // @decision 3a5c5d4a (round 4, B-1) — resolve repoPath's own toplevel, never pass it bare.
+  const { git, timeoutMs } = boundedMergeGit(batchWorktreePath, { ...deps, trustedMainRoot: defaultTrustedMainRoot(repoPath) });
 
   let branchTip: string;
   try {
@@ -462,11 +469,20 @@ async function landBranchCommitsIndividually(
   // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into each call's own explicit env below; the
   // manual "commit --author ..." call below already pins author via that flag (outranking everything),
   // so a committer-only fallback here never touches it.
-  const identityEnv = await resolveGitIdentityFallbackArgs(
-    batchWorktreePath, timeoutMs,
-    deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
-    nonInteractiveEnv(),
-  );
+  // @decision 3a5c5d4a (round 3, B2; round 4, B-1) — thread repoPath's resolved TOPLEVEL as the
+  // probe's own `trustedMainRoot` (never bare repoPath), same as `boundedMergeGit` above; a refusal
+  // here must fail this candidate closed, never be silently read as "identity resolvable".
+  let identityEnv: Record<string, string>;
+  try {
+    identityEnv = await resolveGitIdentityFallbackArgs(
+      batchWorktreePath, timeoutMs,
+      deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+      nonInteractiveEnv(),
+      defaultTrustedMainRoot(repoPath),
+    );
+  } catch (e) {
+    return { ok: false, reason: `${branch}: identity-fallback probe refused: ${describeGitFailure(e).text}` };
+  }
 
   // A rollback that itself FAILS (e.g. a canonicalGit refusal that also blocks `reset`) must not vanish: it is recorded here and appended to the failing
   // result's reason by `fail`, so a batch worktree left holding residue reads as such instead of as a clean refusal. (`cherry-pick --abort` erroring is
@@ -576,6 +592,13 @@ async function landBranchCommitsIndividually(
         raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`cherry-pick of ${sha.slice(0, 7)} could not be confirmed dead after a kill`));
         return { ok: false, quarantined: true, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)}'s git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; the batch worktree may need manual inspection: ${(e as Error).message}` };
       }
+      // @decision 3a5c5d4a — a CanonicalGitRefusal is thrown BEFORE any git process runs: nothing was
+      // mutated, so skip rollback() (it would be refused the same way, dressing a clean refusal up as
+      // "the batch worktree needs recovery") — same short-circuit as the solo squash path.
+      const cherryPickFailure = describeGitFailure(e);
+      if (cherryPickFailure.refusal) {
+        return { ok: false, reason: `${branch}: ${canonicalFailureMessage(cherryPickFailure, cherryPickFailure.text)}` };
+      }
       let conflicted = false;
       try {
         conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (batch land)")).trim() !== "";
@@ -583,7 +606,7 @@ async function landBranchCommitsIndividually(
       await rollback();
       return conflicted
         ? fail({ ok: false, conflict: true, reason: `${branch}: conflict cherry-picking ${sha.slice(0, 7)} onto the batch` })
-        : fail({ ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${describeGitFailure(e).text}` });
+        : fail({ ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${cherryPickFailure.text}` });
     }
     // @decision 2eb78eb2 — detect an ALREADY-PRESENT (redundant) commit's empty stage EXPLICITLY, before
     // the manual commit below, via `git diff --cached --name-only` (not `--quiet`, whose exit-code signal
@@ -642,6 +665,11 @@ async function landBranchCommitsIndividually(
       if (treeDeathUnconfirmed(e)) {
         raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`commit landing ${sha.slice(0, 7)} could not be confirmed dead after a kill`));
         return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — its git process tree could not be confirmed dead after a kill; refusing further cleanup to avoid racing it, the batch worktree may need manual inspection: ${(e as Error).message}` };
+      }
+      // @decision 3a5c5d4a — same refusal short-circuit as the cherry-pick catch above.
+      const commitFailure = describeGitFailure(e);
+      if (commitFailure.refusal) {
+        return { ok: false, reason: `${branch}: ${canonicalFailureMessage(commitFailure, commitFailure.text)}` };
       }
       await rollback();
       return fail({ ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` });
@@ -875,7 +903,10 @@ export async function assembleBatchBranches(
 ): Promise<BatchAssembleResult> {
   const landed: BatchLandedBranch[] = [];
   const dropped: BatchDroppedBranch[] = [];
-  const { git: sortGit, timeoutMs: sortTimeoutMs } = boundedGit(batchWorktreePath, deps);
+  // @decision 3a5c5d4a (round 5) — resolves repoPath's own toplevel via the durable commondir-trust pin
+  // (never a bare path, and never re-derived by a per-call walk) — this read decides `batchHeadMoved`
+  // (043d83d2), so it is tamper-decisive and must be as trustworthy as the gate read it feeds.
+  const { git: sortGit, timeoutMs: sortTimeoutMs } = boundedGit(batchWorktreePath, { ...deps, trustedMainRoot: defaultTrustedMainRoot(repoPath) });
   // @decision 043d83d2 (S1/S2) — `hasBase`: a NON-EMPTY `baseMainSha`. Empty (both caller mainline reads
   // failed) is treated as "not supplied" — nothing trustworthy to check, so skip rather than manufacture
   // a false "tampered" refusal from an unrelated, already-degenerate read failure.
@@ -1113,6 +1144,13 @@ export async function fastForwardCanonicalMain(
             // before the kill — never a confirmed non-landing.
             return { ok: false, quarantined: true, mayHaveLanded: true, reason: `fast-forward merge's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it (canonical main may already be at ${targetSha} if the merge itself landed before the kill); canonical repo may need manual inspection: ${(e as Error).message}` };
           }
+          // @decision 3a5c5d4a — a CanonicalGitRefusal is thrown BEFORE any git process runs: nothing
+          // was mutated and a HEAD re-read would be refused the identical way (same repoPath, same
+          // commondir check) — never fall through to it, and never report mayHaveLanded:true here.
+          const ffFailure = describeGitFailure(e);
+          if (ffFailure.refusal) {
+            return { ok: false, mayHaveLanded: false, reason: canonicalFailureMessage(ffFailure, ffFailure.text) };
+          }
           // A hung post-merge hook can outlive the timeout AFTER HEAD already moved — re-verify before
           // reporting a false failure (mirrors mergeBranchLocked's own post-commit-failure HEAD re-read).
           let headAfterFailure: string | undefined;
@@ -1338,7 +1376,9 @@ export async function runBatchedMerge(
   // @decision 043d83d2 — cross-check the pin IMMEDIATELY, before the gate even runs: catches a tamper in
   // the narrow window since assembly's own last commit, untampered for the gate's own reduction check
   // below. (S2) ALSO refuses on a dirty tree here, mirroring the solo path's `captureGatedTip` pre-gate check.
-  const preGateStamp = await computeWorktreeGateStamp(batchWorktreePath, { timeoutMs: deps.timeoutMs, gitFactory: deps.gitFactory });
+  // @decision 3a5c5d4a (round 5, fifth review correction) — trustedMainRoot must be
+  // defaultTrustedMainRoot(repoPath), never repoPath bare, or B-1 returns for a subdir-bound batch.
+  const preGateStamp = await computeWorktreeGateStamp(batchWorktreePath, { timeoutMs: deps.timeoutMs, gitFactory: deps.gitFactory, trustedMainRoot: defaultTrustedMainRoot(repoPath) });
   if (preGateStamp.head !== assembledTipSha || preGateStamp.dirty) {
     return {
       ok: false, landed, dropped, baseMainSha, assemblyMs, batchHeadMoved: true,
@@ -1360,7 +1400,10 @@ export async function runBatchedMerge(
   // @decision 043d83d2 — re-stamp AFTER the gate (which can run for minutes) and compare against the SAME
   // pin, never a fresh independent read: a HEAD swap during the gate, or an uncommitted edit to a tracked
   // file with HEAD left untouched (the card 975c774b dirty-worktree shape), both fail this the same way.
-  const postGateStamp = await computeWorktreeGateStamp(batchWorktreePath, { timeoutMs: deps.timeoutMs, gitFactory: deps.gitFactory });
+  // @decision 3a5c5d4a (round 5, merge note a) — a restored post-gate HEAD re-read here (trustedMainRoot
+  // and all) IS the original worker-writable-HEAD hole 043d83d2 closes; the pinned tip is never
+  // second-guessed by a live read again, no matter how trustworthy the read itself is made.
+  const postGateStamp = await computeWorktreeGateStamp(batchWorktreePath, { timeoutMs: deps.timeoutMs, gitFactory: deps.gitFactory, trustedMainRoot: defaultTrustedMainRoot(repoPath) });
   const pinnedPreStamp: WorktreeGateStamp = { head: assembledTipSha, dirty: preGateStamp.dirty, dirtyHash: preGateStamp.dirtyHash };
   if (gateStampsDiffer(pinnedPreStamp, postGateStamp)) {
     return {

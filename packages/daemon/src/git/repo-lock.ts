@@ -118,6 +118,14 @@ export function canonicalRepoLockKey(repoPath: string): string {
   return process.platform === "win32" ? toplevel.toLowerCase() : toplevel;
 }
 
+/** @decision 3a5c5d4a (round 5) — never swap this for {@link canonicalRepoLockKey} (fs-walking) as a
+ *  commondir-trust-pin lookup key: a WALK-derived key is as steerable as whatever `p` resolves to on
+ *  disk NOW, so a swapped `p` would find a DIFFERENT pin row instead of failing its live-vs-pin check. */
+export function literalRepoPathKey(p: string): string {
+  const resolved = path.resolve(p).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 /**
  * Resolve the two git-dir roles `repoPath`'s `.git` entry actually implies, fs-only sync, no `git` spawn —
  * the SYNC TWIN of `git/worktrees.ts`'s `resolveGitDirs` (that one stays async: it sits on the merged-map/

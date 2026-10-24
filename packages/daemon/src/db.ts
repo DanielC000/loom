@@ -7,6 +7,8 @@ import { DB_PATH, DAEMON_TEST_DIR, questionAttachmentDir } from "./paths.js";
 import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
 import { worktreeIdentityKey } from "./git/worktrees.js";
 import { parseMainlineWatermark, mainlineWatermarkKey, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX, MAINLINE_BRANCH_TRUST_PREFIX, mainlineBranchTrustKey, type MainlineWatermark } from "./git/mainline-watch.js";
+import { resolveTrustedToplevel, type CommondirTrustPin } from "./git/bounded.js";
+import { literalRepoPathKey } from "./git/repo-lock.js";
 // `secretEnvelopeByteLength` (card 82b22817) is the ONE deliberate exception to this file never touching
 // crypto: it derives a SIZE from the ciphertext's own structure, never decrypts, never sees plaintext —
 // see toQuestion's own comment at `credentialByteLength` for why this stays consistent with "this layer
@@ -1591,6 +1593,14 @@ const COMPANION_HOME_KEY_LEGACY = "companion_home";
  * never a single exact-key delete like COMPANION_HOME_KEY_PREFIX's.
  */
 const BOARD_READ_META_PREFIX = "board_read:";
+
+/** @decision 3a5c5d4a (round 5) — keyed by the LITERAL repoPath (via {@link literalRepoPathKey}), never
+ *  a filesystem walk of it: this is the lookup key `git/bounded.ts`'s registered resolver uses, and a
+ *  walk-derived key would be exactly as steerable as whatever repoPath currently resolves to on disk. */
+const commondirTrustPinKey = (repoPath: string): string => `commondir-trust-pin:${literalRepoPathKey(repoPath)}`;
+/** A small per-(project, repoKey) index pointing at the literal `repoPath` its pin is stored under — lets
+ *  a rebind/delete retire the right {@link commondirTrustPinKey} row without a full-table scan. */
+const commondirTrustPinIndexKey = (projectId: string, repoKey: string): string => `commondir-trust-pin-index:${projectId}:${repoKey}`;
 
 /**
  * app_meta key for the wedged-worktree tracking set (task dea6728e — the threadpool-safe redo of
@@ -3492,6 +3502,59 @@ export class Db {
       repos: JSON.stringify(p.repos ?? []),
       vaultOnly: p.vaultOnly ? 1 : 0,
     });
+    // @decision 3a5c5d4a (round 5) — pin every repoKey's toplevel at BIND time, before any worker can
+    // exist for this brand-new project. Best-effort: a path that isn't a real git repo (vault-only, or a
+    // walk failure) simply stays unpinned, which is fail-closed downstream, never fail-open.
+    for (const [repoKey, repoPath] of [["primary", p.repoPath] as [string, string], ...(p.repos ?? []).map((r): [string, string] => [r.key, r.path])]) {
+      this.pinCommondirTrust(p.id, repoKey, repoPath, "bind");
+    }
+  }
+  /**
+   * fs-only, best-effort: walks `repoPath` via {@link resolveTrustedToplevel} and, on success, records
+   * the result as THIS (project, repoKey)'s durable commondir-trust pin (overwriting any prior pin for
+   * the SAME literal path) — plus a small per-(project, repoKey) index entry so a later rebind/delete can
+   * find and retire it without a full-table scan. A walk failure (not a real git repo, or any other
+   * unresolvable shape) leaves the path unpinned and does nothing else — the caller is never told to
+   * retry; every consumer of a missing pin already fails closed.
+   */
+  private pinCommondirTrust(projectId: string, repoKey: string, repoPath: string, source: CommondirTrustPin["source"]): void {
+    const toplevel = resolveTrustedToplevel(repoPath);
+    if (!toplevel.ok) return;
+    const pin: CommondirTrustPin = { toplevel: toplevel.toplevel, pinnedAt: new Date().toISOString(), source, projectId, repoKey };
+    this.setMeta(commondirTrustPinKey(repoPath), JSON.stringify(pin));
+    this.setMeta(commondirTrustPinIndexKey(projectId, repoKey), repoPath);
+  }
+  /** Read-only lookup by the LITERAL `repoPath` string — the resolver `index.ts` registers with
+   *  `git/bounded.ts`'s `registerCommondirTrustPinLookup` at boot. Never walks the filesystem itself. */
+  getCommondirTrustPin(repoPath: string): CommondirTrustPin | null {
+    const raw = this.getMeta(commondirTrustPinKey(repoPath));
+    if (raw === undefined) return null;
+    try { return JSON.parse(raw) as CommondirTrustPin; } catch { return null; }
+  }
+  /**
+   * A one-time (idempotent — safe to call every boot) pass over every project's own `repoPath` + `repos[]`
+   * entry, pinning any (project, repoKey) that has no pin yet. Trust-on-first-use for a binding that
+   * predates this feature: the walk at THIS boot cannot prove the repo was untouched by a worker before
+   * now, so a non-empty result ALWAYS files one `commondir_trust_pinned` durable event itself (never left
+   * to the caller to remember) — named a residual there and in `docs/decisions/3a5c5d4a`'s round-5 section.
+   */
+  backfillCommondirTrustPins(): { backfilled: number; pins: Array<{ projectId: string; repoKey: string }> } {
+    const pins: Array<{ projectId: string; repoKey: string }> = [];
+    for (const project of [...this.listAllProjects(), ...this.listArchivedProjects()]) {
+      for (const [repoKey, repoPath] of [["primary", project.repoPath] as [string, string], ...project.repos.map((r): [string, string] => [r.key, r.path])]) {
+        if (this.getCommondirTrustPin(repoPath)) continue; // already pinned (bind/rebind, or an earlier boot's backfill) — nothing to do
+        const before = this.getMeta(commondirTrustPinKey(repoPath));
+        this.pinCommondirTrust(project.id, repoKey, repoPath, "boot-backfill");
+        if (this.getMeta(commondirTrustPinKey(repoPath)) !== before) pins.push({ projectId: project.id, repoKey });
+      }
+    }
+    if (pins.length > 0) {
+      this.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "",
+        kind: "commondir_trust_pinned", detail: { count: pins.length, pins },
+      });
+    }
+    return { backfilled: pins.length, pins };
   }
   /**
    * Partial STRUCTURAL edit of a project. Deliberately does NOT touch config (see setProjectConfig).
@@ -3530,9 +3593,21 @@ export class Db {
     const norm = (p: string): string => { const r = path.resolve(p).replace(/[\\/]+$/, ""); return process.platform === "win32" ? r.toLowerCase() : r; };
     const oldPaths = new Map<string, string>([["primary", before.repoPath], ...before.repos.map((r): [string, string] => [r.key, r.path])]);
     const newPaths = new Map<string, string>([["primary", patch.repoPath ?? before.repoPath], ...(patch.repos ?? before.repos).map((r): [string, string] => [r.key, r.path])]);
+    // @decision 3a5c5d4a (round 5) — a BRAND NEW repoKey never appears in `oldPaths`, so the loop below
+    // (which only walks OLD keys) can never visit it. Pin it here, first.
+    for (const [repoKey, to] of newPaths) {
+      if (!oldPaths.has(repoKey)) this.pinCommondirTrust(id, repoKey, to, "bind");
+    }
     for (const [repoKey, from] of oldPaths) {
       const to = newPaths.get(repoKey);
-      if (to !== undefined && (!from || !to ? from === to : norm(from) === norm(to))) continue;
+      const pathChanged = !(to !== undefined && (!from || !to ? from === to : norm(from) === norm(to)));
+      // @decision 3a5c5d4a (round 5) — pin the NEW path and retire the OLD one on every real path
+      // change, independent of the watermark-state early `continue` right after this block.
+      if (pathChanged) {
+        if (to !== undefined) this.pinCommondirTrust(id, repoKey, to, "rebind");
+        this.deleteMeta(commondirTrustPinKey(from));
+      }
+      if (!pathChanged) continue;
       const wKey = `mainline-watermark:${id}:${repoKey}`;
       const aKey = `mainline-boot-alerted:${id}:${repoKey}`;
       const rawMarker = this.getMeta(aKey);
@@ -3980,6 +4055,13 @@ export class Db {
       // first or the final `DELETE FROM projects` below throws for any project that has ever landed.
       this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_BRANCH_TRUST_PREFIX}${id}:%`); // card 2a6a292a round 21
+      // @decision 3a5c5d4a (round 5) — the pin is keyed by LITERAL repoPath, not projectId, so it can't
+      // be swept by a `LIKE '<prefix>${id}:%'` like the mainline keys above; walk this project's own
+      // small index instead to find which path-keyed rows belong to it.
+      for (const row of this.listMetaByPrefix(`commondir-trust-pin-index:${id}:`)) {
+        this.deleteMeta(commondirTrustPinKey(row.value));
+        this.deleteMeta(row.key);
+      }
       // Card af08f7e8: delivered_credentials.project_id is a NOT NULL FK (enforced) with no session/agent
       // tie — deleteSession/deleteAgent never touch it (that's the point), but deleteProject genuinely
       // removes the project itself, so this must be cascaded explicitly or the transaction aborts.

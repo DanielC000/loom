@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
 import { killGateProcessTree } from "../orchestration/gate-runner.js";
 import { assertRepoNotQuarantined } from "./merge-quarantine.js";
-import { RepoQuarantinedError, resolveGitDirsSync } from "./repo-lock.js";
+import { RepoQuarantinedError, findExistingAncestorRealpath, resolveGitDirsSync } from "./repo-lock.js";
 import { WIN_JOB_LAUNCHER_PATH, LOOM_HOME } from "../paths.js";
 
 /**
@@ -76,7 +76,10 @@ export function isGitIdentityUnresolvedError(e: unknown): boolean {
 
 /** @decision 2267e8fa — never drop this `withTimeout` wrap: a never-settling `git var` must not silently
  *  widen the caller's own total-elapsed bound. True iff `<varName>` resolves on `probeGit`; any OTHER
- *  probe failure is treated as resolvable — see {@link resolveGitIdentityFallbackArgs}. */
+ *  probe failure is treated as resolvable — see {@link resolveGitIdentityFallbackArgs}.
+ *  @decision 3a5c5d4a (Code Review round 3, B2) — EXCEPT a {@link CanonicalGitRefusal}: that means the
+ *  probe was refused by `checkCommondirTrust` (an unverified/redirected repo), not that identity is fine
+ *  — PROPAGATE it rather than reading the refusal as "resolvable"; the caller must fail closed. */
 async function probeGitIdentResolvable(
   probeGit: Pick<SimpleGit, "raw">,
   varName: "GIT_AUTHOR_IDENT" | "GIT_COMMITTER_IDENT",
@@ -86,6 +89,7 @@ async function probeGitIdentResolvable(
     await withTimeout(probeGit.raw(["var", varName]), timeoutMs, `git var ${varName}`);
     return true;
   } catch (e) {
+    if (e instanceof CanonicalGitRefusal) throw e;
     return !isGitIdentityUnresolvedError(e);
   }
 }
@@ -116,19 +120,37 @@ export function buildGitIdentityFallbackEnv(authorResolvable: boolean, committer
  *  matter what locale the host or the caller's real instance runs under, while the real commit's own
  *  env is untouched — never built from this merged probe env.
  *
- *  @decision 2267e8fa (card 7b59e981) — returns PER-ROLE env overrides ({@link buildGitIdentityFallbackEnv}), merged by the
- *  caller into the real commit's own explicit env (never `.env()` on an existing instance). Never throws: a
- *  synchronous `makeProbeGit` construct failure degrades to resolvable ({}) — some callers have no try/catch. */
+ *  Returns PER-ROLE env overrides ({@link buildGitIdentityFallbackEnv}), merged by the caller into the
+ *  real commit's own explicit env (never `.env()` on an existing instance). Never throws except to
+ *  propagate a {@link CanonicalGitRefusal} (round 3, B2, below) — a synchronous `makeProbeGit` construct
+ *  failure still degrades to resolvable ({}); some callers have no try/catch for that narrower case.
+ *  @decision 2267e8fa (card 7b59e981) — the ONE shared identity-fallback decision; never re-duplicate it.
+ *
+ *  `trustedMainRoot` (round 3, B2): every production call site hands `cwd` a worker's own worktree, and
+ *  this 3-arg `makeProbeGit` signature has nowhere to carry a trusted root of its own — so when no
+ *  `makeProbeGit` override is supplied (the production case; `identityProbeGitFactory` is a TEST SEAM
+ *  only), this function builds its OWN default probe via `canonicalGit`, THREADING `trustedMainRoot`
+ *  through properly, rather than calling `canonicalGit` bare. A real regression shipped before this: the
+ *  bare 3-arg default left `trustedMainRoot` undefined, the probe's own `git var` read started being
+ *  REFUSED post-round-2, and {@link probeGitIdentResolvable}'s catch (by design) used to treat ANY
+ *  non-identity-shaped error as "resolvable" — silently skipping fallback-identity injection, so the real
+ *  commit that followed failed with git's own "unable to auto-detect email address" on a host with no
+ *  configured identity. Closed two ways at once: (1) every caller now threads the REAL trusted root here,
+ *  and (2) {@link probeGitIdentResolvable} itself now re-throws a {@link CanonicalGitRefusal} instead of
+ *  reading it as resolvable, so even a caller that forgets to thread one fails CLOSED (the whole fallback
+ *  decision aborts) rather than silently guessing against an unverified repo. */
 export async function resolveGitIdentityFallbackArgs(
   cwd: string,
   timeoutMs: number,
-  makeProbeGit: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw"> = canonicalGit,
+  makeProbeGit?: (cwd: string, timeoutMs: number, env: Record<string, string | undefined>) => Pick<SimpleGit, "raw">,
   baseEnv?: Record<string, string | undefined>,
+  trustedMainRoot?: string,
 ): Promise<Record<string, string>> {
   const probeEnv = localReadGitEnv(baseEnv ?? process.env, { LC_ALL: "C", LANGUAGE: "C" });
+  const resolvedMakeProbeGit = makeProbeGit ?? ((p, ms, env) => canonicalGit(p, ms, env, undefined, undefined, trustedMainRoot));
   let probeGit: Pick<SimpleGit, "raw">;
   try {
-    probeGit = makeProbeGit(cwd, timeoutMs, probeEnv);
+    probeGit = resolvedMakeProbeGit(cwd, timeoutMs, probeEnv);
   } catch {
     return {};
   }
@@ -661,7 +683,7 @@ function rawViaDirectSpawn(
   return new Promise<string>((resolve, reject) => {
     const child = spawnImpl(gitBin, args, {
       cwd: repoPath,
-      env: prepareCanonicalEnv(env),
+      env: prepareCanonicalEnv(env, repoPath),
       windowsHide: true,
       detached: process.platform !== "win32",
     });
@@ -749,7 +771,7 @@ function rawViaWinJobLauncher(
       // launcher independently refuses a non-absolute value too (defense in depth, never trust-only).
       child = spawnImpl(resolveWinJobLauncherPath(), ["run", nonce, gitExePath, ...args], {
         cwd: repoPath,
-        env: prepareCanonicalEnv(env),
+        env: prepareCanonicalEnv(env, repoPath),
         windowsHide: true,
         detached: false,
       });
@@ -965,6 +987,70 @@ export function treeDeathConfirmed(e: unknown): boolean {
  * default) for every existing caller — byte-identical argv. Ignored on the `gitFactory` test-seam branch,
  * same as `env`/`onTreeDeathSettled` above (a fake `.raw()` builds its own argv, if any).
  */
+/**
+ * A durable (project, repoKey) trust anchor: the repo toplevel a trusted walk found at project
+ * BIND/REBIND time (before any worker exists for that binding), or, for a binding that predates this
+ * feature, a one-time boot BACKFILL.
+ * @decision 3a5c5d4a (round 5) — never re-derive this per call; a per-call walk cannot be a trust
+ * source — comparing a walk to a second walk of the same path can never fail, pinned or not.
+ */
+export interface CommondirTrustPin {
+  toplevel: string;
+  pinnedAt: string;
+  source: "bind" | "rebind" | "boot-backfill";
+  projectId: string;
+  repoKey: string;
+}
+
+export type CommondirTrustPinLookup = (repoPath: string) => CommondirTrustPin | null;
+
+let commondirTrustPinLookup: CommondirTrustPinLookup | undefined;
+
+/**
+ * The ONE registration point breaking the `git/bounded.ts` ↔ `db.ts` import cycle a direct `Db`
+ * dependency here would create. `index.ts` calls this once at boot, right after `new Db()`, wiring
+ * `db.getCommondirTrustPin` in — the production-use counterpart of the test-only
+ * `setWinJobLauncherOverrideForTest` pattern above.
+ * @decision 3a5c5d4a (round 5) — an unregistered resolver means "no pin ever found" everywhere below:
+ * fails CLOSED for a subdir-bound repo, a pure no-op for an ordinary repo with its own `.git`.
+ */
+export function registerCommondirTrustPinLookup(fn: CommondirTrustPinLookup | undefined): void {
+  commondirTrustPinLookup = fn;
+}
+
+/**
+ * True iff a durable pin exists for `repoPath` AND a LIVE walk from `repoPath` right now resolves to the
+ * EXACT same toplevel the pin recorded. {@link checkCommondirTrust}'s own top-of-function gate and
+ * {@link defaultTrustedMainRoot} both call this rather than each re-deriving the comparison.
+ * @decision 3a5c5d4a (round 5) — the walk is VERIFICATION here, never the trust source: compared only
+ * against an independently-recorded anchor (the pin), never against another walk of the same path.
+ */
+function liveToplevelMatchesPin(repoPath: string, pin: CommondirTrustPin): boolean {
+  const live = resolveTrustedToplevel(repoPath);
+  const caseFold = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+  return live.ok && caseFold(live.toplevel) === caseFold(pin.toplevel);
+}
+
+/**
+ * For `p` with its OWN `.git` directly, returns `p` unchanged (nothing to verify). For `p` with none (a
+ * subdir-bound repo), consults the durable pin, falling back to `p` on no-pin-or-mismatch (preserving
+ * the pre-existing "ends in a downstream refusal" contract). The ONE shared default every bare,
+ * no-`trustedMainRoot` caller gets — never re-derive this per call site.
+ * @decision 3a5c5d4a (round 4, B-1; round 5) — the subdir case now consults {@link liveToplevelMatchesPin}
+ * (a durable pin, verified live) — never a bare per-call walk compared to itself.
+ */
+export function defaultTrustedMainRoot(p: string): string {
+  let hasOwnGit: boolean;
+  try { fs.lstatSync(path.join(p, ".git")); hasOwnGit = true; } catch { hasOwnGit = false; }
+  if (hasOwnGit) return p;
+  const pin = commondirTrustPinLookup?.(p);
+  if (pin && liveToplevelMatchesPin(p, pin)) return pin.toplevel;
+  return p;
+}
+
+/** @decision 3a5c5d4a (round 3, then round 4 B-1) — `trustedMainRoot` defaults to
+ *  `defaultTrustedMainRoot(quarantineRepoPath)`, never `quarantineRepoPath`/`repoPath` directly: that
+ *  resolves the REAL toplevel (never a worktree's own indirection, and never a bound SUBDIR verbatim). */
 export async function killableCanonicalRaw(
   repoPath: string,
   args: string[],
@@ -975,13 +1061,15 @@ export async function killableCanonicalRaw(
   onTreeDeathSettled?: (confirmed: boolean) => void,
   quarantineRepoPath: string = repoPath,
   extraConfigArgs?: string[],
+  trustedMainRoot: string = defaultTrustedMainRoot(quarantineRepoPath),
+  commondirOpts?: CheckCommondirTrustOpts,
 ): Promise<string> {
   const quarantineCheck = assertRepoNotQuarantined(quarantineRepoPath);
   if (!quarantineCheck.ok) throw new RepoQuarantinedError(quarantineCheck.reason);
   if (gitFactory) return withTimeout(gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
   const controller = new AbortController();
   return withTimeoutKillingChild(
-    canonicalRaw(spawnCanonicalGitTree(repoPath, env, controller.signal, timeoutMs, onTreeDeathSettled, undefined, extraConfigArgs), args),
+    canonicalRaw(spawnCanonicalGitTree(repoPath, env, controller.signal, timeoutMs, onTreeDeathSettled, undefined, extraConfigArgs), args, repoPath, trustedMainRoot, undefined, commondirOpts),
     timeoutMs, label, controller,
   );
 }
@@ -1268,10 +1356,474 @@ export class CanonicalGitRefusal extends Error {
   constructor(message: string) { super(message); this.name = "CanonicalGitRefusal"; }
 }
 
-/** One shared way to describe a git failure in a result `reason`: the first line of the message (capped), and whether it was a {@link CanonicalGitRefusal} (nothing changed). */
-export function describeGitFailure(e: unknown): { text: string; refusal: boolean } {
+/**
+ * The DISTINCT subclass of {@link CanonicalGitRefusal} thrown by {@link checkCommondirTrust} — a
+ * worker-plantable `.git`/`commondir` redirect (card 3a5c5d4a), never a merge-driver refusal. Kept as a
+ * genuine subclass (not a flag on the base class) so `instanceof CanonicalGitRefusal` stays true for both
+ * — every existing `refusal`-gated call site (resetOrSkip-skip, "nothing changed" messaging) keeps working
+ * unchanged — while a caller that wants to render this ONE kind distinctly (see
+ * {@link describeGitFailure}'s `commondirRedirect` field) can `instanceof` it directly.
+ *
+ * @decision 3a5c5d4a — never cache this outcome (same posture as every other `CanonicalGitRefusal`): a
+ * redirect is a worker-controlled, call-time condition, not a durable repo fact.
+ */
+export class CanonicalGitCommondirRefusal extends CanonicalGitRefusal {
+  constructor(message: string) { super(message); this.name = "CanonicalGitCommondirRefusal"; }
+}
+
+/**
+ * ANOTHER distinct subclass of {@link CanonicalGitRefusal} (Code Review round 2, S1) — thrown when
+ * {@link checkCommondirTrust} refuses because `trustedMainRoot` resolves to the SAME path as `repoPath`
+ * for a FILE-shaped `.git` (the bound repo is itself a linked git worktree — card ec4afbe9 — OR a caller
+ * forgot to thread the real main root; the two are structurally indistinguishable from this check's own
+ * inputs, so both get this ONE honest classification). Deliberately NOT a {@link CanonicalGitCommondirRefusal}:
+ * that subclass's own rendering names a worker-planted ATTACK and tells a human to go hunt for one, which
+ * would be actively misleading here — there is no redirect to find, just an unsupported repo shape.
+ */
+export class CanonicalGitBoundWorktreeRefusal extends CanonicalGitRefusal {
+  constructor(message: string) { super(message); this.name = "CanonicalGitBoundWorktreeRefusal"; }
+}
+
+/**
+ * A THIRD distinct subclass of {@link CanonicalGitRefusal} (round 5) — thrown when
+ * {@link checkCommondirTrust} refuses a subdir-bound `repoPath` (no `.git` of its own) because NO durable
+ * commondir-trust pin is recorded for it. Deliberately NOT a {@link CanonicalGitCommondirRefusal}: there
+ * is nothing to escalate-and-go-hunt-for here, just a binding that hasn't been pinned yet (a boot
+ * backfill or a project rebind establishes one) — the commondir-redirect wording would misdescribe this
+ * as an active attack when it's usually just a daemon that hasn't restarted since this feature shipped.
+ */
+export class CanonicalGitUnpinnedRefusal extends CanonicalGitRefusal {
+  constructor(message: string) { super(message); this.name = "CanonicalGitUnpinnedRefusal"; }
+}
+
+/** One shared way to describe a git failure in a result `reason`: the first line of the message (capped), whether it was a {@link CanonicalGitRefusal} (nothing changed), and three narrower flags nested inside that — whether it was specifically a {@link CanonicalGitCommondirRefusal} (a commondir redirect, not a merge-driver refusal), a {@link CanonicalGitBoundWorktreeRefusal} (the bound repo is itself a linked worktree), or a {@link CanonicalGitUnpinnedRefusal} (a subdir-bound repo with no durable pin yet) — so a caller can render each case distinctly rather than the generic "refused, nothing changed". */
+export function describeGitFailure(e: unknown): { text: string; refusal: boolean; commondirRedirect: boolean; boundRepoIsWorktree: boolean; unpinned: boolean } {
   const text = String((e as Error)?.message ?? e).split(/\r?\n/, 1)[0]!.slice(0, 400);
-  return { text, refusal: e instanceof CanonicalGitRefusal };
+  return {
+    text,
+    refusal: e instanceof CanonicalGitRefusal,
+    commondirRedirect: e instanceof CanonicalGitCommondirRefusal,
+    boundRepoIsWorktree: e instanceof CanonicalGitBoundWorktreeRefusal,
+    unpinned: e instanceof CanonicalGitUnpinnedRefusal,
+  };
+}
+
+/**
+ * The shared `reason` text for a failed/refused canonical git call — every render site across
+ * `worktrees.ts`/`batch-merge.ts` composes its `reason` from {@link describeGitFailure}'s result; this
+ * is the ONE place that decides the wording.
+ *
+ * @decision 3a5c5d4a — `d.commondirRedirect` renders DISTINCTLY (names the mechanism, says plainly this
+ * needs human escalation) from the generic "refused, nothing changed" every other refusal gets — that
+ * generic wording reads as routine/retry-shaped, which this specifically is not.
+ *
+ * @decision 3a5c5d4a (Code Review round 2, S1) — `d.boundRepoIsWorktree` ALSO renders distinctly, but
+ * with an honest "not supported" wording — never the commondir-redirect's attack/escalation language
+ * alone, which would misdescribe the ORDINARY case (there is no planted pointer to go find there).
+ *
+ * The `boundRepoIsWorktree` text ALSO names the escalation possibility explicitly, never just the benign
+ * one: a worker could swap the MAIN's own DIRECTORY `.git` for a FILE specifically to turn a real
+ * redirect into this quieter message instead of the commondir-redirect one. Deliberately placed HERE
+ * (the fixed template), never appended to `checkCommondirTrust`'s own raw reason — {@link
+ * describeGitFailure}'s `text` truncates the first line to 400 chars, measurably cutting an appended
+ * sentence off mid-word there.
+ * @decision 3a5c5d4a (round 3, S4) — the escalation sentence lives in the fixed template, never the raw reason.
+ */
+export function canonicalFailureMessage(d: { text: string; refusal: boolean; commondirRedirect: boolean; boundRepoIsWorktree: boolean; unpinned: boolean }, fallbackText: string): string {
+  if (d.commondirRedirect) {
+    return `canonical repo redirected — refusing, nothing changed: ${d.text}. A worker-plantable .git/commondir pointed this call away from the trusted repo; this needs HUMAN escalation (ask the Platform Lead to inspect the project's shared .git and remove the planted commondir pointer) — do not retry.`;
+  }
+  if (d.boundRepoIsWorktree) {
+    return `refused, nothing changed: ${d.text}. The project's bound repo is itself a linked git worktree, which the canonical git path does not support verifying (card ec4afbe9) — this needs a human to re-bind the project at its real main checkout. If you did not intentionally bind this project to a worktree, treat this as a possible redirect instead and escalate to the Platform Lead to inspect the project's shared .git — either way, do not retry.`;
+  }
+  if (d.unpinned) {
+    return `refused, nothing changed: ${d.text}. This subdir-bound repo has no durable commondir-trust pin recorded yet — this needs the daemon's boot backfill (restart) or a project rebind to establish one, not a retry. If you did not expect this project to be subdir-bound at all, treat this as a possible redirect instead and escalate to the Platform Lead to inspect the project's shared .git.`;
+  }
+  return d.refusal ? `refused, nothing changed: ${d.text}` : fallbackText;
+}
+
+/**
+ * Options narrowing {@link checkCommondirTrust}'s behavior for a SPECIFIC, reviewed call site — never a
+ * general escape hatch. `commondirCheck: "advisory-read"` restores the pre-round-2 permissive behavior
+ * (`{ok:true}`) for TWO cases that used to be silently permissive by omission: a FILE-shaped `.git` with
+ * no `trustedMainRoot` at all (round 2), and (round 3, second review) a MISSING `.git` entirely (P4) —
+ * widened, in the SAME pass, to also skip {@link prepareCanonicalEnv}'s `GIT_CEILING_DIRECTORIES` pin,
+ * since pinning it would defeat the exact parent-walk this opt-out exists to allow. It does NOT bypass
+ * the DIRECTORY-shape check above, nor the {@link CanonicalGitBoundWorktreeRefusal} case below — both
+ * run unconditionally regardless of this flag. Used at EVERY `boundedGit`-backed call with no
+ * `trustedMainRoot` of its own (`git/worktrees.ts`'s ~20-caller read-mostly/worktree-scoped helper,
+ * five of its own `deps.trustedMainRoot`-less reads) and `detectShallowCanonicalRepo`'s subdir-bound-
+ * repo fallback — never restated as an exhaustive list here; grep `commondirCheck: *"advisory-read"` /
+ * `BOUNDED_GIT_ADVISORY_READ` for the live call-site set.
+ * @decision 3a5c5d4a (Code Review round 2, S2) — use this ONLY at a call site that is read-only (never
+ * feeds a mutating git call) and already documents, at its own call site, why a forged pointer there
+ * costs nothing beyond a misleading read — never add it to silence a refusal without that review.
+ * @decision 3a5c5d4a (round 5) — it ALSO does not bypass the durable-pin check {@link checkCommondirTrust}
+ * now runs first, unconditionally: once a pin exists for repoPath, a live mismatch always refuses,
+ * advisory-read or not — the flag only ever covers the "nothing to verify against yet" cases above.
+ */
+export interface CheckCommondirTrustOpts {
+  commondirCheck?: "advisory-read";
+}
+
+/**
+ * fs-only pre-check, re-run on EVERY canonical git call, before even the merge-driver enumeration
+ * {@link canonicalRaw} runs right after this: does `repoPath`'s `.git` carry (or point through) a
+ * `commondir` that could redirect every object/ref/config read AND write for THIS call away from the
+ * repo the caller actually trusts? Mirrors `resolveGitDirsSync`'s own two `.git` shapes, but never treats
+ * a DIRECTORY `.git`'s own `commondir` file as legitimate, and for the FILE shape (a linked worktree)
+ * verifies the resolved commondir — AND the gitdir pointer itself — against `trustedMainRoot`, rather
+ * than trusting whatever the pointer currently says.
+ *
+ * @decision 3a5c5d4a — never derive trust from the worktree's own files alone, and never default
+ * `trustedMainRoot` to `repoPath` itself for a FILE-shaped `.git` (it would compare against the
+ * worktree's own path, not the real main).
+ *
+ * The FILE-shape parse below is STRICT, matching git's own `read_gitfile_gently`/`get_common_dir_noenv`
+ * rather than a loose regex: byte-0 `"gitdir: "`, strip ALL trailing CR/LF (round 3 correction — see
+ * below), refuse on any FURTHER embedded CR/LF or leading/trailing whitespace WITHIN the value, resolve a
+ * RELATIVE value against the `.git` FILE's own directory (round 3, S1 — git >= 2.48 can write one), and
+ * refuse a drive-less rooted value on win32 (round 3, S2 — ambiguous which drive it resolves against).
+ * The resolved value must name a REAL directory sitting EXACTLY one segment under the trusted main's own
+ * `.git/worktrees/`, that registry entry must not itself be a symlink/junction, and its `commondir` must
+ * exist and be the EXACT literal `"../.."` a real `git worktree add` writes, itself realpath-resolving to
+ * the trusted main's own `.git`. A loose parser here measurably diverged from git's own on 4/4 tested
+ * whitespace shapes (Code Review round 2, B1). **Round 3 correction: "never falls through to `{ok:true}`
+ * on anything it cannot verify" was an OVERCLAIM — round 2 itself still fell through to `{ok:true}` on
+ * TWO unverifiable shapes (a missing `commondir` once already proven under the trusted worktrees dir, and
+ * a missing `.git` entirely), both closed in round 3 (B1/P2, B1/P4 below).** What IS true, and was true
+ * in round 2 too: once the `.git` FILE's own `"gitdir: "` prefix is confirmed, this function never silently
+ * ACCEPTS a shape it could not positively verify — it either verifies or refuses; the round-3 fix closed
+ * the gap between that intent and two spots where the code didn't yet live up to it.
+ * @decision 3a5c5d4a (round 3, B1) — closes the two `{ok:true}` fallbacks round 2's own claim missed.
+ *
+ * A `trustedMainRoot` resolving to the SAME path as `repoPath` (the bound repo is itself a linked
+ * worktree, card ec4afbe9) is refused with its own distinct {@link CanonicalGitBoundWorktreeRefusal}
+ * classification, checked BEFORE the "no trustedMainRoot at all" branch and never bypassed by `opts`.
+ * @decision 3a5c5d4a (round 2, S1) — classify that case honestly; never the redirect/attack wording.
+ *
+ * A FILE-shaped `.git` with NO `trustedMainRoot` at all now fails closed by default (the pre-round-2 code
+ * returned `{ok:true}` here — a silent gap this tightens) unless the caller opts out via
+ * `opts.commondirCheck:"advisory-read"` for a specific, reviewed read-only call site — see
+ * {@link CheckCommondirTrustOpts}.
+ * @decision 3a5c5d4a (round 2, S2) — fail closed by default; opt out only per-site, reviewed, read-only.
+ *
+ * Round 5: ALL of the above now runs only once no durable commondir-trust pin exists for `repoPath` at
+ * all. When one does, it is consulted FIRST, unconditionally, ahead of every shape dispatch below — see
+ * the top of the function body and {@link liveToplevelMatchesPin}'s own doc.
+ */
+// @decision 3a5c5d4a (round 4, B-2) — a gitdir-pointer value may carry a leading run of ".." segments
+// (git's real `--relative-paths` shape) but no OTHER "." or ".." segment: one embedded past that run
+// (e.g. "J/../T") physically escapes a worker-planted symlink on a real POSIX realpath walk.
+function hasDisallowedDotSegment(rawValue: string): boolean {
+  const segments = rawValue.split(/[\\/]/);
+  let i = 0;
+  while (i < segments.length && segments[i] === "..") i++;
+  return segments.slice(i).some((seg) => seg === "." || seg === "..");
+}
+
+/**
+ * @decision 3a5c5d4a (round 4, B-1) — walks up from `startPath` to the FIRST ancestor carrying a `.git`,
+ * requires it to be a plain directory with no `commondir`, returns its realpath. Supports a project
+ * legitimately BOUND to a subdirectory of its repo — see {@link checkCommondirTrust}'s own P4 branch.
+ */
+export function resolveTrustedToplevel(startPath: string): { ok: true; toplevel: string } | { ok: false; reason: string } {
+  const caseFold = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+  let current: string;
+  try { current = fs.realpathSync.native(path.resolve(startPath)); }
+  catch { return { ok: false, reason: `canonicalGit: refusing — "${startPath}" does not resolve to a real, existing directory (docs/decisions/3a5c5d4a).` }; }
+  for (;;) {
+    const gitPath = path.join(current, ".git");
+    let lstatSelf: fs.Stats | undefined;
+    try { lstatSelf = fs.lstatSync(gitPath); } catch { /* no .git here — keep walking up */ }
+    if (lstatSelf) {
+      if (lstatSelf.isSymbolicLink()) {
+        return { ok: false, reason: `canonicalGit: refusing — "${gitPath}" (the first ".git" found walking up from "${startPath}") is a symlink/junction, not a real directory git created (docs/decisions/3a5c5d4a).` };
+      }
+      if (!lstatSelf.isDirectory()) {
+        return { ok: false, reason: `canonicalGit: refusing — "${gitPath}" (the first ".git" found walking up from "${startPath}") is a FILE, not a plain checkout directory — refusing rather than treating a worktree/submodule pointer as a repo toplevel (docs/decisions/3a5c5d4a).` };
+      }
+      if (fs.existsSync(path.join(gitPath, "commondir"))) {
+        return { ok: false, reason: `canonicalGit: refusing — "${gitPath}" (the first ".git" found walking up from "${startPath}") carries its own "commondir" file — a real repo toplevel's own .git directory never legitimately has one (docs/decisions/3a5c5d4a).` };
+      }
+      return { ok: true, toplevel: current };
+    }
+    const parent = path.dirname(current);
+    if (caseFold(parent) === caseFold(current)) {
+      return { ok: false, reason: `canonicalGit: refusing — walking up from "${startPath}" reached the filesystem root without finding any ".git" (docs/decisions/3a5c5d4a).` };
+    }
+    current = parent;
+  }
+}
+
+export function checkCommondirTrust(
+  repoPath: string,
+  trustedMainRoot?: string,
+  opts?: CheckCommondirTrustOpts,
+): { ok: true } | { ok: false; reason: string; kind: "redirect" | "boundRepoIsWorktree" | "unpinned" } {
+  const gitPath = path.join(repoPath, ".git");
+  const caseFold = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+  const normalizeExisting = (p: string): string => caseFold(findExistingAncestorRealpath(p));
+  const stripAllTrailingCRLF = (s: string): string => {
+    let out = s;
+    while (out.endsWith("\n") || out.endsWith("\r")) out = out.slice(0, -1);
+    return out;
+  };
+
+  // @decision 3a5c5d4a (round 5) — consult the pin WHENEVER ONE EXISTS for repoPath, unconditionally,
+  // before any shape dispatch below: a worker who plants a .git AT (or an intermediate ancestor of) a
+  // pinned path must not slip past this into the DIRECTORY/missing branches below by changing the shape.
+  const pin = commondirTrustPinLookup?.(repoPath);
+  if (pin) {
+    if (liveToplevelMatchesPin(repoPath, pin)) return { ok: true };
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${repoPath}" has a durable commondir-trust pin (toplevel "${pin.toplevel}", pinned ${pin.pinnedAt}) but its LIVE toplevel right now does not match it — refusing rather than trusting a repo that no longer matches what was pinned before any worker could have tampered with it (docs/decisions/3a5c5d4a round 5).`,
+    };
+  }
+
+  // @decision 3a5c5d4a (round 5) — a MISSING `.git` with NO pin refuses, full stop; `trustedMainRoot`
+  // plays no role here any more — round 4's walk-and-compare-to-itself was vacuous, never a real check.
+  let lstatSelf: fs.Stats;
+  try { lstatSelf = fs.lstatSync(gitPath); }
+  catch {
+    if (opts?.commondirCheck === "advisory-read") return { ok: true };
+    return {
+      ok: false,
+      kind: "unpinned",
+      reason: `canonicalGit: refusing — "${gitPath}" does not exist, and no durable commondir-trust pin is recorded for "${repoPath}" — refusing rather than letting git discover a DIFFERENT .git by walking up parent directories, or trusting an unpinned subdir binding (docs/decisions/3a5c5d4a round 5). If this repo is genuinely meant to be subdir-bound, this needs the daemon's boot backfill (restart) or a project rebind to establish a pin.`,
+    };
+  }
+
+  // B1/P1/P7: `.git` itself must never be a symlink/junction, for EITHER shape — a worker could
+  // otherwise redirect a plain-file worktree pointer (or a directory main checkout) to an arbitrary
+  // decoy regardless of what that decoy's own content looks like once opened.
+  if (lstatSelf.isSymbolicLink()) {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${gitPath}" is itself a symlink/junction, not a real file or directory git created — refusing rather than trusting a redirected .git entry (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  if (lstatSelf.isDirectory()) {
+    // B1/P1/P7: a DIRECTORY `.git` is legitimate ONLY for the trusted main checkout itself. A worker's
+    // own worktree never legitimately has one — the pre-round-3 code trusted ANY directory `.git` with
+    // no internal `commondir` file as if it were a real main checkout, letting a worker replace their
+    // OWN worktree's `.git` wholesale (a copy, or a junction, of an unrelated standalone repo) and have
+    // every canonical call silently operate on that decoy instead.
+    if (trustedMainRoot !== undefined && normalizeExisting(trustedMainRoot) !== normalizeExisting(repoPath)) {
+      return {
+        ok: false,
+        kind: "redirect",
+        reason: `canonicalGit: refusing — "${repoPath}" is not the trusted main checkout ("${trustedMainRoot}"), so its DIRECTORY-shaped .git ("${gitPath}") is illegitimate — a worker's own worktree never legitimately has one; refusing rather than trusting a replaced .git directory, possibly a copy or junction of an unrelated repo (docs/decisions/3a5c5d4a).`,
+      };
+    }
+    const commondirFile = path.join(gitPath, "commondir");
+    if (fs.existsSync(commondirFile)) {
+      return {
+        ok: false,
+        kind: "redirect",
+        reason: `canonicalGit: refusing — "${gitPath}" is a plain checkout .git DIRECTORY that also carries its own "commondir" file (${commondirFile}). A real main checkout's own top-level .git directory never legitimately has one — only a linked worktree's private .git/worktrees/<name>/ subdirectory does. This is the shape a worker-planted commondir redirect takes (docs/decisions/3a5c5d4a); refusing before running git rather than trusting it.`,
+      };
+    }
+    // Named residual (not fixed here): a WHOLESALE replacement of the trusted main's own .git directory
+    // (deleting it and recreating one with doctored refs/config/objects, while keeping the DIRECTORY
+    // shape and no internal commondir file) is invisible to this check — it has no persisted identity
+    // pin (a stored first-commit sha, inode, or similar) for the main's own .git to verify against. A
+    // redirect-style pointer check cannot catch a swap of the thing it would otherwise point AT.
+    return { ok: true };
+  }
+
+  // `.git` a FILE: a linked worktree or submodule/`--separate-git-dir` pointer.
+  if (trustedMainRoot !== undefined && normalizeExisting(trustedMainRoot) === normalizeExisting(repoPath)) {
+    // S1: structurally indistinguishable from "a caller forgot to thread the real main root" — both hand
+    // this check the identical self-referential input — so always refuse, but with an HONEST reason;
+    // never the commondir-redirect's attack/escalation wording alone, which would misdescribe this case.
+    // S4: ALSO name the possibility plainly, since a worker could swap the MAIN's own directory .git for
+    // a FILE to turn a real redirect into this honest-sounding, non-alarming message instead.
+    return {
+      ok: false,
+      kind: "boundRepoIsWorktree",
+      // @decision 3a5c5d4a (round 3, S4) — the escalation sentence lives in canonicalFailureMessage's
+      // own FIXED template for this case, never here: describeGitFailure's `text` extraction truncates
+      // the first line to 400 chars, which measurably cuts this sentence off mid-word when appended here.
+      reason: `canonicalGit: refusing — "${repoPath}" is itself a linked git worktree (its trusted main root resolves to the same path), which checkCommondirTrust does not support verifying on the canonical git path (card ec4afbe9 tracks deriving the real main checkout once, at project-bind time) — refusing rather than comparing a worktree's own commondir against itself.`,
+    };
+  }
+  if (trustedMainRoot === undefined) {
+    if (opts?.commondirCheck === "advisory-read") return { ok: true }; // reviewed, read-only call site — see its own call-site comment for why
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${repoPath}" has a FILE-shaped .git (a linked worktree or --separate-git-dir pointer) and this call supplied no trustedMainRoot to verify it against — refusing rather than trusting an unverified pointer by default (docs/decisions/3a5c5d4a). Pass trustedMainRoot, or opts.commondirCheck:"advisory-read" for a reviewed read-only call site.`,
+    };
+  }
+
+  let pointerRaw: string;
+  try { pointerRaw = fs.readFileSync(gitPath, "utf8"); } catch { return { ok: true }; }
+
+  // Strict grammar (B1), byte-0 "gitdir: ". S1/P6 (round 3 correction): strip ALL trailing CR/LF, not
+  // just one line-ending sequence — measured against the real reviewer probe that a real, untouched
+  // `git worktree add` pointer file with an EXTRA trailing blank line still resolves correctly; stripping
+  // only one left a lone trailing `\n` embedded in the value and wrongly refused it. Leading/trailing
+  // whitespace WITHIN the value (never part of a line-ending run) and any OTHER embedded CR/LF still
+  // refuse below — this only widens what counts as "the line ending", never what counts as "the value".
+  let stripped = stripAllTrailingCRLF(pointerRaw);
+
+  const GITDIR_PREFIX = "gitdir: ";
+  if (!stripped.startsWith(GITDIR_PREFIX)) return { ok: true }; // not the `gitdir: <path>` shape at byte 0 — not this check's job; git itself will fail to open a repo here
+
+  const rawValue = stripped.slice(GITDIR_PREFIX.length);
+  if (rawValue.length === 0 || /^\s/.test(rawValue) || /\s$/.test(rawValue) || /[\r\n]/.test(rawValue)) {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${gitPath}"'s gitdir pointer is not a strictly-formed single-line path (leading/trailing whitespace, an embedded CR/LF, or an empty value) — refusing a loosely-parsed pointer rather than guessing which bytes to trim (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  // @decision 3a5c5d4a (round 4, B-2) — refuse any embedded "." or ".." segment OUTSIDE a leading ".."
+  // run before doing anything else with the value; see {@link hasDisallowedDotSegment}'s own doc.
+  if (hasDisallowedDotSegment(rawValue)) {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${gitPath}"'s gitdir pointer ("${rawValue}") carries a "." or ".." path segment outside a leading run of ".." — refusing rather than resolving a pointer whose physical (symlink-aware) resolution can differ from its lexical one (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  // S1 (round 3 correction): git >= 2.48 can write a RELATIVE gitdir pointer (`worktree.useRelativePaths`
+  // / `--relative-paths`) — the round-2 code refused every relative value outright, a false refusal on a
+  // real, current git shape. Resolve it exactly as git's own `read_gitfile_gently` does: against the
+  // `.git` FILE's own containing directory, never against `repoPath` or any other base.
+  //
+  // @decision 3a5c5d4a (round 4, B-2) — NEVER `path.resolve()` this: it lexically collapses "J/.."
+  // before realpath sees it, while a real kernel resolves it PHYSICALLY through a symlink `J` —
+  // concatenate the raw string; `fs.realpathSync.native` below does the one real resolution.
+  const resolvedGitdirValue = path.isAbsolute(rawValue) ? rawValue : `${path.dirname(gitPath)}${path.sep}${rawValue}`;
+
+  // S2 (win32): an ORIGINALLY-absolute value with no drive letter or UNC root (e.g. "gitdir: /proj/...")
+  // is genuinely ambiguous on Windows — Node's own path resolution (and `fs.realpathSync`) resolves a
+  // drive-less rooted path against THIS process's current drive, while a spawned git child resolves it
+  // against ITS OWN (which can differ, e.g. a different working directory on another drive). Refuse
+  // rather than silently picking one. A RELATIVE value never hits this: `path.resolve` above already
+  // anchored it to `gitPath`'s own (real, drive-qualified) directory.
+  if (process.platform === "win32" && path.isAbsolute(rawValue) && !isAbsoluteWindowsExePath(rawValue) && !rawValue.startsWith("\\\\") && !rawValue.startsWith("//")) {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${gitPath}"'s gitdir pointer ("${rawValue}") is a drive-less rooted path on win32 — Node and a spawned git child can resolve this against DIFFERENT drives; refusing rather than guessing which one (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  // realpath the resolved value — never a SECOND path.resolve() against repoPath; resolvedGitdirValue is
+  // already absolute (either the raw value itself, or already anchored to gitPath's own directory above).
+  let realGitdir: string;
+  try { realGitdir = fs.realpathSync.native(resolvedGitdirValue); }
+  catch {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${gitPath}"'s gitdir pointer ("${rawValue}") does not resolve to an existing directory — refusing rather than trusting an unverifiable pointer (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  const trustedGitDir = path.join(trustedMainRoot, ".git");
+  const trustedWorktreesDir = path.join(trustedGitDir, "worktrees");
+  let realTrustedWorktreesDir: string;
+  try { realTrustedWorktreesDir = fs.realpathSync.native(trustedWorktreesDir); }
+  catch {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — the trusted main checkout's own "${trustedWorktreesDir}" does not exist — refusing rather than trusting a gitdir pointer with nothing to verify it against (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  if (caseFold(path.dirname(realGitdir)) !== caseFold(realTrustedWorktreesDir)) {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${repoPath}"'s .git points at "${rawValue}" (resolved: "${realGitdir}"), which is not a single-segment child of the trusted main checkout's own "${trustedWorktreesDir}" — refusing rather than trusting an unverified gitdir pointer (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  // The worktree-registry entry itself must be a REAL directory git created, not a symlink/junction a
+  // worker planted so the realpath match above comes out true vacuously (B1).
+  const worktreeName = path.basename(realGitdir);
+  const literalWorktreeEntry = path.join(trustedWorktreesDir, worktreeName);
+  let entryLstat: fs.Stats;
+  try { entryLstat = fs.lstatSync(literalWorktreeEntry); }
+  catch {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — could not lstat the trusted worktrees entry "${literalWorktreeEntry}" to verify it is a real directory, not a symlink/junction — refusing rather than trusting an unverifiable entry (docs/decisions/3a5c5d4a).`,
+    };
+  }
+  if (entryLstat.isSymbolicLink()) {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — the trusted main checkout's own worktree entry "${literalWorktreeEntry}" is itself a symlink/junction, not a real directory git created — refusing rather than trusting a redirected worktree-registry entry (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  // B1/P2 (round 3 correction): once the gitdir is PROVEN to sit directly under the trusted main's own
+  // .git/worktrees/, a MISSING or unreadable commondir must REFUSE, never fall through to `{ok:true}`.
+  // The round-2 code's "submodule/--separate-git-dir shape, nothing to redirect" reasoning for that
+  // fallback was already unreachable for a genuine submodule/`--separate-git-dir` pointer by this point
+  // (neither shape resolves under the trusted worktrees dir — the dirname check above would already have
+  // refused it), so a BARE registry entry reaching here with no commondir is exactly the shape a
+  // worker-planted "evil" directory with no internal structure takes, not a legitimate alternative.
+  let commondirPointerRaw: string;
+  try { commondirPointerRaw = fs.readFileSync(path.join(realGitdir, "commondir"), "utf8"); }
+  catch {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${realGitdir}" (a verified entry directly under the trusted main's own .git/worktrees/) carries no readable commondir file — a real \`git worktree add\` worktree always has one; refusing rather than trusting a bare registry entry as a self-contained repo (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  const commondirStripped = stripAllTrailingCRLF(commondirPointerRaw); // S1/P6: same all-trailing-CRLF strip as the gitdir pointer above
+
+  if (commondirStripped !== "../..") {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${realGitdir}"'s commondir is ${JSON.stringify(commondirStripped)}, not the exact "../.." a real \`git worktree add\` writes — refusing rather than trusting a non-standard commondir pointer (docs/decisions/3a5c5d4a).`,
+    };
+  }
+
+  let realResolvedCommonDir: string;
+  try { realResolvedCommonDir = fs.realpathSync.native(path.resolve(realGitdir, commondirStripped)); }
+  catch {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${realGitdir}"'s commondir does not resolve to an existing directory — refusing rather than trusting an unverifiable commondir pointer (docs/decisions/3a5c5d4a).`,
+    };
+  }
+  let realTrustedGitDir: string;
+  try { realTrustedGitDir = fs.realpathSync.native(trustedGitDir); }
+  catch {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — the trusted main checkout's own "${trustedGitDir}" does not exist — refusing rather than trusting a commondir pointer with nothing to verify it against (docs/decisions/3a5c5d4a).`,
+    };
+  }
+  if (caseFold(realResolvedCommonDir) !== caseFold(realTrustedGitDir)) {
+    return {
+      ok: false,
+      kind: "redirect",
+      reason: `canonicalGit: refusing — "${realGitdir}"'s commondir resolves to "${realResolvedCommonDir}", not the trusted main checkout's own "${trustedGitDir}" — refusing rather than trusting an unverified commondir pointer (docs/decisions/3a5c5d4a).`,
+    };
+  }
+  return { ok: true };
 }
 
 // @decision 62c4953a (round 6) — routes through the SAME walkGitGlobalPrefix() summarizeGitArgsForLog
@@ -1337,11 +1889,29 @@ const defaultPrefixBuilder: MergeDriverPrefixBuilder = (names, args) => {
 };
 
 /**
- * The whole `raw` pipeline of {@link canonicalGit}: enumerate (with the call's own globals) → build the blanking prefix → VERIFY it via
- * {@link assertNoLiveMergeDrivers} → run. Exported ONLY so a test can inject a `buildPrefix` that deliberately misses a driver and prove the post-check is
+ * The whole `raw` pipeline shared by {@link canonicalGit} AND {@link killableCanonicalRaw} (via
+ * {@link spawnCanonicalGitTree}): {@link checkCommondirTrust} FIRST (card 3a5c5d4a — before ANY git
+ * process, including the enumeration below) → enumerate merge drivers (with the call's own globals) →
+ * build the blanking prefix → VERIFY it via {@link assertNoLiveMergeDrivers} → run. `buildPrefix` is
+ * exported ONLY so a test can inject one that deliberately misses a driver and prove the post-check is
  * WIRED and is the last line of defence (production always uses the default builder).
  */
-export async function canonicalRaw(git: Pick<SimpleGit, "raw">, args: string[], buildPrefix: MergeDriverPrefixBuilder = defaultPrefixBuilder): Promise<string> {
+export async function canonicalRaw(
+  git: Pick<SimpleGit, "raw">,
+  args: string[],
+  repoPath: string,
+  trustedMainRoot?: string,
+  buildPrefix: MergeDriverPrefixBuilder = defaultPrefixBuilder,
+  commondirOpts?: CheckCommondirTrustOpts,
+): Promise<string> {
+  const commondirCheck = checkCommondirTrust(repoPath, trustedMainRoot, commondirOpts);
+  if (!commondirCheck.ok) {
+    throw commondirCheck.kind === "boundRepoIsWorktree"
+      ? new CanonicalGitBoundWorktreeRefusal(commondirCheck.reason)
+      : commondirCheck.kind === "unpinned"
+      ? new CanonicalGitUnpinnedRefusal(commondirCheck.reason)
+      : new CanonicalGitCommondirRefusal(commondirCheck.reason);
+  }
   let prefix: string[] = [];
   if (canRunMergeDriver(args)) {
     const names = await configuredMergeDriverNames(git, gitGlobalArgs(args));
@@ -1405,14 +1975,50 @@ export function freshGitSentinelPath(label: "graft" | "shallow"): string {
  * are NOT in simple-git's own unsafe-env blocklist (verified directly against the installed
  * `@simple-git/argv-parser@1.1.1`'s own env→category map), so adding them needs no new `unsafe:` flag.
  */
-export function prepareCanonicalEnv(env?: Record<string, string | undefined>): Record<string, string | undefined> {
+export function prepareCanonicalEnv(env: Record<string, string | undefined> | undefined, repoPath: string, commondirOpts?: CheckCommondirTrustOpts): Record<string, string | undefined> {
   const base = env ?? process.env;
   let cleanEnv = env;
   // Presence check AND strip both go through the ONE case-aware helper (win32: `Git_Config` is `GIT_CONFIG` — card e93703d9); a bare `base.GIT_CONFIG` read would find
   // it on process.env (Node's case-insensitive accessor) while a plain-object `delete` misses it.
   // `GIT_TEST_COMMIT_GRAPH` rides the SAME check (card 7ebb4acf, N3) — see this function's own doc above.
   if (envKeysNamed(base, ["GIT_CONFIG", "GIT_TEST_COMMIT_GRAPH"]).some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, ["GIT_CONFIG", "GIT_TEST_COMMIT_GRAPH"]); }
-  const withSentinels = { ...(cleanEnv ?? base), GIT_GRAFT_FILE: freshGitSentinelPath("graft"), GIT_SHALLOW_FILE: freshGitSentinelPath("shallow") };
+  const merged = { ...(cleanEnv ?? base) };
+  // B1/P4 (round 3): bound git's own upward repo-discovery walk to repoPath's own PARENT — if `.git`
+  // isn't found exactly at `repoPath` (a TOCTOU window after checkCommondirTrust's own check settles, or
+  // any other reason), git must report "not a git repository" rather than silently discovering a
+  // DIFFERENT, possibly worker-planted `.git` by walking further up. Appends to (never replaces) an
+  // ambient value, using the OS-native list separator (`;` on win32, `:` on POSIX — git's own convention).
+  //
+  // @decision 3a5c5d4a (round 3, second review) — SKIPPED under the same advisory-read opt-out
+  // `checkCommondirTrust`'s own P4 branch has: git's ceiling semantics never check the ceiling dir
+  // itself, so pinning it here would break `detectShallowCanonicalRepo`'s subdir-bound-repo fallback.
+  //
+  // @decision 3a5c5d4a (round 4, B-1) — widened: when `repoPath` has no own `.git` (a subdir-bound
+  // project, P4's exemption), bound from the resolved TOPLEVEL's own parent instead, or the toplevel
+  // itself (possibly repoPath's own parent) would be hidden the same way an untreated ceiling hides it.
+  const ceilingKeys = envKeysNamed(merged, ["GIT_CEILING_DIRECTORIES"]);
+  const ambientCeiling = ceilingKeys.length > 0 ? merged[ceilingKeys[0]!] : undefined;
+  deleteEnvKeys(merged, ["GIT_CEILING_DIRECTORIES"]);
+  let ceilingParent: string | undefined;
+  if (commondirOpts?.commondirCheck === "advisory-read") {
+    ceilingParent = undefined;
+  } else {
+    const hasOwnGit = (() => { try { fs.lstatSync(path.join(repoPath, ".git")); return true; } catch { return false; } })();
+    if (hasOwnGit) {
+      ceilingParent = path.dirname(repoPath);
+    } else {
+      const toplevel = resolveTrustedToplevel(repoPath);
+      ceilingParent = path.dirname(toplevel.ok ? toplevel.toplevel : repoPath);
+    }
+  }
+  const withSentinels = {
+    ...merged,
+    GIT_GRAFT_FILE: freshGitSentinelPath("graft"),
+    GIT_SHALLOW_FILE: freshGitSentinelPath("shallow"),
+    ...(ceilingParent || ambientCeiling
+      ? { GIT_CEILING_DIRECTORIES: ceilingParent ? (ambientCeiling ? `${ceilingParent}${path.delimiter}${ambientCeiling}` : ceilingParent) : ambientCeiling! }
+      : {}),
+  };
   return scrubGitEnv(withSentinels);
 }
 
@@ -1447,9 +2053,13 @@ export async function detectShallowCanonicalRepo(
   //
   // @decision 356538ef (card 7ebb4acf, item 13 — SF2) — the git factory CONSTRUCTION, not just the
   // `.raw()` call, must sit inside this try: simple-git throws SYNCHRONOUSLY for a nonexistent repoPath.
+  //
+  // @decision 3a5c5d4a (round 3, second review) — `commondirOpts: advisory-read`: this exact
+  // subdir-bound-repo fallback is the reviewed read-only site `checkCommondirTrust`'s own P4 comment
+  // names; a bare call here would now refuse this call unconditionally (never just the shallow case).
   let commonDirRaw: string;
   try {
-    const git = (gitFactory ?? ((p, ms) => canonicalGit(p, ms)))(repoPath, timeoutMs);
+    const git = (gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, { commondirCheck: "advisory-read" })))(repoPath, timeoutMs);
     commonDirRaw = (await withTimeout(git.raw(["rev-parse", "--git-common-dir"]), timeoutMs, "git rev-parse --git-common-dir (shallow check)")).trim();
   } catch (e) {
     return `could not determine whether the canonical repo is shallow (resolveGitDirsSync could not resolve ${repoPath} fs-only, and \`git rev-parse --git-common-dir\` failed: ${(e as Error).message}) — refusing to merge rather than risk a silent no-op against an unverifiable repository`;
@@ -1461,12 +2071,17 @@ export async function detectShallowCanonicalRepo(
   return size === 0 ? null : shallowMessage(shallowPath);
 }
 
+/** @decision 3a5c5d4a — `trustedMainRoot` has NO default: defaulting it to `repoPath` would make
+ *  {@link checkCommondirTrust}'s FILE-shape check compare a worker WORKTREE's commondir against ITSELF,
+ *  false-refusing every such call. Pass the real main root explicitly for a worktree `repoPath`. */
 export function canonicalGit(
   repoPath: string,
   blockTimeoutMs: number,
   env?: Record<string, string | undefined>,
   abortSignal?: AbortSignal,
   extraUnsafe?: SimpleGitOptions["unsafe"],
+  trustedMainRoot?: string,
+  commondirOpts?: CheckCommondirTrustOpts,
 ): SimpleGit {
   // @decision 5b50eede (round 4, card `b5416a46`) — no longer resolves its OWN absolute git.exe here;
   // `boundedSimpleGit` below now resolves it itself for every caller, canonicalGit included (never
@@ -1474,7 +2089,7 @@ export function canonicalGit(
   //
   // `allowUnsafeMergeDriver` is required for simple-git to pass OUR `-c merge.<x>.driver=` (a blanking, never a set).
   // `boundedSimpleGit` re-applies `scrubGitEnv` to whatever `prepareCanonicalEnv` already scrubbed — idempotent, kept for its own unconditional-at-construction guarantee (f7a80d76).
-  let simpleGitEnv = prepareCanonicalEnv(env);
+  let simpleGitEnv = prepareCanonicalEnv(env, repoPath, commondirOpts);
   // @decision a746a3eb (Follow-up 23c74c62) — strip GIT_ENV_TRANSPORT_KEYS here, ONLY for this real
   // SimpleGit consumer, and gate on "did the caller pass no `env`" alone — never on whether
   // `prepareCanonicalEnv` materialized one (since 356538ef's graft/shallow fix it ALWAYS does).
@@ -1484,7 +2099,7 @@ export function canonicalGit(
     const args = (Array.isArray(callArgs[0]) ? callArgs[0] : callArgs) as string[];
     const startedAt = performance.now();
     try {
-      return await canonicalRaw(git, args);
+      return await canonicalRaw(git, args, repoPath, trustedMainRoot, undefined, commondirOpts);
     } catch (e) {
       // @decision 62c4953a — no abort-kill machinery on this path; label the honest weaker claim, never
       // an affirmative "timed out" an ordinary same-duration slow failure would read identically to.

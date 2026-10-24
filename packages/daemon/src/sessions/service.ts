@@ -34,7 +34,7 @@ import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnre
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
-import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo } from "../git/bounded.js";
+import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert, type MainlineEvidence, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter, unsafeBranchNameReason } from "../git/writer.js";
@@ -14423,7 +14423,12 @@ export class SessionService {
         if (worker.harness === "codex" && !worker.noCommit && !report.noChanges) {
           const task = taskId ? this.db.getTask(taskId) : undefined;
           const ac = await attemptCodexAutoCommit(
-            worktreePath, worker.branch, { taskTitle: task?.title, summary: report.summary }, { timeoutMs: this.gitOpMs },
+            worktreePath, worker.branch, { taskTitle: task?.title, summary: report.summary },
+            // @decision 3a5c5d4a — `trustedMainRoot` must be the real repo, not `worktreePath`: see
+            // `BoundedGitDeps`'s own doc for why this call can't inherit the quarantine-scoping default.
+            // @decision 3a5c5d4a (round 4, B-1) — resolve `precheckRepoPath`'s own TOPLEVEL, never pass
+            // it bare: a project legitimately bound to a subdirectory of its repo has no `.git` there.
+            { timeoutMs: this.gitOpMs, trustedMainRoot: defaultTrustedMainRoot(precheckRepoPath) },
           );
           if (ac.headMismatch) {
             // Distinct short-circuit refusal: precheckWorkerDone (below) never checks ref identity at
@@ -20229,7 +20234,10 @@ export class SessionService {
         // @decision 56c10535 — pass the ALREADY-RESOLVED tip, never the bare branch name: a planted
         // same-named tag/decoy would otherwise pick the REDUCED-gate classification while the eventual
         // squash lands the real branch's (differently-shaped) content.
-        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, emitComparePreWaitBranchHead, { timeoutMs: this.gitOpMs });
+        // @decision 3a5c5d4a (round 3, S3; round 4, B-1) — thread `repoPath`'s resolved TOPLEVEL as
+        // `trustedMainRoot` (never bare `repoPath`): this diff read decides whether the merge gate gets
+        // REDUCED, so it needs the CHECKED path, not advisory-read.
+        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, emitComparePreWaitBranchHead, { timeoutMs: this.gitOpMs, trustedMainRoot: defaultTrustedMainRoot(repoPath) });
         if (emitCompare.eligible) {
           emitCompareSkip = true;
           emitCompareTestFiles = emitCompare.changedTestFiles;
@@ -20561,8 +20569,10 @@ export class SessionService {
             //  now, on both producers, uniformly.
             // @decision 56c10535 — pass postWaitBranchHead (the already-resolved re-read tip), never
             // the bare branch name — same reason as the pre-wait classification call above.
+            // @decision 3a5c5d4a (round 3, S3; round 4, B-1) — same CHECKED-path/resolved-toplevel
+            // reasoning as the pre-wait call above.
             const reclassified = (postWaitBranchHead && emitCompareAdmissionMainHead)
-              ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, postWaitBranchHead, { timeoutMs: this.gitOpMs })
+              ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, postWaitBranchHead, { timeoutMs: this.gitOpMs, trustedMainRoot: defaultTrustedMainRoot(repoPath) })
               : undefined;
             if (reclassified?.eligible) {
               emitCompareTestFiles = reclassified.changedTestFiles;
@@ -22624,7 +22634,10 @@ export class SessionService {
             //
             // @decision 043d83d2 — pass `assembledTipSha` (the sha `runBatchedMerge` itself pinned from
             // assembly and already cross-checked against the worktree), never "HEAD" — mirrors `56c10535`.
-            const batchEmitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainSha, assembledTipSha, { timeoutMs: this.gitOpMs }).catch(() => undefined);
+            // @decision 3a5c5d4a (round 5, merge note b) — ALSO thread
+            // `trustedMainRoot: defaultTrustedMainRoot(finalRepoPath)`, never bare — without it a
+            // rewritten batch-worktree commondir/gitdir pointer could feed this a decoy diff.
+            const batchEmitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainSha, assembledTipSha, { timeoutMs: this.gitOpMs, trustedMainRoot: defaultTrustedMainRoot(finalRepoPath) }).catch(() => undefined);
             // Card d422e279: substitute the SAME smaller command a solo reduced merge runs
             // (`buildReducedGateCommand`) when the WHOLE assembled batch proves eligible — never a
             // batch-specific predicate or command builder. `batchReduced` gates BOTH this substitution and

@@ -310,7 +310,17 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
     registerForCleanup(batchWt);
     return { repo, batchWt, cand: { workerSessionId: `cgi-rb-w-${tag}-${sfx}`, taskId: `cgi-rb-task-${tag}-${sfx}`, branch, taskTitle: "feat(test): rb" } };
   };
-  const failingReset = (p, ms) => { const g = canonicalGit(p, ms); return { raw: (a) => (a[0] === "reset" ? Promise.reject(new Error("reset boom")) : g.raw(a)) }; };
+  // Code Review round 3 (B3): `p` here is the BATCH WORKTREE (a FILE-shaped .git) — since card 3a5c5d4a's
+  // round-2 fix flipped checkCommondirTrust's default to fail-closed for that shape with no
+  // trustedMainRoot, a bare `canonicalGit(p, ms)` no longer passes EVERYTHING through unchanged; it
+  // refused every call, not just the injected "reset" failure below. Threading the REAL trustedMainRoot
+  // (the fixture's own `repo`) restores this fixture's documented intent (pass through normally, fail
+  // ONLY on reset) via the SAME real verification path a production caller uses — a factory-of-a-factory
+  // since `repo` differs per `rbWorld` call and isn't known until the fixture builds it.
+  const makeFailingReset = (trustedMainRoot) => (p, ms) => {
+    const g = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return { raw: (a) => (a[0] === "reset" ? Promise.reject(new Error("reset boom")) : g.raw(a)) };
+  };
   {
     const W = await rbWorld("ctl");
     const r = await assembleBatchBranches(W.repo, W.batchWt, [W.cand]);
@@ -319,7 +329,7 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
   }
   {
     const W = await rbWorld("fail");
-    const r = await assembleBatchBranches(W.repo, W.batchWt, [W.cand], { gitFactory: failingReset });
+    const r = await assembleBatchBranches(W.repo, W.batchWt, [W.cand], { gitFactory: makeFailingReset(W.repo) });
     const d = r.dropped[0];
     check("(rollback) a FAILED rollback over a dirty batch worktree is surfaced in the drop reason (ROLLBACK FAILED … reset boom), not swallowed", !!d && /ROLLBACK FAILED/.test(d.reason) && /reset boom/.test(d.reason));
   }
@@ -394,11 +404,11 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
     try { execSync(`git ${mergeTree.join(" ")}`, { cwd: repo, stdio: "ignore" }); } catch { /* a conflict exit is fine — only the marker matters */ }
     const controlRan = exists(mark); fs.rmSync(mark, { force: true });
     check("(post-check wired) CONTROL: bare git merge-tree on this fixture DOES exec the planted driver", controlRan);
-    let err = null; try { await canonicalRaw(g, mergeTree, () => []); } catch (e) { err = e; }
+    let err = null; try { await canonicalRaw(g, mergeTree, repo, undefined, () => []); } catch (e) { err = e; }
     check("(post-check wired) a prefix-builder that MISSES the driver is stopped by the POST-CHECK (CanonicalGitRefusal naming the key), enumeration refusals bypassed", err instanceof CanonicalGitRefusal && /merge\.evil\.driver/.test(err.message));
     check("(post-check wired) …and the driver did NOT run", !exists(mark));
     fs.rmSync(mark, { force: true });
-    let refused = false; try { await canonicalRaw(g, mergeTree); } catch (e) { if (e instanceof CanonicalGitRefusal) refused = true; /* else: a plain git conflict failure from the blanked driver */ } // the real builder blanks it: the driver "cannot spawn" ⇒ a plain git conflict failure, NOT a refusal
+    let refused = false; try { await canonicalRaw(g, mergeTree, repo); } catch (e) { if (e instanceof CanonicalGitRefusal) refused = true; /* else: a plain git conflict failure from the blanked driver */ } // the real builder blanks it: the driver "cannot spawn" ⇒ a plain git conflict failure, NOT a refusal
     check("(post-check wired) the DEFAULT builder passes the post-check (the driver is really blanked: no CanonicalGitRefusal) and still never runs it", !refused && !exists(mark));
   }
 
@@ -409,7 +419,7 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
     plantDriver(repo, null, "rawbyte", cmd, "r4-collide");
     const g = unwrapped(repo);
     const naive = (names) => names.flatMap((n) => ["-c", `merge.${n}.driver=`]); // no U+FFFD refusal: the enumeration's own guard is out of the picture
-    let err = null; try { await canonicalRaw(g, mergeTree, naive); } catch (e) { err = e; }
+    let err = null; try { await canonicalRaw(g, mergeTree, repo, undefined, naive); } catch (e) { err = e; }
     check("(collision) with the enumeration's U+FFFD refusal bypassed, the post-check ALONE refuses (a decode collision cannot hide the live driver)", err instanceof CanonicalGitRefusal);
     check("(collision) …and the driver did NOT run", !exists(mark));
     let direct = null; try { await assertNoLiveMergeDrivers(g, ["-c", "merge.�.driver="], ["merge"]); } catch (e) { direct = e; }
@@ -566,10 +576,10 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
     fs.mkdirSync(elsewhere, { recursive: true }); registerForCleanup(elsewhere);
     execSync("git init -q", { cwd: elsewhere });
     const gE = unwrapped(elsewhere);
-    let e1 = null; try { await canonicalRaw(gE, ["-C", repo, ...mergeTree], () => []); } catch (e) { e1 = e; }
+    let e1 = null; try { await canonicalRaw(gE, ["-C", repo, ...mergeTree], elsewhere, undefined, () => []); } catch (e) { e1 = e; }
     check("(globals wired: post-check) a leaky builder + `-C <repo>` from a clean cwd is refused: the POST-CHECK read carries the call's globals", e1 instanceof CanonicalGitRefusal && /merge\.evil\.driver/.test(e1.message));
     check("(globals wired: post-check) …and the driver did NOT run", !exists(mark));
-    let e2 = null; try { await canonicalRaw(gE, ["-C", repo, ...mergeTree]); } catch (e) { e2 = e; }
+    let e2 = null; try { await canonicalRaw(gE, ["-C", repo, ...mergeTree], elsewhere); } catch (e) { e2 = e; }
     check("(globals wired: enumeration) the DEFAULT builder + `-C <repo>` blanks the driver found in THAT repo (no refusal: the ENUMERATION read carries the globals)", !(e2 instanceof CanonicalGitRefusal));
     check("(globals wired: enumeration) …and the driver did NOT run", !exists(mark));
   }

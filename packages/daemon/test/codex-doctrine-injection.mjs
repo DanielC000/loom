@@ -273,7 +273,10 @@ let firstBlock = null;
     // that actual exfiltration path, not just a `git status` read that never exercised the auto-commit.
     fs.writeFileSync(path.join(workerCwd, "real-work-2.txt"), "the worker's real deliverable");
     fs.writeFileSync(path.join(workerCwd, "sekrit.secret"), "should stay globally ignored");
-    const autoCommitResult = await attemptCodexAutoCommit(workerCwd, branch, { summary: "test: round 2 auto-commit filter" });
+    // @decision 3a5c5d4a (round 3, second review, B3-class) — every real caller threads a real
+    // trustedMainRoot; without it the function's own default makeGit/identity-probe construction now
+    // refuses this FILE-shaped worktree .git outright.
+    const autoCommitResult = await attemptCodexAutoCommit(workerCwd, branch, { summary: "test: round 2 auto-commit filter" }, { trustedMainRoot: mainCwd });
     check("attemptCodexAutoCommit committed the real file", autoCommitResult.committed === true);
     const committedPaths = git("show --stat --format= HEAD", workerCwd);
     check("attemptCodexAutoCommit's commit includes the real work file", /real-work-2\.txt/.test(committedPaths));

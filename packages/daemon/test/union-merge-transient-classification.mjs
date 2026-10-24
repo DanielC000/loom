@@ -361,8 +361,12 @@ async function runLanded(tag, mergeHeadSequence) {
 // single-attempt shortcut), landing on the SAME classification as the plain-union path.
 {
   const { repo, wt, base, branch } = makeOwedFixture("owedff");
+  // @decision 3a5c5d4a (round 3, B3-class) — `p` here is the worker's own worktree `wt` (a FILE-shaped
+  // .git), reached via mergeMainIntoWorktree's wtGit/killableCanonicalRaw construction; a bare
+  // `canonicalGit(p, ms)` with no trustedMainRoot now THROWS at construction (not just on `.raw()`),
+  // before any call — not just the injected --ff-only one. Thread the real trusted main (`repo`).
   const proxyAlwaysFailFfOnly = (p, ms) => {
-    const real = canonicalGit(p, ms);
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, repo);
     return {
       async raw(args) {
         const a = Array.isArray(args) ? args : [args];
@@ -402,8 +406,10 @@ async function runLanded(tag, mergeHeadSequence) {
   // relabeled dirtyWorktree (residue from the interrupted attempt could be folded in by a plain "commit").
   const { repo, wt, base, branch } = makeOwedFixture("owedff-dirty-timeout");
   fs.writeFileSync(path.join(wt, "base.txt"), "locally modified, never committed\n");
+  // @decision 3a5c5d4a (round 3, B3-class) — same fix as the (ii) block above: thread the real trusted
+  // main (`repo`) so this bare pass-through isn't refused at construction before the injected call.
   const proxyAlwaysFailFfOnly = (p, ms) => {
-    const real = canonicalGit(p, ms);
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, repo);
     return {
       async raw(args) {
         const a = Array.isArray(args) ? args : [args];

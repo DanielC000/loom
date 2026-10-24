@@ -207,7 +207,7 @@ try {
     try {
       const n3fixed = await MW.isAncestorCommit(repo, M0, G, TIMEOUT_MS);
       check(`(N3) isAncestorCommit(M0, G) through canonicalGit correctly reads TRUE despite ambient GIT_TEST_COMMIT_GRAPH=1 (got ${n3fixed}) — prepareCanonicalEnv stripped it before the child saw it`, n3fixed === true);
-      const envSeen = BOUNDED.prepareCanonicalEnv();
+      const envSeen = BOUNDED.prepareCanonicalEnv(undefined, repo); // round 3 (B1/P4): prepareCanonicalEnv now requires repoPath, for the GIT_CEILING_DIRECTORIES pin
       check("(N3) prepareCanonicalEnv()'s own materialized env does NOT carry GIT_TEST_COMMIT_GRAPH (case-aware strip)", !Object.keys(envSeen).some((k) => k.toUpperCase() === "GIT_TEST_COMMIT_GRAPH"));
     } finally {
       if (prevGtcg === undefined) delete process.env.GIT_TEST_COMMIT_GRAPH; else process.env.GIT_TEST_COMMIT_GRAPH = prevGtcg;
@@ -232,7 +232,7 @@ try {
           check(`(N3-casing ${spelling}) CONTROL: raw git -c core.commitGraph=false still sees the odd-cased var and returns the WRONG answer (got ${n3cRaw}, truth M0=${M0})`, n3cRaw !== M0);
           const n3cFixed = await MW.isAncestorCommit(repo, M0, G, TIMEOUT_MS);
           check(`(N3-casing ${spelling}) isAncestorCommit(M0, G) through canonicalGit correctly reads TRUE despite the odd-cased ambient var (got ${n3cFixed})`, n3cFixed === true);
-          const envSeenC = BOUNDED.prepareCanonicalEnv();
+          const envSeenC = BOUNDED.prepareCanonicalEnv(undefined, repo); // round 3 (B1/P4): see the (N3) call above
           check(`(N3-casing ${spelling}) prepareCanonicalEnv()'s own materialized env does NOT carry it under ANY casing`, !Object.keys(envSeenC).some((k) => k.toUpperCase() === "GIT_TEST_COMMIT_GRAPH"));
         } finally {
           delete process.env[spelling];
@@ -261,8 +261,8 @@ try {
 // sentinels, and the materialized env must still carry PATH and HOME/USERPROFILE (never a bare
 // {GIT_GRAFT_FILE, GIT_SHALLOW_FILE} object — that would silently strip the child's whole environment). ──
 {
-  const env1 = BOUNDED.prepareCanonicalEnv();
-  const env2 = BOUNDED.prepareCanonicalEnv();
+  const env1 = BOUNDED.prepareCanonicalEnv(undefined, repo); // round 3 (B1/P4): see the (N3) call above
+  const env2 = BOUNDED.prepareCanonicalEnv(undefined, repo);
   check(`(S4) two separate prepareCanonicalEnv() calls get DIFFERENT GIT_GRAFT_FILE sentinels (${env1.GIT_GRAFT_FILE} vs ${env2.GIT_GRAFT_FILE})`, env1.GIT_GRAFT_FILE !== env2.GIT_GRAFT_FILE);
   check(`(S4) two separate prepareCanonicalEnv() calls get DIFFERENT GIT_SHALLOW_FILE sentinels (${env1.GIT_SHALLOW_FILE} vs ${env2.GIT_SHALLOW_FILE})`, env1.GIT_SHALLOW_FILE !== env2.GIT_SHALLOW_FILE);
   const hasPath = Object.keys(env1).some((k) => k.toUpperCase() === "PATH" && env1[k]);

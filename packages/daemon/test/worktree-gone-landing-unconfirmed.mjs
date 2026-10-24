@@ -483,11 +483,15 @@ try {
     // missing failure instead, since the real directory is never otherwise touched). The vanish is still
     // only ever transient — restored explicitly by the test, below, before the recovery check.
     let worktreePathConstructs = 0;
+    // @decision 3a5c5d4a (round 3, B3-class) — `p === worktreePath` here is a REAL, genuinely-existing
+    // FILE-shaped worktree `.git` at construction time; a bare `canonicalGit(p, ms)` with no
+    // trustedMainRoot now refuses it (it hasn't been renamed away yet — that's this scenario's own later
+    // side effect). Thread the real trusted main (`repo`, already in scope).
     const unionMergeGitFactory = (p, ms) => {
       if (p !== worktreePath) return canonicalGit(p, ms);
       worktreePathConstructs++;
       if (worktreePathConstructs === 1) {
-        const real = canonicalGit(p, ms);
+        const real = canonicalGit(p, ms, undefined, undefined, undefined, repo);
         let sideEffectDone = false;
         return {
           raw: async (args) => {
@@ -1023,9 +1027,12 @@ try {
       const mainHeadBefore = git(repo, "rev-parse HEAD");
 
       let sideEffectDone = false;
+      // @decision 3a5c5d4a (round 3, B3-class) — same fix as scenario (H) above: `p === worktreePath` is
+      // a real, genuinely-existing worktree at construction time (the rm happens inside the FIRST raw()
+      // call, not before); thread the real trusted main (`repo`, already in scope) rather than a bare call.
       const unionMergeGitFactory = (p, ms) => {
         if (p !== worktreePath) return canonicalGit(p, ms);
-        const real = canonicalGit(p, ms);
+        const real = canonicalGit(p, ms, undefined, undefined, undefined, repo);
         return {
           raw: async (args) => {
             const result = await real.raw(args);

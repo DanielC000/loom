@@ -287,7 +287,10 @@ try {
     fs.writeFileSync(path.join(hooksDirReal, "post-commit"), `#!/bin/sh\necho fired > "${marker.replace(/\\/g, "/")}"\n`, { mode: 0o755 });
 
     fs.writeFileSync(path.join(worktreePath, "hook-test.txt"), "real work\n");
-    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "hook test" });
+    // @decision 3a5c5d4a (round 3, second review, B3-class) — every real caller threads a real
+    // trustedMainRoot; without it the function's own default makeGit construction now refuses this
+    // FILE-shaped worktree .git outright.
+    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "hook test" }, { trustedMainRoot: repo });
     check("(K7) auto-commit succeeded with the devNull hooksPath (add/commit both still work)", ac.committed === true);
     check("(K7) the repo's OWN real post-commit hook did NOT fire", !fs.existsSync(marker));
 
@@ -556,7 +559,8 @@ try {
     execSync(`git init -q && git config user.email n@n && git config user.name n`, { cwd: nestedRepo });
     fs.writeFileSync(path.join(nestedRepo, "inner.txt"), "content inside the nested repo\n");
     commitAll(nestedRepo, "nested init", "-c user.email=n@n -c user.name=n");
-    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "gitlink test" });
+    // @decision 3a5c5d4a (round 3, second review, B3-class) — same fix as (K7) above.
+    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "gitlink test" }, { trustedMainRoot: repo });
     check("(gitlink) refused (skippedReason), not committed — never stages a gitlink",
       ac.committed === false && typeof ac.skippedReason === "string" && /gitlink/i.test(ac.skippedReason));
     const tracked = execFileSync("git", ["ls-files"], { cwd: worktreePath }).toString();
@@ -579,7 +583,8 @@ try {
     execFileSync("git", ["mv", "gitmv-orig.txt", "gitmv-new.txt"], { cwd: worktreePath }); // STAGES both halves
     const statusZ = execFileSync("git", ["status", "--porcelain", "-z"], { cwd: worktreePath }).toString();
     check("(gitmv) sanity: git status DOES report a combined R record for a staged git mv", /^R/.test(statusZ));
-    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "gitmv test" });
+    // @decision 3a5c5d4a (round 3, second review, B3-class) — same fix as (K7) above.
+    const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "gitmv test" }, { trustedMainRoot: repo });
     // fileCount is 1, not 2: the OLD half of an already-staged rename is never a real `git add` target
     // (see parseAutoCommitStatusZ's own doc) — only the NEW path is staged; the rename itself still
     // lands correctly because git detects it from the commit's own tree diff, independent of what we
@@ -602,7 +607,8 @@ try {
     const canDoArrow = canCreateFileNamed(worktreePath, "weird -> name.txt");
     if (!canDoArrow) skip("(S1) literal \" -> \" in a filename", "this filesystem rejects '>' in a filename (Windows/NTFS)");
     fs.writeFileSync(path.join(worktreePath, "to-rename-orig.txt"), "will be renamed by a plain fs move\n");
-    const ac1 = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s1 first pass" });
+    // @decision 3a5c5d4a (round 3, second review, B3-class) — same fix as (K7) above.
+    const ac1 = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s1 first pass" }, { trustedMainRoot: repo });
     check("(S1) café.txt / space / (if creatable) arrow-name all committed in one pass",
       ac1.committed === true && ac1.fileCount === (canDoArrow ? 4 : 3));
     const s1Files = execFileSync("git", ["show", "--stat", "--format=", ac1.sha], { cwd: worktreePath }).toString();
@@ -612,7 +618,8 @@ try {
 
     // Real filesystem RENAME (no `git mv` — codex can't run git at all), fully unstaged.
     fs.renameSync(path.join(worktreePath, "to-rename-orig.txt"), path.join(worktreePath, "to-rename-new.txt"));
-    const ac2 = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s1 rename pass" });
+    // @decision 3a5c5d4a (round 3, second review, B3-class) — same fix as (K7) above.
+    const ac2 = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s1 rename pass" }, { trustedMainRoot: repo });
     check("(S1 rename) committed both halves of the rename", ac2.committed === true && ac2.fileCount === 2);
     const renameTracked = execFileSync("git", ["ls-files"], { cwd: worktreePath }).toString();
     check("(S1 rename) the OLD path is gone from the tree", !renameTracked.includes("to-rename-orig.txt"));
@@ -631,7 +638,8 @@ try {
     if (!canCreateFileNamed(worktreePath, "*")) {
       skip("(S2) a file literally named *", "this filesystem rejects '*' in a filename (Windows/NTFS)");
     } else {
-      const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s2 glob test" });
+      // @decision 3a5c5d4a (round 3, second review, B3-class) — same fix as (K7) above.
+      const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s2 glob test" }, { trustedMainRoot: repo });
       check("(S2) auto-commit succeeded", ac.committed === true);
       check("(S2) stages exactly 2 files (the star file + the bystander, each as themselves — not a glob explosion)", ac.fileCount === 2);
       const tracked = execFileSync("git", ["ls-files"], { cwd: worktreePath }).toString();
@@ -651,7 +659,8 @@ try {
     } else {
       const outsideNeverCreated = path.join(os.tmpdir(), `loom-cac-s3-never-exists-${sfx}.txt`);
       fs.symlinkSync(outsideNeverCreated, path.join(worktreePath, "dangling-link.txt")); // target never created — DANGLING
-      const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s3 dangling test" });
+      // @decision 3a5c5d4a (round 3, second review, B3-class) — same fix as (K7) above.
+      const ac = await attemptCodexAutoCommit(worktreePath, branch, { summary: "s3 dangling test" }, { trustedMainRoot: repo });
       check("(S3) refused (skippedReason), not committed — a dangling escape must still be caught",
         ac.committed === false && typeof ac.skippedReason === "string" && /human review/i.test(ac.skippedReason));
     }

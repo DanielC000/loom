@@ -8,6 +8,7 @@ import { installCrashHandlers, installEpipeTolerantStdio, hadCrashLogAtBoot as c
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { HANDLED_SIGNALS, makeBootShutdownStub } from "./boot-shutdown-stub.js";
 import { Db, declareDaemonProcess } from "./db.js";
+import { registerCommondirTrustPinLookup } from "./git/bounded.js";
 import { startGatewayListeners, type RemoteEndpointRef } from "./gateway/remote-listener.js";
 import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
 import { sweepDeadSessions, watchClaudeProjects, watchCodexSessions } from "./sessions/liveness.js";
@@ -144,6 +145,16 @@ async function main(): Promise<void> {
   declareDaemonProcess();
   const db = new Db();
   dbForShutdown = db; // lets the boot-safe shutdown stub registered above best-effort close it
+  // @decision 3a5c5d4a (round 5) — register BEFORE the backfill right below and before anything else
+  // that could issue a canonical git call (boot-reconcile included); an unregistered resolver fails
+  // closed for a subdir-bound repo, so ordering here only ever widens protection, never narrows it.
+  registerCommondirTrustPinLookup((repoPath) => db.getCommondirTrustPin(repoPath));
+  {
+    // `Db.backfillCommondirTrustPins` files its own `commondir_trust_pinned` durable event when it
+    // backfills anything — this is only the console echo of that same fact.
+    const backfill = db.backfillCommondirTrustPins();
+    if (backfill.backfilled > 0) console.log(`[boot] commondir-trust: backfilled ${backfill.backfilled} pre-existing (project, repoKey) binding(s)`);
+  }
   // Card 5eace211: warm the PROJECTS_WORK_ROOT usage cache in the background at boot, so the FIRST
   // served_status read of the fleet's life is less likely to see the all-zero initial value.
   kickProjectsWorkRootUsageRefresh(db);

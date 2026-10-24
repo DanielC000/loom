@@ -1959,6 +1959,15 @@ export type OrchestrationEventKind =
   | "merge_branch_retained"
   // @decision 4fa36502 — the canonical mainline moved without a Loom landing (tripwire, never a refusal): `detail` {projectId, repoKey, branch, from, to, evidence, suspectShas, severity:"high"}; or severity:"low" + unverifiable:true when the check exceeded its cap. Filed under the confirming manager.
   | "mainline_moved_outside_loom"
+  // A daemon-boot backfill established one or more durable commondir-trust pins for a (project, repoKey)
+  // binding that predates this feature — trust-on-first-use, not a pre-attack-verified baseline. `detail`
+  // carries {count, pins: Array<{projectId, repoKey}>}. Filed under `managerSessionId: ""` (no owning
+  // session, same sentinel as `mainline_moved_outside_loom`), ONCE per boot, only when `count > 0`. An
+  // audit-only marker, same bucket as `codex_auto_commit` — deliberately NOT added to
+  // EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS.
+  // @decision 3a5c5d4a (round 5) — never read a backfilled pin as pre-attack-verified; it proves only
+  // "the live toplevel matched this value at THIS boot", never "before any worker ever touched it".
+  | "commondir_trust_pinned"
   // Card 932f13d4: a genuine engine-session-id ROTATION — the Claude Code CLI fired a SECOND
   // `SessionStart` reporting a DIFFERENT `session_id` for the SAME live pty (no new Loom spawn/resume/
   // fork — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117). `db.setEngineSessionId`
@@ -2141,7 +2150,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
-  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, engine_session_rotated: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, commondir_trust_pinned: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,

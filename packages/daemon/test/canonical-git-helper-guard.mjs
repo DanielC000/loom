@@ -174,7 +174,41 @@ for (const abs of allSrcFiles) {
 }
 check(`(global) no file anywhere under src/** spawns git via a literal bare "git" command, array- or shell-string-form (every site resolves the binary via the shared chokepoint)${bareLiteralHits.length ? ` — FOUND: ${bareLiteralHits.join(", ")}` : ""}`, bareLiteralHits.length === 0);
 
-// ── (4) card 7ebb4acf (Code Review S3) — the info/grafts + .git/shallow + commit-graph neutralization
+// ── (4) card 3a5c5d4a: BOTH canonical git spawn sites — canonicalGit's own `raw` AND
+// killableCanonicalRaw (via spawnCanonicalGitTree) — must run checkCommondirTrust before anything else,
+// via the ONE shared chokepoint (canonicalRaw). Source-text only (NOT a behaviour test — that's
+// canonical-git-commondir-refusal.mjs): extracts each named function's own body (naive brace-depth slice
+// from its signature's first `{` to the matching close — good enough for this one, author-controlled
+// file; a template literal's own `${...}` stays internally brace-balanced, so it doesn't desync the count)
+// and asserts the expected call appears inside it, not merely somewhere in the file.
+function functionBody(text, signatureRe) {
+  const m = signatureRe.exec(text);
+  if (!m) return null;
+  const openIdx = text.indexOf("{", m.index + m[0].length - 1);
+  if (openIdx === -1) return null;
+  let depth = 0;
+  for (let i = openIdx; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") { depth--; if (depth === 0) return text.slice(openIdx, i + 1); }
+  }
+  return null;
+}
+const boundedRaw = stripComments(fs.readFileSync(path.join(SRC_DIR, "git/bounded.ts"), "utf8"));
+check("(self) functionBody extracts a known-good slice for a self-test signature", /INSIDE/.test(functionBody("function f(x) { const y = `a${1}b`; return INSIDE; }", /function f\(x\)/) ?? ""));
+check("(self) functionBody returns null for a signature not present", functionBody("function f() {}", /function g\(/) === null);
+// (self) RED demo on known-bad text: a canonicalRaw-shaped body with the commondir check REMOVED must fail this check.
+check("(self) a canonicalRaw body missing checkCommondirTrust( is flagged by this check's own pattern", !/checkCommondirTrust\(/.test(functionBody("export async function canonicalRaw(git, args, repoPath, trustedMainRoot, buildPrefix = defaultPrefixBuilder) { let prefix = []; return git.raw(prefix); }", /export async function canonicalRaw\(/) ?? ""));
+const canonicalRawBody = functionBody(boundedRaw, /export async function canonicalRaw\(/);
+check("(commondir-wired) canonicalRaw's own body was found in git/bounded.ts (extraction sanity)", canonicalRawBody !== null);
+check("(commondir-wired) canonicalRaw calls checkCommondirTrust( before anything else it does", canonicalRawBody !== null && /checkCommondirTrust\(/.test(canonicalRawBody));
+const canonicalGitBody = functionBody(boundedRaw, /export function canonicalGit\(/);
+check("(commondir-wired) canonicalGit's own body was found in git/bounded.ts (extraction sanity)", canonicalGitBody !== null);
+check("(commondir-wired) canonicalGit's own raw() closure routes through canonicalRaw( (spawn site 1)", canonicalGitBody !== null && /canonicalRaw\(/.test(canonicalGitBody));
+const killableCanonicalRawBody = functionBody(boundedRaw, /export async function killableCanonicalRaw\(/);
+check("(commondir-wired) killableCanonicalRaw's own body was found in git/bounded.ts (extraction sanity)", killableCanonicalRawBody !== null);
+check("(commondir-wired) killableCanonicalRaw routes spawnCanonicalGitTree's output through canonicalRaw( (spawn site 2)", killableCanonicalRawBody !== null && /canonicalRaw\(\s*spawnCanonicalGitTree\(/.test(killableCanonicalRawBody));
+
+// ── (5) card 7ebb4acf (Code Review S3) — the info/grafts + .git/shallow + commit-graph neutralization
 // reaches BOTH canonicalGit AND the raw-spawn path (spawnCanonicalGitTree), and CANONICAL_GIT_CONFIG
 // carries core.commitGraph=false. Source-text only (bounded.ts itself) — behavioral proof is
 // canonical-git-graft-shallow-neutralization.mjs.
