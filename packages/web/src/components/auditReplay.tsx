@@ -82,7 +82,10 @@ function ReplayEvent({ t, e, state }: { t: AuditTimeline; e: AuditEvent; state: 
   const detail = detailLine(e);
   const future = state === "future";
   return (
-    <div style={{
+    // `data-replay-state` mirrors the visual state (the phosphor edge + panel2 fill on the head, the
+    // 0.34 opacity on everything after it) as an assertable attribute, so a test can prove the scrub
+    // MOVED rather than sniffing computed opacity off a row it had to find by style. Additive only.
+    <div data-testid="audit-replay-event" data-replay-state={state} style={{
       display: "flex", alignItems: "baseline", gap: 8, padding: "2px 6px",
       fontFamily: font.mono, fontSize: 12, opacity: future ? 0.34 : 1,
       borderLeft: `2px solid ${state === "current" ? tone[tn] : "transparent"}`,
@@ -279,7 +282,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
 
   if (managers.length === 0) {
     return (
-      <div>
+      <div data-testid="audit-replay">
         {!hideLabel && <SectionLabel>Wave replay</SectionLabel>}
         <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No manager waves to replay yet.</span></Panel>
       </div>
@@ -287,7 +290,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
   }
 
   return (
-    <div>
+    <div data-testid="audit-replay">
       {!hideLabel && <SectionLabel>Wave replay</SectionLabel>}
       <Panel style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Subject + scope + compare controls */}
@@ -340,7 +343,8 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
             <input type="range" min={0} max={last} value={cur}
               onChange={(e) => { setPlaying(false); setSeq(Number(e.target.value)); }}
               style={{ flex: 1, accentColor: color.phosphor }} aria-label="Replay position" />
-            <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, minWidth: 64, textAlign: "right" }}>
+            <span data-testid="audit-replay-position"
+              style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, minWidth: 64, textAlign: "right" }}>
               {cur + 1}/{events.length}
             </span>
             {seq !== null && cur < last && <Button variant="ghost" title="Jump to live edge" onClick={() => setSeq(null)}>↦ live</Button>}

@@ -1,10 +1,10 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
-import { fleetRollup, workerBuckets, capArchived } from "../lib/fleet";
+import { fleetRollup, workerBuckets, capArchived, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
 import { harnessOf } from "../lib/harnessFields";
 import { DecisionStateChip } from "./decisions";
 import { HarnessTag } from "./HarnessPicker";
@@ -578,6 +578,58 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
         )}
       </div>
     </Panel>
+  );
+}
+
+// ── The inactive-projects tier ──────────────────────────────────────────────────────────────────
+// The finished-wave tier of the fleet. Every project here has zero live sessions (present only in the
+// archive), so a fleet derived from the RUNNING set would drop it entirely; each one surfaces as a MUTED
+// FleetCard so past waves stay glanceable. The user calls these "inactive" (owner's wording) — NOT
+// "archived": that word is reserved for the separate, reversible soft-archive "Archived" section (card
+// baca1835), a genuinely different project state.
+//
+// Kept OUT of the way per the owner's constraint: collapsed behind a "N inactive project(s)" affordance
+// AND, once open, capped at ARCHIVED_ONLY_CAP cards (the affordance still reports the true total) so
+// inactive history can never crowd an active fleet above it.
+//
+// @decision ff6123de — `defaultOpen` stays defaulted OFF: Mission Control mounts this UNDER its live
+// fleet grid, and an expanded strip there pushes the active fleet off the fold. Only a host with
+// nothing above it to protect may pass it.
+export function InactiveFleet({ projects, defaultOpen = false }: {
+  projects: ArchivedOnlyProject[];
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  if (projects.length === 0) return null;
+  const shown = projects.slice(0, ARCHIVED_ONLY_CAP);
+  const overflow = projects.length - shown.length;
+  return (
+    <div style={{ marginTop: 12 }}>
+      {/* The testid sits on the TOGGLE, not the wrapper: `aria-expanded` lives here, and this is the one
+          button in the strip that is unambiguous whether it is open (when the cards add their own) or
+          shut. The card list carries its own id below. */}
+      <Button variant="ghost" onClick={() => setOpen((v) => !v)}
+        data-testid="inactive-fleet"
+        aria-expanded={open}
+        title={open ? "Hide inactive projects" : "Show inactive projects"}
+        style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, padding: "2px 6px" }}>
+        {open ? "▾" : "▸"} {projects.length} inactive project{projects.length === 1 ? "" : "s"}
+      </Button>
+      {open && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "start", marginTop: 8 }}
+          data-testid="inactive-fleet-list">
+          {shown.map((p) => (
+            <FleetCard key={p.name} name={p.name} managers={[]} workers={[]} archived={p.archived}
+              attention={0} onExpand={() => { /* no live sessions to expand into */ }} muted />
+          ))}
+          {overflow > 0 && (
+            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+              +{overflow} more inactive
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -1,5 +1,8 @@
-// Hermetic unit test for Mission Control's fully-archived-project tier (src/lib/fleet.ts › archivedOnlyProjects
-// + ARCHIVED_ONLY_CAP). MC builds its fleet from the RUNNING session set, so a project whose sessions have all
+// Hermetic unit tests for the pure derivations behind the god-eye fleet feeds (src/lib/fleet.ts) — the
+// fully-archived-project tier, and, since card ff6123de, the three rules Mission Control now SHARES with
+// the Atlas Workspace node's Replay tab (`fleetProjectNames`, `replayRoots`, `GLOBAL_ACTIVITY_CAP`).
+//
+// MC builds its fleet from the RUNNING session set, so a project whose sessions have all
 // exited (auto-archived) would drop off the god-eye. This asserts the pure derivation behind the muted cards:
 //  - a project present ONLY in the archived set yields an archived-only entry (→ a muted card on MC);
 //  - a project that still has ANY live session is EXCLUDED (it stays in the live grid, which MC renders FIRST,
@@ -11,7 +14,10 @@
 // Like fleet.mjs, this imports the TS source directly via Node type stripping — no daemon, no React. Run with:
 //   node --experimental-strip-types packages/web/test/mission-control-archived.mjs
 import assert from "node:assert/strict";
-import { archivedOnlyProjects, ARCHIVED_ONLY_CAP } from "../src/lib/fleet.ts";
+import { readFileSync } from "node:fs";
+import {
+  archivedOnlyProjects, ARCHIVED_ONLY_CAP, fleetProjectNames, replayRoots, GLOBAL_ACTIVITY_CAP,
+} from "../src/lib/fleet.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -106,6 +112,66 @@ check("ARCHIVED_ONLY_CAP is a small, sane bound and caps the rendered card count
   const rendered = result.slice(0, ARCHIVED_ONLY_CAP);
   assert.equal(rendered.length, ARCHIVED_ONLY_CAP, "MC renders at most ARCHIVED_ONLY_CAP muted cards");
   assert.ok(rendered.length < result.length, "the cap actually holds back the deep archive");
+});
+
+// ── The derivations Mission Control now SHARES with the Atlas Workspace Replay tab (card ff6123de) ────
+// Both surfaces render the same inactive tier and the same replay picker. The rules live in lib/fleet.ts
+// precisely so there is one copy; these checks are what makes a silent edit to either one visible.
+
+check("fleetProjectNames is the LIVE population the inactive tier is the complement of", () => {
+  const live = [
+    { ...sess("Loom"), role: "manager", processState: "live" },
+    { ...sess("Loom"), role: "worker", processState: "live" },
+    { ...sess("FireStudio"), role: "manager", processState: "live" },
+  ];
+  assert.deepEqual(fleetProjectNames(live), ["Loom", "FireStudio"], "feed order, de-duplicated");
+  // ⭐ THE DISCRIMINATING CASE, and the reason this is a named function rather than three inline lines:
+  // a project whose only live row is a companion/setup session has no WAVE running, so it must stay OUT
+  // of the live population and therefore read as inactive — Mission Control's long-standing behaviour.
+  const companionOnly = [{ ...sess("Chatty"), role: "companion", processState: "live" }];
+  assert.deepEqual(fleetProjectNames(companionOnly), [], "a non-manager/worker row is not a live wave");
+  // And the two halves compose: that project IS surfaced as inactive once it has archived rows.
+  const names = archivedOnlyProjects(fleetProjectNames(companionOnly), [sess("Chatty")]).map((p) => p.name);
+  assert.deepEqual(names, ["Chatty"]);
+});
+
+check("replayRoots puts LIVE managers first, then archived ones, de-duped with the live row winning", () => {
+  const mgr = (id, processState, lastActivity) =>
+    ({ id, projectId: "p", projectName: "P", role: "manager", processState, lastActivity });
+  const live = [
+    mgr("exited-recent", "exited", "2026-06-03T00:00:00.000Z"),
+    mgr("live-old", "live", "2026-06-01T00:00:00.000Z"),
+    mgr("live-new", "live", "2026-06-02T00:00:00.000Z"),
+  ];
+  const archived = [mgr("arch-a", "exited", "2026-05-02T00:00:00.000Z"), mgr("arch-b", "exited", "2026-05-01T00:00:00.000Z")];
+  assert.deepEqual(replayRoots(live, archived).map((m) => m.id),
+    ["live-new", "live-old", "exited-recent", "arch-a", "arch-b"],
+    "liveness outranks recency, recency breaks ties, and the archived feed's own order is preserved");
+  // The dedupe, and its direction: a manager in BOTH feeds appears ONCE, as its LIVE row — the archived
+  // copy is a stale snapshot of the same session and would render a second, wrong-state option.
+  const both = replayRoots([mgr("m1", "live", "2026-06-01T00:00:00.000Z")], [mgr("m1", "exited", "2026-05-01T00:00:00.000Z")]);
+  assert.equal(both.length, 1, "a manager in both feeds is offered once");
+  assert.equal(both[0].processState, "live", "and the LIVE row is the one that survives");
+  // Neither input is mutated — both arrive as react-query cache arrays, shared with every other reader.
+  assert.deepEqual(live.map((m) => m.id), ["exited-recent", "live-old", "live-new"], "the live input is not sorted in place");
+});
+
+check("GLOBAL_ACTIVITY_CAP is ONE number, and both cross-project feeds read it instead of a literal", () => {
+  assert.equal(GLOBAL_ACTIVITY_CAP, 100, "the cross-project activity feed renders 100 rows");
+  // The anti-drift half, and the whole point of the constant: the two surfaces that render this feed must
+  // REFERENCE it. A literal in either file is the 40-vs-100 split this card closed, reopening itself.
+  for (const rel of ["../src/pages/MissionControl.tsx", "../src/pages/WorkspaceHome.tsx"]) {
+    const src = readFileSync(new URL(rel, import.meta.url), "utf8");
+    assert.ok(src.includes("slice(0, GLOBAL_ACTIVITY_CAP)"),
+      `${rel} must slice its cross-project activity feed with GLOBAL_ACTIVITY_CAP, not a literal`);
+    assert.ok(!/slice\(0,\s*(?:40|100)\)/.test(src),
+      `${rel} still caps a feed with a hardcoded 40/100 — that is the drift this constant exists to stop`);
+  }
+  // POSITIVE CONTROL on that second, ABSENCE-shaped assertion: the pattern must be shown capable of
+  // matching, or two zero-hits prove nothing. The project-scoped pulse keeps its own literal by design.
+  const projectHome = readFileSync(new URL("../src/pages/ProjectHome.tsx", import.meta.url), "utf8");
+  assert.ok(/slice\(0,\s*40\)/.test(projectHome),
+    "positive control: the hardcoded-cap pattern matches nothing anywhere, so the absences above are vacuous");
 });
 
 console.log(`\n${pass} passed`);

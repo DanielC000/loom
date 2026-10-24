@@ -2387,6 +2387,15 @@ button.loom-kpi.is-open {
   color: var(--loom-text-dim);
 }
 
+/* The Replay tab: two full-width sections stacked at the node's own rhythm (card ff6123de). The
+   tab's panel wrapper is a plain div, so the gap lives here rather than on .loom-atlas-home. */
+.loom-atlas-replay {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
 /* The Deck tab: the primary surface takes the page, with a standing rail of the panels you
    act from. The rail is fixed-width so the board's own lanes get every pixel that is left. */
 .loom-atlas-deck {

@@ -9,8 +9,8 @@ import { REQUEST_TYPE_ORDER, requestAttentionLabel } from "../lib/questions";
 import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
 import { color, font } from "../theme";
-import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, WaveConsumption } from "../components/fleet";
-import { archivedOnlyProjects, ARCHIVED_ONLY_CAP, resolveAttentionProjectId, type ArchivedOnlyProject } from "../lib/fleet";
+import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, WaveConsumption, InactiveFleet } from "../components/fleet";
+import { archivedOnlyProjects, fleetProjectNames, replayRoots, resolveAttentionProjectId, GLOBAL_ACTIVITY_CAP } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import { AuditReplayPanel } from "../components/auditReplay";
@@ -134,7 +134,10 @@ export default function MissionControl() {
   const sessionsByProject = new Map<string, SessionListItem[]>();
   for (const s of [...managers, ...workers])
     (sessionsByProject.get(s.projectName) ?? sessionsByProject.set(s.projectName, []).get(s.projectName)!).push(s);
-  const projectNames = [...sessionsByProject.keys()]
+  // The NAMES come from the shared derivation (lib/fleet.ts) — the same one the Atlas Workspace node's
+  // Replay tab passes to archivedOnlyProjects, so the two surfaces can never disagree about which
+  // projects count as live and therefore which count as inactive. The ORDER is this page's own.
+  const projectNames = fleetProjectNames([...managers, ...workers])
     .sort((a, b) => mostRecentActivity(sessionsByProject.get(b)!) - mostRecentActivity(sessionsByProject.get(a)!));
 
   // Inactive projects — those present ONLY in the archived set (all their sessions have exited, so they're
@@ -186,22 +189,10 @@ export default function MissionControl() {
     if (name) attnByProject.set(name, (attnByProject.get(name) ?? 0) + 1);
   }
 
-  // Replay roots: every manager you can replay — LIVE managers first (the wave you're driving, ordered
-  // live-then-recency), then the ARCHIVED managers of past/exited runs (newest-archived first, as the
-  // role-scoped feed already returns them). Since sessions auto-archive on exit, a finished run's manager
-  // is gone from the live feed and lives only in `archivedManagersQ` — without this merge the panel would
-  // show only the current wave and "replay any past run too" (above) would be a lie. Dedup by id, live
-  // row wins.
-  const liveManagerIds = new Set(managers.map((m) => m.id));
-  const archivedManagers = (archivedManagersQ.data?.items ?? []).filter((s) => !liveManagerIds.has(s.id));
-  const replayRoots: SessionListItem[] = [
-    ...[...managers].sort((a, b) => {
-      const liveA = a.processState === "live" ? 1 : 0, liveB = b.processState === "live" ? 1 : 0;
-      if (liveA !== liveB) return liveB - liveA;
-      return mostRecentActivity([b]) - mostRecentActivity([a]);
-    }),
-    ...archivedManagers,
-  ];
+  // Replay roots: every manager you can replay — LIVE managers first, then the ARCHIVED managers of
+  // past/exited runs. The ordering + dedup rule lives in lib/fleet.ts (`replayRoots`), shared with the
+  // Atlas Workspace node's Replay tab so the two pickers list the same subjects in the same order.
+  const roots = replayRoots(managers, archivedManagersQ.data?.items ?? []);
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: orchStatusQuery().queryKey });
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
@@ -318,7 +309,7 @@ export default function MissionControl() {
           <SectionLabel>Activity</SectionLabel>
           <Panel grid style={{ maxHeight: "62vh", overflow: "auto" }}>
             {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
-            {allEvents.slice(0, 100).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
+            {allEvents.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
           </Panel>
         </div>
       </div>
@@ -344,50 +335,17 @@ export default function MissionControl() {
             </span>
           )}
         </button>
-        {replayOpen && <AuditReplayPanel managers={replayRoots} hideLabel />}
+        {replayOpen && <AuditReplayPanel managers={roots} hideLabel />}
       </div>
     </div>
     </HarnessMixProvider>
   );
 }
 
-// Inactive-projects strip — the finished-wave tier of the fleet. Every project here has zero live sessions
-// (present only in the archive), so MC's running-derived fleet would drop it entirely; we surface each as a
-// MUTED FleetCard so past waves stay glanceable. The user calls these "inactive" (owner's wording) — NOT
-// "archived": that word is reserved for the separate, reversible soft-archive "Archived" section on the
-// Workspace page, a genuinely different project state. Kept OUT of the way per the owner's constraint:
-// collapsed behind a "N inactive project(s)" affordance (closed by default) AND, once open, capped at
-// ARCHIVED_ONLY_CAP cards (the affordance still reports the true total) so inactive history can never crowd
-// the active fleet above it.
-function InactiveFleet({ projects }: { projects: ArchivedOnlyProject[] }) {
-  const [open, setOpen] = useState(false);
-  if (projects.length === 0) return null;
-  const shown = projects.slice(0, ARCHIVED_ONLY_CAP);
-  const overflow = projects.length - shown.length;
-  return (
-    <div style={{ marginTop: 12 }}>
-      <Button variant="ghost" onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        title={open ? "Hide inactive projects" : "Show inactive projects"}
-        style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, padding: "2px 6px" }}>
-        {open ? "▾" : "▸"} {projects.length} inactive project{projects.length === 1 ? "" : "s"}
-      </Button>
-      {open && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "start", marginTop: 8 }}>
-          {shown.map((p) => (
-            <FleetCard key={p.name} name={p.name} managers={[]} workers={[]} archived={p.archived}
-              attention={0} onExpand={() => { /* no live sessions to expand into */ }} muted />
-          ))}
-          {overflow > 0 && (
-            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
-              +{overflow} more inactive
-            </span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+// `InactiveFleet` — the finished-wave tier — moved to components/fleet.tsx with card ff6123de, beside
+// FleetCard, which is what it composes: the Atlas Workspace node's Replay tab renders the SAME tier, and
+// a forked copy is two tiers that drift. This page's own mount above is unchanged (it does not pass
+// `defaultOpen`, so the strip is still collapsed under the live fleet grid).
 
 // The global usage-hold override moved to components/fleetControls.tsx with card 7b893d54 — this page
 // and Atlas's two fleet-control mounts now render ONE implementation of it. Mission Control keeps its

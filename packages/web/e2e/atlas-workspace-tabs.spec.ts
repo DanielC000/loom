@@ -7,9 +7,9 @@
 // `?tab=` on `/home`, each one's EXISTING component mounted verbatim as the tab body.
 //
 // Four claims, each measured against the running app rather than a list typed into this file:
-//   1. NINE TABS, WITH THEIR COUNTS. The tab KEYS are parsed out of the real `WORKSPACE_NODE_TABS`
-//      declaration in src/nav.tsx, and each re-homed tab's LABEL is required to equal the label the
-//      CLASSIC rail gives that same address — so the two surfaces are shown to name one destination
+//   1. THE WHOLE DECLARED TAB SET, WITH THEIR COUNTS. The re-homed tab KEYS are parsed out of the
+//      real `WORKSPACE_NODE_TABS` declaration in src/nav.tsx, and each one's LABEL must equal the
+//      label the CLASSIC rail gives that address — so the two surfaces are shown to name one thing
 //      rather than a literal being typed here that could keep passing after a rename. Counts are
 //      asserted on the three the mockup gives one, against seeded data.
 //   2. EACH TAB IS A REAL ADDRESS. Every key survives a reload at its own URL, which is the whole
@@ -45,6 +45,10 @@ const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 
 /** The node's own two tabs, which precede the re-homed ones — pages/WorkspaceHome.tsx's `HOME_TABS`. */
 const HOME_TAB_KEYS = ["overview", "deck"];
+/** The node's own TRAILING tab, which follows them — that file's `REPLAY_TAB` (card ff6123de). Kept a
+ *  separate list because the position is the claim: the node's two readings lead, the re-homed seven
+ *  hold the middle in the mockup's `ROOT_TABS` order, and the forensic tab trails them all. */
+const TRAILING_TAB_KEYS = ["replay"];
 
 /** The rail renders one anchor per NAV_PAGES entry; Settings sits in its footer as a `statrow`. */
 const RAIL_LINKS = "a.loom-rail-item, a.loom-rail-statrow";
@@ -107,7 +111,7 @@ async function renderedTabKeys(page: Page): Promise<string[]> {
 }
 
 test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
-  test("switch ON: nine tabs with their counts, each one a real address", async ({ page, loomDaemon }) => {
+  test("switch ON: the declared tab set with its counts, each one a real address", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const rows = tabsUnderTest();
     const project = await loomDaemon.createProject(`atlas-wstabs-${Date.now()}`);
@@ -134,14 +138,15 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
     expect(railLabels.size, "the rail label collector found no destinations at all").toBeGreaterThan(5);
     expect(railLabels.get("/inbox"), "the rail label collector read no label for /inbox").toBeTruthy();
 
-    // ── ON: the node's nine tabs. ──
+    // ── ON: the node's whole tab set. ──
     await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
 
-    // CLAIM 1a — the keys, in order, are the node's own two followed by the declared seven.
+    // CLAIM 1a — the keys, in order: the node's own two leading readings, the declared re-homed
+    // surfaces in their own order, then the node's own trailing forensic tab.
     expect(await renderedTabKeys(page), "the Workspace node's tab row is not the declared ROOT_TABS set")
-      .toEqual([...HOME_TAB_KEYS, ...rows.map((r) => r.key)]);
+      .toEqual([...HOME_TAB_KEYS, ...rows.map((r) => r.key), ...TRAILING_TAB_KEYS]);
 
     // CLAIM 1b — each re-homed tab's label is the one the classic rail gives its own address. The
     // Atlas-only workspace Settings node has no rail row by design (a second Settings row in the rail
@@ -180,10 +185,10 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
       .toHaveText(/^\d+·\d+$/);
     // Automation: triggers across both tables. Zero on a fresh daemon, so again a shape claim.
     await expect(countOf("automation"), "the Automation tab carries no count").toHaveText(/^\d+$/);
-    // POSITIVE CONTROL on that collector, and on the mockup's own placement: the four tabs the design
-    // gives NO count must carry none. Three readings of a working locator and four of an absence,
-    // from the same collector on the same page at the same moment.
-    for (const bare of ["actors", "usage", "companion", "settings"]) {
+    // POSITIVE CONTROL on that collector, and on the mockup's own placement: every tab the design gives
+    // NO count must carry none. Three readings of a working locator and five of an absence, from the
+    // same collector on the same page at the same moment.
+    for (const bare of ["actors", "usage", "companion", "settings", "replay"]) {
       await expect(countOf(bare), `the ${bare} tab carries a count the approved design does not give it`)
         .toHaveCount(0);
     }
@@ -194,7 +199,7 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
 
     // CLAIM 2 — each tab is a real address: it selects on a fresh load AND survives a reload. A tab
     // that were component state would pass the first and fail the second.
-    for (const key of [...HOME_TAB_KEYS, ...rows.map((r) => r.key)]) {
+    for (const key of [...HOME_TAB_KEYS, ...rows.map((r) => r.key), ...TRAILING_TAB_KEYS]) {
       await page.goto(loomDaemon.baseURL + hrefFor(key));
       await expect(page.getByTestId(`atlas-tab-${key}`),
         `${hrefFor(key)} did not select the ${key} tab`).toHaveAttribute("aria-selected", "true");

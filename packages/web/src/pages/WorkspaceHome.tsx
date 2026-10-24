@@ -22,6 +22,8 @@ import {
   boardRollup, gateLanes, isLiveSession, lastMergeByProject, liveCountsByProject, mergeThroughput,
   plural, relativeTime, useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
+import { GLOBAL_ACTIVITY_CAP } from "../lib/fleet";
+import { WorkspaceReplay } from "../components/workspaceReplay";
 import { isCompanionSession } from "../lib/sessions";
 import { color, font, type Tone } from "../theme";
 import { useNavigate } from "react-router-dom";
@@ -40,10 +42,22 @@ import { useNavigate } from "react-router-dom";
 // through the cache keys the classic pages already fill — so this node adds no poll Mission Control
 // or the Gates page was not already making.
 
-// The node's OWN two tabs. The seven re-homed cross-project surfaces follow them, in the mockup's
+// The node's OWN LEADING tabs. The seven re-homed cross-project surfaces follow them, in the mockup's
 // `ROOT_TABS` order, from the one declaration in src/nav.tsx (card 41eab0eb) — so this file never
 // names which surfaces they are, only how their counts are derived.
 const HOME_TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label: "Deck" }];
+
+// The node's own TRAILING tab — the retrospective reading of the same node (card ff6123de): the wave
+// scrubber/diff plus the finished-wave tier, both of them Mission Control surfaces with nowhere else to
+// live under Atlas. See components/workspaceReplay.tsx.
+//
+// It trails the re-homed seven rather than sitting with Overview/Deck for two reasons. A forensic tool is
+// the rarest thing on this node, and the More ⋯ overflow folds from the END of the row — so last is
+// exactly the slot that should yield first when the row runs out of width (card d4350286). And it is
+// declared separately rather than appended to HOME_TABS because HOME_TABS' own position is load-bearing:
+// the mockup's `homeTabs().concat(ROOT_TABS)` split puts the node's two readings FIRST, and inserting a
+// third there would push Inbox and Gates right for a surface nobody reaches daily.
+const REPLAY_TAB = { key: "replay", label: "Replay" };
 
 /**
  * The `?tab=` values this node answers to. Anything else falls back to Overview.
@@ -55,7 +69,8 @@ const HOME_TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label:
  * soon as the read happens inside a function.
  */
 const isTabKey = (key: string) =>
-  HOME_TABS.some((t) => t.key === key) || WORKSPACE_NODE_TABS.some((t) => t.key === key);
+  HOME_TABS.some((t) => t.key === key) || key === REPLAY_TAB.key
+  || WORKSPACE_NODE_TABS.some((t) => t.key === key);
 
 /** The query key a hosted page's own sub-tab uses here — see lib/nodeTabHost.tsx for why not `tab`. */
 const SUB_KEY = "sub";
@@ -150,6 +165,7 @@ export default function WorkspaceHome() {
       const { key, label } = workspaceNodeTabOf(t);
       return { key, label, count: tabCounts[key] };
     }),
+    REPLAY_TAB,
   ];
 
   const kpis: KpiItem[] = [
@@ -237,10 +253,17 @@ export default function WorkspaceHome() {
       <GateLaneList lanes={lanes} />
     </BandPanel>
   );
+  // The cap is `GLOBAL_ACTIVITY_CAP` (lib/fleet.ts), the SAME constant Mission Control's Activity column
+  // reads — this band was 40 against that page's 100, and that page is the one card 5afd71bd retires, so
+  // the shortfall was 60 rows about to become unreachable rather than merely summarised. The band owns a
+  // fixed 320px scroll by design, so a deeper list changes scroll depth, not layout.
+  //
+  // ⚠️ The project-scoped pulse (pages/ProjectHome.tsx) keeps its OWN, narrower cap: different
+  // population, and its `Runs` exit survives. Don't fold the two onto one number.
   const pulsePanel = (
     <BandPanel label="Pulse" action={{ to: "/", label: "Mission" }} testId="atlas-band-pulse">
       {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}
-      {events.slice(0, 40).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
+      {events.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
     </BandPanel>
   );
 
@@ -275,6 +298,7 @@ export default function WorkspaceHome() {
       </NodeTabs>
 
       <RehomedTabPanels active={tab} />
+      <ReplayTabPanel active={tab} />
 
       {/* The node's own two tabs stay CONDITIONAL, unlike the re-homed bodies above: neither holds
           unfinished user input (a KPI pop-over is ephemeral, and the fleet controls confirm in place),
@@ -375,6 +399,37 @@ function RehomedTabPanels({ active }: { active: string }) {
         );
       })}
     </>
+  );
+}
+
+/**
+ * The Replay tab's body, under the SAME mount rule as the re-homed panels above (card 41eab0eb) rather
+ * than the node's own two conditional tabs: mounted on first visit, never unmounted after.
+ *
+ * Both halves of that rule are load-bearing here, for the same reasons they are there. The panel holds
+ * real unfinished work the moment a reader touches it — a chosen subject, a scrub position, an open
+ * run-diff — and a tab click is not consent to discard it. And it is the ONLY thing on this node that
+ * reads the archive, so leaving it unmounted until asked for is what keeps the default `/home` landing
+ * free of two 300-row archived pages and the two reserved-home probes.
+ *
+ * Deliberately NOT folded into `RehomedTabPanels`: that component maps `WORKSPACE_NODE_TABS` and wraps
+ * each body in a `NodeTabHostProvider`, which exists for a GUEST page that owns a `?tab=` of its own.
+ * This body owns no query parameter and is not a re-homed address, so it needs neither.
+ */
+function ReplayTabPanel({ active }: { active: string }) {
+  // Set during render (React's "adjusting state when a prop changes" path), as the sibling above does,
+  // so the tab's first frame is already its content and not an empty column.
+  const [visited, setVisited] = useState(false);
+  const isActive = active === REPLAY_TAB.key;
+  if (isActive && !visited) setVisited(true);
+  if (!visited) return null;
+  return (
+    // `hidden` as the ATTRIBUTE, never an inline `display` — an author `display` out-specifies the UA's
+    // `[hidden]` rule, and the attribute is also what keeps the panel out of the accessibility tree and
+    // the tab order while it is not showing.
+    <div hidden={!isActive} data-testid={`atlas-tabpanel-${REPLAY_TAB.key}`}>
+      <WorkspaceReplay />
+    </div>
   );
 }
 

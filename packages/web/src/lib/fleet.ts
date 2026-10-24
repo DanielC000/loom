@@ -201,6 +201,74 @@ function archivedRecency(sessions: readonly SessionListItem[]): number {
   return max;
 }
 
+// ── The two god-eye feeds, shared by Mission Control and the Atlas Workspace node (card ff6123de) ───────
+// Both surfaces read the SAME cross-project populations, so the derivations live here rather than once per
+// page: a second copy drifts silently, and the symptom is two screens disagreeing about the same fleet.
+
+/**
+ * The project names the LIVE fleet covers — every project with a manager or worker row in a live
+ * (non-archived) session feed, in feed order, de-duplicated.
+ *
+ * This is the population the inactive tier is the COMPLEMENT of: {@link archivedOnlyProjects} treats
+ * anything outside this set, but present in the archive, as a finished wave. Roles other than
+ * manager/worker are deliberately excluded — a project whose only live row is a companion or a setup
+ * session has no wave running, so it reads as inactive, which is the behaviour Mission Control has
+ * always had.
+ */
+export function fleetProjectNames(sessions: readonly SessionListItem[]): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const s of sessions) {
+    if (s.role !== "manager" && s.role !== "worker") continue;
+    if (seen.has(s.projectName)) continue;
+    seen.add(s.projectName);
+    names.push(s.projectName);
+  }
+  return names;
+}
+
+/**
+ * Every manager a wave can be replayed from, in picker order: LIVE managers first (live-then-recency,
+ * so the default subject is the wave you are driving now), then the ARCHIVED managers of finished runs
+ * in the order their role-scoped feed already returns them (newest-archived first). De-duplicated by
+ * id with the live row winning.
+ *
+ * Sessions auto-archive on exit, so a finished run's manager is absent from the live feed entirely —
+ * without the archived tail the picker would show only the current wave and "replay any past run too"
+ * would be a lie (card 9f010283's guardrail).
+ *
+ * The recency key is `lastActivity` DESC, inlined rather than taken from lib/sessions'
+ * `mostRecentActivity`: this module deliberately carries no relative RUNTIME imports so the hermetic
+ * node test can load it standalone (see the header). On a single row the two are the same expression.
+ */
+export function replayRoots(
+  liveManagers: readonly SessionListItem[],
+  archivedManagers: readonly SessionListItem[],
+): SessionListItem[] {
+  const liveIds = new Set(liveManagers.map((m) => m.id));
+  return [
+    ...[...liveManagers].sort((a, b) => {
+      const liveA = a.processState === "live" ? 1 : 0, liveB = b.processState === "live" ? 1 : 0;
+      if (liveA !== liveB) return liveB - liveA;
+      return +new Date(b.lastActivity) - +new Date(a.lastActivity);
+    }),
+    ...archivedManagers.filter((s) => !liveIds.has(s.id)),
+  ];
+}
+
+/**
+ * How many rows a CROSS-PROJECT activity feed renders — Mission Control's Activity column and the
+ * Atlas Workspace node's Pulse band, which read the same union of every live manager's event stream.
+ *
+ * ⛔ Not the PROJECT-scoped pulse (pages/ProjectHome.tsx), which caps its own, much narrower
+ * population and keeps a live exit to that project's Runs page. Different feed, different number.
+ *
+ * @decision ff6123de — the two cross-project feeds must read ONE constant. The Workspace band shipped
+ * at 40 against Mission Control's 100, and Mission Control is the surface card 5afd71bd retires — so a
+ * lower cap here is 60 rows that become unreachable rather than merely summarised.
+ */
+export const GLOBAL_ACTIVITY_CAP = 100;
+
 // ── BOOT STUCK pairing (card b1da256d round 2, item 3b) ─────────────────────────────────────────────────
 // Extracted out of lib/attention.ts's useAttention so it's unit-testable without React/react-query: given
 // a boot-dialog-stuck candidate's event stream (claude_boot_dialog_stuck/claude_boot_dialog_resolved,
