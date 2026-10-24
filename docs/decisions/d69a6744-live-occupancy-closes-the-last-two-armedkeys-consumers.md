@@ -103,7 +103,7 @@ closure-captured `byRepoKey`). Caught by this card's own DoD (the full `merge-qu
 run), not by code review — see `merge-quarantine-pass1-migrate-resolvedkey-8bff3cae.mjs`'s own
 `shared-ancestor-sibling` scenario, the one that went red.
 
-## The resolvedKeys-retention residual — CLOSED at the fold-in by `f575cebf`; the PASS1 upgrade case stays open on `e7652e06`
+## The resolvedKeys-retention residual — CLOSED at the fold-in by `f575cebf`; the PASS1 upgrade case CLOSED by `e7652e06`
 
 `unionResolvedKeysRetaining(entry.resolvedKeys, freshSecondaryKeys, ...)` unions TWO sources. This card's
 own fix only cleaned the SECOND (`freshSecondaryKeys`, ownership-filtered). The FIRST, `entry.resolvedKeys`
@@ -115,13 +115,14 @@ cross-repo identity/token bleed and stranding on the very next reboot. **`f575ce
 FOLD-IN** — every newly-folded on-disk key is now filtered through `positivelyForeignKey` (drop ONLY a key
 with a live, different-identity occupant; never a merely-unprovable one, which would reopen the
 union-never-drop rule in the other direction) before it ever reaches `entry.resolvedKeys`.
-`f575cebf`'s own investigation ALSO confirmed a SEPARATE, still-open "upgrade case" the fold-in fix cannot
-reach: a latch already contaminated on disk before ANY fold-in runs is unioned by PASS1's own
-`armKeyUnlessDegradedCollision` ("legitimate same-toplevel union" fallthrough, which has NO identity check
-when both colliding sides are resolvable — it DOES compare `directPathIdentity` between two
-resolvable-but-different repos, ~:6131, but only reaches that comparison when exactly one side is
-unresolvable) — independent of how the contamination got there. That is tracked on the Lead's separate
-card `e7652e06`, not this one or `f575cebf`.
+`f575cebf`'s own investigation ALSO confirmed a SEPARATE "upgrade case" the fold-in fix cannot reach: a
+latch already contaminated on disk before ANY fold-in runs was unioned by PASS1's own
+`armKeyUnlessDegradedCollision` ("legitimate same-toplevel union" fallthrough, which had NO identity check
+when both colliding sides were resolvable — it DID compare `directPathIdentity` between two
+resolvable-but-different repos, but only reached that comparison when exactly one side was unresolvable)
+— independent of how the contamination got there. **`e7652e06` closed this** by replacing the
+resolvability-parity gate with a freshness discriminator (`entryFresh`/`priorFresh`) inside
+`armKeyUnlessDegradedCollision` itself — see `docs/decisions/e7652e06-boot-freshness-not-resolvability-parity.md`.
 
 ## Do not
 
@@ -144,8 +145,9 @@ card `e7652e06`, not this one or `f575cebf`.
   would itself be a fail-open (it treats an empty slot as unowned, dropping a legitimate secondary).
 - Do not read "site 2 is now safe" as "a stale `armedKeys` member can never again reach a persisted latch"
   — only the live-occupancy-derived, ownership-filtered secondary set is clean; an already-contaminated
-  `entry.resolvedKeys` is now filtered at the fold-in (`f575cebf`), but the PASS1 boot-time "upgrade case"
-  (an already-contaminated disk file, independent of any fold-in) stays open on card `e7652e06`.
+  `entry.resolvedKeys` is filtered at the fold-in (`f575cebf`), and the PASS1 boot-time "upgrade case" (an
+  already-contaminated disk file, independent of any fold-in) is closed by `e7652e06`'s freshness
+  discriminator — but neither of those is this card's own fix.
 - Do not assume Scenario 3's (the pending-twin) own "the twin stays blocked regardless" outcome
   generalizes to every reduce-shape twin — it depends on `writePendingDivertFile`'s own, UNRELATED
   backstop write (which durably keeps the twin blocked via an independent pending record, no matter what

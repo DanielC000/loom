@@ -73,19 +73,28 @@ itself already wrong. Three shapes slip through, named here rather than widened 
    `accepted-residual-foreign-key-with-empty-slot` scenario reproduces this one directly.
 2. **F is live but PENDING** (degraded-diverted, unreadable-diverted, or not yet graduated into
    `activeQuarantines`) — `positivelyForeignKey` never consults `pendingUnresolvedQuarantines` at all, so
-   a pending-tier F is just as invisible to it as an empty slot; the key survives the filter and PASS 1
-   later unions them anyway.
-3. **The slot already holds a PASS1-merged union whose winning identity is Y itself** (`e7652e06`
-   territory: an earlier boot-time union already re-pointed the occupant's own `repoPath` to Y, not F) —
-   `positivelyForeignKey` correctly reads this as "same identity", because BY THE TIME it looks, the
-   contamination has already rewritten what "same identity" means at that key.
+   a pending-tier F is just as invisible to it as an empty slot; the key survives the filter.
+   **Closed — but AT BOOT, not here (`e7652e06`, see "Do not" below): `e7652e06`'s own freshness
+   discriminator (`isKeyVerifiedFor(prior.repoPath, key)`, checked against `prior`'s repoPath directly,
+   never against whether `prior` has a live `byRepoKey` entry at fold time) makes the NEXT boot converge
+   correctly regardless of whether F's own real latch or Y's contaminated secondary is read first — F
+   "merely pending" when Y's contamination was folded in no longer matters once any boot runs.**
+3. **The slot already holds a PASS1-merged union whose winning identity is Y itself** (an earlier
+   boot-time union already re-pointed the occupant's own `repoPath` to Y, not F) — `positivelyForeignKey`
+   correctly reads this as "same identity", because BY THE TIME it looks, the contamination has already
+   rewritten what "same identity" means at that key. **Not closed — this is exactly the PASS1 "upgrade
+   case" `e7652e06` fixes going FORWARD (a NEW such union can no longer form), but it does not retroactively
+   repair one that already formed before `e7652e06` landed.**
 
-This is not "no live signal exists" — it is **no signal this card adopts**. Real signals DO exist for at
-least shape 1 and 2 (`isKeyVerifiedFor` for a registered repo of a different identity; a pending-entry's
-own identity, matched against `pendingUnresolvedQuarantines`) — this card simply doesn't widen
-`positivelyForeignKey` to consult them, since the shared predicate that would need to unify all three
-shapes (including shape 3, which has no fix at this chokepoint at all) is exactly what `e7652e06` is
-where that design gets decided, not duplicated piecemeal here.
+This is not "no live signal exists" for shape 1 — it is **no signal this card adopts** there. Shape 2 is
+closed structurally, at a different chokepoint, by `e7652e06` (see above) — **`positivelyForeignKey`
+itself was deliberately NOT widened to cover it**, by Lead ruling: fold time has no tautological-primary
+concept at all (it only ever deals with secondary candidates being retained), which is exactly the input
+`e7652e06`'s own discriminator needs and this chokepoint never has — see that record's own "Shared
+predicate with fold time" section for why unifying the two would either add a boot-only input here for no
+fold-time benefit, or weaken boot's own discriminator and reopen a real regression. Shape 1 (empty slot)
+and shape 3 (an already-wrong winning identity) remain genuinely open, named rather than silently assumed
+closed — `e7652e06`'s own record states the same boundary from its own side.
 
 ## Do not
 
@@ -93,19 +102,20 @@ where that design gets decided, not duplicated piecemeal here.
   unowned, which drops a legitimate secondary whose entry was just evicted (nothing armed yet) and is a
   fail-open in the OTHER direction. Use `positivelyForeignKey` (drop ONLY a key with a live,
   different-identity occupant) instead.
-- Do not widen `positivelyForeignKey` to try to catch any of the three accepted-residual shapes above
-  (empty slot, pending-tier F, or an already-merged occupant whose identity is wrongly Y) piecemeal — real
-  signals exist for some of them (`isKeyVerifiedFor`, a pending-entry's own identity), but this card
-  deliberately doesn't adopt them; that unification is `e7652e06`'s own scope, not a wider predicate here.
+- Do not widen `positivelyForeignKey` to try to catch any of the three accepted-residual shapes above —
+  `e7652e06` considered exactly this (the triage note that opened it proposed it verbatim) and REJECTED it
+  by Lead ruling: it regresses the `883e29bc`/`9a55fb90` same-toplevel-union precedent at boot time. Shape
+  2 is closed at a DIFFERENT chokepoint instead (`e7652e06`'s own freshness discriminator, boot-only);
+  shapes 1 and 3 stay open, by design, on both records.
 - Do not pass `activeQuarantines` as `foldInOnDiskTokensIfMarked`'s/`reconcileMarkedBasenameBeforeWrite`'s
   `ownershipMap` from inside `reenterMergeQuarantinesAtBootImpl`'s `bootWriteLatch` closure — it is
   structurally stale there (not synced into `activeQuarantines` until the whole boot function's
   end-of-function loop runs); pass `byRepoKey` instead.
-- Do not read this card as closing the PASS1 "upgrade case" — a latch already contaminated on disk before
-  any fold-in ever runs is unioned by `armKeyUnlessDegradedCollision`'s own "legitimate same-toplevel
-  union" fallthrough, which has NO identity check when both colliding sides are resolvable (it DOES
-  compare `directPathIdentity`, ~:6131, but only reaches that branch when exactly one side is
-  unresolvable), independent of how the contamination got there. That stays open on card `e7652e06`.
+- This card alone does NOT close the PASS1 "upgrade case" — a latch already contaminated on disk before
+  any fold-in ever runs was unioned by `armKeyUnlessDegradedCollision`'s own "legitimate same-toplevel
+  union" fallthrough, independent of how the contamination got there. **That case IS now closed, but by
+  `e7652e06`'s freshness discriminator landing in `armKeyUnlessDegradedCollision` itself — not by anything
+  in this card.** See `docs/decisions/e7652e06-boot-freshness-not-resolvability-parity.md`.
 
 ## Verification
 

@@ -6122,6 +6122,47 @@ function reenterMergeQuarantinesAtBootImpl(
    * own fresh identity backs; EITHER side of this eviction — degraded or genuinely resolvable — can
    * reach the zero-remaining-keys branch, and NEITHER is ever dropped. See the decision record.
    */
+  // @decision e7652e06 — shared by every caller that decides `prior` must lose `key`, so they can
+  // never drift; evicts from THIS key only, never discards `prior`. See the decision record.
+  const evictPriorFromKey = (prior: MergeQuarantineEntry, key: string): void => {
+    const remainingKeys = (prior.armedKeys ?? [key]).filter((k) => k !== key);
+    if (remainingKeys.length > 0) {
+      const trimmedPrior: MergeQuarantineEntry = { ...prior, armedKeys: remainingKeys };
+      // replaceEntryEverywhere re-points EVERY existing byRepoKey/pendingUnresolvedQuarantines
+      // reference to `prior` (including any pending twin an EARLIER flush already pushed) onto
+      // `trimmedPrior` — so a prior already-pending entry stays correct without a separate step.
+      replaceEntryEverywhere(byRepoKey, prior, trimmedPrior);
+      byRepoKey.delete(key); // replaceEntryEverywhere re-points EVERY ref including this one; undo it
+    } else {
+      // `key` was prior's ONLY key — it's displaced entirely. NEVER discarded (card d163aef5, round
+      // 3 ruling: three prior rounds each tried to keep this re-bound across an eviction instead, and
+      // each opened a new hole) — always pushed to `pendingUnresolvedQuarantines`, degraded OR
+      // genuinely resolvable alike. This never reads or mutates `degradedDivertsToFlush` — that
+      // array is flushed on its own, independent schedule, and a duplicate push across the two is an
+      // accepted, harmless outcome (a duplicate beats a loss).
+      byRepoKey.delete(key);
+      degradedOccupiedKeys.delete(key);
+      // Recover `prior`'s own real sourceFile from an ALREADY-FLUSHED pending reference, by object
+      // identity, before ever falling back to inference.
+      const tracked = pendingUnresolvedQuarantines.find((p) => p.entry === prior);
+      let priorSourceFile: string;
+      if (tracked) {
+        priorSourceFile = tracked.sourceFile;
+      } else {
+        // No tracked reference — `prior` reached `key` via its own self-consistent primary arm
+        // (degraded or resolvable), so its real backing file, if it has one at all, is
+        // deterministically `quarantinePathForKey(key)`'s own basename.
+        priorSourceFile = path.basename(quarantinePathForKey(key));
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] evicting ${prior.repoPath} from ${key} with no tracked pending reference of its own — inferring its real source file as ${priorSourceFile} (card d163aef5, round 3 ruling: never discarding it either way).`);
+      }
+      // Dedup on the EXACT (entry, sourceFile) pair only, never on entry identity alone — a second,
+      // genuinely different sourceFile for the same entry must still get its own reference.
+      if (!pendingUnresolvedQuarantines.some((p) => p.entry === prior && p.sourceFile === priorSourceFile)) {
+        pendingUnresolvedQuarantines.push({ entry: prior, sourceFile: priorSourceFile });
+      }
+    }
+  };
   const armKeyUnlessDegradedCollision = (
     key: string,
     entry: MergeQuarantineEntry,
@@ -6131,48 +6172,38 @@ function reenterMergeQuarantinesAtBootImpl(
     if (prior && directPathIdentity(prior.repoPath) !== directPathIdentity(entry.repoPath)) {
       const priorResolvable = isRepoPathCurrentlyResolvable(prior.repoPath);
       const entryResolvable = isRepoPathCurrentlyResolvable(entry.repoPath);
-      if (priorResolvable !== entryResolvable && !registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key))) {
-        if (!entryClaimIsTautological && !entryResolvable) return undefined; // `entry` is the losing side
-        // `prior` loses `key` — evict it from THIS key only; it may still legitimately hold others.
-        const remainingKeys = (prior.armedKeys ?? [key]).filter((k) => k !== key);
-        if (remainingKeys.length > 0) {
-          const trimmedPrior: MergeQuarantineEntry = { ...prior, armedKeys: remainingKeys };
-          // replaceEntryEverywhere re-points EVERY existing byRepoKey/pendingUnresolvedQuarantines
-          // reference to `prior` (including any pending twin an EARLIER flush already pushed) onto
-          // `trimmedPrior` — so a prior already-pending entry stays correct without a separate step.
-          replaceEntryEverywhere(byRepoKey, prior, trimmedPrior);
-          byRepoKey.delete(key); // replaceEntryEverywhere re-points EVERY ref including this one; undo it
-        } else {
-          // `key` was prior's ONLY key — it's displaced entirely. NEVER discarded (card d163aef5, round
-          // 3 ruling: three prior rounds each tried to keep this re-bound across an eviction instead, and
-          // each opened a new hole) — always pushed to `pendingUnresolvedQuarantines`, degraded OR
-          // genuinely resolvable alike. This never reads or mutates `degradedDivertsToFlush` — that
-          // array is flushed on its own, independent schedule, and a duplicate push across the two is an
-          // accepted, harmless outcome (a duplicate beats a loss).
-          byRepoKey.delete(key);
-          degradedOccupiedKeys.delete(key);
-          // Recover `prior`'s own real sourceFile from an ALREADY-FLUSHED pending reference, by object
-          // identity, before ever falling back to inference.
-          const tracked = pendingUnresolvedQuarantines.find((p) => p.entry === prior);
-          let priorSourceFile: string;
-          if (tracked) {
-            priorSourceFile = tracked.sourceFile;
-          } else {
-            // No tracked reference — `prior` reached `key` via its own self-consistent primary arm
-            // (degraded or resolvable), so its real backing file, if it has one at all, is
-            // deterministically `quarantinePathForKey(key)`'s own basename.
-            priorSourceFile = path.basename(quarantinePathForKey(key));
-            // eslint-disable-next-line no-console
-            console.error(`[merge-quarantine] evicting ${prior.repoPath} from ${key} with no tracked pending reference of its own — inferring its real source file as ${priorSourceFile} (card d163aef5, round 3 ruling: never discarding it either way).`);
-          }
-          // Dedup on the EXACT (entry, sourceFile) pair only, never on entry identity alone — a second,
-          // genuinely different sourceFile for the same entry must still get its own reference.
-          if (!pendingUnresolvedQuarantines.some((p) => p.entry === prior && p.sourceFile === priorSourceFile)) {
-            pendingUnresolvedQuarantines.push({ entry: prior, sourceFile: priorSourceFile });
-          }
+      // @decision e7652e06 — the resolvability-MISMATCH path below is UNCHANGED (every ghost/degraded
+      // shape, `e1cb7d33`/`9a55fb90`, still goes there). FRESHNESS applies ONLY when BOTH sides are
+      // genuinely resolvable now, and never at a key a degraded entity's file exclusively backs.
+      if (priorResolvable && entryResolvable && !degradedOccupiedKeys.has(key)) {
+        const entryFresh = entryClaimIsTautological; // a PRIMARY arm's `key` IS entry's own live
+          // canonical key by construction — always fresh. A SECONDARY arm's candidate keys explicitly
+          // exclude `currentKey` (secondaryKeysToAttempt), so a secondary arm's claim is NEVER fresh.
+        const priorFresh = isKeyVerifiedFor(prior.repoPath, key);
+        if (priorFresh && !entryFresh) {
+          // CASE 2 — prior genuinely, freshly owns `key` right now; entry's claim here is purely
+          // historical (a stale resolvedKeys/resolvedKey secondary — the e7652e06 bug, forward read
+          // order). Decline entry's claim at THIS key only; prior is left COMPLETELY untouched.
+          return undefined; // `entry` is the losing side
+        } else if (entryFresh && !priorFresh) {
+          // CASE 3 — entry's claim is tautologically fresh; prior's occupancy here is NOT (the e7652e06
+          // bug, REVERSE read order). Evict `prior` from THIS key only — it may still legitimately hold
+          // others, with every token intact there. This is what makes the fix order-independent:
+          // whichever side PASS1 reads second still reaches the correct outcome.
+          evictPriorFromKey(prior, key);
         }
-        // else (backed by a registered repo): legitimate same-toplevel union, unchanged below.
+        // else (both fresh, or neither — unchanged from pre-e7652e06: a same-tier, both-resolvable
+        // collision always fell through to union): legitimate same-toplevel union, unchanged below.
+      } else if (priorResolvable !== entryResolvable && !registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key))) {
+        // Pre-e7652e06 behaviour, UNCHANGED: legitimate only when backed by SOME registered repo's own
+        // fresh identity (9a55fb90's own "real owner can be a third, not-yet-processed party");
+        // otherwise whichever side is NOT currently resolvable loses. An unprovable key is kept, never
+        // guessed.
+        if (!entryClaimIsTautological && !entryResolvable) return undefined; // `entry` is the losing side
+        evictPriorFromKey(prior, key);
       }
+      // else (backed by a registered repo, or same-tier with neither side fresh, or a degraded-protected
+      // key): legitimate same-toplevel union, unchanged below.
     }
     // `prior` genuinely still occupies `key` here (never evicted above — eviction already deleted it)
     // whenever we reach this point with it non-empty: a same-identity match, a same-tier union, or a
