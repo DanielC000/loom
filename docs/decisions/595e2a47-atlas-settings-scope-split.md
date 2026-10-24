@@ -25,11 +25,19 @@ Derived by reading each section's component and recording the `api.*` members it
 | 8 | Project Links | `createProjectLink` · `deleteProjectLink` | `projectLinks()` · `projects()` | **workspace** |
 | 9 | Disk Reclaim | `reclaimNodeModules(…)` | `nodeModulesReclaimable(…)` | **workspace** |
 
+Added since, by the same rule (the call its component makes), and not part of this card's own audit:
+
+| # | Section | Write call(s) | Read call(s) | Placement |
+|---|---|---|---|---|
+| 2a | Project Lifecycle (card `c9b78d80`, `atlasOnly`) | `updateProject(id,…)` · `archiveProject(id)` · `deleteProjectPermanent(id)` | `allSessions()` | **project** |
+
 Sub-sections, following their parent: **project** — Repository Binding (in `RepoPathEditor`); Board Columns, Permission Allowlist, Orchestration Caps, Merge gate, Resume Doc Rotation, Default Harness, Doc Lint, Python, Session Environment, Memory (in `ConfigEditor`). **workspace** — Rate Limits, Watcher Cadences, Timeouts, Authenticated Request Guard, Message Delivery, Browser notifications, Scheduler, Default Harness, Gate Concurrency, Backups & Telemetry, Elevated Operator, Remote Access (in `GlobalConfigForm`); plus the 6 list headers inside the Connections / Pending bindings / Poll Jobs / Capabilities / Project Links / Disk Reclaim panels.
 
 ## The structural check that makes the table trustworthy
 
 `useActiveProject()` is imported once in `Settings.tsx` and called at exactly one site — the page entry. Its value reaches exactly two components, `RepoPathEditor` and `ConfigEditor`, both inside row 2. Every other section is active-project-blind by construction, not by inspection. So "which sections are project-scoped" has a mechanical answer, and it is row 2 alone.
+
+> **Amended by card `c9b78d80`.** A second project-scoped row now exists — **Project Lifecycle**, between rows 2 and 3 — and it calls `useActiveProject()` a second time, for `setProjectId` (a project it just archived or deleted cannot stay the active one). So the check above no longer holds as written: the project-scoped set is rows 2 and 2a, and the hook has two call sites. The check it was making still has a mechanical answer — grep `useActiveProject` in `Settings.tsx` and read which sections the call sites sit inside — it is just no longer a one-liner. That row is also the array's first `atlasOnly: true` entry; see `docs/decisions/c9b78d80-atlas-project-lifecycle-on-settings.md`.
 
 ## The three rows placed by argument, not by lookup
 

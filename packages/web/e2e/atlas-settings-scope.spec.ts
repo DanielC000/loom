@@ -10,8 +10,11 @@
 //   2. SCOPE, exercised. A project row's Save writes the ACTIVE project's config and not a decoy
 //      project's; a workspace row's Save writes the one platform override. "It rendered in the right
 //      column" is a weaker claim than "it edits the right store", so both are made.
-//   3. SWITCH OFF is untouched. The classic page still renders every row in one column, and the
-//      Atlas-only /workspace-settings address renders nothing there.
+//   3. SWITCH OFF is untouched. The classic page still renders every row it declares in one column,
+//      and the Atlas-only /workspace-settings address renders nothing there. Card c9b78d80 added the
+//      one exception the array can now declare — an `atlasOnly` row, which the classic page must NOT
+//      render because those controls already live on its own /projects page; it is parsed off the
+//      declaration like everything else, and its absence from classic is asserted, not skipped.
 //
 // ⚠️ Locator discipline (see the project-memory note `atlas-nav-labels-collide-with-exact-text-locators`):
 // "Settings" is now TWO tree labels and "Memory" is a tree label too, so a page-wide exact-text
@@ -35,7 +38,7 @@ const SETTINGS_SOURCE = path.resolve(__dirname, "..", "src", "pages", "Settings.
 const PROJECT_NODE = "/settings";
 const WORKSPACE_NODE = "/workspace-settings";
 
-type ParsedSection = { key: string; label: string; scope: string };
+type ParsedSection = { key: string; label: string; scope: string; atlasOnly: boolean };
 
 // Parsed out of the real source, with the filtered row count checked against the declaration's own
 // raw marker count — same idiom (and same reason) as atlas-tree.spec.ts's `parseAtlasHomes`. A regex
@@ -49,8 +52,12 @@ function parseSettingsSections(): { rows: ParsedSection[]; rawMarkers: number; b
   if (end < 0) throw new Error(`SETTINGS_SECTIONS in ${SETTINGS_SOURCE} has no closing "];"`);
   const block = src.slice(start, end);
   const rawMarkers = (block.match(/\bkey:\s*"/g) ?? []).length;
-  const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*label:\s*"([^"]+)",\s*scope:\s*"([^"]+)"/g)]
-    .map((m) => ({ key: m[1] ?? "", label: m[2] ?? "", scope: m[3] ?? "" }));
+  // `atlasOnly` (card c9b78d80) is OPTIONAL and must sit immediately after `scope` in the declaration
+  // for this to see it — a row that grows the flag somewhere else parses as `false` and would then be
+  // demanded on the classic page by the switch-OFF test below, which is the loud failure, not a silent
+  // pass. Captured rather than ignored because that flag is exactly what the OFF contract turns on.
+  const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*label:\s*"([^"]+)",\s*scope:\s*"([^"]+)"(?:,\s*atlasOnly:\s*(true|false))?/g)]
+    .map((m) => ({ key: m[1] ?? "", label: m[2] ?? "", scope: m[3] ?? "", atlasOnly: m[4] === "true" }));
   return { rows, rawMarkers, block };
 }
 
@@ -279,15 +286,30 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
     await page.goto(loomDaemon.baseURL + PROJECT_NODE);
     await expect(page.locator(".loom-rail"), "the classic shell did not render").toBeVisible();
     await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    // EVERY row, both scopes, in ONE column — the classic page keeps the whole page it always had.
-    for (const r of rows) {
+    // EVERY row the classic shell declares, both scopes, in ONE column — the classic page keeps the
+    // whole page it always had. An `atlasOnly` row is subtracted (card c9b78d80: its controls already
+    // live on classic /projects, and a second permanent-delete site is the thing to avoid), and its
+    // ABSENCE here is asserted below rather than merely skipped.
+    const classic = rows.filter((r) => !r.atlasOnly);
+    const atlasOnly = rows.filter((r) => r.atlasOnly);
+    expect(classic.length, "every section is atlasOnly, so the classic page assertions are vacuous")
+      .toBeGreaterThan(0);
+    for (const r of classic) {
       await expect(sectionBox(page, r.key),
         `the classic Settings page lost the ${r.scope} section ${r.key}`).toHaveCount(1);
+    }
+    for (const r of atlasOnly) {
+      await expect(sectionBox(page, r.key),
+        `the classic Settings page renders ${r.key}, which is declared atlasOnly`).toHaveCount(0);
+      // And the label itself, not merely its wrapper — scoped to `main`, since the classic rail draws
+      // nav labels as exact text of its own.
+      await expect(page.locator("main").getByText(r.label, { exact: true }),
+        `the classic Settings page still shows the atlasOnly label "${r.label}"`).toHaveCount(0);
     }
     // And in declaration order, which is the order the page has always rendered in (Disk Reclaim last).
     const rendered = await page.locator("main [data-testid^='settings-section-']")
       .evaluateAll((els) => els.map((el) => el.getAttribute("data-testid")?.replace("settings-section-", "") ?? ""));
-    expect(rendered, "the classic Settings page reordered its sections").toEqual(rows.map((r) => r.key));
+    expect(rendered, "the classic Settings page reordered its sections").toEqual(classic.map((r) => r.key));
 
     // The Workspace node is an ATLAS_HOMES address; LegacyShell deliberately mounts none of those, so
     // under the classic shell this path renders an empty content column rather than a second Settings.

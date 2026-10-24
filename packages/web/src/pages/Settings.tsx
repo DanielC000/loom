@@ -50,6 +50,9 @@ import {
   UNIT_MS, msFromUnit, msInUnit, msRangeError, msRangeErrors, msRangeHint, msStr, type Unit,
 } from "../lib/msUnits";
 import { MergeGateCadencePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
+// The project lifecycle controls (rename / vaultPath / reference repos / registered repos / archive /
+// permanent delete) and their four writes — ONE implementation, shared with the classic Projects page.
+import { ProjectManage, useProjectLifecycleWrites } from "../components/projectLifecycle";
 import { cadenceConfigWrite, intervalError } from "../lib/mergeGate";
 import { type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
@@ -73,6 +76,13 @@ export type SettingsSection = {
   key: string;
   label: string;
   scope: SettingsScope;
+  /**
+   * A section the CLASSIC shell must not render, because that shell already has the same controls
+   * somewhere else. The switch is still read exactly ONCE, at `Settings()`'s own entry — this is a
+   * declarative placement field on the row, not a section reading `useAtlasUi()` for itself, so the
+   * array stays the single source of where a section belongs. Omitted (the default) = both shells.
+   */
+  atlasOnly?: boolean;
   /** `project` is the ACTIVE project (null when the workspace holds none); a workspace row ignores it. */
   render: (project: Project | null) => ReactNode;
 };
@@ -107,6 +117,22 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         </p>
       </Panel>
     )),
+  },
+
+  // The project's own LIFECYCLE — rename, re-bind or unbind its vault, edit its reference-repo mirrors
+  // and its writable repo registry, archive it (reversible), or destroy it (not). PROJECT-scoped by the
+  // same rule as row 2: every one of these is an `updateProject`/`archiveProject`/`deleteProjectPermanent`
+  // call against the ACTIVE project's id.
+  //
+  // ATLAS-ONLY, and the one row in this array that is. These controls already exist under the classic
+  // shell, on `/projects` (card c9b78d80 moved them to components/projectLifecycle.tsx so both frames
+  // mount ONE implementation) — and the Atlas design retires `/projects` as a destination (card
+  // 5afd71bd), which is why they need a home here at all. Rendering them on the classic Settings page
+  // too would put a second, parallel PERMANENT-DELETE site in front of a reader who already has one,
+  // which is the opposite of what a strong confirm is for.
+  {
+    key: "project-lifecycle", label: "Project Lifecycle", scope: "project", atlasOnly: true,
+    render: (project) => <ProjectLifecyclePanel project={project} />,
   },
 
   // Daemon-global tuning — NOT keyed to the active project (one shared daemon).
@@ -176,7 +202,11 @@ function useActiveProjectRow(): Project | null {
 export default function Settings() {
   const [atlasUi] = useAtlasUi();
   const project = useActiveProjectRow();
-  const sections = atlasUi ? SETTINGS_SECTIONS.filter((s) => s.scope === "project") : SETTINGS_SECTIONS;
+  const sections = atlasUi
+    ? SETTINGS_SECTIONS.filter((s) => s.scope === "project")
+    // `atlasOnly` is the only thing the classic branch filters on, and it subtracts — the classic page
+    // still renders every row it ever rendered, in declaration order.
+    : SETTINGS_SECTIONS.filter((s) => !s.atlasOnly);
   return <SettingsColumn sections={sections} project={project} />;
 }
 
@@ -317,6 +347,55 @@ function RepoPathEditor({ project }: { project: Project }) {
           names the OLD repoPath. WARN-only — nothing was auto-edited; the human fixes it in the Agent
           editor if it matters. */}
       <StaleStartupPromptWarning warnings={save.isSuccess ? save.data?.staleStartupPrompts : undefined} />
+    </Panel>
+  );
+}
+
+// The project's lifecycle section (card c9b78d80) — the Atlas project node's home for the five controls
+// that used to exist ONLY on the classic Projects page. The CONTROLS are `ProjectManage`, mounted
+// un-collapsed; this component is just the frame plus the two things a frame owes them: the live-session
+// count their archive/delete guards read, and somewhere for the active selection to go when the project
+// it pointed at stops existing.
+//
+// The live count comes off the SAME `["allSessions"]` key every other surface polls (the project node's
+// own body, the header picker, the classic Projects rail), so this section adds no request of its own —
+// and the figure it disables Archive on is the same one those surfaces show.
+function ProjectLifecyclePanel({ project }: { project: Project | null }) {
+  const { setProjectId } = useActiveProject();
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  // A project that just got archived or deleted cannot stay the active one. Dropping the stored id is
+  // enough: ActiveProjectProvider's own resolver then falls back to the most-recently-active project
+  // rather than leaving the app scoped to a row that no longer resolves.
+  const { update, archive, remove } = useProjectLifecycleWrites({
+    onArchived: () => setProjectId(""),
+    onDeleted: () => setProjectId(""),
+  });
+  if (!project) {
+    return (
+      <Panel>
+        <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
+          No active project. Pick one in the header to manage it.
+        </p>
+      </Panel>
+    );
+  }
+  return (
+    <Panel>
+      <SectionLabel>Name &amp; vault</SectionLabel>
+      <p style={{ color: color.textMuted, fontSize: 12, margin: "0 0 4px", fontFamily: font.mono, lineHeight: 1.5 }}>
+        Rename this project, re-point or unbind its vault, edit its repo lists — or retire it.
+      </p>
+      <ProjectManage key={project.id} project={project} collapsible={false}
+        liveCount={(sessions.data ?? []).filter((s) => s.projectId === project.id && s.processState === "live").length}
+        onSave={(patch) => update.mutate({ id: project.id, patch })}
+        onArchive={() => archive.mutate(project.id)}
+        onDelete={() => remove.mutate(project.id)}
+        saving={update.isPending} archiving={archive.isPending} deleting={remove.isPending}
+        // Scoped to the CURRENTLY shown project, never just "a save succeeded" — the mutation is owned
+        // by this component, which re-renders on a project switch without remounting, so without this
+        // check a warning from saving project A would keep rendering under project B (the same trap the
+        // classic Projects page documents at its own call site).
+        staleStartupPrompts={update.isSuccess && update.data?.id === project.id ? update.data.staleStartupPrompts : undefined} />
     </Panel>
   );
 }
