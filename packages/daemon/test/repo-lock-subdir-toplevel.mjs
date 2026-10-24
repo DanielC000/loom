@@ -19,6 +19,19 @@
 // and re-running this file — the two calls raced instead of queuing, matching the merge-writer-index-lock
 // bug shape) — GREEN once both resolve to the same toplevel key.
 //
+// Card de61988b (2026-10-24) — c056c607/3a5c5d4a round 5 added a DURABLE commondir-trust-pin requirement
+// on top of the toplevel-key fix above: `checkCommondirTrust` now refuses a subdir-bound repoPath (no own
+// `.git`) unless a durable pin vouches for its toplevel. In production that pin is established at project
+// BIND time (`Db.insertProject` -> `pinCommondirTrust`) or, for a binding that predates the feature, at
+// the very next daemon BOOT (`Db.backfillCommondirTrustPins`, wired via `registerCommondirTrustPinLookup`
+// in `index.ts`) — always before any worker/merge can run. This standalone script never boots a daemon or
+// binds a project, so PART 2 below SIMULATES that boot/bind-time pinning itself, via the same
+// `registerCommondirTrustPinLookup` + `resolveTrustedToplevel`/`literalRepoPathKey` helpers production
+// uses (mirrors `canonical-git-commondir-refusal.mjs`'s own `pinFor` pattern) — never a hand-typed pin
+// value that would only match by construction. It also asserts the GATE itself as an explicit precondition
+// (refuses unpinned, succeeds once pinned) so a future regression here is legible rather than silently
+// depended on.
+//
 // Run: 1) build daemon (pnpm build), 2) node test/repo-lock-subdir-toplevel.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -28,9 +41,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
-const { canonicalRepoLockKey, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
+const { canonicalRepoLockKey, resolveGitToplevelSync, resolveGitMainCheckoutRootSync, literalRepoPathKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 const { mergeBranch } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
 const { GitWriter } = await import(pathToFileURL(path.join(distGitDir, "writer.js")).href);
+const { registerCommondirTrustPinLookup, resolveTrustedToplevel } = await import(pathToFileURL(path.join(distGitDir, "bounded.js")).href);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -148,11 +162,58 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // PART 2 — the structural property: GitWriter on one subdir-bound sibling serializes against a
-  // concurrent merge on ANOTHER subdir-bound sibling of the SAME physical repo.
+  // concurrent merge on ANOTHER subdir-bound sibling of the SAME physical repo. See the top-of-file
+  // header comment above for why this part now simulates the daemon's boot/bind-time commondir-trust pin.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
+    // The ONE in-process pin store for the rest of this file, backing the SAME registration production
+    // wires at boot (`index.ts`). `pinFor` mirrors `Db.pinCommondirTrust`: walk `repoPath` via
+    // `resolveTrustedToplevel` (a trusted moment, as if at project bind time) and record the result —
+    // via the SAME helpers production uses, never a hand-typed toplevel value that would only match by
+    // construction.
+    const pinMap = new Map();
+    function pinFor(repoPath, projectId = "rlst-test-project", repoKey = "primary") {
+      const toplevel = resolveTrustedToplevel(repoPath);
+      if (!toplevel.ok) throw new Error(`pinFor(${repoPath}): resolveTrustedToplevel failed: ${toplevel.reason}`);
+      pinMap.set(literalRepoPathKey(repoPath), { toplevel: toplevel.toplevel, pinnedAt: new Date().toISOString(), source: "bind", projectId, repoKey });
+      return toplevel.toplevel;
+    }
+
+    // ── PRECONDITION — assert the gate itself, explicitly, so a future regression here is legible rather
+    // than silently depended on: BEFORE any pin lookup is registered at all, a subdir-bound merge must
+    // refuse via `checkCommondirTrust`'s trust-pin gate (never silently succeed, and never fail for some
+    // OTHER reason); AFTER registering the lookup and pinning both subdirs, the SAME merge call succeeds.
+    // Uses its own small repo/branch, kept separate from the structural-property fixture below, so this
+    // precondition's own (real) merge doesn't consume the branch that test needs.
+    const preSfx = freshSfx();
+    const { repo: preRepo, teamA: preA, teamB: preB } = makeRepoWithSubdirs(preSfx);
+    const preBranch = "loom/precondition-test";
+    const preWt = path.join(os.tmpdir(), `loom-rlst-pre-wt-${preSfx}`);
+    tmpDirs.push(preWt);
+    execSync(`git worktree add -q -b ${preBranch} "${preWt}" HEAD`, { cwd: preRepo });
+    fs.writeFileSync(path.join(preWt, "pre-branch-file.txt"), "pre branch content\n");
+    execSync(`git add -A && git ${GIT_ID} commit -q -m "pre branch work"`, { cwd: preWt });
+
+    const beforePin = await mergeBranch(preB, preBranch, "Precondition Test Card");
+    check(
+      "[part 2] [precondition] before any commondir-trust pin lookup is registered, a subdir-bound merge refuses via the trust-pin gate",
+      beforePin?.ok === false && /no durable commondir-trust pin is recorded/i.test(beforePin?.reason ?? ""),
+    );
+
+    registerCommondirTrustPinLookup((repoPath) => pinMap.get(literalRepoPathKey(repoPath)) ?? null);
+    pinFor(preA);
+    pinFor(preB);
+
+    const afterPin = await mergeBranch(preB, preBranch, "Precondition Test Card");
+    check("[part 2] [precondition] after registering the lookup and pinning both subdirs, the SAME merge succeeds", afterPin?.ok === true);
+
+    // ── THE STRUCTURAL PROPERTY itself.
     const sfx = freshSfx();
     const { repo, teamA, teamB } = makeRepoWithSubdirs(sfx);
+    // Pin THIS fixture's own subdirs too — the lookup registered above stays live for the rest of the
+    // process, but each `makeRepoWithSubdirs` call creates brand-new tmp paths with no pin of their own.
+    pinFor(teamA);
+    pinFor(teamB);
     const branch = "loom/converge-test";
     const wt = path.join(os.tmpdir(), `loom-rlst-wt-${sfx}`);
     tmpDirs.push(wt);
