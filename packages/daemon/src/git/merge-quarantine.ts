@@ -6085,6 +6085,12 @@ function reenterMergeQuarantinesAtBootImpl(
     && isRepoPathCurrentlyResolvable(entry.repoPath)
     && canonicalRepoLockKey(entry.repoPath) !== key
     && registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key) && directPathIdentity(p) !== directPathIdentity(entry.repoPath));
+  // @decision e7652e06 (round 4) — the SAME foreignness test as above, against the STANDING `prior`
+  // instead of the incoming `entry` — order-independent (B1): see the decision record's "Round 4".
+  const priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity = (prior: MergeQuarantineEntry, key: string): boolean =>
+    isRepoPathCurrentlyResolvable(prior.repoPath)
+    && !isKeyVerifiedFor(prior.repoPath, key)
+    && registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key) && directPathIdentity(p) !== directPathIdentity(prior.repoPath));
   /**
    * Routes EVERY `armQuarantineKey` call in this function's read loops through here instead, never a
    * bare call — covering both a PRIMARY arm (`key` is `entry`'s own just-computed `currentKey` — pass
@@ -6170,10 +6176,12 @@ function reenterMergeQuarantinesAtBootImpl(
     // whenever we reach this point with it non-empty: a same-identity match, a same-tier union, or a
     // registered-backed collision all fall through without ever deleting it.
     const priorStillAtKey = prior && byRepoKey.get(key) === prior ? prior : undefined;
-    // @decision e7652e06 (round 3) — about to union a secondary arm with no fresh claim of its own into
-    // a DIFFERENT, still-standing identity — mark it. Never a same-identity re-arm or an evicted prior.
+    // @decision e7652e06 (round 3, widened round 4) — about to union into a DIFFERENT, still-standing
+    // identity — mark it when EITHER side's claim at `key` is non-fresh (round 4/B1: order-independent,
+    // see the decision record). Never a same-identity re-arm or an evicted prior.
     if (priorStillAtKey && directPathIdentity(priorStillAtKey.repoPath) !== directPathIdentity(entry.repoPath)
-      && secondaryArmClaimsADifferentRegisteredIdentitysKey(entry, key, entryClaimIsTautological)) {
+      && (secondaryArmClaimsADifferentRegisteredIdentitysKey(entry, key, entryClaimIsTautological)
+        || priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(priorStillAtKey, key))) {
       entry = { ...entry, provenanceUnknown: true };
     }
     const result = armQuarantineKey(byRepoKey, key, entry);
