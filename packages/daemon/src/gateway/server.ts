@@ -64,7 +64,7 @@ import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-
 import { clearClaudeRateLimit, readClaudeUsageState } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter, gitError } from "../git/writer.js";
-import { readMainlineHead } from "../git/mainline-watch.js";
+import { readMainlineHead, parseMainlineWatermark, mainlineWatermarkKey } from "../git/mainline-watch.js";
 import { bootstrapProjectDir, resolveProjectInitTarget, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached, resolveWorkerBranchInfo } from "../git/worktrees.js";
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
@@ -3573,6 +3573,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // directly — deliberately bypassing validation, never routed through `setProjectConfigSafe`'s
         // kanbanColumns re-keying since this seed never touches that field.
         rawProjectConfig?: { projectId: string; config: Record<string, unknown> }[];
+        // card 40646822's e2e: the ONLY way a hermetic spec can establish Loom's own "trusted mainline
+        // branch" baseline for a project/repoKey — a real baseline is otherwise written only by an actual
+        // worker landing or the boot-time first-sight sweep, both unreachable from this fixture (no real
+        // spawn, and boot already happened before a spec's project exists). Direct db.setMeta write under
+        // the SAME mainlineWatermarkKey shape resetMainlineWatermark/checkMainlineMove already read.
+        mainlineWatermarks?: { projectId: string; repoKey?: string; branch: string; sha: string }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -4004,12 +4010,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.db.setProjectConfig(rc.projectId, merged);
         rawProjectConfigIds.push(rc.projectId);
       }
+      const mainlineWatermarkIds: string[] = [];
+      for (const w of b.mainlineWatermarks ?? []) {
+        if (typeof w.projectId !== "string" || typeof w.branch !== "string" || typeof w.sha !== "string") {
+          return reply.code(400).send({ error: "mainlineWatermarks[].projectId, branch and sha are required strings" });
+        }
+        const repoKey = w.repoKey ?? "primary";
+        deps.db.setMeta(mainlineWatermarkKey(w.projectId, repoKey), JSON.stringify({ branch: w.branch, sha: w.sha }));
+        mainlineWatermarkIds.push(`${w.projectId}:${repoKey}`);
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds, companionTurnsRun,
         companionMessageIds,
         liveSessionIds, wakeIds, enqueued, respawnedSessionIds, archivedSessionIds, orchestrationEventIds, questionIds,
-        projectMemoryIds, scheduleDeferralIds, rawProjectConfigIds,
+        projectMemoryIds, scheduleDeferralIds, rawProjectConfigIds, mainlineWatermarkIds,
       });
     });
 
@@ -4894,13 +4909,36 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!name) return reply.code(400).send({ error: "name required" });
     return new GitWriter(p.repoPath, gitWriteTimeouts).createBranch(name);
   });
+  /**
+   * Whether a REST commit on `repoPath` just landed on the branch the mainline watermark for
+   * (projectId, repoKey) currently trusts. Reuses the SAME two sources the reset route below and
+   * `Db.purgeMainlineWatermarkState` already read: `readMainlineHead` for the canonical repo's live
+   * checked-out branch, and the watermark row (`mainlineWatermarkKey`/`parseMainlineWatermark`) for the
+   * branch Loom currently trusts. No watermark yet ⇒ first sight, nothing to freeze ⇒ false. A live
+   * branch that differs from the watermark's branch is the separate branch-diverted hazard ⇒ false.
+   * Best-effort: a failed live-branch read returns false rather than failing the commit response.
+   */
+  async function commitWillFreezeMainlineTrust(projectId: string, repoKey: string, repoPath: string): Promise<boolean> {
+    const w = parseMainlineWatermark(deps.db.getMeta(mainlineWatermarkKey(projectId, repoKey)));
+    if (!w) return false;
+    try {
+      const head = await readMainlineHead(repoPath, gitWriteTimeouts.gitLocalMs);
+      return !!head && head.branch === w.branch;
+    } catch { return false; }
+  }
+  // @decision 40646822 — UX-only: this never writes a trust record itself, and must never be made to —
+  // only the human's own mainline-watermark reset route may advance trust. "Mainline" is reused, never
+  // re-derived, from the SAME two sources the reset route and the watermark itself read (see above).
   app.post("/api/projects/:id/git/commit", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
     const message = ((req.body ?? {}) as { message?: string }).message;
     if (!message) return reply.code(400).send({ error: "message required" });
     // Plain commit under the repo's configured identity — no -c overrides, no Co-Authored-By trailer.
-    return new GitWriter(p.repoPath, gitWriteTimeouts).commit(message);
+    const result = await new GitWriter(p.repoPath, gitWriteTimeouts).commit(message);
+    if (!result.ok) return result;
+    const willFreeze = await commitWillFreezeMainlineTrust(p.id, "primary", p.repoPath);
+    return willFreeze ? { ...result, willFreezeMainlineTrust: true } : result;
   });
   app.post("/api/projects/:id/git/push", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);

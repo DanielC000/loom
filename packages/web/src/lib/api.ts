@@ -711,10 +711,20 @@ export const api = {
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/checkout`, { branch }),
   gitCreateBranch: (projectId: string, name: string) =>
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/branch`, { name }),
+  // `willFreezeMainlineTrust` (card 40646822, see docs/decisions/40646822-*.md) is present ONLY on an ok
+  // commit that just landed on the branch the mainline watermark currently trusts — never on a failed
+  // commit, and never on a commit to any other branch. Present ⇒ the UI should offer the one-click
+  // mainline-watermark reset below; the field itself never triggers anything on its own.
   gitCommit: (projectId: string, message: string) =>
-    post<{ ok: boolean; hash?: string; warning?: string; residue?: string[]; error?: string }>(`/api/projects/${projectId}/git/commit`, { message }),
+    post<{ ok: boolean; hash?: string; warning?: string; residue?: string[]; willFreezeMainlineTrust?: boolean; error?: string }>(`/api/projects/${projectId}/git/commit`, { message }),
   gitPush: (projectId: string) =>
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/push`),
+  // Human-only remedy for the trust freeze above (also the only exit for a persistent branch-mismatch
+  // alert from a deliberate in-place mainline rename, per decision 2a6a292a round 3) — adopts the
+  // canonical repo's LIVE checked-out head as the newly-trusted baseline. `repoKey` defaults
+  // server-side to "primary"; this UI only ever calls it for the primary repo.
+  gitMainlineWatermarkReset: (projectId: string) =>
+    post<{ reset: boolean }>(`/api/projects/${projectId}/mainline-watermark/reset`, {}),
   board: (projectId: string) =>
     get<{ columns: KanbanColumn[]; tasks: BoardTask[] }>(`/api/projects/${projectId}/board`),
   // One task's full row (incl. body) — the board drawer's lazy fetch for a DONE card, whose body the

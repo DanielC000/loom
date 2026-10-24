@@ -426,6 +426,17 @@ export interface LoomDaemon {
    */
   seedScheduleDeferral: (d: { scheduleId: string; reason?: string; at?: string }) => Promise<string>;
   /**
+   * Seed a mainline-watermark row (card 40646822's e2e: the REST git-commit mainline-trust-freeze
+   * prompt) via POST /internal/test/seed — the ONLY way an e2e spec can establish Loom's own "trusted
+   * mainline branch" baseline for a project/repoKey, since the real path is either an actual worker
+   * landing or the boot-time first-sight sweep (which runs once, before a spec's own project exists) —
+   * both unreachable from this hermetic, no-real-spawn fixture. Writes directly under the SAME
+   * `mainlineWatermarkKey` shape `resetMainlineWatermark`/`checkMainlineMove` already read, so a seeded
+   * row round-trips through the real `willFreezeMainlineTrust` check exactly as a real baseline would.
+   * `repoKey` defaults to "primary". Returns the seeded key (`<projectId>:<repoKey>`, echoed back).
+   */
+  seedMainlineWatermark: (w: { projectId: string; repoKey?: string; branch: string; sha: string }) => Promise<string>;
+  /**
    * Seed a manager→human DECISION INBOX question (card 8701bdbb, child B e2e) via POST /internal/test/seed —
    * the ONLY way an e2e spec can drive the decision surfaces (the attention item, the /question/:id answer
    * page, the global inbox, the fleet affordance). Inserted straight through deps.db.insertQuestion (the
@@ -831,6 +842,13 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       return firstOrThrow(res.orchestrationEventIds, "orchestrationEventId");
     };
 
+    const seedMainlineWatermark: LoomDaemon["seedMainlineWatermark"] = async (w) => {
+      const res = await apiPost<{ mainlineWatermarkIds: string[] }>(baseURL, "/internal/test/seed", {
+        mainlineWatermarks: [w],
+      });
+      return firstOrThrow(res.mainlineWatermarkIds, "mainlineWatermarkId");
+    };
+
     const seedScheduleDeferral: LoomDaemon["seedScheduleDeferral"] = async (d) => {
       const res = await apiPost<{ scheduleDeferralIds: string[] }>(baseURL, "/internal/test/seed", {
         scheduleDeferrals: [d],
@@ -930,7 +948,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, deleteSeededCompanionConfigs, resolveSeededQuestions });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedMainlineWatermark, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, deleteSeededCompanionConfigs, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

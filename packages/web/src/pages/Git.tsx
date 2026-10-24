@@ -20,7 +20,10 @@ export default function Git() {
   const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId, retry: false });
   const log = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId, retry: false });
 
-  const [feedback, setFeedback] = useState<{ ok: boolean; text: string; warning?: string } | null>(null);
+  // `mainlineTrustRisk` (card 40646822) mirrors the commit response's `willFreezeMainlineTrust` — set
+  // only on an ok commit that landed on the branch Loom currently trusts, cleared once the human clicks
+  // the re-adopt button below (never on its own).
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string; warning?: string; mainlineTrustRisk?: boolean } | null>(null);
   const [message, setMessage] = useState("");
   const [newBranch, setNewBranch] = useState("");
 
@@ -29,7 +32,7 @@ export default function Git() {
   // GitWriter.commit's own non-blocking warning (oversized/stripped/residue) — rendered alongside an
   // OK commit, never instead of it.
   const refresh = () => { qc.invalidateQueries({ queryKey: ["git-branches", projectId] }); qc.invalidateQueries({ queryKey: ["git-log", projectId] }); };
-  const report = (ok: boolean, text: string, warning?: string) => setFeedback({ ok, text, warning });
+  const report = (ok: boolean, text: string, warning?: string, mainlineTrustRisk?: boolean) => setFeedback({ ok, text, warning, mainlineTrustRisk });
 
   const checkout = useMutation({
     meta: { inlineError: true },
@@ -46,13 +49,21 @@ export default function Git() {
   const commit = useMutation({
     meta: { inlineError: true },
     mutationFn: (msg: string) => api.gitCommit(projectId, msg),
-    onSuccess: (r) => { refresh(); if (r.ok) setMessage(""); report(r.ok, r.ok ? `Committed ${r.hash?.slice(0, 7)}` : (r.error ?? "commit failed"), r.ok ? r.warning : undefined); },
+    onSuccess: (r) => { refresh(); if (r.ok) setMessage(""); report(r.ok, r.ok ? `Committed ${r.hash?.slice(0, 7)}` : (r.error ?? "commit failed"), r.ok ? r.warning : undefined, r.ok ? r.willFreezeMainlineTrust : undefined); },
     onError: (e) => report(false, errorText(e)),
   });
   const push = useMutation({
     meta: { inlineError: true },
     mutationFn: () => api.gitPush(projectId),
     onSuccess: (r) => { refresh(); report(r.ok, r.ok ? `Pushed ${r.branch}` : (r.error ?? "push failed")); },
+    onError: (e) => report(false, errorText(e)),
+  });
+  // Human-only remedy for the mainline-trust-freeze risk above (card 40646822) — fires ONLY on this
+  // explicit click, never automatically from the commit response or a render effect.
+  const resetMainlineTrust = useMutation({
+    meta: { inlineError: true },
+    mutationFn: () => api.gitMainlineWatermarkReset(projectId),
+    onSuccess: () => setFeedback((f) => (f ? { ...f, mainlineTrustRisk: false, text: `${f.text} — mainline trust re-adopted` } : f)),
     onError: (e) => report(false, errorText(e)),
   });
   const busy = checkout.isPending || createBranch.isPending || commit.isPending || push.isPending;
@@ -70,6 +81,17 @@ export default function Git() {
               {feedback.warning && (
                 <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: 12, color: color.amber, marginTop: 6 }}>
                   ⚠ {feedback.warning}
+                </div>
+              )}
+              {feedback.mainlineTrustRisk && (
+                <div data-mainline-trust-prompt style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
+                  <span style={{ fontFamily: font.mono, fontSize: 12, color: color.amber }}>
+                    ⚠ This commit landed on the branch Loom trusts for merges — landing trust will freeze
+                    on the next landing unless you re-adopt this head.
+                  </span>
+                  <Button disabled={resetMainlineTrust.isPending} onClick={() => resetMainlineTrust.mutate()}>
+                    {resetMainlineTrust.isPending ? "Re-adopting…" : "Re-adopt this head"}
+                  </Button>
                 </div>
               )}
             </Panel>

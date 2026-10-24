@@ -707,10 +707,12 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
 // shapes (re-measured against this exact api.ts before writing the fix), so the exact count is unchanged
 // from before that fix — pinned exactly, not just by the >= thresholds above, so a FUTURE api.ts change
 // that newly crosses one of those shapes is visible as a count change here rather than silently absorbed.
-check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix (93 reads / 121 writes / 214 members)", () => {
-  assert.equal(API_MEMBERS.total, 214, `api.ts now has ${API_MEMBERS.total} members, not 214`);
+// Card 40646822 added one new write member (`gitMainlineWatermarkReset`, a `post<...>` call to the
+// human-only mainline-watermark reset route) — 214→215 total, 121→122 writes, reads unchanged at 93.
+check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write (93 reads / 122 writes / 215 members)", () => {
+  assert.equal(API_MEMBERS.total, 215, `api.ts now has ${API_MEMBERS.total} members, not 215`);
   assert.equal(API_MEMBERS.reads.size, 93, `api.ts now has ${API_MEMBERS.reads.size} reads, not 93`);
-  assert.equal(API_MEMBERS.writes.size, 121, `api.ts now has ${API_MEMBERS.writes.size} writes, not 121`);
+  assert.equal(API_MEMBERS.writes.size, 122, `api.ts now has ${API_MEMBERS.writes.size} writes, not 122`);
 });
 
 // ── card 66b9e590 — planted negative controls proving the "other calls" side is now fail-closed. ─────

@@ -198,6 +198,64 @@ test.describe("repository (Vault + Git consolidation)", () => {
     await expect(warning).toContainText("secret-residue-name.md"); // local/trusted surface: full detail
   });
 
+  // Card 40646822: a REST commit that lands on the branch Loom's mainline watermark currently trusts
+  // must prompt a one-click "re-adopt this head" (never auto-fire it). We SEED the watermark directly
+  // (via the test-only `seedMainlineWatermark`, never through the page) at the repo's CURRENT branch +
+  // head — simulating "a prior landing already stamped trust here" — so the commit about to happen
+  // lands on the SAME branch the watermark trusts, and so that setup call leaves zero trace in the
+  // page's own network activity the auto-call assertion below inspects.
+  test("a REST commit on the trusted mainline branch prompts a one-click reset — never auto-called", async ({ page, loomDaemon }) => {
+    const { id, repoDir } = await seedRepoProject(loomDaemon.baseURL);
+    await pinActiveProject(page, id);
+
+    const branch = execFileSync("git", ["-C", repoDir, "rev-parse", "--abbrev-ref", "HEAD"]).toString().trim();
+    const sha = execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"]).toString().trim();
+    await loomDaemon.seedMainlineWatermark({ projectId: id, branch, sha });
+
+    await page.goto(`${loomDaemon.baseURL}/repository?tab=git`);
+
+    // Every request the PAGE ITSELF makes to the reset route — this is the auto-call witness.
+    const resetCallsFromPage: string[] = [];
+    page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().includes("/mainline-watermark/reset")) resetCallsFromPage.push(req.url());
+    });
+
+    writeFileSync(path.join(repoDir, "intended.md"), "# intended change\n", "utf8");
+    await page.getByPlaceholder(GIT_COMMIT_PLACEHOLDER).fill("a commit on the trusted branch");
+    await page.getByRole("button", { name: "Commit" }).click();
+
+    await expect(page.getByText(/^✓ Committed/)).toBeVisible();
+    const prompt = page.locator("[data-mainline-trust-prompt]");
+    await expect(prompt).toBeVisible();
+    await expect(prompt).toContainText(/freeze/i);
+
+    // NEVER auto-called: the commit response alone must not have fired the reset.
+    expect(resetCallsFromPage.length).toBe(0);
+
+    // ACT: the human clicks the one-click remedy.
+    await page.getByRole("button", { name: "Re-adopt this head" }).click();
+
+    // AFTER: exactly one reset call fired (from this click, not before), and the prompt clears.
+    await expect.poll(() => resetCallsFromPage.length).toBe(1);
+    await expect(prompt).toHaveCount(0);
+    await expect(page.getByText(/re-adopted/i)).toBeVisible();
+  });
+
+  // The other half of card 40646822's scope: a commit with NO established mainline trust yet (first
+  // sight — nothing to freeze) must show no field and no prompt at all.
+  test("a REST commit with no established mainline trust shows no reset prompt", async ({ page, loomDaemon }) => {
+    const { id, repoDir } = await seedRepoProject(loomDaemon.baseURL);
+    await pinActiveProject(page, id);
+    await page.goto(`${loomDaemon.baseURL}/repository?tab=git`);
+
+    writeFileSync(path.join(repoDir, "intended.md"), "# intended change\n", "utf8");
+    await page.getByPlaceholder(GIT_COMMIT_PLACEHOLDER).fill("a commit with no trust established yet");
+    await page.getByRole("button", { name: "Commit" }).click();
+
+    await expect(page.getByText(/^✓ Committed/)).toBeVisible();
+    await expect(page.locator("[data-mainline-trust-prompt]")).toHaveCount(0);
+  });
+
   test("a real action on the Files tab produces an observable state change (open a note → it renders)", async ({ page, loomDaemon }) => {
     const { id } = await seedRepoProject(loomDaemon.baseURL);
     await pinActiveProject(page, id);

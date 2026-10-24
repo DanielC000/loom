@@ -125,3 +125,10 @@ calling the reset route — tracked as a separate card, not a trust-boundary cha
   literal at that one call site.
 - Do not read this record as closing the UX gap (a nudge to call the reset route after a REST commit) —
   that is deliberately a separate, non-trust-boundary card.
+
+## Cross-reference
+
+The UX gap named above shipped as card `40646822` — see
+`docs/decisions/40646822-rest-commit-mainline-trust-freeze-prompt.md`. It adds a response field and a
+web-UI "re-adopt this head" button that calls the existing reset route on an explicit click only; it
+writes no trust record of its own and changes nothing decided in this record.
