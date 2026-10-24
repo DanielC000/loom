@@ -48,6 +48,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { canonicalGit, CanonicalGitPinMismatchRefusal, registerCommondirTrustPinLookup } = await import("../dist/git/bounded.js");
+const { literalRepoPathKey } = await import("../dist/git/repo-lock.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -191,6 +192,78 @@ function plantRealRepoInPlace(dir) {
     // still falls back to a real walk, restoring repo2's own correct toplevel.
     db.pinCommondirTrust(ownerId2, "primary", repo2, "human-repin");
     check("(M2, control) omitting resolvedToplevel still falls back to a real walk (restores repo2's own toplevel)", db.getCommondirTrustPin(repo2)?.toplevel === repo2);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
+// ===================== Code Review round 3, item 1 — M2 wiring, THROUGH repinCommondirTrust =====================
+// The direct test above proves pinCommondirTrust itself honors resolvedToplevel, but never proves
+// repinCommondirTrust actually THREADS its own walk through — removing the argument at the one call site
+// would leave that test green while this one catches it. Spies on pinCommondirTrust's own arguments (TS
+// `private` has no runtime effect) to assert the 5th (resolvedToplevel) argument is EXACTLY
+// repinCommondirTrust's own walk result, and that the written pin matches it.
+{
+  const db = openDb(path.join(TMP, "loom-m2-wiring.db"));
+  const app = await buildApp(db);
+  try {
+    const ancestor3 = initRepo("m2wire-ancestor");
+    const nested3 = path.join(ancestor3, "nested-dir");
+    fs.mkdirSync(nested3);
+    const ownerRes3 = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "M2WireOwner", repoPath: nested3 } });
+    const ownerId3 = ownerRes3.json().id;
+    plantRealRepoInPlace(nested3); // nested3's live toplevel is now itself — a GENUINE change, not the m5 no-op path
+
+    const originalPin = db.pinCommondirTrust.bind(db);
+    let capturedArgs = null;
+    db.pinCommondirTrust = (...args) => { capturedArgs = args; return originalPin(...args); };
+    const repinRes3 = await app.inject({ method: "POST", url: `/api/projects/${ownerId3}/commondir-trust-pin/repin`, payload: { expectedToplevel: nested3 } });
+    delete db.pinCommondirTrust; // restore the prototype method immediately, before any assertion can throw
+    check("(M2-wiring) repin succeeds (200)", repinRes3.statusCode === 200);
+    check("(M2-wiring) pinCommondirTrust was called with a 5th argument equal to repinCommondirTrust's OWN walk result", capturedArgs !== null && capturedArgs[4] === nested3);
+    check("(M2-wiring) the written pin's toplevel is EXACTLY that value", db.getCommondirTrustPin(nested3)?.toplevel === nested3);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
+// ===================== Code Review round 3, item 2 — cross-owner race =====================
+// The pre-flight checkCommondirPinConflicts can go stale between that check and the write: a DIFFERENT
+// project may claim ownership of this exact pin in that window. pinCommondirTrust's own ownership check
+// (private, but still the real guard) is what actually catches this; repinCommondirTrust must honor a
+// skipped write — never changed:true, never an event, for a write that didn't happen. Forces the skip
+// branch directly: the pin's real ownership is reassigned to an "attacker" via a raw meta write (standing
+// in for whatever concurrent bind/rebind would do in the real race window), then the pre-flight check
+// itself is stubbed to simulate "it was fresh when checked, stale by write time".
+{
+  const db = openDb(path.join(TMP, "loom-cross-owner-race.db"));
+  const app = await buildApp(db);
+  try {
+    const repo4 = initRepo("race-repo");
+    const victimRes = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Victim", repoPath: repo4 } });
+    const victimId = victimRes.json().id;
+    check("(race, setup) the pin is initially owned by the victim", db.getCommondirTrustPin(repo4)?.projectId === victimId);
+
+    // The attacker's recorded toplevel is deliberately NOT repo4's real walk value: if it matched, the
+    // m5 no-op short-circuit (oldToplevel === walk.toplevel) would return before ever reaching
+    // pinCommondirTrust's own ownership check — this fake value keeps the write path live so the
+    // ownership check is what actually catches the race, not an unrelated earlier shortcut.
+    const attackerId = "race-attacker-" + Date.now();
+    db.setMeta(`commondir-trust-pin:${literalRepoPathKey(repo4)}`, JSON.stringify({ toplevel: "Z:\\attacker-fake-toplevel-unrelated-to-repo4", pinnedAt: new Date().toISOString(), source: "bind", projectId: attackerId, repoKey: "primary" }));
+    check("(race, setup) ownership is now (artificially) the attacker's — simulating the race window", db.getCommondirTrustPin(repo4)?.projectId === attackerId);
+
+    const originalCheck = db.checkCommondirPinConflicts.bind(db);
+    db.checkCommondirPinConflicts = () => ({ ok: true }); // simulates a stale pre-flight pass
+    let result;
+    try { result = db.repinCommondirTrust(victimId, "primary", repo4, repo4); }
+    finally { db.checkCommondirPinConflicts = originalCheck; } // restore before any assertion can throw
+
+    check("(race) repinCommondirTrust refuses honestly instead of reporting changed:true", result.ok === false);
+    check("(race) the pin is STILL owned by the attacker — no silent write happened", db.getCommondirTrustPin(repo4)?.projectId === attackerId);
+    const raceEvents = db.listEventsSince(0, 100000).filter((e) => e.kind === "commondir_trust_pinned" && e.detail?.event === "human-repin" && e.detail?.projectId === victimId);
+    check("(race) no human-repin event was filed for the victim's failed (raced) attempt", raceEvents.length === 0);
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     db.close();

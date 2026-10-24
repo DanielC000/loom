@@ -3573,8 +3573,11 @@ export class Db {
    * @decision a8bc0404 (Code Review M2) — `resolvedToplevel`, when passed, is used DIRECTLY, never
    * re-walked: a second, independent walk could diverge from a caller's own prior walk under a genuine
    * TOCTOU race, silently no-op'ing the write while that caller still reports the FIRST walk's value.
+   * @decision a8bc0404 (round 3, cross-owner race) — returns whether the REAL pin row was actually
+   * written (`false` on a walk failure, or when a DIFFERENT (project, repoKey) already owns it) — a
+   * caller that needs to know whether ITS pin changed (`repinCommondirTrust`) must check this.
    */
-  private pinCommondirTrust(projectId: string, repoKey: string, repoPath: string, source: CommondirTrustPin["source"], resolvedToplevel?: string): void {
+  private pinCommondirTrust(projectId: string, repoKey: string, repoPath: string, source: CommondirTrustPin["source"], resolvedToplevel?: string): boolean {
     let toplevelValue: string | undefined = resolvedToplevel;
     if (toplevelValue === undefined) {
       const walk = resolveTrustedToplevel(repoPath);
@@ -3582,14 +3585,16 @@ export class Db {
     }
     if (toplevelValue === undefined) {
       this.deleteMeta(commondirTrustPinIndexKey(projectId, repoKey));
-      return;
+      return false;
     }
     const existing = this.getCommondirTrustPin(repoPath);
-    if (!existing || (existing.projectId === projectId && existing.repoKey === repoKey)) {
+    const ownedByCaller = !existing || (existing.projectId === projectId && existing.repoKey === repoKey);
+    if (ownedByCaller) {
       const pin: CommondirTrustPin = { toplevel: toplevelValue, pinnedAt: new Date().toISOString(), source, projectId, repoKey };
       this.setMeta(commondirTrustPinKey(repoPath), JSON.stringify(pin));
     }
     this.setMeta(commondirTrustPinIndexKey(projectId, repoKey), repoPath);
+    return ownedByCaller;
   }
   /** The project's OWN current configured path for `repoKey`, read from the LIVE `projects` table (live
    *  OR archived — {@link getProject} filters neither) — never from the (possibly stale) index. Returns
@@ -3712,7 +3717,15 @@ export class Db {
       return { ok: true, changed: false, oldToplevel, newToplevel: walk.toplevel, alsoAffects };
     }
     // Code Review M2 — pass THIS walk's own result straight through; pinCommondirTrust must never re-walk.
-    this.pinCommondirTrust(projectId, repoKey, repoPath, "human-repin", walk.toplevel);
+    const wrote = this.pinCommondirTrust(projectId, repoKey, repoPath, "human-repin", walk.toplevel);
+    // @decision a8bc0404 (round 3, cross-owner race) — the pre-flight check above can go stale between
+    // it and this write; honor pinCommondirTrust's own return — a skipped write is never changed:true.
+    if (!wrote) {
+      return {
+        ok: false, kind: "conflict",
+        error: `cannot re-pin repoKey "${repoKey}" at "${repoPath}": a DIFFERENT project claimed ownership of this pin between the conflict check above and this write (a race) — re-check who owns it now and try again.`,
+      };
+    }
     this.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "commondir_trust_pinned",
       detail: { event: "human-repin", projectId, repoKey, repoPath, oldToplevel, newToplevel: walk.toplevel, alsoAffects },
