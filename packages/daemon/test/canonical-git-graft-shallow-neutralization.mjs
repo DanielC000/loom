@@ -16,6 +16,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       negative control proving the skew is real; C2/C3 prove canonicalGit's `-c core.commitGraph=false`
 //       closes it). See docs/decisions/356538ef-*.md item 9.
 //   (N3) ambient GIT_TEST_COMMIT_GRAPH overrides `-c core.commitGraph=false` unless stripped — see item 10.
+//   (N4) card c0f5532b: prepareCanonicalEnv strips the WHOLE GIT_TEST_ prefix, not just GIT_TEST_COMMIT_GRAPH
+//       — an ordinary var, a mixed-case one (win32), and GIT_COMMIT_GRAPH_PARANOIA surviving (no prefix).
 //   (P) the two sentinel env vars are a) absolute, b) differ between two separate `canonicalGit(...)`
 //       constructions, c) never the literal "NUL".
 // RED/GREEN proof (not run automatically by this file): revert git/bounded.ts's `prepareCanonicalEnv`
@@ -270,6 +272,45 @@ try {
   const homeKey = process.platform === "win32" ? "USERPROFILE" : "HOME";
   const hasHome = Object.keys(env1).some((k) => k.toUpperCase() === homeKey && env1[k]);
   check(`(S4) the materialized env still carries ${homeKey}`, hasHome);
+}
+
+// ── (N4, card c0f5532b) GENERALIZED: the WHOLE `GIT_TEST_` prefix is stripped, not just
+// `GIT_TEST_COMMIT_GRAPH` — defense in depth (a production daemon has no legitimate use for ANY
+// git-internal-test knob). `GIT_COMMIT_GRAPH_PARANOIA` is protective and has NO `GIT_TEST_` prefix, so it
+// must survive untouched. RED/GREEN: revert `prepareCanonicalEnv`'s prefix strip back to the single-var
+// `GIT_TEST_COMMIT_GRAPH` check (docs/decisions/356538ef-canonical-git-isolation.md, item 10), rebuild,
+// re-run — the (N4-ordinary)/(N4-mixed-case) assertions below go RED; restore, rebuild, re-run — GREEN. ──
+{
+  const prevOrdinary = process.env.GIT_TEST_MUTEX;
+  const prevParanoia = process.env.GIT_COMMIT_GRAPH_PARANOIA;
+  process.env.GIT_TEST_MUTEX = "1"; // an ORDINARY git-internal-test var, unrelated to commit-graph
+  process.env.GIT_COMMIT_GRAPH_PARANOIA = "1"; // protective, no GIT_TEST_ prefix — must survive
+  try {
+    const envSeen = BOUNDED.prepareCanonicalEnv(undefined, repo);
+    check("(N4-ordinary) prepareCanonicalEnv() strips an ORDINARY ambient GIT_TEST_ variable (GIT_TEST_MUTEX)", !Object.keys(envSeen).some((k) => k.toUpperCase() === "GIT_TEST_MUTEX"));
+    check(`(N4-paranoia) prepareCanonicalEnv() does NOT strip GIT_COMMIT_GRAPH_PARANOIA (protective, no GIT_TEST_ prefix) — survives with value ${envSeen.GIT_COMMIT_GRAPH_PARANOIA}`, Object.keys(envSeen).some((k) => k.toUpperCase() === "GIT_COMMIT_GRAPH_PARANOIA" && envSeen[k] === "1"));
+  } finally {
+    if (prevOrdinary === undefined) delete process.env.GIT_TEST_MUTEX; else process.env.GIT_TEST_MUTEX = prevOrdinary;
+    if (prevParanoia === undefined) delete process.env.GIT_COMMIT_GRAPH_PARANOIA; else process.env.GIT_COMMIT_GRAPH_PARANOIA = prevParanoia;
+  }
+
+  // (N4-mixed-case) win32-only, same reasoning as (N3-casing) above: POSIX env names are case-sensitive,
+  // so a mixed-case spelling is a genuinely DIFFERENT, inert variable there and does not even start with
+  // `GIT_TEST_` under a case-sensitive comparison — nothing to test on that platform.
+  if (process.platform !== "win32") {
+    console.log("SKIP  (N4-mixed-case) win32-only: POSIX env names are case-sensitive, so a mixed-case spelling does not start with GIT_TEST_ there");
+  } else {
+    const mixedCaseKey = "Git_Test_Mixed_Case";
+    const prevMixed = process.env[mixedCaseKey];
+    process.env[mixedCaseKey] = "1";
+    try {
+      check(`(N4-mixed-case) the env really carries the mixed-case spelling (${mixedCaseKey})`, Object.keys(process.env).includes(mixedCaseKey));
+      const envSeenMixed = BOUNDED.prepareCanonicalEnv(undefined, repo);
+      check(`(N4-mixed-case) prepareCanonicalEnv() strips the mixed-case ambient GIT_TEST_ variable (${mixedCaseKey}) under ANY casing`, !Object.keys(envSeenMixed).some((k) => k.toUpperCase() === mixedCaseKey.toUpperCase()));
+    } finally {
+      if (prevMixed === undefined) delete process.env[mixedCaseKey]; else process.env[mixedCaseKey] = prevMixed;
+    }
+  }
 }
 
 // ── (N2) a RELATIVE LOOM_HOME must never produce a relative, cwd-dependent sentinel — path.resolve, not

@@ -1190,6 +1190,16 @@ export function deleteEnvKeys(env: Record<string, string | undefined>, names: re
   for (const k of envKeysNamed(env, names)) delete env[k];
 }
 
+/** The keys of `env` that START WITH `prefix` — same case-aware split as {@link envKeysNamed}: win32
+ *  matches case-INSENSITIVELY (`Git_Test_Foo` starts with `GIT_TEST_` to git-for-windows); POSIX matches
+ *  exact-case only (`Git_Test_Foo` does NOT start with `GIT_TEST_` there — a different, inert variable).
+ *  Card c0f5532b. */
+export function envKeysWithPrefix(env: Record<string, string | undefined>, prefix: string): string[] {
+  if (process.platform !== "win32") return Object.keys(env).filter((k) => k.startsWith(prefix));
+  const upperPrefix = prefix.toUpperCase();
+  return Object.keys(env).filter((k) => k.toUpperCase().startsWith(upperPrefix));
+}
+
 /**
  * Build a simpleGit instance bound by a block timeout. ⚠️ **`block` is an IDLE timeout — the kill timer
  * resets on every `data` event from the child's stdout/stderr (verified at source,
@@ -1961,9 +1971,9 @@ export function freshGitSentinelPath(label: "graft" | "shallow"): string {
  * own `.env(obj)` REPLACES the spawned child's entire environment wholesale (never merges with
  * `process.env`), so a small object here would silently strip PATH/HOME/everything else for every call.
  *
- * @decision 356538ef (card 7ebb4acf, N3) — also strips ambient `GIT_TEST_COMMIT_GRAPH` (same case-aware
- * presence-check-and-strip as `GIT_CONFIG` below): MEASURED to override `-c core.commitGraph=false` and
- * resurrect item 9's forged-graph skew. See that item's own record entry for the measurement.
+ * @decision 356538ef (card 7ebb4acf, N3; generalized by c0f5532b) — strips every ambient `GIT_TEST_*`
+ * var (case-aware, {@link envKeysWithPrefix}), not just `GIT_TEST_COMMIT_GRAPH` — see item 10's record
+ * entry. `GIT_COMMIT_GRAPH_PARANOIA` has no `GIT_TEST_` prefix and is never touched.
  *
  * Deliberately does NOT strip {@link GIT_ENV_TRANSPORT_KEYS} here (card `23c74c62`'s Code Review round):
  * the raw-spawn path ({@link spawnCanonicalGitTree}'s own `rawViaDirectSpawn`/`rawViaWinJobLauncher`) is
@@ -1980,8 +1990,10 @@ export function prepareCanonicalEnv(env: Record<string, string | undefined> | un
   let cleanEnv = env;
   // Presence check AND strip both go through the ONE case-aware helper (win32: `Git_Config` is `GIT_CONFIG` — card e93703d9); a bare `base.GIT_CONFIG` read would find
   // it on process.env (Node's case-insensitive accessor) while a plain-object `delete` misses it.
-  // `GIT_TEST_COMMIT_GRAPH` rides the SAME check (card 7ebb4acf, N3) — see this function's own doc above.
-  if (envKeysNamed(base, ["GIT_CONFIG", "GIT_TEST_COMMIT_GRAPH"]).some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, ["GIT_CONFIG", "GIT_TEST_COMMIT_GRAPH"]); }
+  // The whole `GIT_TEST_*` prefix rides the SAME presence-check-and-strip (card c0f5532b, generalizing
+  // card 7ebb4acf/N3's single `GIT_TEST_COMMIT_GRAPH` case) — see this function's own doc above.
+  const stripKeys = [...envKeysNamed(base, ["GIT_CONFIG"]), ...envKeysWithPrefix(base, "GIT_TEST_")];
+  if (stripKeys.some((k) => base[k] !== undefined)) { cleanEnv = { ...base }; deleteEnvKeys(cleanEnv, stripKeys); }
   const merged = { ...(cleanEnv ?? base) };
   // B1/P4 (round 3): bound git's own upward repo-discovery walk to repoPath's own PARENT — if `.git`
   // isn't found exactly at `repoPath` (a TOCTOU window after checkCommondirTrust's own check settles, or
