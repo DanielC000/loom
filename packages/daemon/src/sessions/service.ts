@@ -2645,6 +2645,11 @@ export class SessionService {
    *  from `resumeFleetOnBoot`. */
   private readonly consolidatedPredecessorIds = new Set<string>();
 
+  /** @decision f224632d (round 2) — `${projectId}:${repoKey}` keys already advised by {@link
+   *  fileTrailerDisplacedAdvisory}, for this daemon PROCESS only (never DB-persisted) — a restart may
+   *  refile the advisory once, which is accepted; see that method's own doc. */
+  private readonly trailerDisplacedAdvisedRepos = new Set<string>();
+
   /**
    * @decision 49107314 — freshId -> deadline, never a bare in-flight Set; a later arm EXTENDS this, it
    * never drops. Owned entirely inside waitForHaltedSuccessorReadyThenResolve — never write it elsewhere.
@@ -21370,6 +21375,9 @@ export class SessionService {
     // whenever `merge.landedBase` is unset: a race INSIDE mergeBranch can leave `merge.sha` ALREADY
     // equal to a forged tip, so a bare `merge.sha` would sail through the `head.tip === mergeSha` check.
     if (mainlineCheckedTip && merge.ok && !merge.noop && merge.sha) await this.advanceMainlineWatermark(project.id, worker.repoKey ?? "primary", repoPath, mainlineCheckedTip, merge.landedBase !== undefined ? merge.sha : undefined, merge.landedVerify, managerSessionId, workerSessionId, taskId); // card 4fa36502: a successful Loom landing is the new "explained" tip — but ONLY when this landing's check completed, so an unverified move stays catchable
+    // @decision f224632d (round 2) — a VERIFIED landing kept so despite a commit-msg hook moving/obscuring
+    // its own trailer paragraph gets ONE low-severity advisory, never the forge-race/trust-freeze events above.
+    if (merge.ok && !merge.noop && merge.trailerAdvisory) this.fileTrailerDisplacedAdvisory({ projectId: project.id, repoKey: worker.repoKey ?? "primary", branch, managerSessionId, taskId }, merge.trailerAdvisory);
     // Card 6f13746c: record the landing HERE — at the squash, still INSIDE the repo guard (`endSquash` / `releaseInertRepoGuard` run in the
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
     // that squashed after a pass is never erased by it. (Recording in `finalizeMerge`, after the guard, raced exactly that.) An inert docs-only
@@ -24075,6 +24083,22 @@ export class SessionService {
       if (!a.managerSessionId) throw new Error("no manager to nudge");
       this.enqueueDurableMessage(a.managerSessionId, mainlineMovedNudgeText({ branch: a.branch, repoKey: a.repoKey, from: "", to, evidence, suspectShas: [to], atBoot: false }), { sender: "system", taskId: a.taskId, kind: "warning" });
     } catch { /* the durable event above is the record; a failed nudge must not matter */ }
+  }
+
+  /** @decision f224632d (round 2) — a VERIFIED solo landing that still carries a `trailerAdvisory` files
+   *  ONE low-severity, non-nudging event per (projectId, repoKey), deduped in-process (never the DB) via
+   *  `trailerDisplacedAdvisedRepos` — never `enqueueDurableMessage`; see `verifyLandedAsOwnCommit`'s doc. */
+  private fileTrailerDisplacedAdvisory(a: { projectId: string; repoKey: string; branch: string; managerSessionId: string | null; taskId: string | null }, kind: "displaced" | "unreadable"): void {
+    const key = `${a.projectId}:${a.repoKey}`;
+    if (this.trailerDisplacedAdvisedRepos.has(key)) return;
+    this.trailerDisplacedAdvisedRepos.add(key);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", taskId: a.taskId, kind: "landing_trailer_displaced",
+      detail: {
+        projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, kind, severity: "low",
+        reason: `a commit-msg hook moved branch "${a.branch}"'s Loom trailer paragraph out of the message's final paragraph, or otherwise broke the structural per-line reader (kind: "${kind}") — Loom's own values are still exactly what it wrote (this landing was kept VERIFIED, with a ledger row and trust stamp), but trailer READERS that parse a landed commit's message directly (findLandedSquashCommit, scanMergedCommitMap, pinnedTipForLandedSquash, hold release) cannot read this commit's own trailers on this repo. Filed once per repo for this daemon process; no action required unless something downstream that depends on reading a landed commit's own trailer starts behaving oddly.`,
+      },
+    });
   }
 
   /** @decision 2a6a292a round 20 (card aa7677fa) — records a SOLO landing in the Loom-owned ledger

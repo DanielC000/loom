@@ -1968,6 +1968,16 @@ export type OrchestrationEventKind =
   // @decision 3a5c5d4a (round 5) — never read a backfilled pin as pre-attack-verified; it proves only
   // "the live toplevel matched this value at THIS boot", never "before any worker ever touched it".
   | "commondir_trust_pinned"
+  // Card f224632d (round 2) — a solo squash commit kept VERIFIED (ledger + trust) despite a commit-msg
+  // hook moving/obscuring its trailer paragraph ("displaced"/"unreadable" — see
+  // `verifyLoomTrailersExactAndReadable`'s own doc, `git/worktrees.ts`, for why both kinds already imply
+  // exact trailer values). `detail`: {projectId, repoKey, branch, kind, severity:"low"}. Filed by
+  // `SessionService.fileTrailerDisplacedAdvisory`, deduped per (projectId, repoKey) for the daemon
+  // PROCESS's lifetime only (never DB-persisted — a restart may refile once). Deliberately never routed
+  // into `mainline_moved_outside_loom`, never a manager nudge (forensic record only). Audit-only, same
+  // posture as `codex_isolation_gap_disclosed`/`commondir_trust_pinned` above — deliberately NOT added to
+  // EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS.
+  | "landing_trailer_displaced"
   // Card 932f13d4: a genuine engine-session-id ROTATION — the Claude Code CLI fired a SECOND
   // `SessionStart` reporting a DIFFERENT `session_id` for the SAME live pty (no new Loom spawn/resume/
   // fork — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117). `db.setEngineSessionId`
@@ -2168,6 +2178,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   trust_lock_degraded: true,
   wake_target_redirected: true,
   spawn_target_redirected: true,
+  landing_trailer_displaced: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

@@ -8792,7 +8792,7 @@ export async function mergeBranch(
   // what excludes `undefined` — TS1016 forbids a bare required param after these optional ones): an
   // omitting caller now gets the SAME logged legacy/grandfathered path as explicit `null`, never a silent skip.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalRepoShallow?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalRepoShallow?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -9071,7 +9071,7 @@ async function mergeBranchLocked(
   // @decision 0eaaa693 (round 5) — same required-`string | null` posture as {@link mergeBranch}'s own
   // param; see that signature's comment for why `= null` (not a bare `?`) is what achieves it here.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -9593,10 +9593,14 @@ async function mergeBranchLocked(
     // pre-commit window as preCommitHead; never re-derive it later via a fresh `write-tree`/diff — a
     // later read can't prove it reflects what was actually staged when this commit was made.
     let stagedTree: string | undefined;
+    // @decision f224632d — the digest THIS process actually stamped into `Loom-Worker-PathSet:`, hoisted
+    // so `verifyLandedAsOwnCommit`'s own trailer check (below) can assert the landed commit's own trailer
+    // carries the SAME value, never a re-derived one.
+    let stampedPathSetDigest: string | undefined;
     try {
       preCommitHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, pathset base)")).trim();
-      const digest = await stagedPathSetDigest(git, timeoutMs);
-      message = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${preCommitHead}\nLoom-Worker-PathSet: ${digest}\n`;
+      stampedPathSetDigest = await stagedPathSetDigest(git, timeoutMs);
+      message = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${preCommitHead}\nLoom-Worker-PathSet: ${stampedPathSetDigest}\n`;
       stagedTree = (await withTimeout(git.raw(["write-tree"]), timeoutMs, "git write-tree (canonical, pre-commit tree capture)")).trim();
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -9613,11 +9617,26 @@ async function mergeBranchLocked(
     // @decision 95940402 — the actual parent+tree+single-parent check now lives in the shared, exported
     // `verifyCommitParentAndTree` (above), reused by the batch path; this closure only adds the
     // uncaptured-base short-circuit and the ledger-base return value.
-    const verifyLandedAsOwnCommit = async (sha: string): Promise<string | undefined> => {
-      if (preCommitHead === undefined || stagedTree === undefined) return undefined;
+    // @decision f224632d — parent+tree alone is forgeable-to-match; this closure also verifies the landed
+    // commit's own Loom trailer namespace (shared `verifyLoomTrailersExactAndReadable`, card 95940402).
+    // @decision f224632d (round 2) — ONLY kind "forged" disqualifies; "displaced"/"unreadable" stay
+    // verified (a legitimate commit-msg hook, not a forgery) and surface `trailerAdvisory` instead.
+    const verifyLandedAsOwnCommit = async (sha: string): Promise<{ landedBase: string | undefined; trailerAdvisory?: "displaced" | "unreadable" }> => {
+      if (preCommitHead === undefined || stagedTree === undefined) return { landedBase: undefined };
       // @decision 95940402 — no try/catch here: verifyCommitParentAndTree already catches its own
       // git-read failures and resolves {ok:false} rather than throwing.
-      return (await verifyCommitParentAndTree(git, timeoutMs, sha, preCommitHead, stagedTree)).ok ? preCommitHead : undefined;
+      const verify = await verifyCommitParentAndTree(git, timeoutMs, sha, preCommitHead, stagedTree);
+      if (!verify.ok) return { landedBase: undefined };
+      const expectedTrailers: Record<string, string> = { "Loom-Worker-Branch": branch };
+      if (resolvedBranchHead) expectedTrailers["Loom-Landed-Tip"] = resolvedBranchHead;
+      if (stampedPathSetDigest !== undefined) {
+        expectedTrailers["Loom-Worker-Base"] = preCommitHead;
+        expectedTrailers["Loom-Worker-PathSet"] = stampedPathSetDigest;
+      }
+      const trailerCheck = verifyLoomTrailersExactAndReadable(verify.body ?? "", expectedTrailers);
+      if (trailerCheck.ok) return { landedBase: preCommitHead };
+      if (trailerCheck.kind === "forged") return { landedBase: undefined };
+      return { landedBase: preCommitHead, trailerAdvisory: trailerCheck.kind };
     };
     // @decision 2a6a292a round 23 (card aa7677fa round 5) — a bare `landedBase === undefined` collapses
     // "uncaptured" (nothing was ever checked) and "rejected" (checked — a real race) — a caller needs
@@ -9657,14 +9676,16 @@ async function mergeBranchLocked(
       // m1 (Code Review): a bare "HEAD moved" is not enough to trust as OUR commit — verify it is
       // EXACTLY the commit this attempt would have made before claiming ok:true; otherwise report the
       // ambiguity by name rather than silently discarding or silently trusting an unverified movement.
-      // @decision 2a6a292a round 21 (card aa7677fa round 3) — parent+tree via `verifyLandedAsOwnCommit`,
-      // never a trailer: a trailer is forgeable by anyone with `.git` write access.
+      // @decision 2a6a292a round 21 (card aa7677fa round 3) — parent+tree AND (card f224632d) the
+      // trailer namespace, both via `verifyLandedAsOwnCommit` — never a bare re-read trailer, forgeable
+      // by anyone with `.git` write access.
       if (preCommitHead !== undefined) {
         let headAfterFailure: string | undefined;
         let landedBase: string | undefined;
+        let trailerAdvisory: "displaced" | "unreadable" | undefined;
         try {
           headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit-failure verify)")).trim();
-          if (headAfterFailure !== preCommitHead) landedBase = await verifyLandedAsOwnCommit(headAfterFailure);
+          if (headAfterFailure !== preCommitHead) ({ landedBase, trailerAdvisory } = await verifyLandedAsOwnCommit(headAfterFailure));
         } catch { /* unknown — fall through to the ordinary failure/cleanup path below */ }
         if (headAfterFailure !== undefined && headAfterFailure !== preCommitHead) {
           if (landedBase !== undefined) {
@@ -9673,7 +9694,7 @@ async function mergeBranchLocked(
             // Recover it truthfully rather than reporting a false failure.
             const verified = await verifyLandedOnMainline(headAfterFailure);
             if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
-            return { ok: true, sha: headAfterFailure, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase) };
+            return { ok: true, sha: headAfterFailure, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
           }
           return {
             ok: false,
@@ -9700,8 +9721,8 @@ async function mergeBranchLocked(
       // @decision 2a6a292a round 21 (card aa7677fa round 3) — a racer can move HEAD between `git commit`
       // settling and this read; verify `sha` is OUR commit before a caller treats it as a ledger/trust
       // fact — undefined here means "unverified", never a refusal.
-      const landedBase = await verifyLandedAsOwnCommit(sha);
-      return { ok: true, sha, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase) };
+      const { landedBase, trailerAdvisory } = await verifyLandedAsOwnCommit(sha);
+      return { ok: true, sha, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
     } catch (e) {
       return { ok: false, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
     }
