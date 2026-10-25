@@ -3284,13 +3284,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // was never a registered Loom project (or no longer is), which `/clear` above structurally cannot:
   // that route resolves projectId+repoKey through the DB first, so an orphaned latch (its repoPath isn't
   // bound to ANY project) has nothing for it to resolve. SAME trust tier as `/clear` (loopback +
-  // isGuardedInternalWrite above) and the SAME underlying clear (`clearMergeQuarantineReporting`) — this
+  // isGuardedInternalWrite above); its own `repoPath` form calls `clearMergeQuarantineByRecordedPath`
+  // directly (never `clearMergeQuarantineReporting` — there is no project to resolve here) — this
   // route is strictly a wider address space (repoPath/id instead of projectId/repoKey), never a weaker
   // check; deliberately allowed to also clear a CURRENTLY-REGISTERED repo's quarantine (same bearer+
   // loopback tier already gates both routes, so there is no privilege gap in offering a second address
   // for the same action). Exactly one of `repoPath`/`id` must be given.
   // - `repoPath`: the exact string recorded on the latch (see GET /internal/merge-quarantine/list) —
-  //   delegates straight to `clearMergeQuarantineReporting`, identical to `/clear`'s own last step.
+  //   delegates straight to `clearMergeQuarantineByRecordedPath` (card 2a169469 — same shared
+  //   `stillBlockedEntryFor` disclosure helper `clearMergeQuarantineReporting`'s own `/clear` uses).
   // - `id`: the latch's bare 24-hex-character file id (also from the list route) — for a latch with no
   //   trustworthy `repoPath` at all (a genuinely corrupt/unparsable one). Never auto-deletes anything
   //   this route wasn't explicitly told to.
@@ -3306,7 +3308,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
       // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
       // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
-      const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, stillQuarantined, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
       return {
         ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}),
         // @decision 4b6c8d24 — same disclosure as `/clear` above.
@@ -3314,6 +3316,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // @decision 182c01cc (round 2) — see the matching note on `/clear` above: unconditional, never
         // gated on `latchKept`.
         stillBlockedCoOccupants,
+        // @decision 2a169469 — same shape as the `{id}` form below: forward unconditionally so a human
+        // calling this route sees the SAME still-quarantined/host-contributor disclosure clear-by-id gives.
+        ...(stillQuarantined ? { stillQuarantined: true, reason } : {}),
         ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
         // @decision 8db913e2 (Follow-up 0a783fb2) — same split as `/clear` above.
         ...(contentKeptRepoPaths?.length ? { contentKeptRepoPaths } : {}),

@@ -1320,9 +1320,25 @@ try {
     // route. Must fully, durably lift X in-process.
     const clearResult = clearMergeQuarantineLatchFile(hashForKey(k2));
     check("(precondition) the clear itself succeeds and reports wasQuarantined", clearResult.ok === true && clearResult.wasQuarantined === true);
+    // @decision 2a169469 (round 2) — UPDATED: `liftedRepoPaths` means "genuinely unblocked NOW" (4b6c8d24's
+    // own established semantics — a repoPath whose own record was TOUCHED but is still blocked some other
+    // way, e.g. the M2 protected/relocated case, is never "lifted"), never merely "a record was touched".
+    // X's own TWO duplicate records genuinely ARE both swept (verified directly below, the card 8567df22
+    // fix this scenario exists for) — but X is ALSO genuinely still blocked, via W's own, separate,
+    // still-active raise (this scenario's OWN comment above already knew this: "a direct query for X
+    // before clearing W would legitimately surface W's own entry via that KEY-based tier"). Asserting
+    // `liftedRepoPaths.includes(x)` is therefore the WRONG check now that `stillBlockedEntryFor` correctly
+    // discloses the ancestor block instead of silently omitting it (card 2a169469's own finding 3) — a
+    // repoPath is never reported both lifted AND still-quarantined in the same response (see
+    // `clearMergeQuarantineByRecordedPath`'s own identical filter). Verify the MECHANICAL fact (the
+    // duplicate sweep) directly instead.
     check(
-      "*** THE FIX (card 8567df22, round 5) *** X is fully lifted IN-PROCESS — the subset duplicate is swept too, not left as an independent raise",
-      clearResult.liftedRepoPaths.includes(x) && !clearResult.stillQuarantined,
+      "*** THE FIX (card 8567df22, round 5) *** X's own two duplicate records are BOTH genuinely swept in-process — the subset duplicate is not left as an independent raise",
+      listActiveMergeQuarantines().filter((e) => e.repoPath === x).length === 0,
+    );
+    check(
+      "*** THE FIX (round 2) *** clearResult HONESTLY discloses X is still blocked by W's own, separate, still-active raise",
+      clearResult.stillQuarantined === true && typeof clearResult.reason === "string" && clearResult.reason.includes(`'${w}'`),
     );
 
     // Clear W too (its own raise at Kw is unrelated to this probe, but X's own degraded key walks up to
