@@ -38,6 +38,11 @@ const { buildServer } = await import("../dist/gateway/server.js");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// @decision 58ae4b34 (round 2, CR `ebfdb799`) — assert the EXACT `blocking repo '<path>'` clause, never
+// a bare `reason.includes(hostPath)`: a contributor path (e.g. xSub) contains its host path as a string
+// PREFIX, so a substring check against the host path alone passes vacuously.
+const namesAsBlockingRepo = (reason, repoPath) => reason.includes(`blocking repo '${repoPath}'`);
+
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const GIT_ID = "-c user.email=4b6c8d24@loom -c user.name=4b6c8d24";
 // Mirrors the real module's own private quarantineHashForKey — same helper every sibling
@@ -461,16 +466,15 @@ function makeRepo(tag) {
   check("(L) R is actually unblocked", assertRepoNotQuarantined(R).ok);
   check("(L) X stays blocked (protected, diverted to its own pending record)", !assertRepoNotQuarantined(X).ok);
 
-  // ONE PROBE (Lead's own instruction — describe, do NOT fix): a contributor of a still-blocked,
-  // RELOCATED/protected entry is NOT itself independently enforced. xSub is never anyone's own `repoPath`
-  // anywhere in memory (it rode only inside X's own `contributorRepoPaths` array, which the protective
-  // divert carries forward as DATA, not as a separate queryable record) — so a direct query for xSub
-  // finds nothing blocking it, even though X (the record xSub's own enforcement was always riding on) is
-  // still very much blocked. This is a separate, pre-existing enforcement question this card does not
-  // fix — recorded here as the one probe the Lead asked for, not asserted as "correct" behavior.
-  console.log(`[4b6c8d24][L][FINDING] assertRepoNotQuarantined(xSub).ok = ${JSON.stringify(assertRepoNotQuarantined(xSub).ok)} — a contributor of a still-blocked, protected/relocated entry reads UNBLOCKED even though its own enforcement rides entirely on that entry's surviving record. Not fixed by this card; flagged for the Lead to card separately.`);
+  // @decision 58ae4b34 — this used to be a Round-3-Q open probe (xSub read UNBLOCKED here, logged as a
+  // finding, not fixed by this card). Card 58ae4b34 fixed `ownIdentityEntryFor` to also match an entry's
+  // own `contributorRepoPaths`, so xSub is now correctly found via X's surviving (relocated) record.
+  const xSubResult = assertRepoNotQuarantined(xSub);
+  check("*** 58ae4b34 FIX *** xSub (X's own contributor) reads BLOCKED too, riding on X's surviving record", xSubResult.ok === false);
+  check("*** 58ae4b34 FIX *** the refusal names the HOST entry X, not xSub itself", xSubResult.ok === false && namesAsBlockingRepo(xSubResult.reason, X));
 
-  clearMergeQuarantineByRecordedPath(X); // cleanup — lift X's own surviving divert record
+  clearMergeQuarantineByRecordedPath(X); // lift X's own surviving divert record
+  check("*** 58ae4b34 FIX *** clearing X (the host, by its own path) also unblocks its contributor xSub", assertRepoNotQuarantined(xSub).ok);
 }
 
 console.log(`\n${failures === 0 ? "✅ ALL CHECKS PASSED" : `❌ ${failures} CHECK(S) FAILED`}\n`);

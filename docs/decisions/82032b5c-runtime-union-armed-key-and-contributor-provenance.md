@@ -63,6 +63,18 @@ all three boot-time JSON-parse whitelists in `reenterMergeQuarantinesAtBootImpl`
 1b's tmp recovery, the safety-tmp recovery loop) — every other site that touches an entry object is a
 plain spread and carries the field automatically.
 
+**Pointer (card `58ae4b34`):** this field was, until `58ae4b34`, consulted ONLY by disclosure
+(`4b6c8d24`'s `liftedRepoPaths`) and this card's own clear-by-id ambiguity refusal — never by the actual
+blocking-decision functions, so an UNRESOLVABLE contributor (one whose own `canonicalRepoLockKey` does
+NOT resolve to its host's key — the `c9114934` degraded-occupant shape) read
+`assertRepoNotQuarantined(...).ok === true` (unenforced) regardless of whether its host was armed,
+relocated, or pending. A RESOLVABLE subdirectory contributor (the common case — e.g. this card's own round
+6 D/S siblings) was already enforced the whole time, via the ordinary key-based lookup, never through
+this field. `58ae4b34` widened `ownIdentityEntryFor` to also match `contributorRepoPaths`, closing that
+gap for the ENFORCEMENT check only — it does not touch this card's own clear-route ruling (round 4's "a
+contributor cannot be cleared by its own path" stands unchanged) and does not retroactively stamp this
+field anywhere new. See `docs/decisions/58ae4b34-contributor-enforcement-via-ownidentityentryfor.md`.
+
 ## DoD narrowing (Lead-approved)
 
 Clear-by-id on a runtime-union entry fails closed. Clear-by-path is UNCHANGED — it already discriminates

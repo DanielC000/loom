@@ -142,16 +142,19 @@ either — they ride entirely on `X`'s own surviving record. Fixed by adding `en
 to `excludeRepoPaths` whenever `entry.repoPath` itself is already in `excludeRepoPaths` (see "The fix"
 above).
 
-**The ONE open probe (Lead's own instruction: describe, do not fix here):** in that SAME scenario,
-`assertRepoNotQuarantined(X/sub)` reads `ok:true` — a contributor of a still-blocked, protected/relocated
-entry is NOT itself independently enforced, even though its own enforcement was always supposed to ride
-on `X`'s surviving record. `xSub` is never anyone's own `repoPath` in memory (it exists only as DATA
-inside `X`'s `contributorRepoPaths` array, which the protective divert carries forward as a field, never
-as a second queryable record) — so a direct query for it finds nothing blocking it. This is a genuinely
-SEPARATE enforcement question (whether/how a contributor should be independently blockable at all, not a
-reporting question this card's own scope covers) — recorded here, with the test's own probe output, for
-the Lead to card separately. Probe: `packages/daemon/test/merge-quarantine-4b6c8d24-lifted-identities-
-disclosure.mjs`, scenario (L), the `[4b6c8d24][L][FINDING]` console line.
+**The ONE open probe (Lead's own instruction: describe, do not fix here) — FIXED by card `58ae4b34`.** In
+that SAME scenario, `assertRepoNotQuarantined(X/sub)` used to read `ok:true` — a contributor of a
+still-blocked, protected/relocated entry was NOT itself independently enforced, even though its own
+enforcement was always supposed to ride on `X`'s surviving record. `58ae4b34`'s own investigate-first step
+FALSIFIED this card's implicit premise that relocation was the cause: the gap was identical before any
+clear ever ran, after the clear, and across a reboot — `contributorRepoPaths` was simply never consulted
+by the blocking-decision functions at any lifecycle stage, only by this card's own disclosure machinery
+and `82032b5c`'s clear-by-id ambiguity refusal. Fixed by widening `ownIdentityEntryFor` to also match
+`contributorRepoPaths`, scoped to the enforcement check only (never the clear routes) — see
+`docs/decisions/58ae4b34-contributor-enforcement-via-ownidentityentryfor.md` for the full fix and why it
+leaves `resolveGenuinelyLiftedRepoPaths` (this card's own M2/Q guard) unaffected. Scenario (L) in
+`packages/daemon/test/merge-quarantine-4b6c8d24-lifted-identities-disclosure.mjs` — formerly a
+`[4b6c8d24][L][FINDING]` console-logged probe — now asserts the fixed behavior directly.
 
 ## What did NOT change
 
@@ -213,9 +216,11 @@ disclosure.mjs`, scenario (L), the `[4b6c8d24][L][FINDING]` console line.
 - Do not forget `entry.contributorRepoPaths` when `entry` itself turns out to be a protected/excluded
   occupant (round 3, Q) — add them to `excludeRepoPaths` too; they have no record of their own that
   `ownIdentityEntryFor` could ever find independently.
-- Do not attempt to fix the Round-3-Q probe's own enforcement gap (a contributor of a still-blocked,
+- ~~Do not attempt to fix the Round-3-Q probe's own enforcement gap (a contributor of a still-blocked,
   protected entry reads unenforced via `assertRepoNotQuarantined`) as part of this card — it is a
-  separate enforcement question, deliberately left open per the Lead's own ruling; see "Round 3" above.
+  separate enforcement question, deliberately left open per the Lead's own ruling; see "Round 3" above.~~
+  **FIXED, separately, by card `58ae4b34`** — see "Round 3" above for the pointer. This bullet no longer
+  applies; left struck-through rather than deleted so a reader following an old citation isn't misled.
 
 ## Tests
 

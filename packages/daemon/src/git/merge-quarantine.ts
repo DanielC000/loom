@@ -4940,14 +4940,33 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
 
 /** For a repoPath that is NOT currently resolvable, its OWN recorded entry (active, any key; else
  *  pending) by {@link directPathIdentity} — never the generic key-based lookup, which can surface an
- *  unrelated repo's entry merely occupying the same walked-up key (card 883e29bc, round 2). Returns
- *  undefined when repoPath has no entry of its own at all. */
+ *  unrelated repo's entry merely occupying the same walked-up key (card 883e29bc, round 2). Also matches
+ *  an entry whose own `contributorRepoPaths` (82032b5c) names `repoPath` — a degraded occupant's own
+ *  historical contributor has no record of its own at all (it rides entirely on the host's), so without
+ *  this a contributor's own identity is unenforceable regardless of relocation, boot, or any other
+ *  lifecycle stage (card 58ae4b34). A RESOLVABLE contributor (the common case — a real subdirectory of
+ *  its host, e.g. 82032b5c round 6's own sibling shape) never reaches this function at all: {@link
+ *  resolveQuarantineFor} only calls it for an unresolvable repoPath, and a resolvable subdirectory is
+ *  already independently enforced via ordinary ancestor-walk key-collapse.
+ *
+ *  @decision 58ae4b34 (round 2) — own-identity wins over a contributor match, across both tiers, always.
+ *  See the decision record's "Round 2" section for the Y-is-both-things repro this closes.
+ *
+ *  Returns undefined when repoPath has no entry of its own, and is contributor to none, at all. */
 function ownIdentityEntryFor(repoPath: string): MergeQuarantineEntry | undefined {
   const identity = directPathIdentity(repoPath);
+  const isOwnIdentity = (entry: MergeQuarantineEntry): boolean => directPathIdentity(entry.repoPath) === identity;
+  const isContributor = (entry: MergeQuarantineEntry): boolean =>
+    entry.contributorRepoPaths?.some((c) => directPathIdentity(c) === identity) ?? false;
   for (const entry of activeQuarantines.values()) {
-    if (directPathIdentity(entry.repoPath) === identity) return entry;
+    if (isOwnIdentity(entry)) return entry;
   }
-  return pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === identity)?.entry;
+  const ownPending = pendingUnresolvedQuarantines.find((p) => isOwnIdentity(p.entry));
+  if (ownPending) return ownPending.entry;
+  for (const entry of activeQuarantines.values()) {
+    if (isContributor(entry)) return entry;
+  }
+  return pendingUnresolvedQuarantines.find((p) => isContributor(p.entry))?.entry;
 }
 
 /**
