@@ -24192,8 +24192,19 @@ export class SessionService {
       if (this.db.getMeta(key) !== rawW) return;
       // @decision c013e8a5 — repoPath reconfirmation against a rebind mid-flight: our own `head`/`checkedTip`
       // reads above were taken from THIS `repoPath`, which may no longer be what this key names.
+      // @decision c013e8a5 round 3 — compared via `literalRepoPathKey` (matching the ledger guard, card
+      // 26c12fac), never raw `!==` — a cosmetic-only (win32 case / trailing-separator) difference must not
+      // skip a legitimate advance.
       const project = this.db.getProject(projectId);
-      if (!project || resolveRepoByKey(project, repoKey).path !== repoPath) return;
+      if (!project) return;
+      let currentRepoPath: string;
+      try {
+        currentRepoPath = resolveRepoByKey(project, repoKey).path;
+      } catch (e) {
+        if (!(e instanceof UnknownRepoKeyError)) throw e;
+        return;
+      }
+      if (literalRepoPathKey(currentRepoPath) !== literalRepoPathKey(repoPath)) return;
       // @decision c013e8a5 round 2 — the seeded-stray NOTICE fires only AFTER both guards above pass: firing
       // it before them (the old ordering) told a manager a seed happened on a pass that then skipped it.
       seedStray?.();
@@ -24253,8 +24264,17 @@ export class SessionService {
       }
       // @decision c013e8a5 — same CAS + repoPath reconfirmation as the solo twin; see that method's own comment.
       if (this.db.getMeta(key) !== rawW) return;
+      // @decision c013e8a5 round 3 — same `literalRepoPathKey` comparison as the solo twin.
       const project = this.db.getProject(projectId);
-      if (!project || resolveRepoByKey(project, repoKey).path !== repoPath) return;
+      if (!project) return;
+      let currentRepoPath: string;
+      try {
+        currentRepoPath = resolveRepoByKey(project, repoKey).path;
+      } catch (e) {
+        if (!(e instanceof UnknownRepoKeyError)) throw e;
+        return;
+      }
+      if (literalRepoPathKey(currentRepoPath) !== literalRepoPathKey(repoPath)) return;
       // @decision c013e8a5 round 2 — same reorder as the solo twin: notice only after both guards pass.
       seedStray?.();
       this.db.setMeta(key, JSON.stringify({ branch: head.branch, sha: batchHeadSha }));

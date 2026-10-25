@@ -215,6 +215,39 @@ try {
     d.db.close();
   }
 
+  // ══════════════════════ (cosmetic-variant) advanceMainlineWatermark's repoPath reconfirmation must accept a
+  // cosmetic-only (trailing-separator) variant of the SAME repo, not just an exact string match (card dae603ba) ══
+  {
+    const repo = mkRepo("cosmetic");
+    const d = boot();
+    const { projId, mgrId } = setupProject(d, "cosmetic", repo); // project.repoPath === repo, no trailing separator
+    const key = MW.mainlineWatermarkKey(projId, "primary");
+    await d.sessions.checkMainlineMovesOnBoot(); // true first sight: silently seeds W at the repo's current tip (commit 2)
+    const seeded = watermark(d, projId);
+    check("(cosmetic) setup: first sight seeded W at the pre-advance tip", seeded !== null);
+    fs.writeFileSync(path.join(repo, "third.txt"), "third\n"); git(repo, "add", "third.txt"); git(repo, "commit", "-q", "-m", "feat(x): third"); // a genuine new landing
+    const newTip = git(repo, "rev-parse", "HEAD");
+    const cosmeticVariant = repo + path.sep; // same physical repo, a purely cosmetic (trailing-separator) difference
+    await d.sessions.advanceMainlineWatermark(projId, "primary", cosmeticVariant, seeded.sha, newTip, "verified", mgrId, null, null);
+    check("(dae603ba) (cosmetic) THE FIX: a trailing-separator-only variant of the caller's own repoPath still advances the watermark", watermark(d, projId)?.sha === newTip);
+    d.db.close();
+  }
+  {
+    const repo = mkRepo("cosmetic-batch");
+    const d = boot();
+    const { projId, mgrId } = setupProject(d, "cosmetic-batch", repo);
+    const key = MW.mainlineWatermarkKey(projId, "primary");
+    await d.sessions.checkMainlineMovesOnBoot();
+    const seeded = watermark(d, projId);
+    check("(cosmetic-batch) setup: first sight seeded W at the pre-advance tip", seeded !== null);
+    fs.writeFileSync(path.join(repo, "third.txt"), "third\n"); git(repo, "add", "third.txt"); git(repo, "commit", "-q", "-m", "feat(x): third");
+    const newTip = git(repo, "rev-parse", "HEAD");
+    const cosmeticVariant = repo + path.sep;
+    await d.sessions.advanceMainlineWatermarkForBatch(projId, "primary", cosmeticVariant, seeded.sha, seeded.sha, newTip, mgrId);
+    check("(dae603ba) (cosmetic-batch) THE FIX: a trailing-separator-only variant still advances the watermark for the batch twin too", watermark(d, projId)?.sha === newTip);
+    d.db.close();
+  }
+
   // ══════════════════════ (defer) repeated transient resolver failure ══════════════════════
   {
     const repo = mkRepo("defer");

@@ -165,6 +165,23 @@ wall-clock ISO timestamps (`ts >= episodeSince`), so a backward clock step DURIN
 a stale event re-match. Low impact — a backward step large enough to matter is itself an anomaly a host
 would show elsewhere, and the worst case is one extra duplicate-looking event, never a missed alert.
 
+## Round 3 (card `dae603ba`, from `26c12fac`)
+
+Item 3's repoPath reconfirmation (`resolveRepoByKey(project, repoKey).path !== repoPath`) compared RAW
+strings. `26c12fac`'s sibling ledger-write guard (`recordMainlineLedgerEntryIfRepoUnchanged`) answers the
+SAME "did the repo change" question for the ledger write, but via `literalRepoPathKey` — because
+`resetMainlineBaselinesForRepoChange` itself (the thing that actually decides a rebind happened) also
+compares via `literalRepoPathKey`, through `repoPathMaps`. A raw `!==` here could disagree with that real
+rebind decision on a purely cosmetic difference (win32 case, a trailing separator): the watermark guard
+would read it as "changed" and skip a legitimate advance, while the ledger guard (and the real rebind
+check) would correctly read it as unchanged. Low severity either way — fail-open, corrected by the next
+landing — but the two guards should agree on the same comparison, not drift on it independently.
+
+Fixed: both `advanceMainlineWatermark` and `advanceMainlineWatermarkForBatch` now resolve the project's
+current repo path, catch `UnknownRepoKeyError` (same skip as a genuine mismatch — the registry entry was
+removed, not just repathed) and compare via `literalRepoPathKey`, mirroring
+`recordMainlineLedgerEntryIfRepoUnchanged`'s own shape exactly.
+
 ## Do not
 
 - Do not remove the CAS in `checkMainlineMove` (item 1) — it is the ONLY guard against a reset/rebind
@@ -192,6 +209,9 @@ would show elsewhere, and the worst case is one extra duplicate-looking event, n
 - Do not call `recordFirstSightSeededStray`/`seedStray` before the CAS + repoPath reconfirmation pass in
   `advanceMainlineWatermark{,ForBatch}` (round 2 item 2) — the notice must describe a seed that actually
   happened.
+- Do not compare the watermark's repoPath reconfirmation with raw `!==` (round 3) — use
+  `literalRepoPathKey`, matching `recordMainlineLedgerEntryIfRepoUnchanged` (card `26c12fac`) and
+  `resetMainlineBaselinesForRepoChange`'s own notion of "did the repo change".
 
 ## Tests
 
@@ -204,7 +224,10 @@ same RED-first discipline: R4 (the second CAS after the facts-read await), R5 (t
 repoPath reconfirmation), notice-reorder-R2/R3 (the seeded-stray notice only after its own guards pass),
 defer-unbounded (the streak fires exactly once past the threshold even with the marker slot held by an
 unrelated alert), and defer-deliver (a boot-sourced notice reaches a LIVE manager via
-`deliverPendingBootAlerts` immediately, not on a later `onOrchestrationMcpFirstSeen`).
+`deliverPendingBootAlerts` immediately, not on a later `onOrchestrationMcpFirstSeen`). Round 3 (card
+`dae603ba`) adds cosmetic-variant/cosmetic-variant-batch: a trailing-separator-only variant of the
+caller's own repoPath still advances the watermark (RED on the pre-fix raw `!==` comparison, GREEN after
+switching to `literalRepoPathKey`), while R3/R3-batch/R5 above (a genuine rebind) still correctly skip.
 `packages/daemon/test/mainline-watermark-reset-route.mjs` (F)/(G) — round 2: `previousWatermarkRaw` for a
 present-but-unparseable row, and its 200-char truncation bound.
 `packages/daemon/test/mainline-watch-branch-divert.mjs` (D8)/(D9) — dedupe-scope item 5(a)/(b), also
