@@ -424,7 +424,9 @@ try {
     // returned null — each mode below corrupts a line `scanLoomNamespaceLines`'s narrower reserved-key
     // match never sees (so the exact-set check stays "exact"), while breaking the READER's own per-line
     // `key: value` requirement for the WHOLE final paragraph. RED on beb12b93 (pre-round-4), GREEN on
-    // `verifyLoomTrailersExactAndReadable`'s reader round-trip.
+    // `verifyLoomTrailersExactAndReadable`'s reader round-trip (this detects the `"unreadable"` KIND;
+    // card 45036494 later changed what the batch path DOES with that kind — see `expectUnreadable`'s
+    // own branch below, no longer an abort).
     { tag: "prose-in-trailer", atTip: true, build: (real) => `${real}\n[skip ci]`, expectUnreadable: true },
     { tag: "continuation", atTip: true, build: (real) => `${real}\n    (continued from the digest above)`, expectUnreadable: true },
     { tag: "zw-landedtip", atTip: true, build: (real) => `${real}\n​Loom-Landed-Tip: ${"a".repeat(40)}`, expectUnreadable: true },
@@ -481,12 +483,11 @@ try {
       check(`(K3 ${m.tag}) a foreign (non-Loom) trailer STILL lands untouched`, result.ok === true);
       check(`(K3 ${m.tag}) canonical main advanced`, git(repo, "rev-parse", "HEAD") !== baseMainSha);
     } else if (m.expectUnreadable) {
-      check(`(K3 ${m.tag}) the batch refuses, typed batchHeadMoved`, result.ok === false && result.batchHeadMoved === true);
-      check(`(K3 ${m.tag}) the reason is the DISTINCT, honest "unreadable" wording, never generic 'tampered' or the displaced wording`,
-        /altered Loom's trailer paragraph/i.test(result.reason ?? "") &&
-        !/tampered/i.test(result.reason ?? "") &&
-        !/final paragraph is not Loom's trailer block/i.test(result.reason ?? ""));
-      check(`(K3 ${m.tag}) canonical main untouched`, git(repo, "rev-parse", "HEAD") === baseMainSha);
+      // @decision 45036494 — card 45036494 made "unreadable" kept-VERIFIED (never aborted), mirroring the
+      // solo path's own f224632d M1 ruling: only a genuine "forged" namespace mismatch still aborts.
+      check(`(K3 ${m.tag}) THE RULING (card 45036494): the batch now LANDS kept-VERIFIED, never aborted`, result.ok === true);
+      check(`(K3 ${m.tag}) the landed candidate carries trailerAdvisory "unreadable"`, result.landed?.[0]?.trailerAdvisory === "unreadable");
+      check(`(K3 ${m.tag}) canonical main advanced with it`, git(repo, "rev-parse", "HEAD") !== baseMainSha);
     } else {
       check(`(K3 ${m.tag}) the batch refuses, typed batchHeadMoved`, result.ok === false && result.batchHeadMoved === true);
       check(`(K3 ${m.tag}) canonical main untouched`, git(repo, "rev-parse", "HEAD") === baseMainSha);
@@ -624,9 +625,10 @@ try {
   }
 
   // ── (K3 hook-paragraph) same Code Review, item 3: a hook appending a NON-trailer paragraph AFTER
-  //     Loom's own, otherwise-intact trailer paragraph must refuse with its OWN honest reason, never the
-  //     generic "tampered" wording — Loom's trailers are unmolested, just no longer the message's final
-  //     paragraph, so its own readers (parseLoomTrailerBlock included) can no longer see them as such.
+  //     Loom's own, otherwise-intact trailer paragraph — "displaced". @decision 45036494 — card 45036494
+  //     made this kept-VERIFIED (never aborted), mirroring the solo path's own f224632d M1 ruling; Loom's
+  //     trailers are unmolested, just no longer the message's final paragraph, so discovery-time readers
+  //     need the separate tolerant reader to find it again, but the LANDING itself is never refused.
   {
     const repo = path.join(os.tmpdir(), `loom-bmhm-k3-hookpara-${sfx}`);
     fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
@@ -652,9 +654,9 @@ try {
       { workerSessionId: "bmhm-k3-hookpara-w1", taskId: "bmhm-k3-hookpara-t1", branch: candBranch, cutBaseSha: null },
     ], async () => ({ passed: true }));
 
-    check("(K3 hookpara) the batch refuses, typed batchHeadMoved", result.ok === false && result.batchHeadMoved === true);
-    check("(K3 hookpara) the reason is the DISTINCT, honest hook-paragraph wording, never generic 'tampered'", /final paragraph is not Loom's trailer block/i.test(result.reason ?? "") && !/tampered/i.test(result.reason ?? ""));
-    check("(K3 hookpara) canonical main untouched", git(repo, "rev-parse", "HEAD") === baseMainSha);
+    check("(K3 hookpara) THE RULING (card 45036494): the batch LANDS kept-VERIFIED, never aborted", result.ok === true);
+    check("(K3 hookpara) the landed candidate carries trailerAdvisory \"displaced\"", result.landed?.[0]?.trailerAdvisory === "displaced");
+    check("(K3 hookpara) canonical main advanced with it", git(repo, "rev-parse", "HEAD") !== baseMainSha);
   }
 
   // ── (L2) Code Review 820ce6e3 item 4: the noop leg's OWN `findLandedSquashCommit` lookup (never the

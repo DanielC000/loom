@@ -4357,16 +4357,28 @@ export interface LoomTrailers {
  * @decision 1d3f500e — never a first-match lookup over the whole body (a quoted example line at column 0 would shadow the real trailer); f62ef199 tightens "last match" to
  * "final block only", since a last-match over the whole body still reads a quoted line on a commit that has no real trailer.
  */
-export function parseLoomTrailerBlock(message: string): LoomTrailers | null {
-  // A run of 2+ newlines (blank lines) separates paragraphs — never a single blank, or a 3-newline gap leaves an empty first line (commit.cleanup=verbatim, the batch writer's own append).
-  const paragraphs = message.replace(/\r\n/g, "\n").replace(/\s+$/, "").split(/\n(?:[ \t]*\n)+/);
-  if (paragraphs.length < 2) return null; // git never treats the SUBJECT line as a trailer — the block is always a paragraph AFTER the first
-  const lines = (paragraphs[paragraphs.length - 1] ?? "").split("\n");
+/** The per-line shape {@link parseTrailerParagraph} (and so every caller of it) requires for ANY line
+ *  inside a candidate trailer paragraph — factored out so {@link isTrailerShapedParagraph} (card
+ *  45036494) can test the SAME shape without a second, independently-drifting regex. */
+const TRAILER_LINE_RE = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*?)[ \t]*$/;
+
+/**
+ * Parses ONE paragraph (not a whole message) as a Loom trailer block — the exact per-line field-
+ * extraction {@link parseLoomTrailerBlock} already applied to the message's own LAST paragraph, factored
+ * out here (card 45036494) so {@link tolerantFindLoomTrailerBlock} can apply the IDENTICAL rules to an
+ * ARBITRARY paragraph without a second, independently-drifting copy. Never exported — {@link
+ * parseLoomTrailerBlock}'s own "final paragraph only" semantics (card 95940402's "Do not": never change
+ * its reader semantics) are UNCHANGED by this factor-out; every existing caller still gets byte-identical
+ * behavior, since `parseLoomTrailerBlock` now simply calls this on the last paragraph instead of inlining
+ * the same loop.
+ */
+function parseTrailerParagraph(paragraph: string): LoomTrailers | null {
+  const lines = paragraph.split("\n");
   let branch: string | null = null;
   const out: LoomTrailers = { branch: "", landedTip: null, base: null, pathSet: null };
   for (const line of lines) {
-    const kv = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*?)[ \t]*$/.exec(line);
-    if (!kv) return null; // a prose line ⇒ the final paragraph is not a trailer block
+    const kv = TRAILER_LINE_RE.exec(line);
+    if (!kv) return null; // a prose line ⇒ this paragraph is not a trailer block
     const value = kv[2]!;
     if (kv[1] === "Loom-Worker-Branch") branch = /^\S+$/.test(value) ? value : null;
     else if (kv[1] === "Loom-Landed-Tip") out.landedTip = /^[0-9a-f]{40,64}$/.test(value) ? value : null;
@@ -4376,6 +4388,127 @@ export function parseLoomTrailerBlock(message: string): LoomTrailers | null {
   if (!branch) return null;
   out.branch = branch;
   return out;
+}
+
+export function parseLoomTrailerBlock(message: string): LoomTrailers | null {
+  // A run of 2+ newlines (blank lines) separates paragraphs — never a single blank, or a 3-newline gap leaves an empty first line (commit.cleanup=verbatim, the batch writer's own append).
+  const paragraphs = message.replace(/\r\n/g, "\n").replace(/\s+$/, "").split(/\n(?:[ \t]*\n)+/);
+  if (paragraphs.length < 2) return null; // git never treats the SUBJECT line as a trailer — the block is always a paragraph AFTER the first
+  return parseTrailerParagraph(paragraphs[paragraphs.length - 1] ?? "");
+}
+
+/** True iff every line of `paragraph` is `Key: value`-shaped (see {@link TRAILER_LINE_RE}) — the git
+ *  trailer shape {@link loomTrailerBlockDisplaced} already treats as "an honest hook, not a forgery",
+ *  reused here (card 45036494) to bound {@link tolerantFindLoomTrailerBlock}'s own tolerance: a single
+ *  prose line anywhere in a paragraph it is asked to skip past is refused, never silently walked through. */
+function isTrailerShapedParagraph(paragraph: string): boolean {
+  return paragraph.split("\n").every((line) => TRAILER_LINE_RE.test(line));
+}
+
+/** {@link tolerantFindLoomTrailerBlock}'s own bound on how many trailing paragraphs (after the identified
+ *  Loom block) it will walk past — each one individually required to be {@link isTrailerShapedParagraph}.
+ *  Past this, refuses rather than silently widening further (card 45036494). */
+const TOLERANT_TRAILER_MAX_TRAILING_PARAGRAPHS = 3;
+
+/** {@link tolerantFindLoomTrailerBlock}'s own bound on the TOTAL line count across every trailing
+ *  paragraph it walks past — independent of {@link TOLERANT_TRAILER_MAX_TRAILING_PARAGRAPHS}, since a
+ *  bounded paragraph COUNT alone does not bound a pathological single paragraph with many lines
+ *  (card 45036494). */
+const TOLERANT_TRAILER_MAX_TRAILING_LINES = 12;
+
+/**
+ * @decision 45036494 — never trust this function's result on its own; every call site must still run its
+ * own independent, non-trailer verifier on the candidate before treating it as landed.
+ *
+ * DISCOVERY-ONLY tolerant reader for a landing's Loom trailer block, closing (for the "displaced" shape
+ * only — see below) the residual card c13666c6 left open: that card gated the
+ * branch-gone ledger arm against forgery, but never widened DISCOVERY itself, so a commit whose trailer a
+ * repo's own commit-msg hook legitimately DISPLACED (appended a paragraph after Loom's own — the exact
+ * shape `verifyLoomTrailersExactAndReadable`'s `"displaced"` kind already classifies as honest, not
+ * forged) was — and without this function, still is — never FOUND by the `git log --grep` + parse loop
+ * every discovery call site runs, regardless of any ledger/content check downstream, because that check is
+ * only ever consulted AFTER a candidate sha is found.
+ *
+ * {@link parseLoomTrailerBlock} is UNCHANGED and remains the real reader every WRITE/TRUST-layer consumer
+ * uses (card 95940402's own "Do not" forbids altering its semantics — every other caller, hold-release/
+ * `readLandedTipTrailer`/`pinnedTipForLandedSquash`/the solo-path identity-recovery check/
+ * `verifyLoomTrailersExactAndReadable`'s own round-trip, relies on exactly today's "final paragraph only"
+ * behavior and must keep doing so). This function exists ONLY for a discovery-time grep+parse loop to
+ * locate a CANDIDATE — it is never itself a trust decision, and every call site that uses it MUST still run
+ * its own independent, non-trailer verifier (content equality, or c13666c6's ledger gate) on the result
+ * before trusting it; see each call site's own comment (card 45036494) for which verifier that is.
+ *
+ * Accepts a Loom trailer block that is NOT the message's final paragraph only when:
+ *  1. Exactly ONE paragraph in the message (never the subject) parses as a self-contained, well-formed
+ *     Loom block via {@link parseTrailerParagraph} — more than one is ambiguous (never guess which is
+ *     real) and refuses with `null`, same as zero.
+ *  2. Every paragraph AFTER that one block is ITSELF a well-formed `Key: value`-only block (git trailer
+ *     shape — {@link isTrailerShapedParagraph}, the same shape {@link loomTrailerBlockDisplaced} already
+ *     treats as an honest hook) — bounded by {@link TOLERANT_TRAILER_MAX_TRAILING_PARAGRAPHS} and {@link
+ *     TOLERANT_TRAILER_MAX_TRAILING_LINES}; a single prose line, or exceeding either bound, refuses. A
+ *     hook that does something stranger than append a few trailer-shaped lines is not this function's job
+ *     to parse.
+ *  3. The reserved Loom namespace (`scanLoomNamespaceLines`) carries NO duplicate/case-variant key
+ *     anywhere in the WHOLE message (not just the identified block) — the exact round-trip
+ *     {@link verifyLoomTrailersExactAndReadable}'s own exact-namespace audit already enforces for a KNOWN
+ *     `expected` set; here the candidate set is self-derived (built from the scan itself) since discovery
+ *     has no `expected` to compare against ahead of time, so this step's only real job is catching a
+ *     duplicate/case-variant reserved line sitting anywhere else in the message (the `5e323196`/`6cc1333f`
+ *     shape `RESERVED_LOOM_TRAILER_KEY`'s own doc names: an earlier paragraph quoting a trailer line
+ *     verbatim) — never a value mismatch, which cannot occur against a self-derived expected set.
+ *
+ * **OUT OF SCOPE, deliberately: "unreadable" discovery.** That kind is foreign content folded INTO the
+ * SAME paragraph as Loom's own trailer, with no blank-line paragraph boundary at all — there is no
+ * boundary this function could walk past, so it cannot and does not attempt it. See
+ * docs/decisions/45036494-*.md for the full reasoning; the batch landing path still treats an
+ * "unreadable" LANDING as advisory (never a hard failure), this function just can never DISCOVER one
+ * after the fact.
+ */
+export function tolerantFindLoomTrailerBlock(message: string): LoomTrailers | null {
+  const normalized = normalizeMessageNewlines(message).replace(/\s+$/, "");
+  const paragraphs = normalized.split(/\n(?:[ \t]*\n)+/);
+  if (paragraphs.length < 2) return null; // same subject-is-never-a-trailer rule as parseLoomTrailerBlock
+
+  // Step 3 (done first, cheaply): no duplicate/case-variant reserved key ANYWHERE in the message.
+  const scanned = scanLoomNamespaceLines(normalized);
+  if (scanned.length === 0) return null; // nothing reserved anywhere — ordinary non-Loom commit
+  const candidateExpected: Record<string, string> = {};
+  const seenKeys = new Set<string>();
+  for (const l of scanned) {
+    const lower = l.key.toLowerCase();
+    if (seenKeys.has(lower)) return null; // duplicate/case-variant reserved key anywhere ⇒ ambiguous, refuse
+    seenKeys.add(lower);
+    candidateExpected[l.key] = l.value;
+  }
+  if (candidateExpected["Loom-Worker-Branch"] === undefined) return null; // nothing to discover without this
+
+  // Step 1: exactly one paragraph (never the subject) parses as a self-contained Loom block.
+  const blockCandidates: number[] = [];
+  for (let i = 1; i < paragraphs.length; i++) {
+    if (parseTrailerParagraph(paragraphs[i]!) !== null) blockCandidates.push(i);
+  }
+  if (blockCandidates.length !== 1) return null;
+  const blockIdx = blockCandidates[0]!;
+
+  // Step 2: every paragraph AFTER the block is itself trailer-shaped, bounded.
+  const trailing = paragraphs.slice(blockIdx + 1);
+  if (trailing.length > TOLERANT_TRAILER_MAX_TRAILING_PARAGRAPHS) return null;
+  let trailingLines = 0;
+  for (const p of trailing) {
+    trailingLines += p.split("\n").length;
+    if (trailingLines > TOLERANT_TRAILER_MAX_TRAILING_LINES || !isTrailerShapedParagraph(p)) return null;
+  }
+
+  // Round-trip: the identified block, parsed on its own, must carry exactly the candidate set step 3
+  // derived from the raw-line scan — ties the positional find back to the raw scan rather than trusting
+  // either one alone.
+  const parsed = parseTrailerParagraph(paragraphs[blockIdx]!);
+  if (!parsed) return null;
+  if (parsed.branch !== candidateExpected["Loom-Worker-Branch"]) return null;
+  if ((parsed.landedTip ?? null) !== (candidateExpected["Loom-Landed-Tip"] ?? null)) return null;
+  if ((parsed.base ?? null) !== (candidateExpected["Loom-Worker-Base"] ?? null)) return null;
+  if ((parsed.pathSet ?? null) !== (candidateExpected["Loom-Worker-PathSet"] ?? null)) return null;
+  return parsed;
 }
 
 /**
@@ -7526,7 +7659,10 @@ export async function findLandedSquashCommit(
     for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
       const sepIdx = record.indexOf("\x1f");
       if (sepIdx === -1) continue;
-      const parsed = parseLoomTrailerBlock(record.slice(sepIdx + 1));
+      const body = record.slice(sepIdx + 1);
+      // @decision 45036494 — tolerant fallback ONLY, never instead of the strict parse; both arms below
+      // (content check / ledger gate) independently verify whatever this discovers before it is trusted.
+      const parsed = parseLoomTrailerBlock(body) ?? tolerantFindLoomTrailerBlock(body);
       if (parsed?.branch === branch) {
         sha = record.slice(0, sepIdx).trim();
         trailers = parsed;
@@ -7544,7 +7680,8 @@ export async function findLandedSquashCommit(
         git.raw(["merge-base", sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
       )).trim();
       if (mergeBase === sha) return null;
-      // Content-reachability: a trailer match is not proof (see branchContentLandedInCommit's doc).
+      // Content-reachability (branchContentLandedInCommit) is the NON-TRAILER verifier for this arm —
+      // card 45036494's own widened discovery above still needs this to trust the candidate.
       if (!(await branchContentLandedInCommit(repoPath, branch, sha, mergeBase, deps))) return null;
     } else {
       // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has
@@ -7631,7 +7768,10 @@ export async function findAllLandedTrailerCommits(
     for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
       const sepIdx = record.indexOf("\x1f");
       if (sepIdx === -1) continue;
-      const parsed = parseLoomTrailerBlock(record.slice(sepIdx + 1));
+      const body = record.slice(sepIdx + 1);
+      // @decision 45036494 — tolerant fallback ONLY; this function's own caller (recordedTipContentLanded)
+      // is the non-trailer verifier that makes widening discovery here safe.
+      const parsed = parseLoomTrailerBlock(body) ?? tolerantFindLoomTrailerBlock(body);
       if (parsed?.branch === branch) found.push({ sha: record.slice(0, sepIdx).trim(), trailers: parsed });
     }
     return found;
@@ -8085,7 +8225,9 @@ async function scanMergedCommitMap(
       const sha = record.slice(0, sep1).trim();
       const date = record.slice(sep1 + 1, sep2).trim();
       const body = record.slice(sep2 + 1);
-      const trailers = parseLoomTrailerBlock(body);
+      // @decision 45036494 — tolerant fallback ONLY; every reader of this map (resolveMergedCommitMapHit)
+      // independently verifies a hit (content check / c13666c6's ledger gate) before trusting it.
+      const trailers = parseLoomTrailerBlock(body) ?? tolerantFindLoomTrailerBlock(body);
       if (!sha || !trailers) continue;
       const branch = trailers.branch;
       if (!map.has(branch)) {

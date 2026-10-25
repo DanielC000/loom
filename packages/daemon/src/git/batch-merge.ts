@@ -149,6 +149,15 @@ export interface BatchLandedBranch extends BatchCandidate {
    *  batch and not in this sha, so the finalizer compares the live tip against it and RETAINS the branch +
    *  worktree when it moved, rather than `branch -D`-ing a commit that never landed. */
   assembledTip?: string;
+  /** @decision 45036494 — only a genuine `"forged"` namespace mismatch still aborts the batch (see
+   *  `LandResult.headMoved`); `"displaced"`/`"unreadable"` land VERIFIED with this set instead.
+   *
+   *  Set when this branch's tip commit was kept VERIFIED despite a repo's own commit-msg hook moving
+   *  ("displaced") or otherwise breaking the structural reader of ("unreadable") Loom's trailer paragraph
+   *  — mirrors the solo path's own `MergeBranchResult.trailerAdvisory` (card f224632d). The caller
+   *  (`mergeBatchTracked`, sessions/service.ts) files ONE deduped, low-severity advisory event for this,
+   *  never a hold/refusal. Omitted on an ordinary, undisplaced landing. */
+  trailerAdvisory?: "displaced" | "unreadable";
 }
 
 export interface BatchDroppedBranch extends BatchCandidate {
@@ -240,6 +249,9 @@ interface LandResult {
    *  (the tip {@link assembleBatchBranches} itself last landed) — a worker-writable-ref fact between two
    *  candidates. That caller stops the whole loop on this, like `quarantined`/`rollbackUnverified`. */
   headMoved?: boolean;
+  /** @decision 45036494 — mirrors {@link BatchLandedBranch.trailerAdvisory}; set on `ok:true` only, never
+   *  alongside `headMoved` (a `"forged"` mismatch still maps to `headMoved`, not this). */
+  trailerAdvisory?: "displaced" | "unreadable";
 }
 
 /**
@@ -782,22 +794,15 @@ async function landBranchCommitsIndividually(
     const expectedTrailersAfterPlainCommit: Record<string, string> = isLast ? { "Loom-Worker-Branch": branch } : {};
     const plainTrailerVerify = verifyLoomTrailersExactAndReadable(verifiedPlain.body ?? "", expectedTrailersAfterPlainCommit);
     if (!plainTrailerVerify.ok) {
-      if (plainTrailerVerify.kind === "displaced") {
+      // @decision 45036494 — only "forged" aborts the batch; "displaced"/"unreadable" (a legitimate
+      // commit-msg hook) fall through kept VERIFIED. PROVISIONAL here — the amend below rebuilds the
+      // message, so the post-loop final check (not this one) decides this call's `trailerAdvisory`.
+      if (plainTrailerVerify.kind === "forged") {
         return {
           ok: false, headMoved: true,
-          reason: `${branch}: the commit message's final paragraph is not Loom's trailer block — a commit-msg hook appended text after it; Loom's merge trailers would be invisible to its own readers`,
+          reason: `${branch}: the batch worktree's HEAD after landing ${sha.slice(0, 7)} (${newHead.slice(0, 8)}) carries an unexpected Loom-* trailer — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
         };
       }
-      if (plainTrailerVerify.kind === "unreadable") {
-        return {
-          ok: false, headMoved: true,
-          reason: `${branch}: a commit-msg hook altered Loom's trailer paragraph — Loom's merge trailers would be unreadable`,
-        };
-      }
-      return {
-        ok: false, headMoved: true,
-        reason: `${branch}: the batch worktree's HEAD after landing ${sha.slice(0, 7)} (${newHead.slice(0, 8)}) carries an unexpected Loom-* trailer — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
-      };
     }
     lastExpectedParent = expectedParentForThisCommit;
     lastExpectedTree = preCommitTree;
@@ -900,23 +905,24 @@ async function landBranchCommitsIndividually(
     if (computedPathSetDigest !== undefined) expectedFinalTrailers["Loom-Worker-PathSet"] = computedPathSetDigest;
   }
   const finalTrailerVerify = verifyLoomTrailersExactAndReadable(finalVerify.body ?? "", expectedFinalTrailers);
-  if (!finalVerify.ok || !finalTrailerVerify.ok) {
-    if (finalVerify.ok && !finalTrailerVerify.ok && finalTrailerVerify.kind === "displaced") {
-      return {
-        ok: false, headMoved: true,
-        reason: `${branch}: the commit message's final paragraph is not Loom's trailer block — a commit-msg hook appended text after it; Loom's merge trailers would be invisible to its own readers`,
-      };
-    }
-    if (finalVerify.ok && !finalTrailerVerify.ok && finalTrailerVerify.kind === "unreadable") {
-      return {
-        ok: false, headMoved: true,
-        reason: `${branch}: a commit-msg hook altered Loom's trailer paragraph — Loom's merge trailers would be unreadable`,
-      };
-    }
+  // @decision 45036494 — only an identity mismatch or "forged" aborts the batch; "displaced"/
+  // "unreadable" are kept VERIFIED with `trailerAdvisory` set. AUTHORITATIVE for the tip (reads the
+  // message AFTER the Base/PathSet amend, unlike the earlier "plain" check).
+  let trailerAdvisory: "displaced" | "unreadable" | undefined;
+  if (!finalVerify.ok) {
     return {
       ok: false, headMoved: true,
       reason: `${branch}: the batch worktree's final HEAD (${landedSha.slice(0, 8)}) does not verify as this landing's own commit${lastExpectedParent !== undefined && lastExpectedTree !== undefined ? ` (expected parent ${lastExpectedParent.slice(0, 8)}, tree ${lastExpectedTree.slice(0, 8)})` : ""} — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
     };
+  }
+  if (!finalTrailerVerify.ok) {
+    if (finalTrailerVerify.kind === "forged") {
+      return {
+        ok: false, headMoved: true,
+        reason: `${branch}: the batch worktree's final HEAD (${landedSha.slice(0, 8)}) carries an unexpected Loom-* trailer — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+      };
+    }
+    trailerAdvisory = finalTrailerVerify.kind;
   }
   const landedSubject = (finalVerify.body ?? "").split(/\r?\n/)[0]?.trim() ?? "";
 
@@ -947,7 +953,7 @@ async function landBranchCommitsIndividually(
     }
   }
 
-  return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, strippedReservedLineCount, pathSetStamped, branchTip };
+  return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, strippedReservedLineCount, pathSetStamped, branchTip, ...(trailerAdvisory ? { trailerAdvisory } : {}) };
 }
 
 /**
@@ -1131,7 +1137,7 @@ export async function assembleBatchBranches(
       dropped.push({ ...c, reason: "batch land reported ok with no sha/subject" });
       continue;
     }
-    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, strippedReservedLineCount: r.strippedReservedLineCount, pathSetStamped: r.pathSetStamped, assembledTip: r.branchTip });
+    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, strippedReservedLineCount: r.strippedReservedLineCount, pathSetStamped: r.pathSetStamped, assembledTip: r.branchTip, ...(r.trailerAdvisory ? { trailerAdvisory: r.trailerAdvisory } : {}) });
     assembledTipSha = r.sha;
   }
   return { landed, dropped, assembledTipSha };

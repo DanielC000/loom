@@ -65,7 +65,7 @@ useOwnLoomHome("loom-mw-owncommit-home-");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, mergeBranch, parseLoomTrailerBlock } = await import("../dist/git/worktrees.js");
+const { createWorktree, mergeBranch, parseLoomTrailerBlock, findLandedSquashCommit, getTaskMergedInfo, __resetMergedCommitMapCacheForTest } = await import("../dist/git/worktrees.js");
 const MW = await import("../dist/git/mainline-watch.js");
 
 let failures = 0;
@@ -259,6 +259,27 @@ function installDisplacingCommitMsgHook(repo) {
     "set -e",
     `if [ "$(git rev-parse --show-toplevel)" != ${JSON.stringify(canonicalToplevel)} ]; then exit 0; fi`,
     "printf '\\n[skip ci]\\n' >> \"$1\"",
+    "",
+  ].join("\n");
+  fs.writeFileSync(hookPath, script);
+  fs.chmodSync(hookPath, 0o755);
+}
+
+// Card 45036494 — the SAME "displaced" shape as installDisplacingCommitMsgHook above, but appending a
+// genuinely TRAILER-SHAPED paragraph (a realistic DCO `Signed-off-by:` hook) instead of a prose `[skip
+// ci]` line. `tolerantFindLoomTrailerBlock`'s own discovery widening is deliberately narrower than
+// "displaced" itself: it only recovers a displaced landing when every paragraph AFTER Loom's own block is
+// ITSELF a well-formed `Key: value`-only block — `[skip ci]` is NOT that shape (discovery correctly still
+// refuses it), so the (HOOK-DISPLACED-DISCOVERY)/(HOOK-DISPLACED-RESPAWN) scenarios below need THIS hook,
+// not the `[skip ci]` one L1/L2 already used above.
+function installDcoDisplacingCommitMsgHook(repo) {
+  const hookPath = path.join(repo, ".git", "hooks", "commit-msg");
+  const canonicalToplevel = git(repo, "rev-parse", "--show-toplevel");
+  const script = [
+    "#!/bin/sh",
+    "set -e",
+    `if [ "$(git rev-parse --show-toplevel)" != ${JSON.stringify(canonicalToplevel)} ]; then exit 0; fi`,
+    "printf '\\nSigned-off-by: CI Bot <ci@example.com>\\n' >> \"$1\"",
     "",
   ].join("\n");
   fs.writeFileSync(hookPath, script);
@@ -733,6 +754,81 @@ function installForeignTrailerInBlockCommitMsgHook(repo) {
   check("(HOOK-DISPLACED-SERVICE) L2 ALSO advances trust", ctx.db.getMainlineBranchTrust(ctx.projId, "primary", "main") === tip2);
   check("(HOOK-DISPLACED-SERVICE) DEDUP: still exactly ONE advisory event total — never refiled per landing, per repo per PROCESS", trailerAdvisoryEventsFor(ctx.db, ctx.projId).length === 1);
   check("(HOOK-DISPLACED-SERVICE) STILL zero forge/freeze events after L2", eventsFor(ctx.db, ctx.projId).length === 0);
+
+}
+
+// ===================== (HOOK-DISPLACED-DISCOVERY) / (HOOK-DISPLACED-RESPAWN): card 45036494 — own repo,
+//                        own project, a TRAILER-SHAPED (DCO-style) displacing hook (installDcoDisplacingCommitMsgHook,
+//                        not the `[skip ci]` one above — see that function's own doc for why).
+//                        c13666c6's own ledger gate never actually reached a displaced landing, because
+//                        DISCOVERY (the grep+parse loop every reader runs) could never find the candidate
+//                        sha in the first place. Before this card's fix, every check below failed. =====
+{
+  const repo = makeRepo("hookdiscoverysvc");
+  const ctx = newProject("hookdiscoverysvc", repo);
+  installDcoDisplacingCommitMsgHook(repo);
+
+  const w1 = await addWorker(ctx, "hdd1"); // true first-ever landing (no ledger row expected, same M1 asymmetry)
+  const r1 = await confirm(ctx, w1);
+  check("(HOOK-DISPLACED-DISCOVERY) setup: L1 lands despite the DCO hook", r1.settled === true && r1.ok === true);
+
+  const w2 = await addWorker(ctx, "hdd2");
+  const r2 = await confirm(ctx, w2);
+  check("(HOOK-DISPLACED-DISCOVERY) setup: L2 lands and gets a real ledger row", r2.settled === true && r2.ok === true);
+  const tip2 = git(repo, "rev-parse", "HEAD");
+  check("(HOOK-DISPLACED-DISCOVERY) setup control: L2 IS ledgered", ctx.db.db.prepare("SELECT COUNT(*) AS c FROM mainline_landed_commits WHERE project_id = ? AND tip = ?").get(ctx.projId, tip2).c === 1);
+  check("(HOOK-DISPLACED-DISCOVERY) setup control: the real strict reader genuinely cannot parse L2's own trailer off main", parseLoomTrailerBlock(git(repo, "log", "-1", "--format=%B", tip2)) === null);
+  check("(HOOK-DISPLACED-DISCOVERY) setup control: w2's branch is genuinely gone after confirm (branch-gone arm applies)", git(repo, "branch", "--list", w2.branch) === "");
+
+  __resetMergedCommitMapCacheForTest();
+  // Thread the REAL ledger facts — without this, verifyGoneBranchLanding's own ledger leg is skipped
+  // entirely (`if (!ledger) return true`), so this call alone would prove discovery but NOT that it
+  // still composes with c13666c6's own gate; see (HOOK-FORGED-DISPLACED-REFUSED), below, for the
+  // adversarial half of that same claim.
+  const discovered = await findLandedSquashCommit(repo, w2.branch, "HEAD", { goneBranchLedger: ctx.db.getGoneBranchLedgerFacts(ctx.projId, "primary") });
+  check("(HOOK-DISPLACED-DISCOVERY) THE FIX: findLandedSquashCommit now FINDS the displaced, ledgered landing", discovered === tip2);
+  const boardInfo = await getTaskMergedInfo(repo, w2.taskId, { goneBranchLedger: ctx.db.getGoneBranchLedgerFacts(ctx.projId, "primary") });
+  check("(HOOK-DISPLACED-DISCOVERY) THE FIX: getTaskMergedInfo now resolves it too", boardInfo !== null && tip2.startsWith(boardInfo.sha));
+
+  // (HOOK-DISPLACED-RESPAWN): a worker RE-SPAWNED on the SAME task (same branch name, byte-identical
+  // content) after a displaced landing. CORRECTED EXPECTATION (found while writing this test, not
+  // assumed): `findLandedSquashCommit`'s own RE-TASK GUARD ("if the trailer commit is an ANCESTOR of the
+  // branch tip, the branch was re-cut onto it... NOT an orphaned squash-merge") fires for ANY freshly
+  // re-cut branch, displaced trailer or not — a re-cut branch's own tip always descends from the prior
+  // landing, so `mergeBase === sha` is unconditionally true, independent of this card's fix. Verified via
+  // a direct re-check immediately before the confirm below: `findLandedSquashCommit` returns `null` here
+  // even though the SAME lookup against the (still-gone) branch name resolved moments ago, in
+  // (HOOK-DISPLACED-DISCOVERY) above — the ONLY thing that changed in between is that THIS branch now
+  // exists again. So `mergeBranch`'s `!staged` arm correctly falls through to `STAGE_EMPTY_RETRY`, never
+  // `ALREADY_MERGED` — this is pre-existing, universal behavior for ANY re-cut branch, not a residual of
+  // this card. What this card's fix actually guarantees here: `STAGE_EMPTY_RETRY` (not a crash, and
+  // critically NOT a silent duplicate commit — `!staged` is genuinely true, so no new commit is ever
+  // created either way) — the practical risk is cosmetic (an actionable "re-task or close by hand"
+  // message instead of a clean ALREADY_MERGED one), never data loss or a duplicate landing.
+  const changedFiles = git(repo, "diff", "--name-only", `${tip2}^..${tip2}`).trim().split("\n").filter(Boolean);
+  check("(HOOK-DISPLACED-RESPAWN) setup control: L2's own landing touched exactly one file", changedFiles.length === 1);
+  const respawnFile = changedFiles[0];
+  // NEVER the trimming `git()` helper here — it strips the trailing newline, which would make the
+  // re-written file genuinely DIFFER from main's real blob and defeat the whole point of this scenario
+  // (a byte-identical re-spawn with a truly empty diff).
+  const respawnContent = execFileSync("git", ["show", `${tip2}:${respawnFile}`], { cwd: repo, encoding: "utf8" });
+  const respawnWorkerId = `mwo-hdd2-respawn-${ctx.sfx}`;
+  const { worktreePath: respawnWt, branch: respawnBranch } = await createWorktree(ctx.repo, ctx.projId, w2.taskId);
+  registerForCleanup(respawnWt);
+  check("(HOOK-DISPLACED-RESPAWN) setup control: the re-cut branch is the SAME name w2 landed under", respawnBranch === w2.branch);
+  fs.writeFileSync(path.join(respawnWt, respawnFile), respawnContent);
+  // A genuinely byte-identical re-write stages NOTHING — `commitAll` throws on that (no --allow-empty),
+  // so commit directly, allowing an empty commit: there must be a REAL commit object on this branch for
+  // mergeBranch's own squash/cherry-pick to have something to diff against main at all.
+  git(respawnWt, "add", "-A");
+  execFileSync("git", ["-c", "user.email=mwo@loom", "-c", "user.name=mwo", "commit", "--allow-empty", "-m", `feat(x): change ${respawnFile}`], { cwd: respawnWt, env: { ...process.env, ...IDENT } });
+  ctx.db.insertSession({ id: respawnWorkerId, projectId: ctx.projId, agentId: ctx.agentId, engineSessionId: null, title: null, cwd: respawnWt, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: ctx.mgrId, taskId: w2.taskId, worktreePath: respawnWt, branch: respawnBranch });
+  check("(HOOK-DISPLACED-RESPAWN) setup control: the re-task guard now fires for THIS branch name (it exists again)", await findLandedSquashCommit(repo, w2.branch, "HEAD", { goneBranchLedger: ctx.db.getGoneBranchLedgerFacts(ctx.projId, "primary") }) === null);
+  const headBeforeRespawn = git(repo, "rev-parse", "HEAD");
+  const r3 = await confirm(ctx, { workerId: respawnWorkerId });
+  check("(HOOK-DISPLACED-RESPAWN) the re-spawn settles", r3.settled === true && r3.ok === true);
+  check("(HOOK-DISPLACED-RESPAWN) STAGE_EMPTY_RETRY (pre-existing re-task-guard behavior, unrelated to this card) — merged:false, never a crash", r3.value?.merged === false && r3.value?.emptyKind === "STAGE_EMPTY_RETRY");
+  check("(HOOK-DISPLACED-RESPAWN) SAFE: no duplicate commit landed — HEAD genuinely unchanged (no data-loss/duplicate-landing risk)", git(repo, "rev-parse", "HEAD") === headBeforeRespawn);
 }
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);

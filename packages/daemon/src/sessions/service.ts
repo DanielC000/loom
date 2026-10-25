@@ -23153,6 +23153,9 @@ export class SessionService {
             // problem, so start nothing and surface it loudly, mirroring `branchDiverted`/`quarantined`.
             //
             // @decision 043d83d2 — never run a per-candidate fallback on this outcome.
+            // @decision 45036494 — the "tampered with" tail below is safe unconditionally ONLY because a
+            // legitimate commit-msg hook ("displaced"/"unreadable") no longer reaches `headMoved` at all
+            // (batch-merge.ts's tip-trailer checks fall through kept VERIFIED for those two kinds now).
             evtBatch("batch_merge_head_moved", { repoPath: finalRepoPath, baseMainSha, reason: result.reason, fastForwardMs: result.fastForwardMs });
             const notStarted = await runFallback([
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the batch worktree's HEAD moved unexpectedly" })),
@@ -23276,6 +23279,10 @@ export class SessionService {
             const worker = this.db.getSession(lb.workerSessionId);
             if (!worker) continue;
             const c = chosen.find((x) => x.workerSessionId === lb.workerSessionId);
+            // @decision 45036494 — shares the SOLO path's own method (never a second copy); dedup is
+            // per (projectId, repoKey) in-process, so calling it per-candidate here is safe even when
+            // several candidates in the same batch all carry a `trailerAdvisory`.
+            if (lb.trailerAdvisory) this.fileTrailerDisplacedAdvisory({ projectId: finalProjectId, repoKey: batchRepoKey, branch: lb.branch, managerSessionId, taskId: lb.taskId }, lb.trailerAdvisory);
             // suppressNotify (card c35b60c4): every landed branch here resolves ALREADY_MERGED by
             // construction (the batch's own single fast-forward already put it on main) — none of them is
             // a stale retry, so finishAlreadyMerged's own push would fire once per branch. This method
@@ -23311,7 +23318,7 @@ export class SessionService {
             };
             if (!lb.assembledTip || !liveTip || liveTip !== lb.assembledTip) {
               const branchAdvancedDuringGate = noteRetained("pre-stop", liveTip);
-              landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, strippedReservedLineCount: lb.strippedReservedLineCount, branchAdvancedDuringGate });
+              landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, strippedReservedLineCount: lb.strippedReservedLineCount, branchAdvancedDuringGate, ...(lb.trailerAdvisory ? { trailerAdvisory: lb.trailerAdvisory } : {}) });
               continue;
             }
             // m3: the tip is re-checked INSIDE finalizeMerge (after the worker's hard stop/reap, just before the worktree
@@ -23340,7 +23347,7 @@ export class SessionService {
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
             // Claude-Session trailer that got stripped before landing — surface it to the calling manager
             // rather than leaving it as a console.warn only the host log would show.
-            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, strippedReservedLineCount: lb.strippedReservedLineCount, ...(lateRetained ? { branchAdvancedDuringGate: lateRetained } : {}), ...(dirtyRetained ? { worktreeRetainedDirty: dirtyRetained } : {}) });
+            landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount, strippedReservedLineCount: lb.strippedReservedLineCount, ...(lateRetained ? { branchAdvancedDuringGate: lateRetained } : {}), ...(dirtyRetained ? { worktreeRetainedDirty: dirtyRetained } : {}), ...(lb.trailerAdvisory ? { trailerAdvisory: lb.trailerAdvisory } : {}) });
           }
           const droppedFallback = result.dropped.map((d) => ({ workerSessionId: d.workerSessionId, reason: d.reason }));
           const fallback = await runFallback([
@@ -24100,18 +24107,24 @@ export class SessionService {
     } catch { /* the durable event above is the record; a failed nudge must not matter */ }
   }
 
-  /** @decision f224632d (round 2) — a VERIFIED solo landing that still carries a `trailerAdvisory` files
-   *  ONE low-severity, non-nudging event per (projectId, repoKey), deduped in-process (never the DB) via
-   *  `trailerDisplacedAdvisedRepos` — never `enqueueDurableMessage`; see `verifyLandedAsOwnCommit`'s doc. */
+  /** @decision f224632d (round 2) — a VERIFIED landing (solo OR batch — card 45036494's batch caller
+   *  shares this ONE method) that still carries a `trailerAdvisory` files ONE low-severity, non-nudging
+   *  event per (projectId, repoKey), deduped in-process via `trailerDisplacedAdvisedRepos`. */
   private fileTrailerDisplacedAdvisory(a: { projectId: string; repoKey: string; branch: string; managerSessionId: string | null; taskId: string | null }, kind: "displaced" | "unreadable"): void {
     const key = `${a.projectId}:${a.repoKey}`;
     if (this.trailerDisplacedAdvisedRepos.has(key)) return;
     this.trailerDisplacedAdvisedRepos.add(key);
+    // @decision 45036494 — "displaced" is now DISCOVERABLE (tolerantFindLoomTrailerBlock) at
+    // findLandedSquashCommit/scanMergedCommitMap/findAllLandedTrailerCommits; "unreadable" stays blind
+    // everywhere. pinnedTipForLandedSquash/hold-release are UNCHANGED — never widened, either kind.
+    const readerNote = kind === "displaced"
+      ? "findLandedSquashCommit/scanMergedCommitMap/findAllLandedTrailerCommits can still FIND this commit (a bounded tolerant discovery reader), but pinnedTipForLandedSquash and hold-release cannot"
+      : "no reader — strict or tolerant — can find or read this commit's own trailers (no paragraph boundary to walk past)";
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.managerSessionId ?? "", taskId: a.taskId, kind: "landing_trailer_displaced",
       detail: {
         projectId: a.projectId, repoKey: a.repoKey, branch: a.branch, kind, severity: "low",
-        reason: `a commit-msg hook moved branch "${a.branch}"'s Loom trailer paragraph out of the message's final paragraph, or otherwise broke the structural per-line reader (kind: "${kind}") — Loom's own values are still exactly what it wrote (this landing was kept VERIFIED, with a ledger row and trust stamp), but trailer READERS that parse a landed commit's message directly (findLandedSquashCommit, scanMergedCommitMap, pinnedTipForLandedSquash, hold release) cannot read this commit's own trailers on this repo. Filed once per repo for this daemon process; no action required unless something downstream that depends on reading a landed commit's own trailer starts behaving oddly.`,
+        reason: `a commit-msg hook moved branch "${a.branch}"'s Loom trailer paragraph out of the message's final paragraph, or otherwise broke the structural per-line reader (kind: "${kind}") — Loom's own values are still exactly what it wrote (this landing was kept VERIFIED, with a ledger row and trust stamp). ${readerNote} on this repo. Filed once per repo for this daemon process; no action required unless something downstream that depends on reading a landed commit's own trailer starts behaving oddly.`,
       },
     });
   }
