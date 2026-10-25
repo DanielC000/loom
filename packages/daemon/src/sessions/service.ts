@@ -708,7 +708,7 @@ type MergeBatchResult = {
   /** @decision c85f842d — keep `opId` OPTIONAL, unlike the solo path's — this method has real early
    *  bail-outs (ownership/repo-mismatch, too-few-candidates, no gateCommand) with no op minted yet. */
   opId?: string;
-  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[];
+  landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained; trailerAdvisory?: "displaced" | "unreadable" }[];
   /** @decision 553ea58c — use `landedCount`, the real git-verified total, never `landed.length` — that
    *  array under-reports if a worker session row was hard-deleted between selection and finalize. */
   landedCount?: number;
@@ -23274,7 +23274,7 @@ export class SessionService {
             };
           }
 
-          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained }[] = [];
+          const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained; trailerAdvisory?: "displaced" | "unreadable" }[] = [];
           for (const lb of result.landed) {
             const worker = this.db.getSession(lb.workerSessionId);
             if (!worker) continue;

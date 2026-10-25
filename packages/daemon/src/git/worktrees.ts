@@ -4469,18 +4469,8 @@ export function tolerantFindLoomTrailerBlock(message: string): LoomTrailers | nu
   const paragraphs = normalized.split(/\n(?:[ \t]*\n)+/);
   if (paragraphs.length < 2) return null; // same subject-is-never-a-trailer rule as parseLoomTrailerBlock
 
-  // Step 3 (done first, cheaply): no duplicate/case-variant reserved key ANYWHERE in the message.
-  const scanned = scanLoomNamespaceLines(normalized);
-  if (scanned.length === 0) return null; // nothing reserved anywhere — ordinary non-Loom commit
-  const candidateExpected: Record<string, string> = {};
-  const seenKeys = new Set<string>();
-  for (const l of scanned) {
-    const lower = l.key.toLowerCase();
-    if (seenKeys.has(lower)) return null; // duplicate/case-variant reserved key anywhere ⇒ ambiguous, refuse
-    seenKeys.add(lower);
-    candidateExpected[l.key] = l.value;
-  }
-  if (candidateExpected["Loom-Worker-Branch"] === undefined) return null; // nothing to discover without this
+  // Cheap bailout: nothing reserved anywhere — the common non-Loom-commit case, no need to parse further.
+  if (scanLoomNamespaceLines(normalized).length === 0) return null;
 
   // Step 1: exactly one paragraph (never the subject) parses as a self-contained Loom block.
   const blockCandidates: number[] = [];
@@ -4499,15 +4489,21 @@ export function tolerantFindLoomTrailerBlock(message: string): LoomTrailers | nu
     if (trailingLines > TOLERANT_TRAILER_MAX_TRAILING_LINES || !isTrailerShapedParagraph(p)) return null;
   }
 
-  // Round-trip: the identified block, parsed on its own, must carry exactly the candidate set step 3
-  // derived from the raw-line scan — ties the positional find back to the raw scan rather than trusting
-  // either one alone.
+  // @decision 45036494 (round 2) — built from the PARSE, never the raw scan: a raw-scan-derived set
+  // silently accepted a lone case-variant or unknown reserved key, since nothing then checked every
+  // scanned key was one of the four canonical ones.
+  //
+  // Step 3: the identified block, parsed on its own, must be the ONLY reserved content anywhere in the
+  // message — checked via the SAME exact-match rule `verifyLoomNamespaceExact`/`loomTrailerBlockDisplaced`
+  // apply. This also catches a duplicate of the real key hiding in an earlier, otherwise-unparseable
+  // paragraph (the `5e323196`/`6cc1333f` shape), since the dedup scans the WHOLE message.
   const parsed = parseTrailerParagraph(paragraphs[blockIdx]!);
   if (!parsed) return null;
-  if (parsed.branch !== candidateExpected["Loom-Worker-Branch"]) return null;
-  if ((parsed.landedTip ?? null) !== (candidateExpected["Loom-Landed-Tip"] ?? null)) return null;
-  if ((parsed.base ?? null) !== (candidateExpected["Loom-Worker-Base"] ?? null)) return null;
-  if ((parsed.pathSet ?? null) !== (candidateExpected["Loom-Worker-PathSet"] ?? null)) return null;
+  const canonicalExpected: Record<string, string> = { "Loom-Worker-Branch": parsed.branch };
+  if (parsed.landedTip !== null) canonicalExpected["Loom-Landed-Tip"] = parsed.landedTip;
+  if (parsed.base !== null) canonicalExpected["Loom-Worker-Base"] = parsed.base;
+  if (parsed.pathSet !== null) canonicalExpected["Loom-Worker-PathSet"] = parsed.pathSet;
+  if (!reservedNamespaceExactlyMatches(normalized, canonicalExpected).exact) return null;
   return parsed;
 }
 
@@ -4589,6 +4585,35 @@ export function scanLoomNamespaceLines(message: string): { key: string; value: s
 }
 
 /**
+ * The POSITION-AGNOSTIC core of "does the reserved-namespace scan of `message` exactly equal `expected`'s
+ * key/value set, with no duplicate/extra/missing/case-variant reserved line" — the rule {@link
+ * verifyLoomNamespaceExact} and {@link loomTrailerBlockDisplaced} each inlined as their own copy of this
+ * same loop before card 45036494 factored it out here, so a third copy (needed by {@link
+ * tolerantFindLoomTrailerBlock}'s own round-trip) would not become a third, independently-drifting one.
+ * Every scanned line's key must be a property of `expected` (an unknown OR case-variant key — `expected`
+ * is keyed by exact canonical case — fails immediately, same as a genuine value mismatch); a duplicate of
+ * an expected key also fails immediately; the final `exact` flag additionally requires every key in
+ * `expected` to have actually been seen (catches a key `expected` lists but the scan never found).
+ * Callers layer their OWN `finalParagraph` requirement (or deliberate lack of one) on top of `lines`.
+ *
+ * @decision 45036494 (round 2) — verified behaviorally equivalent to the two pre-existing inlined copies
+ * for every input (dedup, missing-key, extra-key, value-mismatch) before replacing them; see this card's
+ * decision record for the case-by-case argument.
+ */
+function reservedNamespaceExactlyMatches(
+  message: string, expected: Readonly<Record<string, string>>,
+): { exact: boolean; lines: ReturnType<typeof scanLoomNamespaceLines> } {
+  const lines = scanLoomNamespaceLines(message);
+  const seen = new Set<string>();
+  for (const l of lines) {
+    const want = expected[l.key];
+    if (want === undefined || seen.has(l.key) || want !== l.value) return { exact: false, lines };
+    seen.add(l.key);
+  }
+  return { exact: seen.size === Object.keys(expected).length, lines };
+}
+
+/**
  * Strips every line in Loom's RESERVED trailer namespace (see {@link matchReservedLoomTrailerLine}) out of
  * `message`, NEVER touching line 0 (the subject) even when it happens to match — a reserved-shaped
  * SUBJECT is a distinct hazard `batch-merge.ts` refuses the whole candidate for instead of silently
@@ -4633,15 +4658,8 @@ export function stripReservedLoomTrailerLines(message: string): { message: strin
  * reserved-namespace lines at all.
  */
 export function verifyLoomNamespaceExact(message: string, expected: Readonly<Record<string, string>>): boolean {
-  const lines = scanLoomNamespaceLines(message);
-  const seen = new Set<string>();
-  for (const l of lines) {
-    if (!l.finalParagraph) return false;
-    const want = expected[l.key];
-    if (want === undefined || seen.has(l.key) || want !== l.value) return false;
-    seen.add(l.key);
-  }
-  return seen.size === Object.keys(expected).length;
+  const { exact, lines } = reservedNamespaceExactlyMatches(message, expected);
+  return exact && lines.every((l) => l.finalParagraph);
 }
 
 /**
@@ -4656,18 +4674,9 @@ export function verifyLoomNamespaceExact(message: string, expected: Readonly<Rec
  * the exact-set check below already establishes.
  */
 export function loomTrailerBlockDisplaced(message: string, expected: Readonly<Record<string, string>>): boolean {
-  const expectedKeys = Object.keys(expected);
-  if (expectedKeys.length === 0) return false; // nothing expected ⇒ nothing to displace
-  const lines = scanLoomNamespaceLines(message);
-  const seen = new Map<string, string>();
-  for (const l of lines) {
-    if (seen.has(l.key)) return false; // a duplicate is a forgery, not a displacement
-    seen.set(l.key, l.value);
-  }
-  if (seen.size !== expectedKeys.length) return false; // missing or extra namespace keys ⇒ a forgery
-  for (const k of expectedKeys) {
-    if (seen.get(k) !== expected[k]) return false; // wrong value ⇒ a forgery
-  }
+  if (Object.keys(expected).length === 0) return false; // nothing expected ⇒ nothing to displace
+  const { exact, lines } = reservedNamespaceExactlyMatches(message, expected);
+  if (!exact) return false;
   return !lines.every((l) => l.finalParagraph); // the exact right set exists, just not all in the last paragraph
 }
 
@@ -7656,19 +7665,33 @@ export async function findLandedSquashCommit(
     );
     let sha = "";
     let trailers: LoomTrailers | null = null;
+    let tolerantSha = "";
+    let tolerantTrailers: LoomTrailers | null = null;
     for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
       const sepIdx = record.indexOf("\x1f");
       if (sepIdx === -1) continue;
       const body = record.slice(sepIdx + 1);
-      // @decision 45036494 — tolerant fallback ONLY, never instead of the strict parse; both arms below
-      // (content check / ledger gate) independently verify whatever this discovers before it is trusted.
-      const parsed = parseLoomTrailerBlock(body) ?? tolerantFindLoomTrailerBlock(body);
-      if (parsed?.branch === branch) {
+      const strict = parseLoomTrailerBlock(body);
+      if (strict?.branch === branch) {
+        // @decision 45036494 (round 2) — strict ALWAYS wins, regardless of recency: a newer tolerant-only
+        // candidate (a hand-authored commit quoting a Loom block) must never shadow an older, genuinely-
+        // landed strict one just by appearing first in this newest-first scan.
         sha = record.slice(0, sepIdx).trim();
-        trailers = parsed;
+        trailers = strict;
         break;
       }
+      if (!tolerantSha) {
+        // Tolerant fallback ONLY, never instead of the strict parse; both arms below (content check /
+        // ledger gate) independently verify whatever this discovers before it is trusted. Remember only
+        // the FIRST (newest) tolerant hit — kept scanning for a strict one rather than breaking here.
+        const tolerant = tolerantFindLoomTrailerBlock(body);
+        if (tolerant?.branch === branch) {
+          tolerantSha = record.slice(0, sepIdx).trim();
+          tolerantTrailers = tolerant;
+        }
+      }
     }
+    if (!sha) { sha = tolerantSha; trailers = tolerantTrailers; }
     if (!sha || !trailers) return null;
     const branchPresent = (await withTimeout(
       git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
@@ -7769,8 +7792,9 @@ export async function findAllLandedTrailerCommits(
       const sepIdx = record.indexOf("\x1f");
       if (sepIdx === -1) continue;
       const body = record.slice(sepIdx + 1);
-      // @decision 45036494 — tolerant fallback ONLY; this function's own caller (recordedTipContentLanded)
-      // is the non-trailer verifier that makes widening discovery here safe.
+      // @decision 45036494 (round 2 correction) — tolerant fallback ONLY. ONLY the caller's no-`landedTip`
+      // arm content-checks `sha`; a `landedTip`-carrying candidate instead chain-checks the TRAILER VALUE,
+      // never `sha`'s own content — no NEW capability, but "every candidate is content-checked" was wrong.
       const parsed = parseLoomTrailerBlock(body) ?? tolerantFindLoomTrailerBlock(body);
       if (parsed?.branch === branch) found.push({ sha: record.slice(0, sepIdx).trim(), trailers: parsed });
     }
@@ -8205,6 +8229,10 @@ async function scanMergedCommitMap(
   repoPath: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<MergedCommitScan> {
   const map = new Map<string, MergedMapEntry>();
+  // @decision 45036494 (round 2) — tolerant-only hits land here, merged into `map` below only for a
+  // branch with NO strict hit — ranking strict above tolerant so a newer tolerant-only candidate (a
+  // hand-authored false positive quoting a trailer) can never shadow an older, genuinely-landed strict one.
+  const tolerantMap = new Map<string, MergedMapEntry>();
   let recordCount = 0;
   try {
     // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent baseDir
@@ -8225,19 +8253,21 @@ async function scanMergedCommitMap(
       const sha = record.slice(0, sep1).trim();
       const date = record.slice(sep1 + 1, sep2).trim();
       const body = record.slice(sep2 + 1);
-      // @decision 45036494 — tolerant fallback ONLY; every reader of this map (resolveMergedCommitMapHit)
-      // independently verifies a hit (content check / c13666c6's ledger gate) before trusting it.
-      const trailers = parseLoomTrailerBlock(body) ?? tolerantFindLoomTrailerBlock(body);
-      if (!sha || !trailers) continue;
-      const branch = trailers.branch;
-      if (!map.has(branch)) {
-        map.set(branch, { // first hit = most recent (reverse-chron)
-          sha, date,
-          pathSetDigest: trailers.pathSet,
-          baseSha: trailers.base,
-        });
+      if (!sha) continue;
+      const strict = parseLoomTrailerBlock(body);
+      if (strict) {
+        const branch = strict.branch;
+        if (!map.has(branch)) map.set(branch, { sha, date, pathSetDigest: strict.pathSet, baseSha: strict.base }); // first STRICT hit = most recent
+        continue;
       }
+      // Tolerant fallback ONLY; every reader of this map (resolveMergedCommitMapHit) independently
+      // verifies a hit (content check / c13666c6's ledger gate) before trusting it.
+      const tolerant = tolerantFindLoomTrailerBlock(body);
+      if (!tolerant) continue;
+      const branch = tolerant.branch;
+      if (!tolerantMap.has(branch)) tolerantMap.set(branch, { sha, date, pathSetDigest: tolerant.pathSet, baseSha: tolerant.base });
     }
+    for (const [branch, entry] of tolerantMap) if (!map.has(branch)) map.set(branch, entry);
   } catch {
     return { map, truncated: true }; // fail safe: empty map + inconclusive -> every lookup misses AND must fall back
   }

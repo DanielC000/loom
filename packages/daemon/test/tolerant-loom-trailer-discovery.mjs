@@ -21,6 +21,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     blank-line boundary) — there is no paragraph boundary to walk past.
 //   (ACCEPT-ORDINARY) sanity: an ordinary, undisplaced trailer (the ALREADY-last paragraph) still
 //     resolves via the tolerant function too (it does not regress the trivial case).
+//   (REFUSE-LONE-CASE-VARIANT) / (REFUSE-UNKNOWN-KEY) — Code Review 04cfeb36 round 2 (BLOCKING): a LONE
+//     case-variant or unknown reserved key, with no canonical duplicate, used to round-trip fine (the
+//     round-trip only ever compared the 4 canonical fields it already knew about). Also a property-style
+//     check: every ACCEPT fixture must classify "displaced" or "verified" under
+//     `verifyLoomTrailersExactAndReadable`, never "forged".
 //
 // PART B (real git): (HOOK-FORGED-DISPLACED-REFUSED) — a forged commit (never landed by Loom's own merge
 // code) carrying a well-formed-but-WRONG-content Loom block followed by a DCO line, on a GONE branch —
@@ -38,7 +43,7 @@ process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${pr
 useOwnLoomHome("loom-tltd-home-");
 
 const { Db } = await import("../dist/db.js");
-const { createWorktree, findLandedSquashCommit, tolerantFindLoomTrailerBlock } = await import("../dist/git/worktrees.js");
+const { createWorktree, findLandedSquashCommit, tolerantFindLoomTrailerBlock, verifyLoomTrailersExactAndReadable, parseLoomTrailerBlock } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -118,6 +123,47 @@ const now = new Date().toISOString();
   check("(ACCEPT-ORDINARY) sanity: an ALREADY-last-paragraph trailer still resolves (no regression on the trivial case)", r !== null && r.branch === "loom/ordinary" && r.landedTip === "abcdef0000000000000000000000000000000000");
 }
 
+// Code Review 04cfeb36, round 2, MAJOR: the ORIGINAL round-1 code only ever refused a DUPLICATE of a
+// canonical key — a LONE case-variant or a LONE unknown reserved key, with no canonical duplicate at all,
+// silently round-tripped fine (the round-trip only ever compared the 4 canonical fields it already knew
+// about, never asking whether some OTHER scanned key existed that it had never heard of). Both repros
+// below are the reviewer's own, verbatim.
+{
+  const msg = "s\n\nLoom-Worker-Branch: loom/x\nloom-worker-pathset: " + "d".repeat(64) + "\n\nSigned-off-by: a";
+  const r = tolerantFindLoomTrailerBlock(msg);
+  check("(REFUSE-LONE-CASE-VARIANT) a LONE case-variant reserved key (no canonical duplicate) — refused, never silently ignored", r === null);
+}
+
+{
+  const msg = "feat(x): a change\n\nLoom-Worker-Branch: loom/x\nLoom-Worker-Extra: zzz\n\nSigned-off-by: a";
+  const r = tolerantFindLoomTrailerBlock(msg);
+  check("(REFUSE-UNKNOWN-KEY) a LONE unknown reserved-shaped key — refused, never silently ignored", r === null);
+}
+
+// Property-style check (Code Review 04cfeb36, round 2): for every fixture where the tolerant reader
+// ACCEPTS, the SAME message must classify as "displaced" (or fully "verified") under
+// `verifyLoomTrailersExactAndReadable` — i.e. the tolerant reader never accepts anything the landing path
+// itself would call a forgery. `expected` is built the SAME way production does: from the discovered
+// fields, never hand-authored per fixture.
+{
+  const ACCEPT_FIXTURES = [
+    ["ACCEPT-DISPLACED", "feat(x): a change\n\nLoom-Worker-Branch: loom/abc\nLoom-Worker-Base: deadbeef\n\nSigned-off-by: CI Bot <ci@example.com>"],
+    ["ACCEPT-AT-CAP", `feat(x): a change\n\nLoom-Worker-Branch: loom/atcap\n\n${Array.from({ length: 3 }, (_, i) => `Change-Id: I${i}\nReviewed-by: x${i}\nTested-by: y${i}\nCc: z${i}`).join("\n\n")}`],
+    ["ACCEPT-ORDINARY", "feat(x): a change\n\nLoom-Worker-Branch: loom/ordinary\nLoom-Landed-Tip: abcdef0000000000000000000000000000000000"],
+  ];
+  for (const [label, msg] of ACCEPT_FIXTURES) {
+    const r = tolerantFindLoomTrailerBlock(msg);
+    if (r === null) { check(`(PROPERTY ${label}) precondition: tolerant accepts this fixture`, false); continue; }
+    const expected = { "Loom-Worker-Branch": r.branch };
+    if (r.landedTip !== null) expected["Loom-Landed-Tip"] = r.landedTip;
+    if (r.base !== null) expected["Loom-Worker-Base"] = r.base;
+    if (r.pathSet !== null) expected["Loom-Worker-PathSet"] = r.pathSet;
+    const verdict = verifyLoomTrailersExactAndReadable(msg, expected);
+    check(`(PROPERTY ${label}) tolerant-accepts ⇒ verifyLoomTrailersExactAndReadable says "displaced" or verified, never "forged"`,
+      verdict.ok === true || verdict.kind === "displaced");
+  }
+}
+
 // ===================== PART B: real git — forged discovery still refused by the ledger gate =====================
 
 function makeRepo(sfx) {
@@ -158,12 +204,54 @@ function makeRepo(sfx) {
   const forged = git(repo, "commit-tree", tree, "-p", realTip, "-m", forgedMsg);
   git(repo, "update-ref", "-m", "commit: x", "refs/heads/main", forged);
 
-  check("(HOOK-FORGED-DISPLACED-REFUSED) setup control: the real strict reader cannot parse the forged commit's trailer", (await import("../dist/git/worktrees.js")).parseLoomTrailerBlock(forgedMsg) === null);
+  check("(HOOK-FORGED-DISPLACED-REFUSED) setup control: the real strict reader cannot parse the forged commit's trailer", parseLoomTrailerBlock(forgedMsg) === null);
   check("(HOOK-FORGED-DISPLACED-REFUSED) setup control: the tolerant reader, in isolation, WOULD discover it", tolerantFindLoomTrailerBlock(forgedMsg)?.branch === forgedBranch);
   check("(HOOK-FORGED-DISPLACED-REFUSED) setup control: the forged branch name is genuinely gone", git(repo, "branch", "--list", forgedBranch) === "");
 
   const found = await findLandedSquashCommit(repo, forgedBranch, "HEAD", { goneBranchLedger: ledger });
   check("(HOOK-FORGED-DISPLACED-REFUSED) THE FIX HOLDS: discovered-then-REFUSED — findLandedSquashCommit still returns null (the ledger gate catches what discovery alone cannot)", found === null);
+
+  db.close();
+}
+
+// ===================== PART C: a newer hand-authored quoting commit must not shadow an older landing
+//                        (Code Review 04cfeb36, round 2, minor) =====================
+{
+  const repo = makeRepo("shadow");
+  const projId = `tltd-shadow-proj-${Date.now()}`;
+  const db = new Db();
+  db.insertProject({ id: projId, name: "TLTD-SHADOW", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  const ledger = db.getGoneBranchLedgerFacts(projId, "primary");
+
+  // The OLDER, GENUINE landing: a real squash commit with a clean, strict-parseable final-paragraph
+  // trailer, recorded in the ledger — exactly like any ordinary landing.
+  const { worktreePath, branch: shadowBranch } = await createWorktree(repo, projId, `tltd-shadow-task-${Date.now()}`);
+  registerForCleanup(worktreePath);
+  fs.writeFileSync(path.join(worktreePath, "shadow.ts"), "export const shadow = 1;\n");
+  commitAll(worktreePath, "feat(x): shadow genuine change", GIT_ID);
+  const preGenuine = git(repo, "rev-parse", "HEAD");
+  git(repo, "merge", "--squash", shadowBranch);
+  git(repo, "commit", "-m", `feat(x): shadow genuine change\n\nLoom-Worker-Branch: ${shadowBranch}`);
+  const genuineTip = git(repo, "rev-parse", "HEAD");
+  db.recordMainlineLandedCommit(projId, "primary", shadowBranch, genuineTip, preGenuine);
+  // branch gone, as after a real finalize — the worktree must be removed first (git refuses to delete a
+  // branch still checked out in a linked worktree).
+  execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repo });
+  execFileSync("git", ["branch", "-D", shadowBranch], { cwd: repo });
+  check("(SHADOW) setup: the genuine older landing strict-parses cleanly", parseLoomTrailerBlock(git(repo, "log", "-1", "--format=%B", genuineTip)) !== null);
+
+  // The NEWER, HAND-AUTHORED commit (the reviewer's own "honest trigger"): a commit QUOTING the same
+  // Loom block, followed by a Claude-Session-shaped paragraph — tolerant-parseable, never ledgered,
+  // never a real landing (same tree as its own parent — no content change of its own).
+  const tree = git(repo, "rev-parse", `${genuineTip}^{tree}`);
+  const fakeMsg = `feat(x): innocuous\n\nLoom-Worker-Branch: ${shadowBranch}\n\nClaude-Session: https://claude.ai/code/session_fake`;
+  const fakeSha = git(repo, "commit-tree", tree, "-p", genuineTip, "-m", fakeMsg);
+  git(repo, "update-ref", "-m", "commit: x", "refs/heads/main", fakeSha);
+  check("(SHADOW) setup control: the fake newer commit is genuinely NEWER, tolerant-parseable, never strict", parseLoomTrailerBlock(fakeMsg) === null && tolerantFindLoomTrailerBlock(fakeMsg)?.branch === shadowBranch);
+  check("(SHADOW) setup control: the fake commit was never ledgered (unlike the genuine one)", ledger.rowsByTips([fakeSha]).length === 0);
+
+  const found = await findLandedSquashCommit(repo, shadowBranch, "HEAD", { goneBranchLedger: ledger });
+  check("(SHADOW) THE FIX: the OLDER genuine landing is found, never hidden by the newer fake quoting commit", found === genuineTip);
 
   db.close();
 }
