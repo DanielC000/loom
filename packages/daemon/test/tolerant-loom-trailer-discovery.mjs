@@ -32,6 +32,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // tolerant discovery finds a CANDIDATE, but c13666c6's own ledger gate (verifyGoneBranchLanding) still
 // refuses it, because it was never actually ledgered. Proves widening discovery never bypasses the gate.
 //
+// PART C (real git): (SHADOW) — a newer hand-authored commit quoting an older genuine landing's trailer
+// must not hide it, via findLandedSquashCommit's own `--grep` discovery loop.
+//
+// PART D (real git, round 3): (MAP-SHADOW) — the SAME scenario as (SHADOW), but through
+// getMergedCommitMapCached / findLandedSquashCommitViaMap / getTaskMergedInfo instead — scanMergedCommitMap's
+// own `tolerantMap` ranking is a SEPARATE table from findLandedSquashCommit's own loop-local tracking
+// variables, so nothing proved the map path shared the (SHADOW) fix until this test existed.
+//
 // Run: 1) build daemon (pnpm build), 2) node test/tolerant-loom-trailer-discovery.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -43,7 +51,10 @@ process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${pr
 useOwnLoomHome("loom-tltd-home-");
 
 const { Db } = await import("../dist/db.js");
-const { createWorktree, findLandedSquashCommit, tolerantFindLoomTrailerBlock, verifyLoomTrailersExactAndReadable, parseLoomTrailerBlock } = await import("../dist/git/worktrees.js");
+const {
+  createWorktree, findLandedSquashCommit, tolerantFindLoomTrailerBlock, verifyLoomTrailersExactAndReadable, parseLoomTrailerBlock,
+  getMergedCommitMapCached, findLandedSquashCommitViaMap, getTaskMergedInfo,
+} = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -164,6 +175,30 @@ const now = new Date().toISOString();
   }
 }
 
+// Round 3: the 3 fixtures above carry NO bad reserved key, so the property above passed VACUOUSLY against
+// pre-fix 209b1ef3 too (pre-fix code accepts a clean fixture just as correctly as the fix does) — it never
+// actually exercised the round-2 defect. These two are the round-2 Code Review's own repros (verbatim) —
+// messages pre-fix code silently ACCEPTED (a lone case-variant / an unknown reserved key, each followed by
+// a hook paragraph). Phrased as the SAME property but as a plain implication ("accepted ⇒ not forged")
+// rather than "must accept, then check" — so it is vacuously (and correctly) TRUE now that the fix REFUSES
+// both. Against pre-fix 209b1ef3 the antecedent holds (tolerant wrongly accepts) while the consequent is
+// false (both genuinely classify "forged" — independent of tolerantFindLoomTrailerBlock, computed straight
+// from `expected`), so the implication — and so this property — is FALSE pre-fix: RED.
+{
+  const WRONGLY_ACCEPTED_FIXTURES = [
+    ["LONE-CASE-VARIANT", "s\n\nLoom-Worker-Branch: loom/x\nloom-worker-pathset: " + "d".repeat(64) + "\n\nSigned-off-by: a", { "Loom-Worker-Branch": "loom/x" }],
+    ["UNKNOWN-KEY", "feat(x): a change\n\nLoom-Worker-Branch: loom/x\nLoom-Worker-Extra: zzz\n\nSigned-off-by: a", { "Loom-Worker-Branch": "loom/x" }],
+  ];
+  for (const [label, msg, expected] of WRONGLY_ACCEPTED_FIXTURES) {
+    const r = tolerantFindLoomTrailerBlock(msg);
+    const notForged = r === null || (() => {
+      const verdict = verifyLoomTrailersExactAndReadable(msg, expected);
+      return verdict.ok === true || verdict.kind === "displaced";
+    })();
+    check(`(PROPERTY-WRONGLY-ACCEPTED ${label}) accepted ⇒ not forged — vacuously true once refused; FALSE pre-fix (209b1ef3 wrongly accepted a genuinely-forged message)`, notForged);
+  }
+}
+
 // ===================== PART B: real git — forged discovery still refused by the ledger gate =====================
 
 function makeRepo(sfx) {
@@ -252,6 +287,56 @@ function makeRepo(sfx) {
 
   const found = await findLandedSquashCommit(repo, shadowBranch, "HEAD", { goneBranchLedger: ledger });
   check("(SHADOW) THE FIX: the OLDER genuine landing is found, never hidden by the newer fake quoting commit", found === genuineTip);
+
+  db.close();
+}
+
+// ===================== PART D: the SAME shadow scenario through the MAP path (Code Review 04cfeb36,
+//                        round 2, minor — map twin added round 3) =====================
+{
+  const repo = makeRepo("map-shadow");
+  const projId = `tltd-map-shadow-proj-${Date.now()}`;
+  const taskId = `tltd-map-shadow-task-${Date.now()}`;
+  const db = new Db();
+  db.insertProject({ id: projId, name: "TLTD-MAP-SHADOW", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  const ledger = db.getGoneBranchLedgerFacts(projId, "primary");
+
+  // The OLDER, GENUINE landing — `taskId` (not a hand-picked branch string) drives both this cut AND the
+  // later getTaskMergedInfo lookup, since that function derives its own branch from taskId the same way
+  // createWorktree does.
+  const { worktreePath, branch: mapShadowBranch } = await createWorktree(repo, projId, taskId);
+  registerForCleanup(worktreePath);
+  fs.writeFileSync(path.join(worktreePath, "map-shadow.ts"), "export const mapShadow = 1;\n");
+  commitAll(worktreePath, "feat(x): map-shadow genuine change", GIT_ID);
+  const preGenuine = git(repo, "rev-parse", "HEAD");
+  git(repo, "merge", "--squash", mapShadowBranch);
+  git(repo, "commit", "-m", `feat(x): map-shadow genuine change\n\nLoom-Worker-Branch: ${mapShadowBranch}`);
+  const genuineTip = git(repo, "rev-parse", "HEAD");
+  db.recordMainlineLandedCommit(projId, "primary", mapShadowBranch, genuineTip, preGenuine);
+  // branch gone, as after a real finalize — the worktree must be removed first (git refuses to delete a
+  // branch still checked out in a linked worktree).
+  execFileSync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repo });
+  execFileSync("git", ["branch", "-D", mapShadowBranch], { cwd: repo });
+  check("(MAP-SHADOW) setup: the genuine older landing strict-parses cleanly", parseLoomTrailerBlock(git(repo, "log", "-1", "--format=%B", genuineTip)) !== null);
+
+  // The NEWER, HAND-AUTHORED commit (same "honest trigger" as (SHADOW)): quotes the same Loom block,
+  // followed by a Claude-Session-shaped paragraph — tolerant-parseable, never ledgered, never a real
+  // landing (same tree as its own parent — no content change of its own).
+  const tree = git(repo, "rev-parse", `${genuineTip}^{tree}`);
+  const fakeMsg = `feat(x): innocuous\n\nLoom-Worker-Branch: ${mapShadowBranch}\n\nClaude-Session: https://claude.ai/code/session_fake`;
+  const fakeSha = git(repo, "commit-tree", tree, "-p", genuineTip, "-m", fakeMsg);
+  git(repo, "update-ref", "-m", "commit: x", "refs/heads/main", fakeSha);
+  check("(MAP-SHADOW) setup control: the fake newer commit is genuinely NEWER, tolerant-parseable, never strict", parseLoomTrailerBlock(fakeMsg) === null && tolerantFindLoomTrailerBlock(fakeMsg)?.branch === mapShadowBranch);
+  check("(MAP-SHADOW) setup control: the fake commit was never ledgered (unlike the genuine one)", ledger.rowsByTips([fakeSha]).length === 0);
+
+  const { map } = await getMergedCommitMapCached(repo, "HEAD", {});
+  check("(MAP-SHADOW) THE FIX, via getMergedCommitMapCached: scanMergedCommitMap's own table ranks the STRICT hit, never the newer tolerant one", map.get(mapShadowBranch)?.sha === genuineTip);
+
+  const viaMap = await findLandedSquashCommitViaMap(repo, mapShadowBranch, "HEAD", { goneBranchLedger: ledger });
+  check("(MAP-SHADOW) THE FIX, via findLandedSquashCommitViaMap: the OLDER genuine landing is found, never hidden by the newer fake quoting commit", viaMap.hit === true && viaMap.sha === genuineTip);
+
+  const viaTask = await getTaskMergedInfo(repo, taskId, { goneBranchLedger: ledger });
+  check("(MAP-SHADOW) THE FIX, via getTaskMergedInfo: the same genuine landing resolves end-to-end (by taskId, not a hand-picked branch)", viaTask?.sha === genuineTip.slice(0, 7));
 
   db.close();
 }

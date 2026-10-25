@@ -4448,14 +4448,16 @@ const TOLERANT_TRAILER_MAX_TRAILING_LINES = 12;
  *     TOLERANT_TRAILER_MAX_TRAILING_LINES}; a single prose line, or exceeding either bound, refuses. A
  *     hook that does something stranger than append a few trailer-shaped lines is not this function's job
  *     to parse.
- *  3. The reserved Loom namespace (`scanLoomNamespaceLines`) carries NO duplicate/case-variant key
- *     anywhere in the WHOLE message (not just the identified block) — the exact round-trip
- *     {@link verifyLoomTrailersExactAndReadable}'s own exact-namespace audit already enforces for a KNOWN
- *     `expected` set; here the candidate set is self-derived (built from the scan itself) since discovery
- *     has no `expected` to compare against ahead of time, so this step's only real job is catching a
- *     duplicate/case-variant reserved line sitting anywhere else in the message (the `5e323196`/`6cc1333f`
- *     shape `RESERVED_LOOM_TRAILER_KEY`'s own doc names: an earlier paragraph quoting a trailer line
- *     verbatim) — never a value mismatch, which cannot occur against a self-derived expected set.
+ *  3. (round 2 — never round 1's self-derived scan) The identified block, parsed on its own, is turned
+ *     into a CANONICAL-case `expected` set, and the reserved-namespace scan of the WHOLE message (not just
+ *     the identified block) must exactly equal that set — the SAME exact-match core ({@link
+ *     reservedNamespaceExactlyMatches}) {@link verifyLoomNamespaceExact}/{@link loomTrailerBlockDisplaced}
+ *     already apply for a KNOWN `expected` set. This catches a duplicate, an UNKNOWN, or a CASE-VARIANT
+ *     reserved key sitting anywhere else in the message (the `5e323196`/`6cc1333f` shape
+ *     `RESERVED_LOOM_TRAILER_KEY`'s own doc names: an earlier paragraph quoting a trailer line verbatim) —
+ *     and, because `expected` now carries real values instead of being self-derived, also a genuine value
+ *     mismatch. Round 1's self-derived-scan version of this step silently accepted a lone case-variant or
+ *     unknown reserved key (Code Review 04cfeb36, round 2, BLOCKING) — see this card's decision record.
  *
  * **OUT OF SCOPE, deliberately: "unreadable" discovery.** That kind is foreign content folded INTO the
  * SAME paragraph as Loom's own trailer, with no blank-line paragraph boundary at all — there is no
@@ -4597,8 +4599,8 @@ export function scanLoomNamespaceLines(message: string): { key: string; value: s
  * Callers layer their OWN `finalParagraph` requirement (or deliberate lack of one) on top of `lines`.
  *
  * @decision 45036494 (round 2) — verified behaviorally equivalent to the two pre-existing inlined copies
- * for every input (dedup, missing-key, extra-key, value-mismatch) before replacing them; see this card's
- * decision record for the case-by-case argument.
+ * for every input the declared `Readonly<Record<string, string>>` type allows; see this card's decision
+ * record (Round 3) for the case-by-case argument AND the one documented boundary of that equivalence.
  */
 function reservedNamespaceExactlyMatches(
   message: string, expected: Readonly<Record<string, string>>,
@@ -7676,6 +7678,14 @@ export async function findLandedSquashCommit(
         // @decision 45036494 (round 2) — strict ALWAYS wins, regardless of recency: a newer tolerant-only
         // candidate (a hand-authored commit quoting a Loom block) must never shadow an older, genuinely-
         // landed strict one just by appearing first in this newest-first scan.
+        //
+        // RESIDUAL (round 3, documented not fixed): the same ranking can go the OTHER way — an OLDER
+        // strict landing can hide a NEWER genuine tolerantly-readable (hook-displaced) landing of the SAME
+        // branch name. Reachable only when that branch name lands twice with a displacing hook starting
+        // between the two landings; branch-present fails safe (null), branch-gone returns the older sha
+        // (no worse than pre-card mainline, just stale). See docs/decisions/45036494-*.md's Round 3
+        // section and card c0d0eac9 ("fix(git): pick the newest verified landing when strict and tolerant
+        // hits compete").
         sha = record.slice(0, sepIdx).trim();
         trailers = strict;
         break;
@@ -8232,6 +8242,11 @@ async function scanMergedCommitMap(
   // @decision 45036494 (round 2) — tolerant-only hits land here, merged into `map` below only for a
   // branch with NO strict hit — ranking strict above tolerant so a newer tolerant-only candidate (a
   // hand-authored false positive quoting a trailer) can never shadow an older, genuinely-landed strict one.
+  //
+  // RESIDUAL (round 3, documented not fixed): the same ranking direction can hide a NEWER genuine
+  // tolerantly-readable (hook-displaced) landing behind an OLDER strict one of the same branch name — same
+  // narrow reachability and fail-safe bound as findLandedSquashCommit's own comment above; see
+  // docs/decisions/45036494-*.md's Round 3 section and card c0d0eac9.
   const tolerantMap = new Map<string, MergedMapEntry>();
   let recordCount = 0;
   try {

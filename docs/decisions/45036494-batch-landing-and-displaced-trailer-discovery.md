@@ -138,6 +138,70 @@ here; carded separately.
 **(5) Nit.** `batch-merge-head-moved-commit-identity.mjs`'s own ALL-PASS summary banner still said hook
 paragraphs refuse — corrected to describe the kept-VERIFIED outcome.
 
+### Round 3 (docs/tests/harness only — no behavioral `src` change)
+
+**(1) Reverse-shadow residual, documented, NOT fixed.** Round 2's ranking ("strict always wins over
+tolerant") protects against a newer tolerant-only candidate hiding an older genuine strict landing — but
+the same ranking can go the OTHER way: an OLDER strict landing can hide a NEWER genuine tolerantly-
+readable (hook-displaced) landing of the SAME branch name. Branch-gone, `findLandedSquashCommit`/the
+merged-commit map then return the older (wrong) sha; branch-present fails safe (`null`) — no worse than
+pre-card mainline either way. Reachable only when the same branch name lands twice with a displacing hook
+starting between the two landings — narrow, but real (reviewer's own words, verbatim): "ranking strict
+above tolerant means an OLDER strict landing hides a NEWER genuine tolerantly-readable (hook-displaced)
+landing of the same branch name … branch GONE ⇒ findLandedSquashCommit returns S1 and the merged-commit
+map entry is S1 — the WRONG (older) sha; branch-present fails safe (null). No worse than pre-card
+mainline. Reachable narrow: same branch name landing twice with a displacing hook starting between the
+landings." Named inline at both ranking sites (`findLandedSquashCommit`, `scanMergedCommitMap`) and
+tracked by card `c0d0eac9` ("fix(git): pick the newest verified landing when strict and tolerant hits
+compete") — never fixed in this card; see this round's own "Do not" addition below.
+
+**(2) Stale JSDoc, `tolerantFindLoomTrailerBlock`'s header step 3.** It still described round 1's
+self-derived-scan design ("the candidate set is self-derived… never a value mismatch"), which round 2's
+own fix (item 1 of Round 2 above) replaced. Rewritten to describe the actual round-2 design: a canonical-
+case `expected` set built from the IDENTIFIED block's own parse, round-tripped through the shared
+`reservedNamespaceExactlyMatches` core — matching both the inline round-2 comment at the function's own
+step 3 and this record's Round 2 item 1.
+
+**(3) Nit — `reservedNamespaceExactlyMatches`'s own doc.** Its "verified behaviorally equivalent to the
+two pre-existing inlined copies for every input" claim is true only for every input the declared
+`Readonly<Record<string, string>>` type actually allows. Outside that type — an `expected` entry
+explicitly set to `undefined`, only reachable by lying to the type system — this version is STRICTER:
+`want === undefined` then reads as "no such key" and fails the scanned line immediately, where the two
+pre-existing inlined copies' own `want === undefined` check behaved identically; this was never a
+behavior difference AMONG the three real callers, it is a boundary of the equivalence claim that only
+matters for an input outside the declared type. Scoped the doc's wording accordingly.
+
+**(4) Test gaps closed (`tolerant-loom-trailer-discovery.mjs`).**
+  - The PROPERTY block's 3 original `ACCEPT_FIXTURES` carry no bad reserved key, so the property passed
+    VACUOUSLY against pre-fix `209b1ef3` too (pre-fix code accepts a clean fixture just as correctly as
+    the fix does) — it never actually exercised the round-2 defect. A new `WRONGLY_ACCEPTED_FIXTURES`
+    block adds the round-2 Code Review's own two repros, verbatim (a lone case-variant key, an unknown
+    `Loom-Worker-Extra` key, each followed by a hook paragraph) — messages pre-fix code silently ACCEPTED.
+    Phrased as the SAME property but as a plain implication ("accepted ⇒ not forged") rather than "must
+    accept, then check", so it is vacuously (and correctly) TRUE now that the fix REFUSES both. Against
+    pre-fix `209b1ef3` the antecedent holds (tolerant wrongly accepts) while the consequent is false (both
+    genuinely classify "forged" under `verifyLoomTrailersExactAndReadable`, independent of
+    `tolerantFindLoomTrailerBlock` itself), making the property RED. Verified via `negative-control`
+    (`--ref 209b1ef3`): 2 FAILs pre-fix, 0 post-fix, clean restore.
+  - A map-path twin of Round 2's own (SHADOW) scenario, added as PART D: the same older-genuine-vs-newer-
+    fake-quoting-commit setup, exercised through `getMergedCommitMapCached`/`findLandedSquashCommitViaMap`/
+    `getTaskMergedInfo` instead of `findLandedSquashCommit`'s own `--grep` loop — `scanMergedCommitMap`'s
+    `tolerantMap` ranking is a SEPARATE table from that loop's own loop-local tracking variables, so
+    nothing proved it shared the fix until this test existed. Also verified RED via `negative-control`
+    against `209b1ef3` (3 FAILs: the map's own ranking, `findLandedSquashCommitViaMap`, and
+    `getTaskMergedInfo` all resolve to the fake/null instead of the genuine older landing), GREEN against
+    the fix, clean restore.
+
+**(5) Timeout.** `batch-merge-displaced-trailer-hook.mjs` measured 107,999ms solo (this round's own
+re-measurement, 2026-10-25, one host) against a predecessor-reported 108,500ms — both already close to the
+120,000ms default per-file ceiling, with no prior override. Added
+`TEST_TIMEOUT_OVERRIDES["batch-merge-displaced-trailer-hook"] = 270_000` in
+`packages/daemon/scripts/test-daemon.mjs`, sized off the LARGER of the two figures (108,500ms) per this
+round's own instruction — ~2.49x, matching the family's ~2.5x-of-solo convention. Every
+`CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS` member that reads `test-daemon.mjs` (`gate-runner-harness-marker-
+coupling.mjs`, `test-daemon-codex-real-spawn-preset.mjs`, `test-daemon-fixture-import-guard.mjs`,
+`test-daemon-port-allocation.mjs`, `ps-module-analysis-cache-cwd-guard.mjs`) re-run green after this edit.
+
 ### Corrected finding: a re-spawn on the SAME branch name never reaches ALREADY_MERGED either way
 
 The investigate-first checkpoint flagged a risk, not independently reproduced at the time: a worker
@@ -230,6 +294,13 @@ tracked by the manager as their own follow-up cards — neither is fixed in this
 - Do not let `findLandedSquashCommit`/`scanMergedCommitMap` break/keep on the FIRST tolerant-only match
   without first checking for a strict one — strict ALWAYS wins regardless of recency (round 2 fix), or a
   newer tolerant-only candidate that fails its downstream verifier can hide an older genuine landing.
+- Do not read "strict ALWAYS wins" (round 2) as having no residual (round 3) — the same ranking can hide
+  a NEWER genuine tolerantly-readable (hook-displaced) landing behind an OLDER strict landing of the same
+  branch name. Narrow (same branch name landing twice with a displacing hook starting between the two
+  landings) and no worse than pre-card mainline (fails safe to `null`/stale-older, never a forged accept)
+  — documented, not fixed, here. Fix it via card `c0d0eac9` ("fix(git): pick the newest verified landing
+  when strict and tolerant hits compete"), never by silently reversing the round-2 ranking back to
+  recency-order (that reopens round 2's own shadow instead of closing this one).
 - Do not re-derive the `findAllLandedTrailerCommits` caller's verification coverage from memory — re-read
   its own two arms (`landedTip` present vs. `base` present) before restating which one content-checks
   `sha`; round 1's own comment here was wrong once already.
