@@ -106,7 +106,10 @@ export async function resolveMergedInfo(db: Db, projectId: string, task: Pick<Ta
       throw e;
     }
   }
-  const merged = await getTaskMergedInfo(repoPath, task.id);
+  // @decision c13666c6 — branch-gone ledger gate; absent repoKey (degraded to primary above) scopes
+  // the ledger to "primary" too, matching the repo this call is actually checking.
+  const goneBranchLedger = db.getGoneBranchLedgerFacts(projectId, resolvedKey ?? "primary");
+  const merged = await getTaskMergedInfo(repoPath, task.id, { goneBranchLedger });
   return { merged, repoKey: resolvedKey };
 }
 

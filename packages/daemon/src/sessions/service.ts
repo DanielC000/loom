@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -6665,12 +6665,18 @@ export class SessionService {
     } catch {
       existingBranches = null; // fail closed: can't confirm gone ⇒ treat every candidate as still existing
     }
+    // Same pre-existing simplification this function already made (one repoPath for every candidate,
+    // regardless of its own repoKey): "primary" here too, not per-candidate.
+    //
+    // @decision c13666c6 round 2 (Code Review finding 6) — a non-primary candidate gets the WRONG ledger
+    // scope, so a genuinely-gone branch there reads unmerged, never wrongly merged — safe over-refusal.
+    const goneBranchLedger = this.db.getGoneBranchLedgerFacts(projectId, "primary");
     for (const s of candidates) {
       const branch = s.branch as string;
       if (existingBranches && !existingBranches.has(branch)) continue;
       let merged: Awaited<ReturnType<typeof getTaskMergedInfo>> = null;
       if (s.taskId) {
-        try { merged = await getTaskMergedInfo(repoPath, s.taskId, { timeoutMs: this.gitOpMs }); } catch { merged = null; }
+        try { merged = await getTaskMergedInfo(repoPath, s.taskId, { timeoutMs: this.gitOpMs, goneBranchLedger }); } catch { merged = null; }
       }
       if (!merged) out.push({ workerSessionId: s.id, taskId: s.taskId ?? null, branch });
     }
@@ -13872,7 +13878,8 @@ export class SessionService {
       if (!link) return { status: "triaged", triagedTo: null };
       const destProject = this.db.getProject(link.destinationProjectId);
       const destTask = this.db.getTask(link.destinationTaskId);
-      const merged = destProject ? await getTaskMergedInfo(destProject.repoPath, link.destinationTaskId) : null;
+      // @decision c13666c6 — the branch-gone ledger gate, scoped to the destination task's own repoKey.
+      const merged = destProject ? await getTaskMergedInfo(destProject.repoPath, link.destinationTaskId, { goneBranchLedger: this.db.getGoneBranchLedgerFacts(destProject.id, destTask?.repoKey ?? "primary") }) : null;
       const triagedTo: EscalationStatusItem["triagedTo"] = {
         projectId: link.destinationProjectId,
         projectName: destProject?.name ?? "",
@@ -18542,6 +18549,9 @@ export class SessionService {
     // fully qualified (`refs/heads/<branch>`) to avoid a same-named file/dir/tag ambiguity in `git log`.
     // `undefined` (no watermark yet) falls back to "HEAD", byte-identical to before this card.
     expectedMainlineRef?: string,
+    // @decision c13666c6 — the SAME ledger facts confirmWorkerMerge resolved once; absent (a caller not
+    // yet wired) skips the branch-gone ledger gate, byte-identical to before this card.
+    goneBranchLedger?: GoneBranchLedgerFacts,
   ): Promise<{ suppress: boolean; sha: string | null }> {
     if (taskId) {
       const task = this.db.getTask(taskId);
@@ -18550,7 +18560,7 @@ export class SessionService {
         if (terminalKey && task.columnKey === terminalKey) return { suppress: true, sha: null };
       }
     }
-    if (await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs })) return { suppress: true, sha: null };
+    if (await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger })) return { suppress: true, sha: null };
     const sha = await getWorktreeLatestNonMergeSha(worktreePath, { timeoutMs: this.gitOpMs });
     try {
       const already = this.db.listEventsForWorker(workerSessionId)
@@ -18922,6 +18932,9 @@ export class SessionService {
     }
     const expectedMainlineBranch = watermarkResolution.branch;
     const expectedMainlineRef = watermarkResolution.ref;
+    // @decision c13666c6 — resolved ONCE here, threaded through every findLandedSquashCommit/
+    // tipAcrossLandedCheck deps object in this confirm, rather than re-queried per call site.
+    const goneBranchLedger = this.db.getGoneBranchLedgerFacts(project.id, worker.repoKey ?? "primary");
     // Card e8df2659: the HUMAN-only per-project `orchestration.mergeGate:"off"` switch. Routed through the
     // inert-diff-skip machinery below (same repo-guard-only admission, `gateRan:false`, `skipped:true`) with
     // `skipReason:"gate-disabled"`; ONLY the gate command is skipped — the union-merge/conflict refusal, the
@@ -18940,7 +18953,7 @@ export class SessionService {
       return !!task && !!terminalKey && task.columnKey === terminalKey;
     })();
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
-      const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, expectedMainlineRef });
+      const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, expectedMainlineRef, goneBranchLedger });
       if (finished) return finished;
     }
 
@@ -18976,7 +18989,7 @@ export class SessionService {
     // events — never its own about-to-be-appended one (which would otherwise self-suppress the very first
     // notification).
     const rejectNotify = async (reason: string, msg: string): Promise<{ suppressed: boolean; sha: string | null }> => {
-      const { suppress: suppressed, sha } = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, worktreePath, reason, expectedMainlineRef);
+      const { suppress: suppressed, sha } = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, worktreePath, reason, expectedMainlineRef, goneBranchLedger);
       if (!suppressed) {
         // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this is confirmWorkerMergeTracked's own
         // onSettledAfterPending's SUPPRESSING push (outcome.value.notified:true skips its generic echo —
@@ -19056,7 +19069,7 @@ export class SessionService {
     };
     {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null);
-      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "confirm-start");
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger }))) return refuseReviewedTipMoved(rt, "confirm-start");
     }
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
@@ -19183,7 +19196,7 @@ export class SessionService {
       // detected here and could still see an over-refusal in that narrow combination — but no incorrect
       // commit can ever result either way, since `mergeBranchLocked` never reaches subject construction
       // on ANY noop path; the residual cost is at most an unnecessary refusal, not a missed guard.
-      const priorLanding = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
+      const priorLanding = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger });
       const taskForTitleGuard = priorLanding ? null : this.db.getTask(taskId);
       const titleGuard = taskForTitleGuard ? checkTitleHtmlEntities(taskForTitleGuard.title, false) : null;
       if (titleGuard) {
@@ -19623,12 +19636,12 @@ export class SessionService {
       // `findLandedSquashCommit`'s re-task guard (below, via `mergeBranch`'s own noop classification) exists
       // to detect — misclassifying a legitimate ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY otherwise.
       // Card 13fc5227: a HELD branch (owedBase set) is never "already landed" as a whole — its late range is still owed, so it must not take the already-landed shortcut.
-      let preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory });
+      let preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger });
       // @decision c30952c1 — a null `preLanded` here is indistinguishable from "genuinely not landed";
       //  with the worktree also gone, falling through crashes uncaught below. Retry once, fresh, then
       //  refuse rather than let that propagate — never treat the unverified lookup as landed.
       if (!preLanded && !fs.existsSync(worktreePath)) {
-        preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory });
+        preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger });
         if (!preLanded) return refuseWorktreeGoneLandingUnconfirmed("the already-landed lookup, retried once, found no landing");
       }
       if (!preLanded) {
@@ -19713,7 +19726,7 @@ export class SessionService {
         const worktreeGone = !fs.existsSync(worktreePath);
         const landedStamp = worktreeGone ? null : await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         if (worktreeGone || (landedStamp && landedStamp.head !== null && !landedStamp.dirty)) {
-          const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed", expectedMainlineRef });
+          const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed", expectedMainlineRef, goneBranchLedger });
           if (finished) return finished;
           // @decision 89bc3b86 — a gone worktree whose own finalize re-lookup also came back null must
           //  refuse here, never fall through into the freshStamp/reuse logic below, which mislabels a gone
@@ -21351,21 +21364,21 @@ export class SessionService {
     const squashTip = expectedTipForLanding(landingPin) ?? (await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
     {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null);
-      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs }))) return refuseReviewedTipMoved(rt, "pre-squash");
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger }))) return refuseReviewedTipMoved(rt, "pre-squash");
     }
     const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
     // @decision 24c22912 (round 2, item 3) — CLOSE THE NO-GATECOMMAND ASYMMETRY: `expectAlreadyLanded`
     //  above is derived only inside `if (gate)`, leaving a GATELESS project unprotected. Derived fresh
     //  here, only when nothing already has (`!gate`) and the branch isn't owed/held. See that record.
     if (!gate && !owedBase) {
-      const noGateLanded = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs });
+      const noGateLanded = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger });
       if (noGateLanded) expectAlreadyLanded = true;
     }
     // @decision 1ac74580 — never move this earlier: every refusal above this point (incl. the
     // landed-content-diverged refusal just below, inside mergeBranch) already logs its own event or
     // mutates nothing, so firing here keeps a pre-squash crash indistinguishable from review-only.
     evt("merge_landing_started", {});
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory, goneBranchLedger }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
     // @decision 2a6a292a round 20 (card aa7677fa) — record the ledger entry UNCONDITIONALLY (independent
     // of mainlineCheckedTip): a landing whose own tripwire check fail-opened still needs a walkable row.
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — gated on `merge.landedBase` too: an unverified
@@ -21942,11 +21955,14 @@ export class SessionService {
     // @decision d69d4858 — same stored-watermark branch confirmWorkerMerge resolves once, already fully
     // qualified (`refs/heads/<branch>`). `undefined` (no watermark yet) falls back to "HEAD", unchanged.
     expectedMainlineRef?: string;
+    // @decision c13666c6 — the same ledger facts confirmWorkerMerge resolved once; absent (a caller not
+    // yet wired) skips the branch-gone ledger gate, byte-identical to before this card.
+    goneBranchLedger?: GoneBranchLedgerFacts;
   }): Promise<ConfirmMergeResult | null> {
     // @decision 89bc3b86 — reuses the SAME `preLandedLookupGitFactory` test seam the pre-gate lookup
     //  threads through (never a second, dedicated seam): production callers never set it, so this is
     //  byte-identical outside a hermetic test that deliberately faults this specific re-lookup.
-    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory }));
+    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger: a.goneBranchLedger }));
     const alreadyLanded = looked.result;
     if (!alreadyLanded) return null;
     const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded, repoKey: a.repoKey });
@@ -22963,7 +22979,7 @@ export class SessionService {
           //  scoped to end at the squash, not the outer `finally` (finalize never moves main's HEAD).
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
           try {
-            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory }, (landed) => {
+            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory, goneBranchLedger: this.db.getGoneBranchLedgerFacts(finalProjectId, batchRepoKey) }, (landed) => {
               // @decision 1ac74580 — one event per LANDED candidate, fired by runBatchedMerge itself right
               // before the fast-forward; never stamp `branch` (see that record's own Do-not).
               for (const c of landed) {
@@ -25080,7 +25096,9 @@ export class SessionService {
             // skip the already-landed finalize outright and let the original error propagate instead.
             if (crWatermarkResolution.state !== "unreadable") {
               const crExpectedRef = crWatermarkResolution.ref;
-              const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs }).catch(() => null));
+              // @decision c13666c6 — same branch-gone ledger gate confirmWorkerMerge itself threads.
+              const crGoneBranchLedger = this.db.getGoneBranchLedgerFacts(project.id, worker.repoKey ?? "primary");
+              const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger: crGoneBranchLedger }).catch(() => null));
               const landedSha = crLooked.result;
               if (landedSha) {
                 const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null });
@@ -27380,6 +27398,9 @@ export class SessionService {
     // (project,repoKey) this pass" posture — N sessions sharing one project+repoKey pay for the fs-only
     // readBaseSha check once, not once per session.
     const mainlineRefResolvesCache = new Map<string, boolean>();
+    // @decision c13666c6 — same "once per (project,repoKey) this pass" memo, same key, for the
+    // branch-gone ledger gate's DB-side facts.
+    const goneBranchLedgerCache = new Map<string, GoneBranchLedgerFacts>();
     const handledWorktrees = new Set<string>();
     // REBUILT here, not appended — this boot's Pass B is about to recompute the full retained set from
     // scratch, and a stale entry from a prior boot (e.g. a worktree since GC'd by hand) must not linger.
@@ -27631,6 +27652,11 @@ export class SessionService {
           continue;
         }
         const expectedMainlineRef = mainlineRefResolution.ref;
+        let goneBranchLedger = goneBranchLedgerCache.get(mainlineRefCacheKey);
+        if (!goneBranchLedger) {
+          goneBranchLedger = this.db.getGoneBranchLedgerFacts(project.id, s.repoKey ?? "primary");
+          goneBranchLedgerCache.set(mainlineRefCacheKey, goneBranchLedger);
+        }
         // Card eb58b8bd round 2 (Code Review 509f716a minor 1): a stored watermark row can be perfectly
         // well-formed JSON and still name a branch that no longer exists (a master->main rename, a
         // manually deleted branch) — "ok" above only read the DB row, it never checked the branch is a
@@ -27680,12 +27706,12 @@ export class SessionService {
         // uncapped single-branch walk, so full-history detection is never silently narrowed.
         // Card cc9bce38: the branch tip is read around the whole lookup (`tipAcrossLandedCheck`) so the finalize below can CAS-delete at exactly the tip it was content-checked at.
         const paLooked = await this.tipAcrossLandedCheck(repoPath, s.branch!, async () => {
-          const viaMap = await findLandedSquashCommitViaMap(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps });
+          const viaMap = await findLandedSquashCommitViaMap(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps, goneBranchLedger });
           return viaMap.hit
             ? viaMap.sha
             : viaMap.scanComplete
               ? null
-              : await findLandedSquashCommit(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { noPathSetTrailerNoticeCount++; });
+              : await findLandedSquashCommit(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps, goneBranchLedger }, () => { noPathSetTrailerNoticeCount++; });
         });
         const landedSha = paLooked.result;
         if (!landedSha) continue;

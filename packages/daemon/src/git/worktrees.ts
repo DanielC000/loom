@@ -206,6 +206,39 @@ export interface BoundedGitDeps {
    * site — a throwing observer must never break a worktree cut.
    */
   onPhase?: (phase: string, atMs: number) => void;
+
+  // @decision c13666c6 — must stay OPT-IN: never default or widen this to fire for a caller that omits
+  // it, or a project-less/test call silently starts refusing a landing it used to accept.
+
+  /** DB-resolved facts for the branch-gone forged-trailer gate ({@link verifyGoneBranchLanding}),
+   *  threaded down from a caller that knows the project/repoKey/mainline-branch (sessions/service.ts,
+   *  mcp/tasks.ts) — this module is pure-git and has no DB of its own. */
+  goneBranchLedger?: GoneBranchLedgerFacts;
+}
+
+/**
+ * The branch-gone ledger-cutover gate's DB-side inputs for ONE (project, repoKey) scope — card c13666c6
+ * round 2. Callback-shaped (never a pre-fetched snapshot): the SET of shas worth querying depends on a
+ * git-computed chain the caller doesn't know ahead of time, so this module calls back into the DB only
+ * for exactly the shas it needs, each query an indexed point lookup. All three are synchronous
+ * (better-sqlite3) and branch-INDEPENDENT (never scoped to a specific branch name — see
+ * `docs/decisions/c13666c6-*.md` finding 5).
+ */
+export interface GoneBranchLedgerFacts {
+  /** The durable pre-ledger cutover boundary sha for this scope, or `null` when the scope has NO ledger
+   *  rows at all — the whole gate is then a no-op (today's self-consistent-trailer check alone decides).
+   *  See `Db.resolveGoneBranchLedgerBoundary`'s own doc for how/when this is established. */
+  resolveBoundary: () => string | null;
+  /** The ledger rows (any branch) among `tips` that exist for this scope — an indexed `tip IN (...)`
+   *  lookup, never a table scan. */
+  rowsByTips: (tips: readonly string[]) => readonly { base: string; tip: string }[];
+  /** The highest ledger row id for this scope, or `null` with no rows — the verdict memo's own
+   *  cache-invalidation key (a new landing bumps this, so a stale memoized verdict is never reused). */
+  maxRowId: () => number | null;
+  /** `${projectId}:${repoKey}` — round 4, card c13666c6: a stable, DB-known identifier for THIS scope,
+   *  used ONLY to rate-limit the `"error"`-verdict log line (never any DB query or caching decision) so a
+   *  genuinely transient, repeatedly-failing lookup doesn't spam the log once per board read. */
+  scopeKey: string;
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -7181,6 +7214,290 @@ async function verifyPersistedPathSet(
   }
 }
 
+/**
+ * Bound on the `sha..refTip` ANCESTRY-PATH walk {@link classifyAgainstLedgerUncached}'s RECORDED leg uses
+ * to find candidate ledger-row tips (round 2's original per-row scan replaced by round 4's ancestry-path
+ * walk — see docs/decisions/c13666c6-*.md). Past this many commits, fails CLOSED (`"unrecorded"`), logged
+ * once per (sha, scanned-ref tip, max ledger row id) via the memo below. **Round 5: this no longer bounds
+ * the trivial solo/batch-final case at all** — see {@link classifyAgainstLedgerUncached}'s own doc for why
+ * a direct `sha === row.tip` match is checked FIRST, with zero git spawns and no cap, before this walk ever
+ * runs.
+ *
+ * @decision c13666c6 round 4/5 — applies ONLY to the RECORDED leg's walk, in ANCESTRY-PATH commits (not
+ * first-parent-only — a merge-heavy stretch reaches it sooner). Decision record's round 5 has the measured
+ * real-repo gap and walk cost.
+ */
+export const GONE_BRANCH_LEDGER_CHAIN_SCAN_CAP = 20000;
+
+/**
+ * Bound (round 5, card c13666c6) on how many SURVIVING candidate ledger rows {@link
+ * classifyAgainstLedgerUncached}'s RECORDED leg will spawn a `git rev-list --first-parent row.base..row.tip`
+ * call for, after the zero-spawn prune (round 5 fix 1(b)) has already dropped every row that CANNOT
+ * possibly contain `sha`. **Round 6 correction:** this is NOT what bounds a genuinely unrecorded `sha`'s
+ * cost against many unrelated rows — the PRUNE is (under the writer invariant, an unrecorded `sha` has
+ * ZERO survivors once pruned, so this cap never even sees that case). This cap instead binds only on a
+ * ledger shape the writers cannot produce — duplicate rows, or an invariant violation — where SEVERAL rows
+ * genuinely, simultaneously contain `sha`; see the decision record's round 6 section for the measured
+ * distinction and a possible follow-up (deduping survivors by `(base, tip)`).
+ *
+ * @decision c13666c6 round 5/6 — past this many GENUINELY-containing survivors, fails CLOSED
+ * (`"unrecorded"`) — a real landing can read as unmerged on this pathological shape. Same posture as
+ * {@link GONE_BRANCH_LEDGER_CHAIN_SCAN_CAP}'s own overflow.
+ */
+const GONE_BRANCH_LEDGER_ROW_SPAWN_CAP = 8;
+
+/**
+ * Rate-limits the `"error"`-verdict LOG line (round 4, card c13666c6) — the VERDICT itself stays uncached
+ * and fail-closed always (see {@link LedgerCutoverVerdict}'s own doc); this bounds only how often the same
+ * repeatedly-failing `(sha, scope)` pair spams the log (e.g. once per board read). Keyed by
+ * `${sha}\u0000${scopeKey}` — independent of `refTip`/`maxRowId`, since the failure itself doesn't depend
+ * on those. Process-local, bounded at {@link GONE_BRANCH_LEDGER_ERROR_LOG_MAX}, insertion-order eviction.
+ */
+const GONE_BRANCH_LEDGER_ERROR_LOG_RATE_LIMIT_MS = 10 * 60 * 1000;
+const GONE_BRANCH_LEDGER_ERROR_LOG_MAX = 500;
+const goneBranchLedgerErrorLogTimestamps = new Map<string, number>();
+
+function logGoneBranchLedgerErrorRateLimited(sha: string, scopeKey: string, message: string): void {
+  const key = `${sha}\u0000${scopeKey}`;
+  const now = Date.now();
+  const last = goneBranchLedgerErrorLogTimestamps.get(key);
+  if (last !== undefined && now - last < GONE_BRANCH_LEDGER_ERROR_LOG_RATE_LIMIT_MS) return;
+  if (last === undefined && goneBranchLedgerErrorLogTimestamps.size >= GONE_BRANCH_LEDGER_ERROR_LOG_MAX) {
+    const oldestKey = goneBranchLedgerErrorLogTimestamps.keys().next().value;
+    if (oldestKey !== undefined) goneBranchLedgerErrorLogTimestamps.delete(oldestKey);
+  }
+  goneBranchLedgerErrorLogTimestamps.delete(key); // re-set moves it to the end — eviction targets truly stale keys
+  goneBranchLedgerErrorLogTimestamps.set(key, now);
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
+
+/** {@link classifyAgainstLedger}'s verdict. `"skip"` means `deps.goneBranchLedger` was absent or the
+ *  project's ledger holds no rows for this scope — the gate makes no claim either way. `"error"` (card
+ *  c13666c6 round 3) means a git call this classification needed failed transiently (a timeout, a read
+ *  error, a boundary sha that no longer resolves) — fails closed exactly like `"unrecorded"` but is NEVER
+ *  memoized, so a later clean lookup for the same sha can still resolve correctly instead of being wedged
+ *  behind a cached failure forever. */
+type LedgerCutoverVerdict = "skip" | "pre-ledger" | "recorded" | "unrecorded" | "error";
+
+/**
+ * Round-2 bound on {@link goneBranchLedgerVerdictCache}'s own size — process-local, so this bounds worst-
+ * case memory, never correctness (an evicted entry just recomputes, same as a cold cache).
+ */
+const GONE_BRANCH_LEDGER_VERDICT_CACHE_MAX = 500;
+
+/**
+ * Memoizes {@link classifyAgainstLedgerUncached}'s verdict per `(sha, resolved-ref-tip, maxRowId)` — card
+ * c13666c6 round 2 (finding: `tasks_list` fans this lookup out across every card on every board read, so
+ * a repeat lookup for the SAME sha/ref/ledger-state must cost nothing). `maxRowId` in the key is what
+ * invalidates a stale entry: a new landing bumps it, so a later lookup for the same sha naturally misses
+ * and recomputes against the now-larger ledger, never serving a memo that predates a row that might now
+ * matter. Simple insertion-order eviction once {@link GONE_BRANCH_LEDGER_VERDICT_CACHE_MAX} is exceeded.
+ */
+const goneBranchLedgerVerdictCache = new Map<string, LedgerCutoverVerdict>();
+
+function cacheGoneBranchLedgerVerdict(key: string, verdict: LedgerCutoverVerdict): void {
+  if (goneBranchLedgerVerdictCache.size >= GONE_BRANCH_LEDGER_VERDICT_CACHE_MAX) {
+    const oldestKey = goneBranchLedgerVerdictCache.keys().next().value;
+    if (oldestKey !== undefined) goneBranchLedgerVerdictCache.delete(oldestKey);
+  }
+  goneBranchLedgerVerdictCache.set(key, verdict);
+}
+
+/**
+ * The uncached per-sha classification, round 4's acceptance RULE (card c13666c6) — round 5 only reorders/
+ * prunes the RECORDED leg's OWN internal work for performance, see the decision record's round 5 section:
+ * - `"pre-ledger"` when `sha` is a genuine ancestor of (or equal to) the scope's durable boundary — a
+ *   bare, UNBOUNDED ancestor check (no first-parent requirement, no cap): the boundary is a FIXED sha
+ *   whose own ancestry can never change (canonicalGit neutralizes replace-refs/grafts/shallow/commit-
+ *   graph — see `boundedGit`), so a forgery planted AFTER the boundary can never become its ancestor,
+ *   regardless of whether it was later merged in via a first or second parent.
+ * - `"recorded"` when `sha` is BOTH a genuine ancestor of `refTip` (any path) AND a literal member of some
+ *   ledger row's own first-parent range (`sha === row.tip`, or `sha` appears in `rev-list --first-parent
+ *   row.base..row.tip`). Candidate rows are found via one bounded `rev-list --ancestry-path sha..refTip`
+ *   (ALL parents — restricted to commits that are both descendants of `sha` and ancestors of `refTip`, so
+ *   it correctly follows a merge's SECOND parent, unlike a first-parent-only walk) — but ONLY after the
+ *   trivial `sha === row.tip` case is checked directly, with zero spawns and no cap (round 5).
+ * - `"unrecorded"` when neither leg holds; `"error"` when a git call either leg needed failed transiently
+ *   (never cached — see {@link LedgerCutoverVerdict}'s own doc; the LOG is rate-limited, not the verdict).
+ *
+ * @decision c13666c6 round 4 — a forged `F` landed as a merge's SECOND parent fails the RECORDED leg: no
+ * row's own first-parent range ever contains `F` (the row for whatever landed ON `F`'s merge starts AT or
+ * after it). Never accept on `rows.length > 0` alone — the PER-ROW membership check is what discriminates.
+ *
+ * @decision c13666c6 round 4 — never reintroduce a first-parent-of-`refTip` precondition ahead of EITHER
+ * leg (round 3's defect, closed here) — it rejected a real landing the moment ANY legitimate merge (e.g.
+ * `project_checkout_branch create:true`) sat between it and `refTip` (round-3 review's probe4 A/B).
+ *
+ * @decision c13666c6 round 5/6 — the zero-spawn row prune is an ELIMINATION filter, never a membership
+ * proof, and is PERF/AVAILABILITY-only, never a soundness guard — dropping it costs availability (more
+ * row-spawn-cap overflow), never soundness (the per-row walk alone already refuses ADV1-4 regardless).
+ */
+async function classifyAgainstLedgerUncached(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, refTip: string, ledger: GoneBranchLedgerFacts,
+): Promise<LedgerCutoverVerdict> {
+  const boundary = ledger.resolveBoundary();
+  if (boundary === null) return "skip";
+
+  // Boundary existence (round 3): a separate, explicit probe from the merge-base call below, so "the
+  // boundary itself no longer resolves" gets its OWN named log distinct from a generic transient
+  // merge-base failure. Never cached, so a later repair (the app_meta row healed, or the object restored)
+  // is retried rather than refused forever.
+  try {
+    // `-t` (type), never `-e` (exists): `simple-git`'s `raw()` was measured to resolve `cat-file -e` on a
+    // nonexistent object with empty output instead of rejecting (its exit-code handling doesn't flag it),
+    // while `-t` on the same input correctly rejects via a real "could not get object info" fatal error.
+    await withTimeout(git.raw(["cat-file", "-t", boundary]), timeoutMs, "git cat-file -t (ledger boundary existence)");
+  } catch {
+    logGoneBranchLedgerErrorRateLimited(sha, ledger.scopeKey,
+      `[git] classifyAgainstLedger: the scope's own pre-ledger boundary ${boundary.slice(0, 7)} no longer ` +
+      "resolves in this repo — refusing to trust this lookup without caching the result (card c13666c6 round 4)");
+    return "error";
+  }
+
+  // PRE-LEDGER (round 4): dropped round 3's first-parent precondition + cap entirely — see this
+  // function's own doc for why a bare, unbounded ancestor check against the fixed boundary is sound.
+  try {
+    const mb = (await withTimeout(
+      git.raw(["merge-base", sha, boundary]), timeoutMs, "git merge-base (ledger boundary check)",
+    )).trim();
+    if (mb === sha) return "pre-ledger";
+  } catch {
+    logGoneBranchLedgerErrorRateLimited(sha, ledger.scopeKey,
+      `[git] classifyAgainstLedger: the ${sha.slice(0, 7)} pre-ledger boundary check failed (transient git ` +
+      "error) — refusing to trust this lookup without caching the result (card c13666c6 round 4)");
+    return "error";
+  }
+
+  // RECORDED (round 4/5): sha must be a genuine ancestor of refTip, AND literally inside some ledger row's
+  // own first-parent range — see this function's own doc for why this replaces round 3's precondition.
+  try {
+    if (sha !== refTip) {
+      const mbRef = (await withTimeout(
+        git.raw(["merge-base", sha, refTip]), timeoutMs, "git merge-base (ledger ancestor-of-refTip check)",
+      )).trim();
+      if (mbRef !== sha) return "unrecorded"; // sha isn't even reachable (by any path) from refTip
+    }
+
+    // Round 5 fix 1(a)/minor 3: check sha directly against the ledger FIRST — zero git spawns, no cap —
+    // before the (bounded) ancestry-path walk below ever runs. This is what gives the trivial solo/batch-
+    // final case (sha === some row's own tip) an UNBOUNDED horizon at zero extra cost: the capped walk
+    // below exists only to find an intra-batch INTERMEDIATE candidate, never this direct case.
+    if (ledger.rowsByTips([sha]).some((row) => row.tip === sha)) return "recorded";
+    if (sha === refTip) return "unrecorded"; // no further candidates possible when sha IS refTip
+
+    const out = await withTimeout(
+      git.raw(["rev-list", "--ancestry-path", `--max-count=${GONE_BRANCH_LEDGER_CHAIN_SCAN_CAP + 1}`, `${sha}..${refTip}`]),
+      timeoutMs, "git rev-list --ancestry-path (ledger candidate tips)",
+    );
+    const candidateTips = out.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (candidateTips.length > GONE_BRANCH_LEDGER_CHAIN_SCAN_CAP) {
+      // eslint-disable-next-line no-console
+      console.warn(`[git] classifyAgainstLedger: the ${sha.slice(0, 7)}..${refTip.slice(0, 7)} ancestry-path ` +
+        `exceeds the ${GONE_BRANCH_LEDGER_CHAIN_SCAN_CAP}-commit scan cap — treating as unrecorded rather than ` +
+        "scanning further; card c13666c6 round 4");
+      return "unrecorded";
+    }
+    if (candidateTips.length === 0) return "unrecorded"; // no intra-batch intermediate candidate possible
+
+    // Round 5 fix 1(b): prune WITHOUT any git spawn — a row can contain sha only if row.base is a PROPER
+    // ancestor of sha. row.base === sha fails that (the half-open range excludes the base itself); row.base
+    // being a member of candidateTips also fails it, since every candidateTips member is, by construction
+    // of --ancestry-path, a DESCENDANT of sha — and sha's own ancestor can never also be its descendant.
+    const descendantsOfSha = new Set(candidateTips);
+    const rows = ledger.rowsByTips(candidateTips);
+    const survivors = rows.filter((row) => row.base !== sha && !descendantsOfSha.has(row.base));
+    if (survivors.length === 0) return "unrecorded";
+    if (survivors.length > GONE_BRANCH_LEDGER_ROW_SPAWN_CAP) {
+      // eslint-disable-next-line no-console
+      console.warn(`[git] classifyAgainstLedger: ${sha.slice(0, 7)} has ${survivors.length} surviving candidate ` +
+        `ledger rows, past the ${GONE_BRANCH_LEDGER_ROW_SPAWN_CAP}-row spawn cap — treating as unrecorded rather ` +
+        "than spawning a membership check for each; card c13666c6 round 5");
+      return "unrecorded";
+    }
+
+    // Round 5 fix 1(c): spawn the actual membership walk only for rows the prune above could not rule out.
+    for (const row of survivors) {
+      const out2 = await withTimeout(
+        git.raw(["rev-list", "--first-parent", `${row.base}..${row.tip}`]),
+        timeoutMs, "git rev-list --first-parent (ledger row-membership check)",
+      );
+      const rowMembers = out2.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (rowMembers.includes(sha)) return "recorded"; // a batch row's own intermediate candidate
+    }
+    return "unrecorded";
+  } catch {
+    logGoneBranchLedgerErrorRateLimited(sha, ledger.scopeKey,
+      `[git] classifyAgainstLedger: the ${sha.slice(0, 7)} recorded-leg check failed (transient git error) — ` +
+      "refusing to trust this lookup without caching the result (card c13666c6 round 4)");
+    return "error";
+  }
+}
+
+/**
+ * The memoizing wrapper every caller actually uses — resolves `ref` to its current sha ONCE (so the
+ * per-sha walk below is pinned to an exact chain, not a moving branch name), builds the cache key, and
+ * logs the "refusing to treat as landed" warning exactly once per key (a cache HIT never re-logs — card
+ * c13666c6 round 2, closing the "logs on every board read" finding). An `"error"` verdict (round 3) is
+ * never written to the cache, by returning before {@link cacheGoneBranchLedgerVerdict} either way.
+ */
+async function classifyAgainstLedger(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, ref: string, ledger: GoneBranchLedgerFacts,
+): Promise<LedgerCutoverVerdict> {
+  const maxRowId = ledger.maxRowId();
+  if (maxRowId === null) return "skip";
+  let refTip: string;
+  try {
+    refTip = (await withTimeout(git.raw(["rev-parse", ref]), timeoutMs, "git rev-parse (ledger per-sha ref resolve)")).trim();
+  } catch {
+    logGoneBranchLedgerErrorRateLimited(sha, ledger.scopeKey,
+      `[git] classifyAgainstLedger: could not resolve ref "${ref}" to a sha — refusing to trust this ` +
+      "lookup without caching the result (card c13666c6 round 4)");
+    return "error"; // fail closed — never cached, so a transient resolve failure can't wedge future lookups
+  }
+  const cacheKey = `${sha}\u0000${refTip}\u0000${maxRowId}`;
+  const cached = goneBranchLedgerVerdictCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const verdict = await classifyAgainstLedgerUncached(git, timeoutMs, sha, refTip, ledger);
+  if (verdict === "error") return verdict; // round 3 — never memoized
+  if (verdict === "unrecorded") {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] classifyAgainstLedger: ${sha.slice(0, 7)} carries a well-formed Loom trailer for a branch ` +
+      "that is now gone, but is neither pre-ledger nor reachable from any row of Loom's own " +
+      "mainline_landed_commits ledger — refusing to treat it as a real landing (card c13666c6)");
+  }
+  cacheGoneBranchLedgerVerdict(cacheKey, verdict);
+  return verdict;
+}
+
+/**
+ * The branch-gone landing's FULL verification, shared by {@link findLandedSquashCommit} and {@link
+ * resolveMergedCommitMapHit} so the two can never drift apart on this check again: the existing
+ * self-consistent {@link verifyPersistedPathSet} check, PLUS (when `deps.goneBranchLedger` is threaded)
+ * the {@link classifyAgainstLedger} gate against `ref` — `sha` must come back `"skip"`, `"pre-ledger"` or
+ * `"recorded"`; `"unrecorded"` and `"error"` (round 3 — a transient git failure, fails closed exactly
+ * like `"unrecorded"`) both refuse. `deps.goneBranchLedger` absent skips the ledger gate entirely.
+ *
+ * `ref` must be the SAME ref the caller scanned to find `sha` in the first place (never a separately-
+ * resolved watermark branch) — a mismatch (e.g. a fresh `project_checkout_branch` target the watermark
+ * hasn't caught up to yet) would silently scope the ledger lookup to the wrong history. `pathSet === null`
+ * (the pre-f621f185 degraded tier) still runs the ledger gate: a commit with no path-set trailer is even
+ * MORE trivially forgeable than a self-consistent one, so it gets the same gate, never a weaker one.
+ *
+ * @decision c13666c6 round 2 — never pass a resolved watermark branch here as `ref`; always the caller's
+ * own scanned ref, or this re-opens finding 5 (a fresh-checkout branch losing its gate).
+ */
+async function verifyGoneBranchLanding(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, ref: string, pathSet: string | null, baseOverride: string | undefined,
+  deps: BoundedGitDeps,
+): Promise<boolean> {
+  if (pathSet && !(await verifyPersistedPathSet(git, timeoutMs, sha, pathSet, baseOverride))) return false;
+  const ledger = deps.goneBranchLedger;
+  if (!ledger) return true;
+  const verdict = await classifyAgainstLedger(git, timeoutMs, sha, ref, ledger);
+  return verdict === "skip" || verdict === "pre-ledger" || verdict === "recorded";
+}
+
 /** @decision 6ee48e4d — locates the squash-merge commit via the deterministic `Loom-Worker-Branch:` trailer.
  *
  *  RE-TASK GUARD confirms the trailer commit is NOT an ancestor of the branch tip when the branch still exists
@@ -7230,21 +7547,19 @@ export async function findLandedSquashCommit(
       // Content-reachability: a trailer match is not proof (see branchContentLandedInCommit's doc).
       if (!(await branchContentLandedInCommit(repoPath, branch, sha, mergeBase, deps))) return null;
     } else {
-      // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has one.
+      // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has
+      // one, PLUS (card c13666c6) the ledger-cutover gate — see verifyGoneBranchLanding's own doc.
       const pathSet = trailers.pathSet;
-      if (pathSet) {
-        // Phase 2 (card d62dad73) + card 756a2cd8: prefer the commit's own Loom-Worker-Base trailer as the
-        // verification base when present (every solo squash and batched landing now stamps one); undefined
-        // here falls back to sha^ for a commit that predates either fix, or whose best-effort trailer
-        // capture failed — see verifyPersistedPathSet's doc.
-        if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSet, trailers.base ?? undefined))) return null;
-      } else if (onPreFixTrailerNotice) {
+      if (!pathSet && onPreFixTrailerNotice) {
         onPreFixTrailerNotice(branch, sha);
-      } else {
+      } else if (!pathSet) {
         // eslint-disable-next-line no-console
         console.info(`[git] findLandedSquashCommit: ${branch} is gone and its landed commit ${sha.slice(0, 7)} ` +
           "carries no Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone (card f621f185)");
       }
+      // Phase 2 (card d62dad73) + card 756a2cd8: prefer the commit's own Loom-Worker-Base trailer as the
+      // path-set verification base when present; undefined falls back to sha^ — see verifyPersistedPathSet's doc.
+      if (!(await verifyGoneBranchLanding(git, timeoutMs, sha, base, pathSet, trailers.base ?? undefined, deps))) return null;
     }
     return sha;
   } catch {
@@ -7921,7 +8236,7 @@ interface ResolvedMergedHit {
  * returns null (NOT landed) — never resolve ambiguity to `hit.sha`.
  */
 async function resolveMergedCommitMapHit(
-  repoPath: string, branch: string, hit: MergedMapEntry, deps: BoundedGitDeps,
+  repoPath: string, branch: string, hit: MergedMapEntry, ref: string, deps: BoundedGitDeps,
 ): Promise<ResolvedMergedHit | null> {
   try {
     // Bounded via the SAME git+timeoutMs as the merge-base call below (mirrors findLandedSquashCommit's
@@ -7939,18 +8254,15 @@ async function resolveMergedCommitMapHit(
       if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
       if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
       return { sha: hit.sha, verification: "content" };
-    } else if (hit.pathSetDigest) {
-      // Branch gone (card f621f185): verify against the persisted path-set trailer. `hit.baseSha`
-      // (card d62dad73 phase 2 + card 756a2cd8) prefers the commit's own Loom-Worker-Base trailer when
-      // present (every batched and solo landing now stamps one); undefined/null falls back to sha^ for a
-      // commit that predates either fix, exactly as before.
-      if (!(await verifyPersistedPathSet(git, timeoutMs, hit.sha, hit.pathSetDigest, hit.baseSha ?? undefined))) return null;
-      return { sha: hit.sha, verification: "pathset" };
     }
-    // else: pre-fix history (no path-set trailer) — degrades to the trailer-presence-only answer.
-    // Deliberately NOT logged here for either caller: scanMergedCommitMap already logs the pre-fix count
-    // once per actual scan (cache-gated, rebuilt only on a HEAD move) — see its own comment.
-    return { sha: hit.sha, verification: "trailer-only" };
+    // Branch gone (card f621f185): verify against the persisted path-set trailer when this hit has one,
+    // PLUS (card c13666c6) the ledger-cutover gate — see verifyGoneBranchLanding's own doc. `hit.baseSha`
+    // (card d62dad73 phase 2 + card 756a2cd8) prefers the commit's own Loom-Worker-Base trailer when
+    // present; undefined/null falls back to sha^ for a commit that predates either fix, exactly as before.
+    // A pre-fix hit with no path-set trailer still runs the ledger gate — not logged here either way:
+    // scanMergedCommitMap already logs the pre-fix count once per actual scan — see its own comment.
+    if (!(await verifyGoneBranchLanding(git, timeoutMs, hit.sha, ref, hit.pathSetDigest, hit.baseSha ?? undefined, deps))) return null;
+    return { sha: hit.sha, verification: hit.pathSetDigest ? "pathset" : "trailer-only" };
   } catch {
     return null; // fail safe
   }
@@ -7971,7 +8283,7 @@ export async function findLandedSquashCommitViaMap(
   const { map, truncated } = await getMergedCommitMapCached(repoPath, base, deps);
   const entry = map.get(branch);
   if (!entry) return { hit: false, scanComplete: !truncated };
-  const resolved = await resolveMergedCommitMapHit(repoPath, branch, entry, deps);
+  const resolved = await resolveMergedCommitMapHit(repoPath, branch, entry, base, deps);
   return { hit: true, sha: resolved?.sha ?? null };
 }
 
@@ -8030,7 +8342,7 @@ export async function getTaskMergedInfo(
   // IDENTICAL re-task-guard + content/path-set check) — behaviour-identical to the version this replaces,
   // now ALSO reporting which of the two verification means (or the pre-fix degrade) answered it (card
   // 52e978ad) — see {@link MergedVerificationMode}.
-  const resolved = await resolveMergedCommitMapHit(repoPath, branch, hit, deps);
+  const resolved = await resolveMergedCommitMapHit(repoPath, branch, hit, "HEAD", deps);
   if (!resolved) return null;
   return { sha: resolved.sha.slice(0, 7), date: hit.date, verification: resolved.verification };
 }

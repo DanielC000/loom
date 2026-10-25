@@ -4,9 +4,9 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { DB_PATH, DAEMON_TEST_DIR, questionAttachmentDir } from "./paths.js";
-import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
+import type { EmitCompareNotApplicableKind, GoneBranchLedgerFacts } from "./git/worktrees.js";
 import { worktreeIdentityKey } from "./git/worktrees.js";
-import { parseMainlineWatermark, mainlineWatermarkKey, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX, MAINLINE_BRANCH_TRUST_PREFIX, mainlineBranchTrustKey, type MainlineWatermark } from "./git/mainline-watch.js";
+import { parseMainlineWatermark, mainlineWatermarkKey, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX, MAINLINE_BRANCH_TRUST_PREFIX, mainlineBranchTrustKey, goneBranchLedgerBoundaryKey, GONE_BRANCH_LEDGER_BOUNDARY_PREFIX, type MainlineWatermark } from "./git/mainline-watch.js";
 import { resolveTrustedToplevel, type CommondirTrustPin } from "./git/bounded.js";
 import { literalRepoPathKey } from "./git/repo-lock.js";
 // `secretEnvelopeByteLength` (card 82b22817) is the ONE deliberate exception to this file never touching
@@ -1547,9 +1547,20 @@ CREATE TABLE IF NOT EXISTS mainline_landed_commits (
   base TEXT NOT NULL,
   landed_at TEXT NOT NULL
 );
--- The walk (Db.isMainlineLedgerReachable) looks up by (project_id, repo_key, branch, tip); the prune
--- (Db.pruneMainlineLedger) scans the newest rows for a (project_id, repo_key, branch) ordered by id.
+-- The walk (Db.isMainlineLedgerReachable) looks up by (project_id, repo_key, branch, tip) and DOES use
+-- this index for that lookup. Round 5 (card c13666c6) measured via EXPLAIN QUERY PLAN that
+-- getGoneBranchLedgerRowsByTips' own (project_id, repo_key) + "tip IN (...)" query does NOT use this
+-- index -- its WHERE clause leaves the branch column unconstrained, and this repo's DB never runs
+-- ANALYZE, so without gathered stats the planner instead picks idx_mainline_landed_commits_branch_id
+-- below as a plain (project_id, repo_key) scope scan; see that index's own comment.
 CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_tip ON mainline_landed_commits(project_id, repo_key, branch, tip);
+-- Card c13666c6 round 3: served the old per-branch prune, removed in round 2 (see docs/decisions/c13666c6-*.md
+-- section 2). Round 5 measured (EXPLAIN QUERY PLAN, no ANALYZE run -- this DB never runs one) that this is
+-- actually what getGoneBranchLedgerRowsByTips' own (project_id, repo_key) scope scan uses today, as a side
+-- effect of being usable with the branch column unconstrained -- NOT dead as round 3 claimed, and NOT a
+-- correctness concern either way (round 5 made that query's own call-site cost bounded regardless of
+-- which index or scan shape answers it -- see git/worktrees.ts's classifyAgainstLedgerUncached). Kept
+-- rather than dropped, to avoid a migration for it.
 CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_branch_id ON mainline_landed_commits(project_id, repo_key, branch, id);
 `;
 
@@ -1658,11 +1669,6 @@ const MAX_RETAINED_CONVERSATIONS = 20;
 /** @decision 2a6a292a round 20 (card aa7677fa) — hops `isMainlineLedgerReachable`'s walk crosses before
  * failing closed (freezing as before); a realistic lag is 1-2, 50 is generous headroom, never unbounded. */
 const MAINLINE_LEDGER_WALK_CAP = 50;
-/** How many ledger rows `Db.pruneMainlineLedger` retains per (project, repoKey, branch) — 4x
- * {@link MAINLINE_LEDGER_WALK_CAP} so retention is never the limiting factor: a walk can only ever need
- * its own cap's worth of rows, so keeping several times that leaves comfortable margin, never pruning one
- * a still-in-bound walk could use. */
-const MAINLINE_LEDGER_RETENTION_PER_BRANCH = MAINLINE_LEDGER_WALK_CAP * 4;
 
 /** Max chars for a conversation-list preview (card 85f62475) — full text is always available via the
  *  fetch-one-conversation read; the list is not the place to ship whole message bodies. */
@@ -3897,6 +3903,10 @@ export class Db {
         if (to === undefined) this.deleteMeta(commondirTrustPinIndexKey(id, repoKey));
       }
       if (!pathChanged) continue;
+      // @decision c13666c6 round 3 — a rebind invalidates this scope's branch-gone ledger rows/boundary
+      // too (ancestry in the OLD repo), cleared UNCONDITIONALLY here, never gated on W/marker existing.
+      this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?").run(id, repoKey);
+      this.deleteMeta(goneBranchLedgerBoundaryKey(id, repoKey));
       const wKey = `mainline-watermark:${id}:${repoKey}`;
       const aKey = `mainline-boot-alerted:${id}:${repoKey}`;
       const rawMarker = this.getMeta(aKey);
@@ -4005,23 +4015,22 @@ export class Db {
     this.setMeta(mainlineBranchTrustKey(projectId, repoKey, branch), sha);
   }
   /** @decision 2a6a292a round 20 (card aa7677fa) — call UNCONDITIONALLY right after a squash/ff actually
-   *  succeeds, never gated on the mainline tripwire's own verdict (see the CREATE TABLE's own doc). */
+   *  succeeds, never gated on the mainline tripwire's own verdict (see the CREATE TABLE's own doc).
+   *
+   * Rows are never pruned (card c13666c6 round 2 removed the old per-branch cap) and this call also seeds
+   * the branch-gone ledger boundary on a scope's first-ever row.
+   *
+   * @decision c13666c6 round 2 — never reintroduce a row cap/prune here: the branch-gone gate must be
+   * able to vouch for an arbitrarily old landing, and a pruned table silently loses that ability forever. */
   recordMainlineLandedCommit(projectId: string, repoKey: string, branch: string, tip: string, base: string): void {
+    const hadPriorRows = this.db.prepare("SELECT 1 FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? LIMIT 1")
+      .get(projectId, repoKey) !== undefined;
     this.db.prepare("INSERT INTO mainline_landed_commits (project_id, repo_key, branch, tip, base, landed_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(projectId, repoKey, branch, tip, base, new Date().toISOString());
-    this.pruneMainlineLedger(projectId, repoKey, branch);
-  }
-  /** Evicts the oldest rows for (project, repoKey, branch) once it holds more than
-   *  {@link MAINLINE_LEDGER_RETENTION_PER_BRANCH} — same "find the keep-cutoff id, delete below it" shape
-   *  as {@link pruneOldConversations}. Retention is set to 4x {@link MAINLINE_LEDGER_WALK_CAP} so pruning
-   *  can never remove a row a walk still within its own cap could have used — the walk is always the
-   *  tighter bound in practice. */
-  private pruneMainlineLedger(projectId: string, repoKey: string, branch: string): void {
-    const keep = this.db.prepare("SELECT id FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND branch = ? ORDER BY id DESC LIMIT ?")
-      .all(projectId, repoKey, branch, MAINLINE_LEDGER_RETENTION_PER_BRANCH) as { id: number }[];
-    if (keep.length < MAINLINE_LEDGER_RETENTION_PER_BRANCH) return; // nothing to evict yet
-    const minKeep = Math.min(...keep.map((r) => r.id));
-    this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND branch = ? AND id < ?").run(projectId, repoKey, branch, minKeep);
+    if (!hadPriorRows) {
+      const key = goneBranchLedgerBoundaryKey(projectId, repoKey);
+      if (this.getMeta(key) === undefined) this.setMeta(key, base);
+    }
   }
   /** @decision 2a6a292a round 20 (card aa7677fa) — a PURE DB walk, never a git call: a forged commit was
    *  never landed through Loom's own merge code, so it has no row here and always breaks the chain. Past
@@ -4036,6 +4045,64 @@ export class Db {
       cur = row.base;
     }
     return false;
+  }
+  /**
+   * The branch-gone ledger gate's durable pre-ledger cutover boundary (card c13666c6 round 2) for this
+   * (project, repoKey) scope, branch-INDEPENDENT (never filtered by a watermark branch name — see
+   * `docs/decisions/c13666c6-*.md` finding 5). `null` only when the scope has NO ledger rows at all yet.
+   *
+   * Set ONCE, write-if-absent, never updated: `recordMainlineLandedCommit` seeds it the moment a scope's
+   * FIRST-EVER row lands; a scope that already carried rows before this round existed gets it seeded
+   * lazily, HERE, from whatever its CURRENT oldest row's own base happens to be. Either way the value is
+   * then fixed forever — later pruning (there is none now, but even a future one) can never move it.
+   */
+  resolveGoneBranchLedgerBoundary(projectId: string, repoKey: string): string | null {
+    const key = goneBranchLedgerBoundaryKey(projectId, repoKey);
+    const stored = this.getMeta(key);
+    if (stored !== undefined) return stored;
+    const oldest = this.db.prepare("SELECT base FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? ORDER BY id ASC LIMIT 1")
+      .get(projectId, repoKey) as { base: string } | undefined;
+    if (!oldest) return null;
+    this.setMeta(key, oldest.base);
+    return oldest.base;
+  }
+  /** The ledger rows (ANY branch) among `tips` for this (project, repoKey) scope (card c13666c6 round 2).
+   *  **Round 5 correction:** this was previously documented as using `idx_mainline_landed_commits_tip` —
+   *  FALSE, measured via `EXPLAIN QUERY PLAN`: with `branch` unconstrained in this query's WHERE clause,
+   *  and with no `ANALYZE` ever run against this DB (so the planner has no gathered stats to justify a
+   *  skip-scan), SQLite instead picks `idx_mainline_landed_commits_branch_id` as a plain `(project_id,
+   *  repo_key)` scope scan, then filters `tip IN (...)` row-by-row — never a WHOLE-table scan, but also
+   *  never the indexed point lookup this doc previously claimed. `tips` is caller-bounded (round 5 caps
+   *  the git layer's own candidate-row spawn count on top, independent of this query's own cost); this
+   *  method applies no cap of its own. */
+  getGoneBranchLedgerRowsByTips(projectId: string, repoKey: string, tips: readonly string[]): { base: string; tip: string }[] {
+    if (tips.length === 0) return [];
+    const placeholders = tips.map(() => "?").join(",");
+    return this.db.prepare(`SELECT base, tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND tip IN (${placeholders})`)
+      .all(projectId, repoKey, ...tips) as { base: string; tip: string }[];
+  }
+  /** The highest ledger row id for this (project, repoKey) scope, or `null` with no rows at all (card
+   *  c13666c6 round 2) — the cache-invalidation key the branch-gone gate's own verdict memo uses: a new
+   *  landing bumps this, so a verdict memoized against a smaller value is never reused past it. Safe as a
+   *  pure "has anything NEW landed" signal only because `id` is this table's own AUTOINCREMENT column —
+   *  globally increasing and never reused, even across a delete (round 3: a rebind's row delete can only
+   *  ever lower the live MAX(id), never let a stale, already-memoized higher value collide with a fresh
+   *  row's own, differently-scoped id later). */
+  getGoneBranchLedgerMaxRowId(projectId: string, repoKey: string): number | null {
+    const row = this.db.prepare("SELECT MAX(id) as maxId FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?")
+      .get(projectId, repoKey) as { maxId: number | null };
+    return row.maxId ?? null;
+  }
+  /** The ONE construction point every DB-aware caller uses to build the branch-gone ledger gate's facts
+   *  object (card c13666c6 round 2; {@link GoneBranchLedgerFacts} in git/worktrees.ts) — a thin, cheap
+   *  closure bundle. No DB work happens until the git layer actually calls into one of these. */
+  getGoneBranchLedgerFacts(projectId: string, repoKey: string): GoneBranchLedgerFacts {
+    return {
+      resolveBoundary: () => this.resolveGoneBranchLedgerBoundary(projectId, repoKey),
+      rowsByTips: (tips) => this.getGoneBranchLedgerRowsByTips(projectId, repoKey, tips),
+      maxRowId: () => this.getGoneBranchLedgerMaxRowId(projectId, repoKey),
+      scopeKey: `${projectId}:${repoKey}`,
+    };
   }
   /** Whether `repoKey` names a repo of `project` ("primary" always does) — the validation the human REST
    *  mainline-watermark-reset route needs before calling {@link resetMainlineWatermark}; mirrors
@@ -4343,6 +4410,7 @@ export class Db {
       // REFERENCES projects(id) FK, enforced (better-sqlite3 defaults foreign_keys=ON): delete the rows
       // first or the final `DELETE FROM projects` below throws for any project that has ever landed.
       this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${GONE_BRANCH_LEDGER_BOUNDARY_PREFIX}${id}:%`); // card c13666c6 round 3
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_BRANCH_TRUST_PREFIX}${id}:%`); // card 2a6a292a round 21
       // @decision 3a5c5d4a (round 5) — the pin is keyed by LITERAL repoPath, not projectId, so it can't
       // be swept by a `LIKE '<prefix>${id}:%'` like the mainline keys above; walk this project's own

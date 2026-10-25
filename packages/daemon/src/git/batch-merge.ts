@@ -2,7 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
-import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, type MergeEmptyKind, type WorktreeGateStamp } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, type MergeEmptyKind, type WorktreeGateStamp, type GoneBranchLedgerFacts } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
@@ -65,6 +65,10 @@ export interface BatchGitDeps {
    *  {@link boundedMergeGit} is the ephemeral `batchWorktreePath` rather than the canonical repo itself.
    *  Never defaulted — see `canonicalGit`'s own doc for why defaulting it to `repoPath` would be wrong. */
   trustedMainRoot?: string;
+  /** Threaded straight into every {@link findLandedSquashCommit} call this module makes (the
+   *  branch-gone ledger gate, card c13666c6) — see that field's own doc on `BoundedGitDeps`
+   *  (git/worktrees.ts) for what it does and why it must stay opt-in. */
+  goneBranchLedger?: GoneBranchLedgerFacts;
 }
 
 function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {

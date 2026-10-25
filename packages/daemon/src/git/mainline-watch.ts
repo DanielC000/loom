@@ -27,6 +27,12 @@ export const mainlineWatermarkKey = (projectId: string, repoKey: string): string
 export const MAINLINE_BRANCH_TRUST_PREFIX = "mainline-branch-trust:";
 export const mainlineBranchTrustKey = (projectId: string, repoKey: string, branch: string): string => `${MAINLINE_BRANCH_TRUST_PREFIX}${projectId}:${repoKey}:${branch}`;
 
+/** The branch-gone ledger gate's durable pre-ledger cutover boundary (card c13666c6 round 2) — set ONCE,
+ *  write-if-absent, never updated, per (project, repoKey), independent of which branch name a ledger row
+ *  happens to carry. See `Db.resolveGoneBranchLedgerBoundary`'s own doc for how/when it's set. */
+export const GONE_BRANCH_LEDGER_BOUNDARY_PREFIX = "gone-branch-ledger-boundary:";
+export const goneBranchLedgerBoundaryKey = (projectId: string, repoKey: string): string => `${GONE_BRANCH_LEDGER_BOUNDARY_PREFIX}${projectId}:${repoKey}`;
+
 export interface MainlineWatermark { branch: string; sha: string }
 
 export function parseMainlineWatermark(raw: string | undefined): MainlineWatermark | null {

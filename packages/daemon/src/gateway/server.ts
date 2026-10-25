@@ -4851,7 +4851,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // call). UI consumption is a separate follow-up.
       const loomBranches = result.all.filter((b) => b.startsWith("loom/"));
       const taskMap = deps.db.getWorkerBranchTaskMap(p.id);
-      const worker = await resolveWorkerBranchInfo(p.repoPath, loomBranches, taskMap);
+      // @decision c13666c6 — branch-gone ledger gate, scoped to "primary" (this route always reads
+      // `p.repoPath`, never a registry repo).
+      const worker = await resolveWorkerBranchInfo(p.repoPath, loomBranches, taskMap, { goneBranchLedger: deps.db.getGoneBranchLedgerFacts(p.id, "primary") });
       return { ...result, worker };
     } catch (e) {
       return reply.code(500).send({ error: gitError(e) });
