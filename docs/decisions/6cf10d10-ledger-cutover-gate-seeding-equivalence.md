@@ -109,6 +109,51 @@ the conversion. No converted scenario stayed GREEN under a gate-defeat it should
 "300 sequential real landings" was itself wrong — measured directly, none of the four ever called
 `confirmWorkerMergeTracked`.
 
+## Round 2 — Code Review 18e5e030 (HEALTHY, no blockers)
+
+Confirmed round 1's RED-proof independently (its own mutation — `classifyAgainstLedgerUncached` forced to
+return `"recorded"` whenever a boundary exists, placed differently from round 1's own mutation A but
+reaching the same conclusion — reddened all 13 negative-claim checks, none else); per-scenario `check()`
+counts matched exactly (91 → 101, the +10 being EQUIVALENCE CHECK); the fast-import rewrites reproduce the
+real branch names and (tip, base) pairs exactly. Found one minor + several cheap nits, all fixed here.
+
+**Minor — the equivalence proof covers only the SOLO shape.** EQUIVALENCE CHECK compares a real solo
+landing's row against `seedLedgerLanding`'s single-candidate shape (`base = tip^`). Neither real BATCH
+test asserted its own row's shape before this round (MERGEIN-BATCH asserted nothing about the row itself;
+`batch-intermediate-candidates-ledger-recorded.mjs:76` asserts only `maxRowId !== null`), so the
+multi-candidate seeded shape (`base = tip~N`, relied on by GENUINE INTERMEDIATE ABOVE CAP and DUPLICATE
+ROW OVERFLOW) was never pinned against a real batch row at all. Fixed by adding 5 assertions to
+MERGEIN-BATCH itself, right after the batch lands: exactly ONE new ledger row, `branch === "feat"`,
+`base === mainTipBeforeFeat`, `tip === feat`'s own post-batch tip, and `git rev-parse <tip>~2 === base` —
+pinning the real writer's own 2-candidate row shape directly, at zero added runtime (the batch already ran
+for an existing assertion).
+
+`seedLedgerLanding`'s own doc comment now also states explicitly that its one-commit-per-candidate shape
+is a REACHABLE SUBSET of the real batch writer, never the general case: `landBranchCommitsIndividually`
+(`batch-merge.ts` ~706) trailers only each candidate's own LAST commit, and a single candidate can land
+SEVERAL commits (a multi-commit worker branch cherry-picked whole) — the helper matches the common case
+exactly but cannot produce that wider shape; a scenario needing it must build the chain by hand.
+
+**Nits, all applied:** the eight `check(label, true)` setup checks (WEDGED, MERGEFORGE, TRANSIENT,
+NONLINEAR ×2, MERGEIN-A ×2, ERROR RATE LIMIT) now assert something real — the ref actually moved to the
+seeded landing's own `finalTip` (or, for MERGEFORGE, that the forged merge `M` is a genuine ancestor of the
+result). FINDING-5's "the watermark is genuinely stale" check relabelled — the test SETS it that way via
+`setMeta`, not a real confirm's own side effect, so "genuinely stale" overclaimed what the scenario proves.
+`seedLedgerLanding` gained a one-line guard that `onto` is actually `refBranch`'s current tip (catches a
+caller passing a stale base). `fastImportTrailerChain` gained a `shas.length === count` assertion (catches
+the walk silently resolving fewer/more commits than were actually built). The trivially-true
+"NAMED-DIFFERENT tip/base/id differ" check in EQUIVALENCE CHECK was dropped — the seeded row is, by
+construction, a NEW row chained onto the real row's own tip, so those fields differ whether the writer is
+sound or not; the naming/documentation of which fields are compared how is kept, just not asserted. DUP
+ROW's own comment and local variable (`realRow` → `seededRow`) corrected — that scenario was converted off
+real landings in round 1, so "the REAL row this batch just wrote" was stale.
+
+**Re-measurement**, one host, solo/foreground/single-lane, round 2: 202.4s (1 run), 0 failures. Combined
+with round 1's own 152.9s/174.7s/183.9s and the reviewer's own 245.0s solo run (host load unmeasured) —
+the largest of all five is the reviewer's 245.0s. `TEST_TIMEOUT_OVERRIDES` resized 450,000ms → 600,000ms
+(~2.45x of 245,000ms), per the a9119abf 2-2.5x-of-max-solo band sized off the LARGEST observed run, not
+just this seat's own.
+
 ## Do not
 
 - Do not convert RECORDED, LAUNDER, MERGEIN-BATCH, or EQUIVALENCE CHECK to seeded rows — each is the one
@@ -124,3 +169,8 @@ the conversion. No converted scenario stayed GREEN under a gate-defeat it should
   clean sweep there is a vacuous negative, not a verified one; this card's own first report made exactly
   that mistake. Verify an anchor under `test/` by reading the file at the anchor line directly, or by
   running `decision-records.mjs`'s resolver against it.
+- Do not treat `seedLedgerLanding`'s multi-candidate shape (one commit per candidate, each trailered) as
+  the GENERAL real-batch shape — it's a reachable subset. The real writer
+  (`landBranchCommitsIndividually`, `batch-merge.ts` ~706) trailers only each candidate's own LAST commit
+  and can land several commits per candidate; a scenario that needs that wider shape must build it by
+  hand, not via this helper.

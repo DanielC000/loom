@@ -133,8 +133,12 @@ const ledgerFor = (ctx) => ctx.db.getGoneBranchLedgerFacts(ctx.projId, "primary"
 // `tip` is the real commit(s) chained on top of it by ordinary first-parent commits. This helper
 // reproduces exactly that shape: builds `trailerBranches.length` real `git commit-tree` commits chained
 // onto `onto` (one per candidate — a single-entry array is a solo landing; 2+ is a batch intermediate
-// spanning several candidates, mirroring `landBranchCommitsIndividually`'s own per-candidate commit +
-// trailer, batch-merge.ts ~862), each carrying its own well-formed `Loom-Worker-Branch: <name>` trailer
+// spanning several candidates). Round 2 CR (minor): this one-commit-per-candidate shape is a REACHABLE
+// SUBSET of the real batch writer, never the general case — `landBranchCommitsIndividually` (batch-
+// merge.ts ~706) trailers only each candidate's OWN LAST commit, and a single candidate can land SEVERAL
+// commits (e.g. a multi-commit worker branch cherry-picked whole). This helper's shape matches the common
+// case (one commit per candidate) exactly, but a scenario that needs a multi-commit-per-candidate row
+// must build that chain by hand, not via this helper. Each commit carries its own well-formed `Loom-Worker-Branch: <name>` trailer
 // (deliberately NO PathSet trailer — the WEAKER, pathset-absent tier; see the EQUIVALENCE CHECK scenario
 // below for why that's sound: the ledger-gate code under test is tier-agnostic to PathSet, and the
 // stronger pathset-present tier already has independent coverage elsewhere — merge-pathset-deleted-
@@ -144,6 +148,8 @@ const ledgerFor = (ctx) => ctx.db.getGoneBranchLedgerFacts(ctx.projId, "primary"
 // update does. Returns each candidate's own sha plus the final tip, so a caller can reference an
 // intra-batch candidate specifically (its own non-tip position), never just the batch's final tip.
 function seedLedgerLanding(ctx, { onto, trailerBranches, refBranch = "main", repoKey = "primary" }) {
+  const currentRefTip = git(ctx.repo, "rev-parse", `refs/heads/${refBranch}`);
+  if (currentRefTip !== onto) throw new Error(`seedLedgerLanding: onto (${onto}) is not refs/heads/${refBranch}'s current tip (${currentRefTip}) — a caller passed a stale base`);
   const tree = git(ctx.repo, "rev-parse", `${onto}^{tree}`);
   const tips = [];
   let cur = onto;
@@ -183,6 +189,7 @@ function fastImportTrailerChain(repo, onto, count, branchFor) {
   execFileSync("git", ["fast-import", "--quiet"], { cwd: repo, input: lines.join("\n") + "\n", env: { ...process.env, ...IDENT }, stdio: ["pipe", "ignore", "pipe"] });
   const finalTip = git(repo, "rev-parse", "refs/heads/main");
   const shas = git(repo, "rev-list", "--first-parent", `${onto}..${finalTip}`).split("\n").map((s) => s.trim()).filter(Boolean).reverse();
+  if (shas.length !== count) throw new Error(`fastImportTrailerChain: built ${count} commits but rev-list resolved ${shas.length} — the walk is out of sync with what fast-import actually wrote`);
   return { tipAt: [onto, ...shas], finalTip };
 }
 
@@ -271,13 +278,12 @@ function rejectedAnyTipAncestorRule(repo, sha, rows) {
   check("(EQUIVALENCE CHECK) EQUAL: repo_key is field-for-field equal between the real and seeded rows", seededRow.repo_key === realRow.repo_key);
   check("(EQUIVALENCE CHECK) EQUAL: branch (the MAINLINE branch landed onto, not the worker's own branch) is field-for-field equal", seededRow.branch === realRow.branch);
 
-  // NAMED-DIFFERENT, never asserted equal: tip/base/id are distinct per-landing identifiers (commit shas,
-  // autoincrement) and ARE deterministically guaranteed to differ, asserted below. `landed_at` (wall-clock
-  // ms at insert) is ALSO never asserted equal, but for the opposite reason — it is NOT guaranteed to
-  // differ for two inserts this close together, and is never meaningfully comparable either way, so it
-  // is named here but deliberately left unasserted in both directions.
-  check("(EQUIVALENCE CHECK) NAMED-DIFFERENT (never asserted equal — inherently per-landing identifiers): tip/base/id all genuinely differ",
-    seededRow.tip !== realRow.tip && seededRow.base !== realRow.base && seededRow.id !== realRow.id);
+  // NAMED-DIFFERENT, never asserted equal (round 2 CR: the equality would be trivially true by
+  // construction — the seeded row is a NEW row chained onto the real row's own tip, so tip/base/id differ
+  // whether the writer is sound or not; dropped the check, kept the naming): tip/base/id are distinct
+  // per-landing identifiers (commit shas, autoincrement). `landed_at` (wall-clock ms at insert) is also
+  // never asserted equal, for the opposite reason — it is NOT guaranteed to differ for two inserts this
+  // close together, and is never meaningfully comparable either way.
 
   check("(EQUIVALENCE CHECK) THE WRITER INVARIANT: the real row's base is its tip's own first-parent, verified via real git", git(repo, "rev-parse", `${realRow.tip}^`) === realRow.base);
   check("(EQUIVALENCE CHECK) THE WRITER INVARIANT: the seeded row satisfies the SAME invariant, verified via real git", git(repo, "rev-parse", `${seededRow.tip}^`) === seededRow.base);
@@ -329,8 +335,8 @@ function rejectedAnyTipAncestorRule(repo, sha, rows) {
   fs.writeFileSync(path.join(repo, "human.txt"), "x\n");
   commitAll(repo, "chore(x): an ordinary human commit", GIT_ID);
   const humanTip = git(repo, "rev-parse", "HEAD");
-  seedLedgerLanding(ctx, { onto: humanTip, trailerBranches: ["loom/wedged-row1-0000"] });
-  check("(WEDGED) setup: a second landing lands on top of the human commit", true);
+  const seed1 = seedLedgerLanding(ctx, { onto: humanTip, trailerBranches: ["loom/wedged-row1-0000"] });
+  check("(WEDGED) setup: a second landing lands on top of the human commit", git(repo, "rev-parse", "refs/heads/main") === seed1.finalTip);
 
   const found = await findLandedSquashCommit(repo, "loom/wedged0000", "HEAD", { goneBranchLedger: ledgerFor(ctx) });
   check("(WEDGED) a commit wedged between two rows (never itself a row's base) reads NOT landed", found === null);
@@ -433,7 +439,7 @@ function rejectedAnyTipAncestorRule(repo, sha, rows) {
   git(repo, "checkout", "-q", "feature-x");
 
   const watermarkBranch = JSON.parse(ctx.db.getMeta(MW.mainlineWatermarkKey(ctx.projId, "primary"))).branch;
-  check("(FINDING-5) setup: the watermark is genuinely stale — still names main, not feature-x", watermarkBranch === "main");
+  check("(FINDING-5) setup: the watermark was set to \"main\" (stale by construction — the test never re-points it at feature-x)", watermarkBranch === "main");
 
   // getTaskMergedInfo-shaped callers always scan bare "HEAD" (now feature-x) — never the watermark branch.
   const found = await findLandedSquashCommit(repo, "loom/freshbranch0000", "HEAD", { goneBranchLedger: ledgerFor(ctx) });
@@ -502,7 +508,7 @@ function rejectedAnyTipAncestorRule(repo, sha, rows) {
 
   // A landing lands on top of the forged merge, exactly like the Code Review's own reproduction.
   const seed1 = seedLedgerLanding(ctx, { onto: M, trailerBranches: ["loom/mergeforge-row1-0000"] });
-  check("(MERGEFORGE) setup: a landing lands on top of the forged merge", true);
+  check("(MERGEFORGE) setup: a landing lands on top of the forged merge", git(repo, "merge-base", M, seed1.finalTip) === M);
   const finalTip = seed1.finalTip;
 
   check("(MERGEFORGE) NEGATIVE CONTROL: F IS an ancestor of the final tip — the pre-round-3 chain walk (which merely prepended sha, never confirming first-parent membership) would have reached it", git(repo, "merge-base", F, finalTip) === F);
@@ -601,7 +607,7 @@ for (const fillerCount of [2001, 6000]) {
   const seed0 = seedLedgerLanding(ctx, { onto: warmupTip, trailerBranches: ["loom/transient-row0-0000"] });
   check("(TRANSIENT) setup: a landing establishes the boundary", ledgerFor(ctx).resolveBoundary() !== null);
   const seed1 = seedLedgerLanding(ctx, { onto: seed0.finalTip, trailerBranches: [TR_BRANCH] });
-  check("(TRANSIENT) setup: a second landing writes its own recorded row", true);
+  check("(TRANSIENT) setup: a second landing writes its own recorded row", git(repo, "rev-parse", "refs/heads/main") === seed1.finalTip);
 
   function flakyOnceOnMergeBase() {
     let tripped = false;
@@ -659,7 +665,7 @@ for (const fillerCount of [2001, 6000]) {
   const topicBase = git(repo, "rev-parse", "HEAD");
   ctx.db.repointMainlineWatermark(ctx.projId, "primary", "topic", topicBase, ctx.mgrId);
   const seedTopic = seedLedgerLanding(ctx, { onto: topicBase, trailerBranches: ["loom/nonlinear-topic-0000"], refBranch: "topic" });
-  check("(NONLINEAR) setup: a landing lands ON the topic branch before it's merged in", true);
+  check("(NONLINEAR) setup: a landing lands ON the topic branch before it's merged in", git(repo, "rev-parse", "refs/heads/topic") === seedTopic.finalTip);
 
   git(repo, "checkout", "-q", "main");
   git(repo, "merge", "-q", "--no-ff", "-m", "merge(x): integrate topic", "topic");
@@ -667,7 +673,7 @@ for (const fillerCount of [2001, 6000]) {
   ctx.db.repointMainlineWatermark(ctx.projId, "primary", "main", mergeTip, ctx.mgrId);
 
   const seedB = seedLedgerLanding(ctx, { onto: mergeTip, trailerBranches: ["loom/nonlinear-B-0000"] });
-  check("(NONLINEAR) setup: landing B lands on top of the genuine merge commit", true);
+  check("(NONLINEAR) setup: landing B lands on top of the genuine merge commit", git(repo, "rev-parse", "refs/heads/main") === seedB.finalTip);
 
   const foundA = await findLandedSquashCommit(repo, "loom/nonlinear-A-0000", "HEAD", { goneBranchLedger: ledgerFor(ctx) });
   check("(NONLINEAR) landing A (before the merge) still reads landed", foundA !== null && foundA === seedA.finalTip);
@@ -694,9 +700,9 @@ for (const fillerCount of [2001, 6000]) {
   ctx.db.repointMainlineWatermark(ctx.projId, "primary", "feat", mainTipBeforeFeat, ctx.mgrId);
 
   const seed1 = seedLedgerLanding(ctx, { onto: mainTipBeforeFeat, trailerBranches: ["loom/mergeinA-s1-0000"], refBranch: "feat" });
-  check("(MERGEIN-A) setup: s1 lands on feat", true);
+  check("(MERGEIN-A) setup: s1 lands on feat", git(repo, "rev-parse", "refs/heads/feat") === seed1.finalTip);
   const seed2 = seedLedgerLanding(ctx, { onto: seed1.finalTip, trailerBranches: ["loom/mergeinA-s2-0000"], refBranch: "feat" });
-  check("(MERGEIN-A) setup: s2 lands on feat", true);
+  check("(MERGEIN-A) setup: s2 lands on feat", git(repo, "rev-parse", "refs/heads/feat") === seed2.finalTip);
 
   // The owner merges feat into main with a real, non-fast-forward merge commit.
   git(repo, "checkout", "-q", "main");
@@ -727,6 +733,17 @@ for (const fillerCount of [2001, 6000]) {
   const wb = await addWorker(ctx, "mbb");
   const rBatch = await ctx.sessions.mergeBatchTracked(ctx.mgrId, [wa.workerId, wb.workerId]);
   check("(MERGEIN-BATCH) setup: the batch lands both candidates on feat", rBatch.settled === true && rBatch.ok === true && rBatch.value?.landed?.length === 2);
+
+  // Round 2 CR (minor): pin the REAL batch writer's own row shape — the ONE thing the EQUIVALENCE CHECK
+  // scenario never covers (it's solo-only) and that seedLedgerLanding's own multi-candidate shape stands
+  // in for elsewhere in this file (GENUINE INTERMEDIATE ABOVE CAP, DUPLICATE ROW OVERFLOW).
+  const featTipAfterBatch = git(repo, "rev-parse", "refs/heads/feat");
+  const batchRows = ctx.db.db.prepare("SELECT branch, base, tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?").all(ctx.projId, "primary");
+  check("(MERGEIN-BATCH) THE BATCH-SHAPE EQUIVALENCE: the real batch writer wrote exactly ONE new ledger row", batchRows.length === 1);
+  check("(MERGEIN-BATCH) THE BATCH-SHAPE EQUIVALENCE: that row's branch is \"feat\"", batchRows[0]?.branch === "feat");
+  check("(MERGEIN-BATCH) THE BATCH-SHAPE EQUIVALENCE: that row's base is the main tip before feat", batchRows[0]?.base === mainTipBeforeFeat);
+  check("(MERGEIN-BATCH) THE BATCH-SHAPE EQUIVALENCE: that row's tip is feat's own landed tip", batchRows[0]?.tip === featTipAfterBatch);
+  check("(MERGEIN-BATCH) THE BATCH-SHAPE EQUIVALENCE: the row spans exactly 2 commits (one per candidate) — tip~2 is base", git(repo, "rev-parse", `${featTipAfterBatch}~2`) === mainTipBeforeFeat);
 
   git(repo, "checkout", "-q", "main");
   git(repo, "merge", "-q", "--no-ff", "-m", "merge(x): integrate feat", "feat");
@@ -800,7 +817,7 @@ for (const fillerCount of [2001, 6000]) {
   const seed0 = seedLedgerLanding(ctx, { onto: warmupTip, trailerBranches: ["loom/errorratelimit-row0-0000"] });
   check("(ERROR RATE LIMIT) setup: a landing establishes the boundary", ledgerFor(ctx).resolveBoundary() !== null);
   const seed1 = seedLedgerLanding(ctx, { onto: seed0.finalTip, trailerBranches: [ERL_BRANCH] });
-  check("(ERROR RATE LIMIT) setup: a second landing writes its own recorded row", true);
+  check("(ERROR RATE LIMIT) setup: a second landing writes its own recorded row", git(repo, "rev-parse", "refs/heads/main") === seed1.finalTip);
 
   function flakyAlwaysOnMergeBase() {
     return (repoPath, blockTimeoutMs) => {
@@ -1010,13 +1027,14 @@ for (const fillerCount of [2001, 6000]) {
   const mergeTip = git(repo, "rev-parse", "HEAD");
   ctx.db.repointMainlineWatermark(ctx.projId, "primary", "main", mergeTip, ctx.mgrId);
 
-  // The REAL row this batch just wrote, duplicated 8 MORE times — a shape no real writer can ever produce,
-  // standing in for a hypothetical writer-invariant violation. All 9 copies genuinely contain candidate A;
-  // none is prunable (same base/tip for all 9).
-  const realRow = ctx.db.db.prepare("SELECT base, tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?").get(ctx.projId, "primary");
-  check("(DUP ROW) setup: the real row's own base/tip were read back", typeof realRow?.base === "string" && typeof realRow?.tip === "string");
+  // The ONE row the seeded batch just wrote (round 2 CR: not a "real" row — this scenario was converted
+  // off confirmWorkerMergeTracked/mergeBatchTracked, see card 6cf10d10's own record), duplicated 8 MORE
+  // times — a shape no real writer can ever produce, standing in for a hypothetical writer-invariant
+  // violation. All 9 copies genuinely contain candidate A; none is prunable (same base/tip for all 9).
+  const seededRow = ctx.db.db.prepare("SELECT base, tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?").get(ctx.projId, "primary");
+  check("(DUP ROW) setup: the seeded row's own base/tip were read back", typeof seededRow?.base === "string" && typeof seededRow?.tip === "string");
   for (let i = 0; i < 8; i++) {
-    ctx.db.recordMainlineLandedCommit(ctx.projId, "primary", "main", realRow.tip, realRow.base);
+    ctx.db.recordMainlineLandedCommit(ctx.projId, "primary", "main", seededRow.tip, seededRow.base);
   }
   const rowCount = ctx.db.db.prepare("SELECT COUNT(*) as c FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?").get(ctx.projId, "primary").c;
   check(`(DUP ROW) setup: 9 identical rows now exist for this one landing (got ${rowCount})`, rowCount === 9);
