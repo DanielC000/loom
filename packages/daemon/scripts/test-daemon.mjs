@@ -1103,6 +1103,15 @@ const TEST_TIMEOUT_OVERRIDES = {
   "mainline-watch-landing-trust-freeze": 450_000, // card 99f5f0cd, censored sizing — see the decision note above this entry.
   "mainline-watch-own-commit-verify": 450_000, // card 99f5f0cd, censored sizing — see the decision note above this entry.
   "merge-confirm-dirty-gate-verdict-cache-retry-and-guard": 280_000, // card 0bfd9b7c: measured by a taskless QA check (worker 35626365, gen 442) — no prior override (blanket 120s ceiling). Per-file history (daemon-per-file-timing.ndjson): 8 passes 59,600-110,100ms (max 0.917x of the ceiling) and 2 SIGTERM kills at ~120,000ms (one at 13:13Z predating commit 6d13a03f, the other inside 6d13a03f's dist-importer check at 20:10Z on a loaded host). Traced: 6d13a03f's appendEvent change is NOT on a blocking path here (no open transaction, no listener wired in this test) — load/timing, not a hang, so per cc595ca7 the fix is an override, not a blanket raise. Direct solo re-runs on main: 53s/90s/94s (LOOM_DEV unset) and 98s (LOOM_DEV=1), all pass. 280k gives ~2.544x the observed max pass (110,100ms), matching this family's ~2.5x-of-max-pass convention for a file with an OBSERVED kill (a9119abf).
+  // card 3aad1cb3: full merge gate 1b812d96 SIGTERM-killed batch-merge-head-moved.mjs at its 120s blanket
+  // ceiling (card 95940402 had grown it by ~746 lines the same day, landing UNGATED — no full-gate timing
+  // history existed at the new size). Fix was a SPLIT, not an override, along the 043d83d2-vs-95940402
+  // scenario boundary (every scenario after (J) is self-contained — verified by grep before splitting;
+  // see the file's own header comment): the retained-name file batch-merge-head-moved.mjs (card
+  // 043d83d2's own (A)-(J) worktree-REF scenarios) measured 73s solo, direct run, 2026-10-25, one host —
+  // comfortably under the ceiling, no override needed. The new sibling file below (card 95940402's own
+  // landed-COMMIT-identity scenarios, (K)-(S1)) does not clear it on its own.
+  "batch-merge-head-moved-commit-identity": 400_000, // card 3aad1cb3: direct solo runs, 2026-10-25, one host, concurrency 2 with a real merge gate holding the other lane (gate_queue checked before each run): 145,000ms and 130,000ms (n=2, both 80/80 PASS, 0 fails) — both already past the 120,000ms blanket ceiling even before any gate-level contention. 400k gives ~2.76x the observed max (145,000ms), matching this family's ~2.5x-of-max-pass convention.
 };
 // Card fc53ea74: codex-doctrine-real-spawn's own 300_000 override moved to
 // `_codex-real-spawn-lock.mjs`'s `CODEX_OWN_WORK_BUDGET_MS` (that file's own doc carries card 3791b14e's
