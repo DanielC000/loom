@@ -57,7 +57,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // body) has no fixed ceiling, so a budget sized for an idle host has no margin on a busy one. This is
 // still the SAME safety-net backstop described above (never decides an assertion), so widening it via
 // `ambientScaledBudget` — scaled to THIS process's own measured ambient contention, same mechanism (B)'s
-// OVERLAP_TIMEOUT_MS already uses below — is safe for every call site, including the two ((A) gate / (J)
+// own rendezvous wait already uses below — is safe for every call site, including the two ((A) gate / (J)
 // gate1) that have no real git prep at all: an idle host still gets the bare 10000ms. Evaluated as a
 // default-parameter expression so each call reads the SAME memoized-per-process factor `(B)` already
 // relies on (see _wait.mjs's own module-level memoization doc), never a blind bump of the literal 10000.
@@ -130,7 +130,7 @@ async function seedWorkers(sfx, reposDir) {
   const gateWorktreePath = path.join(reposDir, "gate-worker-wt");
   db.insertSession({ id: gateWorkerId, projectId: gateProjId, agentId: `${agentId}-gate`, engineSessionId: null, title: null, cwd: gateWorktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: null, worktreePath: gateWorktreePath, branch: "loom/gate-only" });
 
-  return { db, mgrId, mergeWorkerId, gateWorkerId };
+  return { db, mgrId, mergeWorkerId, gateWorkerId, mergeWorktreePath, gateWorktreePath };
 }
 
 const ptyStub = () => {
@@ -209,62 +209,138 @@ try {
   }
 
   // ── (B) raising the cap to 2 lets a merge gate and a worker gate run TRULY concurrently ────────────
-  // Card 0742f8c3: the old version proved overlap by HOPING a 4000ms sleep was wide enough to outlast
-  // confirmWorkerMerge's real git prep (stranded-check + union-merge) before runWorkerGate's own gate call
-  // finished — an invisible margin that a saturated host can blow through (git prep can itself take
-  // arbitrarily long under load), letting the first fake gate complete and release its slot before the
-  // second is ever admitted. That's the same "guessed wall-clock margin" class as (J)'s old fixed-2500ms
-  // hold and (L)'s old bare durationMs pin — fixed here the same way: make the overlap STRUCTURALLY
-  // GUARANTEED rather than scheduler-dependent. Each fake-gate invocation blocks (after recording its own
-  // active++, so maxActive is already captured) until BOTH invocations have actually entered — i.e. both
-  // calls were genuinely admitted concurrently by the semaphore — then releases both together. This
-  // observes the real property under test (cap 2 lets two calls be inside the gate at once) directly,
-  // with no dependency on how long anything upstream took. `OVERLAP_TIMEOUT_MS` is a safety-net backstop
-  // for a genuine regression (cap 2 somehow never admits the second call) — like `waitUntilGatePhase`'s
-  // `timeoutMs`, it never decides the assertion (maxActive would correctly stay at 1 and the check would
-  // fail), it just stops a broken run from hanging the suite forever.
+  // Card eceb0201: card 0742f8c3's fix above (a `Promise.race([bothEntered, sleep(OVERLAP_TIMEOUT_MS)])`
+  // inside the fake gate) was seen RED twice under real host load (gen 429, 2026-10-19: once in the
+  // dist-importer advisory at host CPU mean 84.5%, once in a serial LOOM_DEV=1 rerun on main) — on
+  // "(B) cap 2 let the merge gate and the worker gate run truly concurrently". ROOT CAUSE: that race is a
+  // TIMING WINDOW, not a rendezvous — `confirmWorkerMerge`'s real git prep (stranded-check + union-merge),
+  // which runs BEFORE the semaphore is ever reached, has no fixed ceiling, so under enough host load the
+  // SECOND call can still be mid-prep when `OVERLAP_TIMEOUT_MS` (even `ambientScaledBudget`-scaled) elapses
+  // on the first. When that happens the race falls through to its `sleep()` branch, the first fake gate
+  // returns having never actually overlapped the second, and `maxActive` never reaches 2 — SILENTLY: the
+  // race resolving via its timeout branch throws nothing and logs nothing, so the test simply proceeds to
+  // a genuine, correctly-computed FAIL on "truly concurrently" that is actually an artifact of the test's
+  // own window, not of cap 2 failing to admit both. Same class as 1c7b3f44 (fixed as 7ef80ae8): a guessed
+  // wall-clock margin standing in for a real "the other party has genuinely arrived" signal.
+  //
+  // FIX: replace the timing window with the SAME deterministic `holds` rendezvous
+  // merge-gate-concurrency-verdict.mjs's own (B) scenario uses (and the same structural style blocks
+  // (A)/(J) above already use via `waitUntilGatePhase`) — each fake-gate invocation blocks on its OWN
+  // externally-controlled promise, keyed by worktreePath, so NEITHER call can ever complete before the
+  // test explicitly releases it. There is no implicit ceiling on how long the test is willing to wait for
+  // the second call to arrive — it waits for the OBSERVABLE event (both calls having genuinely entered the
+  // fake gate), not for a guessed duration. The only timeout left is `sharedWaitUntil`'s own safety-net
+  // (never a decider — see its own doc in _wait.mjs, and `ambientScaledBudget`'s doc): if `calls.length`
+  // genuinely never reaches 2 (a REAL regression — cap 2 stops admitting both), this throws and fails the
+  // whole file LOUDLY, instead of silently proceeding with an unobserved overlap the way the old race did.
   {
     const sfx = `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-b-${sfx}`);
     registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
-    const { db, mgrId, mergeWorkerId, gateWorkerId } = await seedWorkers(sfx, reposDir);
+    const { db, mgrId, mergeWorkerId, gateWorkerId, mergeWorktreePath, gateWorktreePath } = await seedWorkers(sfx, reposDir);
     db.setPlatformConfig({ maxConcurrentGates: 2 });
 
-    let active = 0, maxActive = 0, calls = 0;
-    let resolveBothEntered;
-    const bothEntered = new Promise((res) => { resolveBothEntered = res; });
-    // Card 4c1bfd91: constructing `bothEnteredOrTimeout` here (before either call even starts) let the
-    // timer run out the clock on `confirmWorkerMerge`'s real git prep (stranded-check, union-merge) —
-    // under load that prep alone can exceed 8s, so the first fake gate would release and shed its slot
-    // before the second was ever admitted, and maxActive never reached 2. The timer must bound only the
-    // OVERLAP window between the first and second call actually entering the fake gate, never the real
-    // prep work that happens before either of them gets there — so it's constructed lazily, on the first
-    // genuine entry, not at race-setup time. `ambientScaledBudget` ALSO scales the 8s base against this
-    // process's OWN measured ambient contention (never a blind widen of the flat constant — a genuinely
-    // idle host still gets 8s) — belt-and-suspenders for the residual case where the overlap window
-    // itself (not just the pre-entry prep) stretches past 8s under extreme host load.
-    const OVERLAP_TIMEOUT_MS = ambientScaledBudget(8000); // safety net only — see comment above; never widen the BASE to "fix" a flake
-    let bothEnteredOrTimeout;
-    const fakeGate = async () => {
-      calls++; active++; maxActive = Math.max(maxActive, active);
-      if (calls === 1) bothEnteredOrTimeout = Promise.race([bothEntered, sleep(OVERLAP_TIMEOUT_MS)]);
-      if (calls === 2) resolveBothEntered();
-      await bothEnteredOrTimeout; // block until the OTHER call has genuinely entered too (or the safety net fires)
+    const mkHold = () => { let release; const p = new Promise((r) => { release = r; }); return { p, release: () => release() }; };
+    const holds = new Map([[mergeWorktreePath, mkHold()], [gateWorktreePath, mkHold()]]);
+    const calls = [];
+    let active = 0, maxActive = 0;
+    const fakeGate = async (_gate, cwd) => {
+      calls.push(cwd);
+      active++; maxActive = Math.max(maxActive, active);
+      await holds.get(cwd).p; // held open until the test has structurally confirmed BOTH calls entered
       active--;
       return { passed: true };
     };
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: fakeGate });
 
+    const mergePromise = sessions.confirmWorkerMerge(mgrId, mergeWorkerId);
+    const gatePromise = sessions.runWorkerGate(gateWorkerId);
+
+    // Deterministic rendezvous, no timing window — see the block comment above. `ambientScaledBudget`'s
+    // margin (×3, matching merge-gate-concurrency-verdict.mjs's own CHILD_START_TIMEOUT_MS) is a pure
+    // safety-net backstop here: it decides nothing about the overlap assertion below, it only bounds how
+    // long a genuinely wedged run is allowed to hang the suite before failing loudly.
+    await sharedWaitUntil(() => calls.length === 2, { timeoutMs: ambientScaledBudget(10000, 3), intervalMs: 20, label: "(B) both the merge gate and the worker gate to become co-live" });
+    check("(B precondition) both children are genuinely CO-LIVE at the same instant (cap raised to 2)", calls.length === 2);
+
+    holds.get(mergeWorktreePath).release();
+    holds.get(gateWorktreePath).release();
+
     const [mergeResult, gateResult] = await raceReport(
-      [sessions.confirmWorkerMerge(mgrId, mergeWorkerId), sessions.runWorkerGate(gateWorkerId)],
+      [mergePromise, gatePromise],
       ["confirmWorkerMerge", "runWorkerGate"],
       "B",
     );
-    check("(B) both ran", calls === 2);
+    check("(B) both ran", calls.length === 2);
     check("(B) cap 2 let the merge gate and the worker gate run truly concurrently", maxActive === 2);
     check("(B) the merge still succeeded", mergeResult?.merged === true);
     check("(B) the worker gate still passed", gateResult?.ok === true && gateResult?.value.passed === true);
+  }
+
+  // ── (B-neg) NEGATIVE CONTROL for (B), card eceb0201 DoD: force the cap back to 1 — simulating the exact
+  //        "cap ignored" regression (B) exists to catch — and confirm the SAME rendezvous mechanism
+  //        genuinely FAILS to observe co-liveness, proving (B)'s "truly concurrently" check is a real
+  //        discriminator rather than something that would pass vacuously no matter what the semaphore did.
+  //
+  //        A bounded `sharedWaitUntil` here is sound, not the "unfalsifiable negative in one trial" shape
+  //        CLAUDE.md warns about: under cap 1 with the first call's hold deliberately never released
+  //        during the wait, the second call is STRUCTURALLY held `queued` by the semaphore itself for as
+  //        long as the hold stays open — it is not racing an unknown real duration that might simply
+  //        arrive late on a slower host, it is a logical impossibility for as long as this test controls
+  //        it. So timing out is the one and only correct outcome here, on any host, at any speed — the
+  //        bound only needs to be long enough that a wedged/slow TEST HARNESS (not the thing under test)
+  //        doesn't make this flake, which `ambientScaledBudget` already covers. ───────────────────────────
+  {
+    const sfx = `bneg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-wg-repos-bneg-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
+    const { db, mgrId, mergeWorkerId, gateWorkerId, mergeWorktreePath, gateWorktreePath } = await seedWorkers(sfx, reposDir);
+    db.setPlatformConfig({ maxConcurrentGates: 1 }); // the regression this control guards against: cap ignored/serialized
+
+    const mkHold = () => { let release; const p = new Promise((r) => { release = r; }); return { p, release: () => release() }; };
+    const holds = new Map([[mergeWorktreePath, mkHold()], [gateWorktreePath, mkHold()]]);
+    const calls = [];
+    const fakeGate = async (_gate, cwd) => {
+      calls.push(cwd);
+      await holds.get(cwd).p;
+      return { passed: true };
+    };
+    const { stub } = ptyStub();
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: fakeGate });
+
+    const mergePromise = sessions.confirmWorkerMerge(mgrId, mergeWorkerId);
+    const gatePromise = sessions.runWorkerGate(gateWorkerId);
+
+    // First, a genuinely POSITIVE, generously-bounded wait: at least ONE call has entered. This is NOT the
+    // negative assertion under test — it just establishes the precondition this scenario actually needs
+    // (one real caller holding the only cap-1 slot) before testing what happens to the other, so a slow
+    // host's real pre-admission prep (confirmWorkerMerge's git work) can never masquerade as "cap 1 held" by
+    // starving this wait before either call even arrived.
+    await sharedWaitUntil(() => calls.length >= 1, { timeoutMs: ambientScaledBudget(10000, 3), intervalMs: 20, label: "(B-neg precondition) at least one call to enter the fake gate" });
+    check("(B-neg precondition) exactly one call is in — the only cap-1 slot is held", calls.length === 1);
+
+    // THE DISCRIMINATOR, bounded SHORT and expected to time out — see the block comment above for why this
+    // bound is sound rather than an unfalsifiable negative-in-one-trial: a structural impossibility (the
+    // held-open first slot) decides this, not a race against an unknown real duration. The predicate here
+    // (`calls.length === 2`) can only ever return a value, never throw — so a catch below is unambiguously
+    // `sharedWaitUntil`'s own timeout, nothing else.
+    let timedOut = false;
+    try {
+      await sharedWaitUntil(() => calls.length === 2, { timeoutMs: ambientScaledBudget(3000), intervalMs: 20, label: "(B-neg) the second call to ALSO become co-live under cap 1 (expected to NEVER happen while the first hold stays open)" });
+    } catch {
+      timedOut = true;
+    }
+    check("(B-neg) THE DISCRIMINATOR: under cap 1 the two calls never both become co-live — the SAME rendezvous (B) relies on genuinely times out here instead of silently reading as co-live", timedOut === true && calls.length === 1);
+
+    // Cleanup: release whichever call DID enter (cap 1 admits exactly one), wait for the queued second to
+    // be admitted once that slot frees (a genuine, positive expectation — bounded only as a safety net),
+    // release it too, and let both settle so this scenario doesn't leave a dangling promise behind.
+    holds.get(calls[0]).release();
+    const other = calls[0] === mergeWorktreePath ? gateWorktreePath : mergeWorktreePath;
+    await sharedWaitUntil(() => calls.length === 2, { timeoutMs: ambientScaledBudget(10000, 3), intervalMs: 20, label: "(B-neg cleanup) the queued second call to be admitted once the first hold releases" });
+    holds.get(other).release();
+    await raceReport([mergePromise, gatePromise], ["confirmWorkerMerge", "runWorkerGate"], "B-neg");
   }
 
   // ── (C) WITHOUT the semaphore (calling the fake gate directly), two concurrent calls DO overlap —
