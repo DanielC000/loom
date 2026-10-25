@@ -23,12 +23,11 @@
 //       is completely unaffected — proves the refusal discriminates on the vaultPath's SPELLING, not on
 //       anything about the target directory itself;
 //   (e) REGRESSION: the one exempt member of the family (the extended-length LOCAL form, `\\?\<drive>:\...`)
-//       never trips THIS card's new check — confirmed by asserting the new warning text never fires for it,
-//       not by asserting commitVault successfully commits via it: a SEPARATE, pre-existing quirk (found
-//       empirically — git's own `rev-parse --show-toplevel` normalizes away the `\\?\` prefix, so the raw
-//       vaultPath string no longer string-matches the discovered root, misclassifying it as
-//       "externally managed") already makes commitVault silently no-op for this form, with or without this
-//       card's change, and fixing that quirk is out of this card's scope.
+//       never trips THIS card's own network/device-form warning, AND (card 70ce37f5) now actually COMMITS
+//       via commitVault/writeVaultFile — it used to silently no-op forever instead, because commitVault's
+//       own "externally managed" check compared RAW strings (git's `rev-parse --show-toplevel` strips the
+//       `\\?\` prefix, so the raw vaultPath never string-matched the discovered root). Fixed by comparing
+//       CANONICALIZED paths; see docs/decisions/70ce37f5-commitvault-canonicalize-before-externally-managed-compare.md.
 // Run after build: node test/vault-device-form-write-path-refusal.mjs
 import { requireHermeticEnv } from "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -124,21 +123,33 @@ if (!driveMatch) {
     check("negative control: .git WAS created for the ordinary-spelled vault", fs.existsSync(path.join(realVault, ".git")));
   }
 
-  // (e) REGRESSION: the one exempt member of the family (`\\?\<drive>:\...`) never trips THIS card's new
-  // check. Asserted narrowly via the warning text (never "commitVault succeeds") — see the module doc's
-  // (e) bullet for why a plain success assertion here would be testing an unrelated, pre-existing quirk.
+  // (e) card 70ce37f5: the one exempt member of the family (`\\?\<drive>:\...`) now actually COMMITS via
+  // the full writer path — the real defect this card closes (RED on pre-fix code: commitVault's own raw-
+  // string externally-managed comparison always mismatched for this form, so `w.committed` was false).
+  {
+    const w = await writeVaultFile(extendedLocalCandidate, "notes/extended-length.md", "# via extended-length form\n");
+    check("writeVaultFile(extended-length-local-form vaultPath, ...) actually commits (card 70ce37f5)", w.ok === true && w.committed === true);
+    check(
+      "the file landed on disk at the real target via the extended-length form",
+      fs.readFileSync(path.join(realVault, "notes", "extended-length.md"), "utf8").includes("extended-length"),
+    );
+  }
+
+  // (e continued) REGRESSION: the extended-length LOCAL form still never trips card 35dff468's own
+  // network/device-form warning — unchanged by this card. A second direct commitVault call (nothing new
+  // staged after (e) above) legitimately returns committed:false; this only asserts no warning + no throw.
   {
     const warnings = [];
     const origWarn = console.warn;
     console.warn = (...args) => { warnings.push(args.join(" ")); };
     let result;
     try {
-      result = await commitVault(extendedLocalCandidate, "loom: via extended-length local form");
+      result = await commitVault(extendedLocalCandidate, "loom: via extended-length local form (direct, nothing new staged)");
     } finally {
       console.warn = origWarn;
     }
     check(
-      "the extended-length LOCAL form never trips the new network/device-form warning (card 35dff468 regression)",
+      "the extended-length LOCAL form never trips the network/device-form warning (card 35dff468 regression, unchanged)",
       !warnings.some((w) => w.includes("network/device form")),
     );
     check("commitVault did not THROW for the extended-length local form either", result && typeof result.committed === "boolean");

@@ -821,6 +821,109 @@ function toEntry(p) {
   check("(16) ...and no new commit landed", commitCount(workerShapedWorktree16) === before16);
 }
 
+// ===================== (17) card 70ce37f5 round 2: code-repo collision survives a spelling variant of a REGISTERED repo =====================
+// Round 1 of 70ce37f5 fixed commitVault's externally-managed comparison to use canonicalized paths. Code
+// Review found the LATER checkCodeRepoCollision/assertRepoNotQuarantined/isCommitPathMergeEligible/
+// withCanonicalIndexLock/isVaultAutoCommitPaused calls still took the RAW vaultPath and re-canonicalize it
+// on every call — a junction can be re-pointed at a benign dir between confirmedRoot's computation and one
+// of those re-walks, letting a registered-repo collision slip past the check while the pinned add/commit
+// (already bound to the FROZEN confirmedRoot) still lands in the real registered repo. Round 2 keys all
+// five on confirmedRoot instead. These four pin that the refusal survives for every spelling that
+// canonicalizes to (or into) a registered repoPath, for BOTH commitVault directly and the full writer path.
+if (process.platform !== "win32") {
+  console.log("SKIP  (17) entire section (win32-only: exercises a real junction and \\\\?\\ extended-length spellings)");
+} else {
+  async function assertCollisionSurvives(label, codeRepo, vaultPathForCall, relWritePath = "note-via-write.md") {
+    // A REAL uncommitted change, written directly (never through vaultPathForCall) — if the collision
+    // check did NOT fire, this is exactly what commitVault would otherwise auto-commit, so the "no new
+    // commit landed" assertion below genuinely discriminates rather than passing vacuously on a clean tree.
+    fs.writeFileSync(path.join(codeRepo, `precommit-${label.replace(/[^a-z0-9]/gi, "_")}.md`), `# real pending edit (${label})\n`);
+    const before = commitCount(codeRepo);
+    const result = await commitVault(vaultPathForCall, `loom: auto-commit (should be refused — ${label})`);
+    check(`(17 ${label}) commitVault REFUSES`, result.committed === false && result.blockedReason === "code-repo-collision");
+    check(`(17 ${label}) ...no new commit landed via commitVault`, commitCount(codeRepo) === before);
+
+    const writeResult = await writeVaultFile(vaultPathForCall, relWritePath, `# via writeVaultFile (${label})\n`);
+    check(`(17 ${label}) writeVaultFile still writes to disk (ok:true) despite the collision`, writeResult.ok === true);
+    check(`(17 ${label}) ...but committed is false, with the SPECIFIC blockedReason surfaced`, writeResult.ok === true && writeResult.committed === false && writeResult.committedBlockedReason === "code-repo-collision");
+    check(`(17 ${label}) ...no new commit landed via writeVaultFile either`, commitCount(codeRepo) === before);
+  }
+
+  // (17a) a junction pointing AT the registered code root itself.
+  {
+    const codeRepo = path.join(root, "cc70ce37f5-a");
+    initRepo(codeRepo);
+    fs.writeFileSync(path.join(codeRepo, "src.ts"), "export const a = 1;\n");
+    git(codeRepo, "add src.ts");
+    git(codeRepo, "commit -m init");
+    const unrelatedVault = path.join(root, "cc70ce37f5-a-vault");
+    fs.mkdirSync(unrelatedVault, { recursive: true });
+    const project = { id: "p-70ce37f5-a", repoPath: codeRepo, vaultPath: unrelatedVault, vaultOnly: false, repos: [] };
+    setCodeRepoGuardProvider({ snapshot: () => [toEntry(project)], recordEvent: () => {} });
+
+    const junction = path.join(root, "cc70ce37f5-a-junction");
+    fs.symlinkSync(codeRepo, junction, "junction");
+    try {
+      await assertCollisionSurvives("junction to the registered root", codeRepo, junction);
+    } finally {
+      fs.rmSync(junction, { force: true });
+    }
+  }
+
+  // (17b) a junction pointing at a SUBDIRECTORY of the registered code root.
+  {
+    const codeRepo = path.join(root, "cc70ce37f5-b");
+    initRepo(codeRepo);
+    const docsDir = path.join(codeRepo, "docs");
+    fs.mkdirSync(docsDir);
+    fs.writeFileSync(path.join(codeRepo, "src.ts"), "export const b = 1;\n");
+    git(codeRepo, "add src.ts docs");
+    git(codeRepo, "commit -m init");
+    const unrelatedVault = path.join(root, "cc70ce37f5-b-vault");
+    fs.mkdirSync(unrelatedVault, { recursive: true });
+    const project = { id: "p-70ce37f5-b", repoPath: codeRepo, vaultPath: unrelatedVault, vaultOnly: false, repos: [] };
+    setCodeRepoGuardProvider({ snapshot: () => [toEntry(project)], recordEvent: () => {} });
+
+    const junction = path.join(root, "cc70ce37f5-b-junction");
+    fs.symlinkSync(docsDir, junction, "junction");
+    try {
+      await assertCollisionSurvives("junction to a subdirectory of the registered root", codeRepo, junction);
+    } finally {
+      fs.rmSync(junction, { force: true });
+    }
+  }
+
+  // (17c) a case-variant spelling of the registered code root.
+  {
+    const codeRepo = path.join(root, "cc70ce37f5-c");
+    initRepo(codeRepo);
+    fs.writeFileSync(path.join(codeRepo, "src.ts"), "export const c = 1;\n");
+    git(codeRepo, "add src.ts");
+    git(codeRepo, "commit -m init");
+    const unrelatedVault = path.join(root, "cc70ce37f5-c-vault");
+    fs.mkdirSync(unrelatedVault, { recursive: true });
+    const project = { id: "p-70ce37f5-c", repoPath: codeRepo, vaultPath: unrelatedVault, vaultOnly: false, repos: [] };
+    setCodeRepoGuardProvider({ snapshot: () => [toEntry(project)], recordEvent: () => {} });
+
+    await assertCollisionSurvives("a case-variant spelling", codeRepo, codeRepo.toUpperCase());
+  }
+
+  // (17d) the extended-length \\?\<drive>:\... spelling of the registered code root.
+  {
+    const codeRepo = path.join(root, "cc70ce37f5-d");
+    initRepo(codeRepo);
+    fs.writeFileSync(path.join(codeRepo, "src.ts"), "export const d = 1;\n");
+    git(codeRepo, "add src.ts");
+    git(codeRepo, "commit -m init");
+    const unrelatedVault = path.join(root, "cc70ce37f5-d-vault");
+    fs.mkdirSync(unrelatedVault, { recursive: true });
+    const project = { id: "p-70ce37f5-d", repoPath: codeRepo, vaultPath: unrelatedVault, vaultOnly: false, repos: [] };
+    setCodeRepoGuardProvider({ snapshot: () => [toEntry(project)], recordEvent: () => {} });
+
+    await assertCollisionSurvives("the \\\\?\\ extended-length form", codeRepo, "\\\\?\\" + codeRepo);
+  }
+}
+
 setCodeRepoGuardProvider(undefined); // leave no provider registered for any later test in the SAME process
 
 console.log(failures === 0 ? "\nALL PASS — vault auto-commit refuses a registered-code-repo collision." : `\n${failures} FAILURE(S).`);

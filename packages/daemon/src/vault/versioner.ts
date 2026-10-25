@@ -7,7 +7,8 @@ import chokidar, { type FSWatcher } from "chokidar";
 import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
-import { validateVaultPath, isUnsafeToCanonicalize } from "../projects/vault-path.js";
+import { validateVaultPath, isUnsafeToCanonicalize, canonicalizeForContainment } from "../projects/vault-path.js";
+import { comparisonKey } from "../projects/repos.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, buildGitIdentityFallbackEnv, isGitIdentityUnresolvedError } from "../git/bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
@@ -1000,6 +1001,15 @@ export async function commitVault(
     console.warn(`[vault-versioner] refusing to git-init/commit vault dir using a network/device form (cannot be safely canonicalized): ${vaultPath}`);
     return { committed: false };
   }
+  // @decision 70ce37f5 — canonicalize vaultPath ONCE here; every git-plumbing call below must pin
+  // GIT_DIR/GIT_WORK_TREE to THIS value, never the raw argument — see the decision record for why git
+  // itself refuses a GIT_DIR pinned through a `\\?\<drive>:\...` (or case/junction/8.3) spelling.
+  const vaultCanon = canonicalizeForContainment(vaultPath);
+  if (!vaultCanon.ok) {
+    console.warn(`[vault-versioner] ${vaultPath} commitVault: could not canonicalize vaultPath (${vaultCanon.error}) — skipping this commit rather than risk acting on an unsafe path.`);
+    return { committed: false };
+  }
+  const confirmedRoot = vaultCanon.value;
   const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
   const deps = opts?.deps ?? {};
   // Two tiers, two bounded instances (same seam, different ceiling) — see this function's own doc for
@@ -1037,48 +1047,69 @@ export async function commitVault(
   }
   if (isRepo) {
     const root = (await withTimeout(git.revparse(["--show-toplevel"]), cheapTimeoutMs, "git rev-parse --show-toplevel (vault commit)").catch(() => "")).trim();
-    const externallyManaged = !!root && root.replace(/\\/g, "/") !== vaultPath.replace(/\\/g, "/");
-    if (externallyManaged) {
-      // @decision a09b81a0 — an UNRESOLVED subfolder vaultPath (vault/writer.ts's own call shape) lands
-      // here; check the REAL root for a collision before treating this as a harmless backoff.
-      const rootCollision = checkCodeRepoCollision(root);
-      if (rootCollision) {
-        refuseCodeRepoCollision(vaultPath, root, rootCollision, "commit_vault");
-        return { committed: false, blockedReason: "code-repo-collision" };
+    if (root) {
+      // @decision 70ce37f5 — compare CANONICALIZED forms here, never raw strings — reuses the ONE
+      // canonicalization of vaultPath computed above (confirmedRoot/vaultCanon), never a fresh one.
+      const rootCanon = canonicalizeForContainment(root);
+      if (!rootCanon.ok) {
+        console.warn(
+          `[vault-versioner] ${vaultPath} commitVault: could not canonicalize the discovered repo root ` +
+          `"${root}" for the externally-managed comparison (${rootCanon.error}) — skipping this commit rather than risk a false match.`,
+        );
+        return { committed: false };
       }
-      return { committed: false };
+      const externallyManaged = comparisonKey(rootCanon.value) !== comparisonKey(confirmedRoot);
+      if (externallyManaged) {
+        // @decision a09b81a0 — an UNRESOLVED subfolder vaultPath (vault/writer.ts's own call shape) lands
+        // here; check the REAL root for a collision before treating this as a harmless backoff.
+        const rootCollision = checkCodeRepoCollision(root);
+        if (rootCollision) {
+          refuseCodeRepoCollision(vaultPath, root, rootCollision, "commit_vault");
+          return { committed: false, blockedReason: "code-repo-collision" };
+        }
+        return { committed: false };
+      }
+      // else: canonically root === vaultPath — vaultPath IS the confirmed repo root.
     }
-    // else: root === vaultPath — vaultPath IS the confirmed repo root.
+    // else: root resolution itself returned empty — treat as before (not externally managed; proceed
+    // using vaultPath as the confirmed root below).
   }
   // else: no repo discoverable anywhere up the chain — vaultPath itself will BECOME the repo root below.
 
   // @decision a09b81a0 — never cache this check; consult the live provider on every call so a runtime
   // repoPath rebind or a freshly created project is seen without a daemon restart.
-  const collision = checkCodeRepoCollision(vaultPath);
+  // @decision 70ce37f5 (round 2) — key on `confirmedRoot`, never raw vaultPath, to close a junction-
+  // repoint TOCTOU between this check and the pinned add/commit below — see the decision record.
+  const collision = checkCodeRepoCollision(confirmedRoot);
   if (collision) {
-    refuseCodeRepoCollision(vaultPath, vaultPath, collision, "commit_vault");
+    refuseCodeRepoCollision(vaultPath, confirmedRoot, collision, "commit_vault");
     return { committed: false, blockedReason: "code-repo-collision" };
   }
 
-  // @decision 8d49c36c — key this check on the CONFIRMED governing root (vaultPath), never a raw/possibly-
+  // @decision 8d49c36c — key this check on the CONFIRMED governing root, never a raw/possibly-
   // nested caller argument; re-check again before the commit call below. The add/commit calls below may
   // route through killableCanonicalRaw ONLY with VAULT_GIT_SAFETY_ARGS as extraConfigArgs (bf11ac3f).
-  const quarantineCheck = assertRepoNotQuarantined(vaultPath);
+  // @decision 70ce37f5 (round 2) — `confirmedRoot`, not raw vaultPath — same TOCTOU reasoning as the
+  // collision check above.
+  const quarantineCheck = assertRepoNotQuarantined(confirmedRoot);
   if (!quarantineCheck.ok) {
     console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${quarantineCheck.reason}`);
     return { committed: false };
   }
 
-  // Every remaining call operates on a CONFIRMED root (vaultPath) — pin GIT_DIR/GIT_WORK_TREE to it.
-  const { git: pinnedGit } = boundedVaultGitAtConfirmedRoot(vaultPath, { ...deps, timeoutMs: cheapTimeoutMs });
-  const { git: workGit } = boundedVaultGitAtConfirmedRoot(vaultPath, { ...deps, timeoutMs: workTreeTimeoutMs });
+  // Every remaining call operates on the CONFIRMED, CANONICAL root — pin GIT_DIR/GIT_WORK_TREE to it,
+  // never the raw vaultPath (see confirmedRoot's own definition above).
+  const { git: pinnedGit } = boundedVaultGitAtConfirmedRoot(confirmedRoot, { ...deps, timeoutMs: cheapTimeoutMs });
+  const { git: workGit } = boundedVaultGitAtConfirmedRoot(confirmedRoot, { ...deps, timeoutMs: workTreeTimeoutMs });
 
   if (!isRepo) {
     // @decision 306dd105 — belt-and-suspenders: before `git init`, also probe the ENCLOSING dir from
     // OUTSIDE `vaultPath` and refuse init when it's itself inside a repo. See the decision record.
     // @decision 306dd105 (round 2) — this probe is ALSO message-classified (isNotAGitRepositoryError
     //  below); same locale pin as the discovery probe above, independently, not inherited from it.
-    const parentDir = path.dirname(vaultPath);
+    // @decision 70ce37f5 (round 2) — dirname of `confirmedRoot`, never raw vaultPath: `git init` below
+    // runs AT confirmedRoot, so the enclosing-dir probe must match where init actually happens.
+    const parentDir = path.dirname(confirmedRoot);
     const { git: outsideGit } = boundedVaultGit(parentDir, { ...deps, timeoutMs: cheapTimeoutMs }, messageClassifiedProbeEnv());
     let enclosingRoot = "";
     try {
@@ -1114,16 +1145,19 @@ export async function commitVault(
   let currentOp: { label: string; timeoutMs: number } | undefined;
   // @decision bf11ac3f — hoisted ONCE per call so the add/commit section and the outer lock decision
   // below never disagree within the same commitVault call; still re-consulted fresh on the next call.
-  const mergeEligible = isCommitPathMergeEligible(vaultPath);
+  // @decision 70ce37f5 (round 2) — `confirmedRoot`, not raw vaultPath — same TOCTOU reasoning as the
+  // collision/quarantine checks above; also keeps this lineage's own enterMergeQuarantine/
+  // clearMergeQuarantineByToken calls below keyed on the SAME frozen identity, never a fresh re-walk.
+  const mergeEligible = isCommitPathMergeEligible(confirmedRoot);
   // @decision bf11ac3f — kill-confirm + quarantine-on-unconfirmed-kill state, used only when
   // mergeEligible — see the decision record for why the prior bare withTimeout here was unsafe.
   let raisedToken: string | undefined;
   const onTreeDeathSettled = (confirmed: boolean): void => {
-    if (confirmed && raisedToken) clearMergeQuarantineByToken(vaultPath, raisedToken);
+    if (confirmed && raisedToken) clearMergeQuarantineByToken(confirmedRoot, raisedToken);
   };
   const quarantineOnUnconfirmedKill = (e: unknown, label: string): void => {
     if (treeDeathUnconfirmed(e)) {
-      raisedToken = enterMergeQuarantine(vaultPath, "(vault commit)", unconfirmedKillReason(`vault ${label} could not be confirmed dead after a kill: ${(e as Error)?.message ?? e}`));
+      raisedToken = enterMergeQuarantine(confirmedRoot, "(vault commit)", unconfirmedKillReason(`vault ${label} could not be confirmed dead after a kill: ${(e as Error)?.message ?? e}`));
     }
   };
   const runCommitSequence = async (): Promise<CommitVaultResult> => {
@@ -1149,7 +1183,8 @@ export async function commitVault(
       // @decision a09b81a0 — round 4: the authoritative pause-lease check, placed HERE (inside
       // runCommitSequence, immediately before the mutating "git add .") rather than before the lock is
       // taken. See that decision record's "Round 4: the pause-lease check's placement" section.
-      if (isVaultAutoCommitPaused(vaultPath)) {
+      // @decision 70ce37f5 (round 2) — `confirmedRoot`, not raw vaultPath — same TOCTOU reasoning as above.
+      if (isVaultAutoCommitPaused(confirmedRoot)) {
         console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — an advisory pause lease is held (card 614dfbef).`);
         return { committed: false, blockedReason: "paused" };
       }
@@ -1159,9 +1194,9 @@ export async function commitVault(
       if (mergeEligible) {
         try {
           await killableCanonicalRaw(
-            vaultPath, ["add", "."], workTreeTimeoutMs, currentOp.label,
-            killableVaultGitFactory(vaultPath, deps), pinnedVaultGitEnv(vaultPath), onTreeDeathSettled,
-            vaultPath, VAULT_GIT_SAFETY_ARGS,
+            confirmedRoot, ["add", "."], workTreeTimeoutMs, currentOp.label,
+            killableVaultGitFactory(confirmedRoot, deps), pinnedVaultGitEnv(confirmedRoot), onTreeDeathSettled,
+            confirmedRoot, VAULT_GIT_SAFETY_ARGS,
           );
         } catch (e) {
           quarantineOnUnconfirmedKill(e, currentOp.label);
@@ -1173,7 +1208,7 @@ export async function commitVault(
       currentOp = { label: "git status", timeoutMs: cheapTimeoutMs };
       const status = await withTimeout(pinnedGit.status(), cheapTimeoutMs, currentOp.label);
       if (status.files.length === 0) return { committed: false };
-      const skipped = await unstageOversizedFiles(pinnedGit, vaultPath, status.files, maxFileBytes, cheapTimeoutMs);
+      const skipped = await unstageOversizedFiles(pinnedGit, confirmedRoot, status.files, maxFileBytes, cheapTimeoutMs);
       // NOTE: an unstaged file does NOT disappear from `git status` (it just reverts to untracked/modified),
       // so re-querying status here would still see it and wrongly think there's something left to commit.
       // Comparing counts against the ORIGINAL staged set is the correct "anything real left?" check.
@@ -1184,11 +1219,11 @@ export async function commitVault(
       // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides now, never a shared `-c user.*` pair; merged into the
       // real commit's own explicit env below, never spliced into argv.
       const identityEnv = await resolveGitIdentityFallbackArgs(
-        vaultPath, cheapTimeoutMs, deps.identityProbeGitFactory ?? deps.gitFactory ?? identityProbeVaultGit, pinnedVaultGitEnv(vaultPath),
+        confirmedRoot, cheapTimeoutMs, deps.identityProbeGitFactory ?? deps.gitFactory ?? identityProbeVaultGit, pinnedVaultGitEnv(confirmedRoot),
       );
       // @decision 8d49c36c — re-check right before the real commit call, AFTER resolveGitIdentityFallbackArgs
       // (its own `git var` subprocesses can take ~15s and would otherwise widen the window this check closes).
-      const recheck = assertRepoNotQuarantined(vaultPath);
+      const recheck = assertRepoNotQuarantined(confirmedRoot);
       if (!recheck.ok) {
         console.warn(`[vault-versioner] ${vaultPath} skipping commitVault (quarantined mid-call, after add) — ${recheck.reason}`);
         return { committed: false };
@@ -1198,9 +1233,9 @@ export async function commitVault(
       if (mergeEligible) {
         try {
           await killableCanonicalRaw(
-            vaultPath, commitArgs, workTreeTimeoutMs, currentOp.label,
-            killableVaultGitFactory(vaultPath, deps), { ...pinnedVaultGitEnv(vaultPath), ...identityEnv }, onTreeDeathSettled,
-            vaultPath, VAULT_GIT_SAFETY_ARGS,
+            confirmedRoot, commitArgs, workTreeTimeoutMs, currentOp.label,
+            killableVaultGitFactory(confirmedRoot, deps), { ...pinnedVaultGitEnv(confirmedRoot), ...identityEnv }, onTreeDeathSettled,
+            confirmedRoot, VAULT_GIT_SAFETY_ARGS,
           );
         } catch (e) {
           quarantineOnUnconfirmedKill(e, currentOp.label);
@@ -1211,7 +1246,7 @@ export async function commitVault(
         // test gitFactory is in play (a test fake never receives env anyway) — `workGit` stays untouched
         // (no `.env()` mutation), so the identity-less path is byte-identical to before this card.
         const commitGit = (Object.keys(identityEnv).length > 0 && !deps.gitFactory)
-          ? boundedSimpleGit(vaultPath, workTreeTimeoutMs, { ...pinnedVaultGitEnv(vaultPath), ...identityEnv }, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG)
+          ? boundedSimpleGit(confirmedRoot, workTreeTimeoutMs, { ...pinnedVaultGitEnv(confirmedRoot), ...identityEnv }, undefined, VAULT_GIT_SAFETY_UNSAFE, VAULT_GIT_SAFETY_CONFIG)
           : workGit;
         await withTimeout(commitGit.raw(commitArgs), workTreeTimeoutMs, currentOp.label);
       }
@@ -1231,16 +1266,19 @@ export async function commitVault(
   // repo would, whenever merge-eligible (isCommitPathMergeEligible — see that function's own doc for a
   // known gap this does NOT close: a project bound to a no-.git subfolder of this root).
   //
-  // `vaultPath` here is the CONFIRMED governing root (see above). `withCanonicalIndexLock` re-checks
+  // `confirmedRoot` here is the CONFIRMED governing root (see above). `withCanonicalIndexLock` re-checks
   // quarantine itself (AFTER acquiring the lock, which the pre-check above cannot see) — translate that
   // into commitVault's own established graceful quarantine-backoff shape rather than letting a new throw
   // type escape this function.
   //
   // @decision 62c4953a — `checkIndexLock:true`: whenever `mergeEligible` this IS the same canonical index
   // a real merge/GitWriter write would hit; translate to the SAME graceful backoff as quarantine below.
+  // @decision 70ce37f5 (round 2) — `confirmedRoot`, not raw vaultPath: this lock key must stay the SAME
+  // frozen identity every other check in this call used, never a fresh re-walk of a possibly-moved
+  // junction/case/device-form spelling.
   if (mergeEligible) {
     try {
-      return await withCanonicalIndexLock(vaultPath, runCommitSequence, { checkIndexLock: true });
+      return await withCanonicalIndexLock(confirmedRoot, runCommitSequence, { checkIndexLock: true });
     } catch (err) {
       if (err instanceof RepoQuarantinedError) {
         console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${err.message}`);
@@ -1250,7 +1288,7 @@ export async function commitVault(
         // Call the alert HERE: this refusal returns {committed:false} rather than throwing, so the outer
         // catch in commit()/flushSync() never sees it. maybeAlertStaleVaultLock has its own staleness
         // threshold + per-lock-instance dedupe, so this is safe on every debounced retry.
-        maybeAlertStaleVaultLock(vaultPath, opts?.lockAlert ?? {}, err);
+        maybeAlertStaleVaultLock(confirmedRoot, opts?.lockAlert ?? {}, err);
         if (shouldWarnIndexLockPresent(vaultPath)) {
           console.warn(`[vault-versioner] ${vaultPath} skipping commitVault — ${err.message}`);
         }
