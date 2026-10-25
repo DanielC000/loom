@@ -80,8 +80,18 @@ export type PathCanonResult =
  * NT native namespace prefix (`\??\…`). The ONE exemption is the extended-length LOCAL drive form,
  * `\\?\<drive>:\…` (or its forward-slash spelling `//?/<drive>:/…`) — verified directly to canonicalize
  * correctly through realpath, so it is deliberately let through rather than refused.
+ *
+ * Exported (card 35dff468) so a caller that is about to ACT on a stored `vaultPath` — never just compare
+ * two of them for containment — can refuse one of these forms outright, BEFORE any git discovery call: a
+ * genuine UNC network share is not a carve-out here. `checkVaultRepoTripleContainment` already refuses
+ * ANY unsafe-to-canonicalize vaultPath unconditionally at create/update time — even for a vault-only
+ * project with no code repo at all, since it compares `vaultPath` against `repoPath`, which for a
+ * vault-only project IS `vaultPath` itself, so the self-comparison still fails — so a UNC (or other
+ * device-form) vaultPath can never be CREATED today; a caller encountering one on a stored row is always
+ * looking at either a legacy row that predates that guard, or a hand-edited DB. Treat it exactly like
+ * every other member of this family, not as a legitimate configuration to special-case.
  */
-function isUnsafeToCanonicalize(p: string): boolean {
+export function isUnsafeToCanonicalize(p: string): boolean {
   if (/^[\\/]{2}\?[\\/][A-Za-z]:[\\/]/.test(p)) return false; // \\?\C:\... / //?/C:/... — safe, exempt
   if (/^[\\/]{2}/.test(p)) return true; // any other \\... form: UNC, \\?\UNC\..., \\.\device
   if (/^\\\?\?\\/.test(p)) return true; // the NT native namespace prefix \??\...

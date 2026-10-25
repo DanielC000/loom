@@ -7,7 +7,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import type { SimpleGit, SimpleGitOptions } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME, WORKTREES_DIR } from "../paths.js";
-import { validateVaultPath } from "../projects/vault-path.js";
+import { validateVaultPath, isUnsafeToCanonicalize } from "../projects/vault-path.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, buildGitIdentityFallbackEnv, isGitIdentityUnresolvedError } from "../git/bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
@@ -991,6 +991,13 @@ export async function commitVault(
   // @decision 68cc29db — refuse unconditionally rather than init/stage/commit an operational dir.
   if (isOperationalVaultDir(vaultPath)) {
     console.warn(`[vault-versioner] refusing to git-init/commit operational vault dir: ${vaultPath}`);
+    return { committed: false };
+  }
+  // @decision 35dff468 — refuse a network/device-form vaultPath BEFORE any git discovery call; this is
+  // the chokepoint vault/writer.ts's writers call directly with a project's raw, never-revalidated
+  // vaultPath — see the decision record.
+  if (isUnsafeToCanonicalize(vaultPath)) {
+    console.warn(`[vault-versioner] refusing to git-init/commit vault dir using a network/device form (cannot be safely canonicalized): ${vaultPath}`);
     return { committed: false };
   }
   const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
@@ -2246,6 +2253,13 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
     const check = validateVaultPath(vaultPath);
     if (!check.ok) {
       console.warn(`[vault-versioner] project ${project.id} (${project.name}) has an invalid vaultPath ("${vaultPath}"): ${check.error} — skipped here; rebind it via PATCH /api/projects/:id or the web UI.`);
+      continue;
+    }
+    // @decision 35dff468 — never let a network/device-form vaultPath (validateVaultPath deliberately lets
+    // it through, per f45821a2) reach resolveVaultRepoContext/git init here; it is never a legitimate
+    // configuration — see the decision record for why.
+    if (isUnsafeToCanonicalize(vaultPath)) {
+      console.warn(`[vault-versioner] project ${project.id} (${project.name}) has a vaultPath ("${vaultPath}") using a network/device form (UNC, a DOS device path, or the NT native namespace prefix) that cannot be safely canonicalized — skipped here; rebind it via PATCH /api/projects/:id or the web UI.`);
       continue;
     }
     // Per-project isolation: resolve+construct+start() can THROW on a bad/inaccessible vaultPath

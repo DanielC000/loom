@@ -145,6 +145,16 @@ db.insertProject({ id: "pRel", name: "ZZrel", repoPath: pRel, vaultPath: "relati
 // filesystem access, so no real directory is ever touched regardless of platform.
 const drivelessVaultPath = "/b709113e-driveless-root-marker";
 db.insertProject({ id: "pDriveless", name: "ZZdriveless", repoPath: root, vaultPath: drivelessVaultPath, config: {}, archivedAt: null, createdAt: now });
+// card 35dff468: a NETWORK/DEVICE-FORM vaultPath (a UNC path, a DOS device path `\\.\...`, or the NT
+// native namespace prefix `\??\...`) passes validateVaultPath (f45821a2 deliberately lets this family
+// through there, so the more specific write-time containment check can refuse it instead — but that
+// check runs only at create/update, never again here) and must ALSO be diagnosed loudly and SKIPPED,
+// never handed to resolveVaultRepoContext/git init, where nothing can safely canonicalize it. A plain
+// UNC form (`\\host\share\...`) is used here, win32-only — on POSIX a leading backslash fails the plain
+// absolute-path gate (validateVaultPath) first, the same earlier-refusal shape vault-path-review-
+// bypasses.mjs's (A3/A9, posix) cases already document, so this hazard has no POSIX equivalent to test.
+const deviceFormVaultPath = "\\\\b709113e-device-form-host\\share";
+db.insertProject({ id: "pDeviceForm", name: "ZZdeviceform", repoPath: root, vaultPath: deviceFormVaultPath, config: {}, archivedAt: null, createdAt: now });
 
 const versioners = [];
 try {
@@ -171,14 +181,33 @@ try {
   } else {
     console.log("SKIP  win32 drive-less rooted vaultPath check (this hazard is win32-specific; not applicable on this platform)");
   }
+  // card 35dff468: same family as the drive-less check above, but for a network/device-form vaultPath
+  // (here: a plain UNC path). A leading backslash is never an absolute path on POSIX (path.isAbsolute
+  // requires a leading "/"), so on a non-win32 host this row is caught by validateVaultPath's generic
+  // "must be an absolute path" refusal BEFORE ever reaching the isUnsafeToCanonicalize check this card
+  // adds — same earlier-refusal shape vault-path-review-bypasses.mjs's (A3/A7/A8/A9, posix) cases
+  // document for the identical reason. Only win32 exercises the actual isUnsafeToCanonicalize skip.
+  if (process.platform === "win32") {
+    check(
+      "a network/device-form vaultPath (a UNC path) is named loudly and specifically, never handed to git init (card 35dff468)",
+      warningsBoot.some((w) => w.includes("[vault-versioner]") && w.includes("pDeviceForm") && w.includes("network/device form") && w.includes(deviceFormVaultPath)),
+    );
+  } else {
+    check(
+      "(posix) a network/device-form vaultPath fails the earlier absolute-path gate instead (no leading '/') — still never reaches git init",
+      warningsBoot.some((w) => w.includes("[vault-versioner]") && w.includes("pDeviceForm") && w.includes("vaultPath must be an absolute path") && w.includes(deviceFormVaultPath)),
+    );
+  }
 
   // (a)+(c)+(e): exactly 4 watchers — vaultA (deduped p1+p2) + vaultB + plainRepo ROOT (deduped p6+p7
   // subfolders) + vaultD (pGood, started DESPITE the earlier-iterating pBad throwing). Empty (p4),
   // archived (p5), Obsidian-Git-managed (p8), the operational/daemon-home vaults (op1 loom.db / op2
-  // worktrees/ / op3 == LOOM_HOME), the throwing pBad, the relative-vaultPath pRel, and the win32
+  // worktrees/ / op3 == LOOM_HOME), the throwing pBad, the relative-vaultPath pRel, the win32
   // drive-less-rooted pDriveless (refused by validateVaultPath on win32; on a non-win32 host it instead
   // throws inside resolveVaultRepoContext against its non-existent path, caught the same way pBad is —
-  // either way it never becomes a watcher) are all skipped.
+  // either way it never becomes a watcher), and pDeviceForm (refused by isUnsafeToCanonicalize on win32,
+  // card 35dff468; on a non-win32 host refused earlier still by validateVaultPath's absolute-path gate)
+  // are all skipped.
   check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git/operational)", versioners.length === 4);
   check("each started handle is a VaultVersioner", versioners.every((v) => v instanceof VaultVersioner));
 
