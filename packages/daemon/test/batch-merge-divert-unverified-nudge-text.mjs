@@ -94,7 +94,9 @@ try {
 
     const r = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
     check("(A) precondition: the batch degraded to pending (tiny syncAttachBudgetMs)", r.settled === false);
-    await waitUntil(() => nudges.some((n) => n.target === P.mgrId && /\[loom:merge-batch-diverted\]/.test(n.text)), { timeoutMs: 30_000, intervalMs: 50, label: "merge-batch-diverted settle nudge" });
+    // Card 7b9bafb7's ambient-overshoot calibration (see case (B) below for the full citation) applies
+    // here too — same async settle-nudge wait, same host-contention exposure.
+    await waitUntil(() => nudges.some((n) => n.target === P.mgrId && /\[loom:merge-batch-diverted\]/.test(n.text)), { timeoutMs: ambientScaledBudget(30_000, 3), intervalMs: 50, label: "merge-batch-diverted settle nudge" });
     const nudge = nudges.find((n) => n.target === P.mgrId && /\[loom:merge-batch-diverted\]/.test(n.text)).text;
     check("(A) the nudge carries the restore-checkout guidance", /Restore the canonical checkout to the expected mainline branch BEFORE any worker_merge_confirm/.test(nudge));
     check("(A) the nudge states NOTHING was started", /NOTHING was started/.test(nudge));
@@ -170,7 +172,9 @@ try {
 
     const r = await sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
     check("(C) precondition: the batch degraded to pending (tiny syncAttachBudgetMs)", r.settled === false);
-    await waitUntil(() => nudges.some((n) => n.target === P.mgrId && /\[loom:merge-batch-watermark-unreadable\]/.test(n.text)), { timeoutMs: 30_000, intervalMs: 50, label: "merge-batch-watermark-unreadable settle nudge" });
+    // Card 7b9bafb7's ambient-overshoot calibration (see case (B) above for the full citation) applies
+    // here too — same async settle-nudge wait, same host-contention exposure.
+    await waitUntil(() => nudges.some((n) => n.target === P.mgrId && /\[loom:merge-batch-watermark-unreadable\]/.test(n.text)), { timeoutMs: ambientScaledBudget(30_000, 3), intervalMs: 50, label: "merge-batch-watermark-unreadable settle nudge" });
     const nudge = nudges.find((n) => n.target === P.mgrId && /\[loom:merge-batch-watermark-unreadable\]/.test(n.text)).text;
     check("(C) the nudge uses its OWN dedicated tag, never the generic -diverted one", !/\[loom:merge-batch-diverted\]/.test(nudge));
     check("(C) the nudge names the human-only mainline-watermark reset route", /POST \/api\/projects\/:id\/mainline-watermark\/reset/.test(nudge));
