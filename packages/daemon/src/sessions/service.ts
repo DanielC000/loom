@@ -929,6 +929,10 @@ type ConfirmMergeResult = {
    *  `confirmWorkerMerge` (no gate, nothing attempted); classified `"canonical-repo-shallow"`,
    *  `NEVER_CACHED_OUTCOMES`. Mirrors `MergeBatchResult.canonicalRepoShallow`. */
   canonicalRepoShallow?: boolean;
+  /** @decision b4cc7114 (round 2, M1) — the stranded-work check ITSELF was refused (commondir-trust, not
+   *  an observed branch); classified `"stranded-verification-refused"`, `NEVER_CACHED_OUTCOMES` — a
+   *  cached "rejected" would replay a repaired-but-unmoved-HEAD refusal forever. */
+  strandedVerificationRefused?: boolean;
   /** @decision fb525c31 — set ONLY via `squashRefusedResult` (the ONE constructor): a refusal caused by the state of the CANONICAL CHECKOUT (staged dirt, dirty/untracked overlap on a path the branch touches — at admission or at squash time) or by the squash itself failing after a passing gate (`conflict`/`merge_failed`). Not a verdict about the branch, so classified `"squash-refused"` and never cached (`NEVER_CACHED_OUTCOMES`): a re-call after the human cleans the checkout must be a real re-attempt. Deliberately NOT set for STAGE_EMPTY_RETRY/orphaned_zero_ahead (those ARE about the branch and stay cached). */
   squashRefused?: true;
   /** Card 6f13746c: an UNGATED (gate-off / gate-interval) landing was refused in-lock because a gate became owed after its decision — nothing squashed,
@@ -18367,11 +18371,19 @@ export class SessionService {
     const diff = await diffBranch(repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true }, { timeoutMs: this.gitOpMs });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
     // leaves the assigned branch 0-ahead, so `diff` reads empty and the stranded commits would be
-    // silently lost. Surface a WARNING at review time so the manager sees the divergence (only an
-    // AFFIRMATIVE stranded signal warns; a check failure fails safe to NOT stranded). The diff fields
-    // are returned unchanged.
+    // silently lost. Surface a WARNING at review time so the manager sees the divergence — an AFFIRMATIVE
+    // stranded signal warns, a classified commondir-trust refusal ALSO warns (see verificationRefused/
+    // refusalText below), and only an ORDINARY check error/timeout fails safe to NOT stranded. The diff
+    // fields are returned unchanged.
     const stranded = await detectStrandedWork(repoPath, worker.worktreePath ?? worker.cwd, worker.branch, { timeoutMs: this.gitOpMs });
-    const strandedWarning = stranded.stranded
+    // @decision b4cc7114 — verificationRefused (the WORKTREE's own `wt` probe) and refusalText (the
+    // REPO-level `git` handle, round 2 m1) word their refusal around verification failure, never around a
+    // fabricated branch/commit.
+    const strandedWarning = stranded.verificationRefused
+      ? `STRANDED-WORK CHECK REFUSED: this worktree's own commondir could not be verified against the trusted main checkout — the shape a worker-planted commondir redirect takes. Treating as POSSIBLY stranded out of caution; escalate to the Platform Lead to inspect the shared .git before confirming.`
+      : stranded.refusalText
+      ? `STRANDED-WORK CHECK REFUSED: ${stranded.refusalText} Treating as POSSIBLY stranded out of caution.`
+      : stranded.stranded
       ? `STRANDED WORK: worker committed to '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} commit(s) ahead) instead of its assigned branch '${worker.branch}', which is empty. Confirming would merge nothing and LOSE that work. Re-point '${worker.branch}' to ${stranded.commit} (or cherry-pick it) before confirming.`
       : undefined;
     // Card 5150fdc2 part 4 — the merge-side backstop: "cheap honesty" that this branch's base is behind
@@ -18430,7 +18442,7 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
       detail: {
         branch: worker.branch, filesChanged: diff.filesChanged, tip: reviewedTip, repoKey: worker.repoKey ?? null,
-        ...(stranded.stranded ? { stranded: stranded.branch } : {}),
+        ...(stranded.verificationRefused || stranded.refusalText ? { strandedVerificationRefused: true } : stranded.stranded ? { stranded: stranded.branch } : {}),
         ...(behindMain ? { behindMain } : {}),
         ...(deniedAdds.length ? { deniedAdds: deniedAdds.length } : {}),
       },
@@ -19045,10 +19057,29 @@ export class SessionService {
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
     // branch instead of its assigned `loom/<key>`. The assigned branch is then 0-ahead, so the squash
     // merge below would stage NOTHING and silently DROP the real work (incident: worker 712fd5aa,
-    // commit 1309552). Only an AFFIRMATIVE stranded signal refuses — a check error/timeout fails safe
-    // to NOT stranded so a flaky check never blocks a legitimate merge. Leaves the repo/worktree
-    // untouched so the manager can recover the commit.
+    // commit 1309552). An AFFIRMATIVE stranded signal refuses; so does a classified commondir-trust
+    // refusal on the check itself (card b4cc7114 — see verificationRefused below); only an ORDINARY
+    // check error/timeout fails safe to NOT stranded, so a flaky check never blocks a legitimate merge.
+    // Leaves the repo/worktree untouched so the manager can recover the commit.
     const stranded = await detectStrandedWork(repoPath, worktreePath, branch, { timeoutMs: this.gitOpMs });
+    if (stranded.verificationRefused) {
+      // @decision b4cc7114 (round 2, M1) — the RESULT flag (not just the event detail) is required:
+      // classifyOutcome reads it to classify "stranded-verification-refused" (NEVER_CACHED_OUTCOMES)
+      // before the generic "rejected" fallthrough — repairing the .git never moves the branch's HEAD.
+      const detailText = "STRANDED-WORK CHECK REFUSED: this worktree's own commondir could not be verified against the trusted main checkout before checking for divergent-branch work — the shape a worker-planted commondir redirect takes. Refusing rather than risk an empty merge silently dropping unreadable work; escalate to the Platform Lead to inspect the shared .git, then re-confirm.";
+      const { suppressed, sha } = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "stranded", sha, strandedVerificationRefused: true, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: "stranded-work check refused (commondir could not be verified) — escalate to the Platform Lead before re-confirming", detailText, notified: !suppressed, opId: thisOpId, strandedVerificationRefused: true };
+    }
+    if (stranded.refusalText) {
+      // @decision b4cc7114 (round 2, m1) — the REPO-level handle's own refusal, worded via its real
+      // describeGitFailure classification (e.g. repin guidance) — never the worktree-commondir sentence.
+      // Still classified "stranded-verification-refused" (same NEVER_CACHED_OUTCOMES reasoning as above).
+      const detailText = `STRANDED-WORK CHECK REFUSED: ${stranded.refusalText} Refusing rather than risk an empty merge silently dropping unreadable work; then re-confirm.`;
+      const { suppressed, sha } = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "stranded", sha, strandedVerificationRefused: true, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: `stranded-work check refused: ${stranded.refusalText}`, detailText, notified: !suppressed, opId: thisOpId, strandedVerificationRefused: true };
+    }
     if (stranded.stranded) {
       // Card 522cf573 DoD 4: squash phase never reached — this refusal fires BEFORE the gate or the squash
       // itself ever runs.
@@ -22262,6 +22293,10 @@ export class SessionService {
         }
       }
       const stranded = await detectStrandedWork(finalRepoPath, worktreePath, r.branch, { timeoutMs: this.gitOpMs });
+      // @decision b4cc7114 — a classified commondir refusal names the verification failure, not a
+      // fabricated branch name — same split as the solo confirm's own refusal above.
+      if (stranded.verificationRefused) { strandedFallback.push({ workerSessionId: r.workerSessionId, reason: "stranded-work check refused (this worktree's commondir could not be verified) — refusing the empty batch slot; escalate to the Platform Lead, then re-confirm" }); continue; }
+      if (stranded.refusalText) { strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `stranded-work check refused: ${stranded.refusalText} Refusing the empty batch slot; re-confirm once resolved.` }); continue; }
       if (stranded.stranded) { strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `stranded work on '${stranded.branch}' — refusing the empty batch slot; re-point the branch then re-confirm` }); continue; }
       candidates.push(r);
     }
@@ -25246,7 +25281,7 @@ export class SessionService {
         // @decision c30952c1 — `worktreeGoneLandingUnconfirmed` classifies distinctly too, same reasoning:
         // the cause (a transient lookup glitch, or the worktree still being gone) is checked fresh on a
         // re-call, never replayed from cache.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
@@ -26459,7 +26494,7 @@ export class SessionService {
     // @decision 6796c9ea — read the dirty state AFTER the reap, immediately before removal: a process still rooted in the worktree could write a file
     //  between an earlier check and removeWorktree. A dir with no `.git` link reads clean (see worktreeHasGitLink), so a dead leftover still reaches removal.
     if (opts?.retainIfUncommitted && !opts.forceRemoveWorktree) {
-      const st = await readWorktreeUncommittedState(worktreePath, { timeoutMs: this.gitOpMs });
+      const st = await readWorktreeUncommittedState(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
       if (st.state !== "clean") {
         const dirtyWorktree: DirtyWorktreeRetained = st.state === "dirty"
           ? { files: st.files.slice(0, DIRTY_WORKTREE_FILES_CAP), truncated: st.files.length > DIRTY_WORKTREE_FILES_CAP, unverified: false }

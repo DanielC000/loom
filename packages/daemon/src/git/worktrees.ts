@@ -2744,13 +2744,18 @@ export function findNestedWorktreeLikeChild(dirPath: string): string | null {
   return null;
 }
 export type WorktreeUncommittedState = { state: "clean" } | { state: "dirty"; files: string[] } | { state: "unknown"; reason: string };
-export async function readWorktreeUncommittedState(worktreePath: string, deps: BoundedGitDeps = {}): Promise<WorktreeUncommittedState> {
+/** @decision b4cc7114 — `repoPath` (the real trusted main) is REQUIRED so the dirty-check below can
+ *  verify the worktree's own commondir rather than opt out of verifying it; every caller already has it
+ *  (finalizeMerge's gcWorktreeDir already takes a repoPath). */
+export async function readWorktreeUncommittedState(repoPath: string, worktreePath: string, deps: BoundedGitDeps = {}): Promise<WorktreeUncommittedState> {
   // A missing dir, or a dead leftover with no `.git` link (the Windows busy-handle case: `git worktree remove` dropped the registration but the dir survived),
   // has nothing git can lose — it must reach removal, or the re-finalize paths built for exactly this leftover would never clean it.
   if (!worktreeHasGitLink(worktreePath)) return { state: "clean" };
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: a read-only dirty check.
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
+  // @decision b4cc7114 — this dirty check gates REAL worktree removal (finalizeMerge's retainIfUncommitted
+  // path), not a misleading read only, so it threads the real trusted main instead of the opt-out. A
+  // classified refusal lands in the catch below as state:"unknown", which the caller already retains on.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, deps.trustedMainRoot ?? defaultTrustedMainRoot(repoPath)));
   try {
     const porcelainZ = await withTimeout(
       makeGit(worktreePath, timeoutMs).raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z (finalize dirty check)",
@@ -3314,8 +3319,10 @@ export async function worktreeHasWork(
   // whose methods reject instead), so the ops below already see that as an ordinary bounded failure and
   // fail safe through their own catches; no separate wrap is needed here.
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: a read-only dirty check.
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
+  // @decision b4cc7114 — this `wt` handle feeds a REAL GC-deletion decision, not a misleading read only,
+  // so it threads the real trusted main instead of the 3a5c5d4a advisory-read opt-out (same pattern
+  // diffBranch's own worktree-scoped read already uses).
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, deps.trustedMainRoot ?? defaultTrustedMainRoot(repoPath)));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see worktreeStatusHasWork).
@@ -3359,11 +3366,25 @@ export interface StrandedWork {
   commit?: string;
   /** commits on the divergent branch but not on canonical main. */
   ahead?: number;
+  /** @decision b4cc7114 — true only when a commondir-trust refusal on the WORKTREE's own `wt` probe
+   *  forced stranded:true; branch/commit/ahead are absent then — word a refusal around verification
+   *  failure, never a named branch/commit. See `refusalText` for the sibling REPO-level case. */
+  verificationRefused?: boolean;
+  /** @decision b4cc7114 (round 2, m1) — set ONLY for a classified refusal from the REPO-level `git`
+   *  handle (never the `wt` probe — see `verificationRefused`): the real `describeGitFailure`-classified
+   *  message (e.g. a pin-mismatch's own repin guidance), never the worktree-commondir wording. */
+  refusalText?: string;
 }
 
 /** MERGE-GATE BACKSTOP (2026-06-10): catches a worker whose commits are STRANDED on a self-created
  *  branch instead of its assigned `loom/<key>` (incident: worker `712fd5aa`, commit `1309552` silently
- *  lost via an empty squash merge). FAILS SAFE to `{stranded:false}` on any error — never blocks a merge. */
+ *  lost via an empty squash merge). FAILS SAFE to `{stranded:false}` on any ORDINARY error.
+ *
+ *  @decision b4cc7114 — a classified commondir-trust refusal on the `wt` probe fails safe the OTHER way,
+ *  to `{stranded:true, verificationRefused:true}` — an unverifiable worktree must never read as clean.
+ *  @decision b4cc7114 (round 2, m1) — a refusal from the REPO-level `git` handle (e.g. a durable
+ *  commondir-trust PIN mismatch on `repoPath` itself) is a DIFFERENT object with its own remedy (repin
+ *  guidance, never "the worktree's commondir") — scoped to its own try block below, see `refusalText`. */
 export async function detectStrandedWork(
   repoPath: string,
   worktreePath: string,
@@ -3374,10 +3395,13 @@ export async function detectStrandedWork(
   // @decision 967eb326 — pin LC_ALL/LANGUAGE=C at construction so the detached-HEAD classification
   // below matches git's fatal text under any locale — an unpinned read would otherwise silently fail
   // safe to stranded:false even for a worktree genuinely stranded on a detached HEAD.
-  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: `wt` below is read-only.
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" }), undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
+  // @decision b4cc7114 — `wt` below gates a real merge-refusal decision, not a misleading read only, so
+  // it threads the real trusted main instead of the 3a5c5d4a advisory-read opt-out.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, localReadGitEnv(process.env, { LC_ALL: "C", LANGUAGE: "C" }), undefined, undefined, deps.trustedMainRoot ?? defaultTrustedMainRoot(repoPath)));
+
+  let mainSha: string;
   try {
-    const mainSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD")).trim();
+    mainSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD")).trim();
 
     // (1) Work on the ASSIGNED branch? Any commit reachable from it but not from canonical main ⇒ the
     //     normal path — not stranded, regardless of what the worktree is checked out on.
@@ -3388,10 +3412,21 @@ export async function detectStrandedWork(
       10,
     );
     if (Number.isFinite(assignedAhead) && assignedAhead > 0) return { stranded: false };
+  } catch (e) {
+    // @decision b4cc7114 (round 2, m1) — this phase reads ONLY the REPO-level `git` handle (never `wt`);
+    // a classified refusal here is worded via its OWN describeGitFailure classification (e.g. a
+    // pin-mismatch's own repin guidance), never `verificationRefused`'s worktree-commondir wording.
+    if (e instanceof CanonicalGitRefusal) {
+      const d = describeGitFailure(e);
+      return { stranded: true, refusalText: canonicalFailureMessage(d, `could not determine whether this worktree holds stranded work: ${d.text}`) };
+    }
+    return { stranded: false }; // FAIL SAFE: a check error/timeout must never block a legitimate merge
+  }
 
-    // (2) Assigned branch is empty (0 ahead). Inspect the WORKTREE's actual checked-out branch.
-    // card 967eb326 — `symbolic-ref HEAD` is never ambiguity-shortened, unlike `rev-parse --abbrev-ref
-    // HEAD` (which can resolve to "heads/<name>" beside a same-named tag or refs/remotes/<name>/HEAD).
+  // (2) Assigned branch is empty (0 ahead). Inspect the WORKTREE's actual checked-out branch.
+  // card 967eb326 — `symbolic-ref HEAD` is never ambiguity-shortened, unlike `rev-parse --abbrev-ref
+  // HEAD` (which can resolve to "heads/<name>" beside a same-named tag or refs/remotes/<name>/HEAD).
+  try {
     const wt = makeGit(worktreePath, timeoutMs);
     let wtBranchRef: string | null = null;
     try {
@@ -3421,7 +3456,11 @@ export async function detectStrandedWork(
 
     const commit = (await withTimeout(wt.raw(["rev-parse", "--short", "HEAD"]), timeoutMs, "git rev-parse --short HEAD")).trim();
     return { stranded: true, branch: wtBranch, commit, ahead: wtAhead };
-  } catch {
+  } catch (e) {
+    // @decision b4cc7114 — a classified commondir-trust refusal on the WORKTREE's own probe fails safe
+    // the OTHER way (assume stranded), never as clean/not-stranded; an ordinary error/timeout keeps the
+    // fail-safe below. Scoped to THIS try block only (round 2, m1) — a repo-level refusal is handled above.
+    if (e instanceof CanonicalGitRefusal) return { stranded: true, verificationRefused: true };
     return { stranded: false }; // FAIL SAFE: a check error/timeout must never block a legitimate merge
   }
 }

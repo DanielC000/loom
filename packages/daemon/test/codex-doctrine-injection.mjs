@@ -261,7 +261,7 @@ let firstBlock = null;
     fs.rmSync(path.join(workerCwd, "real-work.txt"));
 
     // --- finalize's own dirty-check reads a worktree holding ONLY the injected AGENTS.md as clean -------
-    const finalizeState = await readWorktreeUncommittedState(workerCwd);
+    const finalizeState = await readWorktreeUncommittedState(mainCwd, workerCwd);
     check("finalize's readWorktreeUncommittedState reads a worktree holding only the injected AGENTS.md as clean",
       finalizeState.state === "clean");
 

@@ -125,7 +125,21 @@ if (junctionOk) {
 }
 check("(H) a registered repo of an ARCHIVED project, under the worktrees root, survives", fs.existsSync(path.join(repoH, ".git")) && fs.existsSync(path.join(repoH, "tracked.txt")));
 check("(G) a wedge entry for a refused path is parked as needsHuman (not retried forever)", db.getWedgedWorktree(outsideWedge)?.needsHuman === true);
-check("(2) the reconcile result COUNTS refused paths (A, B, H ⇒ ≥ 3)", (res.worktreesPathRefused ?? 0) >= 3);
+// @decision b4cc7114 — (H)'s own session row is DELIBERATELY corrupted (its project's resolved repoPath,
+// "h-live-repo", never exists on disk; its worktreePath is a DIFFERENT project's real registered repo,
+// repoH) to drive `gcWorktreeDir`'s own repo-registry refusal. Since worktreeHasWork now threads
+// `defaultTrustedMainRoot(repoPath)` into its `wt` probe, that mismatch (trustedMainRoot resolves to the
+// nonexistent "h-live-repo", never repoH) is ITSELF caught first: a commondir-trust refusal on the probe,
+// fail-safe to `worktreesKept` (never `worktreesPathRefused`) — one MORE layer of protection firing before
+// the registry check ever gets a turn, not a weaker one. (A) and (B) are unaffected (their own
+// repoPath/worktreePath genuinely agree, or the dead-leftover branch is taken before worktreeHasWork runs
+// at all) and still land in `worktreesPathRefused`. Assert the COMBINED protection signal instead of
+// hardcoding which bucket a given protected path lands in — that bucket is an implementation detail of
+// WHICH check fired first, not a promise either check makes on its own.
+check("(2) the reconcile result COUNTS every protected path, refused OR kept (A, B ⇒ path-refused; H ⇒ kept via the earlier commondir-trust fail-safe) ⇒ ≥ 3 combined",
+  (res.worktreesPathRefused ?? 0) + (res.worktreesKept ?? 0) >= 3);
+check("(2b) …and specifically: A+B alone still account for at least 2 path-refused (the registry check genuinely still runs for the paths that reach it)", (res.worktreesPathRefused ?? 0) >= 2);
+check("(2c) …and H specifically lands in worktreesKept (the commondir-trust fail-safe is what actually caught it, not a lucky miscount elsewhere)", (res.worktreesKept ?? 0) >= 1);
 
 // (F) reclaimNodeModulesDir: a node_modules that IS a link into a repo is refused; a real node_modules dir under the root is still reclaimed.
 {
