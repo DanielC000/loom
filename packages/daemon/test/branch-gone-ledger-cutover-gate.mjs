@@ -72,7 +72,7 @@ const confirm = async (ctx, w) => ctx.sessions.confirmWorkerMergeTracked(ctx.mgr
 // `expectedMainlineBranch` (confirmWorkerMerge's own watermark-branch resolution) is captured ONCE at the
 // START of a confirm call, BEFORE that same call's own advanceMainlineWatermark establishes a watermark
 // on true first sight — so the VERY FIRST landing for any (project, repoKey) never writes a
-// mainline_landed_commits row (recordMainlineLedgerEntry's own gate requires expectedMainlineBranch
+// mainline_landed_commits row (recordMainlineLedgerEntryIfRepoUnchanged's own gate requires expectedMainlineBranch
 // truthy). Every scenario below that uses the real confirm flow needs a throwaway warm-up landing first.
 async function warmup(ctx, tag) {
   const w = await addWorker(ctx, tag);

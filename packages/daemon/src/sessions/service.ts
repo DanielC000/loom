@@ -78,7 +78,7 @@ import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatically } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
-import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, checkCanonicalIndexLockNotPresent } from "../git/repo-lock.js";
+import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, checkCanonicalIndexLockNotPresent, literalRepoPathKey } from "../git/repo-lock.js";
 import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
 import { isSupersededByRecycle, currentHaltedSuccessor, isSanctionedHaltedPartner, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
@@ -21383,7 +21383,7 @@ export class SessionService {
     // of mainlineCheckedTip): a landing whose own tripwire check fail-opened still needs a walkable row.
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — gated on `merge.landedBase` too: an unverified
     // `merge.sha` (mergeBranch's own parent+tree check failed, see that function) never gets a ledger row.
-    if (merge.ok && !merge.noop && merge.sha && merge.landedBase && expectedMainlineBranch) this.recordMainlineLedgerEntry(project.id, worker.repoKey ?? "primary", expectedMainlineBranch, merge.sha, merge.landedBase);
+    if (merge.ok && !merge.noop && merge.sha && merge.landedBase && expectedMainlineBranch) this.recordMainlineLedgerEntryIfRepoUnchanged(project.id, worker.repoKey ?? "primary", repoPath, expectedMainlineBranch, merge.sha, merge.landedBase);
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — pass `undefined`, never raw `merge.sha`,
     // whenever `merge.landedBase` is unset: a race INSIDE mergeBranch can leave `merge.sha` ALREADY
     // equal to a forged tip, so a bare `merge.sha` would sail through the `head.tip === mergeSha` check.
@@ -23003,8 +23003,7 @@ export class SessionService {
             // batchCheckedTip, which can be null): `base` is `baseMainSha` directly, never a first-parent
             // read — the ff's own contract already guarantees HEAD === baseMainSha before it ran.
             if (result.ok && result.landed.length > 0 && result.batchHeadSha && expectedBaseBranch) {
-              try { this.db.recordMainlineLandedCommit(finalProjectId, batchRepoKey, expectedBaseBranch, result.batchHeadSha, baseMainSha); }
-              catch (err) { console.warn(`[mainline-watch] batch ledger record skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`); }
+              this.recordMainlineLedgerEntryIfRepoUnchanged(finalProjectId, batchRepoKey, finalRepoPath, expectedBaseBranch, result.batchHeadSha, baseMainSha);
             }
             if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha, managerSessionId); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
@@ -24117,14 +24116,32 @@ export class SessionService {
     });
   }
 
-  /** @decision 2a6a292a round 20 (card aa7677fa) — records a SOLO landing in the Loom-owned ledger
-   *  (Db's own CREATE TABLE doc), unconditionally, independent of the mainline tripwire's own verdict —
-   *  call this right after the squash itself succeeds, never gated on `checkMainlineMove`'s return.
+  /** @decision 2a6a292a round 20 (card aa7677fa) — records a SOLO or BATCH landing in the Loom-owned
+   *  ledger (Db's own CREATE TABLE doc), unconditionally, independent of the mainline tripwire's own
+   *  verdict — call this right after the squash/fast-forward itself succeeds, never gated on
+   *  `checkMainlineMove`'s return.
    *  @decision 2a6a292a round 21 (card aa7677fa round 3) — `base` is threaded from `mergeBranch`'s own
    *  verified `landedBase`, never re-derived via a fresh `readFirstParent(tip)` re-read here — that
-   *  re-read trusted `tip` as a given, letting a racer-forged sibling commit earn a ledger row. */
-  private recordMainlineLedgerEntry(projectId: string, repoKey: string, branch: string, tip: string, base: string): void {
+   *  re-read trusted `tip` as a given, letting a racer-forged sibling commit earn a ledger row.
+   *  @decision 26c12fac — never call `db.recordMainlineLandedCommit` directly from a solo or batch
+   *  landing caller; both must route through this one chokepoint, or the repoPath reconfirmation below
+   *  is silently bypassed for that caller. */
+  private recordMainlineLedgerEntryIfRepoUnchanged(projectId: string, repoKey: string, repoPath: string, branch: string, tip: string, base: string): void {
+    // @decision 26c12fac round 2 — a removed registry entry (UnknownRepoKeyError) takes this SAME skip
+    // branch + log line as an ordinary repoPath mismatch, never the generic fail-open catch below.
+    const skipAsMismatch = (why: string) => console.warn(`[mainline-watch] ledger record skipped: repoPath for (${projectId}, ${repoKey}) changed mid-flight (rebind race, card 26c12fac)${why}`);
     try {
+      const project = this.db.getProject(projectId);
+      if (!project) { skipAsMismatch(" — project no longer exists"); return; }
+      let currentPath: string;
+      try {
+        currentPath = resolveRepoByKey(project, repoKey).path;
+      } catch (e) {
+        if (!(e instanceof UnknownRepoKeyError)) throw e;
+        skipAsMismatch(" — repoKey no longer registered");
+        return;
+      }
+      if (literalRepoPathKey(currentPath) !== literalRepoPathKey(repoPath)) { skipAsMismatch(""); return; }
       this.db.recordMainlineLandedCommit(projectId, repoKey, branch, tip, base);
     } catch (err) {
       console.warn(`[mainline-watch] ledger record skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);

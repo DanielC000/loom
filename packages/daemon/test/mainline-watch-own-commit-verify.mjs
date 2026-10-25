@@ -11,7 +11,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // FIX: `mergeBranchLocked` now captures the staged TREE (`git write-tree`) in the SAME pre-commit window
 // it already captures `preCommitHead` (card c862f14c's own adjacency rule), and verifies a post-commit
 // re-read's parent+tree against both before trusting it as "our own commit" (`verifyLandedAsOwnCommit`,
-// returning the ledger `base` only when verified). `recordMainlineLedgerEntry` no longer re-derives `base`
+// returning the ledger `base` only when verified). `recordMainlineLedgerEntryIfRepoUnchanged` no longer re-derives `base`
 // via its own git read at all — it takes `merge.landedBase` directly, so an unverified `merge.sha` never
 // gets a row. `advanceMainlineWatermark` now REQUIRES `head.tip === mergeSha` before even considering the
 // trust stamp, where `mergeSha` is passed as `undefined` (never a free pass) whenever `merge.landedBase`
