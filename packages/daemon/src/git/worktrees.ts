@@ -1297,7 +1297,9 @@ export async function createWorktree(
     firePhase("prune");
     await boundedLockedRaw(["worktree", "prune"], "git worktree prune"); // drop any stale admin record for a since-deleted dir
     firePhase("branch-list");
-    const exists = (await boundedLockedRaw(["branch", "--list", branch], "git branch --list")).trim() !== "";
+    // @decision 7eac6366 — `--end-of-options` must sit immediately before the bare `branch` token, never
+    // before `--list`/`-D` themselves (there it is swallowed as the branch name instead, measured).
+    const exists = (await boundedLockedRaw(["branch", "--list", "--end-of-options", branch], "git branch --list")).trim() !== "";
     try {
       firePhase("worktree-add");
       // git >= 2.48 CAN write a relative gitdir/commondir pointer (checkCommondirTrust now correctly
@@ -1423,7 +1425,9 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
     if (deps.expectedTip) {
       await withTimeout(git.raw(["update-ref", "-d", `refs/heads/${branch}`, deps.expectedTip]), timeoutMs, "git update-ref -d (compare-and-swap)");
     } else {
-      await withTimeout(git.raw(["branch", "-D", branch]), timeoutMs, "git branch -D");
+      // @decision 7eac6366 — `--end-of-options` right before `branch`, never before `-D` (placed earlier
+      // it is consumed as a flag instead of the bare name).
+      await withTimeout(git.raw(["branch", "-D", "--end-of-options", branch]), timeoutMs, "git branch -D");
     }
     return true;
   } catch (e) {
@@ -1467,7 +1471,9 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
 export async function branchExistsInRepo(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<boolean> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const out = await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list");
+    // @decision 7eac6366 — `--end-of-options` right before `branch` (see git/worktrees.ts:1300 for the
+    // full placement rule).
+    const out = await withTimeout(git.raw(["branch", "--list", "--end-of-options", branch]), timeoutMs, "git branch --list");
     return out.trim() !== "";
   } catch {
     return true; // fail safe: can't confirm gone ⇒ treat as still present
@@ -1494,7 +1500,9 @@ export async function deleteBranches(repoPath: string, branches: string[], deps:
     const chunk = branches.slice(i, i + DELETE_BRANCHES_CHUNK_SIZE);
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     try {
-      await withTimeout(git.raw(["branch", "-D", ...chunk]), timeoutMs, "git branch -D (batch)");
+      // @decision 7eac6366 — `--end-of-options` before the WHOLE chunk (one option-shaped name in the
+      // batch must not be swallowed as a flag for the rest); see git/worktrees.ts:1300 for the rule.
+      await withTimeout(git.raw(["branch", "-D", "--end-of-options", ...chunk]), timeoutMs, "git branch -D (batch)");
       deleted.push(...chunk); // git's own exit code 0 means every named branch in THIS chunk is gone
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -2517,7 +2525,10 @@ export async function reclaimStaleAsideWorktreeDir(
 export async function isBranchMerged(repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {}): Promise<boolean> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    return (await withTimeout(git.raw(["branch", "--merged", base, "--list", branch]), timeoutMs, "git branch --merged")).trim() !== "";
+    // @decision 7eac6366 — `--end-of-options` right before `branch` (`--list`'s own argument slot, not
+    // `--merged`'s — `base` there always resolves as a literal revision regardless of shape, measured);
+    // see git/worktrees.ts:1300 for the full placement rule.
+    return (await withTimeout(git.raw(["branch", "--merged", base, "--list", "--end-of-options", branch]), timeoutMs, "git branch --merged")).trim() !== "";
   } catch {
     return false;
   }
@@ -4284,7 +4295,9 @@ export interface WorkerDiff {
 async function branchExists(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<boolean> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    return (await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list (workerDiff branchExists)")).trim() !== "";
+    // @decision 7eac6366 — `--end-of-options` right before `branch` (see git/worktrees.ts:1300 for the
+    // full placement rule).
+    return (await withTimeout(git.raw(["branch", "--list", "--end-of-options", branch]), timeoutMs, "git branch --list (workerDiff branchExists)")).trim() !== "";
   } catch {
     return false;
   }
@@ -7846,8 +7859,9 @@ export async function findLandedSquashCommit(
     // @decision c0d0eac9 round 3 (finding 1) — NOT separately try/caught: a throw here reaches this
     // function's OWN outer catch, failing the whole call to `null` — never degrade to `branchPresent:
     // false` (see resolveMergedCommitMapHitList's identical fix for the map path, which had that bug).
+    // @decision 7eac6366 — `--end-of-options` right before `branch` (see git/worktrees.ts:1300).
     const branchPresent = (await withTimeout(
-      git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
+      git.raw(["branch", "--list", "--end-of-options", branch]), timeoutMs, "git branch --list",
     )).trim() !== "";
 
     // Shared per-candidate verifier — the branch-present/branch-gone logic itself is UNCHANGED from
@@ -7920,7 +7934,8 @@ export async function findIntroducingSquashCommit(
     // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of
     // the real branch (refs/tags/ outranks refs/heads/; attribution-only, but still identity).
     const branchRef = `refs/heads/${branch}`;
-    if ((await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list (attribution)")).trim() === "") return landedSha;
+    // @decision 7eac6366 — `--end-of-options` right before `branch` (see git/worktrees.ts:1300).
+    if ((await withTimeout(git.raw(["branch", "--list", "--end-of-options", branch]), timeoutMs, "git branch --list (attribution)")).trim() === "") return landedSha;
     const out = await withTimeout(
       git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
       timeoutMs, "git log --grep trailer (attribution)",
@@ -8868,7 +8883,8 @@ async function resolveMergedCommitMapHitList(
   let branchPresent: boolean;
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    branchPresent = (await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list")).trim() !== "";
+    // @decision 7eac6366 — `--end-of-options` right before `branch` (see git/worktrees.ts:1300).
+    branchPresent = (await withTimeout(git.raw(["branch", "--list", "--end-of-options", branch]), timeoutMs, "git branch --list")).trim() !== "";
   } catch {
     return null;
   }
