@@ -582,15 +582,17 @@ async function landBranchCommitsIndividually(
     // resetError can itself be a classified canonical-git refusal (e.g. a pinMismatch surfacing mid-
     // rollback) — route through canonicalFailureMessage so its guidance survives here too, not just the
     // 400-char-capped raw text. Prefixed with "reset --hard" so a bare "nothing changed" downstream
-    // clearly refers to the RESET, not the batch landing as a whole — refused through canonicalFailureMessage
-    // already opens with "refused,"/"refusing," so the prefix omits its own "refused:" there to avoid a
-    // literal doubled "refused: refused"; the plain (never-refused) fallback keeps that word since
-    // canonicalFailureMessage's own fallback text carries none of it.
+    // clearly refers to the RESET, not the batch landing as a whole — when it IS a refusal,
+    // canonicalFailureMessage's own output already opens with "refused,"/"refusing," so the prefix omits
+    // its own "refused:" there to avoid a literal doubled "refused: refused". An ORDINARY git error (an
+    // index.lock, a non-tree-death timeout) is NOT a refusal at all — calling it "refused" would be false
+    // (it may have left a partial write, unlike a genuine refusal's "nothing changed"), so that fallback
+    // branch says "failed:" instead.
     const resetErrorDescribe = resetError ? describeGitFailure(resetError) : undefined;
     const resetErrorMessage = resetErrorDescribe
       ? (resetErrorDescribe.refusal
-          ? `reset --hard ${canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text)}`
-          : `reset --hard refused: ${canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text)}`)
+          ? `reset --hard: ${canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text)}`
+          : `reset --hard failed: ${canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text)}`)
       : undefined;
     try {
       const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch rollback probe)")).trim();

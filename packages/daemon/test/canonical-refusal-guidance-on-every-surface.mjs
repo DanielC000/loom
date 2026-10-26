@@ -15,6 +15,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     catch (already fixed by 26084115, never exercised until this card).
 // (E) batch-merge.ts's landBranchCommitsIndividually — the rollback render where resetError is itself a
 //     CanonicalGitRefusal (already fixed by 26084115, never exercised until this card).
+// (F) batch-merge.ts's landBranchCommitsIndividually — the SAME rollback render, but resetError is an
+//     ORDINARY (non-refusal) git failure — must say "reset --hard failed:", never "refused" (card a3a632fa
+//     round 2).
 //
 // Run: 1) pnpm build, 2) node packages/daemon/test/canonical-refusal-guidance-on-every-surface.mjs
 import fs from "node:fs";
@@ -294,8 +297,61 @@ const identityProbeGitFactory = () => ({
   }
 }
 
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
+// (F) batch-merge.ts — the SAME rollback() render as (E), but `resetError` this time is an ORDINARY git
+// failure (not a CanonicalGitRefusal at all — e.g. an index.lock error, a non-tree-death timeout). Card
+// a3a632fa round 2: before that round's fix, this non-refusal fallback was worded "reset --hard refused:
+// ...", which is FALSE for a plain failure — it may have left a partial write, unlike a genuine refusal's
+// "nothing changed". It must read "reset --hard failed:" instead, and must NOT contain the word "refused"
+// anywhere in the reset clause.
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
+{
+  const repo = makeRepo("rollback-f");
+  const branch = `loom/crgs-rollback-f-${sfx}`;
+  const wt = path.join(os.tmpdir(), `loom-crgs-rollback-f-wt-${sfx}`);
+  tmpDirs.push(wt);
+  execFileSync("git", ["worktree", "add", "-q", "-b", branch, wt, "HEAD"], { cwd: repo });
+  fs.writeFileSync(path.join(wt, "feature-f.txt"), `content-${sfx}\n`);
+  execFileSync("git", ["add", "."], { cwd: wt });
+  execFileSync("git", ["-c", "user.email=worker@loom", "-c", "user.name=worker", "commit", "-q", "-m", "worker work"], { cwd: wt });
+
+  const batchWt = path.join(os.tmpdir(), `loom-crgs-rollback-f-batchwt-${sfx}`);
+  tmpDirs.push(batchWt);
+  execFileSync("git", ["worktree", "add", "-q", "-b", `loom/crgs-rollback-f-batchwt-${sfx}`, batchWt, "HEAD"], { cwd: repo });
+
+  const trustedMainRoot = defaultTrustedMainRoot(repo);
+  const ordinaryResetFailureText = "injected: ordinary reset --hard failure (not a refusal)";
+  const gitFactory = (p, ms) => {
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return {
+      raw: async (...callArgs) => {
+        const args = Array.isArray(callArgs[0]) ? callArgs[0] : callArgs;
+        if (args[0] === "diff" && args[1] === "--cached" && args[2] === "--name-only") {
+          throw new Error("injected: empty-stage probe failure (forces rollback)");
+        }
+        if (args[0] === "reset" && args[1] === "--hard") {
+          // A plain Error, deliberately NOT any CanonicalGitRefusal subclass — this is the non-refusal
+          // branch of resetErrorMessage's composition.
+          throw new Error(ordinaryResetFailureText);
+        }
+        return real.raw(...callArgs);
+      },
+    };
+  };
+
+  const candidate = { workerSessionId: "crgs-wkr-f", taskId: "crgs-task-f", branch, taskTitle: "feat(test): crgs-f" };
+  const { landed, dropped } = await assembleBatchBranches(repo, batchWt, [candidate], { gitFactory });
+
+  check("(F) sanity: the candidate was dropped (empty-stage probe failure, rollback attempted), nothing landed", landed.length === 0 && dropped.length === 1);
+  const reason = dropped[0]?.reason ?? "";
+  check("(F) sanity: the drop reason names the rollback failure", reason.includes("ROLLBACK FAILED"));
+  check("(F) sanity: the drop reason carries the injected ordinary failure text", reason.includes(ordinaryResetFailureText));
+  check('(F) an ORDINARY (non-refusal) reset --hard failure is worded "reset --hard failed:", never "refused"', reason.includes("reset --hard failed:"));
+  check('(F) an ORDINARY (non-refusal) reset --hard failure does NOT say "refused" anywhere', !reason.toLowerCase().includes("refused"));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every merge-path CanonicalGitRefusal render site covered here (identity-probe catches on all three surfaces, the FIRST pre-mutation setup read, and the rollback render) keeps its human guidance, with no doubled \"refused: refused\" wording."
+  ? "\n✅ ALL PASS — every merge-path CanonicalGitRefusal render site covered here (identity-probe catches on all three surfaces, the FIRST pre-mutation setup read, and the rollback render) keeps its human guidance, with no doubled \"refused: refused\" wording, and an ORDINARY (non-refusal) rollback failure is worded \"failed:\", never \"refused\"."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const d of tmpDirs) {

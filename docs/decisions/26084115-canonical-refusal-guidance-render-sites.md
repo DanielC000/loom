@@ -5,8 +5,10 @@ at 400 chars) or a bare `(e as Error).message`/`String(e)` instead of `canonical
 `pinMismatch` refusal's human guidance (verify on disk; the re-pin route; escalate to the Platform Lead)
 and a `commondirRedirect` refusal's escalation wording were silently cut off on a realistically long (Loom
 worktree-shaped) path, or simply never present at all for a `redirect`/`boundRepoIsWorktree` kind — those
-raw reasons (`git/bounded.ts` ~1660-1745) don't carry the guidance sentence; only `pinMismatch`'s raw
-reason does, and only up to the 400-char cap.
+raw reasons (`checkCommondirTrust`'s own refusal-reason range in `git/bounded.ts`, ~1575-1881 — it embeds
+`resolveTrustedToplevel`'s own raw reasons, starting at ~1575, into several of its own `redirect`-kind
+reasons) don't carry the guidance sentence; only `pinMismatch`'s raw reason does, and only up to the
+400-char cap.
 
 Card `26084115` fixed the `describeGitFailure(` consumers that render a refusal's whole `.text`: three
 identity-fallback-probe catches (`landBranchCommitsIndividually` in `git/batch-merge.ts`;
@@ -29,21 +31,35 @@ say it referred to the `reset --hard` specifically.
   `canonicalFailureMessage(describeGitFailure(e), fallbackText)` instead, so a refusal's human guidance
   (escalation wording, the re-pin route, "do not retry") survives.
 - Do not prefix `canonicalFailureMessage`'s own output with a literal "<label> refused: " — every one of
-  its refusal branches already opens with "refused,"/"refusing," (the one exception, `boundRepoIsWorktree`
-  and `unpinned`, still opens with "refused,"), so a naive prefix produces a literal doubled
-  "refused: refused". Drop the word "refused" from the prefix (e.g. "<label>: ${canonicalFailureMessage(...)}"),
-  or branch on `d.refusal` to choose a non-doubling wording when the prefix itself needs "refused:" for the
-  non-refusal fallback case (see the rollback clause's own composition in `batch-merge.ts`).
+  its refusal branches already opens with "refused," (`pinMismatch`, `boundRepoIsWorktree`, `unpinned`,
+  and the generic `d.refusal` fallback) or "refusing," (the one branch that actually differs,
+  `commondirRedirect`, which opens "canonical repo redirected — refusing,"), so a naive prefix produces a
+  literal doubled "refused: refused". Drop the word "refused" from the prefix (e.g. "<label>:
+  ${canonicalFailureMessage(...)}"), or branch on `d.refusal` to choose a non-doubling wording when the
+  prefix itself needs "refused:"/"failed:" for the non-refusal fallback case (see the rollback clause's
+  own composition in `batch-merge.ts` — and note that fallback must say "failed:", never "refused:", since
+  a non-refusal git error is not a refusal at all and may have left a partial write).
 - Do not treat the per-commit cherry-pick loop's own later raw-message catches (after the identity probe,
   once mutation has already started — e.g. the staged-diff/original-message/write-tree/post-commit
   verify probes in `landBranchCommitsIndividually`, or the analogous post-mutation probes inside
-  `mergeMainIntoWorktree`'s kill-timeout recovery path and `mergeBranchLocked`'s own reset/squash
-  machinery) as already covered by card `26084115`/`a3a632fa` — they are a structurally larger, separately
-  judged class (most already correctly gate on `describeGitFailure(e).refusal` before falling through to
-  a raw render, or are deliberately narrow `treeDeathUnconfirmed`/`RepoQuarantinedError` branches that can
-  never carry a `CanonicalGitRefusal` in the first place) and were deliberately left out of both cards'
-  scope — re-derive the sweep yourself (by reading each catch, never a filename/pattern grep) before
-  assuming either card already closed them.
+  `mergeMainIntoWorktree`'s kill-timeout recovery path) as already covered by card `26084115`/`a3a632fa` —
+  they are a structurally larger, separately judged class (most already correctly gate on
+  `describeGitFailure(e).refusal` before falling through to a raw render, or are deliberately narrow
+  `treeDeathUnconfirmed`/`RepoQuarantinedError` branches that can never carry a `CanonicalGitRefusal` in
+  the first place) and were deliberately left out of both cards' scope — re-derive the sweep yourself (by
+  reading each catch, never a filename/pattern grep) before assuming either card already closed them.
+  Card `2968815c` is the filed follow-up tracking the specific gaps card `a3a632fa`'s own review turned up
+  in this larger class, honestly split three ways (an earlier draft of this bullet wrongly lumped the
+  second of these into "`mergeBranchLocked`'s own reset/squash machinery" — they are PRE-mutation entry
+  reads, not that):
+  - the batch post-mutation cherry-pick loop itself (`landBranchCommitsIndividually` in
+    `git/batch-merge.ts`, the staged-diff/original-message/write-tree/post-commit-verify probes named
+    above);
+  - `mergeBranchLocked`'s own PRE-probe entry reads in `git/worktrees.ts` (~:10003, ~:10046, ~:10059,
+    ~:10126, ~:10143) — these all run BEFORE any mutation (the gate-base/cut-base-tip/staged/working-tree
+    checks at entry), never the reset/squash machinery that runs after;
+  - the cut-base ancestry probe's own raw render (`git/batch-merge.ts` ~:411, `checkCutBaseAncestry`'s own
+    `probeError`).
 
 ## RED/GREEN proof
 
@@ -64,3 +80,11 @@ the committed tip immediately BEFORE that fix landed, so diffing against it exer
 behavior. A prior version of this instruction said "default --ref HEAD" — false even at the time it was
 written (the fix was already a committed change by then, not an uncommitted edit on top of HEAD); pin the
 explicit sha above instead of trusting `--ref`'s default.
+
+`--ref e8fa2133` isolates ONLY card `a3a632fa`'s own delta — `e8fa2133` is `26084115`'s own landed squash,
+so diffing against it reverts just what `a3a632fa` added on top. `--ref a4adc243` instead reverts BOTH
+cards' fixes together — use whichever base matches which fix you're isolating. Measured directly (this
+negative-control tool, against the CURRENT test file, which now also carries `a3a632fa` round 2's own (F)
+section): `--ref e8fa2133` ⇒ 11 FAILs, `--ref a4adc243` ⇒ 20 FAILs. These counts move every time a check
+is added to or removed from the test file — re-measure rather than trusting a number quoted here; a prior
+draft of this sentence said 10/19, true only before round 2's own (F) section existed.
