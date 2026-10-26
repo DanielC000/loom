@@ -509,7 +509,10 @@ async function landBranchCommitsIndividually(
       defaultTrustedMainRoot(repoPath),
     );
   } catch (e) {
-    return { ok: false, reason: `${branch}: identity-fallback probe refused: ${describeGitFailure(e).text}` };
+    // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
+    // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
+    const identityProbeFailure = describeGitFailure(e);
+    return { ok: false, reason: `${branch}: identity-fallback probe refused: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
   }
 
   // A rollback that itself FAILS (e.g. a canonicalGit refusal that also blocks `reset`) must not vanish: it is recorded here and appended to the failing
@@ -565,6 +568,12 @@ async function landBranchCommitsIndividually(
     // @decision 0d372516 — verify HEAD == batchHeadBefore UNCONDITIONALLY, whether or not reset --hard
     // itself threw: a non-throwing reset is not itself proof the worktree is clean. Both probes are pure
     // reads (never refused), so this stays truthful either way.
+
+    // resetError can itself be a classified canonical-git refusal (e.g. a pinMismatch surfacing mid-
+    // rollback) — route through canonicalFailureMessage so its guidance survives here too, not just the
+    // 400-char-capped raw text.
+    const resetErrorDescribe = resetError ? describeGitFailure(resetError) : undefined;
+    const resetErrorMessage = resetErrorDescribe ? canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text) : undefined;
     try {
       const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch rollback probe)")).trim();
       const dirty = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (batch rollback probe)")).trim();
@@ -572,11 +581,11 @@ async function landBranchCommitsIndividually(
       const inProgress = (await withTimeout(git.raw(["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"]), timeoutMs, "git rev-parse CHERRY_PICK_HEAD (batch rollback probe)")).trim();
       if (head === batchHeadBefore && dirty === "" && inProgress === "") return;
       rollbackVerificationFailed = true;
-      rollbackIssue = resetError ? describeGitFailure(resetError).text : `batch worktree is not clean after rollback (HEAD=${head || "?"}, expected ${batchHeadBefore})`;
+      rollbackIssue = resetErrorMessage ?? `batch worktree is not clean after rollback (HEAD=${head || "?"}, expected ${batchHeadBefore})`;
     } catch (e) {
       // cannot prove it clean — fail closed, whether or not reset --hard itself threw.
       rollbackVerificationFailed = true;
-      rollbackIssue = resetError ? describeGitFailure(resetError).text : `failed to verify the rollback left a clean tree: ${(e as Error).message}`;
+      rollbackIssue = resetErrorMessage ?? `failed to verify the rollback left a clean tree: ${(e as Error).message}`;
     }
   };
   const fail = <T extends { reason?: string }>(r: T): T & { quarantined?: boolean; rollbackUnverified?: boolean } => {

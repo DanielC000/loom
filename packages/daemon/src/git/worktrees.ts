@@ -9200,7 +9200,10 @@ export async function mergeMainIntoWorktree(
       defaultTrustedMainRoot(repoPath),
     );
   } catch (e) {
-    return { ok: false, reason: `identity-fallback probe refused: ${describeGitFailure(e).text}` };
+    // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
+    // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
+    const identityProbeFailure = describeGitFailure(e);
+    return { ok: false, reason: `identity-fallback probe refused: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
   }
 
   // @decision 7e5b23e7 — every mutating call below pins `quarantineRepoPath` to the CANONICAL `repoPath`,
@@ -10449,7 +10452,10 @@ async function mergeBranchLocked(
         defaultTrustedMainRoot(repoPath),
       );
     } catch (e) {
-      return { ok: false, reason: `identity-fallback probe refused: ${describeGitFailure(e).text}` };
+      // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
+      // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
+      const identityProbeFailure = describeGitFailure(e);
+      return { ok: false, reason: `identity-fallback probe refused: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
     }
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
