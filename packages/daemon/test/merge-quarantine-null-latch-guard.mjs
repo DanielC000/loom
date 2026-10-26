@@ -20,7 +20,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // either exactly like corrupt/unparsable JSON: fail-closed, never throw. The scalar rejection is a REAL,
 // separate behavior change (not just a byproduct of the null-crash fix) at exactly two sites that read
 // on-disk tokens with no OTHER check ahead of it (`markedFinalFullyCoveredByClear`,
-// `orphanFileTokensAccountedForByUpdate` — see each one's own `@decision 495fd320` doc note): a bare
+// `orphanFileTokensAccountedForByUpdate` — see each one's own `@decision 8db913e2 (Follow-up 495fd320)` doc note): a bare
 // scalar there used to be read as vacuously covered/accounted-for (fail-OPEN, via an empty token array's
 // own `.every(...)`) and is now "cannot prove this" (fail-CLOSED) — strictly safer, not a regression.
 // Every OTHER guarded site already had its own `typeof parsed.repoPath === "string"` check ahead of any

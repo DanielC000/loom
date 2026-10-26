@@ -677,7 +677,7 @@ try {
   // this is also the dedicated "distinct sourceFile" case (never relying on the same-identity-coincidence
   // the fix must not).
   //
-  // @decision 6c04633d — SUPERSEDES this round's own merge-everything shape for a DIFFERENT identity: S
+  // @decision 8db913e2 (Follow-up 6c04633d) — SUPERSEDES this round's own merge-everything shape for a DIFFERENT identity: S
   // (identity ≠ D's own) is no longer folded into D's divert record at all — it is pushed straight back,
   // untouched, under its own identity (decision record, Follow-up 6c04633d). `sibFile` is a THIRD valid
   // state the check below now accounts for: live and correct, never an orphan, never gone.
@@ -722,7 +722,7 @@ try {
   const filesAfterRaise = fs.readdirSync(MERGE_QUARANTINE_DIR);
   const allEntriesX = listActiveMergeQuarantines();
   const referencedOrphansX = new Set(allEntriesX.flatMap((e) => e.orphanLatchFiles ?? []));
-  // @decision 6c04633d (M3, Code Review `e8c78d98`) — tie the check to THIS exact file, captured at the
+  // @decision 8db913e2 (Round 2 M3, Code Review `e8c78d98`) — tie the check to THIS exact file, captured at the
   // SAME pre-query snapshot as `filesAfterRaise`/`referencedOrphansX` above — `activeMergeQuarantineFor`
   // below is a QUERY whose own lazy-graduation tail can ITSELF trigger a (pre-existing, unchanged, out of
   // this card's scope) successful consolidation of D+S once reads succeed again, which would delete

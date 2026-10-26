@@ -1097,7 +1097,7 @@ const TEST_TIMEOUT_OVERRIDES = {
   "merge-spawn-tracked": 275_000, // card 926c178d: no prior override (blanket 120s ceiling; was previously in the "measured safe with NO override" bfbe616b/ISOLATED_REAL_SPAWN_BASENAMES set — that measurement has since aged out). ndjson n=9 (last 3 days): 2 kills at the 120s ceiling, max REAL PASS 109,402ms — 275k gives ~2.51x that max pass. Solo (this worker, 2026-10-23): 59,889ms (LOOM_DEV/LOOM_SUPERVISED unset), 56,331ms (LOOM_DEV=1 LOOM_SUPERVISED=1) — both well below the real max pass.
   "batch-merge-hold-branch-keyed": 240_000, // card 926c178d: no prior override (blanket 120s ceiling). ndjson n=9 (last 3 days): 3 kills at/near the 120s ceiling, max REAL PASS 95,907ms — 240k gives ~2.50x that max pass. Solo (this worker, 2026-10-23): 44,349ms (LOOM_DEV/LOOM_SUPERVISED unset), 37,288ms (LOOM_DEV=1 LOOM_SUPERVISED=1) — both well below the real max pass.
   "batch-merge-rollback-abort": 285_000, // card 926c178d: no prior override (blanket 120s ceiling). ndjson n=7 (last 3 days): 2 kills at/near the 120s ceiling, max REAL PASS 112,962ms — 285k gives ~2.52x that max pass. Solo (this worker, 2026-10-23): 41,388ms (LOOM_DEV/LOOM_SUPERVISED unset), 47,220ms (LOOM_DEV=1 LOOM_SUPERVISED=1) — both well below the real max pass.
-  // @decision 99f5f0cd — never treat 450_000 below as a measured margin: no real pass exists for
+  // @decision cc595ca7 (Card 99f5f0cd) — never treat 450_000 below as a measured margin: no real pass exists for
   // these 2 anywhere in the ndjson history, so re-size them from the first real passing rows once
   // those exist, not from this comment.
   "mainline-watch-trust-ledger": 450_000, // card 99f5f0cd, censored sizing — see the decision note above this entry.
