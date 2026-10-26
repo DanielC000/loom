@@ -86,7 +86,7 @@ import { commitAll } from "./_git-commit.mjs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { cleanupPathSync, registerForCleanup } from "./_tmp-fixture.mjs";
 
 // Card fab07aba Code Review (member-existence check, scenario (U) below): this file's own location,
 // three levels up (test -> daemon -> packages -> repo root), to resolve each reduced-gate list's
@@ -215,24 +215,26 @@ try {
   }
 
   // ── (C) WHITESPACE-ONLY .ts edit -> REDUCED gate ────────────────────────────────────────────────────
+  // Card 2001cdec — converted off the full confirmWorkerMerge pipeline: this scenario only ever pinned
+  // computeEmitCompareGate's own classification (eligible/identicalFileCount), never confirmWorkerMerge's
+  // downstream wiring (command assembly, warning text, dispatch) — that wiring stays independently pinned
+  // by (A)'s own ts/REDUCED anchor. Equivalence demonstrated against the pre-conversion pipeline (one-time,
+  // not kept in-file — see docs/decisions/2001cdec-*.md): on this exact fixture, direct.eligible,
+  // identicalFileCount, changedTsPaths and notApplicable all matched the pipeline's own REDUCED verdict.
   {
     const C = mk("c");
     makeRepoWithBaseSrcFile(C, BASE_SRC);
-    const db = new Db(); dbs.push(db);
-    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    let calls = 0; let capturedGate;
-    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const baseSha = execSync("git rev-parse HEAD", { cwd: C.repo }).toString().trim();
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), `\n\n${BASE_SRC}`);
     commitAll(worktreePath, "chore: reformat leading blank lines", GIT_ID);
-    seed(db, C);
 
-    const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
-    check("(C) gateRan:true", confirm.gateRan === true);
-    check("(C) the gate command WAS called exactly once", calls === 1);
-    check("(C) captured command is the REDUCED gate, not the full one", calls === 1 && capturedGate !== FULL_GATE && !capturedGate.includes("test:daemon"));
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
+    check("(C) direct call: eligible — a whitespace-only edit is transpile-identical", direct.eligible === true);
+    check("(C) direct call: identicalFileCount === 1", direct.identicalFileCount === 1);
+    check("(C) direct call: changedTsPaths names example.ts", direct.changedTsPaths.length === 1 && direct.changedTsPaths[0].endsWith("example.ts"));
+    check("(C) direct call: notApplicable:false — a real decided verdict", direct.notApplicable === false);
   }
 
   // ── (D) THE §2 COUNTEREXAMPLE, ENCODED — a comment-only test/*.mjs edit introducing `Date.now()` still
@@ -246,6 +248,11 @@ try {
       "",
     ].join("\n");
     fs.mkdirSync(D.repo, { recursive: true });
+    // Card 2001cdec: unlike every other scenario here, D builds its own fixture repo by hand instead of
+    // via makeRepoWithBaseSrcFile (which calls registerForCleanup internally) — without this, D.repo (the
+    // base repo, distinct from its worktreePath, which IS cleaned below) leaked one ~452KB temp dir per
+    // run, unconditionally, regardless of pass/fail.
+    registerForCleanup(D.repo);
     fs.writeFileSync(path.join(D.repo, "README.md"), "# ecg\n");
     mkdirp(path.join(D.repo, "packages", "daemon", "test"));
     // Card 17cd1f30: a top-level changed test/*.mjs file now ALSO needs loadNotHermeticNames to resolve
@@ -389,23 +396,24 @@ try {
   }
 
   // ── (E) SCOPE BOUNDARY — an ADDED .ts file (status A) -> FULL gate ─────────────────────────────────
+  // Card 2001cdec — converted off the full confirmWorkerMerge pipeline (see (C)'s own comment for the
+  // rationale); the ts-domain FULL_GATE/wiring polarity itself stays pinned by (B). Equivalence
+  // demonstrated against the pre-conversion pipeline (one-time, not kept in-file — see
+  // docs/decisions/2001cdec-*.md): on this exact fixture, direct.eligible/reason/notApplicable all
+  // matched the pipeline's own FULL_GATE verdict.
   {
     const E = mk("e");
     makeRepoWithBaseSrcFile(E, BASE_SRC);
-    const db = new Db(); dbs.push(db);
-    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    let calls = 0; let capturedGate;
-    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const baseSha = execSync("git rev-parse HEAD", { cwd: E.repo }).toString().trim();
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "second.ts"), "export const y = 1;\n");
     commitAll(worktreePath, "feat: add second.ts", GIT_ID);
-    seed(db, E);
 
-    const confirm = await sessions.confirmWorkerMerge(E.mgrId, E.workerId);
-    check("(E) gateRan:true", confirm.gateRan === true);
-    check("(E) captured command IS the full gate — an ADDED compiled file fails closed", capturedGate === FULL_GATE);
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
+    check("(E) direct call: not eligible — an ADDED compiled file fails closed", direct.eligible === false);
+    check("(E) direct call: reason names the non-modify status on the compiled file", /non-modify status "A" on compiled file/.test(direct.reason ?? ""));
+    check("(E) direct call: notApplicable:false — a real decided not-reducible verdict", direct.notApplicable === false);
   }
 
   // ── (F) SCOPE BOUNDARY — a path outside both scoped prefixes forces FULL gate even alongside an
@@ -488,24 +496,25 @@ try {
   }
 
   // ── (Q) card 82662e98 — an ADDED packages/daemon/scripts/**/*.mjs file (status A, not M) -> FULL gate ──
+  // Card 2001cdec — converted off the full confirmWorkerMerge pipeline (see (C)'s own comment for the
+  // rationale); the scripts-domain FULL_GATE/wiring polarity itself stays pinned by (R). Equivalence
+  // demonstrated against the pre-conversion pipeline (one-time, not kept in-file — see
+  // docs/decisions/2001cdec-*.md): on this exact fixture, direct.eligible/reason/notApplicable all
+  // matched the pipeline's own FULL_GATE verdict.
   {
     const Q = mk("q");
     makeRepoWithBaseSrcFile(Q, BASE_SRC);
-    const db = new Db(); dbs.push(db);
-    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    let calls = 0; let capturedGate;
-    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
+    const baseSha = execSync("git rev-parse HEAD", { cwd: Q.repo }).toString().trim();
     const { worktreePath, branch } = await createWorktree(Q.repo, Q.projId, Q.taskId);
     Q.worktreePath = worktreePath; Q.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "packages", "daemon", "scripts"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "new-helper.mjs"), BASE_SCRIPT);
     commitAll(worktreePath, "feat: add new-helper.mjs", GIT_ID);
-    seed(db, Q);
 
-    const confirm = await sessions.confirmWorkerMerge(Q.mgrId, Q.workerId);
-    check("(Q) gateRan:true", confirm.gateRan === true);
-    check("(Q) captured command IS the full gate — an ADDED script file fails closed", capturedGate === FULL_GATE);
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
+    check("(Q) direct call: not eligible — an ADDED script file fails closed", direct.eligible === false);
+    check("(Q) direct call: reason names the non-modify status on the script file", /non-modify status "A" on script file/.test(direct.reason ?? ""));
+    check("(Q) direct call: notApplicable:false — a real decided not-reducible verdict", direct.notApplicable === false);
   }
 
   // ── (R) card 82662e98 — a REAL BEHAVIORAL one-token edit to a scripts/**/*.mjs file -> FULL gate
@@ -601,6 +610,14 @@ try {
   // ── (N2) card b97f643d — NARROWING GUARD: a docs/ line riding alongside a REAL behavioral .ts edit must
   //        NOT turn what would have been a full gate into a reduced one — the skip only ever removes an
   //        already-inert path from consideration, it never widens what counts as eligible ──────────────
+  // Card 2001cdec — converted off the full confirmWorkerMerge pipeline: this scenario's assertions were
+  // always about computeEmitCompareGate's own classification (see the Code Review comment below, and the
+  // pre-conversion code's own note that the merge call only ever re-derived the SAME verdict this direct
+  // call already proves), never about confirmWorkerMerge's downstream wiring — the docs-scope FULL_GATE
+  // wiring stays independently pinned by (N)'s REDUCED anchor and (B)'s FULL_GATE anchor. Equivalence
+  // demonstrated against the pre-conversion pipeline (one-time, not kept in-file — see
+  // docs/decisions/2001cdec-*.md): on this exact fixture, confirm.gateRan:true and capturedGate===FULL_GATE
+  // matched this direct call's own eligible:false/not-transpile-identical verdict.
   {
     const N2 = mk("n2");
     makeRepoWithBaseSrcFile(N2, BASE_SRC);
@@ -608,11 +625,6 @@ try {
     fs.writeFileSync(path.join(N2.repo, "docs", "notes.md"), "# notes\n\nline one\n");
     commitAll(N2.repo, "docs: seed notes", GIT_ID);
     const baseSha = execSync("git rev-parse HEAD", { cwd: N2.repo }).toString().trim();
-    const db = new Db(); dbs.push(db);
-    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    let calls = 0; let capturedGate;
-    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { reapWorktreeProcesses: noReap, runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(N2.repo, N2.projId, N2.taskId);
     N2.worktreePath = worktreePath; N2.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
@@ -624,20 +636,12 @@ try {
     // alone, with or without the docs/ line, so that assertion by itself passes identically pre-fix and
     // post-fix and never actually witnesses the skip. Call `computeEmitCompareGate` directly and assert
     // WHICH reason fired: it must be the real behavioral-edit reason, never the pre-fix "docs/ path is
-    // outside emit-compare scope" reason the skip exists to eliminate. MUST run BEFORE confirmWorkerMerge:
-    // the merge below deletes/advances the branch this reads, so calling it after would read post-merge
-    // repo state instead of the diff being classified (measured: doing this after the merge silently
-    // changes the failure to "git error reading the diff" — a different, unrelated reason that happens to
-    // also not match either regex, which would have made this assertion pass for the wrong cause).
+    // outside emit-compare scope" reason the skip exists to eliminate.
     const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
     check("(N2) direct call: still not eligible", direct.eligible === false);
     check("(N2) direct call: reason IS the real behavioral-edit reason", /not transpile-identical/.test(direct.reason ?? ""));
     check("(N2) direct call: reason is NOT the pre-fix docs/-out-of-scope reason", !/path outside emit-compare scope/.test(direct.reason ?? ""));
-
-    seed(db, N2);
-    const confirm = await sessions.confirmWorkerMerge(N2.mgrId, N2.workerId);
-    check("(N2) gateRan:true", confirm.gateRan === true);
-    check("(N2) captured command IS the full gate — a real behavioral edit alongside a docs/ line still fails closed", capturedGate === FULL_GATE);
+    check("(N2) direct call: notApplicable:false — a real decided not-reducible verdict", direct.notApplicable === false);
   }
 
   // ── (O) card 5149c036 — THE LITERAL MOTIVATING CASE, PAIRED WITH A REDUCIBLE EDIT: a repo-root
