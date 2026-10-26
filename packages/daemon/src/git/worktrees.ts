@@ -5477,6 +5477,13 @@ export const STATIC_GUARD_REPO_PATHS = [
   // `scripts/test-daemon.mjs`'s own `NOT_HERMETIC` set — see the guard's own header for why those files are
   // a documented, different (surgically self-cleaning, manual-only) case.
   "packages/daemon/test/ensure-trusted-config-dir-redirect-guard.mjs",
+  // Card b8122303: a corpus-wide, comment-stripped scan of packages/daemon/src/**/*.ts asserting no
+  // expression reading a trailer-derived value (`trailers.base`/`trailers.landedTip`/`trailers.pathSet`/
+  // `.baseSha`) reaches a git argv anywhere except a named, allowlisted site — see the guard's own header
+  // and docs/decisions/b8122303-*.md. Belongs here on the same ground as remote-trust-single-predicate-
+  // guard.mjs/harness-adapter-claude-literal-guard.mjs above: an explicit, self-contained comment-stripped
+  // whole-file scan, immune by construction to a comment-only diff.
+  "packages/daemon/test/trailer-derived-value-git-argv-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
@@ -7371,6 +7378,34 @@ type CheckVerdict = "pass" | "fail" | "error";
  *  `Loom-Worker-Base` itself is parsed far more loosely (`/^\S+$/`), so this is the real shape gate. */
 const OBJECT_ID_SHAPE_RE = /^[0-9a-f]{40,64}$/;
 
+/**
+ * Resolves a candidate-supplied, trailer-derived hex string to its own RAW COMMIT object id — `null` on
+ * any ambiguity (non-hex shape, nonexistent, resolves to a DIFFERENT object than its own literal text, or
+ * exists but isn't a commit). A thrown git error is NOT caught here — it propagates to the caller's own
+ * try/catch, which must classify it as `"error"`, never collapse it into this function's definitive `null`.
+ *
+ * @decision c0d0eac9 round 5-7 — never peel a TAG through to its commit, and never accept a resolution
+ * that doesn't echo the input back EXACTLY (round 7: a 41-64-hex value can resolve as a REF NAME instead
+ * of the literal object id when a same-named ref also exists).
+ * @decision b8122303 — shared by {@link verifyPersistedPathSet}'s `baseOverride` and
+ * {@link verifyReviewedTipChain}'s `live`; never re-implement this at a third call site.
+ */
+async function resolveExactTrailerObjectId(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, candidate: string,
+): Promise<string | null> {
+  if (!OBJECT_ID_SHAPE_RE.test(candidate)) return null;
+  const resolved = (await withTimeout(
+    git.raw(["-c", "core.warnAmbiguousRefs=false", "rev-parse", "--verify", "--quiet", `${candidate}^{object}`]),
+    timeoutMs, "git rev-parse --verify --quiet (trailer-derived object existence)",
+  )).trim();
+  if (resolved === "" || resolved !== candidate) return null;
+  const objectType = (await withTimeout(
+    git.raw(["-c", "core.warnAmbiguousRefs=false", "cat-file", "-t", resolved]),
+    timeoutMs, "git cat-file -t (trailer-derived object type)",
+  )).trim();
+  return objectType === "commit" ? resolved : null;
+}
+
 /** @decision 756a2cd8 — verifies a squash commit's persisted path-set trailer purely from its OWN ancestry
  *  (survives branch deletion + `git gc`).
  *
@@ -7388,25 +7423,10 @@ async function verifyPersistedPathSet(
   try {
     let parent: string;
     if (baseOverride !== undefined) {
-      if (!OBJECT_ID_SHAPE_RE.test(baseOverride)) return "fail";
-      // @decision c0d0eac9 round 6 (finding 1) — round 5's `<id>^{commit}` peel throws on an EXISTING
-      // non-commit object ("expected commit type", exit 1) — wrongly "error", aborting the lookup.
-      // `^{object}` (existence only) then `cat-file -t` (now safe) gets the type — neither ever throws.
-      // @decision c0d0eac9 round 7 (finding 2) — a 41-64-hex baseOverride resolves as a REF NAME, not an
-      // object id, in a SHA-1 repo; require the resolved stdout to equal baseOverride EXACTLY and reuse
-      // that one validated sha below, never re-resolving the same candidate-supplied text again.
-      const resolved = (await withTimeout(
-        git.raw(["-c", "core.warnAmbiguousRefs=false", "rev-parse", "--verify", "--quiet", `${baseOverride}^{object}`]),
-        timeoutMs, "git rev-parse --verify --quiet (base existence, any object type)",
-      )).trim();
-      if (resolved === "" || resolved !== baseOverride) return "fail";
-      const objectType = (await withTimeout(
-        git.raw(["-c", "core.warnAmbiguousRefs=false", "cat-file", "-t", resolved]),
-        timeoutMs, "git cat-file -t (base object type)",
-      )).trim();
-      // Accept ONLY a raw commit object — never peel a tag. The real writer always stamps a raw commit
-      // sha; a tag naming this exact id is never what a genuine Loom-Worker-Base trailer would carry.
-      if (objectType !== "commit") return "fail";
+      // @decision b8122303 — shared with {@link verifyReviewedTipChain}'s `live`; see
+      // {@link resolveExactTrailerObjectId}'s own doc for the c0d0eac9 round 5-7 mechanics.
+      const resolved = await resolveExactTrailerObjectId(git, timeoutMs, baseOverride);
+      if (resolved === null) return "fail";
       parent = resolved;
     } else {
       // @decision c0d0eac9 round 6 (finding 2) — `${sha}^` throws for a PARENTLESS (root) commit — a
@@ -9727,6 +9747,12 @@ export async function verifyReviewedTipChain(
   const reachable = async (a: string, from: string) => (await raw(["rev-list", "-n1", a, `^${from}`], "git rev-list (reviewed-tip reachability)")).trim() === "";
   const short = (x: string) => x.slice(0, 8);
   try {
+    // @decision b8122303 — `live` may be a trailer-derived value (e.g. `Loom-Landed-Tip`) that is only
+    // shape-validated at parse time; resolve it to its own exact object id here, at entry, before any
+    // later call can be influenced by a same-named decoy ref. See resolveExactTrailerObjectId's own doc.
+    if ((await resolveExactTrailerObjectId(git, timeoutMs, live)) === null) {
+      return { ok: false, reason: `${short(live)} could not be resolved to its own exact, well-formed commit object id` };
+    }
     let cur = live;
     for (let hops = 0; hops <= REVIEWED_TIP_WALK_MAX_HOPS; hops++) {
       if (cur === reviewed) return { ok: true, hops };

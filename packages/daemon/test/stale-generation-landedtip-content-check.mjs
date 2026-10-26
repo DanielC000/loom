@@ -1046,6 +1046,57 @@ try {
     try { fs.rmSync(bsRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 
+  // (LANDEDTIP-REF-NAME-SHAPE, card b8122303) — a trailer-derived `Loom-Landed-Tip` is shape-validated at
+  // parse time (/^[0-9a-f]{40,64}$/, which also admits a 41-64-char string — never itself a valid SHA-1
+  // object-id SHAPE, only ever resolvable as a REF NAME) but that alone does not prove it resolves to
+  // ITSELF: a same-named ref (planted by anyone with write access to the shared .git) resolves to the
+  // ref's TARGET instead of the literal text — the identical class c0d0eac9 round 7 closed for
+  // `Loom-Worker-Base` (same 50-hex-char construction as that card's own REF-NAME-BASE-SHAPE fixture, in
+  // tolerant-loom-trailer-discovery.mjs). `verifyReviewedTipChain`'s `live` param must reject this at
+  // entry, before the chain walk (and even before the trivial `cur === reviewed` string-equality fast
+  // path) ever runs.
+  {
+    const rtRepo = path.join(os.tmpdir(), `loom-sglt-reftip-${sfx}`);
+    fs.mkdirSync(rtRepo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: rtRepo });
+    const RT_ID = ["-c", "user.email=sglt@loom", "-c", "user.name=sglt"];
+    fs.writeFileSync(path.join(rtRepo, "a.txt"), "a\n");
+    execFileSync("git", ["add", "-A"], { cwd: rtRepo });
+    execFileSync("git", [...RT_ID, "commit", "-q", "-m", "genesis"], { cwd: rtRepo });
+    const rtDecoyTarget = execFileSync("git", ["rev-parse", "HEAD"], { cwd: rtRepo }).toString().trim(); // what the planted ref will ACTUALLY point at
+    // A 50-hex-char string — too long to be a SHA-1 object id, so git resolves it ONLY as a REF NAME.
+    const rtRefNameHex = "4".repeat(50);
+    execFileSync("git", [...RT_ID, "tag", rtRefNameHex, rtDecoyTarget], { cwd: rtRepo });
+
+    const rtResolved = execFileSync("git", ["rev-parse", "--verify", "--quiet", `${rtRefNameHex}^{object}`], { cwd: rtRepo }).toString().trim();
+    check("(LANDEDTIP-REF-NAME-SHAPE) setup control: rtRefNameHex resolves (via the planted ref) to the DECOY target, proving it is NOT itself a raw object id",
+      rtResolved === rtDecoyTarget && rtResolved !== rtRefNameHex);
+
+    // `reviewed === live` (both rtRefNameHex's literal text) — proves the entry validation runs BEFORE the
+    // old trivial `cur === reviewed` string-equality fast path, not just somewhere later in the walk.
+    const rtChain = await verifyReviewedTipChain(rtRepo, rtRefNameHex, rtRefNameHex, {}, [], "HEAD");
+    check("(LANDEDTIP-REF-NAME-SHAPE) THE FIX: a ref-name-shaped live tip is a DEFINITIVE refusal, never chain-ok",
+      rtChain.ok === false);
+
+    // card b8122303 Code Review (reviewer 201f0fa5), THE REALISTIC SHAPE: `reviewed` is a REAL, DIFFERENT
+    // commit (rtDecoyTarget), and `live` is the ref-name-shaped forgery that happens to resolve (via the
+    // planted ref) to that SAME commit — reviewed !== live as LITERAL TEXT, so the old `cur === reviewed`
+    // fast path never fires; the old code instead fell through into `reachable(cur, mainRef)` /
+    // `reachable(reviewed, cur)`, where `cur` (interpolated raw into git argv) resolved via the ref to
+    // rtDecoyTarget, making BOTH reachability checks trivially true against reviewed === rtDecoyTarget —
+    // a forged chain-ok, pre-fix. Must now be a definitive refusal.
+    const rtRealisticChain = await verifyReviewedTipChain(rtRepo, rtDecoyTarget, rtRefNameHex, {}, [], "HEAD");
+    check("(LANDEDTIP-REF-NAME-SHAPE) THE FIX, realistic shape (reviewed=real commit, live=ref-name-shaped forgery resolving to it): a DEFINITIVE refusal, never chain-ok",
+      rtRealisticChain.ok === false);
+
+    // Control: a genuine, real commit sha (no decoy ref involved) still resolves chain-ok.
+    const rtCleanChain = await verifyReviewedTipChain(rtRepo, rtDecoyTarget, rtDecoyTarget, {}, [], "HEAD");
+    check("(LANDEDTIP-REF-NAME-SHAPE) control: a genuine raw commit sha (no ref-name ambiguity) still resolves chain-ok (the fix is not a blanket refusal)",
+      rtCleanChain.ok === true);
+
+    try { fs.rmSync(rtRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+
   // --- Direct proof (card 1cf79e64, F4/F4b): a genuine omission of a real backslash-named file, and an
   // all-backslash stamp against a wholly unrelated candidate, both now escalate instead of wrongly
   // attributing. Built via the same plumbing technique as the backslash-net block above (a literal
