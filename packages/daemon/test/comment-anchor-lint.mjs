@@ -201,6 +201,72 @@ async function loadCommentAnchorLintAt(repoRoot, sha) {
   check("single-line block comments: two separate one-line blocks", blocks.length === 2 && blocks.every((b) => b.length === 1));
 }
 
+// --- card 04d9f322: a JSX `{/* ... */}` comment opens a block exactly like a bare `/*` ------------------
+
+{
+  // Single-line JSX comment: `{/* ... */}` closing on the same line must behave exactly like `/* ... */`.
+  const lines = ["const x = 1;", "{/* a short JSX comment */}", "const y = 2;"];
+  const blocks = extractCommentBlocks(lines);
+  check("card 04d9f322: single-line JSX comment is recognized as its own block",
+    blocks.length === 1 && blocks[0]?.startLine === 2 && blocks[0]?.endLine === 2);
+}
+
+{
+  // Multi-line JSX comment: opens with `{/*`, closes on a LATER line with `*/}`.
+  const body = Array.from({ length: 16 }, (_, i) => `    narrative line ${i} — regrowing prose`);
+  const lines = ["{/* first line of a long JSX comment", ...body, "last line */}", "const z = 3;"];
+  const blocks = extractCommentBlocks(lines);
+  check("card 04d9f322: multi-line JSX comment is recognized as ONE block", blocks.length === 1);
+  check("card 04d9f322: multi-line JSX comment spans from its opener to its closer",
+    blocks[0]?.startLine === 1 && blocks[0]?.endLine === lines.length - 1);
+  check("card 04d9f322: a long multi-line JSX comment with no anchor is itself unanchored",
+    blocks[0]?.length >= DEFAULT_MIN_LINES && blocks[0]?.anchorIds.length === 0);
+}
+
+{
+  // An `@decision` anchor sitting inside a JSX comment is captured by its block (anchorIds) AND is
+  // reachable as "inside a block" (the `isAnchorInBlock` contract every block-membership-gated check —
+  // pointerAnchors/overlongAnchorParagraphs/embeddedAnchors/splitAnchorParagraphs/bareCommitAnchors —
+  // relies on) — the exact gap card 04d9f322 closed: before this fix the anchor was a real anchor per
+  // `findFileAnchors` but belonged to NO block at all, so it was invisible to all five of those checks.
+  const lines = [
+    "{/* @decision cccccccc — a short guard living inside a JSX expression container",
+    "    stays reachable by every block-membership-gated check, not just findFileAnchors. */}",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("card 04d9f322: a JSX comment carries its own anchor", blocks[0]?.anchorIds.includes("cccccccc"));
+  check("card 04d9f322: the anchor's line falls within the JSX block's range (the isAnchorInBlock contract)",
+    anchors.length === 1 && anchors[0].line >= blocks[0].startLine && anchors[0].line <= blocks[0].endLine);
+}
+
+{
+  // Negative control: a `{` NOT immediately followed by `/*` must never be swallowed as a comment — an
+  // object/JSX expression, a string, and a bare JSX child expression all stay ordinary CODE. `{` after
+  // `/*` can never legitimately be anything but a comment opener in valid JS/TS/JSX (an object-literal
+  // value can't start with a bare comment token, and a regex literal can't start with `*`), so a false
+  // positive here would mean the widening is unsafe, not merely imprecise.
+  const lines = [
+    '{"this is a string, not a comment"}',
+    "{someFunctionCall()}",
+    "{ someVar }",
+    "const notAComment = { key: 1 };",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  check("card 04d9f322 negative control: a `{` opening a string/call/bare-expression is NEVER captured as a comment",
+    blocks.length === 0);
+}
+
+{
+  // Deliberately OUT of scope (see this card's own record's "Do not"): a `{` with a SPACE before `/*`
+  // (e.g. `{ /* ... */ }`) is NOT recognized — measured zero real occurrences of this variant on this
+  // repo's own corpus, so widening to it was never exercised by card 04d9f322's own measurement.
+  const lines = ["const x = 1;", "{ /* a spaced JSX comment */ }", "const y = 2;"];
+  const blocks = extractCommentBlocks(lines);
+  check("card 04d9f322 scope: a SPACED `{ /*` opener is deliberately NOT recognized (an unmeasured variant)",
+    blocks.length === 0);
+}
+
 // --- doc-comment boundary split (card 01e09f28 — anchoring the first of two abutting doc comments used to
 // make the second vanish from unanchoredLongBlocks) ------------------------------------------------------
 
@@ -2478,6 +2544,60 @@ try {
       cli.status === 0 && JSON.parse(cli.stdout).pointerAnchors.items.some((p) => p.id === "c1c1c1c1"));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- card 04d9f322: REAL-REPO regression pin — every item-level check's full item set is UNCHANGED, ------
+// proving the JSX-comment widening (a) fires somewhere real (totalCommentBlocks strictly increases) and
+// (b) introduces NO new violation anywhere in the repo, now that the two real findings the investigation
+// surfaced (Board.tsx's unanchored narrative, fleet.tsx's embedded anchor) are fixed in the SAME commit.
+// Deliberately an ITEM-SET comparison (byte-identical JSON, mirroring card 0c474dda (b)'s own
+// UNCHANGED_CHECKS pattern), never a hardcoded absolute count — an absolute count drifts with every
+// unrelated commit that touches comment volume anywhere in the repo; an item-set diff, computed fresh
+// against whatever the tree looks like AT TEST TIME (old code vs new code, same snapshot), does not.
+// Pinned to THIS BRANCH's own base (the commit right before this card started), never `HEAD` — see
+// `loadCommentAnchorLintAt`'s own doc for why.
+{
+  const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
+  const PRE_04D9F322_SHA = "e30b9913b2e91cd8dbe36d07752bdfd4559f77be";
+  const { mod: preFixMod, dir: preFixDir, reason: preFixSkipReason } = await loadCommentAnchorLintAt(repoRoot, PRE_04D9F322_SHA);
+  if (preFixMod === null) {
+    console.log(`SKIP  card 04d9f322 real-repo regression pin: ${preFixSkipReason}`);
+  } else {
+    try {
+      const before = preFixMod.computeReport(repoRoot);
+      const after = computeReport(repoRoot);
+
+      // Every item-level check this card's investigation found affected (or confirmed unaffected) by
+      // block-membership — the FULL item set must be byte-identical once the two real findings are fixed.
+      const UNCHANGED_CHECKS = [
+        "unanchoredLongBlocks", "orphanAnchors", "orphanRecords", "brokenAnchors", "overlongAnchorIds",
+        "sigilSpaceAnchors", "bareCommitAnchors", "pointerAnchors", "overlongAnchorParagraphs",
+        "midSentenceAnchors", "embeddedAnchors", "splitAnchorParagraphs",
+      ];
+      for (const c of UNCHANGED_CHECKS) {
+        const beforeItems = JSON.stringify(before[c].items);
+        const afterItems = JSON.stringify(after[c].items);
+        check(`card 04d9f322 real-repo regression pin: ${c}'s full item set is byte-identical before vs after`,
+          beforeItems === afterItems);
+      }
+
+      // Proves the widening isn't vacuous (it actually recognizes NEW blocks somewhere in the real repo)
+      // without hardcoding the exact delta — the real count (372 lines, measured during the investigation)
+      // drifts as unrelated commits add/remove JSX comments elsewhere; the DIRECTION never does.
+      check("card 04d9f322: totalCommentBlocks strictly increases (the widening fires on the real repo)",
+        after.totalCommentBlocks > before.totalCommentBlocks);
+
+      // The two specific real findings the investigation surfaced are gone from the FINAL (after) report —
+      // asserted by site identity (file + line range), never by an absolute repo-wide count, so this never
+      // drifts if an unrelated commit adds a different unanchored block or embedded anchor elsewhere.
+      check("card 04d9f322: Board.tsx's card-context block (the real unanchoredLongBlocks finding) is fixed",
+        !after.unanchoredLongBlocks.items.some((b) => b.file === "packages/web/src/pages/Board.tsx" && b.startLine >= 1030 && b.startLine <= 1040));
+      check("card 04d9f322: fleet.tsx's harness-tag anchor (the real embeddedAnchors finding) is fixed",
+        !after.embeddedAnchors.items.some((e) => e.file === "packages/web/src/components/fleet.tsx" && e.id === "b8e52cfe"));
+    } finally {
+      try { fs.rmSync(preFixDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   }
 }
 

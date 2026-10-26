@@ -394,9 +394,10 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
       {/* Which vendor CLI this session actually runs — grouped with the id because it's an identity
           fact about the row, not a status. `null` (never pinned) and an explicit `"claude"` both read
           as claude here: the daemon keeps them distinct because it's a provenance question, but they
-          spawn the same binary, so there is nothing for a fleet reader to act on between them. The tag
-          renders for codex always, and for claude only inside a MIXED-harness view — see
-          @decision b8e52cfe for why that is conditional on the rendered set rather than global. */}
+          spawn the same binary, so there is nothing for a fleet reader to act on between them.
+
+          @decision b8e52cfe — the tag renders for codex always, and for claude only inside a
+          MIXED-harness view, never unconditionally. */}
       <HarnessTag harness={harnessOf(s.harness)} />
       <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
       {/* Decision affordance (surface 5): a manager holding a pending decision flags it inline + jumps

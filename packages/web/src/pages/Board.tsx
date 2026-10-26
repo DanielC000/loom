@@ -1031,21 +1031,14 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, links, linksUnavaila
             <Button onClick={() => setPendingNav(null)}>Cancel</Button>
           </div>
         )}
-        {/* Card CONTEXT — parent / children / relations (card 1ae4f88c). Sits here, directly under the
-            dossier header and ABOVE the two-column edit body, because it answers "what is this card
-            connected to" in the same register as the header's id/priority/lane chips — it is not another
-            editable field. Renders nothing at all when the card has no links, which is the common case, so
-            an ordinary card's drawer is unchanged.
+        {/* Card-context section: parent / children / relations, for the dossier drawer.
 
-            No loading placeholder on purpose: reserving space for a block that MOST cards will never fill
-            would flash an empty panel on every single drawer open — worse than the block simply appearing
-            once it lands. (A done card waits on that same read anyway, via TaskDrawerLoading, so its links
-            are already there when the drawer draws.)
+            @decision 1ae4f88c — sits directly under the dossier header, above the edit body, and
+            reserves no loading placeholder: that would flash an empty panel on every drawer open for
+            the common case of a card with no links.
 
-            But a FAILED read is not an empty one. A LIVE card renders this drawer off its board row, so
-            the read failing leaves `links` empty and the block absent — indistinguishable from a card that
-            genuinely has no connections, i.e. a false zero (card 230cb6e3). Say so rather than render it;
-            the 4s poll keeps retrying underneath, so the line clears itself once the read recovers. */}
+            @decision 230cb6e3 — a failed links read must say so rather than render silently; otherwise
+            it's indistinguishable from a card that genuinely has no connections (a false zero). */}
         {linksUnavailable && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.textMuted,
             fontFamily: font.mono, fontSize: 11 }}>

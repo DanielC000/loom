@@ -186,9 +186,13 @@
 //      `pointerAnchors`/`overlongAnchorParagraphs` (re-measure the main-tree baseline fresh — it moved with
 //      this card's fix — rather than trusting a number restated here). Card 298a1390: for a NON-test
 //      file this check deliberately reads the full, unscoped `anchors`, not the comment-scoped
-//      `grammarAnchors` every sibling check above uses — reusing `isAnchorInBlock` there would SILENTLY
-//      DROP a genuine JSX `{/* */}`-comment embed (`extractCommentBlocks` still doesn't recognize JSX
-//      syntax — deferred as its own, separate, larger follow-up, never bundled into card 0c474dda below).
+//      `grammarAnchors` every sibling check above uses — at the time, reusing `isAnchorInBlock` there
+//      would have SILENTLY DROPPED a genuine JSX `{/* */}`-comment embed, since `extractCommentBlocks`
+//      didn't recognize JSX syntax yet (card 04d9f322 closed that gap — see `extractCommentBlocks`'s own
+//      doc). This check still reads the unscoped `anchors` regardless: switching it to `grammarAnchors`
+//      now that the reason above no longer applies is a separate, un-asked-for behavior change, not a
+//      consequence of card 04d9f322 (measured zero count/item difference either way on this repo's real
+//      corpus today — re-measure before relying on that staying true).
 //      Card 0c474dda instead widened `isMidSentenceAnchorLine`'s OWN prefix check (not
 //      `extractCommentBlocks`) to fix the other two gap shapes 298a1390 found but could not safely close
 //      this way: a SQL `--` comment (`stripCommentMarkers` now also strips a leading `--`) and a trailing
@@ -538,6 +542,10 @@ function relPath(repoRoot, p) {
  * @decision 01e09f28 — a `*\/` closing a `/* ... *\/` comment, immediately followed (no blank line) by
  * a fresh `//`, `/*`, or `/**`, splits into a new block (two abutting doc comments are never one merged
  * run). Narrow: two abutting `//` lines never split (neither closes a `/* ... *\/` comment).
+ *
+ * @decision 04d9f322 — a trimmed line opening with `{/*` (a JSX expression-container comment) opens a
+ * block exactly like a bare `/*\ `; closing is unaffected (the existing `includes("*\/")` check already
+ * matches a trailing `*\/}` for free).
  */
 export function extractCommentBlocks(lines) {
   const blocks = [];
@@ -570,7 +578,7 @@ export function extractCommentBlocks(lines) {
     } else if (trimmed.startsWith("//")) {
       isComment = true;
       isNewCommentStart = true;
-    } else if (trimmed.startsWith("/*")) {
+    } else if (trimmed.startsWith("/*") || trimmed.startsWith("{/*")) {
       isComment = true;
       isNewCommentStart = true;
       if (trimmed.includes("*/")) closesBlockComment = true;
@@ -1245,9 +1253,10 @@ export function computeReport(repoRoot, opts = {}) {
   // card 298a1390 — comment-scoped anchors feeding bareCommitAnchors/splitAnchorParagraphs (non-test-only
   // — see below) — a SEPARATE population from `allAnchors` (which stays the orphanAnchors/orphanRecords
   // input). `midSentenceAnchors` deliberately keeps reading `allAnchors`/the raw `anchors` variable below
-  // for a NON-test file — see this file's header, check 12, and card 0c474dda's own record for why
-  // `isAnchorInBlock` still isn't safe to apply there for a non-test file (JSX `{/* */}` recognition is
-  // deferred, separately). For a TEST-scoped file, `anchors` is ALREADY comment-scoped (card f9ccdcb1,
+  // for a NON-test file — see this file's header, check 12, and card 0c474dda's own record for the
+  // original reason (`extractCommentBlocks` not yet recognizing JSX `{/* */}`, closed by card 04d9f322 —
+  // this check was never switched to `grammarAnchors` as a consequence, see check 12's own doc). For a
+  // TEST-scoped file, `anchors` is ALREADY comment-scoped (card f9ccdcb1,
   // below) — that's what lets `sigilSpaceAnchors`/`pointerAnchors`/`overlongAnchorParagraphs`/
   // `midSentenceAnchors`/`embeddedAnchors` extend into test/tests/e2e (card 0c474dda) using the SAME
   // per-file `grammarAnchors`/`anchors` already computed below, with no separate test-only filter needed.
