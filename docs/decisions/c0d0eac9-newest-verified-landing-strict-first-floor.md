@@ -666,6 +666,38 @@ TEXT only, so an attacker with `.git` write access can plant more strict-shaped 
 Past the cap, the walk fails closed to `null` — equal to the floor (the pre-card single-attempt behavior),
 never worse. Accepted as-is; no change needed.
 
+## Branch-present arm walk-past, pinned by card ba1252f6 (2026-10-26)
+
+Every round above, and the dedicated `tolerant-loom-trailer-discovery.mjs` suite, tested the phase-1
+walk's "continue past a definitive fail" rule on the branch-GONE/ledger arm (CAP-FLOOR/CAP-IMPROVEMENT),
+or on the branch-PRESENT arm only with a candidate FORGED to literally copy the live branch's own tip
+tree (SHADOW-PRESENT-ARM, TRANSIENT-FAULT) — never with a candidate whose content GENUINELY, definitively
+mismatches the live branch while an OLDER candidate genuinely matches. That exact shape sat untested until
+this card. `packages/daemon/test/landed-commit-attribution.mjs`'s scenario (3) (card cd92e609, predating
+this one entirely) asserted `null` for it — but that was a pin on the OLD, pre-this-card single-candidate
+`findLandedSquashCommit`, never a separately-reviewed invariant: the test's own header only ever
+documented scenario (3) as a PIN-SAFETY control for `findIntroducingSquashCommit`'s attribution feature,
+and this record's own text, across 7 rounds, never once analyzed this specific combination.
+
+Verified (card ba1252f6): walk-past is correct on this arm too, for the same reason the gone/ledger arm's
+`positiveProof` machinery was never needed here. `branchContentLandedInCommit`'s bar is uniform across
+every candidate the walk tries: "is this candidate's version of the branch-touched files byte-identical
+to what's LIVE on the branch right now." Passing never means weaker proof for an older candidate than a
+newer one — it means that candidate's content genuinely represents the branch's current state. That is a
+stronger, content-grounded bar than the branch-gone arm's self-consistent PathSet/ledger checks (the
+entire `positiveProof`/ledger-error-abort apparatus in rounds 2-5 above exists precisely because THAT
+arm's bar is forgeable without it) — extending the same bar to multiple candidates does not weaken it.
+
+`landed-commit-attribution.mjs` scenario (3) is now re-pointed to assert the newest-VERIFIED-wins answer
+(the original squash sha, never `null`) — the first test of walk-past-on-a-genuine-content-mismatch on
+the branch-present arm — and a new scenario (3b) adds the control this card's own floor rule still needs:
+when NEITHER candidate's content matches the live branch (a third, later change to the branch's own
+file, after both land), the walk still returns `null`. Both proven RED/GREEN: (3) RED built against
+`148082e0` (this card's own pre-card parent commit, single-candidate code) in an isolated worktree, GREEN
+on this card's own code; (3b) RED under a `dist` hand-edit that makes `branchContentLandedInCommit`
+treat a definitive `"fail"` as `"pass"` (simulating a walk that accepts a non-verifying candidate), GREEN
+restored, byte-identical.
+
 ## Do not
 
 - Do not revert to "strict always wins, regardless of recency" — that is round 2's now-superseded rule; it
