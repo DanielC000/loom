@@ -3,7 +3,7 @@
 ## Do not
 
 - Do not read this as licence to raise the blanket `TEST_TIMEOUT_MS` — cc595ca7's no-blanket principle stands; a real hang in any other file is still killed at 120s.
-- Do not add an override to a file on thin margin alone — the bar is an OBSERVED kill, or an in-suite max pass at or above 0.9x the blanket ceiling (108,000ms); ba46a06f's "margin alone is not sufficient warrant" still governs the rest.
+- Do not add an override on thin margin alone — the bar is an OBSERVED kill, or a measured max duration (in-suite, OR — for a real-git/worktree-heavy file — quiet-host solo) at or above ~0.60x of the ceiling (~72,000ms). **Not 0.9x/108,000ms** — this line asserted that figure until the 2026-10-27 addendum below; it was already superseded by cc595ca7's card ae141763 round 2 (2026-10-04). Read the cutoff at source, don't copy a number into this file. ba46a06f's "margin alone is not sufficient warrant" still governs anything thinner than that cutoff.
 - Do not size an override off a "solo time x N" factor — the "in-suite ~ 2x solo" figure was one sample and is not supported by the timing corpus (see below).
 
 ## Narrative
@@ -21,3 +21,15 @@ Three `merge_batch` gates on 2026-09-24 landed nothing, each red only on files S
 **Cost.** Passing runs are unchanged. A real hang in one of these nine files is killed at 300s instead of 120s: +180s to detect, per hung file, one pool lane stalled meanwhile. All other files keep the 120s fast-fail. Options rejected: a blanket 180s ceiling (cc595ca7); the isolated real-spawn phase (opt-in/default OFF, adds serial time, 0f0816e2 forbids reusing its numbers, and it does not address a per-file tail).
 
 **Revisit when** per-file rows for many more full runs (across days/hosts) exist — then a rate can replace n=7, and an override whose file never comes near the ceiling can be dropped.
+
+## Card ae60cd4e — 2026-10-27: a thin SOLO margin is unsafe too; corrects this record's stale 0.9x figure
+
+This record's Do-not line stated 0.9x-of-ceiling (108,000ms) — already stale: cc595ca7's card ae141763 round 2 (2026-10-04) re-derived ~0.60x (~72,000ms) after a quiet-host gate killed six files under 108,000ms; read that derivation there, not re-quoted here. This record's line never caught up.
+
+New evidence (2026-10-25/26) reconverges on the same number and adds one finding: a thin QUIET-HOST SOLO margin, not only a thin in-suite max pass, is unsafe for this family.
+
+Card 75e8a845's `batch-merge-head-moved`: 7/14 in-suite SIGTERM kills, all plain 120,000ms timeouts, 0 real failures (every FAILURES-block line quotes the last-passed scenario; ndjson `failureDetail.messages` is `[]` throughout). Solo (6 trials, one host, foreground): 71,434-86,233ms — 0.60x-0.72x of the ceiling, below the old 0.9x bar. In-suite max PASS before any override: 113,613ms (`test-daemon.mjs:1133`). Ratio (in-suite ÷ solo): 1.32x-1.59x — reconverges with round 2's ~1.39x-1.70x (memory `merge-family-ae141763-round2-timing-2026-10-04`) and `2403d1bc`'s 0.60-0.69x. One file, 6 solo + 1 in-suite observation — corroborates round 2's broader sample, not a new rate.
+
+Card 3e51ebf0's other two files don't extend this: `worker-run-gate` (solo 118,220ms; passes 115,212ms/108,889ms, `test-daemon.mjs:971`) already sat at 0.91x-0.99x, inside the OLD bar. `mainline-ledger-rebind-race` (solo 235,897ms, `test-daemon.mjs:1115`) already exceeds the ceiling — an ordinary observed kill, not thin-margin. Only `batch-merge-head-moved` tests the thin-SOLO question.
+
+**Corrected rule** (folded into the Do-not line above): a real-git/worktree-heavy file's quiet-host solo time counts the same as an in-suite max pass — override once either is >= ~0.60x of the ceiling, sized 2-2.5x the observed max as usual. Outside that family, or below ~0.60x, nothing changes; ba46a06f's "margin alone is not sufficient warrant" still governs. Source: `packages/daemon/scripts/test-daemon.mjs` line numbers cited above; `~/.loom/gate-timing/daemon-per-file-timing.ndjson` (read-only, host-local). Cards `75e8a845`, `3e51ebf0`. Related: `cc595ca7`, `2403d1bc`, `ba46a06f`.
