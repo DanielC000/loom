@@ -10,12 +10,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (side-merge) the worker merges a NON-main branch (the reviewer's clock-skew history: L1 adds z Jan 10, side X1 Jan 8, L2 `git rm z` Jan 5, then merge x): REFUSED; the old replay landed a tree that still had z.
 //   (own-union)  a late commit edits a file main ALSO edited (two unchanged lines apart: a clean merge, yet one `diff-tree --cc` hunk that mixes both); a red gate leaves Loom's own union on the branch, main moves, the re-confirm lands: that union carries combined content but is Loom's own and must NOT be refused.
 //   (empty)     main itself removes extra-a.txt after the batch, so the late commit is a no-op on main: review flags it emptyOnMain and shows no diff; the confirm lands nothing.
+//   (equivalence check) proves seedHeldBranch's seeded `batch_merge_branch_retained` event is a row the real writer (service.ts ~23311-23315) could produce: a real mergeBatchTracked retain vs the
+//               seeded one, compared field-for-field on the persisted row, then both driven through reviewWorkerMerge/confirmWorkerMerge to show isBranchHeld/resolveOwedRange treat them identically.
 // In every landing case review == landing: the review's commit subjects and file list equal what the landed commit actually changed.
+// Card 114e96e0: setup() no longer runs a real mergeBatchTracked to produce the HELD state for branch A. isBranchHeld (service.ts:21854) reads ONLY the durable event log — never anything
+// mergeBatchTracked computes in-memory — so seedHeldBranch (below) writes that SAME event directly via db.appendEvent, through the real writer's own chokepoint (service.ts:23311-23315), with the
+// same detail keys/value shapes. The branch-advanced-during-gate DETECTION this scaffolding used to re-exercise in every scenario is independently pinned by
+// batch-merge-branch-advanced-during-gate.mjs (scenarios sync/async/stop/mixed) and batch-merge-finalize-guard-edges.mjs (scenarios U/u/N1/N2) — this file's own claim (13fc5227) is about what
+// happens GIVEN a held branch, never about how the hold was produced. Precedent: docs/decisions/6cf10d10-ledger-cutover-gate-seeding-equivalence.md. Candidate B (never referenced by any
+// assertion in this file — grepped) is dropped entirely; the ONE (equivalence check) scenario above is the sole real-mergeBatchTracked anchor left in the file.
 // Run: 1) pnpm build, 2) node packages/daemon/test/batch-merge-late-range-commits.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -50,7 +59,32 @@ fs.writeFileSync(path.join(TEMPLATE_REPO, "README.md"), "# bmlc\n");
 execSync(`git init -q && git config user.email bmlc@loom && git config user.name bmlc`, { cwd: TEMPLATE_REPO });
 commitAll(TEMPLATE_REPO, "init", GIT_ID);
 
-// preMain: a commit landed on main AFTER the branches are cut and BEFORE the batch runs (M0 in the (m0) scenario).
+/**
+ * Seeds the HELD state a real `mergeBatchTracked` run would produce for a retained candidate — writing
+ * through the SAME chokepoint the real writer uses (service.ts ~23311-23315: `this.db.appendEvent({...,
+ * kind: "batch_merge_branch_retained", workerSessionId, taskId, detail: {opId, branch, assembledTip,
+ * liveTip, phase, landedSha, repoKey}})`), with the SAME detail keys and value shapes — including
+ * `landedSha` (a real sha, never omitted/null: the real writer always supplies `lb.sha`, the candidate's
+ * own just-landed commit). isBranchHeld (service.ts:21854) reads ONLY this durable event log, never
+ * anything mergeBatchTracked computes in-memory, so a caller that also builds the matching git history (a
+ * real worktree at `assembledTip`/`liveTip`, a real commit at `landedSha` on main) gets a hold
+ * indistinguishable from a real retain — proved field-for-field, and via isBranchHeld/heldRecordedTip/
+ * resolveOwedRange's observable effect through the public reviewWorkerMerge/confirmWorkerMerge surface
+ * (all three are private methods), by the (equivalence check) scenario below.
+ * `landedSha` deliberately does NOT need its own `Loom-Worker-Branch` trailer: isBranchHeld's git-fact
+ * release arm (`findLaterBranchSquash`) only greps commits STRICTLY AFTER `landedSha` for that trailer,
+ * never `landedSha`'s own message — so a plain commit standing in for "the batch's own squash of this
+ * candidate" is inert here, confirmed by the equivalence scenario reaching the SAME held verdict.
+ */
+function seedHeldBranch(db, { managerSessionId, workerSessionId, taskId, branch, assembledTip, liveTip, landedSha, phase = "pre-stop" }) {
+  db.appendEvent({
+    id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "batch_merge_branch_retained",
+    workerSessionId, taskId,
+    detail: { opId: randomUUID(), branch, assembledTip, liveTip, phase, landedSha, repoKey: null },
+  });
+}
+
+// preMain: a commit landed on main AFTER the branch is cut and BEFORE its (seeded) assembled landing (M0 in the (m0) scenario).
 async function setup(tag, preMain, initFiles = {}) {
   const repo = path.join(os.tmpdir(), `loom-bmlc-${tag}-${sfx}`);
   registerForCleanup(repo);
@@ -64,42 +98,44 @@ async function setup(tag, preMain, initFiles = {}) {
     commitAll(repo, "init", GIT_ID);
   }
   const projId = `bmlc-proj-${tag}-${sfx}`, agentId = `bmlc-agent-${tag}-${sfx}`, mgrId = `bmlc-mgr-${tag}-${sfx}`;
-  const cut = async (label, files) => {
-    const taskId = `bmlc-task-${tag}-${label}-${sfx}`;
-    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
-    registerForCleanup(worktreePath);
-    for (const f of files) fs.writeFileSync(path.join(worktreePath, f), `work ${label} ${f}\n`);
-    commitAll(worktreePath, label, GIT_ID);
-    return { taskId, branch, worktreePath };
-  };
-  const a = await cut("a", ["feature-a.txt", "extra-a.txt"]);
-  const b = await cut("b", ["feature-b.txt"]);
+  const taskId = `bmlc-task-${tag}-a-${sfx}`;
+  const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+  registerForCleanup(worktreePath);
+  fs.writeFileSync(path.join(worktreePath, "feature-a.txt"), "work a feature-a.txt\n");
+  fs.writeFileSync(path.join(worktreePath, "extra-a.txt"), "work a extra-a.txt\n");
+  commitAll(worktreePath, "a", GIT_ID);
+  const a = { taskId, branch, worktreePath };
+  const assembledTip = git(a.worktreePath, "rev-parse HEAD");
   let m0;
   if (preMain) { fs.writeFileSync(path.join(repo, "pre.txt"), "pre\n"); commitAll(repo, "main-pre", GIT_ID); m0 = git(repo, "rev-parse HEAD"); }
-  const script = path.join(os.tmpdir(), `loom-bmlc-gate-${tag}-${sfx}.mjs`);
-  registerForCleanup(script);
-  fs.writeFileSync(script, [
-    `import fs from "node:fs"; import path from "node:path"; import { execSync } from "node:child_process";`,
-    `const wt = ${JSON.stringify(a.worktreePath)};`,
-    `if (fs.existsSync(path.join(wt, "extra-a.txt"))) {`,
-    `  execSync("git rm -q extra-a.txt && git -c user.email=bmlc@loom -c user.name=bmlc commit -q -m late-revert", { cwd: wt, stdio: "ignore" });`,
-    `}`,
-    `process.exit(0);`,
-  ].join("\n"));
+  // Stands in for "the batch landed A's assembled commits onto main" (same final tree as assembledTip) —
+  // a plain commit instead of a real squash. Its sha becomes `landedSha`; see seedHeldBranch's own doc
+  // above for why the absent Loom-Worker-Branch trailer is inert here. DELIBERATELY a DIFFERENT commit
+  // message than the branch's own "a" commit (not just same tree/parent/identity) — two commits built
+  // from identical tree+parent+author+committer+message can collide to the SAME sha when git's
+  // one-second timestamp granularity lands both in the same second, which would make main an unintended
+  // ancestor of the branch and silently default every (wm)/(cm)-style "merge main into the worktree"
+  // scenario below to a no-op merge instead of a real one (caught as an intermittent flake, card 114e96e0).
+  fs.writeFileSync(path.join(repo, "feature-a.txt"), "work a feature-a.txt\n");
+  fs.writeFileSync(path.join(repo, "extra-a.txt"), "work a extra-a.txt\n");
+  commitAll(repo, "a-landed", GIT_ID);
+  const landedSha = git(repo, "rev-parse HEAD");
+  // The late commit a worker adds WHILE a real batch gate would run (card 42daa283) — applied directly
+  // instead of via a spawned gate-command child process; see the file header for why that detection
+  // mechanism is independently covered elsewhere and does not need re-exercising in every scenario here.
+  git(a.worktreePath, "rm -q extra-a.txt");
+  commitAll(a.worktreePath, "late-revert", GIT_ID);
+  const liveTip = git(a.worktreePath, "rev-parse HEAD");
   const db = new Db(); dbs.push(db);
-  db.insertProject({ id: projId, name: `BMLC-${tag}`, repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: `node "${script}"` } }, createdAt: now, archivedAt: null });
+  db.insertProject({ id: projId, name: `BMLC-${tag}`, repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: `node -e "process.exit(0)"` } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
-  const wA = `bmlc-wkr-a-${tag}-${sfx}`, wB = `bmlc-wkr-b-${tag}-${sfx}`;
-  for (const [wId, w, label] of [[wA, a, "a"], [wB, b, "b"]]) {
-    db.insertTask({ id: w.taskId, projectId: projId, title: `feat(test): ${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
-    db.insertSession({ id: wId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: w.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: w.taskId, worktreePath: w.worktreePath, branch: w.branch });
-  }
+  const wA = `bmlc-wkr-a-${tag}-${sfx}`;
+  db.insertTask({ id: a.taskId, projectId: projId, title: "feat(test): a", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: wA, projectId: projId, agentId, engineSessionId: null, title: null, cwd: a.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: a.taskId, worktreePath: a.worktreePath, branch: a.branch });
+  seedHeldBranch(db, { managerSessionId: mgrId, workerSessionId: wA, taskId: a.taskId, branch: a.branch, assembledTip, liveTip, landedSha });
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {}, purgeQueuedWorkerReportNudgesOnMerge() {}, purgeQueuedWorkerIdleNudges() {} };
   const mk = (extra = {}) => new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 600_000, reapWorktreeProcesses: noReap, ...extra });
-  const first = await mk().mergeBatchTracked(mgrId, [wA, wB]);
-  const val = first.settled && first.ok ? first.value : undefined;
-  check(`(${tag} setup) the batch landed A and B and RETAINED A`, val?.ok === true && !!val.landed.find((l) => l.branch === a.branch)?.branchAdvancedDuringGate);
   const mainCommit = (file, content, subject) => { fs.writeFileSync(path.join(repo, file), content); commitAll(repo, subject, GIT_ID); };
   const workerCommit = (file, content, subject) => { fs.writeFileSync(path.join(a.worktreePath, file), content); commitAll(a.worktreePath, subject, GIT_ID); };
   const workerMerge = (sha) => git(a.worktreePath, `${GIT_ID} merge --no-ff -m worker-merge ${sha}`);
@@ -209,6 +245,106 @@ try {
     const before = git(s.repo, "rev-parse HEAD");
     const res = await s.mk({ runGate: async () => gateOk }).confirmWorkerMerge(s.mgrId, s.wA);
     check("(empty) confirm lands NOTHING (refused/no-op), main did not move, the branch is intact", res.merged !== true && git(s.repo, "rev-parse HEAD") === before && !!git(s.repo, `rev-parse ${s.a.branch}`));
+  }
+  // ── (equivalence check) a real mergeBatchTracked retain vs seedHeldBranch: same event shape, same resolver verdict ──
+  {
+    const tag = "eq";
+    const repo = path.join(os.tmpdir(), `loom-bmlc-${tag}-${sfx}`);
+    registerForCleanup(repo);
+    fs.cpSync(TEMPLATE_REPO, repo, { recursive: true });
+    const projId = `bmlc-proj-${tag}-${sfx}`, agentId = `bmlc-agent-${tag}-${sfx}`, mgrId = `bmlc-mgr-${tag}-${sfx}`;
+    const cutReal = async (label, files) => {
+      const taskId = `bmlc-task-${tag}-${label}-${sfx}`;
+      const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+      registerForCleanup(worktreePath);
+      for (const f of files) fs.writeFileSync(path.join(worktreePath, f), `work ${label} ${f}\n`);
+      commitAll(worktreePath, label, GIT_ID);
+      return { taskId, branch, worktreePath };
+    };
+    const a = await cutReal("a", ["feature-a.txt", "extra-a.txt"]);
+    const b = await cutReal("b", ["feature-b.txt"]);
+    // Rebuilds the ORIGINAL (pre-card-114e96e0) gate script — a real child process, run by a real
+    // mergeBatchTracked — so this one scenario still exercises the batch's OWN assembled-vs-live-tip
+    // detection (the mechanism seedHeldBranch stands in for everywhere else in this file).
+    const script = path.join(os.tmpdir(), `loom-bmlc-gate-${tag}-${sfx}.mjs`);
+    registerForCleanup(script);
+    fs.writeFileSync(script, [
+      `import fs from "node:fs"; import path from "node:path"; import { execSync } from "node:child_process";`,
+      `const wt = ${JSON.stringify(a.worktreePath)};`,
+      `if (fs.existsSync(path.join(wt, "extra-a.txt"))) {`,
+      `  execSync("git rm -q extra-a.txt && git -c user.email=bmlc@loom -c user.name=bmlc commit -q -m late-revert", { cwd: wt, stdio: "ignore" });`,
+      `}`,
+      `process.exit(0);`,
+    ].join("\n"));
+    const db = new Db(); dbs.push(db);
+    db.insertProject({ id: projId, name: `BMLC-${tag}`, repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: `node "${script}"` } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const wA = `bmlc-wkr-a-${tag}-${sfx}`, wB = `bmlc-wkr-b-${tag}-${sfx}`;
+    for (const [wId, w, label] of [[wA, a, "a"], [wB, b, "b"]]) {
+      db.insertTask({ id: w.taskId, projectId: projId, title: `feat(test): ${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      db.insertSession({ id: wId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: w.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: w.taskId, worktreePath: w.worktreePath, branch: w.branch });
+    }
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {}, purgeQueuedWorkerReportNudgesOnMerge() {}, purgeQueuedWorkerIdleNudges() {} };
+    const mk = (extra = {}) => new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 600_000, reapWorktreeProcesses: noReap, ...extra });
+    const result = await mk().mergeBatchTracked(mgrId, [wA, wB]);
+    const val = result.settled && result.ok ? result.value : undefined;
+    check("(eq setup) the real batch landed A and B and RETAINED A", val?.ok === true && !!val.landed.find((l) => l.branch === a.branch)?.branchAdvancedDuringGate);
+
+    const realEvents = db.listEventsForWorker(wA).filter((e) => e.kind === "batch_merge_branch_retained");
+    check("(eq) exactly one REAL batch_merge_branch_retained event for A", realEvents.length === 1);
+    const real = realEvents[0];
+    // Db.appendEvent (db.ts ~7252) auto-stamps `projectId` onto ANY DURABLE_AUDIT_EVENT_KINDS detail that
+    // doesn't already carry one (`batch_merge_branch_retained` is in that set) — so the PERSISTED shape is
+    // the writer's own 7 keys PLUS this chokepoint-level addition, for both the real and the seeded event.
+    const REAL_SHAPE_KEYS = ["opId", "branch", "assembledTip", "liveTip", "phase", "landedSha", "repoKey", "projectId"];
+    check(`(eq) the REAL event's detail keys are exactly the writer's own shape ${JSON.stringify(REAL_SHAPE_KEYS)}`, sameSet(Object.keys(real.detail ?? {}), REAL_SHAPE_KEYS));
+
+    // A second candidate (a2), built the SAME cheap way every other scenario in this file now uses:
+    // seedHeldBranch instead of a real mergeBatchTracked retain. Distinct commit message on the main-side
+    // commit (not just "a2") for the same sha-collision reason noted in setup() above.
+    const a2 = await cutReal("a2", ["feature-a2.txt", "extra-a2.txt"]);
+    const assembledTip2 = git(a2.worktreePath, "rev-parse HEAD");
+    fs.writeFileSync(path.join(repo, "feature-a2.txt"), "work a2 feature-a2.txt\n");
+    fs.writeFileSync(path.join(repo, "extra-a2.txt"), "work a2 extra-a2.txt\n");
+    commitAll(repo, "a2-landed", GIT_ID);
+    const landedSha2 = git(repo, "rev-parse HEAD");
+    git(a2.worktreePath, "rm -q extra-a2.txt");
+    commitAll(a2.worktreePath, "late-revert", GIT_ID);
+    const liveTip2 = git(a2.worktreePath, "rev-parse HEAD");
+    const wA2 = `bmlc-wkr-a2-${tag}-${sfx}`;
+    db.insertTask({ id: a2.taskId, projectId: projId, title: "feat(test): a2", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: wA2, projectId: projId, agentId, engineSessionId: null, title: null, cwd: a2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: a2.taskId, worktreePath: a2.worktreePath, branch: a2.branch });
+    seedHeldBranch(db, { managerSessionId: mgrId, workerSessionId: wA2, taskId: a2.taskId, branch: a2.branch, assembledTip: assembledTip2, liveTip: liveTip2, landedSha: landedSha2 });
+
+    const seededEvents = db.listEventsForWorker(wA2).filter((e) => e.kind === "batch_merge_branch_retained");
+    check("(eq) exactly one SEEDED batch_merge_branch_retained event for a2", seededEvents.length === 1);
+    const seeded = seededEvents[0];
+    check(`(eq) the SEEDED event's detail keys are exactly the SAME shape as the real writer's ${JSON.stringify(REAL_SHAPE_KEYS)}`, sameSet(Object.keys(seeded.detail ?? {}), REAL_SHAPE_KEYS));
+    check("(eq) FIELD-FOR-FIELD: kind is identical (batch_merge_branch_retained)", seeded.kind === real.kind && seeded.kind === "batch_merge_branch_retained");
+    check("(eq) FIELD-FOR-FIELD: EQUAL fields — phase, repoKey", seeded.detail.phase === real.detail.phase && seeded.detail.repoKey === real.detail.repoKey);
+    check("(eq) FIELD-FOR-FIELD: INHERENTLY DIFFERENT fields are each present and well-formed (branch/assembledTip/liveTip/landedSha/opId are distinct shas/ids by construction — never compared for equality)",
+      seeded.detail.branch !== real.detail.branch && typeof seeded.detail.assembledTip === "string" && typeof real.detail.assembledTip === "string" &&
+      typeof seeded.detail.liveTip === "string" && typeof real.detail.liveTip === "string" &&
+      typeof seeded.detail.landedSha === "string" && typeof real.detail.landedSha === "string" && seeded.detail.opId !== real.detail.opId);
+
+    // isBranchHeld/heldRecordedTip/resolveOwedRange are private — driven here through the SAME public
+    // surface every other scenario in this file uses, for BOTH branches, to prove the resolver treats the
+    // seeded event exactly like the real one.
+    const revReal = await mk().reviewWorkerMerge(mgrId, wA);
+    const revSeeded = await mk().reviewWorkerMerge(mgrId, wA2);
+    check("(eq) the REAL-event branch resolves to a late range with exactly [late-revert]", !!revReal.lateRange && sameSet(revReal.lateRange.commitSubjects, ["late-revert"]));
+    check("(eq) the SEEDED-event branch resolves to a late range with exactly [late-revert] — the SAME shape", !!revSeeded.lateRange && sameSet(revSeeded.lateRange.commitSubjects, ["late-revert"]));
+    check("(eq) both late ranges report their own single file removed, proving resolveOwedRange treated both holds identically",
+      revReal.lateRange.files.length === 1 && revSeeded.lateRange.files.length === 1 &&
+      revReal.lateRange.files[0].file === "extra-a.txt" && revSeeded.lateRange.files[0].file === "extra-a2.txt");
+
+    const resReal = await mk({ runGate: async () => gateOk }).confirmWorkerMerge(mgrId, wA);
+    const resSeeded = await mk({ runGate: async () => gateOk }).confirmWorkerMerge(mgrId, wA2);
+    check("(eq) the REAL-event branch lands (merged:true)", resReal.merged === true);
+    check("(eq) the SEEDED-event branch ALSO lands (merged:true) — isBranchHeld genuinely read the seeded event, not a fixed/cached verdict", resSeeded.merged === true);
+    check("(eq) OUTCOME: main lost BOTH extra-a.txt and extra-a2.txt (both late reverts landed) and kept both feature files",
+      !has(repo, "extra-a.txt") && !has(repo, "extra-a2.txt") && has(repo, "feature-a.txt") && has(repo, "feature-a2.txt"));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
