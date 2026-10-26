@@ -87,6 +87,28 @@ export interface MergeQuarantineEntry {
    *  @decision 82032b5c — do not drop this field at any copy/rebuild site; a dropped field silently
    *  re-opens the clear-by-id hard-delete this exists to refuse. */
   contributorRepoPaths?: string[];
+  /** PERSISTED, STICKY (unlike `armedKeys`) — every `directPathIdentity` this union's own
+   *  `contributorRepoPaths` ONCE named but no longer does, because a `/clear` against THAT identity
+   *  already reduced it out (see {@link reduceForeignUnionContributor}). Dropping the membership record
+   *  from `contributorRepoPaths` erases the only evidence that a given identity was ever folded in — so a
+   *  SECOND `/clear` against that same identity (or a reboot's own re-arm followed by one) sees
+   *  `contributorRepoPaths` come up empty and, with nothing else to say otherwise, would route through
+   *  {@link clearMergeQuarantine}'s scenario-B ancestor-collapse clear and lift this entry's WHOLE union a
+   *  second time. This field is the durable record that closes that reopening: once an identity lands
+   *  here, a later `/clear` against it is routed back to the SAME reduce arm (an idempotent no-op — the
+   *  identity has nothing left to drop, but the union must still never be mistaken for ancestor-collapse-
+   *  eligible) instead of ever reaching scenario B.
+   *
+   *  Never implies the identity's own TOKEN was removed — it was not, and (per `reduceForeignUnionContributor`'s
+   *  own doc) cannot be, once folded into the union's flat token set. This field tracks MEMBERSHIP
+   *  history only. Dies with the entry itself: a genuine lift of this union's OWN latch (by its own
+   *  `/clear`/clear-by-path/clear-by-id) discards the whole record, this field included — a fresh raise
+   *  afterward starts with no history.
+   *
+   *  @decision 3b1944b6 (Round 4) — carry this field forward at every copy/rebuild site, exactly like
+   *  `contributorRepoPaths` itself, and persist/parse it at every boot re-entry site, or the second-clear
+   *  reopening above survives a restart. */
+  reducedContributorRepoPaths?: string[];
   /** `true` only for a GENERIC fail-closed/self-heal placeholder this module minted itself (boot-time
    *  dir-scan failure, a corrupt-matched latch/tmp, or an orphan with no entry of its own) — never for a
    *  real, raise-time entry. Unlike `armedKeys`, this IS persisted: it must survive to the NEXT boot, where
@@ -290,6 +312,11 @@ function latchEntryFromParsedRecord(parsed: Record<string, unknown> & { repoPath
     resolvedKeys: parseResolvedKeysField(parsed as { resolvedKeys?: unknown }),
     contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
       ? parsed.contributorRepoPaths : undefined,
+    // @decision 3b1944b6 (Round 4) — same carry-forward as `contributorRepoPaths` just above, for this
+    // field's own sticky history — see its own doc comment for why dropping it silently reopens a
+    // second-clear bug.
+    reducedContributorRepoPaths: Array.isArray(parsed.reducedContributorRepoPaths) && parsed.reducedContributorRepoPaths.every((s): s is string => typeof s === "string")
+      ? parsed.reducedContributorRepoPaths : undefined,
     provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
     provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
   };
@@ -822,6 +849,11 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
   const contributorRepoPaths = older.contributorRepoPaths || newer.contributorRepoPaths
     ? [...new Set([...(older.contributorRepoPaths ?? []), ...(newer.contributorRepoPaths ?? [])])]
     : undefined;
+  // @decision 3b1944b6 (Round 4) — same carry-forward-from-both-sides rule as `contributorRepoPaths`
+  // just above, for its own sticky history field — see that field's own doc comment.
+  const reducedContributorRepoPaths = older.reducedContributorRepoPaths || newer.reducedContributorRepoPaths
+    ? [...new Set([...(older.reducedContributorRepoPaths ?? []), ...(newer.reducedContributorRepoPaths ?? [])])]
+    : undefined;
   // @decision db0a9db0 — OR, never AND: sticky once either side carries it (see the field's own doc).
   const provenanceUnknown = older.provenanceUnknown || newer.provenanceUnknown ? true : undefined;
   // @decision db0a9db0 (round 2) — same OR, same carry-forward posture, for the precision-guard field.
@@ -857,7 +889,7 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
     `unionQuarantineEntries(${older.repoPath})`,
   );
   const resolvedKeys = resolvedKeysRaw.length > 0 ? resolvedKeysRaw : undefined;
-  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys, contributorRepoPaths, provenanceUnknown, provenanceTracked, resolvedKey, resolvedKeys };
+  return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys, contributorRepoPaths, reducedContributorRepoPaths, provenanceUnknown, provenanceTracked, resolvedKey, resolvedKeys };
 }
 
 /**
@@ -1874,6 +1906,11 @@ function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physica
   const contributorRepoPaths = entry.contributorRepoPaths || reingested.contributorRepoPaths
     ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])]
     : undefined;
+  // @decision 3b1944b6 (Round 4) — same union-forward as `contributorRepoPaths` just above, for its own
+  // sticky history field — see that field's own doc comment.
+  const reducedContributorRepoPaths = entry.reducedContributorRepoPaths || reingested.reducedContributorRepoPaths
+    ? [...new Set([...(entry.reducedContributorRepoPaths ?? []), ...(reingested.reducedContributorRepoPaths ?? [])])]
+    : undefined;
   return {
     ...reingested,
     // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too (it can already carry a REAL
@@ -1888,6 +1925,7 @@ function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physica
     armedKeys: entry.armedKeys,
     orphanLatchFiles,
     contributorRepoPaths,
+    reducedContributorRepoPaths,
     // @decision 4913e721 — OR in `entry`'s own (caller's live) mark too, never disk-only.
     provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
   };
@@ -2637,6 +2675,9 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // for whatever survives via this copy.
     contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
       ? parsed.contributorRepoPaths : undefined,
+    // @decision 3b1944b6 (Round 4) — same carry-forward, same reason, for its own sticky history field.
+    reducedContributorRepoPaths: Array.isArray(parsed.reducedContributorRepoPaths) && parsed.reducedContributorRepoPaths.every((s): s is string => typeof s === "string")
+      ? parsed.reducedContributorRepoPaths : undefined,
     // @decision db0a9db0 — same carry-forward, same reason, for this explicit field whitelist.
     // @decision 4913e721 — see this function's own doc for the two in-memory sources OR'd in here too.
     provenanceUnknown: parsed.provenanceUnknown === true
@@ -2825,6 +2866,9 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   // entries share ONE identity here, by construction — see this function's own doc — so there is never
   // a new contributor to originate, only ones already recorded elsewhere to preserve).
   const contributorRepoPaths = [...new Set(matched.flatMap((p) => p.entry.contributorRepoPaths ?? []))];
+  // @decision 3b1944b6 (Round 4) — same cross-matched union as contributorRepoPaths above, for its own
+  // sticky history field.
+  const reducedContributorRepoPaths = [...new Set(matched.flatMap((p) => p.entry.reducedContributorRepoPaths ?? []))];
   // @decision db0a9db0 — same cross-matched OR as contributorRepoPaths above: the bare `...base.entry`
   // spread below only carries BASE's own value — a non-base matched entry's own flag would be silently
   // dropped without this, the exact drop class 82032b5c's own field already guards against.
@@ -2842,6 +2886,7 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   const merged: MergeQuarantineEntry = {
     ...base.entry, tokens, orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
     contributorRepoPaths: contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
+    reducedContributorRepoPaths: reducedContributorRepoPaths.length > 0 ? reducedContributorRepoPaths : undefined,
     provenanceUnknown, provenanceTracked,
     resolvedKey, resolvedKeys, armedKeys,
   };
@@ -3014,6 +3059,9 @@ function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { stat
       ? parsed.orphanLatchFiles : undefined,
     contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
       ? parsed.contributorRepoPaths : undefined,
+    // @decision 3b1944b6 (Round 4) — same carry-forward, same reason, for its own sticky history field.
+    reducedContributorRepoPaths: Array.isArray(parsed.reducedContributorRepoPaths) && parsed.reducedContributorRepoPaths.every((s): s is string => typeof s === "string")
+      ? parsed.reducedContributorRepoPaths : undefined,
     provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
     provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
     // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — this reader used to drop `resolvedKey`
@@ -3198,6 +3246,9 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
     ...others.map((p) => p.sourceFile).filter((f) => f !== base.sourceFile),
   ])];
   const contributorRepoPaths = [...new Set(all.flatMap((e) => e.contributorRepoPaths ?? []))];
+  // @decision 3b1944b6 (Round 4) — same cross-entry union as contributorRepoPaths above, for its own
+  // sticky history field.
+  const reducedContributorRepoPaths = [...new Set(all.flatMap((e) => e.reducedContributorRepoPaths ?? []))];
   const provenanceUnknown = all.some((e) => e.provenanceUnknown) ? true : undefined;
   const provenanceTracked = all.some((e) => e.provenanceTracked) ? true : undefined;
   // @decision 8db913e2 — union EVERY informative resolvedKey/resolvedKeys across all of `all`, never
@@ -3209,6 +3260,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
     orphanLatchFiles: orphanLatchFiles.length > 0 ? orphanLatchFiles : undefined,
     armedKeys: unionArmedKeys(all),
     contributorRepoPaths: contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
+    reducedContributorRepoPaths: reducedContributorRepoPaths.length > 0 ? reducedContributorRepoPaths : undefined,
     provenanceUnknown, provenanceTracked,
     resolvedKey, resolvedKeys,
   };
@@ -3937,9 +3989,10 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
 }
 
 /**
- * `_repoPath` is UNUSED (kept only for call-site/signature stability): this clear is now PROCESS-WIDE BY
- * TOKEN ALONE — a token is a process-unique `randomUUID`, so a token match IS an exact identity of its
- * own holder, and the match no longer needs (or consults) the caller's own repoPath/identity/key at all.
+ * `repoPath` is NOT used for MATCHING: this clear is PROCESS-WIDE BY TOKEN ALONE — a token is a
+ * process-unique `randomUUID`, so a token match IS an exact identity of its own holder, and the match
+ * never needs (or consults) the caller's own repoPath/identity/key. It IS used for one other purpose —
+ * see the Round 6 decision below.
  *
  * @decision 1922be3a (round 3, CRITICAL) — lifts `token` from EVERY matching record, active AND pending,
  * never stopping at the first match. See the decision record.
@@ -3950,8 +4003,26 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
  * @decision 8db913e2 (Follow-up 6c04633d) — every NON-TWIN pending match clears FIRST; a genuine `883e29bc` dual-tracked TWIN
  * (same object reference as an active entry) is EXCLUDED here — it stays `clearActiveEntryTokenAtKey`'s
  * own job, in its established `ae79d492` order. See the decision record.
+ *
+ * @decision 3b1944b6 (Round 6, CR4 finding 2) — `repoPath` IS now used, once: `repoPath` can still read
+ * blocked via key-collapse onto a foreign quarantine after `token` settles ("shape A"), so this stamps
+ * that foreign entry reduced BEFORE releasing `token` — on a write failure, KEEPS the token and logs,
+ * rather than releasing it unmarked.
+ *
+ * @decision 3b1944b6 (Round 8, finding 1) — `preClearForeignKeyStamp`'s generic "has an own record
+ * SOMEWHERE" gate is too coarse here: `token` can belong to a DIFFERENT holder than `repoPath`'s own
+ * record (a contributor token, or none) — computed precisely instead, below. See "Round 8" (q2/q2b).
  */
-export function clearMergeQuarantineByToken(_repoPath: string, token: string): void {
+export function clearMergeQuarantineByToken(repoPath: string, token: string): void {
+  const identity = directPathIdentity(repoPath);
+  const tokenHolderIsOwnRecord = [...activeQuarantines.values()].some((e) => e.tokens.includes(token) && directPathIdentity(e.repoPath) === identity)
+    || pendingUnresolvedQuarantines.some((p) => p.entry.tokens.includes(token) && directPathIdentity(p.entry.repoPath) === identity);
+  const preClear = preClearForeignKeyStamp(repoPath, tokenHolderIsOwnRecord);
+  if (!preClear.ok) {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] refusing to release token for ${repoPath} via clearMergeQuarantineByToken — ${preClear.reason}`);
+    return;
+  }
   const activeMatches = new Set<MergeQuarantineEntry>();
   for (const [, entry] of activeQuarantines) {
     if (entry.tokens.includes(token)) activeMatches.add(entry);
@@ -4653,6 +4724,17 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     candidateIdentities.add(entry.repoPath);
     markProvenanceCandidate(provenanceByCandidate, entry.repoPath, !!entry.provenanceUnknown);
     for (const c of entry.contributorRepoPaths ?? []) candidateIdentities.add(c);
+    // @decision 3b1944b6 (Round 5, CR3 item 3) — a reduced-out identity's own token is still folded into
+    // this union; when it's now fully lifted, that identity is genuinely unblocked too.
+    //
+    // @decision 3b1944b6 (Round 6, CR4 finding 3) — gated on `ownIdentityEntryFor(c)`, evaluated HERE
+    // (before `entry` is deleted below) so a ghost `c` never genuinely entangled is never a candidate.
+    //
+    // @decision 3b1944b6 (Round 7/8, finding 3) — `ownIdentityEntryFor(c)` alone is a tautology (entry
+    // always self-matches); use `reducedCandidateBlockedByEntry` instead — see its own doc.
+    for (const c of entry.reducedContributorRepoPaths ?? []) {
+      if (reducedCandidateBlockedByEntry(c, entry)) candidateIdentities.add(c);
+    }
   }
   // @decision 8db913e2 (round 4) — candidate tokens for the ONE tombstone call at the end of this
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
@@ -4853,6 +4935,14 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     candidateIdentities.add(p.entry.repoPath);
     markProvenanceCandidate(provenanceByCandidate, p.entry.repoPath, !!p.entry.provenanceUnknown);
     for (const c of p.entry.contributorRepoPaths ?? []) candidateIdentities.add(c);
+    // @decision 3b1944b6 (Round 5/6) — same reasoning, and same `ownIdentityEntryFor` blocked-before
+    // gate, as the active-side seed above — evaluated HERE, before `p` is spliced out below.
+    //
+    // @decision 3b1944b6 (Round 7/8, finding 3) — same `reducedCandidateBlockedByEntry` fix as the
+    // active-side seed above; see that function's own doc.
+    for (const c of p.entry.reducedContributorRepoPaths ?? []) {
+      if (reducedCandidateBlockedByEntry(c, p.entry)) candidateIdentities.add(c);
+    }
     for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
     // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too.
     // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the PRE-PASS above,
@@ -4945,6 +5035,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // record (never independently verifiable) — exclude them too once their owner itself is excluded.
   if (entry && excludeRepoPaths.has(entry.repoPath)) {
     for (const c of entry.contributorRepoPaths ?? []) excludeRepoPaths.add(c);
+    // @decision 3b1944b6 (Round 6, CR4 finding 3) — same propagation for the reduced-out field: a kept/
+    // protected owner's own reduced candidates ride on its surviving record just as unverifiably as its
+    // live contributors do.
+    for (const c of entry.reducedContributorRepoPaths ?? []) excludeRepoPaths.add(c);
   }
   const liftedRepoPaths = resolveGenuinelyLiftedRepoPaths(candidateIdentities, excludeRepoPaths);
   const provenanceUnknownLifted = anyLiftedCandidateProvenanceUnknown(liftedRepoPaths, provenanceByCandidate);
@@ -5012,8 +5106,12 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
 function ownIdentityEntryFor(repoPath: string): MergeQuarantineEntry | undefined {
   const identity = directPathIdentity(repoPath);
   const isOwnIdentity = (entry: MergeQuarantineEntry): boolean => directPathIdentity(entry.repoPath) === identity;
+  // @decision 3b1944b6 (Round 6, CR4 finding 3) — ALSO true via `reducedContributorRepoPaths` (already
+  // normalized, never re-mapped) — else a reduced-out identity reads as "blocked by nothing" once its own
+  // record is gone, over-reporting it as genuinely lifted while its token stays folded in.
   const isContributor = (entry: MergeQuarantineEntry): boolean =>
-    entry.contributorRepoPaths?.some((c) => directPathIdentity(c) === identity) ?? false;
+    (entry.contributorRepoPaths?.some((c) => directPathIdentity(c) === identity) ?? false)
+    || (entry.reducedContributorRepoPaths?.includes(identity) ?? false);
   for (const entry of activeQuarantines.values()) {
     if (isOwnIdentity(entry)) return entry;
   }
@@ -5023,6 +5121,35 @@ function ownIdentityEntryFor(repoPath: string): MergeQuarantineEntry | undefined
     if (isContributor(entry)) return entry;
   }
   return pendingUnresolvedQuarantines.find((p) => isContributor(p.entry))?.entry;
+}
+
+/**
+ * @decision 3b1944b6 (Round 7, finding 3) — a bare `ownIdentityEntryFor(c)` is a tautology; a bare
+ * exclusion of `entry` instead regresses `(round5-liftedpair)`'s own tested under-report fix.
+ *
+ * @decision 3b1944b6 (Round 8, finding 3) — Round 7's own fix (`reducedCandidateStillEntangled`, keyed
+ * on the active map alone) missed tier-3/4 PENDING resolution (q3.mjs under-reported). Replaced below.
+ *
+ * Whether a `reducedContributorRepoPaths` member `c` is STILL genuinely blocked by `entry` right now —
+ * i.e. clearing `entry` will actually free `c`'s own outstanding token too — as opposed to a "shape A"
+ * member whose own, independent record was already fully and separately cleared, with nothing of its own
+ * left inside `entry` at all. `ownIdentityEntryFor(c)` alone cannot tell these two shapes apart: BOTH
+ * land `c` in the exact same `reducedContributorRepoPaths` array, and `entry` is ALWAYS a self-match for
+ * its own member — but excluding `entry` outright is ALSO wrong: a genuine union-contributor (card
+ * 64119847/8a1bc2ef) whose token really is folded into `entry`'s own token set is, by definition, blocked
+ * by NOTHING ELSE either, so excluding `entry` would wrongly stop reporting it as lifted when `entry` is
+ * fully cleared (card 4b6c8d24's own CR3 item 3 fix, `(round5-liftedpair)`).
+ *
+ * The fix: snapshot `c`'s REAL current blocker via {@link stillBlockedEntryFor} — the ONE shared, pure
+ * mirror every other disclosure site already trusts, covering every tier (active, pending, ancestor-alias,
+ * contributor) — called BEFORE `entry`'s own deletion/splice, and compare the blocker's own identity to
+ * `entry`'s. A union-contributor whose own `.git` was never restored still resolves to `entry` (still
+ * entangled — count it, `(round5-liftedpair)`). A shape-A member whose own `.git` came back resolves to
+ * its own, now-independent nothing (already free — do NOT count it, `(round7-p6)`).
+ */
+function reducedCandidateBlockedByEntry(c: string, entry: MergeQuarantineEntry): boolean {
+  const blocker = stillBlockedEntryFor(c);
+  return !!blocker && directPathIdentity(blocker.repoPath) === directPathIdentity(entry.repoPath);
 }
 
 /**
@@ -5105,27 +5232,303 @@ function anyLiftedCandidateProvenanceUnknown(lifted: readonly string[], provenan
  * When `repoPath` is NOT currently resolvable, a freshly-recomputed `canonicalRepoLockKey(repoPath)` can
  * walk UP past repoPath's own absence to an ENCLOSING repo's real key and lift ITS unrelated quarantine
  * instead of repoPath's own — `abccee85` deliberately kept this function on the fresh key for the
- * RESOLVABLE case, which stays unchanged; only the unresolvable branch is redirected.
+ * RESOLVABLE case; only the unresolvable branch is redirected to {@link clearMergeQuarantineByRecordedPath}.
  *
  * @decision 883e29bc — delegate to clearMergeQuarantineByRecordedPath (resolves by STORED identity)
  * instead, when repoPath is not currently resolvable.
  *
+ * For the RESOLVABLE case: if `repoPath`'s OWN identity ALSO has a genuine active record at a key other
+ * than the fresh one, this clears via the shared {@link tryClearMergeQuarantineByOwnIdentity} helper
+ * instead of the plain fresh-key call below — the fresh key might belong to an unrelated ancestor instead
+ * of repoPath's own record. Otherwise (the common case — no own record elsewhere, or none at all), the
+ * fresh-key call below runs exactly as before this card, including when NOTHING is active there at all
+ * (the deliberate, abccee85-documented ancestor-collapse clear for a registry-bound subdirectory with no
+ * independent identity, AND card 07e3ad30's own foreign-occupant file-protection at that bare key).
+ *
+ * @decision 3b1944b6 — never key the shared-helper decision on `ownMatchesElsewhere.length` (Round 1's
+ * own trigger — missed the degraded-twin-only shape) — key it on `freshIsForeign` (Round 2) instead; see
+ * the decision record's "Round 2" section.
+ *
  * @decision 882d6cff (round 4) — returns the unresolvable branch's own result (`latchKept`/
- * `referencingRepoPaths` when a shared latch survives); `void` for the resolvable branch, unchanged.
+ * `referencingRepoPaths` when a shared latch survives); the resolvable branch's own result, when routed
+ * through the shared helper (card 3b1944b6), can now ALSO carry `stillQuarantined` — never otherwise.
  */
-export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
   if (!isRepoPathCurrentlyResolvable(repoPath)) {
     return clearMergeQuarantineByRecordedPath(repoPath);
   }
-  // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
-  return clearMergeQuarantineByKey(canonicalRepoLockKey(repoPath), repoPath, undefined, true);
+  const freshKey = canonicalRepoLockKey(repoPath);
+  const identity = directPathIdentity(repoPath);
+  const { matched } = activeMatchesAndLiftedKeysFor(identity);
+  const freshEntry = activeQuarantines.get(freshKey);
+  // @decision 3b1944b6 (Round 3) — never drop `freshKey !== identity`: a path owning its own key is
+  // never foreign, even if a union there merely NAMES another path as `.repoPath` — treating it as
+  // foreign would wrongly reduce instead of fully lifting a repo clearing its own, genuinely-owned key.
+  //
+  // @decision 3b1944b6 (Round 2) — the fresh key is occupied by a GENUINELY FOREIGN identity (never
+  // repoPath's own) — the exact shape the over-clearing bug needs. `matched` can never itself contain
+  // `freshKey` when this is true (it only ever holds entries sharing `identity`).
+  const freshIsForeign = freshKey !== identity && !!freshEntry && directPathIdentity(freshEntry.repoPath) !== identity;
+  if (freshIsForeign) {
+    const hasOwnPendingMatch = pendingUnresolvedQuarantines.some((p) => directPathIdentity(p.entry.repoPath) === identity);
+    if (matched.length === 0 && !hasOwnPendingMatch) {
+      // @decision 3b1944b6 (Round 2, checkpoint-approved) — repoPath's own identity may still be folded
+      // into the foreign entry as a `contributorRepoPaths` entry (card 8a1bc2ef's cross-tier sibling
+      // absorption). REDUCE that case — never the plain fresh-key clear. See the decision record's "Round 2".
+      if (freshEntry!.contributorRepoPaths?.some((c) => directPathIdentity(c) === identity)) {
+        return reduceForeignUnionContributor(freshEntry!, identity);
+      }
+      // @decision 3b1944b6 (Round 4) — repoPath was ALREADY reduced out of this union by an earlier
+      // `/clear(repoPath)` (or carried through a reboot); `contributorRepoPaths` no longer names it, so
+      // without this marker the call falls through to scenario B and re-lifts the WHOLE union.
+      if (freshEntry!.reducedContributorRepoPaths?.includes(identity)) {
+        return reduceForeignUnionContributor(freshEntry!, identity);
+      }
+      // repoPath has NO record of its own, anywhere (neither tier, nor folded in as a contributor, nor
+      // previously reduced out of one) — the deliberate, abccee85-documented ancestor-collapse clear for a
+      // registry-bound subdirectory with no independent identity of its own (scenario B). Unchanged: still
+      // the plain fresh-key clear, foreign occupant and all.
+      return clearMergeQuarantineByKey(freshKey, repoPath, undefined, true);
+    }
+    // repoPath has its own record (active elsewhere, and/or pending) while the fresh key belongs to a
+    // DIFFERENT identity entirely — NEVER touch the fresh key in this branch (that is exactly the
+    // over-clearing bug this card closes). Clear every one of repoPath's own active records instead,
+    // including a degraded dual-arm twin (never excluded here, unlike the `!freshIsForeign` branch below
+    // — there is no "fresh key's own tie/reduce logic" to defer to when the fresh key isn't repoPath's
+    // own), via the shared helper's `"unreduced"` pending mode — never `"broad"`, which regressed this
+    // card's own Round 1 AJ scenario by re-sweeping an already-reduced twin a second time.
+    //
+    // @decision 3b1944b6 (Round 6, CR4 finding 1) — "shape A": stamp the foreign entry reduced FIRST,
+    // before touching repoPath's own record (never after — that left a crash/write-failure window
+    // reopening the over-clear). Refuse outright on a durable-write failure.
+    //
+    // @decision 3b1944b6 (Round 8/CR7 item 2) — pass this branch's OWN already-computed
+    // `matched.length > 0 || hasOwnPendingMatch` explicitly — the one fact that got us into this branch
+    // in the first place — never let the (now-required) parameter be inferred by the chokepoint itself.
+    const preClear = preClearForeignKeyStamp(repoPath, matched.length > 0 || hasOwnPendingMatch);
+    if (!preClear.ok) {
+      // @decision 3b1944b6 (Round 8, finding 2) — `refusedBeforeClear:true` marks THIS as a genuine
+      // preClear refusal, distinct from `stillQuarantined` — see clearMergeQuarantineReporting's own doc.
+      return { wasQuarantined: true, reason: preClear.reason, liftedRepoPaths: [], stillQuarantined: true, refusedBeforeClear: true, stillBlockedCoOccupants: [] };
+    }
+    const own = tryClearMergeQuarantineByOwnIdentity(repoPath, "unreduced", matched);
+    // `matched.length > 0 || hasOwnPendingMatch` guarantees `own.matched === true` here; the fallback
+    // below is defensive only, never expected to run.
+    return own.matched ? own.result : clearMergeQuarantineByKey(freshKey, repoPath, undefined, true);
+  }
+  // Fresh key is NOT foreign (either genuinely empty, or already repoPath's own identity) — byte-identical
+  // to this card's own Round 1 behavior.
+  //
+  // A matched entry other than the fresh key counts only when it is a GENUINELY independent active
+  // raise — never a degraded dual-arm twin (883e29bc) also referenced by `pendingUnresolvedQuarantines`
+  // by object reference (card 64119847's own P). A dual-tracked twin must be left entirely to the fresh
+  // key's own clearMergeQuarantineByKey call and its internal tie/reduce logic.
+  //
+  // @decision 3b1944b6 — never independently clear a dual-tracked twin here — see the decision record
+  // for the regression (a surviving private token destroyed a second time) this exclusion closes.
+  const ownMatchesElsewhere = matched.filter((m) => {
+    if (m.key === freshKey) return false;
+    const entry = activeQuarantines.get(m.key);
+    return !!entry && !pendingUnresolvedQuarantines.some((p) => p.entry === entry);
+  });
+  if (ownMatchesElsewhere.length === 0) {
+    // Byte-identical to before this card: a single, unconditional clearMergeQuarantineByKey at the fresh
+    // key — covers the ordinary case, the ancestor-collapse fallback, AND every dual-tracked-twin shape.
+    // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
+    return clearMergeQuarantineByKey(freshKey, repoPath, undefined, true);
+  }
+  // repoPath's own identity has a genuinely independent active record elsewhere (the over-clearing bug,
+  // or the round-5-finding-3 multi-key-twin shape). Clear it there too — but never silently drop the
+  // fresh key: include its own match when one exists, or a `mustRun` synthetic target when the fresh key
+  // is genuinely EMPTY (card 07e3ad30's own foreign-occupant file-protection at a bare key) — but NEVER
+  // when the fresh key holds a real, FOREIGN (different-identity) active entry, which must never be
+  // touched by clearing repoPath (the original over-clearing bug this card closes).
+  const freshMatch = matched.find((m) => m.key === freshKey);
+  const overrideTargets = freshMatch
+    ? [freshMatch, ...ownMatchesElsewhere]
+    : freshEntry
+      ? ownMatchesElsewhere
+      : [{ key: freshKey, repoPath, mustRun: true as const }, ...ownMatchesElsewhere];
+  // `"none"`: never the broad, unconditional pending sweep here — see tryClearMergeQuarantineByOwnIdentity's
+  // own doc for the regression that sweep caused when reached through this caller.
+  const own = tryClearMergeQuarantineByOwnIdentity(repoPath, "none", overrideTargets);
+  // `overrideTargets` is never empty, so `own.matched` is guaranteed true here; the fallback below is
+  // defensive only, never expected to run.
+  return own.matched ? own.result : clearMergeQuarantineByKey(freshKey, repoPath, undefined, true);
+}
+
+/**
+ * Reduce `entry` — a FOREIGN union `/clear`'s own fresh key resolved to, which has `identity` folded in
+ * only as a `contributorRepoPaths` entry (never as `entry.repoPath` itself) — by dropping that membership
+ * claim alone and recording it durably in `reducedContributorRepoPaths` (Round 4) — see that field's own
+ * doc comment on {@link MergeQuarantineEntry} for why: dropping `contributorRepoPaths`'s own membership
+ * record erases the only evidence `identity` was ever folded in, so a LATER `/clear` against the same
+ * `identity` would otherwise see nothing left to reduce and wrongly fall through to scenario B's
+ * ancestor-collapse clear — this durable marker routes that later call back to this SAME reduce arm (an
+ * idempotent no-op) instead. Never touches `tokens` or `armedKeys`: tokens are a flat, unordered set with
+ * no per-contributor tagging (see {@link unionQuarantineEntries}'s own doc), so once absorbed, `identity`'s
+ * own token cannot be distinguished from the union's other token(s) to remove it specifically — "lifting"
+ * `identity` here can only ever mean removing its own recorded membership, never its token.
+ *
+ * @decision 3b1944b6 (Round 2) — never add token-level removal here even if a future field makes it look
+ * possible: a real probe proved the union's own owner can still fully lift it (own `/clear`/clear-by-path/
+ * clear-by-id) with `identity`'s token left outstanding, so there is no safety reason to attempt it.
+ *
+ * @decision 3b1944b6 (Round 4) — the durable rewrite below targets ONLY a key with a real latch file on
+ * disk right now, never minting a fresh one at a key `identity`'s own absorption already deleted — a bare
+ * `liveArmedKeysOf`/`entryStillOwnsKey` scan alone could still count that deleted key as "owned".
+ */
+function reduceForeignUnionContributor(entry: MergeQuarantineEntry, identity: string): { wasQuarantined: boolean; liftedRepoPaths: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+  const remainingContributors = (entry.contributorRepoPaths ?? []).filter((c) => directPathIdentity(c) !== identity);
+  const reducedContributorRepoPaths = [...new Set([...(entry.reducedContributorRepoPaths ?? []), identity])];
+  const updated: MergeQuarantineEntry = {
+    ...entry,
+    contributorRepoPaths: remainingContributors.length > 0 ? remainingContributors : undefined,
+    reducedContributorRepoPaths,
+  };
+  replaceEntryEverywhere(activeQuarantines, entry, updated);
+  const ownedKeys = liveArmedKeysOf(updated).filter((k) => entryStillOwnsKey(k, updated) && fs.existsSync(quarantinePathForKey(k)));
+  for (const k of ownedKeys) {
+    if (!writeMergeQuarantineLatch(updated, new Set(), false, k, false, false, activeQuarantines)) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] could not durably persist the reduced contributor set for ${updated.repoPath}'s own union entry at key ${k} after clearing contributor ${identity} — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-list the already-cleared contributor.`);
+    }
+  }
+  // Nothing is reported as lifted here — `identity`'s own token is still physically outstanding inside
+  // the union (see this function's own doc). `clearMergeQuarantineReporting`'s own `after = stillBlockedEntryFor`
+  // check (unaffected by `contributorRepoPaths`, since it resolves by KEY) independently reports the
+  // union's own owner as still-quarantining `identity` — this return value is deliberately minimal.
+  return { wasQuarantined: true, liftedRepoPaths: [], stillBlockedCoOccupants: [] };
+}
+
+/**
+ * Durably records `identity` in `entry`'s own `reducedContributorRepoPaths` WITHOUT touching anything
+ * else on `entry` — the SAME marker {@link reduceForeignUnionContributor} stamps, applied to a SECOND
+ * entry shape: `identity` was NEVER a `contributorRepoPaths` member of `entry` at all (no union, no
+ * absorption ever folded them together) — `identity` merely held its own, fully independent record that
+ * happened to COLLAPSE onto `entry`'s own key once `identity`'s own `.git` disappeared (card 3b1944b6's
+ * own "shape A"). `clearMergeQuarantine`'s `freshIsForeign` branch already clears that independent record
+ * correctly, the first time, via `tryClearMergeQuarantineByOwnIdentity` — but once it's gone, nothing
+ * records that `identity` was ever here, so a SECOND `/clear(identity)` would otherwise look identical to
+ * "never had a record here at all" and wrongly fall through to the ancestor-collapse clear, lifting
+ * `entry` too. This call site's own marking closes that exact reopening, mirroring
+ * `reduceForeignUnionContributor`'s write discipline (one tmp+rename, only ever at a key that already has
+ * a real file on disk).
+ *
+ * @decision 3b1944b6 (Round 5) — Lead ruling, CR3 item 4: the SAME `reducedContributorRepoPaths` field
+ * covers this shape too — never a second, parallel marker field.
+ *
+ * Returns `true` only once the marker is GENUINELY durable (every owned, on-disk key's write succeeded).
+ * On a write FAILURE, the in-memory mutation is ROLLED BACK (re-pointed to the ORIGINAL `entry`, never
+ * left pointing at `updated`) before returning `false` — or a same-process retry would see
+ * `reducedContributorRepoPaths.includes(identity)` already true (the idempotent-no-op check above) and
+ * skip the write attempt entirely, stranding the marker in-memory-only forever with nothing durable
+ * backing it across the exact crash/reboot this marker exists to survive.
+ *
+ * @decision 3b1944b6 (Round 6, CR4 finding 1) — every caller MUST call this BEFORE touching `identity`'s
+ * own record, and REFUSE its own clear outright on `false` (never proceed unmarked).
+ */
+function markIdentityAsReducedOnForeignKey(entry: MergeQuarantineEntry, identity: string): boolean {
+  if (entry.reducedContributorRepoPaths?.includes(identity)) return true; // already marked — idempotent no-op
+  const updated: MergeQuarantineEntry = {
+    ...entry,
+    reducedContributorRepoPaths: [...new Set([...(entry.reducedContributorRepoPaths ?? []), identity])],
+  };
+  replaceEntryEverywhere(activeQuarantines, entry, updated);
+  const ownedKeys = liveArmedKeysOf(updated).filter((k) => entryStillOwnsKey(k, updated) && fs.existsSync(quarantinePathForKey(k)));
+  for (const k of ownedKeys) {
+    if (!writeMergeQuarantineLatch(updated, new Set(), false, k, false, false, activeQuarantines)) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] could not durably persist the reduced-contributor marker for ${updated.repoPath}'s own entry at key ${k} after clearing ${identity}'s own record off its stale key — refusing rather than leaving an unpersisted marker in memory.`);
+      replaceEntryEverywhere(activeQuarantines, updated, entry);
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * THE single chokepoint every route that is about to clear `repoPath`'s OWN record must call FIRST —
+ * `/clear`, clear-by-path, clear-by-id, and clear-by-token (card 3b1944b6, Round 6, CR4 finding 2 —
+ * "rule on the CLASS, not one site," lesson 251). If `repoPath`'s fresh key is genuinely occupied by a
+ * FOREIGN entry (never `repoPath`'s own identity), durably stamps `repoPath`'s own identity into that
+ * foreign entry's `reducedContributorRepoPaths` marker — via {@link markIdentityAsReducedOnForeignKey} —
+ * BEFORE the caller may touch `repoPath`'s own record at all (CR4 finding 1's own atomicity ruling): a
+ * marker on the foreign entry while `repoPath`'s own record still exists is harmless (a later call's own
+ * non-empty match already wins over the ancestor-collapse clear), so stamping first and refusing on
+ * failure costs nothing but a retry, while stamping AFTER risks a crash/write-failure window where
+ * `repoPath`'s record is gone and the foreign entry is unmarked.
+ *
+ * Returns `{ok:true}` as a NO-OP when the fresh key is not foreign at all (empty, or already `repoPath`'s
+ * own identity) — nothing to mark. On a genuine durable-write failure, returns `{ok:false, reason}` — the
+ * caller MUST refuse its own clear entirely, never proceed unmarked.
+ *
+ * Deliberately a NO-OP for a currently-UNRESOLVABLE `repoPath`: `canonicalRepoLockKey` degrades to a
+ * walked-up ancestor fallback for an unresolvable path, never a trustworthy "this used to be my own key"
+ * signal — this shape only ever needs this while `repoPath` is still resolvable (its own `.git` merely
+ * gone), mirroring `clearMergeQuarantine`'s own existing resolvability gate.
+ *
+ * Also deliberately a NO-OP when `identity` has no own record (active OR pending) about to be cleared at
+ * all — never merely because the fresh key happens to be foreign. Without this, a route that calls this
+ * chokepoint UNCONDITIONALLY (clear-by-path, at its own top, before any match is even looked for) or for
+ * an identity that was NEVER independently recorded (a token-route contributor whose token is purely
+ * folded into a foreign union's own token set, with no own record of its own) would durably mark the
+ * foreign entry as having "reduced" an identity it was never actually clearing — a plain dir with no
+ * record, or a pure token-union contributor, is not "repoPath's own record being cleared."
+ *
+ * @decision 3b1944b6 (Round 6, CR4 finding 2) — call this from EVERY route that clears `repoPath`'s own
+ * record, never just `/clear` — a per-site fix regresses the moment a new route is added.
+ *
+ * @decision 3b1944b6 (Round 7, finding 1) — mirror `clearMergeQuarantine`'s own `matched.length > 0 ||
+ * hasOwnPendingMatch` gate HERE, inside the shared chokepoint — see the decision record's "Round 7"
+ * section (scenarios D/D2) for the two real over-stamping repros this closes.
+ *
+ * @decision 3b1944b6 (Round 8, finding 1) — "has an own record SOMEWHERE" is NOT "THIS clear is about to
+ * clear that record" — see "Round 8" (q2/q2b) for the token-route repro this closes.
+ *
+ * @decision 3b1944b6 (Round 8/CR7 item 2) — `ownRecordBeingCleared` is REQUIRED, never inferred here:
+ * every caller states what IT already knows it's clearing, so a future route can't silently inherit a
+ * coarse default. `identityHasOwnRecordAnywhere` below is the named helper for callers needing it.
+ */
+function preClearForeignKeyStamp(repoPath: string, ownRecordBeingCleared: boolean): { ok: true } | { ok: false; reason: string } {
+  if (!isRepoPathCurrentlyResolvable(repoPath)) return { ok: true };
+  const freshKey = canonicalRepoLockKey(repoPath);
+  const identity = directPathIdentity(repoPath);
+  const freshEntry = activeQuarantines.get(freshKey);
+  const freshIsForeign = freshKey !== identity && !!freshEntry && directPathIdentity(freshEntry.repoPath) !== identity;
+  if (!freshIsForeign) return { ok: true };
+  if (!ownRecordBeingCleared) return { ok: true };
+  if (!markIdentityAsReducedOnForeignKey(freshEntry!, identity)) {
+    return {
+      ok: false,
+      reason: `could not durably mark '${identity}' as reduced on '${freshEntry!.repoPath}'s own quarantine before clearing it — refusing to clear '${repoPath}' to avoid losing track of it; retry, or clear '${freshEntry!.repoPath}'s own quarantine instead.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * The generic "does `identity` have an own record (active OR pending) anywhere, right now" answer —
+ * factored out of {@link preClearForeignKeyStamp} (Round 8/CR7 item 2) so a caller that genuinely needs
+ * this general computation (never a per-token or per-match precise answer) has a single, named place to
+ * get it from, rather than re-deriving `activeMatchesAndLiftedKeysFor` + a pending scan by hand at each
+ * call site. Never called BY the chokepoint itself any more — every caller must pass its own answer
+ * explicitly, so a future route can't silently inherit this coarse default by omission.
+ */
+function identityHasOwnRecordAnywhere(identity: string): boolean {
+  const { matched } = activeMatchesAndLiftedKeysFor(identity);
+  const hasOwnPendingMatch = pendingUnresolvedQuarantines.some((p) => directPathIdentity(p.entry.repoPath) === identity);
+  return matched.length > 0 || hasOwnPendingMatch;
 }
 
 /**
  * Every ACTIVE entry sharing `identity`, matched once each (`matched`), plus the full set of keys this
- * identity's own active-side clear will lift (`activeLiftedKeys`) — the `L` seed `clearMergeQuarantineByRecordedPath`
- * computes before running any delegated clear. Extracted into its own function purely so the test corpus
- * can assert on `activeLiftedKeys` directly; behavior is byte-identical to being inlined.
+ * identity's own active-side clear will lift (`activeLiftedKeys`) — the `L` seed {@link
+ * tryClearMergeQuarantineByOwnIdentity} computes before running any delegated clear. Also called directly
+ * by {@link clearMergeQuarantine} (card 3b1944b6) to decide whether repoPath has its own active record
+ * elsewhere, before deciding whether to reach for that shared helper at all. Extracted into its own
+ * function purely so the test corpus can assert on `activeLiftedKeys` directly; behavior is byte-identical
+ * to being inlined.
  *
  * @decision 8db913e2 (Follow-up 4b06875f, Round 3, CR be296830 finding 1) — every key this phase's own
  * matched-active clears will unconditionally lift, collected HERE (before any clear runs) so the caller's
@@ -5152,32 +5555,61 @@ export function activeMatchesAndLiftedKeysFor(identity: string): { matched: Arra
 }
 
 /**
- * Clear every quarantine entry addressed by its STORED `repoPath` — matches EACH ACTIVE entry's own
- * recorded `repoPath` field via {@link directPathIdentity} (never a fresh, walking `canonicalRepoLockKey`
- * recompute of the GIVEN string) and clears every match via that entry's own already-armed key (round 5:
+ * Match `repoPath`'s OWN identity — active tier via {@link activeMatchesAndLiftedKeysFor}, pending tier
+ * via a direct {@link directPathIdentity} filter, never a freshly-walked `canonicalRepoLockKey` (round 5:
  * two distinct active entries, under two distinct keys, can share one stored repoPath after a raise-time
- * key drift — clearing only the first one found left the other fully armed). Falls back to a direct
- * {@link directPathIdentity} match against `pendingUnresolvedQuarantines` when nothing ACTIVE matches, and
- * reports NOT FOUND (round 7) when NEITHER matches at all — never a recompute (see this function's own
- * `@decision` tag below for why).
+ * key drift — clearing only the first one found left the other fully armed) — clear every match, and
+ * compose the SAME disclosure fields {@link clearMergeQuarantineByRecordedPath} has always composed.
  *
- * Used directly by `/clear-by-path`'s `{repoPath}` form, AND (card 883e29bc, round 2) by {@link
- * clearMergeQuarantine} itself whenever its own `repoPath` is not currently resolvable — including,
- * transitively, `/clear` (project-resolved) via {@link clearMergeQuarantineReporting}. No longer the
- * no-project-resolution route's own exclusive caller.
+ * Extracted (card 3b1944b6) out of that function's own body so a second caller ({@link
+ * clearMergeQuarantine}'s resolvable branch) can share it without duplicating the active+pending matching
+ * or the disclosure composition (latchKept/referencingRepoPaths/contentKeptRepoPaths/provenanceUnknown/
+ * stillBlockedCoOccupants/stillQuarantined) — byte-identical behavior for `clearMergeQuarantineByRecordedPath`'s
+ * own callers.
+ *
+ * @decision 3b1944b6 — return an EXPLICIT `{ matched: false }` only when BOTH tiers miss — never let a
+ * caller infer "nothing happened" from the result's own fields after the fact (drifts the moment a field
+ * is added). A PENDING-ONLY match still reports `matched: true`. See each caller's own doc for the divergence.
+ *
+ * `pendingSweep` (card 3b1944b6) picks which pending-tier pass runs below, after the active-tier loop:
+ * `"broad"` — the UNCONDITIONAL "drop every pending entry sharing this identity" pass (d4b25feb round
+ * 3's own identity-wide-clear semantic); `clearMergeQuarantineByRecordedPath` always passes this
+ * (unchanged). `"none"` — no pending pass at all; `clearMergeQuarantine`'s `!freshIsForeign` branch
+ * passes this, since `"broad"` doesn't distinguish "never touched" from "already correctly reduced by an
+ * earlier matched active entry's own internal tie" (card 64119847) and would destroy the latter a second
+ * time — a real regression this card's own Round 1 worker found via `merge-quarantine-clear-by-path.mjs`'s
+ * (AJ) scenario. `"unreduced"` (Round 2) — the SAME identity-wide pass as `"broad"`, minus any pending
+ * wrapper the active-tier loop just above already reduced in THIS SAME call (detected via a `.entry`
+ * reference change against a pre-loop snapshot — see the snapshot below); `clearMergeQuarantine`'s
+ * `freshIsForeign` branch passes this: it needs a real pending pass (its own matched active entries can
+ * include a degraded twin with NO fresh-key clear left to defer the reduce to), but the plain `"broad"`
+ * pass would still re-sweep an already-reduced twin exactly like the AJ regression above.
  *
  * @decision abccee85 — never recompute `canonicalRepoLockKey` from a human-supplied repoPath string to
- * decide which entry to clear; see the decision record for the key-drift bugs this closes, including
- * round 7's fix to this function's OWN final fallback (it used to do exactly that).
+ * decide which entry to clear; see the decision record for the key-drift bugs this closes.
+ *
+ * `matchedOverride` (card 3b1944b6), when given, REPLACES the active-tier `matched` list this function
+ * would otherwise compute itself — never widening `L`/`activeLiftedKeys`, which always still come from
+ * the FULL, unfiltered scan. Only `clearMergeQuarantine` passes this (excluding a degraded dual-arm twin
+ * only in its own `!freshIsForeign` branch — see that function's own doc for why its `freshIsForeign`
+ * branch passes every matched entry, twins included); `clearMergeQuarantineByRecordedPath` never does, so
+ * its own matching is unchanged. An override entry may carry `mustRun: true` (the fresh key itself, when
+ * nothing is currently active there) to force a `clearMergeQuarantineByKey` call even past the
+ * vacated-key skip below.
  */
-export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+function tryClearMergeQuarantineByOwnIdentity(
+  repoPath: string,
+  pendingSweep: "broad" | "none" | "unreduced",
+  matchedOverride?: Array<{ key: string; repoPath: string; mustRun?: true }>,
+): { matched: true; result: { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } } | { matched: false } {
   // @decision 4b6c8d24 (round 2) — CANDIDATES only (never a final answer): a delegated call's own
   // `liftedRepoPaths` is already correctly re-resolved, but is re-verified again here too, since this
   // function's own later pending sweep can still mutate state after a given delegated call returns.
   const candidateIdentities = new Set<string>();
   const provenanceByCandidate = new Map<string, boolean>();
   const identity = directPathIdentity(repoPath);
-  const { matched, activeLiftedKeys } = activeMatchesAndLiftedKeysFor(identity);
+  const { matched: computedMatched, activeLiftedKeys } = activeMatchesAndLiftedKeysFor(identity);
+  const matched = matchedOverride ?? computedMatched;
   // @decision 8db913e2 (Follow-up c93e9e7a) — the full lifted-key union `L`, computed ONCE before any
   // delegated clear — this function's own pending sweep is unconditional, so every identity-matched
   // pending entry's owned keys belong in it from the start. See the decision record's own section.
@@ -5193,8 +5625,19 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     // `clearMergeQuarantineByKey`. See the decision record.
     const ownedArmedKeys = liveArmedKeysOf(p.entry).filter((k) => entryStillOwnsKey(k, p.entry));
     pendingOwnedArmedKeys.set(p, ownedArmedKeys);
-    for (const k of ownedArmedKeys) L.add(k);
+    // @decision 3b1944b6 (Round 2) — never add to `L` for `"none"`: it touches nothing in the pending
+    // tier, so including this key would falsely tell another key's protect call "already being lifted."
+    // See the decision record's Round 2 section.
+    if (pendingSweep !== "none") for (const k of ownedArmedKeys) L.add(k);
   }
+  // @decision 3b1944b6 (Round 2) — snapshot each identity-matched pending wrapper's `.entry` ref, taken
+  // AFTER the reconcile above (not a "reduce") and BEFORE the active-tier loop below, so `"unreduced"`
+  // can tell an already-reduced wrapper (its `.entry` ref changes) from an untouched one.
+  const identityPendingSnapshot = pendingSweep === "unreduced"
+    ? new Map<PendingUnresolvedQuarantine, MergeQuarantineEntry>(
+        pendingUnresolvedQuarantines.filter((p) => directPathIdentity(p.entry.repoPath) === identity).map((p) => [p, p.entry]),
+      )
+    : undefined;
   // @decision 182c01cc — a Map (repoPath -> BlockedCoOccupant), never a bare Set<string>: every fold-in
   // site below already has (or can cheaply derive) the sourceFile a kept claimant is filed under, so this
   // function's own "latchKept" result can name each one's clear-by-path route, not just its repoPath.
@@ -5213,6 +5656,16 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   if (matched.length > 0) {
     wasQuarantined = true;
     for (const m of matched) {
+      // An EARLIER match's own pending-sweep can already have vacated THIS key (a degraded dual-arm
+      // twin, 883e29bc) — re-clearing it hits `clearMergeQuarantineByKey`'s `!entry` branch, destroying
+      // an already-reduced twin again. A `mustRun` entry (the fresh key, nothing active there) is exempt.
+      // Scoped to a `matchedOverride` call (only `clearMergeQuarantine`) — `clearMergeQuarantineByRecordedPath`
+      // never passes an override, so this skip must never touch its own established, pre-card behavior.
+      //
+      // @decision 3b1944b6 (Round 2) — never drop this skip, never exempt a non-`mustRun` entry from it,
+      // and never widen it to a `clearMergeQuarantineByRecordedPath` call (no `matchedOverride`) — see the
+      // decision record for why its own broad semantic must stay genuinely byte-identical to before.
+      if (matchedOverride && !("mustRun" in m) && !activeQuarantines.has(m.key)) continue;
       // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
       const result = clearMergeQuarantineByKey(m.key, m.repoPath, L, true);
       // @decision 182c01cc (round 2) — split EVERY result's own stillBlockedCoOccupants by whether it's
@@ -5245,9 +5698,34 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   //
   // @decision d4b25feb (round 3, MAJOR) — NOT merely an `else` to the active branch: this function's own
   // job is a BROAD, identity-wide clear; `clearMergeQuarantineByKey`'s round-2 fix narrowed ITS own sweep.
-  const matchedPending = pendingUnresolvedQuarantines.filter((p) => directPathIdentity(p.entry.repoPath) === identity);
+  //
+  // @decision 3b1944b6 — gated on `pendingSweep` — see this function's own doc for why
+  // `clearMergeQuarantine`'s `!freshIsForeign` branch passes `"none"` and its `freshIsForeign` branch
+  // passes `"unreduced"` (Round 2) rather than `"broad"`.
+  const matchedPending = pendingSweep === "broad"
+    ? pendingUnresolvedQuarantines.filter((p) => directPathIdentity(p.entry.repoPath) === identity)
+    : pendingSweep === "unreduced"
+      ? pendingUnresolvedQuarantines.filter((p) => {
+          if (directPathIdentity(p.entry.repoPath) !== identity) return false;
+          // Untouched by the active-tier loop above (still the pre-loop `.entry`), or newly appeared
+          // during this call — never one that loop's own internal reduce logic already handled.
+          const before = identityPendingSnapshot!.get(p);
+          return before === undefined || before === p.entry;
+        })
+      : [];
   if (matchedPending.length > 0) {
     wasQuarantined = true;
+    // @decision 3b1944b6 (Round 6, CR4 finding 3) — snapshot "was `c` blocked before" BEFORE the filter
+    // below removes `matchedPending` — evaluating `ownIdentityEntryFor` AFTER would miss the evidence.
+    //
+    // @decision 3b1944b6 (Round 7/8, finding 3) — same `reducedCandidateBlockedByEntry` fix as the two
+    // active-side seed sites; see that function's own doc.
+    const reducedCandidateBlockedBefore = new Map<string, boolean>();
+    for (const p of matchedPending) {
+      for (const c of p.entry.reducedContributorRepoPaths ?? []) {
+        if (!reducedCandidateBlockedBefore.has(c)) reducedCandidateBlockedBefore.set(c, reducedCandidateBlockedByEntry(c, p.entry));
+      }
+    }
     pendingUnresolvedQuarantines = pendingUnresolvedQuarantines.filter((p) => !matchedPending.includes(p));
     // @decision 6237bef6 — sweep each dropped pending entry's OWN orphanLatchFiles too, not just its
     // sourceFile; see the decision record (site 3 of 3 — abccee85's own trace named only the other two).
@@ -5267,6 +5745,11 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
       candidateIdentities.add(p.entry.repoPath);
       markProvenanceCandidate(provenanceByCandidate, p.entry.repoPath, !!p.entry.provenanceUnknown);
       for (const c of p.entry.contributorRepoPaths ?? []) candidateIdentities.add(c);
+      // @decision 3b1944b6 (Round 5/6) — same reasoning as clearMergeQuarantineByKey's own seed, gated on
+      // the pre-filter `reducedCandidateBlockedBefore` snapshot above.
+      for (const c of p.entry.reducedContributorRepoPaths ?? []) {
+        if (reducedCandidateBlockedBefore.get(c)) candidateIdentities.add(c);
+      }
       for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
       // @decision 8db913e2 (Follow-up c93e9e7a) — reuse `pendingOwnedArmedKeys`'s own pre-delegation
       // snapshot value, never a live recompute (a sibling delegated clear, or an earlier entry in THIS
@@ -5316,31 +5799,10 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     for (const rp of orphanContentKept.keys()) keptContentRepoPaths.add(rp);
     tombstoneIfNotSurviving(pendingCandidateTokens, pendingTouchedBasenames);
   }
-  if (!wasQuarantined) {
-    // @decision 2a169469 (round 2, minor 3) — `wasQuarantined` stays FALSE (this route genuinely acted
-    // on nothing of repoPath's own — 82032b5c round 4's "never cleared by its own path" ruling holds
-    // unchanged) — but a genuinely blocked PURE contributor still gets named, instead of a silent "not
-    // found" lie by omission.
-    const hostEntry = stillBlockedEntryFor(repoPath);
-    if (hostEntry) {
-      return {
-        wasQuarantined: false, stillQuarantined: true,
-        reason: stillQuarantinedReason(hostEntry, repoPath),
-        liftedRepoPaths: [], stillBlockedCoOccupants: [],
-      };
-    }
-    // Nothing active or pending matches this identity at all (round 7) — report NOT FOUND rather than
-    // falling through to a recompute: a fresh canonicalRepoLockKey walk of a given string that resolves to
-    // NOTHING under this exact repoPath can still walk UP to an ENCLOSING repo's real `.git` and collaterally
-    // lift THAT unrelated, genuinely-quarantined repo (the same drift class round 5/6 already closed for the
-    // pending-entry case, reached here through the "nothing matches at all" door instead — see the decision
-    // record, round 7).
-    return {
-      wasQuarantined: false,
-      reason: `no active or pending quarantine is stored under the exact repoPath '${repoPath}' — see GET /internal/merge-quarantine/list for the exact recorded repoPath/id to clear by`,
-      liftedRepoPaths: [], stillBlockedCoOccupants: [],
-    };
-  }
+  // @decision 3b1944b6 — an EXPLICIT no-match signal, never an inferred one: `repoPath` has no
+  // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
+  // doc + each caller's own doc) — this helper never guesses on their behalf.
+  if (!wasQuarantined) return { matched: false };
   // @decision 4b6c8d24 (round 2) — ONE final re-resolve, after every mutation above, never a
   // pre-computed guess — see resolveGenuinelyLiftedRepoPaths's own doc. `excludeRepoPaths` is every
   // repoPath this clear already knows is still blocked — the explicit never-in-both guard.
@@ -5366,7 +5828,7 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
     // out of `liftedRepoPaths` (which never sees the ancestor tier `stillBlockedEntryFor` just matched on).
     const queriedIdentity = directPathIdentity(repoPath);
     const liftedExcludingQueried = liftedRepoPaths.filter((rp) => directPathIdentity(rp) !== queriedIdentity);
-    return {
+    return { matched: true, result: {
       wasQuarantined: true, stillQuarantined: true,
       reason: composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), combinedRelocated),
       liftedRepoPaths: liftedExcludingQueried,
@@ -5375,7 +5837,7 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
       ...(anyKept ? { latchKept: true as const } : {}),
       ...(keptReferencingRepoPaths.size > 0 || anyKeptUnattributed ? { referencingRepoPaths: [...keptReferencingRepoPaths.keys()] } : {}),
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
-    };
+    } };
   }
   if (keptReferencingRepoPaths.size > 0) {
     const refs = [...keptReferencingRepoPaths.keys()];
@@ -5394,7 +5856,7 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
       const keptCo = keptReferencingRepoPaths.get(co.repoPath);
       return keptCo !== undefined && !co.alsoClear ? mergeKeptAndRelocatedCoOccupant(co, keptCo) : co;
     });
-    return {
+    return { matched: true, result: {
       wasQuarantined: true, latchKept: true, referencingRepoPaths: refs,
       liftedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
@@ -5404,24 +5866,24 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
       stillBlockedCoOccupants: [...combinedRelocated, ...[...keptReferencingRepoPaths.values()].filter((co) => !relocatedSet.has(co.repoPath))],
       reason: composeReasonWithRelocated(keptReason, combinedRelocated),
-    };
+    } };
   }
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — kept for an UNATTRIBUTED reason (an unconfirmed EPERM/EBUSY
   // unlink, or a marked-but-unprovable-coverage keep) still reports latchKept:true, never plain success.
   if (anyKeptUnattributed) {
-    return {
+    return { matched: true, result: {
       wasQuarantined: true, latchKept: true, referencingRepoPaths: [],
       liftedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
       stillBlockedCoOccupants: relocated,
       reason: composeReasonWithRelocated(unattributedKeptReasonFor(), relocated),
-    };
+    } };
   }
   // @decision 182c01cc (round 2, finding 1) — a PURE relocation (nothing kept at all) must still report
   // it, never fall through to a plain, uninformative success.
   if (relocated.length > 0) {
-    return {
+    return { matched: true, result: {
       wasQuarantined: true, stillBlockedCoOccupants: relocated,
       liftedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
@@ -5431,23 +5893,80 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
         ? `${relocatedCoOccupantsReason(relocated)} ${contentKeptOnlyReasonFor([...keptContentRepoPaths])}`
         : relocatedCoOccupantsReason(relocated),
       ...(keptContentRepoPaths.size > 0 ? { latchKept: true as const, contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
-    };
+    } };
   }
   // @decision 8db913e2 (Follow-up 0a783fb2) — nothing referencing, unattributed, or relocated — but a
   // content-parsed keep can still be the ONLY thing this clear found; report it, with a real reason, rather
   // than a plain, uninformative success (Code Review 47289f8d: this branch gave no reason at all).
   if (keptContentRepoPaths.size > 0) {
-    return {
+    return { matched: true, result: {
       wasQuarantined: true, latchKept: true, contentKeptRepoPaths: [...keptContentRepoPaths], stillBlockedCoOccupants: [],
       liftedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       reason: contentKeptOnlyReasonFor([...keptContentRepoPaths]),
-    };
+    } };
   }
-  return {
+  return { matched: true, result: {
     wasQuarantined: true, stillBlockedCoOccupants: [],
     liftedRepoPaths,
     ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
+  } };
+}
+
+/**
+ * Clear every quarantine entry addressed by its STORED `repoPath` — matches EACH ACTIVE entry's own
+ * recorded `repoPath` field (never a fresh, walking `canonicalRepoLockKey` recompute of the GIVEN string),
+ * via the shared {@link tryClearMergeQuarantineByOwnIdentity} helper, and reports NOT FOUND (round 7) when
+ * NEITHER tier matches at all — never a recompute (see this function's own `@decision` tag below for why).
+ *
+ * Used directly by `/clear-by-path`'s `{repoPath}` form, AND (card 883e29bc, round 2) by {@link
+ * clearMergeQuarantine} itself whenever its own `repoPath` is not currently resolvable — including,
+ * transitively, `/clear` (project-resolved) via {@link clearMergeQuarantineReporting}. No longer the
+ * no-project-resolution route's own exclusive caller.
+ *
+ * @decision abccee85 — never recompute `canonicalRepoLockKey` from a human-supplied repoPath string to
+ * decide which entry to clear; see the decision record for the key-drift bugs this closes, including
+ * round 7's fix to this function's OWN final fallback (it used to do exactly that).
+ *
+ * @decision 3b1944b6 — on a no-match from the shared helper, keep reporting NOT FOUND here; never fall
+ * through to a fresh-key ancestor clear — that fall-through belongs ONLY to {@link clearMergeQuarantine}'s
+ * resolvable branch (see that function's own doc for why the two legitimately diverge).
+ */
+export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+  // @decision 3b1944b6 (Round 6, CR4 finding 2) — stamp a foreign fresh-key occupant reduced BEFORE
+  // touching repoPath's own record below — see preClearForeignKeyStamp's own doc; refuse on failure.
+  //
+  // @decision 3b1944b6 (Round 8/CR7 item 2) — this call runs BEFORE any match is even looked for, so it
+  // must compute the generic "has an own record" answer itself via `identityHasOwnRecordAnywhere` — the
+  // (now-required) parameter can never be inferred by the chokepoint.
+  const preClear = preClearForeignKeyStamp(repoPath, identityHasOwnRecordAnywhere(directPathIdentity(repoPath)));
+  if (!preClear.ok) {
+    return { wasQuarantined: true, reason: preClear.reason, liftedRepoPaths: [], stillQuarantined: true, refusedBeforeClear: true, stillBlockedCoOccupants: [] };
+  }
+  // `"broad"`: this route's own established, broad identity-wide-clear semantic (d4b25feb round 3) — unchanged.
+  const own = tryClearMergeQuarantineByOwnIdentity(repoPath, "broad");
+  if (own.matched) return own.result;
+  // @decision 2a169469 (round 2, minor 3) — `wasQuarantined` stays FALSE (82032b5c round 4's "never
+  // cleared by its own path" ruling holds unchanged) — a genuinely blocked PURE contributor still gets
+  // named, instead of a silent "not found" lie by omission.
+  const hostEntry = stillBlockedEntryFor(repoPath);
+  if (hostEntry) {
+    return {
+      wasQuarantined: false, stillQuarantined: true,
+      reason: stillQuarantinedReason(hostEntry, repoPath),
+      liftedRepoPaths: [], stillBlockedCoOccupants: [],
+    };
+  }
+  // Nothing active or pending matches this identity at all (round 7) — report NOT FOUND rather than
+  // falling through to a recompute: a fresh canonicalRepoLockKey walk of a given string that resolves to
+  // NOTHING under this exact repoPath can still walk UP to an ENCLOSING repo's real `.git` and collaterally
+  // lift THAT unrelated, genuinely-quarantined repo (the same drift class round 5/6 already closed for the
+  // pending-entry case, reached here through the "nothing matches at all" door instead — see the decision
+  // record, round 7).
+  return {
+    wasQuarantined: false,
+    reason: `no active or pending quarantine is stored under the exact repoPath '${repoPath}' — see GET /internal/merge-quarantine/list for the exact recorded repoPath/id to clear by`,
+    liftedRepoPaths: [], stillBlockedCoOccupants: [],
   };
 }
 
@@ -5839,8 +6358,12 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, queriedRepoPath: st
   // @decision 2a169469 (round 3) — gate the contributor wording on `queriedRepoPath` being UNRESOLVABLE,
   // the same split `stillBlockedEntryFor` uses for `ownIdentityEntryFor`: a RESOLVABLE contributor (e.g. a
   // real subdir folded into its real toplevel) is blocked via the key-collapse/ancestor tier, not this one.
+  // @decision 3b1944b6 (Round 4) — ALSO true for a membership already `reduceForeignUnionContributor`'d
+  // out of `contributorRepoPaths` (its own durable `reducedContributorRepoPaths` marker survives that
+  // drop) — the token stays outstanding either way, so this wording stays accurate for both.
   const isHostOfContributor = !isOwnEntry && !isRepoPathCurrentlyResolvable(queriedRepoPath) &&
-    (after.contributorRepoPaths?.some((c) => directPathIdentity(c) === queriedIdentity) ?? false);
+    ((after.contributorRepoPaths?.some((c) => directPathIdentity(c) === queriedIdentity) ?? false)
+      || (after.reducedContributorRepoPaths?.includes(queriedIdentity) ?? false));
   const reason = isOwnEntry
     ? `repoPath is still quarantined by its own recorded entry (repoPath '${after.repoPath}', latch id '${latchId}') — this clear did not lift it`
     : isHostOfContributor
@@ -5889,6 +6412,12 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
   const liftedRepoPaths = clearResult?.liftedRepoPaths ?? [];
   const provenanceUnknownFields = clearResult?.provenanceUnknown ? { provenanceUnknown: true as const } : {};
   if (after) {
+    // @decision 3b1944b6 (Round 8, finding 2) — forward a preClear REFUSAL's own reason verbatim.
+    // `stillQuarantined` alone double-composed the relocated clause (q4.mjs) — `refusedBeforeClear`
+    // discriminates a refusal from the ordinary still-blocked case below, whose reason is pre-composed.
+    if (clearResult?.refusedBeforeClear && clearResult.reason) {
+      return { wasQuarantined: true, reason: clearResult.reason, liftedRepoPaths, ...provenanceUnknownFields, stillBlockedCoOccupants: stillBlocked };
+    }
     // @decision 182c01cc (round 3, m4) — compose the relocated clause here too, consistent with
     // clearMergeQuarantineLatchFile's own still-quarantined branch — this used to drop it silently.
     return {
@@ -5965,7 +6494,7 @@ const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
  * names only an identity actually freed, never one still blocked by its own independent (d4b25feb) record
  * — `stillQuarantined`/`reason` name that case instead of a silently-false success.
  */
-export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; stillQuarantined?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
+export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; stillQuarantined?: true; refusedBeforeClear?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
   if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
     return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list)` };
   }
@@ -6030,6 +6559,16 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
           `pending entr${differentRepoPending.length === 1 ? "y" : "ies"} for a DIFFERENT repo (${differentRepoPending.map((p) => `'${p.entry.repoPath}'`).join(", ")}) — ` +
           `refusing to guess which one you meant. Clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify(candidates)}.`,
       };
+    }
+    // @decision 3b1944b6 (Round 6, CR4 finding 2) — stamp a foreign fresh-key occupant reduced BEFORE
+    // the clear below — same ordering/refusal rule as `/clear`'s own `preClearForeignKeyStamp` call.
+    //
+    // @decision 3b1944b6 (Round 8/CR7 item 2) — `activeMatch.entry` was found BY this exact identity, so
+    // `identityHasOwnRecordAnywhere` always answers `true` here — computed via the named helper anyway,
+    // never hardcoded, so this call site stays correct even if the matching logic above it ever changes.
+    const preClearActive = preClearForeignKeyStamp(activeMatch.entry.repoPath, identityHasOwnRecordAnywhere(directPathIdentity(activeMatch.entry.repoPath)));
+    if (!preClearActive.ok) {
+      return { ok: true, wasQuarantined: true, reason: preClearActive.reason, liftedRepoPaths: [], stillQuarantined: true, refusedBeforeClear: true, stillBlockedCoOccupants: [] };
     }
     // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
     const activeClearResult = clearMergeQuarantineByKey(activeMatch.key, activeMatch.entry.repoPath, undefined, true);
@@ -6097,6 +6636,19 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
         reason: `latch id '${id}' matches a PENDING entry ${collisionClause} — a bare id cannot tell which identity you mean to clear. Nothing was cleared. ` +
           `${remediationTextFor(matchedRepoPaths, { siblingRepoPaths: [], contributorRepoPaths: pendingContributors, unknownProvenance: pendingUnknownProvenance, unknownProvenanceKeyPaths: unknownKeyPaths })}.`,
       };
+    }
+    // @decision 3b1944b6 (Round 6, CR4 finding 2) — stamp a foreign fresh-key occupant reduced for EVERY
+    // matched pending identity BEFORE dropping any of them below — same ordering/refusal rule as the
+    // active-match branch above.
+    //
+    // @decision 3b1944b6 (Round 8/CR7 item 2) — `p.entry` was found BY this exact identity's own pending
+    // match (same reasoning as the active branch above) — pass `true` directly, no need for the generic
+    // helper's own recompute.
+    for (const p of matchedPending) {
+      const preClearPending = preClearForeignKeyStamp(p.entry.repoPath, true);
+      if (!preClearPending.ok) {
+        return { ok: true, wasQuarantined: true, reason: preClearPending.reason, liftedRepoPaths: [], stillQuarantined: true, refusedBeforeClear: true, stillBlockedCoOccupants: [] };
+      }
     }
     // A pending entry isn't armed into activeQuarantines under any key — drop ONLY these exact pending
     // entries and their own sourceFiles directly, never a recomputed-key delegation (which could drift
@@ -6806,6 +7358,11 @@ function reenterMergeQuarantinesAtBootImpl(
         // refusal for a runtime-union entry silently stops working the moment the process restarts.
         contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
           ? parsed.contributorRepoPaths : undefined,
+        // @decision 3b1944b6 (Round 4) — carry a persisted `reducedContributorRepoPaths` back in at boot
+        // too, same reason as `contributorRepoPaths` just above: without this, the second-clear reopening
+        // this field closes survives only until the next restart.
+        reducedContributorRepoPaths: Array.isArray(parsed.reducedContributorRepoPaths) && parsed.reducedContributorRepoPaths.every((s): s is string => typeof s === "string")
+          ? parsed.reducedContributorRepoPaths : undefined,
         // @decision db0a9db0 — same carry-forward, same reason: without this, a PERSISTED marker (written
         // by a partial clear's own rewrite) is silently dropped on the very next boot's PRIMARY parse,
         // falling back to re-derivation alone — which can miss it once `tokens.length` drops to 1.
@@ -7111,6 +7668,10 @@ function reenterMergeQuarantinesAtBootImpl(
         // @decision 82032b5c — same carry-forward as PASS 1's own parse above, for a tmp-residue recovery.
         contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
           ? parsed.contributorRepoPaths : undefined,
+        // @decision 3b1944b6 (Round 4) — same carry-forward as PASS 1's own parse above, for a
+        // tmp-residue recovery, for its own sticky history field.
+        reducedContributorRepoPaths: Array.isArray(parsed.reducedContributorRepoPaths) && parsed.reducedContributorRepoPaths.every((s): s is string => typeof s === "string")
+          ? parsed.reducedContributorRepoPaths : undefined,
         // @decision db0a9db0 — same carry-forward, same reason, for a tmp-residue recovery.
         provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
         // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.
@@ -7283,6 +7844,10 @@ function reenterMergeQuarantinesAtBootImpl(
         // @decision 82032b5c — same carry-forward as PASS 1/1b's own parses, for a safety-tmp recovery.
         contributorRepoPaths: Array.isArray(parsed.contributorRepoPaths) && parsed.contributorRepoPaths.every((s): s is string => typeof s === "string")
           ? parsed.contributorRepoPaths : undefined,
+        // @decision 3b1944b6 (Round 4) — same carry-forward as PASS 1/1b's own parses, for a safety-tmp
+        // recovery, for its own sticky history field.
+        reducedContributorRepoPaths: Array.isArray(parsed.reducedContributorRepoPaths) && parsed.reducedContributorRepoPaths.every((s): s is string => typeof s === "string")
+          ? parsed.reducedContributorRepoPaths : undefined,
         // @decision db0a9db0 — same carry-forward, same reason, for a safety-tmp recovery.
         provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
         // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.
