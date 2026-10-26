@@ -89,20 +89,65 @@ function loadCommentAnchorLintModule(): Promise<WellFormedCommentAnchorLintModul
   return modulePromise;
 }
 
+// @decision 1300c169 — TAB/`"`/`\`/control characters C-quote a `+++`/`---` path REGARDLESS of
+// `core.quotepath` (unlike a non-ASCII byte, which `-c core.quotepath=false` below already suppresses);
+// never assume that flag alone makes `parseAddedLineNumbers`'s `^b\/`-strip safe against such a path.
+const GIT_QUOTE_ESCAPES: Record<string, number> = {
+  a: 0x07, b: 0x08, t: 0x09, n: 0x0a, v: 0x0b, f: 0x0c, r: 0x0d, '"': 0x22, "\\": 0x5c,
+};
+
+/**
+ * Reverse git's C-style quoting of a `+++`/`---` header path. Returns `raw` unchanged when it isn't
+ * wrapped in `"..."` (the common case — most paths need no quoting at all). Octal escapes (`\NNN`) are
+ * accumulated as raw bytes and UTF-8-decoded together with any adjacent octal run, so a multi-byte
+ * character split across consecutive octal escapes (only reachable under `core.quotepath=true`, which
+ * this file's own call never sets — kept for robustness, not because this call site can hit it today)
+ * decodes correctly rather than byte-by-byte.
+ */
+function unquoteGitPath(raw: string): string {
+  if (raw.length < 2 || raw[0] !== "\"" || raw[raw.length - 1] !== "\"") return raw;
+  const inner = raw.slice(1, -1);
+  let out = "";
+  let pendingBytes: number[] = [];
+  const flush = () => {
+    if (pendingBytes.length === 0) return;
+    out += Buffer.from(pendingBytes).toString("utf8");
+    pendingBytes = [];
+  };
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch !== "\\") { flush(); out += ch; continue; }
+    const next = inner[i + 1];
+    if (next !== undefined && /[0-7]/.test(next) && /[0-7]/.test(inner[i + 2] ?? "") && /[0-7]/.test(inner[i + 3] ?? "")) {
+      pendingBytes.push(parseInt(inner.slice(i + 1, i + 4), 8) & 0xff);
+      i += 3;
+      continue;
+    }
+    const code = next !== undefined ? GIT_QUOTE_ESCAPES[next] : undefined;
+    if (code !== undefined) { pendingBytes.push(code); i += 1; continue; }
+    // Unrecognized escape — git's own quote_c_style never emits one; keep the backslash literally.
+    flush();
+    out += "\\";
+    if (next !== undefined) { out += next; i += 1; }
+  }
+  flush();
+  return out;
+}
+
 /**
  * Parse a unified `git diff` patch into `file -> Set<new-file line numbers this diff ADDS>`. Only `+`
  * lines inside a hunk count; a `-` (removed) line never advances the new-file line counter, and a `+++
  * /dev/null` (a deleted file) is skipped entirely (nothing to scan in a file that no longer exists). File
- * paths are kept exactly as git renders them in the patch (posix, `a/`/`b/` prefix stripped, and always
- * the REAL post-rename destination).
+ * paths are kept exactly as git renders them in the patch (posix, `a/`/`b/` prefix stripped, C-quoting
+ * reversed via {@link unquoteGitPath}, and always the REAL post-rename destination).
  */
-function parseAddedLineNumbers(patch: string): Map<string, Set<number>> {
+export function parseAddedLineNumbers(patch: string): Map<string, Set<number>> {
   const result = new Map<string, Set<number>>();
   let currentFile: string | null = null;
   let newLine = 0;
   for (const raw of patch.split("\n")) {
     if (raw.startsWith("+++ ")) {
-      const rest = raw.slice(4).trim();
+      const rest = unquoteGitPath(raw.slice(4).trim());
       currentFile = rest === "/dev/null" ? null : rest.replace(/^b\//, "");
       continue;
     }
