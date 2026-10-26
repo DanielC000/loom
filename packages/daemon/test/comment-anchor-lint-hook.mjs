@@ -77,19 +77,27 @@ const cleanSrc = [
 ].join("\n");
 const violatingPath = path.join(REPO, "packages", "daemon", "src", "violating.ts");
 const cleanPath = path.join(REPO, "packages", "daemon", "src", "clean.ts");
-const excludedPath = path.join(REPO, "packages", "daemon", "test", "fixture-test.mjs");
+// card f9ccdcb1: this path is under test/ — no longer rejected outright, but narrowed to orphanAnchors
+// only (comment-scoped); see the dedicated assertions below.
+const testScopedPath = path.join(REPO, "packages", "daemon", "test", "fixture-test.mjs");
 const wrongExtPath = path.join(REPO, "packages", "daemon", "src", "notes.md");
+// A genuinely EXCLUDED path (hidden dir, card 03fbb126) — the negative control for "stays silent" below,
+// now that test/ no longer plays that role.
+const hiddenPath = path.join(REPO, ".claude", "skills", "x.mjs");
 fs.writeFileSync(violatingPath, violatingSrc);
 fs.writeFileSync(cleanPath, cleanSrc);
-fs.writeFileSync(excludedPath, "// @decision ffffffff — synthetic test-fixture anchor, must never be scanned\n");
+fs.writeFileSync(testScopedPath, "// @decision ffffffff — a real test-file comment anchor, no record: must surface as an orphan\n");
 fs.writeFileSync(wrongExtPath, "# not a source file\n");
+fs.mkdirSync(path.dirname(hiddenPath), { recursive: true });
+fs.writeFileSync(hiddenPath, "// @decision eeeeeeee — hidden mirror dir, must never be scanned\n");
 fs.writeFileSync(path.join(REPO, "docs", "adr", "aaaaaaaa-example.md"), "# aaaaaaaa\n\nAn ADR.\n");
 
 try {
   // --- isInScope -----------------------------------------------------------------------------------
   check("isInScope: an in-scope source file resolves to its repo-relative path",
     isInScope(REPO, violatingPath) === "packages/daemon/src/violating.ts");
-  check("isInScope: a file under an excluded segment (test/) is rejected", isInScope(REPO, excludedPath) === null);
+  check("isInScope (f9ccdcb1): a file under test/ now resolves to its repo-relative path (no longer excluded)",
+    isInScope(REPO, testScopedPath) === "packages/daemon/test/fixture-test.mjs");
   check("isInScope: a non-source extension (.md) is rejected", isInScope(REPO, wrongExtPath) === null);
   check("isInScope: a path outside repoRoot entirely is rejected",
     isInScope(REPO, path.join(os.tmpdir(), "elsewhere.ts")) === null);
@@ -122,9 +130,24 @@ try {
   check("computeFileReport: clean file has zero orphanAnchors (aaaaaaaa resolves via docs/adr)",
     cleanReport.orphanAnchors.length === 0);
 
-  // --- computeFileReport: out-of-scope file returns null, not an empty report (distinguishable) -----
-  check("computeFileReport: out-of-scope file (test/) returns null, not a zeroed report",
-    computeFileReport(REPO, excludedPath, "// @decision ffffffff — x\n") === null);
+  // --- computeFileReport: a GENUINELY excluded path (hidden dir) still returns null ------------------
+  check("computeFileReport: a hidden-dir path (.claude/skills) returns null, not a zeroed report",
+    computeFileReport(REPO, hiddenPath, "// @decision eeeeeeee — x\n") === null);
+
+  // --- computeFileReport (card f9ccdcb1): a test-scoped file is IN scope, narrowed to orphanAnchors ---
+  const testScopedReport = computeFileReport(REPO, testScopedPath, fs.readFileSync(testScopedPath, "utf8"), { minLines: 15 });
+  check("card f9ccdcb1: a test-scoped file is NOT null — it's in scope, just narrowed", testScopedReport !== null);
+  check("card f9ccdcb1: the real comment anchor (ffffffff, no record) IS reported as an orphan",
+    testScopedReport.orphanAnchors.length === 1 && testScopedReport.orphanAnchors[0].id === "ffffffff");
+  check("card f9ccdcb1: every OTHER field is empty for a test-scoped file (unanchoredLongBlocks/brokenAnchors/"
+    + "overlongAnchorIds/sigilSpaceAnchors/bareCommitAnchors/pointerAnchors/overlongAnchorParagraphs/"
+    + "midSentenceAnchors/embeddedAnchors/splitAnchorParagraphs all []), even though the file's own content "
+    + "has no other grammar violations to hide that fact",
+    testScopedReport.unanchoredLongBlocks.length === 0 && testScopedReport.brokenAnchors.length === 0
+    && testScopedReport.overlongAnchorIds.length === 0 && testScopedReport.sigilSpaceAnchors.length === 0
+    && testScopedReport.bareCommitAnchors.length === 0 && testScopedReport.pointerAnchors.length === 0
+    && testScopedReport.overlongAnchorParagraphs.length === 0 && testScopedReport.midSentenceAnchors.length === 0
+    && testScopedReport.embeddedAnchors.length === 0 && testScopedReport.splitAnchorParagraphs.length === 0);
 
   // --- formatHookMessage ------------------------------------------------------------------------------
   const msg = formatHookMessage(violatingReport);
@@ -158,8 +181,17 @@ try {
   // NEGATIVE CONTROLS — each isolates ONE reason the hook should stay silent.
   check("runHook (negative control): a Write on a CLEAN in-scope file stays silent", runHookProc(cleanPath, "Write") === null);
   check("runHook (negative control): a Read (wrong tool) on the SAME violating file stays silent", runHookProc(violatingPath, "Read") === null);
-  check("runHook (negative control): a Write on an out-of-scope file (test/) stays silent", runHookProc(excludedPath, "Write") === null);
+  check("runHook (negative control): a Write on a GENUINELY excluded file (.claude/skills) stays silent", runHookProc(hiddenPath, "Write") === null);
   check("runHook (negative control): a Write on a non-source extension stays silent", runHookProc(wrongExtPath, "Write") === null);
+  // card f9ccdcb1: the hook's live counterpart to the computeFileReport assertions above — a real
+  // orphan anchor in a test-file comment IS surfaced, through the actual subprocess spawn.
+  {
+    const testScopedMsg = runHookProc(testScopedPath, "Write");
+    check("card f9ccdcb1: runHook FIRES for a test-scoped file carrying a real orphan anchor (not silent)",
+      testScopedMsg !== null);
+    check("card f9ccdcb1: the hook's advisory names the real orphan (ffffffff)",
+      !!testScopedMsg && /ffffffff/.test(testScopedMsg.hookSpecificOutput?.additionalContext ?? ""));
+  }
   {
     const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook"], { input: "{}", encoding: "utf8" });
     check("runHook (negative control): missing repoRoot arg exits 0 and stays silent", r.status === 0 && !(r.stdout || "").trim());

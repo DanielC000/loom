@@ -90,6 +90,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { commitAll } from "./_git-commit.mjs";
 import {
   extractCommentBlocks,
@@ -1623,9 +1624,10 @@ try {
   // BEFORE: no malformed anchor in the fixture at all.
   fs.writeFileSync(fixturePath, buildSrc(false));
 
-  // A synthetic fixture anchor placed under test/ must NEVER pollute the measured corpus.
+  // card f9ccdcb1: a REAL comment anchor under test/, with no record, now DOES surface as an orphan
+  // (comment-scoped — see this file's own f9ccdcb1-tagged block below for the fixture-vs-real split).
   fs.writeFileSync(path.join(REPO, "packages", "daemon", "test", "fixture-test.mjs"),
-    "// @decision ffffffff — a synthetic test-fixture anchor with no record; must be excluded from the sweep\n");
+    "// @decision ffffffff — a real test-file comment anchor with no record; must now surface as an orphan\n");
 
   fs.writeFileSync(path.join(REPO, "docs", "adr", "aaaaaaaa-example.md"), "# aaaaaaaa\n\nAn ADR.\n");
   fs.writeFileSync(path.join(REPO, "docs", "investigations", "bbbbbbbb-an-investigation", "findings.md"), "# bbbbbbbb\n\nAn investigation record.\n");
@@ -1744,7 +1746,7 @@ try {
     fs.writeFileSync(fixturePath, buildSrc(true));
   }
 
-  check("computeReport: fixture-test.mjs under test/ is excluded from the sweep (filesScanned === 1)", report.filesScanned === 1);
+  check("card f9ccdcb1: fixture-test.mjs under test/ IS now walked alongside fixture.ts (filesScanned === 2)", report.filesScanned === 2);
   check("computeReport: the 20-line unanchored block is flagged", report.unanchoredLongBlocks.count === 1
     && report.unanchoredLongBlocks.items[0]?.length === 20);
   check("computeReport: aaaaaaaa (adr-resolved) is not an orphan anchor",
@@ -1753,8 +1755,8 @@ try {
     !report.orphanAnchors.items.some((a) => a.id === "bbbbbbbb"));
   check("computeReport: dddddddd (unresolved) IS an orphan anchor, exactly once",
     report.orphanAnchors.items.filter((a) => a.id === "dddddddd").length === 1);
-  check("computeReport: the synthetic test/-fixture anchor ffffffff never reaches orphanAnchors",
-    !report.orphanAnchors.items.some((a) => a.id === "ffffffff"));
+  check("card f9ccdcb1: the REAL test-file comment anchor ffffffff DOES now reach orphanAnchors (comment-scoped, no record)",
+    report.orphanAnchors.items.some((a) => a.id === "ffffffff" && a.file === "packages/daemon/test/fixture-test.mjs"));
 
   // --- sigil namespace, card 969b0e1c ---
   check("computeReport (sigil): a sha:-sigil'd anchor citing a REAL, verified commit is NOT an orphan",
@@ -1765,9 +1767,10 @@ try {
   check("computeReport (sigil): the SAME hex under the sha: sigil IS refused — deadc0de is not a real "
     + "commit in this repo, even though a matching record file exists (refuse-rather-than-fall-through)",
     report.orphanAnchors.items.some((a) => a.ns === "sha" && a.id === "deadc0de"));
-  check("computeReport (sigil): orphanAnchors.count is exactly 2 — dddddddd (pre-existing, unresolved) "
-    + "and sha:deadc0de (new refusal); sha:REAL_SHA and card:deadc0de both resolve and add nothing",
-    report.orphanAnchors.count === 2);
+  check("computeReport (sigil) + card f9ccdcb1: orphanAnchors.count is exactly 3 — dddddddd (pre-existing, "
+    + "unresolved), sha:deadc0de (new refusal), and ffffffff (the real test-file comment anchor, card "
+    + "f9ccdcb1); sha:REAL_SHA and card:deadc0de both resolve and add nothing",
+    report.orphanAnchors.count === 3);
   check("computeReport: eeeeeeee (no inbound anchor) IS an orphan record, marked advisory",
     report.orphanRecords.items.some((r) => r.id === "eeeeeeee") && report.orphanRecords.advisory === true);
   // 8 real records (aaaaaaaa via adr, bbbbbbbb via investigations, eeeeeeee + 12345678 + the two
@@ -1884,25 +1887,36 @@ try {
     w("src/a.ts", "// @decision aaaaaaaa — recorded\nconst a = 1;\n");
     w("lib/b.js", "// @decision bbbbbbbb — NO record: must surface as an orphan\nconst b = 1;\n");
     w("lib/long.cjs", long(20) + "\nconst c = 1;\n");
-    // must NOT be scanned
+    // must NOT be scanned at all
     w("node_modules/pkg/x.js", "// @decision cccccccc — vendored, must never be scanned\n");
     w(".claude/skills/x.mjs", "// @decision dddddddd — hidden mirror dir, must never be scanned\n");
     w("build/y.js", "// @decision eeeeeeee — build output, must never be scanned\n");
-    w("tests/z.js", "// @decision ffffffff — test fixture, must never be scanned\n");
     w("src/docs/d.ts", "// @decision aaaaaaaa — nested src/docs IS real source, must be scanned\n");
     w("docs/scripts/q.mjs", "// @decision 0a0a0a0a — docs/ one-off script, must never be scanned\n");
+    // card f9ccdcb1: `tests/` is now WALKED, but a real comment anchor there feeds ONLY orphanAnchors
+    // (comment-scoped) — a fixture id in a string literal in the SAME directory must still never surface.
+    w("tests/z.js", "// @decision ffffffff — a REAL comment, no record: must surface as an orphan too\n");
+    w("tests/fixture.js", "const lines = [\"// @decision aaaaaaaa — synthetic fixture id in a string literal, never an anchor\"];\n");
     // .md ruling: a long HTML-comment block in a note is NOT a comment block, and the note is not scanned
     w("notes/note.md", "<!--\n" + Array.from({ length: 20 }, (_, i) => `prose ${i}`).join("\n") + "\n-->\n<!-- @decision 12345678 — md anchor, this script does not scan .md -->\n");
 
     const r = computeReport(NL);
-    check("03fbb126 layout-agnostic: the non-Loom layout is actually scanned (4 source files incl. nested src/docs, none excluded)", r.filesScanned === 4);
+    check("03fbb126 layout-agnostic: the non-Loom layout is actually scanned (6 source files: 4 production + 2 under tests/, none excluded)", r.filesScanned === 6);
     check("03fbb126 layout-agnostic: the orphan anchor in lib/b.js is FOUND (bbbbbbbb)",
-      r.orphanAnchors.count === 1 && r.orphanAnchors.items[0]?.id === "bbbbbbbb" && r.orphanAnchors.items[0]?.file === "lib/b.js");
+      r.orphanAnchors.items.some((o) => o.id === "bbbbbbbb" && o.file === "lib/b.js"));
+    check("card f9ccdcb1 (a): a real orphan anchor in a test-file COMMENT (tests/z.js, ffffffff) IS reported",
+      r.orphanAnchors.items.some((o) => o.id === "ffffffff" && o.file === "tests/z.js"));
+    check("card f9ccdcb1 (b): a synthetic fixture id in a STRING LITERAL under tests/ (aaaaaaaa, tests/fixture.js) is NOT reported — only the real (recorded) aaaaaaaa sites count",
+      !r.orphanAnchors.items.some((o) => o.file === "tests/fixture.js"));
+    check("card f9ccdcb1: orphanAnchors under tests/ is exactly {bbbbbbbb, ffffffff} — no fixture noise, no extra sites",
+      r.orphanAnchors.count === 2);
     check("03fbb126 layout-agnostic: the 20-line unanchored block in lib/long.cjs is FOUND",
       r.unanchoredLongBlocks.count === 1 && r.unanchoredLongBlocks.items[0]?.file === "lib/long.cjs");
-    check("03fbb126 exclusions: node_modules/.claude/build/tests/docs anchors never surface (only the 3 real anchor sites count, incl. nested src/docs)",
-      r.totalAnchorSites === 3 && !r.orphanAnchors.items.some((o) => ["cccccccc", "dddddddd", "eeeeeeee", "ffffffff", "0a0a0a0a"].includes(o.id)));
-    check("03fbb126 .md ruling: the note's HTML-comment block and anchor are NOT scanned (4 real blocks: 3 anchors + 1 long)",
+    check("03fbb126 exclusions: node_modules/.claude/build/docs anchors never surface (only the 3 production + 1 real test-dir site count, incl. nested src/docs)",
+      r.totalAnchorSites === 4 && !r.orphanAnchors.items.some((o) => ["cccccccc", "dddddddd", "eeeeeeee", "0a0a0a0a"].includes(o.id)));
+    check("card f9ccdcb1: tests/fixture.js's string-literal occurrence never reaches totalAnchorSites at all (4, not 5)",
+      r.totalAnchorSites === 4);
+    check("card f9ccdcb1: tests/ files contribute NOTHING to unanchoredLongBlocks/totalCommentBlocks — only the 4 real (non-test) blocks count",
       r.totalCommentBlocks === 4 && !r.orphanAnchors.items.some((o) => o.id === "12345678"));
     check("03fbb126: an uncapped walk reports walkTruncated:false", r.walkTruncated === false);
 
@@ -1918,8 +1932,78 @@ try {
     const cli = spawnSync(process.execPath, [scriptPath, NL], { encoding: "utf8" });
     check("03fbb126 CLI: stdout is the JSON report carrying walkTruncated:false, stderr has no truncation warning",
       cli.status === 0 && JSON.parse(cli.stdout).walkTruncated === false && !/PARTIAL/.test(cli.stderr || ""));
+    check("card f9ccdcb1 (a): the CLI scan itself (not just computeReport in-process) reports the real test-file orphan",
+      cli.status === 0 && JSON.parse(cli.stdout).orphanAnchors.items.some((o) => o.id === "ffffffff" && o.file === "tests/z.js"));
     check("03fbb126 CLI: the shipped script writes the truncation warning to stderr (walkTruncated -> PARTIAL)",
       /if \(report\.walkTruncated\)[\s\S]{0,200}process\.stderr\.write\([^)]*PARTIAL/.test(fs.readFileSync(scriptPath, "utf8")));
+  } finally {
+    try { fs.rmSync(NL, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- card f9ccdcb1: orphanAnchors/orphanRecords extend into test/tests/e2e, comment-scoped only --------
+{
+  const NL = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-test-scope-"));
+  const w = (rel, txt) => { const f = path.join(NL, ...rel.split("/")); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, txt); };
+  try {
+    // (d) a MIXED file: a real comment anchor (11111111, no record) alongside the SAME-SHAPED id
+    // (22222222) appearing ONLY inside a string literal on another line — the real one must surface as
+    // an orphan, the string-literal one must not, in the SAME file.
+    w("test/mixed.mjs",
+      "// @decision 11111111 — a real decision anchor in an actual comment, with no record\n"
+      + "const label = \"check this against @decision 22222222 in a label string, never a real anchor\";\n");
+
+    const r = computeReport(NL);
+    check("card f9ccdcb1 (d) mixed file: the REAL comment anchor (11111111) is reported as an orphan",
+      r.orphanAnchors.items.some((o) => o.id === "11111111" && o.file === "test/mixed.mjs"));
+    check("card f9ccdcb1 (d) mixed file: the STRING-LITERAL occurrence (22222222) is NOT reported",
+      !r.orphanAnchors.items.some((o) => o.id === "22222222"));
+    check("card f9ccdcb1 (d) mixed file: exactly one orphan site surfaces from this file (the real comment, not the string)",
+      r.orphanAnchors.count === 1);
+
+    // (a) hook parity: computeFileReport (what the live PostToolUse hook calls) agrees with the CLI scan
+    // above for the SAME mixed file — orphanAnchors only, every other field empty for a test-scoped file.
+    const mixedContent = fs.readFileSync(path.join(NL, "test", "mixed.mjs"), "utf8");
+    const hookReport = computeFileReport(NL, path.join(NL, "test", "mixed.mjs"), mixedContent);
+    check("card f9ccdcb1 (a) hook: computeFileReport reports the SAME real orphan (11111111) for a test-scoped file",
+      hookReport?.orphanAnchors.some((o) => o.id === "11111111"));
+    check("card f9ccdcb1 (a) hook: the string-literal occurrence (22222222) is NOT reported by the hook either",
+      !hookReport?.orphanAnchors.some((o) => o.id === "22222222"));
+    check("card f9ccdcb1: for a test-scoped file, computeFileReport returns EVERY other field empty (orphanAnchors is the only live signal)",
+      hookReport?.unanchoredLongBlocks.length === 0 && hookReport?.brokenAnchors.length === 0
+      && hookReport?.overlongAnchorIds.length === 0 && hookReport?.sigilSpaceAnchors.length === 0
+      && hookReport?.bareCommitAnchors.length === 0 && hookReport?.pointerAnchors.length === 0
+      && hookReport?.overlongAnchorParagraphs.length === 0 && hookReport?.midSentenceAnchors.length === 0
+      && hookReport?.embeddedAnchors.length === 0 && hookReport?.embeddedAnchorsStacked.length === 0
+      && hookReport?.splitAnchorParagraphs.length === 0 && hookReport?.splitAnchorParagraphsUnterminated.length === 0);
+
+    // (c) REGRESSION, real before/after: dynamically load the PRE-this-card version of
+    // comment-anchor-lint.mjs (git HEAD, i.e. before card f9ccdcb1's own uncommitted changes — its
+    // sibling imports, decision-records.mjs/git-resolve.mjs, are copied byte-identical from disk since
+    // this card never touches them) and run it against the EXACT SAME fixture tree used above.
+    // unanchoredLongBlocks must be byte-identical: this card never changes how a non-test block is
+    // computed, and a test-scoped block was excluded from it before (file never walked) and stays
+    // excluded now (walked, but deliberately not pushed into allBlocks) — see f9ccdcb1's own record.
+    w("src/long.ts", Array.from({ length: 20 }, (_, i) => `// regrowing narrative ${i}`).join("\n") + "\nconst x = 1;\n");
+    w("test/long.mjs", Array.from({ length: 25 }, (_, i) => `// an even longer, unanchored test-fixture block, line ${i}`).join("\n") + "\nconst y = 1;\n");
+
+    const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
+    const preFixSrc = execFileSync("git", ["show", "HEAD:packages/daemon/assets/comment-anchor-lint.mjs"], { cwd: repoRoot, encoding: "utf8" });
+    const preFixDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-prefix-"));
+    fs.writeFileSync(path.join(preFixDir, "comment-anchor-lint.mjs"), preFixSrc);
+    fs.copyFileSync(path.join(import.meta.dirname, "..", "assets", "decision-records.mjs"), path.join(preFixDir, "decision-records.mjs"));
+    fs.copyFileSync(path.join(import.meta.dirname, "..", "assets", "git-resolve.mjs"), path.join(preFixDir, "git-resolve.mjs"));
+    const preFixMod = await import(pathToFileURL(path.join(preFixDir, "comment-anchor-lint.mjs")).href);
+
+    const afterReport = computeReport(NL);
+    const beforeReport = preFixMod.computeReport(NL);
+    check("card f9ccdcb1 (c) before/after: unanchoredLongBlocks.count is BYTE-IDENTICAL pre- vs post-fix on the SAME fixture (src/long.ts's block counts both ways; test/long.mjs's never does)",
+      beforeReport.unanchoredLongBlocks.count === afterReport.unanchoredLongBlocks.count);
+    check("card f9ccdcb1 (c): that identical count is exactly 1 (src/long.ts only) — proves the comparison isn't vacuously 0=0",
+      afterReport.unanchoredLongBlocks.count === 1 && afterReport.unanchoredLongBlocks.items[0]?.file === "src/long.ts");
+    check("card f9ccdcb1 (c): the pre-fix import genuinely never saw test/long.mjs at all (it predates the walk widening)",
+      beforeReport.filesScanned < afterReport.filesScanned);
+    try { fs.rmSync(preFixDir, { recursive: true, force: true }); } catch { /* ignore */ }
   } finally {
     try { fs.rmSync(NL, { recursive: true, force: true }); } catch { /* ignore */ }
   }

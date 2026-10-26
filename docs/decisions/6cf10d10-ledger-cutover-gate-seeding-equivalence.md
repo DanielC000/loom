@@ -163,12 +163,16 @@ just this seat's own.
 - Do not write a `mainline_landed_commits` row for a new scenario except through `seedLedgerLanding` (or a
   real landing, for the four above) — a hand-rolled insert would drift from the writer's own (tip, base)
   semantics silently.
-- Do not trust `comment-anchor-lint.mjs`'s "zero orphan anchors" result for a file under `test/`/`tests/`/
-  `e2e/` as proof an anchor in it resolves — `EXCLUDE_SEGMENTS` (that script, ~line 412) skips those
-  directories by default (test fixtures commonly plant synthetic ids), so it never scans them at all. A
-  clean sweep there is a vacuous negative, not a verified one; this card's own first report made exactly
-  that mistake. Verify an anchor under `test/` by reading the file at the anchor line directly, or by
-  running `decision-records.mjs`'s resolver against it.
+- UPDATED by card f9ccdcb1 (docs/decisions/f9ccdcb1-orphan-anchors-extend-into-test-comment-scoped.md):
+  the superseded version of this bullet said a `test/`/`tests/`/`e2e/` file's "zero orphan anchors" was
+  always vacuous, since `EXCLUDE_SEGMENTS` skipped those directories outright — the gap this card's own
+  anchor (6cf10d10) fell into. `orphanAnchors`/`orphanRecords` now DO scan those directories (comment-
+  scoped: a real `@decision <id>` written in an actual comment counts, a synthetic fixture id in a quoted
+  string/template literal never does), so a clean `orphanAnchors` sweep there is now a verified negative
+  for THAT check specifically. It is still vacuous for every OTHER check in the file (`unanchoredLongBlocks`,
+  `brokenAnchors`, `overlongAnchorIds`, `sigilSpaceAnchors`, `bareCommitAnchors`, `pointerAnchors`,
+  `overlongAnchorParagraphs`, `midSentenceAnchors`, `embeddedAnchors`, `splitAnchorParagraphs`) — those
+  stay excluded from test/ entirely, by design (see f9ccdcb1's own record for the measured reason).
 - Do not treat `seedLedgerLanding`'s multi-candidate shape (one commit per candidate, each trailered) as
   the GENERAL real-batch shape — it's a reachable subset. The real writer
   (`landBranchCommitsIndividually`, `batch-merge.ts` ~706) trailers only each candidate's own LAST commit

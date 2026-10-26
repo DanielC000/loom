@@ -35,6 +35,11 @@
 //      969b0e1c: a `@decision sha:<id>` anchor is ALSO orphan if its sha no longer verifies as a real
 //      commit in this repo (`anchorResolves`/`verifyCommitSha` below), even when a same-named record file
 //      exists — mirroring `decision-records.mjs`'s own refuse-rather-than-fall-through resolver gate.
+//      Card f9ccdcb1: this check (and `orphanRecords` below, through the same anchor set) now ALSO
+//      scans `test`/`tests`/`e2e` files — comment-scoped (`isAnchorInBlock`), so a synthetic fixture id
+//      planted in a quoted string/template literal never counts, only a real `@decision <id>` written in
+//      an actual comment does. No other check in this file extends into those directories — see
+//      `TEST_SCOPE_SEGMENTS`'s own doc for why, and the full record for the measurements behind it.
 //   3. orphanRecords — a record with no inbound anchor anywhere in the swept source. ADVISORY, never an
 //      error (see `advisory: true` on its report key) — a policy-level record can correctly have no single
 //      anchor site, and treating this as a hard violation trains people to ignore the whole lint.
@@ -410,15 +415,15 @@ export const GUARD_MAX_LINES = 3;
 // package layout, and never add `.md` (HTML-comment blocks in notes are prose, not comment bloat).
 // Extensions: the `//` + `/* */` syntax family `extractCommentBlocks` can group.
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
-// `test`/`tests`/`e2e` excluded by DEFAULT: test fixtures commonly plant SYNTHETIC anchor ids
-// (aaaaaaaa, deadbeef, cafebabe, ...) with no matching record by design — sweeping them would report
-// fixture noise as real orphan-anchor violations. Measuring against real production source only.
-// The rest are build output / vendored / tool-state directories (parity with `mcp/decisions.ts`'s
-// SKIP_DIRS). Any dot-directory (`.claude`, `.github`, ...) is ALSO skipped — see `isExcludedSegment`.
+// Build output / vendored / tool-state directories (parity with `mcp/decisions.ts`'s SKIP_DIRS) — never
+// walked at all, by any check. Any dot-directory (`.claude`, `.github`, ...) is ALSO skipped — see
+// `isExcludedSegment`.
 const EXCLUDE_SEGMENTS = new Set([
-  "node_modules", "dist", "build", ".turbo", ".next", ".cache", "coverage", "test", "tests", "e2e", ".git",
-  ".loom", "worktrees",
+  "node_modules", "dist", "build", ".turbo", ".next", ".cache", "coverage", ".git", ".loom", "worktrees",
 ]);
+// @decision f9ccdcb1 — `test`/`tests`/`e2e` are WALKED, but feed ONLY `orphanAnchors`/`orphanRecords`
+// below (comment-scoped, never `unanchoredLongBlocks` or any other anchor-grammar check).
+const TEST_SCOPE_SEGMENTS = new Set(["test", "tests", "e2e"]);
 // Repo-ROOT-relative exclusions (never matched at depth — `src/docs/x.ts` is real source): the root `docs/`
 // holds the record stores (`.md`) plus frozen one-off investigation scripts (21 of the 35 blocks newly
 // flagged on Loom's own tree when the walk first widened), by convention never primary source.
@@ -428,6 +433,19 @@ const ROOT_EXCLUDED_DIRS = new Set(["docs"]);
 // has no source extension anyway).
 function isExcludedSegment(seg) {
   return EXCLUDE_SEGMENTS.has(seg) || seg.startsWith(".");
+}
+/** True iff any DIRECTORY segment of `dirSegs` (a file's repo-relative path, split on "/", every element
+ * except the filename) names a `TEST_SCOPE_SEGMENTS` entry (card f9ccdcb1) — shared by `computeReport`'s
+ * per-file loop and `computeFileReport` so both entry points agree on which files get the narrowed,
+ * orphanAnchors-only treatment. */
+function isTestScopedSegments(dirSegs) {
+  return dirSegs.some((seg) => TEST_SCOPE_SEGMENTS.has(seg));
+}
+/** True iff anchor `a`'s own line sits inside one of `blocks`' ranges — i.e. a REAL comment as
+ * `extractCommentBlocks` classifies it, never a quoted string/template literal, which is where a
+ * synthetic test-fixture id lives (card f9ccdcb1). */
+function isAnchorInBlock(a, blocks) {
+  return blocks.some((b) => a.line >= b.startLine && a.line <= b.endLine);
 }
 // Hard bound on files VISITED by the CLI/`computeReport` walk (parity with `mcp/decisions.ts`'s
 // MAX_WALK_FILES). Overrun sets `walkTruncated` on the report — never a silent partial scan. The per-file
@@ -1152,9 +1170,15 @@ export function computeReport(repoRoot, opts = {}) {
     try { raw = fs.readFileSync(file, "utf8"); } catch { continue; }
     const lines = raw.split(/\r?\n/);
     const blocks = extractCommentBlocks(lines);
-    const anchors = findFileAnchors(lines);
+    const rawAnchors = findFileAnchors(lines);
+    // card f9ccdcb1 — a test/tests/e2e file feeds ONLY allAnchors (comment-scoped, for orphanAnchors/
+    // orphanRecords below) and nothing else: no blocks into allBlocks, and none of its anchors into any
+    // of the per-line/per-anchor checks below — exactly as if it were still excluded outright.
+    const testScoped = isTestScopedSegments(relPath(repoRoot, file).split("/").slice(0, -1));
+    const anchors = testScoped ? rawAnchors.filter((a) => isAnchorInBlock(a, blocks)) : rawAnchors;
+    for (const a of anchors) allAnchors.push({ ...a, file, testScoped });
+    if (testScoped) continue;
     for (const b of blocks) allBlocks.push({ file, ...b });
-    for (const a of anchors) allAnchors.push({ ...a, file });
     for (const b of findBrokenAnchors(lines)) allBroken.push({ ...b, file });
     for (const o of findOverlongAnchorIds(lines)) allOverlong.push({ ...o, file });
     for (const s of findSigilSpaceAnchors(lines)) allSigilSpace.push({ ...s, file });
@@ -1192,9 +1216,13 @@ export function computeReport(repoRoot, opts = {}) {
   }
   const orphanRecords = records.filter((r) => !anchorIdSet.has(r.id));
 
-  const cardIds = [...new Set(allAnchors.filter((a) => a.ns === "card").map((a) => a.id))];
+  // card f9ccdcb1 — bareCommitAnchors is one of the anchor-grammar checks a test-scoped anchor must NOT
+  // feed (see the per-file loop above); allAnchors itself stays test-inclusive for orphanAnchors/
+  // orphanRecords, so filter here rather than at the source.
+  const nonTestAnchors = allAnchors.filter((a) => !a.testScoped);
+  const cardIds = [...new Set(nonTestAnchors.filter((a) => a.ns === "card").map((a) => a.id))];
   const commitResolvedIds = batchResolveCommits(repoRoot, cardIds);
-  const bareCommitAnchors = findBareCommitAnchors(allAnchors, commitResolvedIds);
+  const bareCommitAnchors = findBareCommitAnchors(nonTestAnchors, commitResolvedIds);
 
   return {
     repoRoot,
@@ -1355,16 +1383,50 @@ export function resolveHookRepoRoot(startDir) {
  * `blocks`/`anchors` already computed here for the other per-file checks, no extra filesystem or git cost.
  * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
  * below (empty arrays when the file is in scope but has nothing to flag — a real, distinguishable "clean"
- * result, not the same `null` as "not even scanned").
+ * result, not the same `null` as "not even scanned"). A test/tests/e2e-scoped file (card f9ccdcb1) gets
+ * the SAME narrowing `computeReport` applies: every field here is `[]` except `orphanAnchors`, which is
+ * computed from comment-scoped anchors only (`isAnchorInBlock`) — see `computeReport`'s own doc for why.
  */
 export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const rel = isInScope(repoRoot, filePath);
   if (rel === null) return null;
   const minLines = Number.isInteger(opts.minLines) && opts.minLines > 0 ? opts.minLines : DEFAULT_MIN_LINES;
+  const testScoped = isTestScopedSegments(rel.split("/").slice(0, -1));
 
   const lines = content.split(/\r?\n/);
   const blocks = extractCommentBlocks(lines);
-  const anchors = findFileAnchors(lines);
+  const rawAnchors = findFileAnchors(lines);
+  const anchors = testScoped ? rawAnchors.filter((a) => isAnchorInBlock(a, blocks)) : rawAnchors;
+
+  const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
+  const shaCache = new Map();
+  const orphanAnchorsById = new Map();
+  for (const a of anchors) {
+    const key = `${a.ns}:${a.id}`;
+    if (!anchorResolves(repoRoot, a, recordIdSet, shaCache) && !orphanAnchorsById.has(key)) orphanAnchorsById.set(key, a);
+  }
+  const orphanAnchorsOut = [...orphanAnchorsById.values()].map((a) => ({ id: a.id, ns: a.ns, line: a.line }));
+
+  if (testScoped) {
+    return {
+      file: rel,
+      minLines,
+      unanchoredLongBlocks: [],
+      orphanAnchors: orphanAnchorsOut,
+      brokenAnchors: [],
+      overlongAnchorIds: [],
+      sigilSpaceAnchors: [],
+      bareCommitAnchors: [],
+      pointerAnchors: [],
+      overlongAnchorParagraphs: [],
+      midSentenceAnchors: [],
+      embeddedAnchors: [],
+      embeddedAnchorsStacked: [],
+      splitAnchorParagraphs: [],
+      splitAnchorParagraphsUnterminated: [],
+    };
+  }
+
   const broken = findBrokenAnchors(lines);
   const overlong = findOverlongAnchorIds(lines);
   const sigilSpace = findSigilSpaceAnchors(lines);
@@ -1375,14 +1437,6 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const splitParagraph = findSplitAnchorParagraphs(lines, blocks, anchors);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
-  const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
-  const shaCache = new Map();
-  const orphanAnchorsById = new Map();
-  for (const a of anchors) {
-    const key = `${a.ns}:${a.id}`;
-    if (!anchorResolves(repoRoot, a, recordIdSet, shaCache) && !orphanAnchorsById.has(key)) orphanAnchorsById.set(key, a);
-  }
-
   const cardIds = [...new Set(anchors.filter((a) => a.ns === "card").map((a) => a.id))];
   const commitResolvedIds = batchResolveCommits(repoRoot, cardIds);
   const bareCommitAnchors = findBareCommitAnchors(anchors, commitResolvedIds);
@@ -1391,7 +1445,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     file: rel,
     minLines,
     unanchoredLongBlocks: unanchoredLong.map((b) => ({ startLine: b.startLine, endLine: b.endLine, length: b.length })),
-    orphanAnchors: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, ns: a.ns, line: a.line })),
+    orphanAnchors: orphanAnchorsOut,
     brokenAnchors: broken.map((b) => ({ line: b.line })),
     overlongAnchorIds: overlong.map((o) => ({ line: o.line, ns: o.ns, match: o.match })),
     sigilSpaceAnchors: sigilSpace.map((s) => ({ line: s.line, match: s.match })),
