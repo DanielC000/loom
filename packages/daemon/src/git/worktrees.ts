@@ -4758,11 +4758,14 @@ const NAME_ONLY_DIFF_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-only
  *
  *  Never
  *  drop `--no-renames` — proven on git 2.47 it lets a renamed source file relocated into an allowlisted
- *  prefix misclassify as inert. */
+ *  prefix misclassify as inert.
+ *
+ *  @decision 65b2b002 — `--end-of-options` guards the range token against an option-shaped `base`/`ref`;
+ *  never bake it into {@link NAME_ONLY_DIFF_FLAGS} itself — see that decision record. */
 async function changedPathsBetween(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<string[]> {
-  const args = [...NAME_ONLY_DIFF_FLAGS, `${base}..${ref}`];
+  const args = [...NAME_ONLY_DIFF_FLAGS, "--end-of-options", `${base}..${ref}`];
   const raw = timeoutMs === undefined
     ? await git.raw(args)
     : await withTimeout(git.raw(args), timeoutMs, "git diff --name-only (changed paths)");
@@ -5083,7 +5086,8 @@ const NAME_STATUS_DIFF_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-st
 async function changedPathStatusesBetween(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<Map<string, string>> {
-  const args = [...NAME_STATUS_DIFF_FLAGS, `${base}..${ref}`];
+  // @decision 65b2b002 — `--end-of-options` guards the range token the same way {@link changedPathsBetween} does; see that decision record.
+  const args = [...NAME_STATUS_DIFF_FLAGS, "--end-of-options", `${base}..${ref}`];
   const raw = timeoutMs === undefined
     ? await git.raw(args)
     : await withTimeout(git.raw(args), timeoutMs, "git diff --name-status (changed skill statuses)");
@@ -6738,8 +6742,9 @@ export async function computeEmitCompareGate(
     // most concretely now that a changed path is tested against {@link isInertMergePath}'s `startsWith`
     // allowlist here too (card b97f643d): a renamed-into-`docs/` source file or an unquoted non-ASCII
     // `docs/` filename would otherwise misclassify exactly as `isInertMergeDiff` warns against.
+    // @decision 65b2b002 — `--end-of-options` guards the range token the same way {@link changedPathsBetween} does; see that decision record.
     const raw = (await withTimeout(
-      git.raw(["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames", `${baseSha}..${ref}`]),
+      git.raw(["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames", "--end-of-options", `${baseSha}..${ref}`]),
       timeoutMs, "git diff --name-status (emit-compare classify)",
     )).trim();
     entries = raw ? raw.split("\n").map((s) => s.replace(/\r$/, "")).filter(Boolean) : [];
