@@ -89,11 +89,18 @@ flag needed at all (brackets are never interpreted as glob magic by `ls-tree` wi
 
 ## Path-key exactness
 
-Every map key is the raw `-z`-delimited path string exactly as git emits it (UTF-8 bytes), with NO
-normalization applied — no backslash↔slash conversion, no case folding, no Unicode NFC/NFD. A case-variant
-pair (`A.txt` vs `a.txt`) is two distinct keys, matching git's own case-sensitive tree storage regardless
-of the host filesystem's own case-folding behavior (relevant on Windows/macOS, where the working directory
-itself is typically case-insensitive but the git object store is not).
+Every map key is the `-z`-delimited path string as returned by `git.raw()` (simple-git), with NO
+normalization applied ON TOP of that — no backslash↔slash conversion, no case folding, no Unicode NFC/NFD.
+A case-variant pair (`A.txt` vs `a.txt`) is two distinct keys, matching git's own case-sensitive tree
+storage regardless of the host filesystem's own case-folding behavior (relevant on Windows/macOS, where
+the working directory itself is typically case-insensitive but the git object store is not).
+
+**Round 2 correction:** the original wording here claimed these keys are "raw bytes" — false.
+`git.raw()` returns a UTF-8-DECODED JS string, not the subprocess's raw stdout bytes. A path whose true
+on-disk bytes are NOT valid UTF-8 decodes LOSSILY (Node substitutes U+FFFD, the replacement character,
+for each invalid byte sequence), so two genuinely different raw paths can decode to the identical string
+and collide as one Map key — the opposite of the exactness this design otherwise relies on. See "Round 2"
+below for the fix.
 
 ## Tests
 
@@ -101,12 +108,78 @@ itself is typically case-insensitive but the git object store is not).
 real backslash-named file now escalates) and F4b (an all-backslash stamp against a wholly unrelated
 candidate now escalates) scenarios; a non-ASCII filename tree-entry comparison; a case-variant pair
 (`A.txt`/`a.txt`, built via plumbing so the host filesystem's own case-folding can't interfere) proving
-both are compared as distinct keys; an explicit `files.length === 0` assertion (fails closed, never
-vacuously attributed); the repurposed bracket-precision scenario; every pre-existing scenario in the file
+both are compared as distinct keys; an explicit `files.length === 0` assertion — this is a MUTATION-style
+proof that the `if (files.length === 0) return "no-match"` guard is load-bearing (if that line were
+removed, `recordedTipContentLanded` would fall through to the comparison loop over zero paths and return
+a vacuous `"attributed"`), not a regression test against the pre-fix pathspec implementation, which never
+had this exact guard to remove in the first place; the repurposed bracket-precision scenario; every
+pre-existing scenario in the file
 (FORGED/GENUINE/OVERLAP/FB_LANDEDTIP/FB_NOLANDEDTIP/ZERODELTA/REFMOVE/SCOPED_REVIEW_GENUINE/RENAME_PARTIAL/
 LEGACY/REVERT/LAG/SPECIAL_NAME_*/backslash-net) re-run green against the new implementation. Negative
 control: the pre-fix implementation (pinned to `a8685a71`, this worktree's HEAD before this card) shows
 F4/F4b RED; the post-fix implementation shows both GREEN.
+
+See "Round 2" below for the UTF-8-decode fix's own tests, the two PIPELINE-level scenarios, and the
+hoisting-order change.
+
+## Round 2 (Code Review, reviewer `1abba72c`) — ship, with five minors
+
+Round 1 shipped clean (no blocking or Major findings; F4/F4b confirmed RED against the reverted dist,
+GREEN after). Five minors, applied as new commits (never an amend of the shipped round-1 commit):
+
+### Minor 1: keys are NOT raw bytes — `git.raw()` decodes as UTF-8, lossily on invalid input
+
+Corrected above ("Path-key exactness"). `fullTreeEntries` now fails closed to `null` if any decoded key
+contains U+FFFD (the replacement character a lossy UTF-8 decode substitutes for an invalid byte sequence)
+or if a decoded key collides with one already in the map being built — either symptom means the map can
+no longer be trusted to distinguish every real path. Test: a tree built via plumbing with two genuinely
+different, invalid-UTF-8 byte sequences as filenames, asserting `fullTreeEntries` returns `null` for it.
+**Caveat, stated honestly:** git plumbing (`hash-object`/`update-index --cacheinfo`) accepts an arbitrary
+byte string as a path on this host, so the test constructs the invalid bytes directly as a Buffer passed
+to `update-index`'s path argument — if a future host's git/filesystem combination refuses to let plumbing
+express this at all, the test documents that limitation inline rather than silently skipping.
+
+### Minor 2: hoist `fullTreeEntries(reviewedTip)` AFTER the `candidates.length === 0` check
+
+Moved inside the `try` block, after `findAllLandedTrailerCommits` resolves and its own empty-candidates
+check returns, so a session with genuinely zero candidates never pays for the reviewedTip tree read at
+all. Fail-closed semantics are unchanged: a session that reaches the hoisted read and has it fail still
+returns `{kind:"no-match"}` immediately, before the candidate loop.
+
+### Minor 3: two PIPELINE-level scenarios, through the real `attributeStaleGenerationOwnLanding`
+
+Round 1's F4/F4b tests called `recordedTipContentLanded` directly. Two new scenarios
+(`stale-generation-landedtip-content-check.mjs`) now exercise the SAME shapes end-to-end through the real
+`reconcileOrchestrationOnBoot` pipeline: **PIPELINE_BACKSLASH** — a worker's real branch tip (built via git
+plumbing on top of a real, fs-written parent commit, since a literal backslash can't be created via the
+real filesystem on Windows; the branch ref is moved directly via `update-ref`, never checked out) genuinely
+adds a backslash-named file, and a partial landing on main omits it — must escalate, not attribute.
+**PIPELINE_HOISTED_READ_FAILS** — the worker's own recorded `merge_request.detail.tip` is a sha that never
+resolves in the repo at all, with at least one otherwise-eligible candidate present (so the candidate scan
+itself doesn't short-circuit first) — the hoisted tree read must fail and the whole attempt must escalate
+before any candidate's own content is ever examined.
+
+### Minor 4: reworded a stale "backslash net" test label
+
+The label at the "(backslash net) content check ALONE..." assertion described the mechanism as a
+pathspec defeat — no pathspec exists in `recordedTipContentLanded` anymore (round 1 removed it). The real
+mechanism for THIS specific scenario (a stamped path that was never real at either `recordedTip` or the
+candidate) is structural, not pathspec-related: both sides' tree-entry maps simply lack the key, so the
+comparison vacuously finds no mismatch for it — the forged path "matches" by sheer absence on both sides,
+in isolation from every other (genuinely present and correctly compared) stamped path. Reworded in place.
+
+### Minor 5: a second typo + a mischaracterized test in this record
+
+"own own-files" in `docs/decisions/c7dc99bf-*.md` fixed to "own-files". The empty-stamp test's framing in
+the "Tests" section above corrected to describe it as a mutation-style proof against the GUARD's own
+removal, not a regression test against the pre-fix pathspec implementation (which never had this specific
+guard line to begin with, so "regression" was never the right frame for it).
+
+### Minor 6 (project memory, not this record)
+
+`b8122303-recordedtipcontentlanded-note-is-stale` (project memory) is corrected separately to drop its own
+stale claim that `recordedTipContentLanded` makes a `--literal-pathspecs diff` call — round 1 of this card
+already removed that call entirely.
 
 ## Do not
 
@@ -114,9 +187,13 @@ F4/F4b RED; the post-fix implementation shows both GREEN.
   literal backslash in a stamped path defeats ANY pathspec (no flag, magic, or env var avoids it) and
   silently reads as a vacuous content match for a candidate that genuinely omits that file, or even an
   unrelated candidate entirely when the whole stamp happens to be backslash-shaped.
-- Do not apply any normalization (case folding, Unicode NFC/NFD, backslash↔slash) to a tree-entry map key
-  — compare the raw `-z`-delimited path strings exactly as git emits them, or a case-variant or
-  differently-normalized pair of real, distinct paths can be silently conflated.
+- Do not apply any normalization (case folding, Unicode NFC/NFD, backslash↔slash) ON TOP OF `fullTreeEntries`'s
+  own decode to a tree-entry map key — compare the decoded path strings exactly as `git.raw()` returns
+  them, or a case-variant or differently-normalized pair of real, distinct paths can be silently conflated.
+- Do not treat `fullTreeEntries`'s map keys as raw bytes — `git.raw()` (simple-git) UTF-8-decodes the
+  subprocess's stdout, so an invalid-UTF-8 path decodes lossily (U+FFFD) and two different real paths can
+  collide as one key. `fullTreeEntries` fails closed to `null` if any decoded key contains U+FFFD or
+  collides with one already in the map — do not relax either check "because it only affects edge cases."
 - Do not let `recordedTipContentLanded` return `"attributed"` for an empty `files` list — fails closed to
   `"no-match"` instead; a vacuous match on zero paths proves nothing about any candidate.
 - Do not read `stampedPathsPlausible`'s continued necessity as redundant with this fix — it closes a
@@ -125,3 +202,5 @@ F4/F4b RED; the post-fix implementation shows both GREEN.
 - Do not re-read `recordedTip`'s own tree once per candidate when looping over several candidates for the
   same attribution attempt — it is loop-invariant; read it once via `fullTreeEntries` and pass the result
   as the optional `recordedTipEntries` param to both `recordedTipContentLanded` and `stampedPathsPlausible`.
+- Do not hoist that shared `fullTreeEntries(reviewedTip)` read BEFORE the candidate scan's own
+  `candidates.length === 0` check — a session with no eligible candidates at all should pay nothing for it.

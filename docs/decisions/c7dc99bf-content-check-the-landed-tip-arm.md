@@ -766,7 +766,7 @@ satisfy the assertion by accident.
   review-time stamped `merge_request.detail.filesChangedPaths` directly, as-is; it was never computed
   against any anchor in the first place, so there is nothing left for a live ref or a lagging record to
   narrow. The candidate SCAN (`findAllLandedTrailerCommits`) may still stay on the live ref — only the
-  content check's own own-files set must never be anchor-derived. (Card `1cf79e64`: this set is no longer
+  content check's own-files set must never be anchor-derived. (Card `1cf79e64`: this set is no longer
   consumed as a pathspec at all — see that card's own record.)
 - Do not read `candidate.trailers.base`'s presence as anything more than an ELIGIBILITY gate for the
   sibling (no-`landedTip`) arm — it decides whether to attempt a content match at all, never what value
