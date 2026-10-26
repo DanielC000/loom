@@ -4071,9 +4071,9 @@ async function diffNameStatus(git: Pick<SimpleGit, "raw">, range: string, timeou
 
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",
-  opts: { includePatch?: boolean; files?: string[]; pathGlob?: string; includeStatus?: boolean } = {},
+  opts: { includePatch?: boolean; files?: string[]; pathGlob?: string; includeStatus?: boolean; includeMachinePathSet?: boolean } = {},
   deps: DiffBranchDeps = {},
-): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; allFiles: DiffstatFile[]; patch: string; hint?: string }> {
+): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; allFiles: DiffstatFile[]; patch: string; hint?: string; machinePathSet?: { paths: string[] } | { truncated: true } }> {
   // The full unified `patch` is UNBOUNDED — on a large change it overflows an MCP display limit, blinding a
   // manager exactly when the diff is biggest/riskiest. So the patch is OPT-IN: callers that only need a
   // bounded summary pass includePatch:false and skip the expensive `git diff` entirely. Defaults to true so
@@ -4110,6 +4110,11 @@ export async function diffBranch(
       if (s) f.status = s;
     }
   }
+
+  // OPTIONAL machine-readable path set (includeMachinePathSet, round 5): computed from this SAME `range`
+  // — never re-derived independently — so it can never describe a different diff than allFiles above.
+  // Off by default; only reviewWorkerMerge's stale-generation-attribution stamp opts in.
+  const machinePathSet = opts.includeMachinePathSet ? await machineReadablePathSet(repoPath, range, deps) : undefined;
 
   // OPTIONAL scope-down filter (files/pathGlob): narrows the diffstat + patch to matching file(s) so a
   // manager can pull one file's hunk at a time instead of the whole patch. ADDITIVE — with neither param
@@ -4151,7 +4156,7 @@ export async function diffBranch(
   // narrowing (which only scopes `files`/`patch`/the totals). A caller that needs "did this branch
   // change X anywhere" (e.g. the deny-glob check) must not have that answer silently narrowed by a
   // manager's unrelated "show me just this one file" review filter.
-  return { filesChanged, insertions, deletions, files, allFiles, patch, ...(hint ? { hint } : {}) };
+  return { filesChanged, insertions, deletions, files, allFiles, patch, ...(hint ? { hint } : {}), ...(machinePathSet ? { machinePathSet } : {}) };
 }
 
 /**
@@ -7984,38 +7989,174 @@ export async function findAllLandedTrailerCommits(
   }
 }
 
+/** Bounds for {@link machineReadablePathSet} — see its own doc for why an over-cap diff truncates rather
+ *  than stamping a partial (and therefore misleading) list. */
+export const FILES_CHANGED_PATHS_MAX_COUNT = 500;
+export const FILES_CHANGED_PATHS_MAX_BYTES = 32_000;
+
 /**
- * Does `recordedTip`'s own content (vs `recordedBase`, the landing's `Loom-Worker-Base`) match what `candidateSha` actually landed? The
- * sha-parameterized sibling of {@link branchContentLandedInCommit} — that one diffs the LIVE branch ref, which is wrong once the branch
- * has been reused by a different generation; this one only reads two fixed, already-resolved shas. For a landing with no
- * `Loom-Landed-Tip` (batch, or a legacy pre-cc9bce38 solo squash) — {@link verifyReviewedTipChain} cannot apply to either.
- * @decision e5458ccd — fails closed to `"no-match"` on any ambiguity (error, unreadable base/merge-base, non-empty diff) — never resolve to `"attributed"`.
+ * Round 5 (Code Review 7fb963b2, findings 1+2 — replacing round 4's `diffstatPathSet`): the review-time
+ * path set for `range`, from a DEDICATED machine-readable call — `git diff --name-status -z`, NUL-
+ * delimited, taking BOTH sides of an `R`/`C` row as separate fields — NEVER parsed from `git diff --stat`'s
+ * own DISPLAY text (round 4's `diffstatPathSet` did, via `normalizeDiffstatPath`/`diffstatRenameSource`).
+ * That text form is lossy in two measured, exploitable ways: a non-ASCII name is C-quoted
+ * (`"caf\303\251.txt"`) by `--stat`'s own rendering, so it never matches the real file as a pathspec and
+ * silently drops out of the content check; and a name genuinely containing `{`/`}` (`{{tpl}}/a.txt`)
+ * collides with `normalizeDiffstatPath`'s own rename-collapse syntax and is rewritten into a path that
+ * doesn't exist at all. Both let a partial landing's missing file go unchecked — the content check
+ * "matches" vacuously against a pathspec that resolves to nothing on either side.
+ * `--name-status -z` has neither defect: `-z` disables C-quoting outright regardless of `core.quotepath`
+ * (verified empirically: a non-ASCII name's raw UTF-8 bytes come through unquoted under `-z` alone — no
+ * `-c core.quotepath=false` needed), and `--name-status` never does `--stat`'s own `{old => new}`
+ * collapsing in the first place.
+ * Round 5 also tried adding that redundant `-c core.quotepath=false` anyway, and every call read as
+ * truncated as a result — but NOT because simple-git's `blockUnsafeOperationsPlugin` rejects the key (it
+ * doesn't; `core.quotepath` isn't on that plugin's fixed block-list at all — see `K`/`Y` in
+ * `@simple-git/argv-parser`'s own source). Round 6 (Code Review `e319ea92`) found the real cause: the
+ * flag was placed AFTER the subcommand (`["diff", "-c", "core.quotepath=false", ...]`), which git parses
+ * as `git diff -c` (COMBINED-DIFF mode, an unrelated flag meaning) followed by an unrecognized revision —
+ * a plain `fatal: ambiguous argument`, caught by this function's own `try/catch` and misdiagnosed at the
+ * time as a plugin rejection. A GLOBAL `-c` placed BEFORE the subcommand works fine through real
+ * `canonicalGit` (measured directly); only a FIXED key list is ever actually blocked — see `K`/`Y` in
+ * `@simple-git/argv-parser`'s own source (the same source cited above) for the current list, never a
+ * restatement here — and a key on that list needs the explicit `allowUnsafe*` opt-in
+ * (`attemptCodexAutoCommit`'s own `cfg` + `extraUnsafe` wiring, this file, is a real example).
+ *
+ * `diffBranch` calls this with the SAME `range` it already resolved (never re-derived independently), so
+ * the stamp can never describe a different diff than the diffstat computed beside it. Bounded identically
+ * to round 4's cap (same constants): over either cap, or on a failed read, returns `{truncated:true}` —
+ * never a partial or empty list, which the caller would otherwise misread as "genuinely zero changes."
+ * @decision c7dc99bf — a stamp must read as UNKNOWN (truncated) on any read failure, never as empty.
  */
-export async function recordedTipContentLanded(
-  repoPath: string, recordedTip: string, candidateSha: string, recordedBase: string, deps: BoundedGitDeps = {},
-): Promise<"attributed" | "zero-delta" | "no-match"> {
+/**
+ * Round 6 (Code Review `e319ea92`, finding 3, minor) — pure-function extraction of
+ * {@link machineReadablePathSet}'s own `-z` record parse, so a malformed/short token stream can be unit-
+ * tested directly rather than only through a real git spawn. A record whose declared path field(s) run
+ * past the end of the token stream (an R/C row missing its second path, or any status with no path at
+ * all) now fails CLOSED to `{truncated:true}` — the prior version's `if (!p) continue` silently dropped
+ * just that one field and kept going, producing a PARTIAL list (missing exactly the field that ran out)
+ * instead of the unknown-stamp signal the caller actually needs. Byte accounting now uses
+ * `Buffer.byteLength` (UTF-8 bytes), not `.length` (UTF-16 code units) — the two diverge for any non-ASCII
+ * path, under- or over-counting against `FILES_CHANGED_PATHS_MAX_BYTES` depending on the surrogate shape.
+ * @decision c7dc99bf — a stamp must read as UNKNOWN (truncated) on any read failure, never as empty OR
+ * as a partial list that looks complete.
+ */
+export function parseNameStatusZ(out: string): { paths: string[] } | { truncated: true } {
+  const tokens = out.split("\0").filter((t) => t.length > 0);
+  const paths: string[] = [];
+  let bytes = 0;
+  let i = 0;
+  while (i < tokens.length) {
+    const status = tokens[i];
+    i++;
+    if (!status) return { truncated: true };
+    // R/C (rename/copy) rows carry TWO paths (old, new); every other status carries exactly one.
+    const need = status[0] === "R" || status[0] === "C" ? 2 : 1;
+    if (i + need > tokens.length) return { truncated: true }; // declared fields run past the stream end
+    for (let k = 0; k < need; k++) {
+      const p = tokens[i + k];
+      if (!p) return { truncated: true };
+      paths.push(p);
+      bytes += Buffer.byteLength(p, "utf8");
+      if (paths.length > FILES_CHANGED_PATHS_MAX_COUNT || bytes > FILES_CHANGED_PATHS_MAX_BYTES) return { truncated: true };
+    }
+    i += need;
+  }
+  return { paths };
+}
+
+export async function machineReadablePathSet(
+  repoPath: string, range: string, deps: BoundedGitDeps = {},
+): Promise<{ paths: string[] } | { truncated: true }> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    // @decision e5458ccd — `recordedBase` can be ahead of X's own fork point if main moved since; diff
-    // from the actual common ancestor, not `recordedBase` itself, or a plain two-dot diff wrongly surfaces
-    // main's own unrelated changes and this check fails closed whenever main moved at all.
+    const out = await withTimeout(
+      git.raw(["diff", "--name-status", "-z", range]),
+      timeoutMs, "git diff --name-status -z (machine-readable path set)",
+    );
+    return parseNameStatusZ(out);
+  } catch {
+    return { truncated: true };
+  }
+}
+
+/**
+ * Round 5 (Code Review 7fb963b2 ruling c): a fail-closed sanity net on the STAMPED set itself, run once
+ * per candidate before trusting {@link recordedTipContentLanded}'s verdict against it. A stamped path
+ * absent from BOTH `recordedTip`'s own tree AND its merge-base with `otherSha` means the stamp and the
+ * repo disagree — the stamp can no longer be trusted to describe anything real for that path, so the
+ * candidate is rejected (never attributed on a stamp this check cannot corroborate).
+ *
+ * Round 6 (Code Review `e319ea92`, finding 2, BLOCKING — measured cost): the original per-PATH design
+ * (`ls-tree --name-only -z <ref> -- <p>`, up to 2 spawns per path) made this net the dominant cost on the
+ * boot-reconcile path — measured 500 paths at ~29.5s per candidate when every path exists, ~98.4s when
+ * all 500 are absent (2 ls-tree reads apiece). Fixed by reading each tree ONCE as a full recursive
+ * listing (`ls-tree -r --name-only -z <ref>`, no pathspec at all) into a `Set`, then testing membership
+ * locally — 3 total spawns per candidate (merge-base + 2 tree reads) regardless of how many paths are
+ * checked. Listing the WHOLE tree also closes a correctness bug the per-path pathspec design had: git
+ * normalizes `\` in a pathspec argument (Windows), so a path genuinely containing a literal backslash
+ * (e.g. a plumbing-built `back\slash.txt`) never matched its own pathspec on either side, even when the
+ * file truly existed unchanged on both — this net fails closed on that path and the TRUE positive (a
+ * genuine attribution) was escalated anyway, never a safety hole; but it wrongly escalated every such
+ * file, trivial self-comparison included (measured: `stampedPathsPlausible(tip, tip, [thatPath])` read
+ * `false`). A full-tree listing carries no pathspec to normalize — membership is exact string equality
+ * against the raw, `-z`-delimited (unquoted) tree entries, so this is now MORE literal than the old
+ * `--literal-pathspecs` ls-tree call, not merely equally so; the flag is dropped from this function because
+ * there is no pathspec left for it to act on.
+ *
+ * The Lead's ruling (round 6, finding 2) also moved this net to run AFTER {@link recordedTipContentLanded}
+ * returns `"attributed"`, never before — this net only ever REJECTS a positive attribution (see the "fail-
+ * closed sanity net" doc above); it can never turn a `"no-match"` into anything else, so running it
+ * against a candidate whose content already failed is pure waste. Most candidates in a real scan fail the
+ * (single, cheap) content diff; only the one that would otherwise be attributed now pays this net's cost.
+ * See `attributeStaleGenerationOwnLanding` (sessions/service.ts) for the call-site ordering.
+ * @decision c7dc99bf — fails closed to `false` on any ambiguity (a failed git read, an unresolvable
+ * merge-base, or a genuinely absent path on both sides), never `true` on a shaky read.
+ */
+export async function stampedPathsPlausible(
+  repoPath: string, recordedTip: string, otherSha: string, paths: string[], deps: BoundedGitDeps = {},
+): Promise<boolean> {
+  if (paths.length === 0) return true;
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
     const mergeBase = (await withTimeout(
-      git.raw(["merge-base", recordedTip, recordedBase]), timeoutMs, "git merge-base (stale-generation content check)",
+      git.raw(["merge-base", recordedTip, otherSha]), timeoutMs, "git merge-base (stamped-path plausibility)",
     )).trim();
-    // @decision e5458ccd — do not drop this check: a missing merge-base leaves `mergeBase` empty without
-    // throwing (simple-git treats git's empty-stderr exit 1 as success), which would otherwise silently
-    // widen the diff below to bare "HEAD"..recordedTip.
-    if (!mergeBase) return "no-match";
-    const changedFiles = (await withTimeout(
-      git.raw(["diff", "--name-only", `${mergeBase}..${recordedTip}`]), timeoutMs, "git diff --name-only (stale-generation content check)",
-    )).trim();
-    // @decision e5458ccd — Round 3 item 3: a zero-own-delta recorded tip is NEVER attributed — matching
-    // it vacuously would attribute X to whichever candidate happens to be checked, possibly a prior
-    // generation's own landing. The caller escalates this distinctly, with an accurate reason.
-    if (!changedFiles) return "zero-delta";
-    const files = changedFiles.split("\n").filter(Boolean);
+    if (!mergeBase) return false;
+    const treeSet = async (ref: string): Promise<Set<string>> => {
+      const out = await withTimeout(
+        git.raw(["ls-tree", "-r", "--name-only", "-z", ref]),
+        timeoutMs, "git ls-tree -r (stamped-path plausibility)",
+      );
+      return new Set(out.split("\0").filter((p) => p.length > 0));
+    };
+    const [recordedTipSet, mergeBaseSet] = await Promise.all([treeSet(recordedTip), treeSet(mergeBase)]);
+    for (const p of paths) {
+      if (!recordedTipSet.has(p) && !mergeBaseSet.has(p)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The per-candidate half: does `candidateSha` carry the SAME content as `recordedTip` over exactly `files`
+ * (the review-time stamped path set {@link machineReadablePathSet} produced, used as-is — see its own
+ * doc)? The sha-parameterized sibling of {@link branchContentLandedInCommit} — that one diffs the LIVE
+ * branch ref, which is wrong once the branch has been reused by a different generation.
+ * @decision e5458ccd — fails closed to `"no-match"` on any ambiguity, never `"attributed"` on a shaky read.
+ * @decision c7dc99bf — `--literal-pathspecs`: a stamped name (e.g. `pages/[id].tsx`) must never be
+ * reinterpreted as pathspec glob/magic here — round 6 measured this flag DOES flip a real bracket-name
+ * case through this exact spawn path, correcting round 5's own "no measured flip" claim.
+ */
+export async function recordedTipContentLanded(
+  repoPath: string, recordedTip: string, candidateSha: string, files: string[], deps: BoundedGitDeps = {},
+): Promise<"attributed" | "no-match"> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
     const diffOutput = (await withTimeout(
-      git.raw(["diff", "--name-only", candidateSha, recordedTip, "--", ...files]), timeoutMs, "git diff --name-only (stale-generation content check, candidate vs recorded tip)",
+      git.raw(["--literal-pathspecs", "diff", "--name-only", candidateSha, recordedTip, "--", ...files]), timeoutMs, "git diff --name-only (stale-generation content check, candidate vs recorded tip)",
     )).trim();
     return diffOutput === "" ? "attributed" : "no-match"; // no output ⇒ zero difference on any of the recorded tip's own paths ⇒ content matches
   } catch {

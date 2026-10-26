@@ -51,6 +51,7 @@ const { createWorktree } = await import("../dist/git/worktrees.js");
 const { boundedSimpleGit } = await import("../dist/git/bounded.js");
 const { nonInteractiveEnv } = await import("../dist/git/writer.js");
 const { clearMergeQuarantine } = await import("../dist/git/merge-quarantine.js");
+const { mainlineWatermarkKey } = await import("../dist/git/mainline-watch.js");
 
 
 let failures = 0;
@@ -88,6 +89,13 @@ function boot(repo, projId, agentId, mgrId, runGate, extraOpts = {}) {
   db.insertProject({ id: projId, name: `MLAB-${projId}`, repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // Card c7dc99bf round 3 ADDED this watermark seed (genesis = every worker's true fork point in this
+  // file — none of D/E/F's own batch attempts ever confirm cleanly enough to establish it the normal way);
+  // round 5 removed the sibling Db.setMainlineBranchTrust seed round 3 also added here, once trust stopped
+  // being read by this path at all. The watermark itself is KEPT — attributeStaleGenerationOwnLanding
+  // still reads it to scope the candidate scan's own `base` (refs/heads/main, not a bare "HEAD" fallback).
+  const genesisSha = git(repo, "rev-parse", "HEAD");
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
   return { db, sessions };
 }
 

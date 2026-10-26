@@ -26,6 +26,14 @@ falling back to the existing one-shot escalation:
    silently verify the CURRENT generation's own tip instead of the stale row's. `extraUnionBases` is always
    `[]`: no owedBase is persisted on `merge_request`, so a branch HELD at the stale row's own confirm time
    is a documented, accepted gap — it fails this check and escalates rather than risking a wrong attribution.
+   **Follow-up (card `c7dc99bf`): `chain.ok` alone never attributes.** It proves only that the candidate's
+   OWN trailer value chains back to the stale row's tip — nothing about the candidate commit's own content.
+   `recordedTipContentLanded` (step 3's own check) is now ALSO required for this branch. **Round 2
+   (same card) found the content check's own notion of "the worker's own files" was ITSELF still
+   candidate-derived (the candidate's `Loom-Worker-Base` trailer) for both this arm and step 3's own —
+   fixed to always use the resolved mainline ref instead, plus an independent `filesChanged` cross-check.**
+   See `docs/decisions/c7dc99bf-*.md` for the forgery this closes, the accepted content-overlap residual,
+   and the round-2 fix.
 3. **Batch / no-Loom-Landed-Tip content match**: `recordedTipContentLanded` (git/worktrees.ts), the
    sha-parameterized sibling of `branchContentLandedInCommit` — diffs the stale row's own recorded tip
    against the candidate's own `Loom-Worker-Base` trailer (the landed base, a real commit sha — see

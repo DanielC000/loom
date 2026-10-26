@@ -499,6 +499,12 @@ async function setupRealRetaskOwnLandingAttributable(tag, repo) {
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // Card c7dc99bf round 3 ADDED this watermark seed (genesis = X's true fork point); round 5 removed the
+  // sibling Db.setMainlineBranchTrust seed round 3 also added here, once trust stopped being read by this
+  // path at all. The watermark itself is KEPT — attributeStaleGenerationOwnLanding still reads it to scope
+  // the candidate scan's own `base` (refs/heads/main, not a bare "HEAD" fallback).
+  const genesisShaM = git(repo, "rev-parse HEAD");
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisShaM }));
 
   const first = await createWorktree(repo, projId, taskId);
   db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
@@ -511,7 +517,9 @@ async function setupRealRetaskOwnLandingAttributable(tag, repo) {
   execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
-  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // Card c7dc99bf round 4: filesChangedPaths (X's own real file set) replaces round 3's filesChangedTotal
+  // count — the attribution content-check's pathspec now comes from this stamped set directly.
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip, filesChangedPaths: ["x.txt"] } });
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here — worktree/branch left exactly as a crash before finalize leaves them.
 
@@ -708,6 +716,12 @@ async function setupRealRetaskOwnLandingBatchAttributable(tag, repo) {
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // Card c7dc99bf round 3 ADDED this watermark seed (genesis = X's true fork point); round 5 removed the
+  // sibling Db.setMainlineBranchTrust seed round 3 also added here, once trust stopped being read by this
+  // path at all. The watermark itself is KEPT — attributeStaleGenerationOwnLanding still reads it to scope
+  // the candidate scan's own `base` (refs/heads/main, not a bare "HEAD" fallback).
+  const genesisShaQ = git(repo, "rev-parse HEAD");
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisShaQ }));
 
   const first = await createWorktree(repo, projId, taskId);
   db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
@@ -721,7 +735,9 @@ async function setupRealRetaskOwnLandingBatchAttributable(tag, repo) {
   execSync(`git ${GIT_ID} cherry-pick --no-commit ${xTip}`, { cwd: repo });
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${preLandSha}\nLoom-Worker-PathSet: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
-  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // Card c7dc99bf round 4: filesChangedPaths (X's own real file set) replaces round 3's filesChangedTotal
+  // count — the attribution content-check's pathspec now comes from this stamped set directly.
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip, filesChangedPaths: ["x.txt"] } });
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here — worktree/branch left exactly as a crash before finalize leaves them.
 
@@ -747,6 +763,12 @@ async function setupRealRetaskTwoAttributableLandings(tag, repo) {
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // Card c7dc99bf round 3 ADDED this watermark seed (genesis = X's true fork point); round 5 removed the
+  // sibling Db.setMainlineBranchTrust seed round 3 also added here, once trust stopped being read by this
+  // path at all. The watermark itself is KEPT — attributeStaleGenerationOwnLanding still reads it to scope
+  // the candidate scan's own `base` (refs/heads/main, not a bare "HEAD" fallback).
+  const genesisShaR = git(repo, "rev-parse HEAD");
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisShaR }));
 
   const first = await createWorktree(repo, projId, taskId);
   db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
@@ -756,7 +778,9 @@ async function setupRealRetaskTwoAttributableLandings(tag, repo) {
   execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: repo });
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
-  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // Card c7dc99bf round 4: filesChangedPaths (X's own real file set) replaces round 3's filesChangedTotal
+  // count — the attribution content-check's pathspec now comes from this stamped set directly.
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip, filesChangedPaths: ["x.txt"] } });
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here.
 
@@ -856,6 +880,12 @@ async function setupBatchAttributionSurvivesUnrelatedMainMove(tag, repo) {
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: taskId, projectId: projId, title: `WRAP-${tag}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // Card c7dc99bf round 3 ADDED this watermark seed (T0/genesis = X's true fork point, BEFORE main's own
+  // unrelated move below); round 5 removed the sibling Db.setMainlineBranchTrust seed round 3 also added
+  // here, once trust stopped being read by this path at all. The watermark itself is KEPT —
+  // attributeStaleGenerationOwnLanding still reads it to scope the candidate scan's own `base`.
+  const genesisShaU = git(repo, "rev-parse HEAD");
+  db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisShaU }));
 
   const first = await createWorktree(repo, projId, taskId); // forks off main's CURRENT tip (T0)
   db.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
@@ -871,7 +901,9 @@ async function setupBatchAttributionSurvivesUnrelatedMainMove(tag, repo) {
   execSync(`git ${GIT_ID} cherry-pick --no-commit ${xTip}`, { cwd: repo });
   commitAll(repo, [`WRAP-${tag}-x`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${preLandSha}\nLoom-Worker-PathSet: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`], GIT_ID);
   const xLandedSha = git(repo, "rev-parse HEAD");
-  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip } });
+  // Card c7dc99bf round 4: filesChangedPaths (X's own real file set) replaces round 3's filesChangedTotal
+  // count — the attribution content-check's pathspec now comes from this stamped set directly.
+  db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip, filesChangedPaths: ["x.txt"] } });
   db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} }); // card 1ac74580: a real confirm genuinely reached its own landing write
   // X crashes here.
 

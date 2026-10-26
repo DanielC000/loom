@@ -133,7 +133,9 @@ candidate. "a candidate carrying `Loom-Landed-Tip` goes to `verifyReviewedTipCha
 candidate.trailers.landedTip)` (service.ts ~27329-27336) — a chain check of the trailer VALUE, never
 `candidate.sha`'s content." Corrected both to name that arm honestly: no new capability (a strict-shaped
 plant already reaches it), but the precondition does not hold as written. The arm itself is NOT fixed
-here; carded separately.
+here; carded separately. **Fixed by card `c7dc99bf`** — the chain check alone never attributes; a
+real-git repro found a meaningfully cheaper, content-independent exploit path than "no new capability"
+implied. See `docs/decisions/c7dc99bf-*.md`.
 
 **(5) Nit.** `batch-merge-head-moved-commit-identity.mjs`'s own ALL-PASS summary banner still said hook
 paragraphs refuse — corrected to describe the kept-VERIFIED outcome.
@@ -243,7 +245,10 @@ data-loss risk exists here, displaced or not.
   candidate WITH one instead chain-checks the TRAILER VALUE itself (`verifyReviewedTipChain`), never
   `candidate.sha`'s own content. This widening adds no NEW capability — a strict-shaped plant already
   reaches that arm unverified today — but the original "every candidate is content-checked" framing here
-  was wrong. The arm itself is not fixed by this card; tracked separately.
+  was wrong. The arm itself is not fixed by this card; tracked separately. **Fixed by card `c7dc99bf`**
+  — see `docs/decisions/c7dc99bf-*.md`: the real exploit is cheaper than "no new capability" suggested
+  (a content-unrelated forgery, requiring only the non-secret reviewed tip, trivially passed the chain
+  check alone).
 
 ### Deliberately left STRICT (no verifier runs on the candidate before it's trusted, or it IS the trust
 decision itself)
@@ -273,7 +278,8 @@ card's own diff to also thread an unrelated field risks obscuring the actual fix
 
 `findLaterBranchSquash` staying strict (no accompanying verifier — flagged round 1, left alone) and the
 `findAllLandedTrailerCommits` `landedTip` arm's own content-check gap (round 2, item 4 above) are each
-tracked by the manager as their own follow-up cards — neither is fixed in this card.
+tracked by the manager as their own follow-up cards — neither is fixed in this card. **The latter is now
+fixed by card `c7dc99bf`** (`docs/decisions/c7dc99bf-*.md`); `findLaterBranchSquash` remains open.
 
 ## Do not
 
