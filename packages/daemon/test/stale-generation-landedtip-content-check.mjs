@@ -63,7 +63,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, verifyReviewedTipChain, recordedTipContentLanded, stampedPathsPlausible, machineReadablePathSet, parseNameStatusZ, FILES_CHANGED_PATHS_MAX_COUNT, FILES_CHANGED_PATHS_MAX_BYTES } = await import("../dist/git/worktrees.js");
+const { createWorktree, verifyReviewedTipChain, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, machineReadablePathSet, parseNameStatusZ, FILES_CHANGED_PATHS_MAX_COUNT, FILES_CHANGED_PATHS_MAX_BYTES } = await import("../dist/git/worktrees.js");
 const { mainlineWatermarkKey } = await import("../dist/git/mainline-watch.js");
 
 let failures = 0;
@@ -708,6 +708,85 @@ try {
     }
   }
 
+  // --- PIPELINE_BACKSLASH / PIPELINE_HOISTED_READ_FAILS (card 1cf79e64 round 2, Code Review minor 3):
+  // F4's own repro, but through the REAL reconcileOrchestrationOnBoot pipeline end-to-end (not a direct
+  // recordedTipContentLanded call), plus a scenario that exercises the HOISTED fullTreeEntries(reviewedTip)
+  // read's own failure path specifically (reviewedTip is a sha that never resolves in the repo at all). ---
+  async function setupPipelineBackslashOmission(tag, repo) {
+    const ctx = await baseSetup(tag, repo);
+    const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
+    const REAL_NAME = "pipeline-real.txt";
+    const BS_NAME = "back\\slash-pipeline.txt"; // a literal backslash cannot be created via fs on Windows
+    fs.writeFileSync(path.join(first.worktreePath, REAL_NAME), "real\n");
+    commitAll(first.worktreePath, "c1 real", GIT_ID);
+    const c1 = git(first.worktreePath, "rev-parse HEAD");
+
+    // Add the backslash file on top of c1 via plumbing — NEVER checked out anywhere (checking it out
+    // would try to materialize a path Windows can't express). Then move the branch ref directly; the
+    // worktree's own index/HEAD staying at c1 is harmless, since nothing reads that worktree again below.
+    const idxPath = path.join(os.tmpdir(), `loom-sglt-pipebs-idx-${sfx}-${Math.random()}`);
+    const env = { ...process.env, GIT_INDEX_FILE: idxPath };
+    execFileSync("git", ["read-tree", c1], { cwd: first.worktreePath, env });
+    const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: first.worktreePath, input: "backslash\n" }).toString().trim();
+    execFileSync("git", ["-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", `100644,${blob},${BS_NAME}`], { cwd: first.worktreePath, env });
+    const tree = execFileSync("git", ["write-tree"], { cwd: first.worktreePath, env }).toString().trim();
+    const c2 = execFileSync("git", [...GIT_ID.split(" "), "commit-tree", tree, "-p", c1, "-m", "c2 backslash (plumbing)"], { cwd: first.worktreePath }).toString().trim();
+    execFileSync("git", ["update-ref", `refs/heads/${first.branch}`, c2], { cwd: repoPath });
+    try { fs.rmSync(idxPath, { force: true }); } catch { /* best-effort */ }
+
+    // PARTIAL landing on repoPath: lands REAL_NAME only — genuinely OMITS the backslash file.
+    fs.writeFileSync(path.join(repoPath, REAL_NAME), "real\n");
+    commitAll(repoPath, [`chore(unrelated): partial landing (omits backslash file)`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${c1}`], GIT_ID);
+    const forgedSha = git(repoPath, "rev-parse HEAD");
+
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: c2, filesChangedPaths: [REAL_NAME, BS_NAME] } });
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+    const y = await finishWithRetask(ctx);
+    return { ...ctx, ...y, c1, c2, forgedSha };
+  }
+  async function setupPipelineHoistedReadFails(tag, repo) {
+    const ctx = await baseSetup(tag, repo);
+    const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
+    // At least one eligible candidate must exist, or the (now-later) hoisted read is never reached at
+    // all — its content is irrelevant, since the read must fail before any candidate is examined.
+    fs.writeFileSync(path.join(repoPath, "irrelevant.txt"), "irrelevant\n");
+    commitAll(repoPath, [`chore(unrelated): any candidate`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${ctx.genesisSha}`], GIT_ID);
+    const anyCandidateSha = git(repoPath, "rev-parse HEAD");
+
+    const bogusTip = "f".repeat(40); // never resolves in this repo — the hoisted tree read must fail
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: bogusTip, filesChangedPaths: ["irrelevant.txt"] } });
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+    const y = await finishWithRetask(ctx);
+    return { ...ctx, ...y, anyCandidateSha, bogusTip };
+  }
+  {
+    const R_PIPE_BS = path.join(os.tmpdir(), `loom-sglt-pipe-bs-${sfx}`);
+    const R_PIPE_HRF = path.join(os.tmpdir(), `loom-sglt-pipe-hrf-${sfx}`);
+    try {
+      const PIPE_BS = await setupPipelineBackslashOmission("pipe-bs", R_PIPE_BS);
+      const PIPE_HRF = await setupPipelineHoistedReadFails("pipe-hrf", R_PIPE_HRF);
+
+      const r3 = await sessions.reconcileOrchestrationOnBoot(new Set());
+      console.log("PIPELINE reconcile result:", JSON.stringify(r3));
+
+      const pipeBsMergeDone = db.listEventsForWorker(PIPE_BS.workerXId).find((ev) => ev.kind === "merge_done");
+      check("(PIPELINE_BACKSLASH) never attributed to the partial landing that omits the real backslash-named file", !pipeBsMergeDone || pipeBsMergeDone.detail?.attributedLandedSha !== PIPE_BS.forgedSha);
+      check("(PIPELINE_BACKSLASH) escalated — end-to-end through the real reconcile pipeline, not just the direct recordedTipContentLanded call", db.listStaleGenerationUnresolved().some((e) => e.sessionId === PIPE_BS.workerXId));
+      check("(PIPELINE_BACKSLASH) worker Y is still independently finalized, unaffected", db.listEventsForWorker(PIPE_BS.workerYId).some((ev) => ev.kind === "merge_done"));
+
+      const pipeHrfMergeDone = db.listEventsForWorker(PIPE_HRF.workerXId).find((ev) => ev.kind === "merge_done");
+      check("(PIPELINE_HOISTED_READ_FAILS) never attributed (the hoisted reviewedTip tree read never resolves)", !pipeHrfMergeDone);
+      check("(PIPELINE_HOISTED_READ_FAILS) escalated — the whole attribution attempt fails closed before any candidate's own content is ever examined", db.listStaleGenerationUnresolved().some((e) => e.sessionId === PIPE_HRF.workerXId));
+      check("(PIPELINE_HOISTED_READ_FAILS) worker Y is still independently finalized, unaffected", db.listEventsForWorker(PIPE_HRF.workerYId).some((ev) => ev.kind === "merge_done"));
+    } finally {
+      for (const dir of [R_PIPE_BS, R_PIPE_HRF]) {
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
   // --- Mutation proof (round 4): the content check's pathspec is LOAD-BEARING, not merely present. Drop
   // A.txt from REVERT's own stamped pathspec and confirm the partial landing's missing revert becomes
   // INVISIBLE — recordedTipContentLanded flips from "no-match" (what the full pipeline above already
@@ -859,6 +938,47 @@ try {
     try { fs.rmSync(bnRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 
+  // --- Direct proof (card 1cf79e64 round 2, Code Review minor 1): `git.raw()` (simple-git) returns a
+  // UTF-8-DECODED string, never raw bytes — a genuinely non-UTF-8 path decodes LOSSILY (Node substitutes
+  // U+FFFD for each invalid byte sequence), so two DIFFERENT raw paths can collide as one decoded key.
+  // `git mktree` (fed raw bytes on STDIN, never argv — argv would force Node to re-encode as valid UTF-8)
+  // is the one plumbing primitive available on this host that can put a genuinely non-UTF-8 byte sequence
+  // into a real tree object at all. ---
+  {
+    const futf8Repo = path.join(os.tmpdir(), `loom-sglt-badutf8-${sfx}`);
+    fs.mkdirSync(futf8Repo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: futf8Repo });
+    const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: futf8Repo, input: "x\n" }).toString().trim();
+    // 0xC0 and 0xC1 are both invalid UTF-8 lead bytes in isolation (they can only ever introduce an
+    // OVERLONG encoding, which is itself illegal) — two GENUINELY DIFFERENT single-byte names, each
+    // decoding (lossily) to the SAME one-character string "�" when read as UTF-8.
+    const mktreeInput = Buffer.concat([
+      Buffer.from(`100644 blob ${blob}\t`), Buffer.from([0xc0]), Buffer.from("\n"),
+      Buffer.from(`100644 blob ${blob}\t`), Buffer.from([0xc1]), Buffer.from("\n"),
+    ]);
+    const badTree = execFileSync("git", ["mktree"], { cwd: futf8Repo, input: mktreeInput }).toString().trim();
+    const badCommit = execFileSync("git", [...GIT_ID.split(" "), "commit-tree", badTree, "-m", "bad-utf8"], { cwd: futf8Repo }).toString().trim();
+
+    const badResult = await fullTreeEntries(futf8Repo, badCommit);
+    // Honest scope note: the per-entry U+FFFD check already fails this closed on the FIRST such entry,
+    // before the duplicate-key check ever runs — the duplicate check is additional defense-in-depth for a
+    // decode COLLISION that doesn't itself contain U+FFFD, which isn't reachable through real UTF-8
+    // decoding (two distinct VALID UTF-8 byte sequences can never decode to the identical string), so this
+    // one test cannot isolate the duplicate-key branch from the U+FFFD branch on this host.
+    check("(UTF-8 decode safety) a tree with two genuinely different invalid-UTF-8 names (which decode lossily to the identical U+FFFD string) makes fullTreeEntries fail closed to null",
+      badResult === null);
+
+    // Control: an ordinary valid-UTF-8 non-ASCII name is unaffected by either new check.
+    const goodBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: futf8Repo, input: "y\n" }).toString().trim();
+    const goodTree = execFileSync("git", ["mktree"], { cwd: futf8Repo, input: `100644 blob ${goodBlob}\tcafé.txt\n` }).toString().trim();
+    const goodCommit = execFileSync("git", [...GIT_ID.split(" "), "commit-tree", goodTree, "-m", "good-utf8"], { cwd: futf8Repo }).toString().trim();
+    const goodResult = await fullTreeEntries(futf8Repo, goodCommit);
+    check("(UTF-8 decode safety control) an ordinary valid-UTF-8 non-ASCII name is read normally, not rejected",
+      goodResult !== null && goodResult.has("café.txt"));
+
+    try { fs.rmSync(futf8Repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+
   // --- Direct proof (round 6, finding 4). Built via plumbing (hash-object/update-index/write-tree/
   // commit-tree) because a literal backslash in a filename cannot be created through the real filesystem
   // on Windows.
@@ -890,7 +1010,7 @@ try {
     const forgedStamp = [REAL_NAME, BS_BOGUS_NAME];
 
     const forgedContentAlone = await recordedTipContentLanded(bsRepo, bsReviewedTip, bsCandidate, forgedStamp);
-    check("(backslash net) content check ALONE wrongly reads the forged bogus-path stamp as attributed — git's own backslash-as-separator handling defeats the pathspec",
+    check("(backslash net) content check ALONE wrongly reads the forged bogus-path stamp as attributed — no pathspec exists anymore, but BS_BOGUS_NAME is absent from BOTH sides' tree-entry maps, so it vacuously matches in isolation from REAL_NAME's own (correctly-compared) entry",
       forgedContentAlone === "attributed");
 
     const forgedPlausible = await stampedPathsPlausible(bsRepo, bsReviewedTip, bsCandidate, forgedStamp);
