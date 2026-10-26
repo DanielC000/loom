@@ -45,7 +45,7 @@ const {
   clearMergeQuarantineReporting, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot,
   listActiveMergeQuarantines, MERGE_QUARANTINE_DIR, enterMergeQuarantine, clearMergeQuarantineByToken,
   clearMergeQuarantineByRecordedPath, clearMergeQuarantineLatchFile, quarantineLatchFileIdsFor,
-  clearMergeQuarantine, assertRepoNotQuarantined, ownedKeysIncluding,
+  clearMergeQuarantine, assertRepoNotQuarantined, ownedKeysIncluding, clearMergeQuarantineByKey,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -1016,10 +1016,16 @@ try {
   check("(item1 precondition) both tokens are tracked IN-PROCESS after the divert", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(r2Token)
     && new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("d2-token-item1"));
 
+  // @decision 3be11be4 (Round 2) — d2 does not own K2 and r2 is a contributor, so the PUBLIC route now
+  // refuses this shape. Pin that, then drive dd34da46's own internal logic via clearMergeQuarantineByKey.
+  const publicRefusal = clearMergeQuarantineByRecordedPath(d2);
+  check("*** THE FIX (3be11be4) *** (item1) the PUBLIC clear-by-path route now refuses this shape", publicRefusal.refusedBeforeClear === true && publicRefusal.liftedRepoPaths.length === 0);
+  check("(item1) `final` is untouched by the refused public-route attempt", (contentIfExists(finalPath) ?? "").includes("d2-token-item1"));
+
   // The LATER full clear — reads are restored, so this is a FRESH, successful read proving the mark is
   // stale: `final` still holds nothing but d2's own token, which this clear (of the SAME merged identity)
   // is already dropping.
-  const clearResult = clearMergeQuarantineByRecordedPath(d2);
+  const clearResult = clearMergeQuarantineByKey(K2, d2, undefined, true);
   check("(item1) the clear itself reports wasQuarantined", clearResult?.wasQuarantined === true);
   check("*** THE FIX (item1) *** `final` is UNLINKED, not kept on a stale mark", contentIfExists(finalPath) === null);
   const tokensAfterClear = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
@@ -1067,13 +1073,19 @@ try {
     (contentIfExists(finalPath) ?? "").includes("d2-token-n4") && !(contentIfExists(finalPath) ?? "").includes(r2Token));
   const contentBeforeClear = contentIfExists(finalPath);
 
+  // @decision 3be11be4 (Round 2) — same shape as item1: pin the PUBLIC route's own refusal before
+  // driving dd34da46's own internal logic directly via clearMergeQuarantineByKey.
+  const publicRefusalN4 = clearMergeQuarantineByRecordedPath(d2);
+  check("*** THE FIX (3be11be4) *** (n4) the PUBLIC clear-by-path route now refuses this shape", publicRefusalN4.refusedBeforeClear === true && publicRefusalN4.liftedRepoPaths.length === 0);
+  check("(n4) `final` is untouched by the refused public-route attempt", contentIfExists(finalPath) === contentBeforeClear);
+
   // The LATER full clear — reads succeed (proving coverage, the same way item1's own clear does), but the
   // unlink that proof would otherwise license fails with EPERM.
   const injectUnlink = injectUnlinkFailureForPath(finalPath);
   let threw = false;
   let clearResult;
   try {
-    clearResult = clearMergeQuarantineByRecordedPath(d2);
+    clearResult = clearMergeQuarantineByKey(K2, d2, undefined, true);
   } catch {
     threw = true;
   } finally {
@@ -2437,7 +2449,13 @@ try {
     enteredAt: Date.now(), tokens: ["A-d", tombTokA], resolvedKey: KrA,
   }, null, 2) + "\n");
 
-  const clearResultA = clearMergeQuarantineByRecordedPath(dA);
+  // @decision 3be11be4 (Round 2) — same shape as item1/n4: pin the PUBLIC route's own refusal before
+  // driving 25f6a7dc's own internal coverage logic directly via clearMergeQuarantineByKey.
+  const publicRefusalA = clearMergeQuarantineByRecordedPath(dA);
+  check("*** THE FIX (3be11be4) *** (probeA) the PUBLIC clear-by-path route now refuses this shape", publicRefusalA.refusedBeforeClear === true && publicRefusalA.liftedRepoPaths.length === 0);
+  check("(probeA) final is untouched by the refused public-route attempt", (contentIfExists(finalPathA) ?? "").includes("A-d"));
+
+  const clearResultA = clearMergeQuarantineByKey(KrA, dA, undefined, true);
   check("(probeA) the clear reports success", clearResultA?.wasQuarantined === true);
   check("*** THE FIX (probeA) *** final is UNLINKED (coverage proven: A-d is being cleared, T is already tombstoned)",
     contentIfExists(finalPathA) === null);

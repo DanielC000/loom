@@ -212,6 +212,8 @@ function buildRuntimeUnionFixture(tag) {
   const x = path.join(os.tmpdir(), `loom-mqrup-x-${tag}-never-exists-${freshSfx()}`);
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`);
+  // @decision 3be11be4 (Round 4, MAJOR-2) — deliberately NO `identityAtRaise`: genuinely pre-upgrade
+  // residue (no current raise can produce this field-less) — pins the LEGACY fail-closed behaviour.
   fs.writeFileSync(xFile, JSON.stringify({
     repoPath: x, branch: "x-branch", reason: "X's manufactured resolvedKey collision with Y",
     enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: ky,
@@ -570,6 +572,16 @@ try {
       check(`*** THE FIX (${tag}) *** the text says clearing lifts the WHOLE entry (every contributor's token + X's own unconfirmed-kill quarantine)`, refusal.reason.includes("lifts the WHOLE entry") && refusal.reason.includes("outstanding unconfirmed-kill quarantine"));
       check(`*** THE FIX (${tag}) *** the text says to confirm no process is running under any listed path first`, refusal.reason.includes("confirm no process is still running"));
     };
+    // @decision 3be11be4 (Round 4) — the LEGACY counterpart of the helper above, for a hand-written
+    // (field-less) X: the refusal still fires (the pre-existing 82032b5c/9a55fb90 mechanism), but the
+    // text now names the two-step sequence instead of a direct clear-by-path target.
+    const assertRefusalNamesTwoStepSequenceLegacy = (refusal, x, tag) => {
+      check(`(${tag}) clear-by-id refuses`, refusal.ok === false);
+      if (refusal.ok !== false) return;
+      check(`(${tag}) the text names the two-step sequence (no honest direct clear-by-path target for X alone)`, refusal.reason.includes("clear each contributor's own quarantine directly FIRST"));
+      check(`(${tag}) the text names X as the eventual clear-by-path target once every contributor is cleared`, refusal.reason.includes(x));
+      check(`(${tag}) the text does NOT claim X "does not own this key" — Loom cannot tell, for a LEGACY entry`, !refusal.reason.includes("does not own this key"));
+    };
 
     {
       // CASE 1 — ACTIVE refusal, RESOLVABLE X (X = a real repo's toplevel; Y = a subdir of it, no own
@@ -612,21 +624,45 @@ try {
       check("*** THE FIX (active+resolvable) *** assertRepoNotQuarantined(ySub) ALSO reads clear afterward", assertRepoNotQuarantined(ySub).ok === true);
     }
     {
-      // CASE 2 — ACTIVE refusal, DEGRADED X (the existing runtime-union fixture shape).
+      // CASE 2 — ACTIVE refusal, DEGRADED X (the existing runtime-union fixture shape). X is a hand-
+      // written, field-less (LEGACY-shaped, 3be11be4 Round 4 MAJOR-2) latch — no current raise can ever
+      // produce this exact shape; this is the pinned test of the new fail-closed default, never a stand-
+      // in for a modern raise.
       const { x, y, ky, xFile } = buildRuntimeUnionFixture("active-degraded");
       enterMergeQuarantine(y, "y-branch", "y's own genuine unconfirmed-kill reason");
       check("(precondition, non-vacuity) x is BLOCKED before any clear", assertRepoNotQuarantined(x).ok === false);
 
       const refusal2 = clearMergeQuarantineLatchFile(hashForKey(ky));
-      assertRefusalNamesOnlyClearByPath(refusal2, x, "active+degraded (clear-by-id)");
+      assertRefusalNamesTwoStepSequenceLegacy(refusal2, x, "active+degraded, LEGACY (clear-by-id)");
       // Round 5 TEST GAP (a) — same third call site, for the DEGRADED active tier too.
       const refusal2b = assertRepoNotQuarantined(x);
-      assertRefusalNamesOnlyClearByPath(refusal2b, x, "active+degraded (assertRepoNotQuarantined)");
-      const clearResult2 = clearMergeQuarantineByRecordedPath(x);
-      check("*** THE FIX (active+degraded) *** clearMergeQuarantineByRecordedPath(x) actually lifts the block", clearResult2.wasQuarantined === true);
-      check("*** THE FIX (active+degraded) *** Ky's file is gone", !fs.existsSync(xFile));
-      check("*** THE FIX (active+degraded) *** assertRepoNotQuarantined(x) reads clear afterward", assertRepoNotQuarantined(x).ok === true);
-      check("*** THE FIX (active+degraded) *** assertRepoNotQuarantined(y) ALSO reads clear afterward", assertRepoNotQuarantined(y).ok === true);
+      assertRefusalNamesTwoStepSequenceLegacy(refusal2b, x, "active+degraded, LEGACY (assertRepoNotQuarantined)");
+      // *** THE FIX (Round 4) *** clearMergeQuarantineByRecordedPath(x) now REFUSES directly — X is
+      // LEGACY and y is a genuine contributor, so Loom can't tell whether x owns this key.
+      const directClearAttempt2 = clearMergeQuarantineByRecordedPath(x);
+      check("*** THE FIX (active+degraded, LEGACY) *** a DIRECT clear-by-path(x) now refuses (liftedRepoPaths empty)", directClearAttempt2.liftedRepoPaths.length === 0);
+      check("(active+degraded, LEGACY) x is STILL blocked after the refused direct clear", assertRepoNotQuarantined(x).ok === false);
+
+      // The remediation route the refusal text actually names: clear the genuine contributor (y) FIRST.
+      // X is genuinely UNRESOLVABLE (never created on disk) — clearing y's own key triggers the SAME
+      // pre-existing degraded-occupant PROTECTION (cards 07e3ad30/e0192ffb) that diverts x's own content
+      // to a fresh pending record rather than releasing it outright; x stays reported as quarantined.
+      // @decision 3be11be4 (Round 5, MINOR-2) — assert what step 1 ACTUALLY did, never a vacuous boolean
+      // check: it lifts nothing directly and reports x back as a still-blocked co-occupant.
+      const contributorClear2 = clearMergeQuarantine(y);
+      check("(active+degraded, LEGACY remediation) step 1 (clear contributor y) lifts NOTHING directly", contributorClear2.liftedRepoPaths.length === 0);
+      check("(active+degraded, LEGACY remediation) step 1 reports x as a still-blocked co-occupant", contributorClear2.stillBlockedCoOccupants.some((c) => c.repoPath === x));
+      check("(active+degraded, LEGACY remediation) y reads clear after step 1", assertRepoNotQuarantined(y).ok === true);
+      check("(active+degraded, LEGACY remediation) x is STILL reported quarantined after step 1 alone (diverted to a fresh pending record, never released by step 1 alone)", assertRepoNotQuarantined(x).ok === false);
+      // Step 2 — clear-by-path(x) AGAINST THE FRESH PENDING RECORD step 1 just created — is what ACTUALLY
+      // releases the whole union end-to-end: this card's own guard structurally never reaches a
+      // pending-only match (see selfClearRefusesForStaleKeyContributors's own doc), so the degraded
+      // shape's LEGACY status no longer blocks it here.
+      const primaryClear2 = clearMergeQuarantineByRecordedPath(x);
+      check("*** THE FIX (active+degraded, LEGACY remediation) *** step 2 (clear-by-path x) now releases the whole entry end-to-end", primaryClear2.liftedRepoPaths.length > 0);
+      check("*** THE FIX (active+degraded, LEGACY remediation) *** Ky's file is gone", !fs.existsSync(xFile));
+      check("*** THE FIX (active+degraded, LEGACY remediation) *** assertRepoNotQuarantined(x) reads clear afterward", assertRepoNotQuarantined(x).ok === true);
+      check("*** THE FIX (active+degraded, LEGACY remediation) *** assertRepoNotQuarantined(y) ALSO reads clear afterward", assertRepoNotQuarantined(y).ok === true);
     }
     {
       // CASE 3 — PENDING refusal, DEGRADED X (clear-by-path(y) triggers protectDegradedOccupantBeforeDelete,
@@ -761,6 +797,10 @@ try {
     // raw, no stripping).
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     const bareClearRoute = /merge-quarantine\/clear(?!-)/;
+    // @decision 3be11be4 (Round 4) — CASE B's own two-step-sequence text legitimately names plain
+    // "/merge-quarantine/clear" too (for a contributor's own project) — check the SPECIFIC embedded
+    // clause's own absence instead, derived the same way production does, never hand-duplicated.
+    const unconfirmedKillRouteClause = UNCONFIRMED_KILL_WINDOWS_GUIDANCE.slice(UNCONFIRMED_KILL_WINDOWS_GUIDANCE.lastIndexOf(", then "));
 
     // CASE A — a FRESH runtime raise, built via the REAL unconfirmedKillReason() helper (never a
     // hand-typed stand-in), on a resolvable X with a subdir contributor Y.
@@ -820,16 +860,37 @@ try {
 
       const refusalB = reboot1.assertRepoNotQuarantined(x);
       check("(case B) assertRepoNotQuarantined(x) is refused", refusalB.ok === false);
-      check("*** THE FIX (case B) *** a boot-loaded LEGACY reason's bare /clear route is ALSO stripped", refusalB.ok === false && !bareClearRoute.test(refusalB.reason));
+      check("*** THE FIX (case B) *** a boot-loaded LEGACY reason's bare /clear route is ALSO stripped", refusalB.ok === false && !refusalB.reason.includes(unconfirmedKillRouteClause));
       check("(case B) the legacy reason's OWN diagnostic text survives", refusalB.ok === false && refusalB.reason.includes("husky/lefthook/pre-commit"));
+      // @decision 3be11be4 (Round 4) — x is LEGACY (field-less), so this disclosure now names the
+      // two-step sequence, never a direct clear-by-path target, and must NOT claim x "does not own this
+      // key" — Loom genuinely can't tell.
+      check("(case B) the text names the two-step sequence (no honest direct clear-by-path target for x alone)", refusalB.ok === false && refusalB.reason.includes("clear each contributor's own quarantine directly FIRST"));
+      check(`(case B) the text does NOT claim x "does not own this key"`, refusalB.ok === false && !refusalB.reason.includes("does not own this key"));
 
-      const clearByPathMatchB = refusalB.ok === false ? refusalB.reason.match(/clear-by-path with one of (\[.*?\])/) : null;
-      const clearByPathTargetsB = clearByPathMatchB ? JSON.parse(clearByPathMatchB[1]) : [];
-      check("(case B) clear-by-path targets include x", clearByPathTargetsB.includes(x));
+      // @decision 3be11be4 (Round 4, MAJOR-2) — x is LEGACY (field-less) and y is a genuine contributor,
+      // so a DIRECT clear-by-path(x) now refuses — Loom can't tell whether x owns this key.
+      const directClearB = reboot1.clearMergeQuarantineByRecordedPath(x);
+      check("*** THE FIX (case B) *** a DIRECT clear-by-path(x) now refuses", directClearB.liftedRepoPaths.length === 0);
+      check("(case B) x is STILL blocked after the refused direct clear", reboot1.assertRepoNotQuarantined(x).ok === false);
+
+      // The remediation route the refusal text names: clear the contributor (y) first. X is genuinely
+      // UNRESOLVABLE (never created on disk) — clearing y's own key triggers the SAME pre-existing
+      // degraded-occupant PROTECTION CASE 2 above exercises, diverting x to a fresh pending record rather
+      // than releasing it outright; x stays reported as quarantined after step 1 alone.
+      // @decision 3be11be4 (Round 5, MINOR-2) — assert what step 1 ACTUALLY did, never a vacuous boolean
+      // check: it lifts nothing directly and reports x back as a still-blocked co-occupant.
+      const contributorClearB = reboot1.clearMergeQuarantine(y);
+      check("(case B remediation) step 1 (clear contributor y) lifts NOTHING directly", contributorClearB.liftedRepoPaths.length === 0);
+      check("(case B remediation) step 1 reports x as a still-blocked co-occupant", contributorClearB.stillBlockedCoOccupants.some((c) => c.repoPath === x));
+      check("(case B remediation) y reads clear after step 1", reboot1.assertRepoNotQuarantined(y).ok === true);
+      check("(case B remediation) x is STILL reported quarantined after step 1 alone", reboot1.assertRepoNotQuarantined(x).ok === false);
+      // Step 2 — clear-by-path(x) against the fresh pending record step 1 just created — actually
+      // releases the whole union: this card's own guard structurally never reaches a pending-only match.
       const clearResultB = reboot1.clearMergeQuarantineByRecordedPath(x);
-      check("*** THE FIX (case B) *** clear-by-path with the entry's own path actually lifts the block", clearResultB.wasQuarantined === true);
-      check("(case B) assertRepoNotQuarantined(x) reads clear afterward", reboot1.assertRepoNotQuarantined(x).ok === true);
-      check("(case B) assertRepoNotQuarantined(y) ALSO reads clear afterward", reboot1.assertRepoNotQuarantined(y).ok === true);
+      check("*** THE FIX (case B remediation) *** step 2 (clear-by-path x) now releases the whole entry end-to-end", clearResultB.liftedRepoPaths.length > 0);
+      check("(case B remediation) assertRepoNotQuarantined(x) reads clear afterward", reboot1.assertRepoNotQuarantined(x).ok === true);
+      check("(case B remediation) assertRepoNotQuarantined(y) ALSO reads clear afterward", reboot1.assertRepoNotQuarantined(y).ok === true);
     }
   } else if (scenarioName === "stale-armed-key-survives-sibling-absorb-raise") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1241,6 +1302,8 @@ try {
 
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
     // S's own real file, dual-armed via legacy stale resolvedKey=Kr.
+    // @decision 3be11be4 (Round 4, MAJOR-2) — deliberately NO `identityAtRaise`: genuinely pre-upgrade
+    // residue, pins the LEGACY fail-closed behaviour.
     fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${ksHash}.json`), JSON.stringify({
       repoPath: s, branch: "s-branch", reason: "S dual-armed via legacy stale resolvedKey=Kr",
       enteredAt: Date.now() - 90_000, tokens: ["4b06875f-pd-tok-s"], resolvedKey: kr,
@@ -1276,8 +1339,21 @@ try {
     check("*** THE FIX (pre-union) *** D's protective copy does NOT carry resolvedKey=Ks right after the raise",
       dProtectiveFile?.parsed.resolvedKey !== ks);
 
-    clearMergeQuarantine(s);
-    check("(mid-window) assertRepoNotQuarantined(s) reads unblocked right after S's own clear", assertRepoNotQuarantined(s).ok === true);
+    // @decision 3be11be4 (Round 4) — S is LEGACY and r is a genuine contributor, so a DIRECT clear now
+    // refuses; drive the named two-step remediation instead (orthogonal to 4b06875f's own concern above).
+    const directClearS = clearMergeQuarantine(s);
+    check("*** THE FIX (3be11be4, Round 4) *** a DIRECT clearMergeQuarantine(s) now refuses", directClearS.liftedRepoPaths.length === 0);
+    check("(3be11be4) s is STILL blocked after the refused direct clear", assertRepoNotQuarantined(s).ok === false);
+    // @decision 3be11be4 (Round 5, MINOR-2) — step 1's own outcome here is genuinely ORDER-DEPENDENT
+    // (card 24ed371f's own MAJOR-1 residual; confirmed by running this repro twice, both outcomes seen) —
+    // assert the real, bounded outcome set, never a vacuous boolean check.
+    const contributorClearR = clearMergeQuarantine(r);
+    check("(3be11be4 remediation) step 1 (clear contributor r) either releases s directly or reports it still-blocked",
+      contributorClearR.liftedRepoPaths.includes(s) || contributorClearR.stillBlockedCoOccupants.some((c) => c.repoPath === s));
+    // @decision 3be11be4 (Round 5, NIT-2) — the final state is the same regardless of which of step 1's
+    // two outcomes fired; assert it plainly, no `||` fallback needed once step 1 is pinned above.
+    clearMergeQuarantineByRecordedPath(s);
+    check("*** THE FIX (3be11be4 remediation) *** the two-step sequence releases s end-to-end, whichever order step 1 took", assertRepoNotQuarantined(s).ok === true);
 
     const fresh = await rebootSim();
     fresh.reenterMergeQuarantinesAtBoot([]);

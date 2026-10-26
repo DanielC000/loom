@@ -154,10 +154,10 @@ function makeRealRepo(tag) {
 // Mirrors merge-quarantine-unknown-provenance.mjs's own writePreFixLatch — writes a latch JSON with ONLY
 // the pre-82032b5c/pre-db0a9db0 persisted fields (no armedKeys, no contributorRepoPaths, no
 // provenanceUnknown, no provenanceTracked), at the given target hash.
-function writePreFixLatch(targetHash, { repoPath, branch, reason, enteredAt, tokens, resolvedKey }) {
+function writePreFixLatch(targetHash, { repoPath, branch, reason, enteredAt, tokens, resolvedKey, identityAtRaise }) {
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
   const file = path.join(MERGE_QUARANTINE_DIR, `${targetHash}.json`);
-  fs.writeFileSync(file, JSON.stringify({ repoPath, branch, reason, enteredAt, tokens, resolvedKey }, null, 2) + "\n");
+  fs.writeFileSync(file, JSON.stringify({ repoPath, branch, reason, enteredAt, tokens, resolvedKey, identityAtRaise }, null, 2) + "\n");
   return file;
 }
 
@@ -260,6 +260,8 @@ try {
     const ky = canonicalRepoLockKey(y);
     const x = path.join(os.tmpdir(), `loom-mqrp-e-x-never-exists-${freshSfx()}`);
     const enteredAt = Date.now() - 120_000;
+    // @decision 3be11be4 (Round 4, MAJOR-2) — deliberately NO `identityAtRaise`: genuinely pre-upgrade
+    // residue (no current raise can produce this field-less) — pins the LEGACY fail-closed behaviour.
     const kyFile = writePreFixLatch(hashForKey(ky), {
       repoPath: x, branch: "x-branch", reason: "X's manufactured resolvedKey collision with Y",
       enteredAt, tokens: ["x-token"], resolvedKey: ky,
@@ -297,9 +299,20 @@ try {
     check("*** THE PRECEDENCE RULE HOLDS *** clear-by-id STILL refuses after the runtime absorb + reboot", clearResult.ok === false);
     check("(sanity) Y is still reachable/enforced post-reboot — its own runtime raise rode along, never silently dropped", reboot.assertRepoNotQuarantined(y).ok === false);
 
+    // @decision 3be11be4 (Round 4, MAJOR-2) — X is LEGACY (no identityAtRaise) and y is a genuine
+    // contributor, so a DIRECT clear-by-path(x) now refuses — drive the named two-step remediation.
+    const directClear = reboot.clearMergeQuarantineByRecordedPath(x);
+    check("*** THE FIX (3be11be4, Round 4) *** a DIRECT clear-by-path(x) now refuses", directClear.liftedRepoPaths.length === 0);
+    check("(3be11be4) x is STILL blocked after the refused direct clear", reboot.assertRepoNotQuarantined(x).ok === false);
+    // @decision 3be11be4 (Round 5, MINOR-2) — assert what step 1 ACTUALLY did, never a vacuous boolean
+    // check. In this degraded shape, clearing the contributor diverts x to a fresh pending record rather
+    // than releasing it — x comes back as a still-blocked co-occupant, never silently lifted.
+    const contributorClear = reboot.clearMergeQuarantine(y);
+    check("(3be11be4 remediation) step 1 (clear contributor y) lifts NOTHING directly", contributorClear.liftedRepoPaths.length === 0);
+    check("(3be11be4 remediation) step 1 reports x as a still-blocked co-occupant", contributorClear.stillBlockedCoOccupants.some((c) => c.repoPath === x));
     const pathClear = reboot.clearMergeQuarantineByRecordedPath(x);
-    check("(sanity) clear-by-path still lifts the whole union, Y included", pathClear.wasQuarantined === true);
-    check("(sanity) Y reads clear after clear-by-path(X)", reboot.assertRepoNotQuarantined(y).ok === true);
+    check("*** THE FIX (3be11be4 remediation) *** the two-step sequence actually releases the whole union, Y included", reboot.assertRepoNotQuarantined(x).ok === true);
+    check("(sanity) Y reads clear after the two-step remediation", reboot.assertRepoNotQuarantined(y).ok === true);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

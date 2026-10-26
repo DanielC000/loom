@@ -34,14 +34,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // physical file remains, so this is the check that is actually sensitive to whether `contributorRepoPaths`
 // round-tripped through the JSON parse, not just to the in-memory runtime stamp).
 //
-// SCENARIO 3 (CLEAR-BY-PATH'S ACTION IS UNCHANGED — Lead ruling, round 3 of 82032b5c, SITE A) —
-// clearing by S's own recorded path still lifts the WHOLE entry, D's folded-in token included
-// (already-accepted, documented residual: the entry's own stored identity IS S, and clear-by-path never
-// refuses). Clearing by D's own recorded path still reports `wasQuarantined:false` (D still has no entry
-// of its own `repoPath` to match) — `clearMergeQuarantineByRecordedPath` deliberately never consults
-// `contributorRepoPaths` (round 3's own Lead ruling: "do NOT make clear-by-path honour contributor
-// identities — that depends on 398f476c's own token-split question"). This is NOT the defect this card
-// closes — see SCENARIO 2 for the route that WAS fixed (clear-by-id, not clear-by-path).
+// SCENARIO 3 (SITE A) — 3a (clearing by D's own recorded path) is UNCHANGED (Lead ruling, round 3 of
+// 82032b5c): still reports `wasQuarantined:false` (D has no entry of its own `repoPath` to match) —
+// `clearMergeQuarantineByRecordedPath` deliberately never consults `contributorRepoPaths` for THIS
+// (round 3's own Lead ruling: "do NOT make clear-by-path honour contributor identities — that depends on
+// 398f476c's own token-split question"). Not the defect either card closes.
+//
+// 3b (clearing by S's own recorded path) — **UPDATED by card 3be11be4**: round 3 of 82032b5c had
+// EXPLICITLY ACCEPTED, as a known/documented residual, that clearing by S's own path (S does not own its
+// own key either — it is `R/s-sub`, a bare subdirectory) lifts the WHOLE entry, destroying D's
+// genuinely separate hold. Card 3be11be4 is the SAME shape as 3b1944b6's own mirror (an identity that
+// merely won a union's naming race by raise-order, never by owning its own key) and closes this exact
+// residual: `clearMergeQuarantineByRecordedPath(S)` now REFUSES instead, leaving BOTH D and S enforced.
+// See docs/decisions/3be11be4-*.md.
 //
 // SCENARIO 4 (SITE B — the raise-branch shape) — S is pending (older); D instead RAISES (never queried
 // first). D (the RAISER itself) loses `unionQuarantineEntries`' own tie-break to its OWN older sibling —
@@ -210,14 +215,21 @@ try {
     check("(s3a UNCHANGED) clearMergeQuarantineByRecordedPath(D) still reports wasQuarantined:false", clearDResult.wasQuarantined === false);
     check("(s3a UNCHANGED) D is still enforced afterward (fail-closed, never silently lifted)", !!activeMergeQuarantineFor(dSub));
 
-    // 3b — S's own recorded path: UNCHANGED accepted behavior — lifts the whole entry, D included.
+    // 3b — S's own recorded path: card 3be11be4 closes the residual round 3 of 82032b5c had explicitly
+    // ACCEPTED here (S doesn't own its own key either — see the header comment above) — clear-by-path(S)
+    // now REFUSES instead of destroying D's genuinely separate hold.
     const clearSResult = clearMergeQuarantineByRecordedPath(sSub);
-    check("(s3b UNCHANGED) clearMergeQuarantineByRecordedPath(S) reports wasQuarantined:true", clearSResult.wasQuarantined === true);
-    check("(s3b UNCHANGED) D's own enforcement is ALSO lifted (same shared token set — accepted, documented in 82032b5c's own DoD)", !activeMergeQuarantineFor(dSub));
+    check("*** THE FIX (3be11be4) *** (s3b) clearMergeQuarantineByRecordedPath(S) now REFUSES", clearSResult.wasQuarantined === true && clearSResult.refusedBeforeClear === true);
+    check("*** THE FIX (3be11be4) *** (s3b) lifts NOTHING", clearSResult.liftedRepoPaths.length === 0);
+    check("*** THE FIX (3be11be4) *** (s3b) D's own enforcement is PRESERVED (no longer destroyed by clearing S)", !!activeMergeQuarantineFor(dSub));
+    check("*** THE FIX (3be11be4) *** (s3b) S's own enforcement is ALSO preserved (nothing was lifted at all)", !!activeMergeQuarantineFor(sSub));
 
     const fresh = await freshBootModule();
     fresh.reenterMergeQuarantinesAtBoot([dSub, sSub]);
-    check("(s3b UNCHANGED) survives a reboot: D stays lifted too (same shared physical file)", !fresh.activeMergeQuarantineFor(dSub));
+    check("*** THE FIX (3be11be4) *** (s3b) survives a reboot: D is STILL enforced (never lifted)", !!fresh.activeMergeQuarantineFor(dSub));
+    // @decision 3be11be4 (Round 2, item 4) — assert S (the refused clear's own target) ALSO stays
+    // enforced after the reboot, not just D — a refusal means NOTHING was lifted, S included.
+    check("*** THE FIX (3be11be4) *** (s3b) survives a reboot: S is STILL enforced too (the refusal lifted neither)", !!fresh.activeMergeQuarantineFor(sSub));
 
     try { clearMergeQuarantine(repo); } catch { /* best-effort */ }
   }
