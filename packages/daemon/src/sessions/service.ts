@@ -27901,10 +27901,12 @@ export class SessionService {
     // plus the rare best-effort stamp failure (logged at the stamp site itself when it happens). This
     // diagnostic still can't and doesn't try to tell those apart, same as its worktrees.ts mirror.
     if (noPathSetTrailerNoticeCount > 0) {
+      // @decision c0d0eac9 — "candidate(s)", never "worker(s)": this callback can now fire more than once
+      // per worker, so the count is no longer "one per affected worker".
       // eslint-disable-next-line no-console
-      console.info(`[reconcile] ${noPathSetTrailerNoticeCount} worker(s) had a landed squash with no ` +
-        "Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a best-effort Base/PathSet stamp " +
-        "that failed to land — logged at the stamp site when it happens) — trusted Loom-Worker-Branch " +
+      console.info(`[reconcile] ${noPathSetTrailerNoticeCount} candidate(s) examined had a landed squash ` +
+        "with no Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a best-effort Base/PathSet " +
+        "stamp that failed to land — logged at the stamp site when it happens) — trusted Loom-Worker-Branch " +
         "presence alone");
     }
     // Card eb58b8bd: aggregated ONCE per pass, same convention as noPathSetTrailerNoticeCount above — a

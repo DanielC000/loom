@@ -4289,11 +4289,12 @@ async function branchExists(repoPath: string, branch: string, deps: BoundedGitDe
  *  changes, not merely carry its trailer text (a squash+commit race can bear one branch's trailer while its
  *  content belongs to another)?
  *
- *  FAILS CLOSED to `false` on any ambiguity — a false `true` here is the exact
- *  silent-data-loss bug this check exists to close. */
+ *  @decision c0d0eac9 round 4 (finding B1) — returns a {@link CheckVerdict}, not a bare boolean: `"error"`
+ *  on any git-call failure here is NON-DEFINITIVE (unknown, not confirmed-absent) and must never be read by
+ *  a caller as the same thing as a genuine `"fail"` content mismatch — see `walkCandidates`'s own doc. */
 async function branchContentLandedInCommit(
   repoPath: string, branch: string, sha: string, mergeBase: string, deps: BoundedGitDeps,
-): Promise<boolean> {
+): Promise<CheckVerdict> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of
@@ -4302,14 +4303,14 @@ async function branchContentLandedInCommit(
     const changedFiles = (await withTimeout(
       git.raw(["diff", "--name-only", `${mergeBase}..${branchRef}`]), timeoutMs, "git diff --name-only (content check)",
     )).trim();
-    if (!changedFiles) return true; // branch has no changes of its own relative to its fork point — vacuously landed
+    if (!changedFiles) return "pass"; // branch has no changes of its own relative to its fork point — vacuously landed
     const files = changedFiles.split("\n").filter(Boolean);
     const diffOutput = (await withTimeout(
       git.raw(["diff", "--name-only", sha, branchRef, "--", ...files]), timeoutMs, "git diff --name-only (content check, candidate vs branch)",
     )).trim();
-    return diffOutput === ""; // no output ⇒ zero difference on any of the branch's own paths ⇒ content matches
+    return diffOutput === "" ? "pass" : "fail"; // no output ⇒ zero difference on any of the branch's own paths ⇒ content matches
   } catch {
-    return false;
+    return "error";
   }
 }
 
@@ -7343,23 +7344,70 @@ export function buildReducedGateCommand(
   return steps.join(" && ");
 }
 
+/** @decision c0d0eac9 round 4 (finding B1) — tri-state outcome for a sub-check: `"pass"`/`"fail"` (the
+ *  check ran, DEFINITIVE either way) vs `"error"` (it could not run — never collapse into `"fail"`).
+ *  {@link verifyPersistedPathSet} and {@link branchContentLandedInCommit} both return this. */
+type CheckVerdict = "pass" | "fail" | "error";
+
+/** @decision c0d0eac9 round 5 (finding 1) — a value must match this shape before it ever reaches git;
+ *  `Loom-Worker-Base` itself is parsed far more loosely (`/^\S+$/`), so this is the real shape gate. */
+const OBJECT_ID_SHAPE_RE = /^[0-9a-f]{40,64}$/;
+
 /** @decision 756a2cd8 — verifies a squash commit's persisted path-set trailer purely from its OWN ancestry
  *  (survives branch deletion + `git gc`).
  *
- *  A `true` proves only the SAME FILE SET, never the same CONTENT —
+ *  A `"pass"` proves only the SAME FILE SET, never the same CONTENT —
  *  never read it as content-verified; two branches sharing an identical path set are NOT distinguishable by
- *  this check alone. */
+ *  this check alone.
+ *
+ * @decision c0d0eac9 round 5 (finding 1) — `baseOverride` is CANDIDATE-SUPPLIED; malformed/nonexistent is
+ * the candidate's own claim being false, a DEFINITIVE `"fail"`, never `"error"` — never catch-and-collapse
+ * this existence check into the same bucket as a genuine git/spawn failure.
+ */
 async function verifyPersistedPathSet(
   git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, expectedDigest: string, baseOverride?: string,
-): Promise<boolean> {
+): Promise<CheckVerdict> {
   try {
-    const parent = baseOverride ?? (await withTimeout(
-      git.raw(["rev-parse", `${sha}^`]), timeoutMs, "git rev-parse (path-set verify parent)",
-    )).trim();
+    let parent: string;
+    if (baseOverride !== undefined) {
+      if (!OBJECT_ID_SHAPE_RE.test(baseOverride)) return "fail";
+      // @decision c0d0eac9 round 6 (finding 1) — round 5's `<id>^{commit}` peel throws on an EXISTING
+      // non-commit object ("expected commit type", exit 1) — wrongly "error", aborting the lookup.
+      // `^{object}` (existence only) then `cat-file -t` (now safe) gets the type — neither ever throws.
+      // @decision c0d0eac9 round 7 (finding 2) — a 41-64-hex baseOverride resolves as a REF NAME, not an
+      // object id, in a SHA-1 repo; require the resolved stdout to equal baseOverride EXACTLY and reuse
+      // that one validated sha below, never re-resolving the same candidate-supplied text again.
+      const resolved = (await withTimeout(
+        git.raw(["-c", "core.warnAmbiguousRefs=false", "rev-parse", "--verify", "--quiet", `${baseOverride}^{object}`]),
+        timeoutMs, "git rev-parse --verify --quiet (base existence, any object type)",
+      )).trim();
+      if (resolved === "" || resolved !== baseOverride) return "fail";
+      const objectType = (await withTimeout(
+        git.raw(["-c", "core.warnAmbiguousRefs=false", "cat-file", "-t", resolved]),
+        timeoutMs, "git cat-file -t (base object type)",
+      )).trim();
+      // Accept ONLY a raw commit object — never peel a tag. The real writer always stamps a raw commit
+      // sha; a tag naming this exact id is never what a genuine Loom-Worker-Base trailer would carry.
+      if (objectType !== "commit") return "fail";
+      parent = resolved;
+    } else {
+      // @decision c0d0eac9 round 6 (finding 2) — `${sha}^` throws for a PARENTLESS (root) commit — a
+      // real shape (a candidate merged on as a second parent). Read the parent list first instead.
+      const parentsOut = (await withTimeout(
+        git.raw(["rev-list", "--parents", "-n1", sha]), timeoutMs, "git rev-list --parents -n1 (path-set verify parent)",
+      )).trim();
+      const tokens = parentsOut.split(/\s+/).filter(Boolean);
+      // @decision c0d0eac9 round 7 (finding 3) — `sha` is already known-real (it came from the same
+      // `git log` scan that found this candidate), so empty/mismatched output here is a FAULT, never a
+      // legitimate "no parent" — only a genuine first token echoing `sha` back may answer that question.
+      if (tokens.length === 0 || tokens[0] !== sha) return "error";
+      if (tokens.length < 2) return "fail"; // no parent — a root commit; definitive, never an error
+      parent = tokens[1]!;
+    }
     const actual = await changedPathSetDigest(git, parent, sha, timeoutMs);
-    return actual === expectedDigest;
+    return actual === expectedDigest ? "pass" : "fail";
   } catch {
-    return false;
+    return "error";
   }
 }
 
@@ -7635,23 +7683,125 @@ async function classifyAgainstLedger(
  *
  * @decision c13666c6 round 2 — never pass a resolved watermark branch here as `ref`; always the caller's
  * own scanned ref, or this re-opens finding 5 (a fresh-checkout branch losing its gate).
+ *
+ * @decision c0d0eac9 round 3 — `positiveProof` is ledger `"recorded"` ONLY, never a PathSet trailer (self-
+ * consistent only, decision `756a2cd8`).
+ *
+ * @decision c0d0eac9 round 4 (finding B1) — `error` (renamed from round 3's `ledgerError`) is true on
+ * EITHER a non-definitive PathSet check OR a ledger `"error"` verdict. A caller must abort the WHOLE
+ * lookup on it (see `walkCandidates`), regardless of strict/tolerant.
  */
 async function verifyGoneBranchLanding(
   git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, ref: string, pathSet: string | null, baseOverride: string | undefined,
   deps: BoundedGitDeps,
-): Promise<boolean> {
-  if (pathSet && !(await verifyPersistedPathSet(git, timeoutMs, sha, pathSet, baseOverride))) return false;
+): Promise<{ passed: boolean; positiveProof: boolean; error: boolean }> {
+  if (pathSet !== null) {
+    const pathSetVerdict = await verifyPersistedPathSet(git, timeoutMs, sha, pathSet, baseOverride);
+    if (pathSetVerdict === "error") return { passed: false, positiveProof: false, error: true };
+    if (pathSetVerdict === "fail") return { passed: false, positiveProof: false, error: false };
+  }
   const ledger = deps.goneBranchLedger;
-  if (!ledger) return true;
+  if (!ledger) return { passed: true, positiveProof: false, error: false };
   const verdict = await classifyAgainstLedger(git, timeoutMs, sha, ref, ledger);
-  return verdict === "skip" || verdict === "pre-ledger" || verdict === "recorded";
+  const passed = verdict === "skip" || verdict === "pre-ledger" || verdict === "recorded";
+  return { passed, positiveProof: verdict === "recorded", error: verdict === "error" };
+}
+
+/** @decision c0d0eac9 — bounds verification attempts (never the scan itself) in the "newest verified
+ *  wins" walk below; do not remove this cap — an unbounded walk lets a `.git`-write attacker force
+ *  unbounded git spawns per lookup by planting many newer candidates that each fail verification. */
+const MIXED_VERIFY_CAP = 5;
+
+/** @decision c0d0eac9 — never let the fallback below return LESS than round 2's own strict-first answer:
+ *  it must keep trying strict-only candidates past {@link MIXED_VERIFY_CAP}, bounded here, before failing
+ *  closed — sized to the same scale as {@link GONE_BRANCH_LEDGER_ROW_SPAWN_CAP}. */
+const STRICT_FALLBACK_VERIFY_CAP = 8;
+
+/** @decision c0d0eac9 round 4 (finding N2) — rate-limits the cap-exceeded warn below; a UI-polled caller
+ *  must not log once per poll. Keyed by (caller, branch); see the decision record for the measured need. */
+const WALK_CAP_WARN_RATE_LIMIT_MS = 10 * 60 * 1000;
+const WALK_CAP_WARN_MAX = 500;
+const walkCapWarnTimestamps = new Map<string, number>();
+
+function logWalkCapExceededRateLimited(caller: string, branch: string, message: string): void {
+  const key = `${caller}\u0000${branch}`;
+  const now = Date.now();
+  const last = walkCapWarnTimestamps.get(key);
+  if (last !== undefined && now - last < WALK_CAP_WARN_RATE_LIMIT_MS) return;
+  if (last === undefined && walkCapWarnTimestamps.size >= WALK_CAP_WARN_MAX) {
+    const oldestKey = walkCapWarnTimestamps.keys().next().value;
+    if (oldestKey !== undefined) walkCapWarnTimestamps.delete(oldestKey);
+  }
+  walkCapWarnTimestamps.delete(key); // re-set moves it to the end — eviction targets truly stale keys
+  walkCapWarnTimestamps.set(key, now);
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
+
+/**
+ * @decision c0d0eac9 round 3 (finding 4) — the ONE shared walk findLandedSquashCommit and
+ * resolveMergedCommitMapHitList both use, so the two can never drift (round 2's finding 1 was such a drift).
+ *
+ * @decision c0d0eac9 round 4 (finding B1, superseding round 3) — `outcome.error` on ANY candidate (strict
+ * OR tolerant) aborts the WHOLE lookup to `null`; the walk can't tell a stale older candidate from the
+ * right one once a status is UNKNOWN, so it takes the floor. See the decision record's round-4 section.
+ */
+async function walkCandidates<C extends { strict: boolean }, R>(
+  branch: string, caller: string, candidates: C[],
+  verify: (candidate: C) => Promise<{ passed: boolean; positiveProof: boolean; error: boolean; resolved: R | null }>,
+): Promise<{ candidate: C; resolved: R } | null> {
+  const hasAnyStrictCandidate = candidates.some((c) => c.strict);
+
+  // PHASE 1 — "newest verified wins": walk the full newest-first candidate list, verifying up to
+  // MIXED_VERIFY_CAP of them, returning the first that passes.
+  let mixedAttempts = 0;
+  let strictAttempts = 0;
+  for (const candidate of candidates) {
+    if (mixedAttempts >= MIXED_VERIFY_CAP) break;
+    mixedAttempts++;
+    if (candidate.strict) strictAttempts++;
+    const outcome = await verify(candidate);
+    if (outcome.error) return null; // round 4 (B1): ANY non-definitive outcome aborts the WHOLE lookup
+    if (!outcome.passed || outcome.resolved === null) continue;
+    // A TOLERANT candidate may only win over a competing STRICT one with POSITIVE PROOF of authorship —
+    // without it, this pass doesn't count; keep walking toward an older strict candidate instead.
+    if (!candidate.strict && hasAnyStrictCandidate && !outcome.positiveProof) continue;
+    return { candidate, resolved: outcome.resolved };
+  }
+
+  // PHASE 2 (fallback) — the round-2 FLOOR: keep trying STRICT candidates only, past MIXED_VERIFY_CAP, up
+  // to STRICT_FALLBACK_VERIFY_CAP total strict attempts (counting phase 1's own strict attempts above,
+  // never a second independent budget). Never re-verifies a candidate phase 1 already tried (this loop
+  // starts at `mixedAttempts`, strictly past everything phase 1 just walked).
+  for (let i = mixedAttempts; i < candidates.length; i++) {
+    const candidate = candidates[i]!;
+    if (!candidate.strict) continue;
+    if (strictAttempts >= STRICT_FALLBACK_VERIFY_CAP) {
+      // @decision c0d0eac9 round 4 (finding N2) — this branch is UNREACHABLE from the map path's own
+      // caller: scanMergedCommitMap never stores more than STRICT_FALLBACK_VERIFY_CAP strict entries per
+      // branch, so there is never a (cap+1)th strict candidate left for it to try.
+      logWalkCapExceededRateLimited(caller, branch, `[git] ${caller}: ${branch} has more than ${STRICT_FALLBACK_VERIFY_CAP} ` +
+        "strict trailer candidates that all failed verification — refusing to treat any of them as " +
+        "landed (card c0d0eac9)");
+      break;
+    }
+    strictAttempts++;
+    const outcome = await verify(candidate);
+    if (outcome.error) return null; // round 4 (B1): applies in phase 2 too
+    if (outcome.passed && outcome.resolved !== null) return { candidate, resolved: outcome.resolved };
+  }
+  return null;
 }
 
 /** @decision 6ee48e4d — locates the squash-merge commit via the deterministic `Loom-Worker-Branch:` trailer.
  *
  *  RE-TASK GUARD confirms the trailer commit is NOT an ancestor of the branch tip when the branch still exists
  *  (a re-cut DESCENDS from it; a genuine orphan diverges) — never `--is-ancestor` (misreads); use merge-base
- *  equality. FAILS SAFE to `null`. */
+ *  equality. FAILS SAFE to `null`.
+ *
+ *  @decision c0d0eac9 — picks the newest VERIFIED candidate (strict or tolerant), not the newest STRICT
+ *  one unconditionally; do not revert to unconditional strict-priority — it hides a newer genuine
+ *  tolerant landing behind an older strict one. */
 export async function findLandedSquashCommit(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
   onPreFixTrailerNotice?: (branch: string, sha: string) => void,
@@ -7670,73 +7820,81 @@ export async function findLandedSquashCommit(
       git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
       timeoutMs, "git log --grep trailer",
     );
-    let sha = "";
-    let trailers: LoomTrailers | null = null;
-    let tolerantSha = "";
-    let tolerantTrailers: LoomTrailers | null = null;
+    // @decision c0d0eac9 — collect EVERY matching candidate (never break on the first strict hit — that
+    // was round 2's own mistake, hiding a newer genuine tolerant landing behind an older strict one).
+    // Zero extra cost: `out` above already holds the full matching output from the one git call.
+    const candidates: Array<{ sha: string; trailers: LoomTrailers; strict: boolean }> = [];
     for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
       const sepIdx = record.indexOf("\x1f");
       if (sepIdx === -1) continue;
+      const sha = record.slice(0, sepIdx).trim();
       const body = record.slice(sepIdx + 1);
       const strict = parseLoomTrailerBlock(body);
-      if (strict?.branch === branch) {
-        // @decision 45036494 (round 2) — strict ALWAYS wins, regardless of recency: a newer tolerant-only
-        // candidate (a hand-authored commit quoting a Loom block) must never shadow an older, genuinely-
-        // landed strict one just by appearing first in this newest-first scan.
-        //
-        // RESIDUAL (round 3, documented not fixed): the same ranking can go the OTHER way — an OLDER
-        // strict landing can hide a NEWER genuine tolerantly-readable (hook-displaced) landing of the SAME
-        // branch name. Reachable only when that branch name lands twice with a displacing hook starting
-        // between the two landings; branch-present fails safe (null), branch-gone returns the older sha
-        // (no worse than pre-card mainline, just stale). See docs/decisions/45036494-*.md's Round 3
-        // section and card c0d0eac9 ("fix(git): pick the newest verified landing when strict and tolerant
-        // hits compete").
-        sha = record.slice(0, sepIdx).trim();
-        trailers = strict;
-        break;
-      }
-      if (!tolerantSha) {
-        // Tolerant fallback ONLY, never instead of the strict parse; both arms below (content check /
-        // ledger gate) independently verify whatever this discovers before it is trusted. Remember only
-        // the FIRST (newest) tolerant hit — kept scanning for a strict one rather than breaking here.
-        const tolerant = tolerantFindLoomTrailerBlock(body);
-        if (tolerant?.branch === branch) {
-          tolerantSha = record.slice(0, sepIdx).trim();
-          tolerantTrailers = tolerant;
-        }
-      }
+      if (strict?.branch === branch) { candidates.push({ sha, trailers: strict, strict: true }); continue; }
+      // Tolerant fallback ONLY, never instead of the strict parse; the per-candidate verifier below
+      // independently verifies whatever this discovers before it is ever trusted.
+      const tolerant = tolerantFindLoomTrailerBlock(body);
+      if (tolerant?.branch === branch) candidates.push({ sha, trailers: tolerant, strict: false });
     }
-    if (!sha) { sha = tolerantSha; trailers = tolerantTrailers; }
-    if (!sha || !trailers) return null;
+    if (candidates.length === 0) return null;
+
+    // @decision c0d0eac9 round 3 (finding 1) — NOT separately try/caught: a throw here reaches this
+    // function's OWN outer catch, failing the whole call to `null` — never degrade to `branchPresent:
+    // false` (see resolveMergedCommitMapHitList's identical fix for the map path, which had that bug).
     const branchPresent = (await withTimeout(
       git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
     )).trim() !== "";
-    if (branchPresent) {
-      // Re-task guard: if the trailer commit is an ANCESTOR of the branch tip, the branch was re-cut onto
-      // it (a re-spawned task carrying NEW live work) — NOT an orphaned squash-merge of the current branch.
-      const mergeBase = (await withTimeout(
-        git.raw(["merge-base", sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
-      )).trim();
-      if (mergeBase === sha) return null;
-      // Content-reachability (branchContentLandedInCommit) is the NON-TRAILER verifier for this arm —
-      // card 45036494's own widened discovery above still needs this to trust the candidate.
-      if (!(await branchContentLandedInCommit(repoPath, branch, sha, mergeBase, deps))) return null;
-    } else {
-      // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has
-      // one, PLUS (card c13666c6) the ledger-cutover gate — see verifyGoneBranchLanding's own doc.
-      const pathSet = trailers.pathSet;
-      if (!pathSet && onPreFixTrailerNotice) {
-        onPreFixTrailerNotice(branch, sha);
-      } else if (!pathSet) {
-        // eslint-disable-next-line no-console
-        console.info(`[git] findLandedSquashCommit: ${branch} is gone and its landed commit ${sha.slice(0, 7)} ` +
-          "carries no Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone (card f621f185)");
+
+    // Shared per-candidate verifier — the branch-present/branch-gone logic itself is UNCHANGED from
+    // before this card; only WHICH candidate(s) get a turn at it has changed. Returns `positiveProof`/
+    // `error` alongside `passed` (round 2 finding 2 / round 4 finding B1 — see verifyGoneBranchLanding's
+    // own doc); branch-present's content check is NEVER positive proof (an attacker who can write to the
+    // shared .git can craft a decoy whose tree matches the live branch, without being its real author).
+    //
+    // @decision c0d0eac9 round 4 (finding B1, supersedes round 2 here) — the outer catch now returns
+    // `error: true`, not a bare fail: an uncaught throw (e.g. the re-task-guard's merge-base call) is
+    // non-definitive, so walkCandidates aborts the whole lookup on it instead of treating it as a fail.
+    const verify = async (candidate: { sha: string; trailers: LoomTrailers; strict: boolean }): Promise<{ passed: boolean; positiveProof: boolean; error: boolean; resolved: string | null }> => {
+      try {
+        if (branchPresent) {
+          // Re-task guard: if the trailer commit is an ANCESTOR of the branch tip, the branch was re-cut
+          // onto it (a re-spawned task carrying NEW live work) — NOT an orphaned squash-merge.
+          //
+          // @decision c0d0eac9 round 5 (CR4's reasoned point) — `git merge-base` with NO common ancestor
+          // exits 1, empty output, no throw at all (empirically, via simple-git) — DEFINITIVE "unrelated",
+          // never "error". Short-circuit here rather than feed an empty `mergeBase` into the content check.
+          const mergeBase = (await withTimeout(
+            git.raw(["merge-base", candidate.sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
+          )).trim();
+          if (mergeBase === "") return { passed: false, positiveProof: false, error: false, resolved: null };
+          if (mergeBase === candidate.sha) return { passed: false, positiveProof: false, error: false, resolved: null };
+          // Content-reachability is the NON-TRAILER verifier for this arm.
+          const contentVerdict = await branchContentLandedInCommit(repoPath, branch, candidate.sha, mergeBase, deps);
+          if (contentVerdict === "error") return { passed: false, positiveProof: false, error: true, resolved: null };
+          const ok = contentVerdict === "pass";
+          return { passed: ok, positiveProof: false, error: false, resolved: ok ? candidate.sha : null };
+        }
+        // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has
+        // one, PLUS (card c13666c6) the ledger-cutover gate — see verifyGoneBranchLanding's own doc.
+        const pathSet = candidate.trailers.pathSet;
+        if (!pathSet && onPreFixTrailerNotice) {
+          onPreFixTrailerNotice(branch, candidate.sha);
+        } else if (!pathSet) {
+          // eslint-disable-next-line no-console
+          console.info(`[git] findLandedSquashCommit: ${branch} is gone and its landed commit ${candidate.sha.slice(0, 7)} ` +
+            "carries no Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone (card f621f185)");
+        }
+        // Phase 2 (card d62dad73) + card 756a2cd8: prefer the commit's own Loom-Worker-Base trailer as the
+        // path-set verification base when present; undefined falls back to sha^ — see verifyPersistedPathSet's doc.
+        const { passed, positiveProof, error } = await verifyGoneBranchLanding(git, timeoutMs, candidate.sha, base, pathSet, candidate.trailers.base ?? undefined, deps);
+        return { passed, positiveProof, error, resolved: passed ? candidate.sha : null };
+      } catch {
+        return { passed: false, positiveProof: false, error: true, resolved: null }; // fail safe: an UNCAUGHT throw is non-definitive (round 4) — walkCandidates aborts the whole lookup on it
       }
-      // Phase 2 (card d62dad73) + card 756a2cd8: prefer the commit's own Loom-Worker-Base trailer as the
-      // path-set verification base when present; undefined falls back to sha^ — see verifyPersistedPathSet's doc.
-      if (!(await verifyGoneBranchLanding(git, timeoutMs, sha, base, pathSet, trailers.base ?? undefined, deps))) return null;
-    }
-    return sha;
+    };
+
+    const walked = await walkCandidates(branch, "findLandedSquashCommit", candidates, verify);
+    return walked?.resolved ?? null;
   } catch {
     return null; // fail safe: unknown signal → NOT landed → caller KEEPS the worktree
   }
@@ -7770,8 +7928,12 @@ export async function findIntroducingSquashCommit(
     }
     const at = shas.indexOf(landedSha);
     if (at === -1) return landedSha;
+    // @decision c0d0eac9 round 6 (finding 3) — was interpolated into the diff range below with no empty
+    // check: "no common ancestor" would silently become `..branchRef`. Guard it like the loop's own below.
+    const landedMergeBase = (await withTimeout(git.raw(["merge-base", landedSha, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
+    if (!landedMergeBase) return landedSha; // no common ancestor — fails conservatively, same as any other ambiguity here
     const ownChanges = (await withTimeout(
-      git.raw(["diff", "--name-only", `${(await withTimeout(git.raw(["merge-base", landedSha, branchRef]), timeoutMs, "git merge-base (attribution)")).trim()}..${branchRef}`]),
+      git.raw(["diff", "--name-only", `${landedMergeBase}..${branchRef}`]),
       timeoutMs, "git diff --name-only (attribution)",
     )).trim();
     if (!ownChanges) return landedSha;
@@ -7779,7 +7941,10 @@ export async function findIntroducingSquashCommit(
     for (const older of shas.slice(at + 1, at + 1 + INTRODUCING_COMMIT_MAX_OLDER)) {
       const mergeBase = (await withTimeout(git.raw(["merge-base", older, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
       if (!mergeBase || mergeBase === older) break; // re-cut onto it: the branch descends from this commit
-      if (!(await branchContentLandedInCommit(repoPath, branch, older, mergeBase, deps))) break;
+      // Attribution-only (decision 293d418e) — treats "error" the same as "fail" here, unlike the gating
+      // walk's own tri-state handling; this function already fails conservatively (returns landedSha) on
+      // any ambiguity via its own outer catch, so a non-pass of either kind just stops the older-walk.
+      if ((await branchContentLandedInCommit(repoPath, branch, older, mergeBase, deps)) !== "pass") break;
       introducer = older;
     }
     return introducer;
@@ -8221,6 +8386,10 @@ const MERGED_MAP_RECORD_SEP = "\x1e";
 export interface MergedMapEntry extends MergedCommitInfo {
   pathSetDigest: string | null;
   baseSha: string | null;
+  /** @decision c0d0eac9 — whether THIS candidate's own trailer parsed strict or tolerant; the map path's
+   *  "newest verified wins, strict-first floor" walk ({@link resolveMergedCommitMapHitList}) needs this
+   *  per-candidate, not just per-branch, now that a branch can carry more than one candidate. */
+  strict: boolean;
 }
 
 /**
@@ -8231,11 +8400,19 @@ export interface MergedMapEntry extends MergedCommitInfo {
  * `truncated: true` covers both a genuine limit-hit AND any scan failure/timeout (the existing fail-safe
  * empty map) — a caller that wants to treat a miss as authoritative must check this flag first; treating
  * every miss as authoritative without it would silently narrow full-history detection.
+ *
+ * @decision c0d0eac9 — each branch now maps to a bounded, newest-first LIST of candidates (strict and
+ * tolerant together), not a single "best guess" entry — see {@link resolveMergedCommitMapHitList}.
  */
 export interface MergedCommitScan {
-  map: Map<string, MergedMapEntry>;
+  map: Map<string, MergedMapEntry[]>;
   truncated: boolean;
 }
+
+/** @decision c0d0eac9 — caps how many candidates {@link scanMergedCommitMap} retains PER BRANCH; must stay
+ *  >= `MIXED_VERIFY_CAP + STRICT_FALLBACK_VERIFY_CAP`, or the map path's own fallback walk could run out of
+ *  retained strict candidates before `findLandedSquashCommit`'s own unbounded, fresh-per-call scan would. */
+const MAP_CANDIDATE_LIST_CAP = MIXED_VERIFY_CAP + STRICT_FALLBACK_VERIFY_CAP;
 
 /** @decision 6ee48e4d — one bounded `git log` pass building a `branch -> {sha, date, pathSetDigest, baseSha}`
  *  map, plus whether the scan was TRUNCATED — count EVERY record seen, never only trailer-matching ones, or a
@@ -8243,16 +8420,11 @@ export interface MergedCommitScan {
 async function scanMergedCommitMap(
   repoPath: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<MergedCommitScan> {
-  const map = new Map<string, MergedMapEntry>();
-  // @decision 45036494 (round 2) — tolerant-only hits land here, merged into `map` below only for a
-  // branch with NO strict hit — ranking strict above tolerant so a newer tolerant-only candidate (a
-  // hand-authored false positive quoting a trailer) can never shadow an older, genuinely-landed strict one.
-  //
-  // RESIDUAL (round 3, documented not fixed): the same ranking direction can hide a NEWER genuine
-  // tolerantly-readable (hook-displaced) landing behind an OLDER strict one of the same branch name — same
-  // narrow reachability and fail-safe bound as findLandedSquashCommit's own comment above; see
-  // docs/decisions/45036494-*.md's Round 3 section and card c0d0eac9.
-  const tolerantMap = new Map<string, MergedMapEntry>();
+  const map = new Map<string, MergedMapEntry[]>();
+  // @decision c0d0eac9 round 2 (finding 1, CRITICAL) — kept SEPARATE from `list.length`: a single shared
+  // cap let enough tolerant-shaped candidates evict a genuine strict landing from the list entirely.
+  // Mirrors findLandedSquashCommit's own two-phase walk AT STORAGE TIME — see that function's own doc.
+  const perBranchCounts = new Map<string, { mixed: number; strict: number }>();
   let recordCount = 0;
   try {
     // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent baseDir
@@ -8275,19 +8447,29 @@ async function scanMergedCommitMap(
       const body = record.slice(sep2 + 1);
       if (!sha) continue;
       const strict = parseLoomTrailerBlock(body);
-      if (strict) {
-        const branch = strict.branch;
-        if (!map.has(branch)) map.set(branch, { sha, date, pathSetDigest: strict.pathSet, baseSha: strict.base }); // first STRICT hit = most recent
-        continue;
+      // Tolerant fallback ONLY, never instead of the strict parse; every reader of this map
+      // (resolveMergedCommitMapHit) independently verifies a candidate (content check / c13666c6's ledger
+      // gate) before trusting it.
+      const trailers = strict ?? tolerantFindLoomTrailerBlock(body);
+      if (!trailers) continue;
+      const branch = trailers.branch;
+      let list = map.get(branch);
+      if (!list) { list = []; map.set(branch, list); }
+      let counts = perBranchCounts.get(branch);
+      if (!counts) { counts = { mixed: 0, strict: 0 }; perBranchCounts.set(branch, counts); }
+      const isStrict = strict !== null;
+      // @decision c0d0eac9 — newest-first: the first MIXED_VERIFY_CAP candidates of ANY kind are kept;
+      // past that, ONLY strict ones, up to STRICT_FALLBACK_VERIFY_CAP — a tolerant one past the mixed
+      // window is dropped outright, never occupying a slot a strict candidate might still need.
+      if (counts.mixed < MIXED_VERIFY_CAP) {
+        list.push({ sha, date, pathSetDigest: trailers.pathSet, baseSha: trailers.base, strict: isStrict });
+        counts.mixed++;
+        if (isStrict) counts.strict++;
+      } else if (isStrict && counts.strict < STRICT_FALLBACK_VERIFY_CAP) {
+        list.push({ sha, date, pathSetDigest: trailers.pathSet, baseSha: trailers.base, strict: true });
+        counts.strict++;
       }
-      // Tolerant fallback ONLY; every reader of this map (resolveMergedCommitMapHit) independently
-      // verifies a hit (content check / c13666c6's ledger gate) before trusting it.
-      const tolerant = tolerantFindLoomTrailerBlock(body);
-      if (!tolerant) continue;
-      const branch = tolerant.branch;
-      if (!tolerantMap.has(branch)) tolerantMap.set(branch, { sha, date, pathSetDigest: tolerant.pathSet, baseSha: tolerant.base });
     }
-    for (const [branch, entry] of tolerantMap) if (!map.has(branch)) map.set(branch, entry);
   } catch {
     return { map, truncated: true }; // fail safe: empty map + inconclusive -> every lookup misses AND must fall back
   }
@@ -8295,10 +8477,10 @@ async function scanMergedCommitMap(
   // getTaskMergedInfo runs per task on every polled board read, so per-lookup logging would flood the daemon
   // log.
   let noPathSetTrailerCount = 0;
-  for (const entry of map.values()) if (entry.pathSetDigest === null) noPathSetTrailerCount++;
+  for (const list of map.values()) for (const entry of list) if (entry.pathSetDigest === null) noPathSetTrailerCount++;
   if (noPathSetTrailerCount > 0) {
     // eslint-disable-next-line no-console
-    console.info(`[git] scanMergedCommitMap: ${noPathSetTrailerCount} landed branch(es) in ${repoPath} carry no ` +
+    console.info(`[git] scanMergedCommitMap: ${noPathSetTrailerCount} candidate(s) in ${repoPath} carry no ` +
       "Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a best-effort Base/PathSet stamp that " +
       "failed to land — logged at the stamp site when it happens) — trusting Loom-Worker-Branch presence " +
       "alone for those once their branch is gone, until re-merged");
@@ -8319,7 +8501,7 @@ const MERGED_MAP_CACHE_MAX_ENTRIES = 100;
 
 interface MergedMapCacheEntry {
   headSha: string;
-  map: Map<string, MergedMapEntry>;
+  map: Map<string, MergedMapEntry[]>;
   truncated: boolean;
 }
 
@@ -8413,39 +8595,48 @@ export async function getMergedCommitMapCached(
 }
 
 /** {@link resolveMergedCommitMapHit}'s resolved answer: the verified sha PLUS which mode verified it —
- *  see {@link MergedVerificationMode}. */
+ *  see {@link MergedVerificationMode}. `positiveProof` mirrors {@link verifyGoneBranchLanding}'s own
+ *  field (card c0d0eac9 round 2) — `false` unconditionally for `verification: "content"` (branch-present
+ *  never counts as positive authorship proof), threaded through for the two branch-gone tiers. */
 interface ResolvedMergedHit {
   sha: string;
   verification: MergedVerificationMode;
+  positiveProof: boolean;
 }
 
 /**
  * Shared verification body for a {@link scanMergedCommitMap} entry, factored out of {@link
- * getTaskMergedInfo} so {@link findLandedSquashCommitViaMap} (boot-reconcile Pass A's batch path, card
- * 6ee48e4d) can apply the IDENTICAL re-task-ancestry-guard + content/path-set check a map hit needs,
- * rather than a second hand-copied verification with its own chance to drift from this one. Same
- * fail-safe contract as every verification in this file: any error, or the checks genuinely disagreeing,
- * returns null (NOT landed) — never resolve ambiguity to `hit.sha`.
+ * getTaskMergedInfo} so {@link findLandedSquashCommitViaMap} can apply the IDENTICAL re-task-ancestry-
+ * guard + content/path-set check a map hit needs, rather than a second hand-copied verification. Same
+ * fail-safe contract as every verification in this file: any ambiguity returns `passed:false`/
+ * `resolved:null` — never resolve ambiguity to `hit.sha`.
+ *
+ * `branchPresent` is a REQUIRED caller-supplied param (hoisted by {@link resolveMergedCommitMapHitList}),
+ * never computed internally. Always returns all four fields (never a bare null), so {@link
+ * walkCandidates} can see `error` — true on ANY non-definitive sub-check (a throw, or a `"error"` {@link
+ * CheckVerdict}), never collapsed into a definitive `fail` (round 4, finding B1) — even when `passed` is
+ * false; `resolved` is non-null exactly when `passed` is true.
  */
 async function resolveMergedCommitMapHit(
-  repoPath: string, branch: string, hit: MergedMapEntry, ref: string, deps: BoundedGitDeps,
-): Promise<ResolvedMergedHit | null> {
+  repoPath: string, branch: string, hit: MergedMapEntry, ref: string, branchPresent: boolean, deps: BoundedGitDeps,
+): Promise<{ passed: boolean; positiveProof: boolean; error: boolean; resolved: ResolvedMergedHit | null }> {
+  const fail = { passed: false, positiveProof: false, error: false, resolved: null };
+  const errorOut = { passed: false, positiveProof: false, error: true, resolved: null };
   try {
-    // Bounded via the SAME git+timeoutMs as the merge-base call below (mirrors findLandedSquashCommit's
-    // OWN `branch --list` check exactly) — NOT the shared (workerDiff-private) branchExists() helper,
-    // which as of card c6a6f405 is also bounded but would construct its own separate bounded git client
-    // for the same repo; reusing this one instance avoids that redundant construction.
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const branchPresent = (await withTimeout(
-      git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
-    )).trim() !== "";
     if (branchPresent) {
+      // @decision c0d0eac9 round 5 — same classification as findLandedSquashCommit's own re-task-guard
+      // merge-base: empty output (no common ancestor) is DEFINITIVE, never "error" — see that call's own
+      // comment for the full reasoning.
       const mergeBase = (await withTimeout(
         git.raw(["merge-base", hit.sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
       )).trim();
-      if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
-      if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
-      return { sha: hit.sha, verification: "content" };
+      if (mergeBase === "") return fail;
+      if (mergeBase === hit.sha) return fail; // re-cut onto its own prior squash: live again, not landed
+      const contentVerdict = await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps);
+      if (contentVerdict === "error") return errorOut;
+      if (contentVerdict !== "pass") return fail;
+      return { passed: true, positiveProof: false, error: false, resolved: { sha: hit.sha, verification: "content", positiveProof: false } };
     }
     // Branch gone (card f621f185): verify against the persisted path-set trailer when this hit has one,
     // PLUS (card c13666c6) the ledger-cutover gate — see verifyGoneBranchLanding's own doc. `hit.baseSha`
@@ -8453,11 +8644,41 @@ async function resolveMergedCommitMapHit(
     // present; undefined/null falls back to sha^ for a commit that predates either fix, exactly as before.
     // A pre-fix hit with no path-set trailer still runs the ledger gate — not logged here either way:
     // scanMergedCommitMap already logs the pre-fix count once per actual scan — see its own comment.
-    if (!(await verifyGoneBranchLanding(git, timeoutMs, hit.sha, ref, hit.pathSetDigest, hit.baseSha ?? undefined, deps))) return null;
-    return { sha: hit.sha, verification: hit.pathSetDigest ? "pathset" : "trailer-only" };
+    const { passed, positiveProof, error } = await verifyGoneBranchLanding(git, timeoutMs, hit.sha, ref, hit.pathSetDigest, hit.baseSha ?? undefined, deps);
+    if (!passed) return { passed: false, positiveProof, error, resolved: null };
+    return { passed: true, positiveProof, error, resolved: { sha: hit.sha, verification: hit.pathSetDigest ? "pathset" : "trailer-only", positiveProof } };
   } catch {
-    return null; // fail safe
+    return errorOut; // fail safe: an UNCAUGHT throw is non-definitive (round 4)
   }
+}
+
+/** {@link resolveMergedCommitMapHitList}'s resolved answer: the winning candidate entry PLUS its verified
+ *  result — callers need the entry back (e.g. for its `.date`) since the winner isn't always `list[0]`. */
+interface ResolvedMergedHitList {
+  entry: MergedMapEntry;
+  resolved: ResolvedMergedHit;
+}
+
+/** @decision c0d0eac9 — the map path's twin of findLandedSquashCommit's own walk (both now delegate to
+ *  the shared {@link walkCandidates}) — must stay behaviorally symmetric or the two readers can disagree
+ *  on whether the same branch is landed. */
+async function resolveMergedCommitMapHitList(
+  repoPath: string, branch: string, candidates: MergedMapEntry[], ref: string, deps: BoundedGitDeps,
+): Promise<ResolvedMergedHitList | null> {
+  // @decision c0d0eac9 round 3 (finding 1, CRITICAL) — a branch-list failure fails the WHOLE lookup to
+  // `null` (matching findLandedSquashCommit). Round 2's `branchPresent:false` degrade silently routed a
+  // LIVE branch onto the branch-gone arm, skipping the re-task guard — never a false accept.
+  let branchPresent: boolean;
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    branchPresent = (await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list")).trim() !== "";
+  } catch {
+    return null;
+  }
+
+  const walked = await walkCandidates(branch, "resolveMergedCommitMapHitList", candidates,
+    (entry) => resolveMergedCommitMapHit(repoPath, branch, entry, ref, branchPresent, deps));
+  return walked ? { entry: walked.candidate, resolved: walked.resolved } : null;
 }
 
 /** Batch-primitive sibling of {@link findLandedSquashCommit}: looks `branch` up against the shared cached
@@ -8473,10 +8694,10 @@ export async function findLandedSquashCommitViaMap(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<{ hit: true; sha: string | null } | { hit: false; scanComplete: boolean }> {
   const { map, truncated } = await getMergedCommitMapCached(repoPath, base, deps);
-  const entry = map.get(branch);
-  if (!entry) return { hit: false, scanComplete: !truncated };
-  const resolved = await resolveMergedCommitMapHit(repoPath, branch, entry, base, deps);
-  return { hit: true, sha: resolved?.sha ?? null };
+  const candidates = map.get(branch);
+  if (!candidates || candidates.length === 0) return { hit: false, scanComplete: !truncated };
+  const resolved = await resolveMergedCommitMapHitList(repoPath, branch, candidates, base, deps);
+  return { hit: true, sha: resolved?.resolved.sha ?? null };
 }
 
 /** One entry of the Git tab's worker-branch enrichment — see {@link resolveWorkerBranchInfo}. */
@@ -8527,16 +8748,18 @@ export async function getTaskMergedInfo(
 ): Promise<MergedCommitInfo | null> {
   const branch = `loom/${taskKey(taskId)}`;
   const { map } = await getMergedCommitMapCached(repoPath, "HEAD", deps);
-  const hit = map.get(branch);
-  if (!hit) return null;
-  // Verification delegated to {@link resolveMergedCommitMapHit} (card 6ee48e4d factored this out of a
-  // hand-inlined copy here so boot-reconcile Pass A's {@link findLandedSquashCommitViaMap} shares the
-  // IDENTICAL re-task-guard + content/path-set check) — behaviour-identical to the version this replaces,
-  // now ALSO reporting which of the two verification means (or the pre-fix degrade) answered it (card
-  // 52e978ad) — see {@link MergedVerificationMode}.
-  const resolved = await resolveMergedCommitMapHit(repoPath, branch, hit, "HEAD", deps);
+  const candidates = map.get(branch);
+  if (!candidates || candidates.length === 0) return null;
+  // Verification delegated to {@link resolveMergedCommitMapHitList} (card 6ee48e4d factored the
+  // single-candidate verifier out of a hand-inlined copy here so boot-reconcile Pass A's {@link
+  // findLandedSquashCommitViaMap} shares the IDENTICAL re-task-guard + content/path-set check; card
+  // c0d0eac9 widened this to a bounded multi-candidate walk) — reports which of the two verification
+  // means (or the pre-fix degrade) answered it (card 52e978ad) — see {@link MergedVerificationMode}.
+  // `date` comes from the WINNING entry (`resolved.entry`), never `candidates[0]` — the winner isn't
+  // always the newest candidate once the strict-fallback floor (card c0d0eac9) kicks in.
+  const resolved = await resolveMergedCommitMapHitList(repoPath, branch, candidates, "HEAD", deps);
   if (!resolved) return null;
-  return { sha: resolved.sha.slice(0, 7), date: hit.date, verification: resolved.verification };
+  return { sha: resolved.resolved.sha.slice(0, 7), date: resolved.entry.date, verification: resolved.resolved.verification };
 }
 
 /** TEST-ONLY: clear the merged-commit map cache (settled + in-flight) between hermetic test cases reusing the same temp repos.

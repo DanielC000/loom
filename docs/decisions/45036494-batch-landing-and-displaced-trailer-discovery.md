@@ -202,6 +202,17 @@ round's own instruction — ~2.49x, matching the family's ~2.5x-of-solo conventi
 coupling.mjs`, `test-daemon-codex-real-spawn-preset.mjs`, `test-daemon-fixture-import-guard.mjs`,
 `test-daemon-port-allocation.mjs`, `ps-module-analysis-cache-cwd-guard.mjs`) re-run green after this edit.
 
+### Round 4 (card `c0d0eac9`) — the round-3 residual is fixed, not just documented
+
+Round 3's own residual (this file's "Do not" above, before this card) is now CLOSED: `findLandedSquashCommit`
+and the map path (`scanMergedCommitMap`/`resolveMergedCommitMapHitList`) no longer rank strict
+unconditionally above tolerant. Both now pick the newest VERIFIED candidate (strict or tolerant alike,
+bounded by `MIXED_VERIFY_CAP`), falling back to a strict-only search (bounded by
+`STRICT_FALLBACK_VERIFY_CAP`, a manager-review correction that keeps round 2's own strict-first answer as
+a floor the new rule can never regress below) only when nothing in the newest-first walk verifies. Full
+design, the real-git repro, the cost model, and the reader sweep confirming no other call site shares this
+shape: `docs/decisions/c0d0eac9-newest-verified-landing-strict-first-floor.md`.
+
 ### Corrected finding: a re-spawn on the SAME branch name never reaches ALREADY_MERGED either way
 
 The investigate-first checkpoint flagged a risk, not independently reproduced at the time: a worker
@@ -291,16 +302,15 @@ tracked by the manager as their own follow-up cards — neither is fixed in this
 - Do not write a third copy of the reserved-namespace exact-match loop — `reservedNamespaceExactlyMatches`
   is the ONE shared core `verifyLoomNamespaceExact`, `loomTrailerBlockDisplaced`, and
   `tolerantFindLoomTrailerBlock`'s own round-trip all call; a new caller needing this rule reuses it too.
-- Do not let `findLandedSquashCommit`/`scanMergedCommitMap` break/keep on the FIRST tolerant-only match
-  without first checking for a strict one — strict ALWAYS wins regardless of recency (round 2 fix), or a
-  newer tolerant-only candidate that fails its downstream verifier can hide an older genuine landing.
-- Do not read "strict ALWAYS wins" (round 2) as having no residual (round 3) — the same ranking can hide
-  a NEWER genuine tolerantly-readable (hook-displaced) landing behind an OLDER strict landing of the same
-  branch name. Narrow (same branch name landing twice with a displacing hook starting between the two
-  landings) and no worse than pre-card mainline (fails safe to `null`/stale-older, never a forged accept)
-  — documented, not fixed, here. Fix it via card `c0d0eac9` ("fix(git): pick the newest verified landing
-  when strict and tolerant hits compete"), never by silently reversing the round-2 ranking back to
-  recency-order (that reopens round 2's own shadow instead of closing this one).
+- **Superseded by card `c0d0eac9` — do not revert to this round's own rule.** Round 2/3's own rule here was
+  "strict ALWAYS wins regardless of recency" — that rule has a documented round-3 residual (an OLDER
+  strict landing can hide a NEWER genuine tolerantly-readable one of the same re-cut branch name) and is
+  now REPLACED by card `c0d0eac9`'s "the newest VERIFIED candidate wins, with round 2's strict-first
+  answer kept as a bounded FALLBACK FLOOR" — see `docs/decisions/c0d0eac9-*.md` for the full design, its
+  two caps, and the manager-review correction that keeps the floor from ever regressing below round 2's
+  own answer. Do not let `findLandedSquashCommit`/the map path break/keep on the first tolerant-only match
+  without verifying it first — a candidate's RECENCY alone is never enough to trust it; only VERIFICATION
+  (content check or the ledger gate) decides, newest-first, up to the bounded caps `c0d0eac9` defines.
 - Do not re-derive the `findAllLandedTrailerCommits` caller's verification coverage from memory — re-read
   its own two arms (`landedTip` present vs. `base` present) before restating which one content-checks
   `sha`; round 1's own comment here was wrong once already.
