@@ -22,8 +22,8 @@
 // on give-up/healIfStuck's multi-second windows, and no raced engine timing.
 //
 // Both OLDER_MESSAGE and NEWER_MESSAGE default to "warning" kind with no route, so once the fix lands
-// they are coalesced into ONE physical write by drainPending's route-keyed coalescing (@decision
-// 8f1d7912: same-route + same-kind runs coalesce unconditionally) — this test asserts on that actual
+// they are coalesced into ONE physical write by drainPending's route-keyed coalescing (@decision 8f1d7912:
+// same-route + same-kind runs coalesce unconditionally) — this test asserts on that actual
 // post-fix shape (both drain together, in order), not on an invented "they must stay separate turns"
 // requirement the card never asked for.
 //
@@ -125,8 +125,8 @@ try {
   const newerIdx = w.indexOf("NEWER_MESSAGE");
   check("FIFO INVARIANT: OLDER_MESSAGE must be written no later than NEWER_MESSAGE (older arrived first)",
     olderIdx !== -1 && newerIdx !== -1 && olderIdx < newerIdx);
-  // Post-fix: both are "warning"-kind with no route, so drainPending's route-keyed coalescing (@decision
-  // 8f1d7912) merges them into ONE physical write — neither is left behind in live.pending. (Pre-fix this
+  // Post-fix: both are "warning"-kind with no route, so drainPending's route-keyed coalescing (@decision 8f1d7912)
+  // merges them into ONE physical write — neither is left behind in live.pending. (Pre-fix this
   // also failed: OLDER_MESSAGE was still sitting in pending while NEWER_MESSAGE alone had already gone
   // out — the opposite of "both drained together".)
   check("post-fix: OLDER_MESSAGE and NEWER_MESSAGE drained TOGETHER — neither is left stranded in pending",

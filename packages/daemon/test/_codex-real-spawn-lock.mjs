@@ -132,10 +132,11 @@ export function computeCodexLockWaitTimeoutMs(cap) {
 // it actually HOLDS the lock, i.e. EXCLUDING any time spent waiting on a same-host sibling. Defaults to
 // DEFAULT_CODEX_OWN_WORK_BUDGET_MS (today's blanket scripts/test-daemon.mjs TEST_TIMEOUT_MS) for every
 // member not named here. `codex-doctrine-real-spawn` carries the 300_000 scripts/test-daemon.mjs used to
-// hold directly in its own TEST_TIMEOUT_OVERRIDES entry (moved here, not duplicated) — `@decision
-// 3791b14e` requires this stay above that file's own largest internal `waitUntil` (150_000ms);
-// {@link computeCodexFileCeilingMs} only ever ADDS the lock wait budget on top, so that invariant holds
-// at every cap by construction.
+// hold directly in its own TEST_TIMEOUT_OVERRIDES entry (moved here, not duplicated).
+//
+// @decision 3791b14e — this override must stay above that file's own largest internal `waitUntil`
+// (150_000ms); {@link computeCodexFileCeilingMs} only ever ADDS the lock wait budget on top, so that
+// invariant holds at every cap by construction.
 export const DEFAULT_CODEX_OWN_WORK_BUDGET_MS = 120_000;
 export const CODEX_OWN_WORK_BUDGET_MS = {
   "codex-doctrine-real-spawn": 300_000,

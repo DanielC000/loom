@@ -166,8 +166,8 @@ const REAL_MERGE_QUARANTINE_PATH = path.join(DIST_ROOT, "git", "merge-quarantine
 const hashFile = (p) => createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 const REAL_MERGE_QUARANTINE_HASH_BEFORE = hashFile(REAL_MERGE_QUARANTINE_PATH);
 
-/** ONE-SITE DIST MUTATION, on a throwaway COPY of the minimal import closure — see the `@decision
- *  db0a9db0` comment above. Throws if `find` doesn't occur EXACTLY once in the copy. */
+/** ONE-SITE DIST MUTATION, on a throwaway COPY of the minimal import closure — see the `@decision db0a9db0`
+ *  comment above. Throws if `find` doesn't occur EXACTLY once in the copy. */
 async function withDistMutation(find, replace, fn) {
   const tmpDistDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-4913e721-distcopy-"));
   tmpDirs.push(tmpDistDir);

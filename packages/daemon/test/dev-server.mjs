@@ -1241,8 +1241,8 @@ if (SUPERVISOR_CODE_UNDER_TEST) {
 // separate OS thread), and can complete AFTER the 'error' handler's synchronous `fs.appendFileSync`
 // diagnostic write — even though that write is durable on the main thread before `process.exit()` runs,
 // a LATER truncating open from a different thread wipes it out from under it regardless. Undetectable at
-// normal load (0/300 combined trials on Windows + real Linux/WSL2 in isolated loops — see @decision
-// 4946f01d) because the race window is normally far too small to hit; reproduced DETERMINISTICALLY (15/15
+// normal load (0/300 combined trials on Windows + real Linux/WSL2 in isolated loops — see @decision 4946f01d)
+// because the race window is normally far too small to hit; reproduced DETERMINISTICALLY (15/15
 // on both platforms against the pre-fix helper) by saturating the threadpool with async, non-blocking
 // `crypto.pbkdf2` calls immediately before `out`'s own createWriteStream, delaying its open while leaving
 // spawn()'s own error path (which does not depend on the threadpool) unaffected. The forcing MUST run

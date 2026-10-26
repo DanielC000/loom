@@ -2192,9 +2192,16 @@ try {
         check(`card 298a1390 (c) real-repo regression pin: ${c}'s non-test item set is byte-identical before vs after`,
           beforeItems === afterItems);
       }
-      check("card 298a1390 (c): brokenAnchors DOES gain new items once test/tests/e2e is included (the one "
-        + "deliberate extension) — proves this isn't a vacuous before=after comparison",
-        after.brokenAnchors.count > before.brokenAnchors.count);
+      // Card 20af6321 fixed every real brokenAnchors specimen that used to live in test/tests/e2e, so
+      // this real-repo comparison can no longer prove the extension isn't vacuous (before=after=0 here
+      // now) — same shape sigilSpaceAnchors already hit in card 0c474dda's own section (b) above, and
+      // the same resolution: assert today's real population instead of a ">" that depends on ambient
+      // repo content staying broken forever, and rely on section (d) below's dedicated synthetic
+      // fixture to prove the extension mechanism itself.
+      check("card 298a1390 (c): brokenAnchors' real test-corpus population is exactly 0 today (card "
+        + "20af6321 fixed the 9 specimens that used to live here — see section (d) below for the "
+        + "dedicated fixture proving the extension mechanism)",
+        after.brokenAnchors.items.filter((x) => isTestPath(x.file)).length === 0);
     } finally {
       try { fs.rmSync(preFixDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }

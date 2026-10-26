@@ -309,9 +309,11 @@ try {
     !!archiveDest && fs.existsSync(archiveDest) && !fs.existsSync(liveFile), `archiveDest=${archiveDest} liveFile=${liveFile}`);
 
   // --- Resume through the REAL PtyHost path. restoreArchivedCodexRollout runs SYNCHRONOUSLY inside
-  // createCodexPty, strictly before the real `codex resume <uuid>` child process is spawned (@decision
-  // 5172fe3a, pty/host.ts) — so by the time this synchronous call returns, the restore has already
-  // happened. Same Loom sessionId, same cwd — a genuine resume, not a fresh second conversation. -------
+  // createCodexPty, strictly before the real `codex resume <uuid>` child process is spawned (pty/host.ts)
+  // — so by the time this synchronous call returns, the restore has already happened. Same Loom
+  // sessionId, same cwd — a genuine resume, not a fresh second conversation.
+  //
+  // @decision 5172fe3a — the archiver and the restore path must never race each other. -------
   console.log(`[info] resuming engine id ${capturedEngineId} through the real PtyHost.spawn({resumeId}) → createCodexPty path`);
   host.spawn({
     sessionId: SESSION_ID, cwd: scratchCwd, permission: {}, geometry: { cols: 120, rows: 40 },

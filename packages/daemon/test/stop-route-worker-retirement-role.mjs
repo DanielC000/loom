@@ -1,7 +1,7 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card e7a9a884 item 3 — test gap: POST /api/sessions/:id/stop (gateway/server.ts) calls
-// `deps.sessions.retireWorkerSessionIfWorker(id, "human_stop")` after a successful pty.stop (@decision
-// 4ee527d1). Every EXISTING test that drives this route through buildServer stubs `sessions` with a
+// `deps.sessions.retireWorkerSessionIfWorker(id, "human_stop")` after a successful pty.stop (@decision 4ee527d1).
+// Every EXISTING test that drives this route through buildServer stubs `sessions` with a
 // bare `retireWorkerSessionIfWorker: () => {}` no-op (see shell-terminal-rest-refusal.mjs) — real,
 // but it never actually exercises the role gate `retireWorkerSessionIfWorker` applies internally
 // (`session?.role === "worker"`). Nobody has proven, through the REAL route against a REAL

@@ -3,9 +3,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // re-resolve-by-identity fallback (3315b08a) can re-resolve `live` onto an entry that is ALSO an ACTIVE
 // TWIN protectOccupantContentBeforeDelete's own BOTH-INDICES branch just re-pointed — that branch calls
 // replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename, written.entry) for the twin's own key,
-// but the armedKeys union feeding written.entry is gated to atFilenameIdx alone (@decision
-// c9114934/cd5a3cf9), so the twin's own armedKeys never join it. clearTokenFromPendingIndices' re-derived
-// plan is sourced purely from live.entry.armedKeys, so the twin's key is invisible to it, even though
+// but the armedKeys union feeding written.entry is gated to atFilenameIdx alone (@decision c9114934;
+// see also @decision 8db913e2 (Follow-up cd5a3cf9)), so the twin's own armedKeys never join it.
+// clearTokenFromPendingIndices' re-derived plan is sourced purely from live.entry.armedKeys, so the
+// twin's key is invisible to it, even though
 // activeQuarantines now genuinely points that key at live.entry.
 //
 // Construction: T (clear target, canonical pending slot, tokens=[token]) + M (real clear target,

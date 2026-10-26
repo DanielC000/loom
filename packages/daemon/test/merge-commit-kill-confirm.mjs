@@ -1,8 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 24c0bdba — mergeBranchLocked's squash `commit` (and merge --squash / reset) ran under a bare
 // `withTimeout` (git/bounded.ts) while holding the per-repo canonical index lock (withCanonicalIndexLock,
-// git/repo-lock.ts). withTimeout REJECTS INDEPENDENTLY of the underlying git child on expiry (@decision
-// 8e75ee20) — so on a commit whose pre-commit hook outlives the timeout, mergeBranchLocked's own promise
+// git/repo-lock.ts). withTimeout REJECTS INDEPENDENTLY of the underlying git child on expiry (@decision 8e75ee20)
+// — so on a commit whose pre-commit hook outlives the timeout, mergeBranchLocked's own promise
 // settles (ok:false, lock released) long before the REAL git.exe child actually dies. That orphaned child
 // keeps running, still able to write a commit once its hook finishes — and by then, a SECOND merge (queued
 // no longer, since the lock released early) may have staged its OWN diff. If the orphan resumes and
