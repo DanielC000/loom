@@ -72,6 +72,54 @@ const { createWorktree, GIT_OP_TIMEOUT_MS } = await import("../dist/git/worktree
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// Card 3e3a548b — [positive]'s resetCalls/resetTimeoutsSeen checks flake under heavy host CPU load (n=1
+// in 3 solo runs at 93% load, project memory key mcvcsmt-positive-flake-under-load). Investigation ruled
+// out "sustained load alone blows the 50ms LOCK_MTIME_CLOCK_SKEW_TOLERANCE_MS tolerance" by direct
+// measurement (actual skew stayed ~1-5ms at up to 91% load) but could not reproduce the failure to pin
+// the real mechanism. This prints the refusal evidence ONLY on an actual [positive] failure, parsed from
+// resetOrSkip's own already-exposed give-up log line (worktrees.ts's `[git] mergeBranchLocked: ...`
+// console.log, captured below) — never a new production hook, and never a change to any assertion.
+function printLockRefusalEvidence(capturedLogs) {
+  const relevant = capturedLogs.filter((l) => /mergeBranchLocked:.*reset --hard/.test(l));
+  if (relevant.length === 0) {
+    console.log("  [diag:lock-refusal] no mergeBranchLocked reset --hard log line was captured — the retry may never have been attempted, or the log line itself didn't fire");
+    return;
+  }
+  for (const line of relevant) {
+    console.log(`  [diag:lock-refusal] captured: ${line}`);
+    const predates = line.match(/lock mtime \(([^)]+)\) predates this reset attempt's own start \(([^)]+)\) by more than the (\d+)ms clock-skew tolerance/);
+    const postdates = line.match(/lock mtime \(([^)]+)\) postdates this kill's own confirmation \(([^)]+)\) by more than the (\d+)ms clock-skew tolerance/);
+    const unstable = line.match(/the lock changed during a (\d+)ms persistence check \(mtime\/size differ\)/);
+    const disappeared = /vanished during a persistence check/.test(line);
+    const unlinkFailed = /could not be removed/.test(line);
+    const unresolvedDir = /could not even be checked for a leaked lock/.test(line);
+    const retried = /retrying once at/.test(line);
+    if (predates) {
+      const mtimeMs = Date.parse(predates[1]);
+      const attemptStartedAtMs = Date.parse(predates[2]);
+      const toleranceMs = Number(predates[3]);
+      console.log(`  [diag:lock-refusal] reasonCode=predates-attempt mtimeMs=${mtimeMs} attemptStartedAtMs=${attemptStartedAtMs} toleranceMs=${toleranceMs} overshootMs=${(attemptStartedAtMs - mtimeMs) - toleranceMs} persistedAcrossWait=n/a (refused before the persistence wait ever ran)`);
+    } else if (postdates) {
+      const mtimeMs = Date.parse(postdates[1]);
+      const killConfirmedAtMs = Date.parse(postdates[2]);
+      const toleranceMs = Number(postdates[3]);
+      console.log(`  [diag:lock-refusal] reasonCode=postdates-confirmation mtimeMs=${mtimeMs} killConfirmedAtMs=${killConfirmedAtMs} toleranceMs=${toleranceMs} overshootMs=${(mtimeMs - killConfirmedAtMs) - toleranceMs} persistedAcrossWait=n/a (refused before the persistence wait ever ran)`);
+    } else if (unstable) {
+      console.log(`  [diag:lock-refusal] reasonCode=unstable persistenceWaitMs=${unstable[1]} persistedAcrossWait=false (mtime or size changed during the wait) — production exposes no numeric mtime/margin for this reasonCode`);
+    } else if (disappeared) {
+      console.log("  [diag:lock-refusal] reasonCode=disappeared persistedAcrossWait=false (the lock vanished during the wait) — production exposes no numeric mtime/margin for this reasonCode");
+    } else if (unlinkFailed) {
+      console.log("  [diag:lock-refusal] reasonCode=unlink-failed persistedAcrossWait=true (reached unlink only after the persistence check passed) — production exposes no numeric mtime/margin for this reasonCode");
+    } else if (unresolvedDir) {
+      console.log("  [diag:lock-refusal] reasonCode=unresolved-git-dir — no mtime/margin applicable (the git directory itself was never resolved)");
+    } else if (retried) {
+      console.log("  [diag:lock-refusal] this line reports a RETRY was actually fired (removal succeeded, or no-lock) — not a refusal; if resetCalls is still wrong, look at what happened to the retry attempt itself, not this lock-removal guard");
+    } else {
+      console.log("  [diag:lock-refusal] captured log line matched none of the known reasonCode wordings — the message text may have changed; read it verbatim above");
+    }
+  }
+}
 const GIT_ID = "-c user.email=mcvcsmt@loom -c user.name=mcvcsmt";
 const now = new Date().toISOString();
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
@@ -150,6 +198,12 @@ const UNCONFIRMED = "git reset --hard (canonical, commit-failure cleanup) exceed
 
 // ===== [POSITIVE] confirmed-kill + a FRESH leaked lock -> removed, retried, retry succeeds for real =====
 {
+  // Capture (never suppress — the original lines still print exactly as before) resetOrSkip's own
+  // console.log diagnostics for this scenario's confirmWorkerMergeTracked call, so a failure below can
+  // print the already-exposed refusal evidence instead of leaving the mechanism unidentified again.
+  const capturedLogs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { capturedLogs.push(args.map(String).join(" ")); originalLog(...args); };
   const { db, repo, lockPath, state, r1 } = await runScenario("positive", async ({ repoPath, attemptNumber }) => {
     if (attemptNumber === 1) {
       fs.writeFileSync(path.join(repoPath, ".git", "index.lock"), ""); // the confirmed-killed reset's own leaked lock
@@ -157,12 +211,19 @@ const UNCONFIRMED = "git reset --hard (canonical, commit-failure cleanup) exceed
     }
     return execFileSync("git", ["reset", "--hard", "HEAD"], { cwd: repoPath, encoding: "utf8" }); // real retry
   });
+  console.log = originalLog;
   dbs.push(db);
   check("[positive] settled, not merged (the commit call itself still fails — only the cleanup recovers)", r1.settled === true && r1.ok && r1.value.merged === false);
   check("[positive] NOT quarantined", r1.ok && r1.value.quarantined !== true);
   check("[positive] NOT soloMergeTransient — the cleanup genuinely succeeded this time, no residue to flag", r1.ok && r1.value.soloMergeTransient !== true);
-  check("[positive] the cleanup reset was retried exactly once (two attempts total)", state.resetCalls === 2);
-  check("[positive] both reset attempts received the FLOORED timeout, not the small configured gitOpMs", state.resetTimeoutsSeen.length === 2 && state.resetTimeoutsSeen.every((t) => t === GIT_OP_TIMEOUT_MS));
+  const resetCallsOk = state.resetCalls === 2;
+  check("[positive] the cleanup reset was retried exactly once (two attempts total)", resetCallsOk);
+  const resetTimeoutsOk = state.resetTimeoutsSeen.length === 2 && state.resetTimeoutsSeen.every((t) => t === GIT_OP_TIMEOUT_MS);
+  check("[positive] both reset attempts received the FLOORED timeout, not the small configured gitOpMs", resetTimeoutsOk);
+  if (!resetCallsOk || !resetTimeoutsOk) {
+    console.log(`  [diag:lock-refusal] [positive] diverged from the expected two attempts (resetCalls=${state.resetCalls}, resetTimeoutsSeen=${JSON.stringify(state.resetTimeoutsSeen)}) — printing the refusal evidence:`);
+    printLockRefusalEvidence(capturedLogs);
+  }
   check("[positive] the leaked lock is actually gone from disk", !fs.existsSync(lockPath));
   const stagedAfter = execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: repo, encoding: "utf8" }).trim();
   check("[positive] GENUINE RECOVERY: the canonical repo's index is actually clean — the real retried reset ran for real", stagedAfter === "");
