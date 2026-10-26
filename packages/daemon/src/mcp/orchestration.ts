@@ -4390,7 +4390,9 @@ export class OrchestrationMcpRouter {
           "`my_context`) so you can see whether confirming this branch will run the gate or land ungated. " +
           "By DEFAULT returns a bounded DIFFSTAT — " +
           "the list of changed files with per-file +/- and the insertion/deletion totals — so it will NOT " +
-          "overflow the display on a large change (where the full patch is biggest/riskiest). Pass " +
+          "overflow the display on a large change (where the full patch is biggest/riskiest). A renamed " +
+          "file's entry carries `renameFrom` (the real pre-rename path) instead of the old `{old => new}` " +
+          "inline display text. Pass " +
           "fullDiff:true to ALSO get the full unified patch for line-level review (the full patch is " +
           "unbounded and may itself overflow on a very large change — review the diffstat first, then pull " +
           "the patch). Pass `files` (an array of exact/substring path matches — RELIABLE for nested paths, " +

@@ -23,10 +23,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // uses) via `Db.hasLandingTrustFreezeEvent` — every later landing mints its own distinct `to`, so an
 // exact-pair dedupe would re-alert on every single one.
 //
-// Readers of `getMainlineBranchTrust(` verified (grep, packages/daemon/src): exactly two, both inside
-// `project_checkout_branch`'s own gates (`refuseIfTargetBranchUntrusted` service.ts:6483,
-// `refuseIfWatermarkUntrusted` service.ts:6546) — a frozen trust record costs ONLY that tool's own
-// switch/create-from-W path until a human resets it; nothing else reads this record.
+// Readers of `getMainlineBranchTrust(` verified (grep, packages/daemon/src), card fdf09672 (Code Review
+// 7fb963b2): FOUR, in two pairs — `project_checkout_branch`'s own gates (`refuseIfTargetBranchUntrusted`
+// service.ts ~6533, `refuseIfWatermarkUntrusted` service.ts ~6596), AND the two functions THIS fix just
+// described above (`advanceMainlineWatermark` service.ts ~24236, `advanceMainlineWatermarkForBatch`
+// service.ts ~24304) — the earlier "exactly two" count omitted its own round's own addition. A frozen
+// trust record costs more than just `project_checkout_branch`'s switch/create-from-W path: it also
+// governs every FUTURE landing's own freeze decision (the `trustedBefore` comparison in those same two
+// functions), so a freeze on one landing propagates forward until a human resets it, not just sideways
+// into one tool's gates.
 //
 //   (SOLO-FREEZE) forge an "explained" move, then a REAL confirmWorkerMergeTracked lands on top of it:
 //       trust stays frozen at its pre-forgery value, W still advances onto the real landed tip, exactly

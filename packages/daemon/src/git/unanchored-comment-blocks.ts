@@ -1,6 +1,6 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { diffBranch, normalizeDiffstatPath, resolveBranchTip, type DiffBranchDeps, type DiffstatFile } from "./worktrees.js";
+import { diffBranch, resolveBranchTip, type DiffBranchDeps, type DiffstatFile } from "./worktrees.js";
 import { boundedSimpleGit, withTimeout } from "./bounded.js";
 import { COMMENT_ANCHOR_LINT_SCRIPT } from "../paths.js";
 
@@ -94,7 +94,7 @@ function loadCommentAnchorLintModule(): Promise<WellFormedCommentAnchorLintModul
  * lines inside a hunk count; a `-` (removed) line never advances the new-file line counter, and a `+++
  * /dev/null` (a deleted file) is skipped entirely (nothing to scan in a file that no longer exists). File
  * paths are kept exactly as git renders them in the patch (posix, `a/`/`b/` prefix stripped, and always
- * the REAL post-rename destination — never the `--stat` bracket form `normalizeDiffstatPath` handles).
+ * the REAL post-rename destination).
  */
 function parseAddedLineNumbers(patch: string): Map<string, Set<number>> {
   const result = new Map<string, Set<number>>();
@@ -164,13 +164,22 @@ export async function detectUnanchoredAddedCommentBlocks(
 
     const allFiles = hint.allFiles ?? (await diffBranch(repoPath, branch, base, { includePatch: false }, deps)).allFiles;
 
-    // Rename-safe candidate scoping (see normalizeDiffstatPath's own doc) — `f.file` may carry `--stat`'s
-    // rename rendering, neither a real path nor a valid pathspec.
+    // @decision fdf09672 — `f.file` is already the real post-rename path (diffBranch's allFiles comes
+    // from `-z` machine-readable output, never `--stat` display text) — no normalization needed here.
     const candidates = new Set<string>();
+    // card fdf09672 (Code Review 7b67f7b5, finding 1) — the pathspec sent to git ALSO needs a rename's
+    // old name, same as diffBranch's own filtered patch: with only the destination in scope, git cannot
+    // pair the rename and shows the WHOLE renamed file as added, falsely flagging every pre-existing
+    // (unchanged) comment block in it as newly added. `candidates` itself stays destination-only — it's
+    // also the scope-filter set and the thing `isInScope`/content-reads below key off.
+    const pathspecPaths = new Set<string>();
     for (const f of allFiles) {
       if (f.binary) continue;
-      const p = normalizeDiffstatPath(f.file);
-      if (isInScope(repoPath, path.join(repoPath, p)) !== null) candidates.add(p);
+      if (isInScope(repoPath, path.join(repoPath, f.file)) !== null) {
+        candidates.add(f.file);
+        pathspecPaths.add(f.file);
+        if (f.renameFrom !== undefined) pathspecPaths.add(f.renameFrom);
+      }
     }
     if (candidates.size === 0) return { blocks: [], truncated: false, totalCount: 0, minLines };
 
@@ -182,8 +191,11 @@ export async function detectUnanchoredAddedCommentBlocks(
     const branchTip = await resolveBranchTip(repoPath, branch, deps);
     if (!branchTip) return EMPTY_RESULT;
     const range = `${base}...${branchTip}`;
+    // @decision fdf09672 — both GLOBAL flags precede the subcommand, via `.raw([...])` never `.diff([...])`.
+    // `-c core.quotepath=false` is REQUIRED here: `-z` has NO effect on a unified patch's `+++`/`---`
+    // lines, which `parseAddedLineNumbers` below reads to key its added-lines map.
     const patch = await withTimeout(
-      git.diff([range, "--", ...candidates]), timeoutMs, "git diff (unanchored-comment-blocks, scoped)",
+      git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", range, "--", ...pathspecPaths]), timeoutMs, "git diff (unanchored-comment-blocks, scoped)",
     );
     if (!patch) return { blocks: [], truncated: false, totalCount: 0, minLines };
 

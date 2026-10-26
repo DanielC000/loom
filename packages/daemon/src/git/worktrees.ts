@@ -3987,48 +3987,52 @@ export interface DiffstatFile {
    * deny-glob matcher (`matchAddedDenyGlobs`) treats as an addition.
    */
   status?: "A" | "M" | "D" | "T" | "U" | "X" | "B";
+  /**
+   * The pre-rename path, present ONLY for a rename row — from {@link parseNumstatZ}'s own `-z` record,
+   * never reconstructed from `--stat`'s `{old => new}`/`old => new` DISPLAY text (card fdf09672; see that
+   * function's own doc for why the display form is lossy). `file` is always the real POST-rename path.
+   */
+  renameFrom?: string;
 }
 
 /**
- * `git diff --stat`'s summary rendering collapses a rename into `{old => new}` (common-prefix form) or
- * `old => new` (whole-path form) — neither is a valid git pathspec, and neither matches the REAL
- * post-rename path the unified patch's own `+++ b/<path>` line carries. Recovers the real destination
- * path so a diffstat-derived candidate list stays usable as BOTH a scope check and a pathspec, instead of
- * silently excluding every renamed file (the defect this exists to prevent — a rename plus a genuinely
- * new block used to yield nothing; `diffBranch`'s own `files:` filter had the same hole).
+ * Decodes `git diff --numstat -z`'s own machine-readable record format — never `--stat`'s (or plain
+ * `--numstat` without `-z`) DISPLAY text. Throws on a malformed token stream (real git under `-z` never
+ * produces one).
+ * @decision fdf09672 — never parse `--stat`/`--numstat`/`--name-status` DISPLAY text (no `-z`) for a path
+ * identity; always add `-z` and go through a record parser like this one. See the full record for the
+ * verified defects (C-quoting, rename-as-text-collapse) and the exact `-z` record shape.
  */
-export function normalizeDiffstatPath(raw: string): string {
-  const openIdx = raw.indexOf("{");
-  const closeIdx = openIdx === -1 ? -1 : raw.indexOf("}", openIdx + 1);
-  if (openIdx !== -1 && closeIdx !== -1) {
-    const prefix = raw.slice(0, openIdx);
-    const suffix = raw.slice(closeIdx + 1);
-    const inner = raw.slice(openIdx + 1, closeIdx); // "old.ts => new.ts"
-    const arrowIdx = inner.indexOf(" => ");
-    const dest = arrowIdx === -1 ? inner : inner.slice(arrowIdx + 4);
-    return `${prefix}${dest}${suffix}`.replace(/\/{2,}/g, "/"); // `{ => sub}` / `{sub => }` leave a doubled slash
+export function parseNumstatZ(out: string): DiffstatFile[] {
+  const tokens = out.split("\0");
+  const files: DiffstatFile[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    if (i === tokens.length - 1 && tokens[i] === "") break; // trailing NUL terminator
+    const head = tokens[i];
+    const m = head === undefined ? null : /^(\d+|-)\t(\d+|-)\t([\s\S]*)$/.exec(head);
+    if (!m) throw new Error(`parseNumstatZ: malformed numstat -z record at token ${i}: ${JSON.stringify(head)}`);
+    const [, insRaw, delRaw, pathField] = m;
+    const binary = insRaw === "-" || delRaw === "-";
+    const insertions = binary ? 0 : Number(insRaw);
+    const deletions = binary ? 0 : Number(delRaw);
+    i++;
+    if (pathField === "") {
+      const oldPath = tokens[i];
+      const newPath = tokens[i + 1];
+      // card fdf09672 (CR 7b67f7b5, finding 2) — an EMPTY token (not just a missing/undefined one) is
+      // ALSO truncation: a path is never legitimately the empty string, so `"" ` here means the stream
+      // ran out mid-record, same as `undefined` — never a real rename with a blank name.
+      if (!oldPath || !newPath) {
+        throw new Error(`parseNumstatZ: truncated rename record at token ${i} (missing old/new path)`);
+      }
+      files.push({ file: newPath, renameFrom: oldPath, insertions, deletions, binary });
+      i += 2;
+    } else {
+      files.push({ file: pathField!, insertions, deletions, binary });
+    }
   }
-  const arrowIdx = raw.indexOf(" => ");
-  return arrowIdx === -1 ? raw : raw.slice(arrowIdx + 4).trim();
-}
-
-/**
- * The SOURCE (pre-rename) path of a `--stat` rename entry — the sibling of {@link normalizeDiffstatPath}
- * (same two forms, same doubled-slash collapse for an empty-side `{ => sub}` / `{sub => }` move). `null`
- * when `raw` is not a rename. A filtered diff needs BOTH paths in its pathspec: with only the destination
- * git cannot pair the rename and shows the whole file as added.
- */
-export function diffstatRenameSource(raw: string): string | null {
-  const openIdx = raw.indexOf("{");
-  const closeIdx = openIdx === -1 ? -1 : raw.indexOf("}", openIdx + 1);
-  if (openIdx !== -1 && closeIdx !== -1) {
-    const inner = raw.slice(openIdx + 1, closeIdx);
-    const arrowIdx = inner.indexOf(" => ");
-    if (arrowIdx === -1) return null;
-    return `${raw.slice(0, openIdx)}${inner.slice(0, arrowIdx)}${raw.slice(closeIdx + 1)}`.replace(/\/{2,}/g, "/");
-  }
-  const arrowIdx = raw.indexOf(" => ");
-  return arrowIdx === -1 ? null : raw.slice(0, arrowIdx).trim();
+  return files;
 }
 
 /** @decision 91d847db — a bare leading `*` with no `/` anywhere (e.g. `*service.ts`) is auto-prefixed with
@@ -4058,14 +4062,16 @@ function pathGlobToRegExp(rawGlob: string): RegExp {
 }
 
 /**
- * Best-effort `git diff --name-status <range>` → `Map<path, status>`, used ONLY by `diffBranch`'s
+ * Best-effort `git diff --name-status -z <range>` → `Map<path, status>`, used ONLY by `diffBranch`'s
  * `includeStatus` opt (card d5d3bdc9). Deliberately narrow and fail-safe: `reviewWorkerMerge` must
- * NEVER throw on a weird diff, so any parse miss silently drops that line's status rather than guessing.
+ * NEVER throw on a weird diff, so any parse miss silently drops that entry's status rather than guessing.
+ * @decision fdf09672 — `-z` (never plain `--name-status`), so a non-ASCII path is never C-quoted into a
+ * key that can't match `diffBranch`'s own (equally `-z`-sourced) real path.
  *
- * - A rename/copy line (`R100\told\tnew` / `C100\told\tnew`) carries TWO paths on one row — attributing
- *   status to either would be a guess (is the new path "added"? is the old path "deleted"?), so these
- *   lines are skipped entirely; both paths end up with no status, same as an untracked file.
- * - A path containing a tab, or any row that doesn't parse as `<letter><digits?>\t<path>`, is skipped.
+ * - A rename/copy record (`R100\0old\0new\0` / `C100\0old\0new\0`) carries TWO paths — attributing status
+ *   to either would be a guess (is the new path "added"? is the old path "deleted"?), so these records
+ *   are skipped entirely (both their paths' NUL tokens consumed); both paths end up with no status, same
+ *   as an untracked file.
  * - Any git failure (missing range, non-repo, etc.) OR a `timeoutMs` timeout (a hung `git diff` child)
  *   returns an empty map — the caller degrades to "no status available", not an error or a hang.
  */
@@ -4073,19 +4079,19 @@ async function diffNameStatus(git: Pick<SimpleGit, "raw">, range: string, timeou
   const map = new Map<string, DiffstatFile["status"]>();
   const SINGLE_PATH_STATUS = new Set(["A", "M", "D", "T", "U", "X", "B"]);
   try {
-    const raw = await withTimeout(git.raw(["diff", "--name-status", range]), timeoutMs, "git diff --name-status (diffBranch)");
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      const tab = line.indexOf("\t");
-      if (tab < 1) continue; // no tab, or an empty status column — can't parse
-      const code = line.slice(0, tab);
-      const letter = code[0];
-      if (!letter || !SINGLE_PATH_STATUS.has(letter)) continue; // R/C (rename/copy) or unrecognized — skip
-      const rest = line.slice(tab + 1);
-      if (rest.includes("\t")) continue; // a second tab means more than one path on this row — skip
-      const file = rest.trim();
-      if (!file) continue;
-      map.set(file, letter as DiffstatFile["status"]);
+    const raw = await withTimeout(git.raw(["diff", "--name-status", "-z", range]), timeoutMs, "git diff --name-status -z (diffBranch)");
+    const tokens = raw.split("\0");
+    let i = 0;
+    while (i < tokens.length) {
+      if (i === tokens.length - 1 && tokens[i] === "") break; // trailing NUL terminator
+      const code = tokens[i];
+      i++;
+      const letter = code?.[0];
+      if (letter === "R" || letter === "C") { i += 2; continue; } // rename/copy — two paths, skip both
+      if (!letter || !SINGLE_PATH_STATUS.has(letter)) { i += 1; continue; } // unrecognized — skip its one path token
+      const file = tokens[i];
+      i++;
+      if (file) map.set(file, letter as DiffstatFile["status"]);
     }
   } catch {
     // fail-safe: a name-status failure never blocks or alters the diffstat/review — just no status.
@@ -4116,13 +4122,10 @@ export async function diffBranch(
   const branchTip = deps.resolvedTip ?? (await resolveBranchTip(repoPath, branch, deps));
   if (!branchTip) throw new Error(`diffBranch: could not resolve ${branch}'s current tip (refs/heads/${branch} is unreadable or missing)`);
   const range = `${base}...${branchTip}`; // 3-dot: changes on `branch` since the merge-base with `base`
-  const summary = await withTimeout(git.diffSummary([range]), timeoutMs, "git diff --stat (diffBranch summary)");
-  const allFiles: DiffstatFile[] = summary.files.map((f) => ({
-    file: f.file,
-    insertions: "insertions" in f ? f.insertions : 0, // binary files carry before/after, not ins/del
-    deletions: "deletions" in f ? f.deletions : 0,
-    binary: f.binary,
-  }));
+  // @decision fdf09672 — machine-readable `-z` numstat, never `--stat`'s DISPLAY text (`diffSummary()`'s
+  // own call) — see parseNumstatZ's own doc + the full record for the verified defects this replaces.
+  const numstatOut = await withTimeout(git.raw(["diff", "--numstat", "-z", range]), timeoutMs, "git diff --numstat -z (diffBranch summary)");
+  const allFiles: DiffstatFile[] = parseNumstatZ(numstatOut);
 
   // OPTIONAL status enrichment (includeStatus): a second, best-effort `git diff --name-status` call,
   // merged onto allFiles by path. Off by default — every existing caller pays no extra git call and
@@ -4148,20 +4151,25 @@ export async function diffBranch(
   const filtering = needles.length > 0 || globRe !== undefined;
   const files = filtering
     ? allFiles.filter((f) => {
-        // Match the REAL post-rename path too: `f.file` may be `--stat`'s `{old => new}` display form.
-        const real = normalizeDiffstatPath(f.file);
-        return needles.some((n) => f.file.includes(n) || real.includes(n)) || (globRe ? globRe.test(f.file) || globRe.test(real) : false);
+        // @decision fdf09672 — `f.file` is already the real post-rename path; never re-derive it from
+        // `--stat` display text. Match a rename's old name via `f.renameFrom`, never display-text
+        // concatenation.
+        const matches = (p: string) => needles.some((n) => p.includes(n)) || (globRe ? globRe.test(p) : false);
+        return matches(f.file) || (f.renameFrom !== undefined && matches(f.renameFrom));
       })
     : allFiles;
 
-  const filesChanged = filtering ? files.length : summary.files.length;
-  const insertions = filtering ? files.reduce((s, f) => s + f.insertions, 0) : summary.insertions;
-  const deletions = filtering ? files.reduce((s, f) => s + f.deletions, 0) : summary.deletions;
+  const filesChanged = files.length;
+  const insertions = files.reduce((s, f) => s + f.insertions, 0);
+  const deletions = files.reduce((s, f) => s + f.deletions, 0);
 
+  // @decision fdf09672 — `--literal-pathspecs` (never add where there is no `--` pathspec) and
+  // `-c core.quotepath=false` (a patch's `+++`/`---` lines stay C-quoted under `-z` too) are GLOBAL
+  // flags, must precede the subcommand — every patch call here goes through `.raw([...])`.
   const patch = includePatch
     ? filtering
-      ? (files.length > 0 ? await withTimeout(git.diff([range, "--", ...new Set(files.flatMap((f) => [normalizeDiffstatPath(f.file), diffstatRenameSource(f.file)].filter((p): p is string => p !== null)))]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
-      : await withTimeout(git.diff([range]), timeoutMs, "git diff (diffBranch patch)")
+      ? (files.length > 0 ? await withTimeout(git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", range, "--", ...new Set(files.flatMap((f) => f.renameFrom !== undefined ? [f.file, f.renameFrom] : [f.file]))]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
+      : await withTimeout(git.raw(["-c", "core.quotepath=false", "diff", range]), timeoutMs, "git diff (diffBranch patch)")
     : "";
 
   // pathGlob matched ZERO of the N actually-changed files: without this, the result is `filesChanged:0`
@@ -9753,16 +9761,11 @@ export async function diffOwedLanding(repoPath: string, tip: string, owedBase: s
     const main = (await raw(["rev-parse", "--verify", "HEAD"])).trim();
     const landing = await computeOwedLanding(raw, owedBase, tip, main, timeoutMs);
     if (!landing.ok) return { failure: landing };
-    const files: DiffstatFile[] = [];
-    let insertions = 0, deletions = 0;
-    for (const line of (await raw(["diff", "--numstat", landing.mainTree, landing.tree])).split(/\r?\n/)) {
-      const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
-      if (!m) continue;
-      const binary = m[1] === "-";
-      const ins = binary ? 0 : Number(m[1]), del = binary ? 0 : Number(m[2]);
-      files.push({ file: m[3]!, insertions: ins, deletions: del, binary });
-      insertions += ins; deletions += del;
-    }
+    // @decision fdf09672 — `-z` + parseNumstatZ, never a hand-rolled line/regex parse of plain `--numstat`
+    // text (which C-quotes a non-ASCII path and collapses a rename into unusable "old => new" text).
+    const files = parseNumstatZ(await raw(["diff", "--numstat", "-z", landing.mainTree, landing.tree]));
+    const insertions = files.reduce((s, f) => s + f.insertions, 0);
+    const deletions = files.reduce((s, f) => s + f.deletions, 0);
     return { filesChanged: files.length, insertions, deletions, files, commits: landing.commits, commitSubjects: landing.commits.map((c) => c.subject) };
   } catch {
     return undefined;

@@ -30,6 +30,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       semantic the card cares about (mockups/x/y.png yes, my-mockups no) — pinned as a regression test
 //       against any future pathGlobToRegExp change, since the positive (A) and modified (C) cases alone
 //       don't exercise this negative boundary.
+//   (F) NON-ASCII (card fdf09672): worker adds a non-ASCII-named file under mockups/ — `diffNameStatus`
+//       used to read plain `--name-status` (no `-z`), so the status map's own key was the C-quoted
+//       literal `"caf\303\251.html"`, never matching the real `café.html` path `diffBranch`'s (already
+//       `-z`-sourced) allFiles carries — the status enrichment silently found nothing and the warning
+//       never fired for this one file, even though it was a genuine deny-glob add.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-deny-glob.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -79,6 +84,7 @@ const B = { projId: `mdg-b-proj-${sfx}`, agentId: `mdg-b-top-${sfx}`, taskId: `m
 const C = { projId: `mdg-c-proj-${sfx}`, agentId: `mdg-c-top-${sfx}`, taskId: `mdg-c-task-${sfx}`, mgrId: `mdg-c-mgr-${sfx}`, workerId: `mdg-c-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mdg-modonly-${sfx}`) };
 const D = { projId: `mdg-d-proj-${sfx}`, agentId: `mdg-d-top-${sfx}`, taskId: `mdg-d-task-${sfx}`, mgrId: `mdg-d-mgr-${sfx}`, workerId: `mdg-d-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mdg-rename-${sfx}`) };
 const E = { projId: `mdg-e-proj-${sfx}`, agentId: `mdg-e-top-${sfx}`, taskId: `mdg-e-task-${sfx}`, mgrId: `mdg-e-mgr-${sfx}`, workerId: `mdg-e-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mdg-prefix-${sfx}`) };
+const F = { projId: `mdg-f-proj-${sfx}`, agentId: `mdg-f-top-${sfx}`, taskId: `mdg-f-task-${sfx}`, mgrId: `mdg-f-mgr-${sfx}`, workerId: `mdg-f-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mdg-nonascii-${sfx}`) };
 
 try {
   // ── (A) ADDED: default denyGlobs (no explicit config on the project row), worker adds mockups/new.html ──
@@ -173,9 +179,26 @@ try {
     const mergeRequestE = db.listEvents(E.mgrId).find((e) => e.kind === "merge_request");
     check("(E) merge_request event carries NO deniedAdds", mergeRequestE?.detail?.deniedAdds === undefined);
   }
+  // ── (F) NON-ASCII: worker adds a non-ASCII-named file under mockups/ — must still be flagged ──────────
+  initRepo(F.repo);
+  {
+    const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
+    F.worktreePath = worktreePath; F.branch = branch;
+    fs.mkdirSync(path.join(worktreePath, "mockups"), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "mockups", "café.html"), "<html></html>\n");
+    commitAll(worktreePath, "add non-ASCII-named mockup", GIT_ID);
+    seed(F);
+
+    const review = await sessions.reviewWorkerMerge(F.mgrId, F.workerId);
+    check("(F) reviewWorkerMerge surfaces a DENY-GLOB warning for the non-ASCII file", typeof review.warning === "string" && /DENY-GLOB/.test(review.warning));
+    check("(F) warning names the REAL unquoted path", review.warning.includes("mockups/café.html"));
+    check("(F) diff fields carry the real path with status A, not a C-quoted key miss", review.files.some((f) => f.file === "mockups/café.html" && f.status === "A"));
+    check("(F) merge_request event carries deniedAdds:1",
+      db.listEvents(F.mgrId).some((e) => e.kind === "merge_request" && e.detail?.deniedAdds === 1));
+  }
 } finally {
   db.close();
-  for (const p of [A, B, C, D, E]) {
+  for (const p of [A, B, C, D, E, F]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }

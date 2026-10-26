@@ -21,6 +21,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (F) a file OUTSIDE comment-anchor-lint's own source scope -> NOT flagged.
 //   (G) the `hint.allFiles` path (a caller-supplied pre-fetched diffstat) produces the SAME result as the
 //       no-hint path for the same branch.
+//   (K) RENAME-PATHSPEC PAIRING (card fdf09672, Code Review 7b67f7b5 finding 1): `git mv` a file that
+//       carries a long PRE-EXISTING unanchored block, plus a tiny one-line (below-threshold) append —
+//       the pre-existing block must NOT be flagged. Without the old name in the scoped diff's own
+//       pathspec, git cannot pair the rename and the scoped diff shows the WHOLE new file as added,
+//       falsely flagging the untouched legacy block.
 // Run: 1) build daemon (pnpm build), 2) node test/unanchored-comment-blocks-detect.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -192,6 +197,85 @@ try {
 
     const result = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-f", base);
     check("(F) out-of-scope file is NOT flagged", result.blocks.length === 0);
+  }
+
+  // ── (H) BRACE-COLLISION (card fdf09672): a REAL `{{x}}`-named file, no rename involved — pre-fix,
+  //      normalizeDiffstatPath("{{tpl}}/example-h.ts") mangled this to "{tpl}/example-h.ts" (a path that
+  //      doesn't exist), so `git show branchTip:{tpl}/example-h.ts` failed and the block went unseen.
+  {
+    const repo = mkRepo("brace");
+    initRepo(repo);
+    const base = cutBranch(repo, "loom/ucb-h");
+    const braceRel = path.join("packages", "daemon", "src", "{{tpl}}", "example-h.ts");
+    const filePath = path.join(repo, braceRel);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${longUnanchoredComment(16)}\nexport const h = 1;\n`);
+    commitAll(repo, "add long unanchored block in a brace-named directory", GIT_ID);
+
+    const result = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-h", base);
+    check("(H) brace-named path is flagged (not silently dropped)", result.blocks.length === 1);
+    check("(H) flagged block names the REAL unmangled path", result.blocks[0]?.file === "packages/daemon/src/{{tpl}}/example-h.ts");
+  }
+
+  // ── (I) NON-ASCII (card fdf09672): a real non-ASCII filename — pre-fix, `--stat`'s C-quoting under
+  //      core.quotepath turned this into the literal string `"caf\303\251.ts"`, so `git show
+  //      branchTip:"caf\303\251.ts"` (the quoted text itself, as a path) failed and the block went unseen.
+  {
+    const repo = mkRepo("nonascii");
+    initRepo(repo);
+    const base = cutBranch(repo, "loom/ucb-i");
+    const nonAsciiRel = path.join("packages", "daemon", "src", "café.ts");
+    const filePath = path.join(repo, nonAsciiRel);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${longUnanchoredComment(16)}\nexport const i = 1;\n`);
+    commitAll(repo, "add long unanchored block in a non-ASCII-named file", GIT_ID);
+
+    const result = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-i", base);
+    check("(I) non-ASCII path is flagged (not silently dropped)", result.blocks.length === 1);
+    check("(I) flagged block names the REAL unquoted path", result.blocks[0]?.file === "packages/daemon/src/café.ts");
+  }
+
+  // ── (J) GLOB-MAGIC (card fdf09672, ruling 3): a REAL "[x].ts"-named in-scope file alongside an
+  //      unrelated "x.ts" — proves the scoped `git diff`/`git show` pathspec built from `candidates`
+  //      doesn't cross-contaminate. Pre-fix (no --literal-pathspecs on this call at all), pathspec
+  //      "[x].ts" would ALSO glob-match "x.ts" (verified on real git: bracket char-class), so the
+  //      unrelated x.ts's own long unanchored block would have been swept in too.
+  {
+    const repo = mkRepo("globmagic");
+    const bracketRel = path.join("packages", "daemon", "src", "[x].ts");
+    const xRel = path.join("packages", "daemon", "src", "x.ts");
+    initRepo(repo, { [bracketRel]: "export const bracket = 0;\n", [xRel]: "export const x = 0;\n" });
+    const base = cutBranch(repo, "loom/ucb-j");
+    fs.writeFileSync(path.join(repo, bracketRel), `export const bracket = 0;\n${longUnanchoredComment(16)}\n`);
+    commitAll(repo, "add long unanchored block ONLY in the bracket-named file", GIT_ID);
+
+    const result = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-j", base);
+    check("(J) bracket-named file's block is flagged", result.blocks.some((b) => b.file === "packages/daemon/src/[x].ts"));
+    check("(J) the UNRELATED x.ts is never touched by this branch — no false attribution to it", !result.blocks.some((b) => b.file === "packages/daemon/src/x.ts"));
+    check("(J) exactly one block total (no cross-contaminated duplicate)", result.blocks.length === 1);
+  }
+
+  // ── (K) RENAME-PATHSPEC PAIRING (card fdf09672, CR 7b67f7b5 finding 1): a PRE-EXISTING long unanchored
+  //      block survives a rename + a tiny below-threshold append — must NOT be flagged.
+  {
+    const repo = mkRepo("rename-pairing");
+    const legacyRel = path.join("packages", "daemon", "src", "rename-legacy.ts");
+    initRepo(repo, { [legacyRel]: `${longUnanchoredComment(32)}\nexport const legacy = 1;\n` });
+    const base = cutBranch(repo, "loom/ucb-k");
+    const newRel = path.join("packages", "daemon", "src", "rename-legacy-moved.ts");
+    execFileSync("git", ["mv", legacyRel, newRel], { cwd: repo });
+    const newFilePath = path.join(repo, newRel);
+    fs.appendFileSync(newFilePath, "export const added = 2;\n");
+    commitAll(repo, "rename + tiny below-threshold append", GIT_ID);
+
+    // Sanity: confirm this really IS detected as a rename (never a plain delete+add) — otherwise the
+    // case below doesn't exercise the pairing bug at all.
+    const statusOut = execFileSync("git", ["diff", "--name-status", `${base}...loom/ucb-k`], { cwd: repo, encoding: "utf8" });
+    check("(K) sanity: git detects this as a rename (R-status), not delete+add",
+      /^R\d*\t/m.test(statusOut) && statusOut.includes("rename-legacy.ts") && statusOut.includes("rename-legacy-moved.ts"));
+
+    const result = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-k", base);
+    check("(K) the pre-existing 32-line legacy block in the renamed file is NOT flagged", result.blocks.length === 0);
   }
 
   // ── (G) hint.allFiles path produces the SAME result as the no-hint path ────────────────────────────
