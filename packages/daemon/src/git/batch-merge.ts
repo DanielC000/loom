@@ -378,7 +378,10 @@ async function landBranchCommitsIndividually(
       git.raw(["rev-parse", "--verify", `${resolved}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
     )).trim();
   } catch (e) {
-    return { ok: false, reason: `failed to resolve branch tip: ${(e as Error).message}` };
+    // This read can carry a CanonicalGitRefusal (e.g. a commondir redirect) — route through
+    // canonicalFailureMessage so its human guidance survives, not just the bare `.message`.
+    const branchTipFailure = describeGitFailure(e);
+    return { ok: false, reason: `failed to resolve branch tip: ${canonicalFailureMessage(branchTipFailure, branchTipFailure.text)}` };
   }
 
   let batchHeadBefore: string;
@@ -387,7 +390,8 @@ async function landBranchCommitsIndividually(
       git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch worktree, pre-land)",
     )).trim();
   } catch (e) {
-    return { ok: false, reason: `failed to read batch worktree HEAD: ${(e as Error).message}` };
+    const headFailure = describeGitFailure(e);
+    return { ok: false, reason: `failed to read batch worktree HEAD: ${canonicalFailureMessage(headFailure, headFailure.text)}` };
   }
 
   // @decision 043d83d2 (S1) — a sibling worker moving this worker-writable worktree ref BETWEEN two
@@ -435,7 +439,8 @@ async function landBranchCommitsIndividually(
       git.raw(["merge-base", batchHeadBefore, branchTip]), timeoutMs, "git merge-base (batch land)",
     )).trim();
   } catch (e) {
-    return { ok: false, reason: `failed to compute merge-base: ${(e as Error).message}` };
+    const mergeBaseFailure = describeGitFailure(e);
+    return { ok: false, reason: `failed to compute merge-base: ${canonicalFailureMessage(mergeBaseFailure, mergeBaseFailure.text)}` };
   }
 
   if (mergeBase === branchTip) {
@@ -455,7 +460,8 @@ async function landBranchCommitsIndividually(
     );
     commitShas = out.split("\n").map((s) => s.trim()).filter(Boolean);
   } catch (e) {
-    return { ok: false, reason: `failed to enumerate branch's commit range: ${(e as Error).message}` };
+    const commitRangeFailure = describeGitFailure(e);
+    return { ok: false, reason: `failed to enumerate branch's commit range: ${canonicalFailureMessage(commitRangeFailure, commitRangeFailure.text)}` };
   }
   if (commitShas.length === 0) {
     return { ok: false, reason: "empty commit range — nothing to land" };
@@ -469,7 +475,8 @@ async function landBranchCommitsIndividually(
       git.raw(["rev-list", "--merges", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --merges (batch land, merge-commit probe)",
     )).split("\n").map((s) => s.trim()).filter(Boolean);
   } catch (e) {
-    return { ok: false, reason: `${branch}: failed to probe for merge commits in range: ${(e as Error).message}` };
+    const mergeProbeFailure = describeGitFailure(e);
+    return { ok: false, reason: `${branch}: failed to probe for merge commits in range: ${canonicalFailureMessage(mergeProbeFailure, mergeProbeFailure.text)}` };
   }
   if (mergeShas.length > MAX_MERGE_COMMITS_CHECKED) {
     return { ok: false, reason: `${branch}: ${mergeShas.length} merge commits in its own range (more than ${MAX_MERGE_COMMITS_CHECKED} checked) — rebase onto main` };
@@ -484,7 +491,8 @@ async function landBranchCommitsIndividually(
         git.raw(["rev-list", "--reverse", "--no-merges", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --no-merges (batch land, commit range)",
       )).split("\n").map((s) => s.trim()).filter(Boolean);
     } catch (e) {
-      return { ok: false, reason: `${branch}: failed to enumerate branch's non-merge commits: ${(e as Error).message}` };
+      const noMergeRangeFailure = describeGitFailure(e);
+      return { ok: false, reason: `${branch}: failed to enumerate branch's non-merge commits: ${canonicalFailureMessage(noMergeRangeFailure, noMergeRangeFailure.text)}` };
     }
     if (commitShas.length === 0) {
       return { ok: false, reason: `${branch}: only main-forward merge commit(s) in its range — no own commits to land` };
@@ -512,7 +520,9 @@ async function landBranchCommitsIndividually(
     // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
     // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
     const identityProbeFailure = describeGitFailure(e);
-    return { ok: false, reason: `${branch}: identity-fallback probe refused: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
+    // canonicalFailureMessage's own refusal branches already open with "refused,"/"refusing," — dropping
+    // "refused:" from this prefix avoids a literal doubled "refused: refused".
+    return { ok: false, reason: `${branch}: identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
   }
 
   // A rollback that itself FAILS (e.g. a canonicalGit refusal that also blocks `reset`) must not vanish: it is recorded here and appended to the failing
@@ -571,9 +581,17 @@ async function landBranchCommitsIndividually(
 
     // resetError can itself be a classified canonical-git refusal (e.g. a pinMismatch surfacing mid-
     // rollback) — route through canonicalFailureMessage so its guidance survives here too, not just the
-    // 400-char-capped raw text.
+    // 400-char-capped raw text. Prefixed with "reset --hard" so a bare "nothing changed" downstream
+    // clearly refers to the RESET, not the batch landing as a whole — refused through canonicalFailureMessage
+    // already opens with "refused,"/"refusing," so the prefix omits its own "refused:" there to avoid a
+    // literal doubled "refused: refused"; the plain (never-refused) fallback keeps that word since
+    // canonicalFailureMessage's own fallback text carries none of it.
     const resetErrorDescribe = resetError ? describeGitFailure(resetError) : undefined;
-    const resetErrorMessage = resetErrorDescribe ? canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text) : undefined;
+    const resetErrorMessage = resetErrorDescribe
+      ? (resetErrorDescribe.refusal
+          ? `reset --hard ${canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text)}`
+          : `reset --hard refused: ${canonicalFailureMessage(resetErrorDescribe, resetErrorDescribe.text)}`)
+      : undefined;
     try {
       const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch rollback probe)")).trim();
       const dirty = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (batch rollback probe)")).trim();

@@ -9241,7 +9241,10 @@ export async function mergeMainIntoWorktree(
     // spawn-error code here is always safe to mark `transient:true`; never add kill-confirmation to this
     // read as part of closing that gap — file a separate card instead (see the decision record).
     const transient = TIMEOUT_SHAPED_RE.test((e as Error)?.message ?? "") || isTransientSpawnErrorCode(e);
-    return { ok: false, reason: `failed to resolve main tip: ${(e as Error).message}`, ...(transient ? { transient: true } : {}) };
+    // This read can carry a CanonicalGitRefusal (e.g. a commondir redirect) — route through
+    // canonicalFailureMessage so its human guidance survives, not just the bare `.message`.
+    const mainTipFailure = describeGitFailure(e);
+    return { ok: false, reason: `failed to resolve main tip: ${canonicalFailureMessage(mainTipFailure, mainTipFailure.text)}`, ...(transient ? { transient: true } : {}) };
   }
 
   // `mainSha` (card eda70da6) rides along on EVERY success return below — it's the canonical main tip
@@ -9281,8 +9284,10 @@ export async function mergeMainIntoWorktree(
   } catch (e) {
     // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
     // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
+    // canonicalFailureMessage's own refusal branches already open with "refused,"/"refusing," — dropping
+    // "refused:" from this prefix avoids a literal doubled "refused: refused".
     const identityProbeFailure = describeGitFailure(e);
-    return { ok: false, reason: `identity-fallback probe refused: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
+    return { ok: false, reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
   }
 
   // @decision 7e5b23e7 — every mutating call below pins `quarantineRepoPath` to the CANONICAL `repoPath`,
@@ -10533,8 +10538,10 @@ async function mergeBranchLocked(
     } catch (e) {
       // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
       // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
+      // canonicalFailureMessage's own refusal branches already open with "refused,"/"refusing," —
+      // dropping "refused:" from this prefix avoids a literal doubled "refused: refused".
       const identityProbeFailure = describeGitFailure(e);
-      return { ok: false, reason: `identity-fallback probe refused: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
+      return { ok: false, reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
     }
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
