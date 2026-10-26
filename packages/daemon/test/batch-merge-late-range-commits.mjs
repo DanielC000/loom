@@ -10,12 +10,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (side-merge) the worker merges a NON-main branch (the reviewer's clock-skew history: L1 adds z Jan 10, side X1 Jan 8, L2 `git rm z` Jan 5, then merge x): REFUSED; the old replay landed a tree that still had z.
 //   (own-union)  a late commit edits a file main ALSO edited (two unchanged lines apart: a clean merge, yet one `diff-tree --cc` hunk that mixes both); a red gate leaves Loom's own union on the branch, main moves, the re-confirm lands: that union carries combined content but is Loom's own and must NOT be refused.
 //   (empty)     main itself removes extra-a.txt after the batch, so the late commit is a no-op on main: review flags it emptyOnMain and shows no diff; the confirm lands nothing.
-//   (equivalence check) proves seedHeldBranch's seeded `batch_merge_branch_retained` event is a row the real writer (service.ts ~23311-23315) could produce: a real mergeBatchTracked retain vs the
+//   (equivalence check) proves seedHeldBranch's seeded `batch_merge_branch_retained` event is a row the real writer (service.ts ~23318-23322) could produce: a real mergeBatchTracked retain vs the
 //               seeded one, compared field-for-field on the persisted row, then both driven through reviewWorkerMerge/confirmWorkerMerge to show isBranchHeld/resolveOwedRange treat them identically.
 // In every landing case review == landing: the review's commit subjects and file list equal what the landed commit actually changed.
-// Card 114e96e0: setup() no longer runs a real mergeBatchTracked to produce the HELD state for branch A. isBranchHeld (service.ts:21854) reads ONLY the durable event log — never anything
-// mergeBatchTracked computes in-memory — so seedHeldBranch (below) writes that SAME event directly via db.appendEvent, through the real writer's own chokepoint (service.ts:23311-23315), with the
-// same detail keys/value shapes. The branch-advanced-during-gate DETECTION this scaffolding used to re-exercise in every scenario is independently pinned by
+// Card 114e96e0: setup() no longer runs a real mergeBatchTracked to produce the HELD state for branch A. isBranchHeld (service.ts ~21861) reads ONLY the durable event log — never anything
+// mergeBatchTracked computes in-memory — so seedHeldBranch (./_held-branch-fixture.mjs, card 1bf5d9c3) writes that SAME event directly via db.appendEvent, through the real writer's own
+// chokepoint (service.ts ~23318-23322), with the same detail keys/value shapes. The branch-advanced-during-gate DETECTION this scaffolding used to re-exercise in every scenario is independently pinned by
 // batch-merge-branch-advanced-during-gate.mjs (scenarios sync/async/stop/mixed) and batch-merge-finalize-guard-edges.mjs (scenarios U/u/N1/N2) — this file's own claim (13fc5227) is about what
 // happens GIVEN a held branch, never about how the hold was produced. Precedent: docs/decisions/6cf10d10-ledger-cutover-gate-seeding-equivalence.md. Candidate B (never referenced by any
 // assertion in this file — grepped) is dropped entirely; the ONE (equivalence check) scenario above is the sole real-mergeBatchTracked anchor left in the file.
@@ -24,9 +24,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { seedHeldBranch } from "./_held-branch-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -59,30 +59,10 @@ fs.writeFileSync(path.join(TEMPLATE_REPO, "README.md"), "# bmlc\n");
 execSync(`git init -q && git config user.email bmlc@loom && git config user.name bmlc`, { cwd: TEMPLATE_REPO });
 commitAll(TEMPLATE_REPO, "init", GIT_ID);
 
-/**
- * Seeds the HELD state a real `mergeBatchTracked` run would produce for a retained candidate — writing
- * through the SAME chokepoint the real writer uses (service.ts ~23311-23315: `this.db.appendEvent({...,
- * kind: "batch_merge_branch_retained", workerSessionId, taskId, detail: {opId, branch, assembledTip,
- * liveTip, phase, landedSha, repoKey}})`), with the SAME detail keys and value shapes — including
- * `landedSha` (a real sha, never omitted/null: the real writer always supplies `lb.sha`, the candidate's
- * own just-landed commit). isBranchHeld (service.ts:21854) reads ONLY this durable event log, never
- * anything mergeBatchTracked computes in-memory, so a caller that also builds the matching git history (a
- * real worktree at `assembledTip`/`liveTip`, a real commit at `landedSha` on main) gets a hold
- * indistinguishable from a real retain — proved field-for-field, and via isBranchHeld/heldRecordedTip/
- * resolveOwedRange's observable effect through the public reviewWorkerMerge/confirmWorkerMerge surface
- * (all three are private methods), by the (equivalence check) scenario below.
- * `landedSha` deliberately does NOT need its own `Loom-Worker-Branch` trailer: isBranchHeld's git-fact
- * release arm (`findLaterBranchSquash`) only greps commits STRICTLY AFTER `landedSha` for that trailer,
- * never `landedSha`'s own message — so a plain commit standing in for "the batch's own squash of this
- * candidate" is inert here, confirmed by the equivalence scenario reaching the SAME held verdict.
- */
-function seedHeldBranch(db, { managerSessionId, workerSessionId, taskId, branch, assembledTip, liveTip, landedSha, phase = "pre-stop" }) {
-  db.appendEvent({
-    id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "batch_merge_branch_retained",
-    workerSessionId, taskId,
-    detail: { opId: randomUUID(), branch, assembledTip, liveTip, phase, landedSha, repoKey: null },
-  });
-}
+// seedHeldBranch moved to ./_held-branch-fixture.mjs (card 1bf5d9c3) — batch-merge-late-range-reunion.mjs
+// now imports the SAME helper rather than carrying a second verbatim copy; see that file's own doc
+// comment for the full field-equivalence argument. This file's (equivalence check) scenario below is
+// still the ONE place that equivalence is proved — a sibling caller cites it rather than re-proving it.
 
 // preMain: a commit landed on main AFTER the branch is cut and BEFORE its (seeded) assembled landing (M0 in the (m0) scenario).
 async function setup(tag, preMain, initFiles = {}) {

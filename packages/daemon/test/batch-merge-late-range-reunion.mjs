@@ -11,6 +11,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (no-tip)        a retain event with no assembledTip/landedTip/landedSha ⇒ refused, names the missing range.
 //   (no-live-tip)   the branch ref cannot be read ⇒ refused.
 //   (no-gate)       the repo has no gateCommand ⇒ refused (the late-range union exists only on the gated path).
+// Card 1bf5d9c3 (speed-up, suite-speed-up epic 24608d33): (reunion-red)/(review-exact) and (reunion-moved) are this file's (and batch-merge-late-range-landing.mjs's) REAL-COVERAGE HOME for the
+// "real batch squash + watermark state → late-range review/confirm" interaction (Code Review on card 13fc5227) — they stay on `setup()`'s real two-worker `mergeBatchTracked`, UNCHANGED. The four
+// fail-closed scenarios below ((unverified)/(no-tip)/(no-live-tip)/(no-gate)) key only on THAT the branch is held, never on HOW — measured: 89-97% of each of their own wall time was spent inside
+// setup()'s real batch merge, and none of their refusal paths (a mocked probe, a malformed retain event, a deleted ref, a missing gateCommand) ever reference worker B. They now run through
+// `seededSetup()`, which builds worker A's real git history (same shape setup() already builds for A) and writes the HELD event directly via `seedHeldBranch` (./_held-branch-fixture.mjs,
+// also used by batch-merge-late-range-commits.mjs, whose own (equivalence check) scenario is the ONE place the seeded event is proved field-for-field equal to the real writer's — see that
+// helper's own doc comment). See each converted scenario's own comment, below, for the exact service.ts fields its refusal reads and why seeding supplies them identically.
 // Run: 1) pnpm build, 2) node packages/daemon/test/batch-merge-late-range-reunion.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -19,6 +26,7 @@ import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { seedHeldBranch } from "./_held-branch-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -101,6 +109,54 @@ async function setup(tag) {
   return { repo, projId, mgrId, wA, a, db, mk, mainCommit, script };
 }
 
+// seededSetup: the lighter single-candidate fixture for the four fail-closed scenarios below — builds
+// worker A's real git history (same shape setup() already builds for A) but writes the HELD
+// `batch_merge_branch_retained` event directly via seedHeldBranch instead of running a real two-worker
+// `mergeBatchTracked` (no worker B, no spawned gate script). See the file header for why this is safe
+// for these four scenarios specifically, and each scenario's own comment for its exact field reads.
+async function seededSetup(tag) {
+  const repo = path.join(os.tmpdir(), `loom-bmlu-${tag}-${sfx}`);
+  registerForCleanup(repo);
+  fs.cpSync(TEMPLATE_REPO, repo, { recursive: true });
+  const projId = `bmlu-proj-${tag}-${sfx}`, agentId = `bmlu-agent-${tag}-${sfx}`, mgrId = `bmlu-mgr-${tag}-${sfx}`;
+  const taskId = `bmlu-task-${tag}-a-${sfx}`;
+  const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+  registerForCleanup(worktreePath);
+  fs.writeFileSync(path.join(worktreePath, "feature-a.txt"), "work a feature-a.txt\n");
+  fs.writeFileSync(path.join(worktreePath, "extra-a.txt"), "work a extra-a.txt\n");
+  commitAll(worktreePath, "a", GIT_ID);
+  const a = { taskId, branch, worktreePath };
+  const assembledTip = git(a.worktreePath, "rev-parse HEAD");
+  // Stands in for "the batch landed A's assembled commits onto main" (same final tree as assembledTip) —
+  // a plain commit instead of a real squash; its sha becomes `landedSha`. DELIBERATELY a DIFFERENT commit
+  // message than the branch's own "a" commit — see batch-merge-late-range-commits.mjs's setup() for the
+  // sha-collision reason (identical tree+parent+author+committer+message can land on the SAME sha when
+  // git's one-second timestamp granularity lands both in the same second).
+  fs.writeFileSync(path.join(repo, "feature-a.txt"), "work a feature-a.txt\n");
+  fs.writeFileSync(path.join(repo, "extra-a.txt"), "work a extra-a.txt\n");
+  commitAll(repo, "a-landed", GIT_ID);
+  const landedSha = git(repo, "rev-parse HEAD");
+  // The late commit a worker adds WHILE a real batch gate would run — applied directly instead of via a
+  // spawned gate-command child process (none of the four scenarios that call this actually execute a real
+  // gateCommand: each either injects its own `runGate` override or tests the ABSENT-gateCommand case
+  // directly, so no spawnable script is needed here at all).
+  git(a.worktreePath, "rm -q extra-a.txt");
+  commitAll(a.worktreePath, "late-revert", GIT_ID);
+  const liveTip = git(a.worktreePath, "rev-parse HEAD");
+  const db = new Db(); dbs.push(db);
+  db.insertProject({ id: projId, name: `BMLU-${tag}`, repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: `node -e "process.exit(0)"` } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  const wA = `bmlu-wkr-a-${tag}-${sfx}`;
+  db.insertTask({ id: a.taskId, projectId: projId, title: "feat(test): a", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: wA, projectId: projId, agentId, engineSessionId: null, title: null, cwd: a.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: a.taskId, worktreePath: a.worktreePath, branch: a.branch });
+  seedHeldBranch(db, { managerSessionId: mgrId, workerSessionId: wA, taskId: a.taskId, branch: a.branch, assembledTip, liveTip, landedSha });
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {}, purgeQueuedWorkerReportNudgesOnMerge() {}, purgeQueuedWorkerIdleNudges() {} };
+  const mk = (extra = {}) => new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 600_000, reapWorktreeProcesses: noReap, ...extra });
+  const mainCommit = (file, content, subject) => { fs.writeFileSync(path.join(repo, file), content); commitAll(repo, subject, GIT_ID); };
+  return { repo, projId, mgrId, wA, a, db, mk, mainCommit };
+}
+
 const otherOnMain = (repo) => fs.readFileSync(path.join(repo, "other.txt"), "utf8").trim();
 
 try {
@@ -142,9 +198,13 @@ try {
     void a;
   }
 
-  // ── fail-closed paths ─────────────────────────────────────────────────────────────────────────────────────────────────
+  // ── fail-closed paths — all four converted to seededSetup() (card 1bf5d9c3): each refusal keys on service.ts fields seedHeldBranch writes identically to the real writer ────────────────────
   {
-    const s = await setup("unverified");
+    // Reads (service.ts): isBranchHeld (~21861) — detail.assembledTip (via heldRecordedTip ~21886-21890) sets `recordedTip`, compared to the live branch tip (~21876/21879) so the hold does NOT
+    // release; detail.landedSha (~21870/21887) is truthy, so isBranchHeld reaches the git-fact probe `findLaterBranchSquash` (~21881) — which THIS scenario's `heldProbeGitFactory` mocks to
+    // throw, making it return "error" ⇒ gitUnverified:true (~21883) ⇒ resolveOwedRange's (~21900) "could not be verified" refusal. seedHeldBranch writes assembledTip/landedSha with the exact
+    // same shapes/values the real writer would (a real worktree at assembledTip, a real commit at landedSha on main) — the mocked probe is what decides this scenario, not how the hold formed.
+    const s = await seededSetup("unverified");
     const { repo, mgrId, wA, a, mk } = s;
     const failing = () => ({ raw: async () => { throw new Error("simulated transient git failure"); } });
     const mainBefore = git(repo, "rev-parse HEAD");
@@ -154,7 +214,11 @@ try {
     check("(unverified) confirm REFUSES (usually transient, retry); main untouched, branch intact", res.merged === false && /usually transient, retry/.test(res.reason ?? "") && git(repo, "rev-parse HEAD") === mainBefore && !!git(repo, `rev-parse ${a.branch}`));
   }
   {
-    const s = await setup("notip");
+    // Reads (service.ts): isBranchHeld's retain-selection (~21867, picks the LATEST `ts` event for the branch) picks THIS scenario's own malformed second event (ts = +5s), never the seeded one
+    // from setup — so heldRecordedTip (~21886-21890) and resolveOwedRange's base-null refusal (~21902, "records no readable assembledTip/landedTip") are driven entirely by the malformed event
+    // this scenario appends itself. The seeded base event only needs to exist as a valid, non-interfering prior retain (no merge_done, which seedHeldBranch never writes) — its own field values
+    // are irrelevant here, so seeding is safe independent of the field-equivalence argument above.
+    const s = await seededSetup("notip");
     const { repo, mgrId, wA, a, db, mk } = s;
     db.appendEvent({ id: randomUUID(), ts: new Date(Date.now() + 5000).toISOString(), managerSessionId: mgrId, kind: "batch_merge_branch_retained", workerSessionId: wA, taskId: a.taskId, detail: { opId: "synthetic", branch: a.branch, phase: "pre-stop" } });
     const mainBefore = git(repo, "rev-parse HEAD");
@@ -162,7 +226,11 @@ try {
     check("(no-tip) confirm REFUSES: the retain records no readable assembledTip/landedTip; main untouched", res.merged === false && /records no readable assembledTip\/landedTip/.test(res.reason ?? "") && git(repo, "rev-parse HEAD") === mainBefore);
   }
   {
-    const s = await setup("nolive");
+    // Reads (service.ts): isBranchHeld (~21861) reads detail.assembledTip to compute `recordedTip` (~21889) and detail.landedSha (~21870) to reach findLaterBranchSquash (~21881, real call here,
+    // not mocked — returns "none" since no later squash exists) ⇒ gitUnverified:false, held stays true. resolveOwedRange then re-resolves the branch's CURRENT tip via resolveBranchTip (~21903)
+    // — which THIS scenario forces to fail by deleting the branch ref — ⇒ the "current tip could not be read" refusal (~21904). seedHeldBranch's assembledTip/landedSha (real git commits,
+    // landedSha reachable from main's HEAD) satisfy findLaterBranchSquash's own merge-base check identically to a real writer's values; the deleted ref is what actually triggers this refusal.
+    const s = await seededSetup("nolive");
     const { repo, mgrId, wA, a, mk } = s;
     git(repo, `update-ref -d refs/heads/${a.branch}`);
     const mainBefore = git(repo, "rev-parse HEAD");
@@ -170,7 +238,11 @@ try {
     check("(no-live-tip) confirm REFUSES: the branch's current tip could not be read; main untouched", res.merged === false && /current tip could not be read/.test(res.reason ?? "") && git(repo, "rev-parse HEAD") === mainBefore);
   }
   {
-    const s = await setup("nogate");
+    // Reads (service.ts): this is resolveOwedRange's full SUCCESS path (~21896-21913: held, gitUnverified:false, base=assembledTip, tip=live branch tip, baseIsCommit && baseIsAncestor both
+    // true) ⇒ owed.kind==="range" — then confirmWorkerMerge's own `!gate` check (~18925/18971) fires the "no gateCommand" refusal because THIS scenario strips `gateCommand` from the project
+    // config. seedHeldBranch's assembledTip must be a genuine git ancestor of the branch's live tip for baseIsAncestor to hold — true here because liveTip is assembledTip's own child commit
+    // (the late-revert commit built on top of it), the same construction the real writer's single-candidate shape produces.
+    const s = await seededSetup("nogate");
     const { repo, mgrId, wA, projId, db, mk } = s;
     const cfg = db.getProject(projId).config;
     db.setProjectConfig(projId, { ...cfg, orchestration: { ...(cfg.orchestration ?? {}), gateCommand: undefined } });
