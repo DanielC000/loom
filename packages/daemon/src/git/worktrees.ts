@@ -9059,6 +9059,14 @@ async function deriveWorkerCommitLogBody(
   } catch {
     return undefined; // best-effort: the squash still lands with a title-only body, exactly as before this card
   }
+  // @decision 112b8d5d — do not fold a worker subject into this body without this strip: an unstripped
+  // reserved-shaped subject is a forgeable trailer-quote risk. Leading placeholder line subjects even
+  // the FIRST entry to the strip, since the callee always exempts its own line 0 as "the subject".
+  if (subjects.length > 0) {
+    const probe = ["", ...subjects].join("\n");
+    const { message: strippedProbe, strippedCount } = stripReservedLoomTrailerLines(probe);
+    if (strippedCount > 0) subjects = strippedProbe.split("\n").slice(1);
+  }
   if (subjects.length === 0) return undefined;
   if (subjects.length === 1 && subjects[0]!.toLowerCase() === subject.trim().toLowerCase()) return undefined;
 
