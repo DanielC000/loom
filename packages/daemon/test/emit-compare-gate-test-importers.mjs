@@ -31,7 +31,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       a graph seed).
 //   (H) REAL CORPUS — a positive control against THIS repo's own real packages/daemon/test/** (not a
 //       synthetic fixture): touching ONLY fixed-wait-witness-guard.mjs does NOT fail closed, and folds in
-//       its real selftest importer, with buildReducedGateCommand naming both.
+//       its real selftest importer, with buildReducedGateCommand naming both — via an `onlyFilePath`
+//       supplied the same way every real production caller supplies one (card 0f884c1d), so the assertion
+//       holds regardless of whether the corpus's current size keeps the `--only=` selection inline or
+//       forces it to spill to a file.
 //   (I) EVENT-LOOP NON-BLOCKING (round 4) — the real-corpus scan must run OFF the host event loop, not
 //       freeze it synchronously for its whole ~9s wall-clock duration: a setInterval probe ticking every
 //       20ms observes the max gap between ticks while computeEmitCompareGate runs against the real
@@ -371,10 +374,33 @@ try {
     check("(H) ⭐ REAL CORPUS: eligible:true — the scan does NOT fail closed on this repo's actual corpus", direct.eligible === true);
     check("(H) changedTestFiles includes the directly-changed fixed-wait-witness-guard.mjs", direct.changedTestFiles.includes("packages/daemon/test/fixed-wait-witness-guard.mjs"));
     check("(H) ⭐ changedTestFiles ALSO includes the REAL fixed-wait-witness-guard-selftest.mjs (its real importer)", direct.changedTestFiles.includes("packages/daemon/test/fixed-wait-witness-guard-selftest.mjs"));
-    const cmd = buildReducedGateCommand(direct);
-    const onlyMatch = /--only=(\S+)/.exec(cmd);
-    const onlyNames = onlyMatch ? onlyMatch[1].split(",") : [];
-    check("(H) buildReducedGateCommand's --only= list names BOTH real files", onlyNames.includes("fixed-wait-witness-guard") && onlyNames.includes("fixed-wait-witness-guard-selftest"));
+    // Card 0f884c1d: `buildReducedGateCommand` throws `ReducedGateOnlyFileError` once the inline `--only=`
+    // selection crosses `REDUCED_GATE_ONLY_INLINE_MAX_CHARS` (6000 chars) UNLESS the caller supplies an
+    // `onlyFilePath` — exactly what every real production caller already does (`gateOnlyListPath(opId)`,
+    // `sessions/service.ts`'s solo + retry + batch paths). This scenario's real corpus crossed that
+    // threshold (measured at triage: 164 files / 6061 chars; confirmed again just now: 165 / 6105) because
+    // the corpus keeps growing, not because of anything this scenario does — so it now supplies an
+    // `onlyFilePath` too, unconditionally, and reads back whichever of the two shapes the command actually
+    // took (inline `--only=` or the spill-to-file `--only-file=`) rather than assuming inline. This makes
+    // the scenario robust to further corpus growth: it proves the same claim (both real files are named)
+    // either way, instead of breaking again the next time the corpus crosses the threshold.
+    const onlyFilePath = `${H.repo}.only.txt`;
+    registerForCleanup(onlyFilePath);
+    const cmd = buildReducedGateCommand(direct, { onlyFilePath });
+    const inlineMatch = /--only=(\S+)/.exec(cmd);
+    const fileMatch = /--only-file=(\S+)/.exec(cmd);
+    check("(H) buildReducedGateCommand built a reduced run (inline --only= or the --only-file= overflow form)", !!inlineMatch || !!fileMatch);
+    let onlyNames;
+    if (inlineMatch) {
+      onlyNames = inlineMatch[1].split(",");
+      console.log("(H) real-corpus --only= selection stayed INLINE (under REDUCED_GATE_ONLY_INLINE_MAX_CHARS)");
+    } else {
+      const writtenPath = JSON.parse(fileMatch[1]);
+      check("(H) --only-file= overflow form names the SAME onlyFilePath this scenario supplied, and it exists", writtenPath === onlyFilePath && fs.existsSync(onlyFilePath));
+      onlyNames = fs.readFileSync(onlyFilePath, "utf8").split("\n").filter(Boolean);
+      console.log(`(H) real-corpus --only= selection OVERFLOWED REDUCED_GATE_ONLY_INLINE_MAX_CHARS and spilled to ${onlyFilePath}`);
+    }
+    check("(H) the reduced --only selection names BOTH real files", onlyNames.includes("fixed-wait-witness-guard") && onlyNames.includes("fixed-wait-witness-guard-selftest"));
     // MEASUREMENT (round 3, card 72769424): since EVERY non-literal dynamic import() is now an
     // unconditional wildcard (no classifier left to narrow it to the 2 of 24 real specimens round 2
     // measured), log the FULL --only= population so a human can judge whether the reduction is still
