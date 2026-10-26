@@ -757,8 +757,11 @@ test("editing the project Alert webhook URL + events persists, and clearing both
 // come back "orchestration.gateCommandTimeoutMs: Too big: expected number to be <=1800000" — a correct
 // rejection quoting a bound in a unit the field is not measured in. Two project owners read that as a
 // broken validator on the same night. (The gate field's ceiling was later raised 1800s -> 3600s by card
-// fc8aa167, then 3600s -> 7200s by owner decision (request b09c77af, 2026-10-01); the deploy/webhook
-// fields kept their original bounds, so the assertions below diverge by field.)
+// fc8aa167, then 3600s -> 7200s by owner decision (request b09c77af, 2026-10-01), then the policy cap was
+// REMOVED ENTIRELY (request 0e1ed089 + the owner's follow-up) — the gate field's bound is now just the raw
+// Node timer ceiling (MAX_TIMER_DELAY_MS), so its hint shows no max at all and its over-limit path is
+// exercised at that ceiling instead; the deploy/webhook fields kept their original bounds, so the
+// assertions below diverge by field.)
 test("timeout fields state their bound in seconds and block an over-limit entry (card 48365fda)", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`settings-timeout-bounds-${Date.now()}`);
   await pinActiveProject(page, project.id);
@@ -769,7 +772,10 @@ test("timeout fields state their bound in seconds and block an over-limit entry 
   const gateBox = page.locator('label:has(> span:text-is("Gate command timeout (s)"))');
   const deployBox = page.locator('label:has(> span:text-is("Deploy command timeout (s)"))');
   const webhookBox = page.locator('label:has(> span:text-is("Alert webhook timeout (s)"))');
-  await expect(gateBox.getByText("min 1s · max 7200s")).toBeVisible();
+  // The gate field's max is now MAX_TIMER_DELAY_MS (no policy ceiling) — msRangeHint omits the max half
+  // for that specific bound rather than showing an ugly non-whole-second figure (card: remove the gate
+  // command timeout ceiling).
+  await expect(gateBox.getByText("min 1s", { exact: true })).toBeVisible();
   await expect(deployBox.getByText("min 1s · max 1800s")).toBeVisible();
   // The webhook field's own bounds differ (500ms-60s) — proving the hint is driven from the SHARED
   // per-field schema bounds, not one hardcoded pair reused for all three.
@@ -783,15 +789,16 @@ test("timeout fields state their bound in seconds and block an over-limit entry 
   // BEFORE: an untouched form has no range error and Save is merely not-dirty.
   await expect(gateBox.getByRole("alert")).toHaveCount(0);
 
-  // DoD-1, field 1 — the gate field's ceiling is 7200s (request b09c77af); "2000"/"4000" from earlier
-  // ceilings are now IN-RANGE, so this uses a value over the LIVE ceiling instead to keep exercising the
-  // over-limit path the test is named for.
-  await gate.fill("8000");
-  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 7200s");
+  // DoD-1, field 1 — the gate field's ceiling is now MAX_TIMER_DELAY_MS (no policy cap, request 0e1ed089);
+  // older over-limit probes ("2000"/"4000"/"8000") are all IN-RANGE now, so this uses a value one second
+  // over the raw timer ceiling (2147483.647s) instead to keep exercising the over-limit path the test is
+  // named for.
+  await gate.fill("2147484");
+  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 2147483.647s");
   await expect(projectSave).toBeDisabled();
   // The raw millisecond bound never reaches the user. (Asserted as the server error's own phrasing so a
   // legitimate ms-derived value elsewhere on the page can't make this vacuously pass.)
-  await expect(page.getByText(/<=\s*7200000/)).toHaveCount(0);
+  await expect(page.getByText(/<=\s*2147483647/)).toHaveCount(0);
   // AFTER: back in range → the error clears and Save is reachable again.
   await gate.fill("1800");
   await expect(gateBox.getByRole("alert")).toHaveCount(0);
@@ -812,7 +819,7 @@ test("timeout fields state their bound in seconds and block an over-limit entry 
 
   // The under-limit end of the range is caught too, not just the ceiling.
   await gate.fill("0.5");
-  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 7200s");
+  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 2147483.647s");
 
   // And an in-range value still SAVES — the guard rejects out-of-range entries, it doesn't wedge the form.
   await gate.fill("300");

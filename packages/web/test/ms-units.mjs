@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { PLATFORM_MS_BOUNDS, ORCHESTRATION_TIMEOUT_MS_BOUNDS } from "@loom/shared";
+import { PLATFORM_MS_BOUNDS, ORCHESTRATION_TIMEOUT_MS_BOUNDS, MAX_TIMER_DELAY_MS } from "@loom/shared";
 import {
   UNIT_MS, msFromUnit, msInUnit, msRangeError, msRangeErrors, msRangeHint, msStr,
 } from "../src/lib/msUnits.ts";
@@ -102,17 +102,24 @@ check("msRangeError accepts a fractional entry whose ROUNDED value sits exactly 
 });
 
 check("msRangeError still catches a genuinely out-of-range entry, stated in the field's own unit", () => {
+  // gateCommandTimeoutMs now has NO policy max (card: remove the gate command timeout ceiling) — its
+  // `max` is MAX_TIMER_DELAY_MS, the raw Node timer limit. Derive the expected message from the LIVE
+  // bound rather than a hardcoded "7200s" so this test keeps discriminating if the ceiling ever moves
+  // again, instead of silently testing a value that's no longer actually out of range.
+  const b = ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs;
+  const maxS = b.max / 1000; // field's own unit (seconds)
+  const overMax = String(maxS + 1);
   assert.equal(
-    msRangeError("8000", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs),
-    "must be between 1s and 7200s",
+    msRangeError(overMax, "s", b),
+    `must be between 1s and ${maxS}s`,
   );
   assert.equal(
-    msRangeError("0.5", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs),
-    "must be between 1s and 7200s",
+    msRangeError("0.5", "s", b),
+    `must be between 1s and ${maxS}s`,
   );
   // The raw millisecond figure never appears in the message — that is the whole point.
-  const msg = msRangeError("8000", "s", ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs);
-  assert.equal(/7200000/.test(msg), false);
+  const msg = msRangeError(overMax, "s", b);
+  assert.equal(new RegExp(String(b.max)).test(msg), false);
 });
 
 check("msRangeError reports nothing for blank, for no bounds, or for a non-numeric entry", () => {
@@ -129,6 +136,12 @@ check("msInUnit / msRangeHint translate a canonical-ms bound into the displayed 
   assert.equal(msInUnit(3_600_000, "h"), "1h");
   assert.equal(msRangeHint({ min: 5000, max: 3_600_000 }, "s"), "min 5s · max 3600s");
   assert.equal(msRangeHint(PLATFORM_MS_BOUNDS.updateCheckIntervalMs, "h"), "min 1h · max 24h");
+});
+
+check("msRangeHint omits the max half for a bound sitting at MAX_TIMER_DELAY_MS (the raw timer ceiling, not a policy cap)", () => {
+  assert.equal(msRangeHint(ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs, "s"), "min 1s");
+  // Control: an ordinary bound (not at the timer ceiling) still shows its max, same as before.
+  assert.equal(msRangeHint({ min: 1000, max: MAX_TIMER_DELAY_MS - 1 }, "s"), `min 1s · max ${(MAX_TIMER_DELAY_MS - 1) / 1000}s`);
 });
 
 check("msRangeErrors names each offending field and omits the clean ones", () => {

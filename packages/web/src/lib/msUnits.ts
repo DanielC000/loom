@@ -2,7 +2,7 @@
 // 0a5d61c9 extracted them from Settings.tsx so they can be unit-tested; see test/ms-units.mjs). A Loom
 // timing config value is ALWAYS canonical milliseconds on the wire and in the DB; a form shows it in a
 // human unit (s/m/h). These are the only two directions that conversion is allowed to happen in.
-import type { MsBounds } from "@loom/shared";
+import { MAX_TIMER_DELAY_MS, type MsBounds } from "@loom/shared";
 
 export type Unit = "s" | "m" | "h";
 export const UNIT_MS: Record<Unit, number> = { s: 1000, m: 60000, h: 3600000 };
@@ -46,8 +46,13 @@ export function msInUnit(ms: number, unit: Unit): string {
   return `${ms / UNIT_MS[unit]}${unit}`;
 }
 
-/** The always-on range hint shown under a bounded MsField, in the field's own unit. */
+/** The always-on range hint shown under a bounded MsField, in the field's own unit.
+ *
+ *  When `b.max` is `MAX_TIMER_DELAY_MS` (the raw Node timer ceiling, not a policy cap — see that
+ *  constant's own doc in `shared/config.ts`), the max half is omitted rather than shown as an ugly
+ *  non-whole-second figure (e.g. "2147483.647s") that would read as a policy choice when it isn't one. */
 export function msRangeHint(b: MsBounds, unit: Unit): string {
+  if (b.max === MAX_TIMER_DELAY_MS) return `min ${msInUnit(b.min, unit)}`;
   return `min ${msInUnit(b.min, unit)} · max ${msInUnit(b.max, unit)}`;
 }
 

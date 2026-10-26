@@ -233,6 +233,15 @@ export function resolveMergeGateCadence(o: { mergeGate: "on" | "off"; mergeGateI
 }
 
 /**
+ * Node's `setTimeout`/`setInterval` delay is internally a signed 32-bit int — any requested delay above
+ * this (2^31-1 ms, ≈24.8 days) is silently coerced down to 1ms, which would fire a gate's own kill timer
+ * almost immediately instead of honoring a configured timeout. This is the one genuine TECHNICAL ceiling
+ * any ms-keyed timeout field that reaches a real timer unclamped must never exceed — never a policy
+ * choice, unlike the bounds below it.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
  * The accepted range (in canonical MS) of each per-project, human-only orchestration TIMEOUT field —
  * the SINGLE source of truth for those bounds. The daemon's human config validator
  * (`mcp/platform.ts` › `orchestrationOverride`) builds its zod `.min()/.max()` from this table, and the
@@ -250,7 +259,10 @@ export const ORCHESTRATION_TIMEOUT_MS_BOUNDS = {
   // Raised 3_600_000 (60m) -> 7_200_000 (2h) by owner decision (request b09c77af, 2026-10-01): the full
   // daemon suite had grown to sit at the old 60m ceiling (~54m at 3 lanes), so the owner chose a 75m
   // project value — 4_500_000 — which needs headroom above it, not a ceiling flush against the new value.
-  gateCommandTimeoutMs: { min: 1000, max: 7_200_000 },
+  // Owner then REMOVED the policy cap entirely (request 0e1ed089 + the owner's follow-up): there is no
+  // longer any project-tuning reason to cap this field at all, so `max` is now MAX_TIMER_DELAY_MS — the
+  // raw technical ceiling a setTimeout delay can safely hold, not a policy choice.
+  gateCommandTimeoutMs: { min: 1000, max: MAX_TIMER_DELAY_MS },
   deployCommandTimeoutMs: { min: 1000, max: 1_800_000 },
   alertWebhookTimeoutMs: { min: 500, max: 60_000 },
   // Card bd9a483b: per-step timeout for the `ungatedLandingCheckCommand` safety-net check — same bound
