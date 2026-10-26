@@ -118,6 +118,35 @@ import { PER_RECORD_MAX_BYTES } from "../assets/decision-records.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+/**
+ * Dynamically load comment-anchor-lint.mjs as it existed at a FIXED, NAMED commit `sha` — never `HEAD`.
+ * A before/after regression pin that diffs against `git show HEAD:` is only ever true on the BRANCH that
+ * introduces the fix, before it merges — once that commit lands on main, HEAD *is* the fix, forever, and
+ * the comparison silently degrades to comparing the fixed version against itself (card 298a1390's own
+ * review: this exact mistake shipped in card f9ccdcb1's own "(c)" test and reds on main the moment that
+ * card merged, invisible to the merge gate because an assets-only diff has no dist importers to catch it).
+ * Every "before" snapshot in this file must instead be pinned to a sha that stays correct regardless of
+ * which commit HEAD later becomes — see each call site for which fixed point it uses and why.
+ *
+ * Guards against a SHALLOW clone (e.g. CI) where `sha` may genuinely not be present: `git cat-file -e`
+ * first, and on failure returns `{ mod: null, reason }` for the caller to SKIP that check (with the
+ * reason printed) rather than fail — a shallow clone missing history is not a real regression.
+ */
+async function loadCommentAnchorLintAt(repoRoot, sha) {
+  try {
+    execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: repoRoot, stdio: "ignore" });
+  } catch {
+    return { mod: null, dir: null, reason: `commit ${sha} is not reachable in this checkout (shallow clone?) — skipping` };
+  }
+  const src = execFileSync("git", ["show", `${sha}:packages/daemon/assets/comment-anchor-lint.mjs`], { cwd: repoRoot, encoding: "utf8" });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-pin-"));
+  fs.writeFileSync(path.join(dir, "comment-anchor-lint.mjs"), src);
+  fs.copyFileSync(path.join(import.meta.dirname, "..", "assets", "decision-records.mjs"), path.join(dir, "decision-records.mjs"));
+  fs.copyFileSync(path.join(import.meta.dirname, "..", "assets", "git-resolve.mjs"), path.join(dir, "git-resolve.mjs"));
+  const mod = await import(pathToFileURL(path.join(dir, "comment-anchor-lint.mjs")).href);
+  return { mod, dir, reason: null };
+}
+
 // --- pure-function tests: extractCommentBlocks / findFileAnchors -----------------------------------
 
 {
@@ -1578,9 +1607,14 @@ try {
   ].join("\n");
   // The split-anchor shape (card ad3a9a85): the keyword and id land on different lines — ANCHOR_RE never
   // fires on either line alone, so this is invisible to every other check; only findBrokenAnchors sees it.
+  // Card 298a1390: written as two independent `//` lines (never a bare ` * ` continuation with no
+  // preceding `/**` opener) — each line must independently open its own comment per extractCommentBlocks,
+  // since brokenAnchors is now comment-scoped and a ` * `-only line with nothing opening it is NOT
+  // recognized as a comment at all (exactly the shape every real specimen in this repo's own test corpus
+  // uses — see this card's own investigation). Keeps the SAME 2-line shape so no later line number shifts.
   const splitAnchor = [
-    " * @decision",
-    " * cccccccc — split across a line wrap, must be flagged as a broken anchor",
+    "// @decision",
+    "// cccccccc — split across a line wrap, must be flagged as a broken anchor",
   ].join("\n");
   // Card afc56dcc DoD-4: built as a function of `includeOverlong` so a genuine BEFORE/AFTER comparison can
   // run against otherwise-byte-identical fixture content — the only permitted difference between the two
@@ -1977,35 +2011,227 @@ try {
       && hookReport?.embeddedAnchors.length === 0 && hookReport?.embeddedAnchorsStacked.length === 0
       && hookReport?.splitAnchorParagraphs.length === 0 && hookReport?.splitAnchorParagraphsUnterminated.length === 0);
 
-    // (c) REGRESSION, real before/after: dynamically load the PRE-this-card version of
-    // comment-anchor-lint.mjs (git HEAD, i.e. before card f9ccdcb1's own uncommitted changes — its
-    // sibling imports, decision-records.mjs/git-resolve.mjs, are copied byte-identical from disk since
-    // this card never touches them) and run it against the EXACT SAME fixture tree used above.
+    // (c) REGRESSION, real before/after: dynamically load the PRE-f9ccdcb1 version of
+    // comment-anchor-lint.mjs and run it against the EXACT SAME fixture tree used above.
     // unanchoredLongBlocks must be byte-identical: this card never changes how a non-test block is
     // computed, and a test-scoped block was excluded from it before (file never walked) and stays
     // excluded now (walked, but deliberately not pushed into allBlocks) — see f9ccdcb1's own record.
+    //
+    // Card 298a1390 (found on main AFTER f9ccdcb1 merged, card e2ecc383): the "before" snapshot MUST be a
+    // FIXED, NAMED commit, never `HEAD` — `HEAD` was a valid stand-in for "pre-fix" only on the f9ccdcb1
+    // BRANCH, before it merged; once merged, HEAD *is* the fix, forever, so a `git show HEAD:` comparison
+    // silently degrades to comparing the fixed version against itself and this whole section goes
+    // permanently vacuous (every assertion below either trivially passes on an unrelated reason, or, for
+    // the filesScanned one, trivially FAILS — exactly what shipped and reded on main). Pinned to the
+    // PARENT of f9ccdcb1's own landing commit on main — found via
+    // `git log --format=%H -1 --grep "report orphan decision anchors in test-file comments"` (ebe018b4),
+    // then that commit's first parent — i.e. the last commit BEFORE test/tests/e2e walking existed at
+    // all, confirmed by reading that commit's own EXCLUDE_SEGMENTS (still lists "test"/"tests"/"e2e" then).
+    // Correct forever regardless of what HEAD later becomes, since it names a specific, immutable commit
+    // rather than "whatever is currently checked out".
+    const PRE_F9CCDCB1_SHA = "966182f2693119925d311bed11ef5667ca9cc05f";
     w("src/long.ts", Array.from({ length: 20 }, (_, i) => `// regrowing narrative ${i}`).join("\n") + "\nconst x = 1;\n");
     w("test/long.mjs", Array.from({ length: 25 }, (_, i) => `// an even longer, unanchored test-fixture block, line ${i}`).join("\n") + "\nconst y = 1;\n");
 
     const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
-    const preFixSrc = execFileSync("git", ["show", "HEAD:packages/daemon/assets/comment-anchor-lint.mjs"], { cwd: repoRoot, encoding: "utf8" });
-    const preFixDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-prefix-"));
-    fs.writeFileSync(path.join(preFixDir, "comment-anchor-lint.mjs"), preFixSrc);
-    fs.copyFileSync(path.join(import.meta.dirname, "..", "assets", "decision-records.mjs"), path.join(preFixDir, "decision-records.mjs"));
-    fs.copyFileSync(path.join(import.meta.dirname, "..", "assets", "git-resolve.mjs"), path.join(preFixDir, "git-resolve.mjs"));
-    const preFixMod = await import(pathToFileURL(path.join(preFixDir, "comment-anchor-lint.mjs")).href);
-
-    const afterReport = computeReport(NL);
-    const beforeReport = preFixMod.computeReport(NL);
-    check("card f9ccdcb1 (c) before/after: unanchoredLongBlocks.count is BYTE-IDENTICAL pre- vs post-fix on the SAME fixture (src/long.ts's block counts both ways; test/long.mjs's never does)",
-      beforeReport.unanchoredLongBlocks.count === afterReport.unanchoredLongBlocks.count);
-    check("card f9ccdcb1 (c): that identical count is exactly 1 (src/long.ts only) — proves the comparison isn't vacuously 0=0",
-      afterReport.unanchoredLongBlocks.count === 1 && afterReport.unanchoredLongBlocks.items[0]?.file === "src/long.ts");
-    check("card f9ccdcb1 (c): the pre-fix import genuinely never saw test/long.mjs at all (it predates the walk widening)",
-      beforeReport.filesScanned < afterReport.filesScanned);
-    try { fs.rmSync(preFixDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    const { mod: preFixMod, dir: preFixDir, reason: preFixSkipReason } = await loadCommentAnchorLintAt(repoRoot, PRE_F9CCDCB1_SHA);
+    if (preFixMod === null) {
+      console.log(`SKIP  card f9ccdcb1 (c) before/after: ${preFixSkipReason}`);
+    } else {
+      const afterReport = computeReport(NL);
+      const beforeReport = preFixMod.computeReport(NL);
+      check("card f9ccdcb1 (c) before/after: unanchoredLongBlocks.count is BYTE-IDENTICAL pre- vs post-fix on the SAME fixture (src/long.ts's block counts both ways; test/long.mjs's never does)",
+        beforeReport.unanchoredLongBlocks.count === afterReport.unanchoredLongBlocks.count);
+      check("card f9ccdcb1 (c): that identical count is exactly 1 (src/long.ts only) — proves the comparison isn't vacuously 0=0",
+        afterReport.unanchoredLongBlocks.count === 1 && afterReport.unanchoredLongBlocks.items[0]?.file === "src/long.ts");
+      check("card f9ccdcb1 (c): the pre-fix import genuinely never saw test/long.mjs at all (it predates the walk widening)",
+        beforeReport.filesScanned < afterReport.filesScanned);
+      try { fs.rmSync(preFixDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   } finally {
     try { fs.rmSync(NL, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- card 298a1390: comment-scoped anchor-grammar checks — positive + negative controls -----------------
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-298a1390-"));
+  const srcDir = path.join(dir, "packages", "daemon", "src");
+  fs.mkdirSync(srcDir, { recursive: true });
+  try {
+    // A real git repo with one commit — needed for bareCommitAnchors' own `git cat-file --batch-check`
+    // call, same fixture shape as the existing bareCommitAnchors test above.
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    fs.writeFileSync(path.join(dir, "SEED.md"), "seed\n");
+    commitAll(dir, "seed", "-c user.email=cal-298a1390@loom -c user.name=cal-298a1390");
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim().slice(0, 8);
+
+    // (a)+(b): the three RAW-LINE finders (brokenAnchors/overlongAnchorIds/sigilSpaceAnchors) — a real
+    // comment is still flagged; the SAME malformed shape inside a string/template literal (never a real
+    // comment per extractCommentBlocks) is NOT.
+    const rawLinePath = path.join(srcDir, "raw-line-checks.ts");
+    fs.writeFileSync(rawLinePath, [
+      "// @decision",                                                                     // 1
+      "// e0e0e0e0 — split across a line wrap, must be flagged as a broken anchor",        // 2
+      "",                                                                                  // 3
+      "// @decision 1234567890abcdef — a verbatim 40-hex-shaped paste, must be flagged",   // 4
+      "",                                                                                  // 5
+      "// @decision sha: cafe1234 — a space after the sigil's colon, must be flagged",     // 6
+      "",                                                                                  // 7
+      "const brokenInString = `// @decision",                                             // 8
+      "// e1e1e1e1 — fake wrap, inside a template literal, never a real comment`;",        // 9
+      "",                                                                                  // 10
+      "const overlongInString = \"// @decision 1234567890abcdef — fake, in a string literal\";", // 11
+      "",                                                                                  // 12
+      "const sigilSpaceInString = \"// @decision sha: cafe5678 — fake, in a string literal\";",  // 13
+      "",                                                                                  // 14
+    ].join("\n"));
+
+    // (a): the remaining five anchor-based checks — bareCommitAnchors, pointerAnchors,
+    // overlongAnchorParagraphs, embeddedAnchors, splitAnchorParagraphs — each a real comment anchor is
+    // still flagged (the comment-scoping filter must never exclude a GENUINE comment anchor).
+    const anchorPath = path.join(srcDir, "anchor-checks.ts");
+    fs.writeFileSync(anchorPath, [
+      `// @decision ${sha} — bare form citing a real commit, must be flagged as bareCommitAnchors`, // 1
+      "",                                                                                  // 2
+      "// @decision f2f2f2f2 — see docs/decisions/f2f2f2f2-x.md (a pointer phrase)",        // 3
+      "",                                                                                  // 4
+      "/**",                                                                               // 5
+      " * @decision f3f3f3f3 — line one of an overlong paragraph",                         // 6
+      " * line two",                                                                       // 7
+      " * line three",                                                                     // 8
+      " * line four — now 4 lines, past the 3-line cap, must be flagged",                  // 9
+      " */",                                                                               // 10
+      "",                                                                                  // 11
+      "/** preceding prose that does not end a sentence",                                  // 12
+      " * @decision f4f4f4f4 — embedded across a line boundary, must be flagged",          // 13
+      " */",                                                                               // 14
+      "",                                                                                  // 15
+      "/**",                                                                               // 16
+      " * @decision f5f5f5f5 — a paragraph the blank line below cuts off before",          // 17
+      " *",                                                                                // 18
+      " * it actually finishes, a continuation, must be flagged as split",                 // 19
+      " */",                                                                               // 20
+      "",                                                                                  // 21
+    ].join("\n"));
+
+    const report = computeReport(dir, { minLines: 15 });
+
+    check("card 298a1390 (a) brokenAnchors: a real EOL-wrap anchor in a REAL comment is flagged",
+      report.brokenAnchors.items.some((b) => b.file === "packages/daemon/src/raw-line-checks.ts" && b.line === 1));
+    check("card 298a1390 (b) brokenAnchors: the SAME wrap shape inside a template literal is NOT flagged",
+      !report.brokenAnchors.items.some((b) => b.file === "packages/daemon/src/raw-line-checks.ts" && b.line === 8));
+
+    check("card 298a1390 (a) overlongAnchorIds: a real 40-hex-shaped id in a REAL comment is flagged",
+      report.overlongAnchorIds.items.some((o) => o.file === "packages/daemon/src/raw-line-checks.ts" && o.line === 4));
+    check("card 298a1390 (b) overlongAnchorIds: the SAME shape inside a string literal is NOT flagged",
+      !report.overlongAnchorIds.items.some((o) => o.file === "packages/daemon/src/raw-line-checks.ts" && o.line === 11));
+
+    check("card 298a1390 (a) sigilSpaceAnchors: a real sigil-space anchor in a REAL comment is flagged",
+      report.sigilSpaceAnchors.items.some((s) => s.file === "packages/daemon/src/raw-line-checks.ts" && s.line === 6));
+    check("card 298a1390 (b) sigilSpaceAnchors: the SAME shape inside a string literal is NOT flagged",
+      !report.sigilSpaceAnchors.items.some((s) => s.file === "packages/daemon/src/raw-line-checks.ts" && s.line === 13));
+
+    check("card 298a1390 (a) bareCommitAnchors: a bare anchor whose id is a real commit, in a REAL comment, is flagged",
+      report.bareCommitAnchors.items.some((a) => a.id === sha && a.file === "packages/daemon/src/anchor-checks.ts"));
+    check("card 298a1390 (a) pointerAnchors: a pointer phrase in a REAL comment is flagged",
+      report.pointerAnchors.items.some((p) => p.id === "f2f2f2f2"));
+    check("card 298a1390 (a) overlongAnchorParagraphs: a >3-line anchor paragraph in a REAL comment is flagged",
+      report.overlongAnchorParagraphs.items.some((o) => o.id === "f3f3f3f3"));
+    check("card 298a1390 (a) embeddedAnchors: an anchor embedded across a line boundary in a REAL comment is flagged",
+      report.embeddedAnchors.items.some((e) => e.id === "f4f4f4f4"));
+    check("card 298a1390 (a) splitAnchorParagraphs: a paragraph split by a blank line in a REAL comment is flagged",
+      report.splitAnchorParagraphs.items.some((s) => s.id === "f5f5f5f5"));
+
+    // computeFileReport (the live hook path) must agree with the CLI scan for the SAME raw-line fixture.
+    const hookReport = computeFileReport(dir, rawLinePath, fs.readFileSync(rawLinePath, "utf8"));
+    check("card 298a1390 (a)/(b) hook: computeFileReport agrees — real comment flagged, string literal not, for all three raw-line checks",
+      hookReport?.brokenAnchors.some((b) => b.line === 1) && !hookReport?.brokenAnchors.some((b) => b.line === 8)
+      && hookReport?.overlongAnchorIds.some((o) => o.line === 4) && !hookReport?.overlongAnchorIds.some((o) => o.line === 11)
+      && hookReport?.sigilSpaceAnchors.some((s) => s.line === 6) && !hookReport?.sigilSpaceAnchors.some((s) => s.line === 13));
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- card 298a1390 (c): REAL-REPO regression pin — non-test item sets unchanged before/after -------------
+// Pinned to THIS BRANCH's own merge-base with main (found via `git merge-base HEAD main` at the time this
+// test was written: ebe018b4, which is also f9ccdcb1's own landing commit — this branch forked right
+// there) rather than `HEAD` — see `loadCommentAnchorLintAt`'s own doc for why `HEAD` degrades to comparing
+// the fixed version against itself the moment this branch merges. A sha is a fixed point regardless of
+// what HEAD later becomes; re-deriving "the merge-base" at run time would not be (post-merge, HEAD IS
+// main, so `git merge-base HEAD main` would just return HEAD again — the same degenerate comparison).
+{
+  const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
+  const PRE_298A1390_SHA = "ebe018b4e8017f1cfced9222b4a0574eac357ebb";
+  const { mod: preFixMod, dir: preFixDir, reason: preFixSkipReason } = await loadCommentAnchorLintAt(repoRoot, PRE_298A1390_SHA);
+  if (preFixMod === null) {
+    console.log(`SKIP  card 298a1390 (c) real-repo regression pin: ${preFixSkipReason}`);
+  } else {
+    try {
+      const before = preFixMod.computeReport(repoRoot);
+      const after = computeReport(repoRoot);
+
+      const isTestPath = (f) => /[\\/](test|tests|e2e)[\\/]/.test(f);
+      const CHECKS = [
+        "brokenAnchors", "overlongAnchorIds", "sigilSpaceAnchors", "bareCommitAnchors", "pointerAnchors",
+        "overlongAnchorParagraphs", "midSentenceAnchors", "embeddedAnchors", "splitAnchorParagraphs",
+      ];
+      for (const c of CHECKS) {
+        const beforeItems = JSON.stringify(before[c].items.filter((x) => !isTestPath(x.file)));
+        const afterItems = JSON.stringify(after[c].items.filter((x) => !isTestPath(x.file)));
+        check(`card 298a1390 (c) real-repo regression pin: ${c}'s non-test item set is byte-identical before vs after`,
+          beforeItems === afterItems);
+      }
+      check("card 298a1390 (c): brokenAnchors DOES gain new items once test/tests/e2e is included (the one "
+        + "deliberate extension) — proves this isn't a vacuous before=after comparison",
+        after.brokenAnchors.count > before.brokenAnchors.count);
+    } finally {
+      try { fs.rmSync(preFixDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+}
+
+// --- card 298a1390 (d): brokenAnchors extends into test/tests/e2e — CLI + hook, with its own negative ----
+// control (a synthetic fixture id's wrap shape inside a test-file STRING LITERAL must still never flag)
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-298a1390-test-broken-"));
+  try {
+    const testFile = path.join(dir, "packages", "daemon", "test", "fixture.mjs");
+    fs.mkdirSync(path.dirname(testFile), { recursive: true });
+    fs.writeFileSync(testFile, [
+      "// @decision",
+      "// a0a0a0a0 — split across a line wrap in a TEST file, must still be flagged",
+    ].join("\n"));
+
+    const report = computeReport(dir);
+    check("card 298a1390 (d) CLI: a broken anchor in a test-file COMMENT is reported",
+      report.brokenAnchors.items.some((b) => b.file === "packages/daemon/test/fixture.mjs" && b.line === 1));
+
+    const fileReport = computeFileReport(dir, testFile, fs.readFileSync(testFile, "utf8"));
+    check("card 298a1390 (d) hook: the SAME broken anchor is reported by computeFileReport too",
+      fileReport?.brokenAnchors?.length === 1 && fileReport.brokenAnchors[0]?.line === 1);
+    check("card 298a1390 (d) hook: every OTHER field for a test-scoped file stays empty except orphanAnchors/brokenAnchors",
+      fileReport?.overlongAnchorIds.length === 0 && fileReport?.sigilSpaceAnchors.length === 0
+      && fileReport?.bareCommitAnchors.length === 0 && fileReport?.pointerAnchors.length === 0
+      && fileReport?.overlongAnchorParagraphs.length === 0 && fileReport?.midSentenceAnchors.length === 0
+      && fileReport?.embeddedAnchors.length === 0 && fileReport?.splitAnchorParagraphs.length === 0);
+
+    const stringLitFile = path.join(dir, "packages", "daemon", "test", "fixture-string.mjs");
+    fs.writeFileSync(stringLitFile, [
+      "const brokenInString = `// @decision",
+      "// b0b0b0b0 — fake wrap, inside a template literal, never a real comment`;",
+    ].join("\n"));
+    const report2 = computeReport(dir);
+    check("card 298a1390 (d) negative control: the SAME wrap shape inside a test-file STRING LITERAL is NOT flagged",
+      !report2.brokenAnchors.items.some((b) => b.file === "packages/daemon/test/fixture-string.mjs"));
+
+    const scriptPath = path.join(import.meta.dirname, "..", "assets", "comment-anchor-lint.mjs");
+    const cli = spawnSync(process.execPath, [scriptPath, dir], { encoding: "utf8" });
+    check("card 298a1390 (d) CLI subprocess: the real CLI invocation (not just computeReport in-process) reports the test-file broken anchor",
+      cli.status === 0 && JSON.parse(cli.stdout).brokenAnchors.items.some((b) => b.file === "packages/daemon/test/fixture.mjs" && b.line === 1));
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
 
