@@ -27386,17 +27386,18 @@ export class SessionService {
     // genuine zero-delta (escalate, distinct reason); neither needs a git call or a trust record.
     if (filesChangedPaths === null) return { kind: "no-match" };
     if (filesChangedPaths.length === 0) return { kind: "zero-delta" };
-    // reviewedTip's own tree is loop-invariant across every candidate below — read it ONCE and share it
-    // with every recordedTipContentLanded/stampedPathsPlausible call in both arms below.
-    // @decision 1cf79e64 — a failed read here means every candidate would fail closed anyway; short-
-    // circuit immediately with today's existing "no-match" kind, never a new one.
-    const recordedTipEntries = await fullTreeEntries(repoPath, reviewedTip, { timeoutMs: this.gitOpMs });
-    if (!recordedTipEntries) return { kind: "no-match" };
     try {
       // @decision e5458ccd — verify OLDEST-first: a coincidental later match must never win over this
       // worker's own true landing.
       const candidates = [...await findAllLandedTrailerCommits(repoPath, branch, base, { timeoutMs: this.gitOpMs })].reverse();
       if (candidates.length === 0) return { kind: "no-match" };
+      // reviewedTip's own tree is loop-invariant across every candidate below — read it ONCE (AFTER the
+      // empty-candidates check above, round 2: a session with no eligible candidates pays nothing for
+      // this) and share it with every recordedTipContentLanded/stampedPathsPlausible call in both arms.
+      // @decision 1cf79e64 — a failed read here means every candidate would fail closed anyway; short-
+      // circuit immediately with today's existing "no-match" kind, never a new one.
+      const recordedTipEntries = await fullTreeEntries(repoPath, reviewedTip, { timeoutMs: this.gitOpMs });
+      if (!recordedTipEntries) return { kind: "no-match" };
       for (const candidate of candidates) {
         if (candidate.trailers.landedTip) {
           // @decision e5458ccd — Round 3 item 1: pass the SAME resolved mainline watermark ref the

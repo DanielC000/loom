@@ -8083,16 +8083,24 @@ export async function machineReadablePathSet(
 /**
  * Full recursive tree listing of `ref` as `path -> "<mode> <type> <sha>"`, via ONE `git ls-tree -r -z
  * <ref>` call with NO pathspec argument at all — so no hazardous name (a literal backslash, bracket/brace
- * glob-magic, non-ASCII, a leading `-`, a space) is ever interpreted as pathspec syntax; every key is the
- * RAW `-z`-delimited path string exactly as git emits it, with NO normalization applied (no backslash<->
- * slash, no case folding, no Unicode NFC/NFD) — a case-variant pair (`A.txt` vs `a.txt`) is two distinct
- * keys, matching git's own case-sensitive tree storage regardless of the host filesystem's own case-
- * folding behavior. Shared by both {@link recordedTipContentLanded} and {@link stampedPathsPlausible} —
- * `recordedTip`'s own listing is loop-invariant across every candidate in a scan, so a caller should read
- * it ONCE and pass the result to both functions' optional `recordedTipEntries` param instead of letting
- * either one re-read it per candidate.
- * @decision 1cf79e64 — fails closed to `null` on any read failure OR a malformed record (a line with no
- * tab separator) — the WHOLE map is untrustworthy then, never a partial one that looks complete.
+ * glob-magic, non-ASCII, a leading `-`, a space) is ever interpreted as pathspec syntax; every key is
+ * compared by plain string equality, with NO additional normalization applied on top of that decode (no
+ * backslash<->slash, no case folding, no Unicode NFC/NFD) — a case-variant pair (`A.txt` vs `a.txt`) is
+ * two distinct keys, matching git's own case-sensitive tree storage regardless of the host filesystem's
+ * own case-folding behavior. Shared by both {@link recordedTipContentLanded} and
+ * {@link stampedPathsPlausible} — `recordedTip`'s own listing is loop-invariant across every candidate in
+ * a scan, so a caller should read it ONCE and pass the result to both functions' optional
+ * `recordedTipEntries` param instead of letting either one re-read it per candidate.
+ *
+ * `git.raw()` (simple-git) returns the subprocess's stdout as a UTF-8-DECODED JS string, not raw bytes —
+ * a path whose real on-disk bytes are NOT valid UTF-8 decodes LOSSILY (Node's decoder substitutes U+FFFD,
+ * the replacement character, for each invalid byte sequence), so two genuinely DIFFERENT raw byte paths
+ * can decode to the IDENTICAL string and collide as one Map key. Fails closed to `null` if any decoded
+ * key contains U+FFFD, or if a decoded key collides with one already in the map (the two symptoms of the
+ * same underlying risk) — never silently keeps whichever entry happened to be seen first.
+ * @decision 1cf79e64 — fails closed to `null` on any read failure, a malformed record (a line with no tab
+ * separator), a decoded key containing U+FFFD, or a duplicate decoded key — the WHOLE map is untrustworthy
+ * then, never a partial one that looks complete.
  */
 export async function fullTreeEntries(
   repoPath: string, ref: string, deps: BoundedGitDeps = {},
@@ -8107,7 +8115,10 @@ export async function fullTreeEntries(
       if (!rec) continue;
       const tab = rec.indexOf("\t");
       if (tab === -1) return null; // malformed record — fail the whole map closed, never a partial one
-      map.set(rec.slice(tab + 1), rec.slice(0, tab)); // path -> "<mode> <type> <sha>"
+      const p = rec.slice(tab + 1);
+      if (p.includes("�")) return null; // a lossily-decoded (non-UTF-8) path can't be trusted as a key
+      if (map.has(p)) return null; // a duplicate decoded key — a genuine collision or a lossy one; either way, untrustworthy
+      map.set(p, rec.slice(0, tab)); // path -> "<mode> <type> <sha>"
     }
     return map;
   } catch {
