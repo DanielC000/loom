@@ -8081,6 +8081,41 @@ export async function machineReadablePathSet(
 }
 
 /**
+ * Full recursive tree listing of `ref` as `path -> "<mode> <type> <sha>"`, via ONE `git ls-tree -r -z
+ * <ref>` call with NO pathspec argument at all — so no hazardous name (a literal backslash, bracket/brace
+ * glob-magic, non-ASCII, a leading `-`, a space) is ever interpreted as pathspec syntax; every key is the
+ * RAW `-z`-delimited path string exactly as git emits it, with NO normalization applied (no backslash<->
+ * slash, no case folding, no Unicode NFC/NFD) — a case-variant pair (`A.txt` vs `a.txt`) is two distinct
+ * keys, matching git's own case-sensitive tree storage regardless of the host filesystem's own case-
+ * folding behavior. Shared by both {@link recordedTipContentLanded} and {@link stampedPathsPlausible} —
+ * `recordedTip`'s own listing is loop-invariant across every candidate in a scan, so a caller should read
+ * it ONCE and pass the result to both functions' optional `recordedTipEntries` param instead of letting
+ * either one re-read it per candidate.
+ * @decision 1cf79e64 — fails closed to `null` on any read failure OR a malformed record (a line with no
+ * tab separator) — the WHOLE map is untrustworthy then, never a partial one that looks complete.
+ */
+export async function fullTreeEntries(
+  repoPath: string, ref: string, deps: BoundedGitDeps = {},
+): Promise<Map<string, string> | null> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const out = await withTimeout(
+      git.raw(["ls-tree", "-r", "-z", ref]), timeoutMs, "git ls-tree -r (full tree entries)",
+    );
+    const map = new Map<string, string>();
+    for (const rec of out.split("\0")) {
+      if (!rec) continue;
+      const tab = rec.indexOf("\t");
+      if (tab === -1) return null; // malformed record — fail the whole map closed, never a partial one
+      map.set(rec.slice(tab + 1), rec.slice(0, tab)); // path -> "<mode> <type> <sha>"
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Round 5 (Code Review 7fb963b2 ruling c): a fail-closed sanity net on the STAMPED set itself, run once
  * per candidate before trusting {@link recordedTipContentLanded}'s verdict against it. A stamped path
  * absent from BOTH `recordedTip`'s own tree AND its merge-base with `otherSha` means the stamp and the
@@ -8091,18 +8126,15 @@ export async function machineReadablePathSet(
  * (`ls-tree --name-only -z <ref> -- <p>`, up to 2 spawns per path) made this net the dominant cost on the
  * boot-reconcile path — measured 500 paths at ~29.5s per candidate when every path exists, ~98.4s when
  * all 500 are absent (2 ls-tree reads apiece). Fixed by reading each tree ONCE as a full recursive
- * listing (`ls-tree -r --name-only -z <ref>`, no pathspec at all) into a `Set`, then testing membership
- * locally — 3 total spawns per candidate (merge-base + 2 tree reads) regardless of how many paths are
- * checked. Listing the WHOLE tree also closes a correctness bug the per-path pathspec design had: git
- * normalizes `\` in a pathspec argument (Windows), so a path genuinely containing a literal backslash
- * (e.g. a plumbing-built `back\slash.txt`) never matched its own pathspec on either side, even when the
- * file truly existed unchanged on both — this net fails closed on that path and the TRUE positive (a
- * genuine attribution) was escalated anyway, never a safety hole; but it wrongly escalated every such
- * file, trivial self-comparison included (measured: `stampedPathsPlausible(tip, tip, [thatPath])` read
- * `false`). A full-tree listing carries no pathspec to normalize — membership is exact string equality
- * against the raw, `-z`-delimited (unquoted) tree entries, so this is now MORE literal than the old
- * `--literal-pathspecs` ls-tree call, not merely equally so; the flag is dropped from this function because
- * there is no pathspec left for it to act on.
+ * listing into a `Set`, then testing membership locally — 3 total spawns per candidate (merge-base + 2
+ * tree reads) regardless of how many paths are checked. Listing the WHOLE tree also closes a correctness
+ * bug the per-path pathspec design had: git normalizes `\` in a pathspec argument (Windows), so a path
+ * genuinely containing a literal backslash (e.g. a plumbing-built `back\slash.txt`) never matched its own
+ * pathspec on either side, even when the file truly existed unchanged on both — this net fails closed on
+ * that path and the TRUE positive (a genuine attribution) was escalated anyway, never a safety hole; but
+ * it wrongly escalated every such file, trivial self-comparison included (measured:
+ * `stampedPathsPlausible(tip, tip, [thatPath])` read `false`). A full-tree listing carries no pathspec to
+ * normalize — membership is exact string equality against the raw, `-z`-delimited (unquoted) tree entries.
  *
  * The Lead's ruling (round 6, finding 2) also moved this net to run AFTER {@link recordedTipContentLanded}
  * returns `"attributed"`, never before — this net only ever REJECTS a positive attribution (see the "fail-
@@ -8112,9 +8144,13 @@ export async function machineReadablePathSet(
  * See `attributeStaleGenerationOwnLanding` (sessions/service.ts) for the call-site ordering.
  * @decision c7dc99bf — fails closed to `false` on any ambiguity (a failed git read, an unresolvable
  * merge-base, or a genuinely absent path on both sides), never `true` on a shaky read.
+ * @decision 1cf79e64 — now built on the shared {@link fullTreeEntries} helper instead of its own bespoke
+ * `--name-only` tree-set read; `recordedTipEntries`, when passed, is used in place of a fresh read of
+ * `recordedTip`'s own tree (the caller's shared-read optimization — see that function's own doc).
  */
 export async function stampedPathsPlausible(
   repoPath: string, recordedTip: string, otherSha: string, paths: string[], deps: BoundedGitDeps = {},
+  recordedTipEntries?: Map<string, string> | null,
 ): Promise<boolean> {
   if (paths.length === 0) return true;
   try {
@@ -8123,16 +8159,13 @@ export async function stampedPathsPlausible(
       git.raw(["merge-base", recordedTip, otherSha]), timeoutMs, "git merge-base (stamped-path plausibility)",
     )).trim();
     if (!mergeBase) return false;
-    const treeSet = async (ref: string): Promise<Set<string>> => {
-      const out = await withTimeout(
-        git.raw(["ls-tree", "-r", "--name-only", "-z", ref]),
-        timeoutMs, "git ls-tree -r (stamped-path plausibility)",
-      );
-      return new Set(out.split("\0").filter((p) => p.length > 0));
-    };
-    const [recordedTipSet, mergeBaseSet] = await Promise.all([treeSet(recordedTip), treeSet(mergeBase)]);
+    const [recordedMap, mergeBaseMap] = await Promise.all([
+      recordedTipEntries !== undefined ? recordedTipEntries : fullTreeEntries(repoPath, recordedTip, deps),
+      fullTreeEntries(repoPath, mergeBase, deps),
+    ]);
+    if (!recordedMap || !mergeBaseMap) return false;
     for (const p of paths) {
-      if (!recordedTipSet.has(p) && !mergeBaseSet.has(p)) return false;
+      if (!recordedMap.has(p) && !mergeBaseMap.has(p)) return false;
     }
     return true;
   } catch {
@@ -8145,20 +8178,32 @@ export async function stampedPathsPlausible(
  * (the review-time stamped path set {@link machineReadablePathSet} produced, used as-is — see its own
  * doc)? The sha-parameterized sibling of {@link branchContentLandedInCommit} — that one diffs the LIVE
  * branch ref, which is wrong once the branch has been reused by a different generation.
+ *
+ * Built on {@link fullTreeEntries} (mode+type+blob-sha tree-entry comparison) rather than a pathspec-based
+ * `git diff`, so a hazardous stamped name (a literal backslash, bracket/brace glob-magic, …) is compared
+ * by exact string equality, never reinterpreted as pathspec syntax. `files.length === 0` fails closed to
+ * `"no-match"` — never a vacuous `"attributed"`, since an empty stamp proves nothing about any candidate.
+ * `recordedTipEntries`, when passed, replaces a fresh read of `recordedTip`'s own tree — see
+ * `fullTreeEntries`'s own doc for why a caller looping over candidates should share this read.
  * @decision e5458ccd — fails closed to `"no-match"` on any ambiguity, never `"attributed"` on a shaky read.
- * @decision c7dc99bf — `--literal-pathspecs`: a stamped name (e.g. `pages/[id].tsx`) must never be
- * reinterpreted as pathspec glob/magic here — round 6 measured this flag DOES flip a real bracket-name
- * case through this exact spawn path, correcting round 5's own "no measured flip" claim.
+ * @decision 1cf79e64 — do not reintroduce a pathspec-based diff here: a literal backslash in a stamped
+ * path defeats ANY pathspec (no flag/magic/env override exists) and silently reads as a vacuous content
+ * match for a candidate that genuinely omits that file, or even an unrelated candidate entirely.
  */
 export async function recordedTipContentLanded(
   repoPath: string, recordedTip: string, candidateSha: string, files: string[], deps: BoundedGitDeps = {},
+  recordedTipEntries?: Map<string, string> | null,
 ): Promise<"attributed" | "no-match"> {
+  if (files.length === 0) return "no-match";
   try {
-    const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const diffOutput = (await withTimeout(
-      git.raw(["--literal-pathspecs", "diff", "--name-only", candidateSha, recordedTip, "--", ...files]), timeoutMs, "git diff --name-only (stale-generation content check, candidate vs recorded tip)",
-    )).trim();
-    return diffOutput === "" ? "attributed" : "no-match"; // no output ⇒ zero difference on any of the recorded tip's own paths ⇒ content matches
+    const recordedMap = recordedTipEntries !== undefined ? recordedTipEntries : await fullTreeEntries(repoPath, recordedTip, deps);
+    if (!recordedMap) return "no-match";
+    const candidateMap = await fullTreeEntries(repoPath, candidateSha, deps);
+    if (!candidateMap) return "no-match";
+    for (const p of files) {
+      if (recordedMap.get(p) !== candidateMap.get(p)) return "no-match";
+    }
+    return "attributed";
   } catch {
     return "no-match";
   }

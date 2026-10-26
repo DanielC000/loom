@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -27386,6 +27386,12 @@ export class SessionService {
     // genuine zero-delta (escalate, distinct reason); neither needs a git call or a trust record.
     if (filesChangedPaths === null) return { kind: "no-match" };
     if (filesChangedPaths.length === 0) return { kind: "zero-delta" };
+    // reviewedTip's own tree is loop-invariant across every candidate below — read it ONCE and share it
+    // with every recordedTipContentLanded/stampedPathsPlausible call in both arms below.
+    // @decision 1cf79e64 — a failed read here means every candidate would fail closed anyway; short-
+    // circuit immediately with today's existing "no-match" kind, never a new one.
+    const recordedTipEntries = await fullTreeEntries(repoPath, reviewedTip, { timeoutMs: this.gitOpMs });
+    if (!recordedTipEntries) return { kind: "no-match" };
     try {
       // @decision e5458ccd — verify OLDEST-first: a coincidental later match must never win over this
       // worker's own true landing.
@@ -27404,12 +27410,12 @@ export class SessionService {
             // @decision c7dc99bf — round 6: content-check FIRST, confirm with stampedPathsPlausible only
             // on "attributed" — the net only ever REJECTS a positive attribution, so paying its cost
             // against an already-failed candidate is pure waste (measured: it dominated the old order).
-            const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs });
+            const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
             if (contentResult === "attributed") {
               // @decision c7dc99bf — round 5 ruling c: a stamped path absent from BOTH reviewedTip's own
               // tree and its merge-base with this candidate means the stamp and the repo disagree — never
               // trust the content check's verdict for a candidate that fails this.
-              const plausible = await stampedPathsPlausible(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs });
+              const plausible = await stampedPathsPlausible(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
               if (plausible) return { kind: "attributed", sha: candidate.sha, via: "union-chain" };
             }
           }
@@ -27417,9 +27423,9 @@ export class SessionService {
           // @decision c7dc99bf — `candidate.trailers.base` is only an ELIGIBILITY gate here (does this
           // candidate look like a Loom landing shape at all), never a trusted value fed into the check.
           // Round 6: same content-check-first ordering as the landedTip arm above.
-          const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs });
+          const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
           if (contentResult === "attributed") {
-            const plausible = await stampedPathsPlausible(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs });
+            const plausible = await stampedPathsPlausible(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
             if (plausible) return { kind: "attributed", sha: candidate.sha, via: "content-match" };
           }
         }

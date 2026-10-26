@@ -1,6 +1,6 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// @decision c7dc99bf — never derive the own-files pathspec from a candidate's own trailer, a live ref, or
-// any reconcile-time anchor; read it from the review-time stamped filesChangedPaths directly, and
+// @decision c7dc99bf — never derive the own-files set from a candidate's own trailer, a live ref, or any
+// reconcile-time anchor; read it from the review-time stamped filesChangedPaths directly, and
 // content-check candidates against that set only.
 //
 // This tests `attributeStaleGenerationOwnLanding` (sessions/service.ts, boot-reconcile Pass A2). Six
@@ -29,24 +29,27 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Plus direct unit-style proofs: `machineReadablePathSet`'s own cap/name-reading behavior and its pure
 // `parseNameStatusZ` parse (malformed-record + UTF-8 byte accounting); a mutation proof that dropping a
-// stamped path from the pathspec wrongly attributes; a producer-side proof that a SCOPED
-// `reviewWorkerMerge` call still stamps the unfiltered set; a `--literal-pathspecs` bracket-precision
-// proof; a `stampedPathsPlausible` "backslash net" proof (what the net actually catches, plus its own
-// false-escalation regression fix); a `filesChangedPaths` assertion on each SPECIAL_NAME_* partial
-// scenario, so a truncated/absent stamp can't satisfy the escalation check by accident.
+// stamped path from the content check wrongly attributes; a producer-side proof that a SCOPED
+// `reviewWorkerMerge` call still stamps the unfiltered set; a repurposed bracket-precision proof (no
+// longer about `--literal-pathspecs`, which card 1cf79e64 removed — see below); a `stampedPathsPlausible`
+// "backslash net" proof (what the net actually catches, plus its own false-escalation regression fix); a
+// `filesChangedPaths` assertion on each SPECIAL_NAME_* partial scenario, so a truncated/absent stamp can't
+// satisfy the escalation check by accident.
 //
-// Two named residuals (not fixed, not tested — recorded in docs/decisions/c7dc99bf-*.md, do not
-// re-derive): (1) "the check is only as strong as the review-time HEAD" — a review that ran against a
+// One named residual (not fixed, not tested — recorded in docs/decisions/c7dc99bf-*.md, do not
+// re-derive): "the check is only as strong as the review-time HEAD" — a review that ran against a
 // stale/diverted canonical checkout stamps whatever that checkout's diff found, nothing here re-verifies
-// it against a later-resolved mainline; (2) Finding 4 — a partial/forged landing that omits a real
-// backslash-named file is still wrongly attributed (git's backslash-as-separator handling on Windows
-// defeats `recordedTipContentLanded`'s own pathspec, and the plausibility net cannot rescue an omission
-// by design). This is a REGRESSION against this branch's OWN round-5 tip (round 5's per-path net happened
-// to escalate this shape by accident, as a side effect of a bug round 6 correctly fixed elsewhere) but
-// PRE-EXISTING against upstream `main` (its own pre-card content check has the identical defect) — the
-// branch stays strictly better than `main` on every other shape tried. A wider sibling shape (an
-// ALL-backslash stamp attributing against an arbitrary, unrelated candidate) is also recorded there as
-// Finding 4b. Tracked by card 1cf79e64.
+// it against a later-resolved mainline.
+//
+// Card `1cf79e64` (docs/decisions/1cf79e64-*.md) FIXED c7dc99bf's own Finding 4/4b — a partial/forged
+// landing that omits a real backslash-named file was wrongly attributed, and (wider) an all-backslash
+// stamp could attribute against an arbitrary unrelated candidate, both because git's backslash-as-
+// separator handling on Windows defeats ANY pathspec. `recordedTipContentLanded` no longer uses a
+// pathspec at all — it compares stamped paths' own tree entries (mode+type+sha, via `fullTreeEntries`) by
+// exact string equality. Tested below: F4 (a genuine omission now escalates) and F4b (an all-backslash
+// stamp against an unrelated candidate now escalates), a non-ASCII name and a case-variant pair (both
+// exact-match, no normalization), and `files.length === 0` failing closed rather than vacuously
+// attributing.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -809,15 +812,15 @@ try {
       "truncated" in wideResult && wideResult.truncated === true);
   }
 
-  // --- Direct proof (round 6, Code Review e319ea92 finding 1b, CORRECTED shape — see this card's own
-  // round-6 investigation note before trusting a restatement): --literal-pathspecs on
-  // recordedTipContentLanded IS measurably load-bearing — round 5's own record claimed no measured flip;
-  // that claim is false. The exploitable shape is NOT "a missing bracket-named file" (when the real
-  // stamped file genuinely differs between candidate and recordedTip, git matches it literally even
-  // without the flag — measured directly, no flip there). It is the OPPOSITE: a GENUINE landing whose own
-  // stamped file matches EXACTLY, sitting next to an UNRELATED file that independently drifted and
-  // happens to glob-match the stamped name's bracket shape — without the flag, that unrelated drift gets
-  // swept into the diff and the genuine landing wrongly ESCALATES (safe direction, but wrong). ---
+  // --- Direct proof (round 6, Code Review e319ea92 finding 1b — REPURPOSED by card 1cf79e64 now that
+  // recordedTipContentLanded no longer uses a pathspec at all; see docs/decisions/1cf79e64-*.md). This
+  // used to prove `--literal-pathspecs` was load-bearing against a bracket-shaped name glob-matching an
+  // unrelated, independently-drifting file. That flag and the pathspec it guarded are both gone now — the
+  // SAME scenario (a genuine landing whose own bracket-named file matches exactly, sitting next to an
+  // unrelated coincidentally-bracket-matching file that drifted) is kept to prove the new tree-entry
+  // comparison still attributes correctly via plain Map-key equality, with no flag or pathspec involved at
+  // all. The second assertion below is now purely illustrative — it demonstrates the pathspec hazard class
+  // this redesign structurally avoids, not a risk `recordedTipContentLanded` itself still runs. ---
   {
     const bnRepo = path.join(os.tmpdir(), `loom-sglt-bracket-${sfx}`);
     initRepo(bnRepo);
@@ -842,15 +845,16 @@ try {
 
     const bnStamp = ["pages/[i].tsx"]; // what a real review would stamp for the worker's own commit
 
-    const withFlag = await recordedTipContentLanded(bnRepo, bnReviewedTip, bnCandidate, bnStamp);
-    check("(bracket precision) recordedTipContentLanded (HAS --literal-pathspecs) correctly attributes — the unrelated drift never enters the literal pathspec",
-      withFlag === "attributed");
+    const treeEntryResult = await recordedTipContentLanded(bnRepo, bnReviewedTip, bnCandidate, bnStamp);
+    check("(bracket precision) recordedTipContentLanded correctly attributes via exact tree-entry comparison — the unrelated drift is never consulted at all (it isn't in the stamped set)",
+      treeEntryResult === "attributed");
 
-    // Demonstrate WHY the flag matters: the IDENTICAL diff, run directly without it, sweeps in the
-    // unrelated pages/i.tsx drift because it glob-matches the bracket-shaped pathspec.
-    const withoutFlagOutput = git(bnRepo, `diff --name-only ${bnCandidate} ${bnReviewedTip} -- "pages/[i].tsx"`); // git() trims trailing newline
-    check("(bracket precision) the SAME diff WITHOUT the flag wrongly sweeps in the unrelated drift — proving the flag is load-bearing, not merely reasoned",
-      withoutFlagOutput === "pages/i.tsx");
+    // Illustrative only: a NAIVE pathspec-based diff (the OLD design) sweeps in the unrelated pages/i.tsx
+    // drift because it glob-matches the bracket-shaped pathspec — this is the hazard class the tree-entry
+    // redesign avoids structurally (no pathspec is ever passed to git by the real function anymore).
+    const naivePathspecDiff = git(bnRepo, `diff --name-only ${bnCandidate} ${bnReviewedTip} -- "pages/[i].tsx"`); // git() trims trailing newline
+    check("(bracket precision) a NAIVE pathspec diff (illustrative, not what the real function runs) wrongly sweeps in the unrelated drift — the hazard this redesign avoids",
+      naivePathspecDiff === "pages/i.tsx");
 
     try { fs.rmSync(bnRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
@@ -920,6 +924,130 @@ try {
       bsContentGenuineBackslash === "attributed");
 
     try { fs.rmSync(bsRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+
+  // --- Direct proof (card 1cf79e64, F4/F4b): a genuine omission of a real backslash-named file, and an
+  // all-backslash stamp against a wholly unrelated candidate, both now escalate instead of wrongly
+  // attributing. Built via the same plumbing technique as the backslash-net block above (a literal
+  // backslash cannot be created through the real filesystem on Windows). See docs/decisions/1cf79e64-*.md
+  // for the full repro this mirrors and the design that fixes it. ---
+  {
+    const f4Repo = path.join(os.tmpdir(), `loom-sglt-f4-${sfx}`);
+    fs.mkdirSync(f4Repo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: f4Repo });
+    const F4_ID = ["-c", "user.email=sglt@loom", "-c", "user.name=sglt"];
+    const f4Raw = (args, input) => execFileSync("git", args, { cwd: f4Repo, input }).toString();
+    const f4Blob = (content) => f4Raw(["hash-object", "-w", "--stdin"], content).trim();
+    const f4Tree = (entries) => {
+      const env = { ...process.env, GIT_INDEX_FILE: path.join(os.tmpdir(), `loom-sglt-f4-idx-${sfx}-${Math.random()}`) };
+      for (const [p, content] of entries) {
+        execFileSync("git", ["-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", `100644,${f4Blob(content)},${p}`], { cwd: f4Repo, env });
+      }
+      return execFileSync("git", ["write-tree"], { cwd: f4Repo, env }).toString().trim();
+    };
+    const f4Commit = (tree, parent, msg) => f4Raw([...F4_ID, "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", msg]).trim();
+
+    const F4_BS_NAME = "back\\slash-f4.txt"; // a GENUINE backslash-named file the worker actually added
+    const F4_REAL_NAME = "real-f4.txt";
+    const f4Base = f4Commit(f4Tree([["keep.txt", "k\n"]]), null, "base");
+    // reviewedTip: the worker's REAL tip — genuinely adds BOTH files.
+    const f4ReviewedTip = f4Commit(f4Tree([["keep.txt", "k\n"], [F4_REAL_NAME, "r\n"], [F4_BS_NAME, "b\n"]]), f4Base, "reviewedTip");
+    // F4: a partial candidate that OMITS the backslash file — never actually landed it.
+    const f4PartialCandidate = f4Commit(f4Tree([["keep.txt", "k\n"], [F4_REAL_NAME, "r\n"]]), f4Base, "partial");
+    const f4Stamp = [F4_REAL_NAME, F4_BS_NAME]; // what a real review of reviewedTip would have stamped
+
+    const f4Content = await recordedTipContentLanded(f4Repo, f4ReviewedTip, f4PartialCandidate, f4Stamp);
+    check("(F4) a genuine omission of a real backslash-named file now escalates — tree-entry comparison is not defeated by git's backslash-as-separator handling",
+      f4Content === "no-match");
+    const f4Plausible = await stampedPathsPlausible(f4Repo, f4ReviewedTip, f4PartialCandidate, f4Stamp);
+    check("(F4) stampedPathsPlausible still reads plausible for this candidate (the backslash file IS genuinely present in reviewedTip's own tree) — confirms the fix is in the content check, not a side effect of the net",
+      f4Plausible === true);
+
+    // F4b (wider): EVERY stamped path is backslash-shaped; candidate has ZERO shared history/content.
+    const f4bUnrelatedCandidate = f4Commit(f4Tree([["totally-different.txt", "nothing shared\n"]]), null, "unrelated");
+    const f4bAllBackslashStamp = [F4_BS_NAME];
+    const f4bContent = await recordedTipContentLanded(f4Repo, f4ReviewedTip, f4bUnrelatedCandidate, f4bAllBackslashStamp);
+    check("(F4b) an all-backslash stamp against a wholly unrelated candidate now escalates, instead of vacuously attributing",
+      f4bContent === "no-match");
+
+    // Positive control: a genuine backslash-named landing (candidate matches reviewedTip exactly) still
+    // attributes — the fix escalates a real omission, it does not blanket-refuse every backslash name.
+    const f4GenuineCandidate = f4Commit(f4Tree([["keep.txt", "k\n"], [F4_REAL_NAME, "r\n"], [F4_BS_NAME, "b\n"]]), f4Base, "genuine");
+    const f4GenuineContent = await recordedTipContentLanded(f4Repo, f4ReviewedTip, f4GenuineCandidate, f4Stamp);
+    check("(F4 control) a genuine backslash-named landing (no omission) still attributes",
+      f4GenuineContent === "attributed");
+
+    try { fs.rmSync(f4Repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+
+  // --- Direct proof (card 1cf79e64, manager condition 3): path keys are the RAW -z bytes exactly as git
+  // emits them, with NO normalization — a non-ASCII name, and a case-variant pair (A.txt vs a.txt) built
+  // via plumbing so the host filesystem's own case-folding can't interfere. ---
+  {
+    const nkRepo = path.join(os.tmpdir(), `loom-sglt-namekeys-${sfx}`);
+    fs.mkdirSync(nkRepo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: nkRepo });
+    const NK_ID = ["-c", "user.email=sglt@loom", "-c", "user.name=sglt"];
+    const nkRaw = (args, input) => execFileSync("git", args, { cwd: nkRepo, input }).toString();
+    const nkBlob = (content) => nkRaw(["hash-object", "-w", "--stdin"], content).trim();
+    const nkTree = (entries) => {
+      const env = { ...process.env, GIT_INDEX_FILE: path.join(os.tmpdir(), `loom-sglt-namekeys-idx-${sfx}-${Math.random()}`) };
+      for (const [p, content] of entries) {
+        execFileSync("git", ["-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", `100644,${nkBlob(content)},${p}`], { cwd: nkRepo, env });
+      }
+      return execFileSync("git", ["write-tree"], { cwd: nkRepo, env }).toString().trim();
+    };
+    const nkCommit = (tree, parent, msg) => nkRaw([...NK_ID, "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", msg]).trim();
+
+    // Non-ASCII name: a genuine landing must still attribute (the -z stream carries raw UTF-8 bytes).
+    const NONASCII_NAME = "café-1cf79e64.txt"; // café
+    const nkBase = nkCommit(nkTree([["keep.txt", "k\n"]]), null, "base");
+    const nkNonAsciiTip = nkCommit(nkTree([["keep.txt", "k\n"], [NONASCII_NAME, "n\n"]]), nkBase, "reviewedTip-nonascii");
+    const nkNonAsciiGenuine = nkCommit(nkTree([["keep.txt", "k\n"], [NONASCII_NAME, "n\n"]]), nkBase, "genuine-nonascii");
+    const nonAsciiResult = await recordedTipContentLanded(nkRepo, nkNonAsciiTip, nkNonAsciiGenuine, [NONASCII_NAME]);
+    check("(path-key exactness) a non-ASCII stamped name attributes correctly — the raw UTF-8 bytes are the key, no quoting/escaping involved",
+      nonAsciiResult === "attributed");
+    const nkNonAsciiPartial = nkCommit(nkTree([["keep.txt", "k\n"]]), nkBase, "partial-nonascii"); // omits the non-ASCII file
+    const nonAsciiOmissionResult = await recordedTipContentLanded(nkRepo, nkNonAsciiTip, nkNonAsciiPartial, [NONASCII_NAME]);
+    check("(path-key exactness) a non-ASCII stamped name's genuine omission still escalates",
+      nonAsciiOmissionResult === "no-match");
+
+    // Case-variant pair: A.txt and a.txt as TWO DISTINCT tree entries (via plumbing — the real filesystem
+    // on this host may be case-insensitive and would silently collapse them into one file on disk).
+    const caseBase = nkCommit(nkTree([["keep.txt", "k\n"]]), null, "case-base");
+    const caseReviewedTip = nkCommit(nkTree([["keep.txt", "k\n"], ["A.txt", "upper\n"], ["a.txt", "lower\n"]]), caseBase, "case-reviewedTip");
+    // A genuine landing of BOTH distinct entries must attribute.
+    const caseGenuine = nkCommit(nkTree([["keep.txt", "k\n"], ["A.txt", "upper\n"], ["a.txt", "lower\n"]]), caseBase, "case-genuine");
+    const caseGenuineResult = await recordedTipContentLanded(nkRepo, caseReviewedTip, caseGenuine, ["A.txt", "a.txt"]);
+    check("(path-key exactness) a case-variant pair (A.txt + a.txt) genuinely landing both attributes",
+      caseGenuineResult === "attributed");
+    // A candidate that only landed "a.txt" (the OTHER case) must NOT be mistaken for landing "A.txt" too —
+    // if case were folded, this would wrongly read as a match for A.txt's own stamp entry.
+    const caseOnlyLower = nkCommit(nkTree([["keep.txt", "k\n"], ["a.txt", "lower\n"]]), caseBase, "case-only-lower");
+    const caseOnlyLowerResult = await recordedTipContentLanded(nkRepo, caseReviewedTip, caseOnlyLower, ["A.txt", "a.txt"]);
+    check("(path-key exactness) a candidate landing only the lowercase variant does NOT satisfy the uppercase variant's own stamp entry — case is never folded",
+      caseOnlyLowerResult === "no-match");
+
+    try { fs.rmSync(nkRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+
+  // --- Direct proof (card 1cf79e64, manager condition 2): an empty stamp fails CLOSED, never a vacuous
+  // "attributed" — the whole-stamp-vacuous shape is exactly F4b's class, just via an empty array instead
+  // of an all-backslash one. ---
+  {
+    const efRepo = path.join(os.tmpdir(), `loom-sglt-emptyfiles-${sfx}`);
+    fs.mkdirSync(efRepo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: efRepo });
+    fs.writeFileSync(path.join(efRepo, "a.txt"), "a\n");
+    commitAll(efRepo, "base", GIT_ID);
+    const efTip = git(efRepo, "rev-parse HEAD");
+    fs.writeFileSync(path.join(efRepo, "unrelated.txt"), "unrelated\n");
+    commitAll(efRepo, "unrelated candidate", GIT_ID);
+    const efUnrelatedCandidate = git(efRepo, "rev-parse HEAD");
+    const emptyFilesResult = await recordedTipContentLanded(efRepo, efTip, efUnrelatedCandidate, []);
+    check("(empty stamp) recordedTipContentLanded with files.length===0 fails closed to 'no-match', never a vacuous 'attributed'",
+      emptyFilesResult === "no-match");
+    try { fs.rmSync(efRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 } finally {
   for (const dir of [R_FORGED, R_GENUINE, R_OVERLAP, R_LEGACY, R_FB_LANDEDTIP, R_FB_NOLANDEDTIP, R_ZERODELTA, R_REFMOVE, R_SCOPED, R_RENAME, R_REVERT, R_LAG]) {

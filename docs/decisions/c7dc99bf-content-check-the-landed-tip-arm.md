@@ -736,12 +736,11 @@ essentially anything" — still bounded by `e5458ccd`'s own threat model (a fals
 never a mainline forgery or gate bypass; see the "What a positive verdict grants" section at the top of
 this record), but a materially wider blast radius than Finding 4's original framing implied.
 
-Not fixed here — closing either shape would require `recordedTipContentLanded` itself to stop using a
-pathspec at all (diff with none, then filter the full changed-path list against the stamped set in JS,
-mirroring this round's `stampedPathsPlausible` fix) — a real behavior change to the content check's own
-cost profile (an unbounded diff instead of a pathspec-filtered one) outside this round's own scope.
-Tracked by card `1cf79e64` ("fix(git): compare stamped tree entries instead of a pathspec diff in
-attribution", p1).
+**Fixed by card `1cf79e64`** — `recordedTipContentLanded` no longer uses a pathspec at all. It now
+compares the stamped paths' own tree entries (mode + type + blob/commit sha, via a new shared
+`fullTreeEntries` helper) between `recordedTip` and the candidate, by exact string equality — no pathspec
+is ever in play, so neither shape can be defeated by git's backslash-as-separator handling. See
+`docs/decisions/1cf79e64-*.md` for the full repro, design, and tests.
 
 ### Finding 5 (NIT): a truncated/absent stamp could trivially satisfy a SPECIAL_NAME_* "escalated" assertion
 
@@ -760,14 +759,15 @@ satisfy the assertion by accident.
 - Do not loosen `recordedTipContentLanded`'s own content-equality check to "fix" the OVERLAP residual
   above — that reopens the forgery this card closes. Escalation is the correct, safe outcome for that
   shape; it is a named, measured residual, not a defect.
-- **Do not derive the own-files pathspec from ANY anchor at reconcile time** — not a live ref
+- **Do not derive the own-files set from ANY anchor at reconcile time** — not a live ref
   (`resolveMainlineWatermarkRef`), not a candidate's own trailer, not `${candidate.sha}^`, and not
   `Db.getMainlineBranchTrust` (round 3's own anchor, since removed — it was Loom-owned but still the WRONG
   value on a genuine lagging-trust landing, see "Round 4, finding 1/finding 2"). Read it from the
   review-time stamped `merge_request.detail.filesChangedPaths` directly, as-is; it was never computed
   against any anchor in the first place, so there is nothing left for a live ref or a lagging record to
   narrow. The candidate SCAN (`findAllLandedTrailerCommits`) may still stay on the live ref — only the
-  content check's own pathspec must never be anchor-derived.
+  content check's own own-files set must never be anchor-derived. (Card `1cf79e64`: this set is no longer
+  consumed as a pathspec at all — see that card's own record.)
 - Do not read `candidate.trailers.base`'s presence as anything more than an ELIGIBILITY gate for the
   sibling (no-`landedTip`) arm — it decides whether to attempt a content match at all, never what value
   that content match diffs against.
@@ -795,15 +795,13 @@ satisfy the assertion by accident.
   the bullet above) made every attribution attempt in this card escalate for a long stretch of round 5 with
   no error anywhere. Caught only by re-running the fix end-to-end a second time, not by unit-testing the
   helper function in isolation — see "Round 5" above for the full specimen.
-- **Do not run `recordedTipContentLanded`'s content-check diff without `--literal-pathspecs`** — simple-
-  git's own documented behavior is that this flag disables ALL pathspec magic unconditionally; a stamped
-  name containing glob-magic characters (e.g. a bracket expression) risks being reinterpreted as a glob,
-  resolving onto an unrelated coincidental file instead of being matched literally. **(Round 6 correction)
-  This IS measured, not merely reasoned** — but the exploitable shape needs the TRUE stamped file
-  UNCHANGED (sitting next to an unrelated, independently-drifting file that glob-matches the bracket
-  shape), not a missing/added file — git matches a genuinely-differing literal path regardless of the
-  flag. See "Round 6" Finding 1 below for the full, corrected scenario and why an earlier, backwards
-  attempt at this test found no flip.
+- **(Superseded by card `1cf79e64`) `recordedTipContentLanded` no longer runs a pathspec-based diff at
+  all** — it compares stamped paths' own tree entries by exact string equality (`fullTreeEntries`), so
+  `--literal-pathspecs` has nothing left to act on and was removed from this call. This bullet's
+  historical claim (the flag was measurably load-bearing against a bracket-named glob-magic collision)
+  stays true of the OLD pathspec-diff design — see `docs/decisions/1cf79e64-*.md` for how that coverage
+  was repurposed onto the new design instead of lost. Do not reintroduce a pathspec here; see that card's
+  own "Do not" list for why.
 - **Do not skip `stampedPathsPlausible`'s per-candidate plausibility net "because the content check already
   covers it"** — it is a SEPARATE fail-closed defense against a FORGED stamp (a path that was never real
   at either the reviewed tip's own tree or its merge-base with the candidate), which the content check
@@ -811,8 +809,9 @@ satisfy the assertion by accident.
   genuinely-matching one from `recordedTipContentLanded`'s point of view). **Do not read this as "the net
   detects a candidate that omits a real added file"** — it structurally cannot: an added path is always
   present in the reviewed tip's own tree, so the net's OR-check can never fail on it regardless of what
-  the candidate does; that omission is the content check's job alone. See "Round 6" Finding 4 below for a
-  real, measured, NOT-fixed residual on this exact point (a backslash-named omission).
+  the candidate does; that omission is the content check's job alone. See "Round 6" Finding 4 below for
+  the backslash-named-omission shape this net could never rescue — fixed, not by this net, but by card
+  `1cf79e64`'s own content-check redesign (`docs/decisions/1cf79e64-*.md`).
 - **(Round 6) Do call `stampedPathsPlausible` AFTER `recordedTipContentLanded` returns `"attributed"`,
   never before** — the net only ever REJECTS a positive attribution; it can't turn a `"no-match"` into
   anything else, so running it against a candidate that already failed the content check is pure wasted
