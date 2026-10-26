@@ -9059,16 +9059,24 @@ async function deriveWorkerCommitLogBody(
   } catch {
     return undefined; // best-effort: the squash still lands with a title-only body, exactly as before this card
   }
-  // @decision 112b8d5d — do not fold a worker subject into this body without this strip: an unstripped
-  // reserved-shaped subject is a forgeable trailer-quote risk. Leading placeholder line subjects even
-  // the FIRST entry to the strip, since the callee always exempts its own line 0 as "the subject".
-  if (subjects.length > 0) {
-    const probe = ["", ...subjects].join("\n");
-    const { message: strippedProbe, strippedCount } = stripReservedLoomTrailerLines(probe);
-    if (strippedCount > 0) subjects = strippedProbe.split("\n").slice(1);
+  // Each subject is checked DIRECTLY against matchReservedLoomTrailerLine (the SAME predicate
+  // stripReservedLoomTrailerLines itself wraps) — no message-shaped probe/placeholder line needed, since
+  // there is no "line 0 is the subject" exemption to route around when checking a bare subject list.
+  // @decision 112b8d5d (round 2) — do not fold a worker subject into this body unstripped.
+  const beforeStrip = subjects.length;
+  subjects = subjects.filter((s) => !matchReservedLoomTrailerLine(s));
+  const strippedCount = beforeStrip - subjects.length;
+  if (strippedCount > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] mergeBranchLocked: stripped ${strippedCount} reserved Loom-* trailer line(s) from ` +
+      `${branch}'s own commit(s) before folding them into the squash body — a worker's own commit carried a ` +
+      `line in Loom's reserved merge-trailer namespace`);
   }
-  if (subjects.length === 0) return undefined;
-  if (subjects.length === 1 && subjects[0]!.toLowerCase() === subject.trim().toLowerCase()) return undefined;
+  // 8b7b81e0's own "pure duplicate" dedup — a lone surviving subject that merely repeats the squash
+  // subject carries no new information, whether or not anything was ALSO stripped; the strip marker
+  // below still surfaces independently of this dedup.
+  if (subjects.length === 1 && subjects[0]!.toLowerCase() === subject.trim().toLowerCase()) subjects = [];
+  if (subjects.length === 0 && strippedCount === 0) return undefined;
 
   const lines: string[] = [];
   let omitted = 0;
@@ -9080,8 +9088,15 @@ async function deriveWorkerCommitLogBody(
     lines.push(bullet);
     usedChars += bullet.length + 1;
   }
-  if (lines.length === 0) return undefined; // every entry was too long to fit even one — degrade to title-only
+  // A nonzero strippedCount keeps the body alive even when every surviving subject was too long to fit
+  // (or none survived at all) — 8b7b81e0's "never truncate silently" contract extends to this strip too,
+  // never silently degrading to a title-only commit the way a run with nothing stripped still correctly does.
+  // @decision 112b8d5d (round 2) — the strip itself must stay VISIBLE, never silent.
+  if (lines.length === 0 && omitted === 0 && strippedCount === 0) return undefined;
   if (omitted > 0) lines.push(`- …(${omitted} more commit${omitted === 1 ? "" : "s"})`);
+  if (strippedCount > 0) {
+    lines.push(`- …(${strippedCount} reserved-shaped worker commit subject(s) removed)`);
+  }
   return `Worker commits:\n${lines.join("\n")}`;
 }
 
