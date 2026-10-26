@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
-import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
+import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError, unsafeBranchNameShapeReason } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, canonicalFailureMessage, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot, type CheckCommondirTrustOpts } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
@@ -448,6 +448,14 @@ let worktreeCollisionBackstopEnabled = true;
  *  the shared flag via {@link isWorktreeCollisionBackstopEnabled} instead. Omit the arg (or pass `true`)
  *  to restore the real, enabled check. */
 export function __setWorktreeCollisionBackstopForTest(enabled?: boolean): void { worktreeCollisionBackstopEnabled = enabled ?? true; }
+
+let unsafeBranchNameShapeReasonImpl: typeof unsafeBranchNameShapeReason = unsafeBranchNameShapeReason;
+/** Test-only seam (card abbda4f5): overrides `createWorktree`'s entry branch-shape guard. `branch` is
+ *  always `loom/${taskKey(taskId)}` — a shape that can never legitimately trip the real check — so there
+ *  is no other way to dynamically exercise this guard's wiring. `undefined` restores the real function. */
+export function __setUnsafeBranchNameShapeReasonForTest(fn?: typeof unsafeBranchNameShapeReason): void {
+  unsafeBranchNameShapeReasonImpl = fn ?? unsafeBranchNameShapeReason;
+}
 /** Read-only counterpart to {@link __setWorktreeCollisionBackstopForTest} — lets a caller outside this
  *  module (`SessionService.reclaimWedgedWorktreePathForSpawn`) consult the SAME shared flag before
  *  running its own nested-worktree-child check, so the one test seam above governs both backstops. */
@@ -1192,6 +1200,11 @@ export async function createWorktree(
   }
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
+  // @decision abbda4f5 — defense-in-depth against a FUTURE change in how `branch` is built: `--end-of-
+  // options` can't close the `worktree add` call below (measured — it only steers WHICH commit a
+  // dash-prefixed name detaches at), so entry-shape validation is the only fix for that call.
+  const branchShapeReason = unsafeBranchNameShapeReasonImpl(branch);
+  if (branchShapeReason) throw new Error(`refusing to cut a worktree: ${branchShapeReason}`);
   const worktreePath = resolveWorktreePath(projectId, taskId, repoKey);
   // Card c994ffeb — cut-time backstop against a repoKey spelled like (or, on a case-insensitive
   // filesystem, case-colliding with) a task's own 12-hex worktree-dir name. `validateRepoRegistry`
@@ -7683,7 +7696,10 @@ async function classifyAgainstLedger(
   if (maxRowId === null) return "skip";
   let refTip: string;
   try {
-    refTip = (await withTimeout(git.raw(["rev-parse", ref]), timeoutMs, "git rev-parse (ledger per-sha ref resolve)")).trim();
+    // @decision abbda4f5 — `--verify` + `--end-of-options` right before `ref` (measured: `--end-of-options`
+    // ALONE, with no `--verify`, makes rev-parse echo "--end-of-options" back as a literal extra output
+    // line even for a well-formed ref — `--verify` is what makes it a true no-op for the ordinary case).
+    refTip = (await withTimeout(git.raw(["rev-parse", "--verify", "--end-of-options", ref]), timeoutMs, "git rev-parse (ledger per-sha ref resolve)")).trim();
   } catch {
     logGoneBranchLedgerErrorRateLimited(sha, ledger.scopeKey,
       `[git] classifyAgainstLedger: could not resolve ref "${ref}" to a sha — refusing to trust this ` +
@@ -7704,6 +7720,13 @@ async function classifyAgainstLedger(
   cacheGoneBranchLedgerVerdict(cacheKey, verdict);
   return verdict;
 }
+
+/** TEST-ONLY direct passthrough (card abbda4f5): every production path into {@link classifyAgainstLedger}
+ *  couples its `ref` to the SAME `base`/`ref` value a preceding `git log` call already uses (and that
+ *  call now fails first on an option-shaped value, via this card's OWN sibling fix) — so this site's own
+ *  rev-parse guard has no public call path to exercise independently. Zero behavior change; mirrors
+ *  {@link worktreeAddLandedTestOnly}'s own pattern. */
+export const classifyAgainstLedgerForTest = classifyAgainstLedger;
 
 /**
  * The branch-gone landing's FULL verification, shared by {@link findLandedSquashCommit} and {@link
@@ -7855,7 +7878,10 @@ export async function findLandedSquashCommit(
     // The grep is only a cheap PREFILTER (card f62ef199): it matches the text anywhere in a message, so no --max-count — the first hit may be a commit that merely
     // QUOTES the line, hiding the real one behind it. The verdict comes from the parsed final trailer block.
     const out = await withTimeout(
-      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
+      // @decision abbda4f5 — `base` moved LAST with `--end-of-options` immediately before it: placed
+      // right after "log" (ahead of -F/--grep/--format) it would also swallow those real flags as
+      // literal positionals and break the ordinary case (measured) — reordering is the fix shape here.
+      git.raw(["log", "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e", "--end-of-options", base]),
       timeoutMs, "git log --grep trailer",
     );
     // @decision c0d0eac9 — collect EVERY matching candidate (never break on the first strict hit — that
@@ -7957,7 +7983,10 @@ export async function findIntroducingSquashCommit(
     // @decision 7eac6366 — `--end-of-options` right before `branch` (see git/worktrees.ts:1300).
     if ((await withTimeout(git.raw(["branch", "--list", "--end-of-options", branch]), timeoutMs, "git branch --list (attribution)")).trim() === "") return landedSha;
     const out = await withTimeout(
-      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
+      // @decision abbda4f5 — `base` moved LAST with `--end-of-options` immediately before it: placed
+      // right after "log" (ahead of -F/--grep/--format) it would also swallow those real flags as
+      // literal positionals and break the ordinary case (measured) — reordering is the fix shape here.
+      git.raw(["log", "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e", "--end-of-options", base]),
       timeoutMs, "git log --grep trailer (attribution)",
     );
     const shas: string[] = [];
@@ -8004,7 +8033,10 @@ export async function findAllLandedTrailerCommits(
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const out = await withTimeout(
-      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e"]),
+      // @decision abbda4f5 — `base` moved LAST with `--end-of-options` immediately before it: placed
+      // right after "log" (ahead of -F/--grep/--format) it would also swallow those real flags as
+      // literal positionals and break the ordinary case (measured) — reordering is the fix shape here.
+      git.raw(["log", "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B%x1e", "--end-of-options", base]),
       timeoutMs, "git log --grep trailer (all-candidates)",
     );
     const found: Array<{ sha: string; trailers: LoomTrailers }> = [];
@@ -8664,8 +8696,10 @@ async function scanMergedCommitMap(
     // project's repoPath breaks the fail-safe contract instead of resolving to an empty map.
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const format = `%H${MERGED_MAP_FIELD_SEP}%aI${MERGED_MAP_FIELD_SEP}%B${MERGED_MAP_RECORD_SEP}`;
+    // @decision abbda4f5 — same reorder as findLandedSquashCommit's own `log` call: `base` moved LAST
+    // with `--end-of-options` immediately before it, so --format/-n stay real flags.
     const out = await withTimeout(
-      git.raw(["log", base, `--format=${format}`, "-n", String(MERGED_LOOKUP_SCAN_LIMIT)]),
+      git.raw(["log", `--format=${format}`, "-n", String(MERGED_LOOKUP_SCAN_LIMIT), "--end-of-options", base]),
       timeoutMs, "git log merged-commit scan",
     );
     for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
