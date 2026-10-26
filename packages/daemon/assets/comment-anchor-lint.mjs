@@ -103,7 +103,10 @@
 //      already states) — requires 8+ hex chars, mirroring `overlongAnchorIds`'s own
 //      `{8,}`-vs-well-formed-length distinction. Card 298a1390: comment-scoped, same `isLineInBlock`
 //      mechanism as `brokenAnchors`/`overlongAnchorIds` above — measured zero count/item change on this
-//      repo's real non-test source today (not extended into test/).
+//      repo's real non-test source today. Card 0c474dda: ALSO extended into `test`/`tests`/`e2e`
+//      (comment-scoped, same mechanism) — the only test-corpus hits were this lint's OWN test file citing
+//      a malformed example as doc-prose (now reworded to a non-matching placeholder); the comment-scoping
+//      filter already excludes every synthetic fixture-string occurrence.
 //
 //   9. bareCommitAnchors (card a2fc4031) — a BARE `@decision <id>` (never `sha:`-sigil'd) whose id ALSO
 //      resolves as a real commit object in this repo's git history. CLAUDE.md's comment-taxonomy convention
@@ -145,7 +148,9 @@
 //      lead review, round 2). `computeFileReport` itself is unaffected — it still always returns the
 //      file's complete `pointerAnchors`; only what `runHook` chooses to SURFACE is narrowed. Card 298a1390:
 //      fed the SAME comment-scoped anchor set `bareCommitAnchors` above uses — measured zero count/item
-//      change on this repo's real non-test source today.
+//      change on this repo's real non-test source today. Card 0c474dda: ALSO extended into
+//      `test`/`tests`/`e2e` (comment-scoped, same mechanism) — measured 30 real test-corpus sites,
+//      sampled as genuine citations, zero fixture noise.
 //  11. overlongAnchorParagraphs (card 5e5841dd) — an `@decision <id>` (or `sha:<id>`) SITE whose own
 //      CONTIGUOUS PARAGRAPH (the anchor's line plus its continuation lines, up to the next blank comment
 //      line, a new JSDoc tag, the next `@decision` site, or the enclosing block's own end — the SAME window
@@ -161,7 +166,9 @@
 //      SCOPES this field too, same mechanism and same reason as `pointerAnchors` above (a main-tree
 //      baseline of 257, concentrated in the same giant files, would otherwise flood every edit there).
 //      Card 298a1390: fed the SAME comment-scoped anchor set `pointerAnchors`/`bareCommitAnchors` above
-//      use — measured zero count/item change on this repo's real non-test source today.
+//      use — measured zero count/item change on this repo's real non-test source today. Card 0c474dda:
+//      ALSO extended into `test`/`tests`/`e2e` (comment-scoped, same mechanism) — measured 231 real
+//      test-corpus sites, sampled as genuine citations.
 //  12. midSentenceAnchors (card 5e5841dd; per-occurrence fix card f3c054f3) — an `@decision` OCCURRENCE that
 //      is NOT the first non-prefix token before ITS OWN position on the line (comment-syntax markers
 //      stripped) — i.e. the anchor is embedded MID-SENTENCE inside other prose rather than opening its own
@@ -177,14 +184,25 @@
 //      the per-file hook, same ground as `overlongAnchorParagraphs` — it needs only the one file's own
 //      `anchors` already computed. ⚠️ The HOOK's own advisory SCOPES this field too, same mechanism as
 //      `pointerAnchors`/`overlongAnchorParagraphs` (re-measure the main-tree baseline fresh — it moved with
-//      this card's fix — rather than trusting a number restated here). Card 298a1390: DELIBERATELY LEFT
-//      UNFILTERED, unlike every sibling check above — still reads the full, unscoped `anchors`. Reusing
-//      `isAnchorInBlock` here would SILENTLY DROP real violations: `extractCommentBlocks` doesn't
-//      recognize a SQL `--` comment, a trailing same-line `//` comment after code, or a JSX `{/* */}`
-//      comment as "in a block" at all, and this repo carries real mid-sentence violations in exactly
-//      those three shapes today (measured: 8 sites, including a genuine JSX-comment embed that
-//      comment-scoping would have wrongly hidden). Safe to comment-scope only once `extractCommentBlocks`/
-//      `stripCommentMarkers` learn those three shapes — a separate, larger follow-up, not this card.
+//      this card's fix — rather than trusting a number restated here). Card 298a1390: for a NON-test
+//      file this check deliberately reads the full, unscoped `anchors`, not the comment-scoped
+//      `grammarAnchors` every sibling check above uses — reusing `isAnchorInBlock` there would SILENTLY
+//      DROP a genuine JSX `{/* */}`-comment embed (`extractCommentBlocks` still doesn't recognize JSX
+//      syntax — deferred as its own, separate, larger follow-up, never bundled into card 0c474dda below).
+//      Card 0c474dda instead widened `isMidSentenceAnchorLine`'s OWN prefix check (not
+//      `extractCommentBlocks`) to fix the other two gap shapes 298a1390 found but could not safely close
+//      this way: a SQL `--` comment (`stripCommentMarkers` now also strips a leading `--`) and a trailing
+//      same-line comment that opens its OWN comment even though CODE precedes it on the physical line
+//      (`return; // @decision <id> — ...`) — a deliberate STYLE decision (don't flag it), not an unfixed
+//      detection gap; see `isMidSentenceAnchorLine`'s own doc and this id's record for why
+//      `extractCommentBlocks` itself stays untouched for both (`--`-as-block is measured UNSAFE — a real
+//      `--flag` CLI-help-text line in a template literal would be wrongly swept into a comment block; a
+//      trailing-`//`-as-block is simply unnecessary once the narrower per-anchor check above exists). For
+//      a TEST-scoped file, this check NOW ALSO runs (card 0c474dda) — reading the SAME comment-scoped
+//      `anchors` the f9ccdcb1 mechanism already computes for test files (no separate filter needed),
+//      which is what keeps a synthetic fixture id planted in a string literal (e.g. this repo's own
+//      `test/comment-anchor-lint-hook.mjs` fixtures) from flooding the result: measured 156 real
+//      test-corpus sites once scoped this way, vs. 345 unfiltered.
 //  13. embeddedAnchors (card a873621e; round 2 lead review) — an `@decision` SITE whose own line ALSO
 //      opens correctly (checked via `isMidSentenceAnchorLine` — `midSentenceAnchors` above owns every site
 //      that doesn't; round-2 finding: 15 of the original 24 hits on this repo were exactly that population,
@@ -213,6 +231,10 @@
 //      file's own `blocks`/`anchors` already computed for those checks. Card 298a1390: already effectively
 //      comment-scoped before this card (its own `block` lookup `continue`s when no enclosing block is
 //      found) — passing it the comment-scoped `grammarAnchors` set is a no-op, confirmed by measurement.
+//      Card 0c474dda: ALSO extended into `test`/`tests`/`e2e` (comment-scoped, same mechanism) — measured
+//      16 raw test-corpus sites, only 9 genuine; the other 7 were ALL the SAME `isDecorativeSeparatorLine`
+//      missing-ASCII-`=` false positive (one test file's own `====...====` section-banner convention,
+//      repeated), fixed by the same card — see that function's own doc.
 //  14. splitAnchorParagraphs (card a873621e; round 2 lead review) — an `@decision` SITE whose own paragraph
 //      (the SAME `anchorParagraphEnd` window `overlongAnchorParagraphs`/`pointerAnchors` share) ends
 //      because the NEXT comment line is genuinely BLANK (never the block's own bare closing delimiter, e.g.
@@ -451,7 +473,14 @@ const EXCLUDE_SEGMENTS = new Set([
 // below (comment-scoped, never `unanchoredLongBlocks` or any other anchor-grammar check).
 //
 // Card 298a1390 — one exception to the line above: `brokenAnchors` (the EOL-wrap check) also extends
-// into these directories, comment-scoped the same way. Every other check stays non-test-only.
+// into these directories, comment-scoped the same way.
+//
+// Card 0c474dda — five more exceptions: `sigilSpaceAnchors`, `pointerAnchors`,
+// `overlongAnchorParagraphs`, `midSentenceAnchors`, and `embeddedAnchors` also extend into these
+// directories, comment-scoped the same way (`isAnchorInBlock`/`isLineInBlock`) — the mechanism that
+// tells a real test-file comment citation apart from a synthetic fixture id planted in a string
+// literal. `unanchoredLongBlocks`/`guardClassBlocks`/`distribution` (fed by `allBlocks`),
+// `overlongAnchorIds`, `bareCommitAnchors`, and `splitAnchorParagraphs` stay non-test-only.
 const TEST_SCOPE_SEGMENTS = new Set(["test", "tests", "e2e"]);
 // Repo-ROOT-relative exclusions (never matched at depth — `src/docs/x.ts` is real source): the root `docs/`
 // holds the record stores (`.md`) plus frozen one-off investigation scripts (21 of the 35 blocks newly
@@ -633,9 +662,13 @@ export function findSigilSpaceAnchors(lines) {
 
 /** Strip the common `//`, `/*`, `/**`, `*`, `*​/` comment-syntax markers off `line` and trim — a
  * comment-agnostic "what text, if any, does this line actually carry" reduction shared by
- * `isBlankCommentLine`/`startsNewDocTag` below. */
+ * `isBlankCommentLine`/`startsNewDocTag` below.
+ *
+ * @decision 0c474dda — also strips a leading SQL `--` marker; never widen `extractCommentBlocks` itself
+ * to recognize `--` as a block-opener — a real `--flag` CLI-usage-text line in a help string would be
+ * wrongly swept into a comment block. */
 function stripCommentMarkers(line) {
-  return line.trim().replace(/^\/\*\*?/, "").replace(/\*\/$/, "").replace(/^\*/, "").replace(/^\/\//, "").trim();
+  return line.trim().replace(/^\/\*\*?/, "").replace(/\*\/$/, "").replace(/^\*/, "").replace(/^\/\//, "").replace(/^--/, "").trim();
 }
 
 /** True iff `line` carries no text once comment markers are stripped — a "blank" JSDoc line (e.g. a bare
@@ -745,9 +778,15 @@ export function findOverlongAnchorParagraphs(lines, blocks, anchors, maxLines = 
  * occurrence's own prefix (not the whole line, card f3c054f3) is what lets this also catch a SECOND
  * `@decision` sharing one physical line with a first: testing the whole line's own start (the original
  * shape) could only ever see the FIRST occurrence's own position, so a second anchor on that same line
- * inherited the first one's "opens the line" verdict no matter where it actually sat. */
+ * inherited the first one's "opens the line" verdict no matter where it actually sat.
+ *
+ * @decision 0c474dda — a trailing same-line comment (`return; // @decision <id> — ...`) opens its OWN
+ * comment and is never mid-sentence, no matter what CODE precedes that `//`/`/*` on the same line. */
 function isMidSentenceAnchorLine(line, col) {
-  return stripCommentMarkers(line.slice(0, col)).length > 0;
+  const before = line.slice(0, col);
+  if (stripCommentMarkers(before).length === 0) return false;
+  if (/(?:\/\/|\/\*\*?)\s*$/.test(before)) return false;
+  return true;
 }
 
 /** Every anchor SITE (as returned by `findFileAnchors`) whose own `@decision` occurrence embeds the token
@@ -781,10 +820,13 @@ function endsSentence(stripped) {
  * violation, whether or not it also carries a banner label. Deliberately narrow to ASCII/box-drawing rule
  * characters (`-─━═`), never an em-dash (`—`, a different codepoint) — an em-dash is ordinary prose
  * punctuation (see `companion/store.ts:177`'s real, still-flagged specimen, whose preceding line uses two
- * em-dashes and is NOT decorative). */
+ * em-dashes and is NOT decorative).
+ *
+ * @decision 0c474dda — ASCII `=` added to the class: a `====... <label> ====...` banner was wrongly not
+ * recognized, causing a real `embeddedAnchors` false positive on the anchor right after it. */
 function isDecorativeSeparatorLine(stripped) {
   if (!/[a-zA-Z0-9]/.test(stripped)) return true;
-  return /[-─━═]{6,}/.test(stripped);
+  return /[=\-─━═]{6,}/.test(stripped);
 }
 
 // card a873621e — the SAME "does the next line continue the sentence" shape used by both
@@ -1200,14 +1242,15 @@ export function computeReport(repoRoot, opts = {}) {
   const allEmbeddedStacked = [];
   const allSplitParagraph = [];
   const allSplitParagraphUnterminated = [];
-  // card 298a1390 — comment-scoped anchors feeding the grammar checks below (pointerAnchors,
-  // overlongAnchorParagraphs, embeddedAnchors, splitAnchorParagraphs, bareCommitAnchors) — a SEPARATE
-  // population from `allAnchors` (which stays the orphanAnchors/orphanRecords input, unchanged by this
-  // card). `midSentenceAnchors` deliberately keeps reading `allAnchors`/the raw `anchors` variable below,
-  // not this one — see this file's header, check 12, and the card's own investigation for why
-  // `isAnchorInBlock` isn't safe to apply there yet (extractCommentBlocks doesn't recognize a SQL `--`
-  // comment, a JSX `{/* */}` comment, or a trailing same-line `//` comment after code, so filtering on it
-  // would silently drop real violations in exactly those three shapes).
+  // card 298a1390 — comment-scoped anchors feeding bareCommitAnchors/splitAnchorParagraphs (non-test-only
+  // — see below) — a SEPARATE population from `allAnchors` (which stays the orphanAnchors/orphanRecords
+  // input). `midSentenceAnchors` deliberately keeps reading `allAnchors`/the raw `anchors` variable below
+  // for a NON-test file — see this file's header, check 12, and card 0c474dda's own record for why
+  // `isAnchorInBlock` still isn't safe to apply there for a non-test file (JSX `{/* */}` recognition is
+  // deferred, separately). For a TEST-scoped file, `anchors` is ALREADY comment-scoped (card f9ccdcb1,
+  // below) — that's what lets `sigilSpaceAnchors`/`pointerAnchors`/`overlongAnchorParagraphs`/
+  // `midSentenceAnchors`/`embeddedAnchors` extend into test/tests/e2e (card 0c474dda) using the SAME
+  // per-file `grammarAnchors`/`anchors` already computed below, with no separate test-only filter needed.
   const allGrammarAnchors = [];
 
   for (const file of files) {
@@ -1216,21 +1259,24 @@ export function computeReport(repoRoot, opts = {}) {
     const lines = raw.split(/\r?\n/);
     const blocks = extractCommentBlocks(lines);
     const rawAnchors = findFileAnchors(lines);
-    // card f9ccdcb1 — a test/tests/e2e file feeds ONLY allAnchors (comment-scoped, for orphanAnchors/
-    // orphanRecords below) and, as of card 298a1390, the comment-scoped brokenAnchors check — nothing
-    // else: no blocks into allBlocks, no contribution to allGrammarAnchors, and none of its anchors into
-    // any of the other per-line/per-anchor checks below — exactly as if it were still excluded outright.
+    // card f9ccdcb1 — a test/tests/e2e file's `anchors` is comment-scoped (`isAnchorInBlock`) so a
+    // synthetic fixture id in a string/template literal never counts, only a real `@decision <id>`
+    // written in an actual comment does.
     const testScoped = isTestScopedSegments(relPath(repoRoot, file).split("/").slice(0, -1));
     const anchors = testScoped ? rawAnchors.filter((a) => isAnchorInBlock(a, blocks)) : rawAnchors;
     for (const a of anchors) allAnchors.push({ ...a, file, testScoped });
     // card 298a1390 — brokenAnchors is comment-scoped (never a quoted string/template literal) AND, the
     // one exception named on TEST_SCOPE_SEGMENTS's own doc, extended into test-scoped files too.
     for (const b of findBrokenAnchors(lines).filter((x) => isLineInBlock(x.line, blocks))) allBroken.push({ ...b, file });
-    if (testScoped) continue;
-    for (const b of blocks) allBlocks.push({ file, ...b });
+
+    // card 0c474dda — sigilSpaceAnchors/pointerAnchors/overlongAnchorParagraphs/midSentenceAnchors/
+    // embeddedAnchors ALSO extend into test-scoped files (comment-scoped, same mechanism as
+    // brokenAnchors above) — unlike brokenAnchors, these need `grammarAnchors`, computed here but
+    // deliberately NEVER pushed into `allBlocks`/`allGrammarAnchors` for a test-scoped file (those stay
+    // non-test-only, see the `if (testScoped) continue;` below) since unanchoredLongBlocks/
+    // guardClassBlocks/distribution/bareCommitAnchors/overlongAnchorIds/splitAnchorParagraphs are
+    // deliberately NOT extended.
     const grammarAnchors = anchors.filter((a) => isAnchorInBlock(a, blocks));
-    for (const a of grammarAnchors) allGrammarAnchors.push({ ...a, file });
-    for (const o of findOverlongAnchorIds(lines).filter((x) => isLineInBlock(x.line, blocks))) allOverlong.push({ ...o, file });
     for (const s of findSigilSpaceAnchors(lines).filter((x) => isLineInBlock(x.line, blocks))) allSigilSpace.push({ ...s, file });
     for (const p of findPointerAnchors(lines, blocks, grammarAnchors)) allPointer.push({ ...p, file });
     for (const o of findOverlongAnchorParagraphs(lines, blocks, grammarAnchors)) allOverlongParagraph.push({ ...o, file });
@@ -1238,6 +1284,11 @@ export function computeReport(repoRoot, opts = {}) {
     const embedded = findEmbeddedAnchors(lines, blocks, grammarAnchors);
     for (const e of embedded.items) allEmbedded.push({ ...e, file });
     for (const e of embedded.stacked) allEmbeddedStacked.push({ ...e, file });
+
+    if (testScoped) continue;
+    for (const b of blocks) allBlocks.push({ file, ...b });
+    for (const a of grammarAnchors) allGrammarAnchors.push({ ...a, file });
+    for (const o of findOverlongAnchorIds(lines).filter((x) => isLineInBlock(x.line, blocks))) allOverlong.push({ ...o, file });
     const splitParagraph = findSplitAnchorParagraphs(lines, blocks, grammarAnchors);
     for (const s of splitParagraph.items) allSplitParagraph.push({ ...s, file });
     for (const s of splitParagraph.unterminated) allSplitParagraphUnterminated.push({ ...s, file });
@@ -1433,13 +1484,17 @@ export function resolveHookRepoRoot(startDir) {
  * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
  * below (empty arrays when the file is in scope but has nothing to flag — a real, distinguishable "clean"
  * result, not the same `null` as "not even scanned"). A test/tests/e2e-scoped file (card f9ccdcb1; card
- * 298a1390) gets the SAME narrowing `computeReport` applies: every field here is `[]` except
- * `orphanAnchors` (comment-scoped, `isAnchorInBlock`) and `brokenAnchors` (comment-scoped, line-based) —
- * see `computeReport`'s own doc for why. A non-test file's `pointerAnchors`/`overlongAnchorParagraphs`/
- * `embeddedAnchors`/`splitAnchorParagraphs`/`bareCommitAnchors` are computed from a comment-scoped
- * anchor set too (card 298a1390) — a SEPARATE filter from the one `orphanAnchors` uses on `anchors`
- * above, never touching that variable; `midSentenceAnchors` deliberately still reads the unfiltered
- * `anchors` (see this file's header, check 12).
+ * 298a1390; card 0c474dda) gets a NARROWED report, but not an all-empty one: `unanchoredLongBlocks`/
+ * `overlongAnchorIds`/`bareCommitAnchors`/`splitAnchorParagraphs`(+`Unterminated`) are `[]`, while
+ * `orphanAnchors`, `brokenAnchors`, `sigilSpaceAnchors`, `pointerAnchors`, `overlongAnchorParagraphs`,
+ * `midSentenceAnchors`, and `embeddedAnchors`(+`Stacked`) are all LIVE — comment-scoped the same way
+ * (`isAnchorInBlock`/`isLineInBlock`) so a synthetic fixture id in a string/template literal never
+ * counts. A non-test file's `pointerAnchors`/`overlongAnchorParagraphs`/`embeddedAnchors`/
+ * `splitAnchorParagraphs`/`bareCommitAnchors` are computed from a comment-scoped anchor set too (card
+ * 298a1390) — a SEPARATE filter from the one `orphanAnchors` uses on `anchors`, never touching that
+ * variable; `midSentenceAnchors` deliberately still reads the unfiltered `anchors` for a non-test file
+ * (see this file's header, check 12), but for a TEST-scoped file `anchors` is ALREADY comment-scoped
+ * (card f9ccdcb1), so `midSentenceAnchors` gets the right population either way with no special-casing.
  */
 export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const rel = isInScope(repoRoot, filePath);
@@ -1465,6 +1520,18 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   // TEST_SCOPE_SEGMENTS's own doc for why it alone gets this treatment).
   const broken = findBrokenAnchors(lines).filter((x) => isLineInBlock(x.line, blocks));
 
+  // card 0c474dda — grammarAnchors/sigilSpace/pointer/overlongParagraph/midSentence/embedded are now
+  // computed for BOTH populations (shared with the test-scoped early return below), the same comment-
+  // scoped mechanism `brokenAnchors` above already used, extended to five more checks.
+  // `unanchoredLongBlocks`/`overlongAnchorIds`/`bareCommitAnchors`/`splitAnchorParagraphs` stay
+  // non-test-only (computed only in the branch below, after the early return).
+  const grammarAnchors = anchors.filter((a) => isAnchorInBlock(a, blocks));
+  const sigilSpace = findSigilSpaceAnchors(lines).filter((x) => isLineInBlock(x.line, blocks));
+  const pointer = findPointerAnchors(lines, blocks, grammarAnchors);
+  const overlongParagraph = findOverlongAnchorParagraphs(lines, blocks, grammarAnchors);
+  const midSentence = findMidSentenceAnchors(lines, anchors);
+  const embedded = findEmbeddedAnchors(lines, blocks, grammarAnchors);
+
   if (testScoped) {
     return {
       file: rel,
@@ -1473,29 +1540,19 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
       orphanAnchors: orphanAnchorsOut,
       brokenAnchors: broken.map((b) => ({ line: b.line })),
       overlongAnchorIds: [],
-      sigilSpaceAnchors: [],
+      sigilSpaceAnchors: sigilSpace.map((s) => ({ line: s.line, match: s.match })),
       bareCommitAnchors: [],
-      pointerAnchors: [],
-      overlongAnchorParagraphs: [],
-      midSentenceAnchors: [],
-      embeddedAnchors: [],
-      embeddedAnchorsStacked: [],
+      pointerAnchors: pointer.map((p) => ({ line: p.line, id: p.id, ns: p.ns, phrase: p.phrase })),
+      overlongAnchorParagraphs: overlongParagraph.map((o) => ({ line: o.line, id: o.id, ns: o.ns, length: o.length })),
+      midSentenceAnchors: midSentence.map((m) => ({ line: m.line, id: m.id, ns: m.ns })),
+      embeddedAnchors: embedded.items.map((e) => ({ line: e.line, id: e.id, ns: e.ns, prevViolation: e.prevViolation, nextViolation: e.nextViolation })),
+      embeddedAnchorsStacked: embedded.stacked.map((e) => ({ line: e.line, id: e.id, ns: e.ns })),
       splitAnchorParagraphs: [],
       splitAnchorParagraphsUnterminated: [],
     };
   }
 
-  // card 298a1390 — grammarAnchors is the comment-scoped population feeding pointerAnchors/
-  // overlongAnchorParagraphs/embeddedAnchors/splitAnchorParagraphs/bareCommitAnchors below; a SEPARATE
-  // filter from the one `anchors` already applied for test-scoped files above — `anchors` itself stays
-  // the orphanAnchors input, unfiltered here since this branch is never test-scoped.
-  const grammarAnchors = anchors.filter((a) => isAnchorInBlock(a, blocks));
   const overlong = findOverlongAnchorIds(lines).filter((x) => isLineInBlock(x.line, blocks));
-  const sigilSpace = findSigilSpaceAnchors(lines).filter((x) => isLineInBlock(x.line, blocks));
-  const pointer = findPointerAnchors(lines, blocks, grammarAnchors);
-  const overlongParagraph = findOverlongAnchorParagraphs(lines, blocks, grammarAnchors);
-  const midSentence = findMidSentenceAnchors(lines, anchors);
-  const embedded = findEmbeddedAnchors(lines, blocks, grammarAnchors);
   const splitParagraph = findSplitAnchorParagraphs(lines, blocks, grammarAnchors);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 

@@ -139,15 +139,20 @@ try {
   check("card f9ccdcb1: a test-scoped file is NOT null — it's in scope, just narrowed", testScopedReport !== null);
   check("card f9ccdcb1: the real comment anchor (ffffffff, no record) IS reported as an orphan",
     testScopedReport.orphanAnchors.length === 1 && testScopedReport.orphanAnchors[0].id === "ffffffff");
-  check("card f9ccdcb1: every OTHER field is empty for a test-scoped file (unanchoredLongBlocks/brokenAnchors/"
-    + "overlongAnchorIds/sigilSpaceAnchors/bareCommitAnchors/pointerAnchors/overlongAnchorParagraphs/"
-    + "midSentenceAnchors/embeddedAnchors/splitAnchorParagraphs all []), even though the file's own content "
-    + "has no other grammar violations to hide that fact",
-    testScopedReport.unanchoredLongBlocks.length === 0 && testScopedReport.brokenAnchors.length === 0
-    && testScopedReport.overlongAnchorIds.length === 0 && testScopedReport.sigilSpaceAnchors.length === 0
-    && testScopedReport.bareCommitAnchors.length === 0 && testScopedReport.pointerAnchors.length === 0
-    && testScopedReport.overlongAnchorParagraphs.length === 0 && testScopedReport.midSentenceAnchors.length === 0
-    && testScopedReport.embeddedAnchors.length === 0 && testScopedReport.splitAnchorParagraphs.length === 0);
+  // card 0c474dda: unanchoredLongBlocks/overlongAnchorIds/bareCommitAnchors/splitAnchorParagraphs are
+  // STRUCTURALLY forced to [] for ANY test-scoped file (never computed at all for one) — see the
+  // dedicated fixture below for proof sigilSpaceAnchors/pointerAnchors/overlongAnchorParagraphs/
+  // midSentenceAnchors/embeddedAnchors are now LIVE for a test-scoped file too; they read [] HERE only
+  // because this one-line fixture's own content has no such shape to find, not because they're forced.
+  check("card f9ccdcb1/0c474dda: the four STILL-structurally-forced fields are empty for a test-scoped file",
+    testScopedReport.unanchoredLongBlocks.length === 0 && testScopedReport.overlongAnchorIds.length === 0
+    && testScopedReport.bareCommitAnchors.length === 0 && testScopedReport.splitAnchorParagraphs.length === 0
+    && testScopedReport.splitAnchorParagraphsUnterminated.length === 0);
+  check("this one-line fixture has none of the LIVE-but-empty shapes either (brokenAnchors/sigilSpaceAnchors/"
+    + "pointerAnchors/overlongAnchorParagraphs/midSentenceAnchors/embeddedAnchors)",
+    testScopedReport.brokenAnchors.length === 0 && testScopedReport.sigilSpaceAnchors.length === 0
+    && testScopedReport.pointerAnchors.length === 0 && testScopedReport.overlongAnchorParagraphs.length === 0
+    && testScopedReport.midSentenceAnchors.length === 0 && testScopedReport.embeddedAnchors.length === 0);
 
   // --- formatHookMessage ------------------------------------------------------------------------------
   const msg = formatHookMessage(violatingReport);
@@ -191,6 +196,59 @@ try {
       testScopedMsg !== null);
     check("card f9ccdcb1: the hook's advisory names the real orphan (ffffffff)",
       !!testScopedMsg && /ffffffff/.test(testScopedMsg.hookSpecificOutput?.additionalContext ?? ""));
+  }
+  // card 0c474dda: the hook's live counterpart to the computeFileReport test-extension proof above — a
+  // test-scoped file carrying a REAL (never a quoted string) occurrence of each of the 5 newly-extended
+  // shapes (sigilSpaceAnchors/pointerAnchors/overlongAnchorParagraphs/midSentenceAnchors/embeddedAnchors)
+  // is surfaced by the actual subprocess spawn, stays advisory-only (exit 0, asserted inside runHookProc
+  // above), and the 4 still-structurally-forced fields (unanchoredLongBlocks/overlongAnchorIds/
+  // bareCommitAnchors/splitAnchorParagraphs) stay silent.
+  {
+    const extTestPath = path.join(REPO, "packages", "daemon", "test", "fixture-0c474dda-ext.mjs");
+    fs.writeFileSync(extTestPath, [
+      "// @decision aa110001 — see docs/decisions/aa110001-x.md (a pointer phrase, in a REAL test-file comment)", // 1
+      "",                                                                                             // 2
+      "// @decision sha: aa110002 — a sigil-space anchor, in a REAL test-file comment",                // 3
+      "",                                                                                             // 4
+      "/**",                                                                                           // 5
+      " * @decision aa110003 — line one of a real test-file overlong anchor paragraph",                // 6
+      " * line two",                                                                                   // 7
+      " * line three",                                                                                 // 8
+      " * line four — now 4 lines, past the 3-line cap, must be flagged even in a test file",          // 9
+      " */",                                                                                           // 10
+      "",                                                                                              // 11
+      "// prose that does not end a sentence @decision aa110004 — embedded mid-sentence in a test file", // 12
+      "",                                                                                              // 13
+      "/** preceding prose that does not end a sentence",                                              // 14
+      " * @decision aa110005 — embedded across a line boundary, in a REAL test-file comment",          // 15
+      " */",                                                                                           // 16
+    ].join("\n"));
+
+    const extReport = computeFileReport(REPO, extTestPath, fs.readFileSync(extTestPath, "utf8"), { minLines: 15 });
+    check("card 0c474dda: a test-scoped pointerAnchors violation IS reported",
+      extReport?.pointerAnchors?.some((p) => p.id === "aa110001"));
+    check("card 0c474dda: a test-scoped sigilSpaceAnchors violation IS reported",
+      extReport?.sigilSpaceAnchors?.some((s) => s.match.includes("aa110002")));
+    check("card 0c474dda: a test-scoped overlongAnchorParagraphs violation IS reported",
+      extReport?.overlongAnchorParagraphs?.some((o) => o.id === "aa110003"));
+    check("card 0c474dda: a test-scoped midSentenceAnchors violation IS reported",
+      extReport?.midSentenceAnchors?.some((m) => m.id === "aa110004"));
+    check("card 0c474dda: a test-scoped embeddedAnchors violation IS reported",
+      extReport?.embeddedAnchors?.some((e) => e.id === "aa110005"));
+    check("card 0c474dda: the 4 still-structurally-forced fields stay empty for this test-scoped file",
+      extReport.unanchoredLongBlocks.length === 0 && extReport.overlongAnchorIds.length === 0
+      && extReport.bareCommitAnchors.length === 0 && extReport.splitAnchorParagraphs.length === 0
+      && extReport.splitAnchorParagraphsUnterminated.length === 0);
+
+    const extMsg = runHookProc(extTestPath, "Write");
+    check("card 0c474dda: runHook FIRES for a test-scoped file carrying these 5 new violation shapes (not silent)",
+      extMsg !== null);
+    const extCtx = extMsg?.hookSpecificOutput?.additionalContext ?? "";
+    check("card 0c474dda: the hook's advisory names the pointer anchor (aa110001)", /aa110001/.test(extCtx));
+    check("card 0c474dda: the hook's advisory names the sigil-space anchor (aa110002)", /aa110002/.test(extCtx));
+    check("card 0c474dda: the hook's advisory names the overlong-paragraph anchor (aa110003)", /aa110003/.test(extCtx));
+    check("card 0c474dda: the hook's advisory names the mid-sentence anchor (aa110004)", /aa110004/.test(extCtx));
+    check("card 0c474dda: the hook's advisory names the embedded anchor (aa110005)", /aa110005/.test(extCtx));
   }
   {
     const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook"], { input: "{}", encoding: "utf8" });

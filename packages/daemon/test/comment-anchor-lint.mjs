@@ -34,9 +34,11 @@
 //      same-line id, the EOL-wrap shape (a DIFFERENT defect — brokenAnchors' own concern), and mid-line
 //      mentions of the literal token are all confirmed NOT flagged.
 //  11. sigilSpaceAnchors (card e708670b): a same-line `sha` sigil with whitespace adjacent to its colon on
-//      EITHER side or both (e.g. "@decision sha: deadbeef", "@decision sha :deadbeef", or
-//      "@decision sha : deadbeef") — the SECOND defect shape card afc56dcc named but whose original fix
-//      (overlongAnchorIds) never covered, widened mid-review after the lead independently re-verified
+//      EITHER side or both (e.g. "@decision sha: XXXXXXXX", "@decision sha :XXXXXXXX", or
+//      "@decision sha : XXXXXXXX" — a non-hex placeholder, card 0c474dda, so this doc-prose itself never
+//      self-matches once this check extends into test/tests/e2e) — the SECOND defect shape card afc56dcc
+//      named but whose original fix (overlongAnchorIds) never covered, widened mid-review after the lead
+//      independently re-verified
 //      that the space-before-colon shape was ALSO silent and NOT caught by the first (after-only) version
 //      — is flagged, in both the CLI scan and the live per-file hook; a well-formed sigil'd anchor (no
 //      space either side), a well-formed bare anchor, a too-short same-line id (either side), the EOL-wrap
@@ -2173,9 +2175,16 @@ try {
       const after = computeReport(repoRoot);
 
       const isTestPath = (f) => /[\\/](test|tests|e2e)[\\/]/.test(f);
+      // card 0c474dda — `midSentenceAnchors` REMOVED from this list: that card widened
+      // `isMidSentenceAnchorLine`'s own prefix check (fixing 7 real false positives — 5 SQL `--` sites,
+      // 2 trailing-same-line-comment sites), so its non-test item set is NO LONGER byte-identical
+      // against the pre-298a1390 baseline this section pins to — 298a1390 itself never touched
+      // `midSentenceAnchors` at all, but this comparison's "after" side is simply whatever HEAD is NOW,
+      // which also carries every later card. See card 0c474dda's OWN real-repo regression pin, section
+      // (b) below, for the precise (not merely "unchanged") assertion that check now needs.
       const CHECKS = [
         "brokenAnchors", "overlongAnchorIds", "sigilSpaceAnchors", "bareCommitAnchors", "pointerAnchors",
-        "overlongAnchorParagraphs", "midSentenceAnchors", "embeddedAnchors", "splitAnchorParagraphs",
+        "overlongAnchorParagraphs", "embeddedAnchors", "splitAnchorParagraphs",
       ];
       for (const c of CHECKS) {
         const beforeItems = JSON.stringify(before[c].items.filter((x) => !isTestPath(x.file)));
@@ -2230,6 +2239,236 @@ try {
     const cli = spawnSync(process.execPath, [scriptPath, dir], { encoding: "utf8" });
     check("card 298a1390 (d) CLI subprocess: the real CLI invocation (not just computeReport in-process) reports the test-file broken anchor",
       cli.status === 0 && JSON.parse(cli.stdout).brokenAnchors.items.some((b) => b.file === "packages/daemon/test/fixture.mjs" && b.line === 1));
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- card 0c474dda (a): SQL `--` / trailing-same-line-comment shapes — positive + negative controls -----
+{
+  // (1) A SQL `--` comment inside a template literal — the false positive card 298a1390 found and left
+  // unresolved. midSentenceAnchors must NOT flag it now.
+  const sqlLines = [
+    "const SCHEMA = `",                                                                              // 1
+    "CREATE TABLE x (",                                                                              // 2
+    "  -- @decision b0b0b0b1 — a SQL comment inside a template literal, must NOT be mid-sentence",   // 3
+    ");",                                                                                             // 4
+    "`;",                                                                                             // 5
+  ];
+  const sqlAnchors = findFileAnchors(sqlLines);
+  check("card 0c474dda (a): findFileAnchors still finds the SQL-comment anchor (sanity)", sqlAnchors.length === 1);
+  check("card 0c474dda (a): a SQL `--` comment anchor is NOT flagged as mid-sentence",
+    findMidSentenceAnchors(sqlLines, sqlAnchors).length === 0);
+
+  // (2) Trailing-same-line-comment: an anchor that opens its OWN comment (nothing between the `//` and
+  // the anchor but whitespace) is NOT mid-sentence, even though real CODE precedes the `//` on the same
+  // physical line — the real pty/host.ts shape (a trailing comment after `return;`, card 710a34fa).
+  const trailingOpensOwnLines = ["function f() { return; } // @decision b0b0b0b2 — a terse guard annotation"];
+  check("card 0c474dda (a): a trailing same-line comment that opens its OWN comment is NOT mid-sentence",
+    findMidSentenceAnchors(trailingOpensOwnLines, findFileAnchors(trailingOpensOwnLines)).length === 0);
+
+  // (3) NARROWNESS (manager's explicit condition): the SAME trailing-comment shape, but with real prose
+  // BETWEEN the `//` and the anchor ("see " below) — this does NOT open its own comment, so it IS still
+  // flagged mid-sentence. Proves the exemption is narrow (position-based), not "any trailing // is safe".
+  const trailingMidSentenceLines = ["function f() { return; } // see @decision b0b0b0b3 for why"];
+  check("card 0c474dda (a) narrowness: a trailing comment whose anchor is PRECEDED by real prose within "
+    + "that SAME comment IS still flagged mid-sentence ('// see @decision <id> for why')",
+    findMidSentenceAnchors(trailingMidSentenceLines, findFileAnchors(trailingMidSentenceLines)).length === 1);
+
+  // (4) NARROWNESS, the other direction (manager's explicit condition): real `--flag` CLI-usage-text
+  // lines inside a template literal (the exact shape measured UNSAFE for `extractCommentBlocks` to
+  // recognize as a comment-opener) must leave EVERY check's count unchanged — count-identical, not just
+  // "this one check is fine" — proving `extractCommentBlocks` itself was never touched for this shape.
+  const helpTextLines = [
+    "const USAGE = `",
+    "  --range      Git range passed to the diff command. Default: main.",
+    "  --repo-root  Override the repo root everything is resolved against.",
+    "  --help       Print this and exit 0.",
+    "`;",
+  ];
+  const withoutHelp = ["// @decision b0b0b0b4 — a real anchor elsewhere in the same file, for count comparison"];
+  const withHelp = [...withoutHelp, ...helpTextLines];
+  check("card 0c474dda (a) narrowness: appending `--flag` CLI-help-text lines creates NO new comment block "
+    + "(extractCommentBlocks itself stays untouched for this shape)",
+    extractCommentBlocks(withHelp).length === extractCommentBlocks(withoutHelp).length);
+  check("card 0c474dda (a) narrowness: findFileAnchors count is count-identical with the appended help text",
+    findFileAnchors(withHelp).length === findFileAnchors(withoutHelp).length);
+  check("card 0c474dda (a) narrowness: findMidSentenceAnchors count is count-identical with the appended help text",
+    findMidSentenceAnchors(withHelp, findFileAnchors(withHelp)).length
+      === findMidSentenceAnchors(withoutHelp, findFileAnchors(withoutHelp)).length);
+  check("card 0c474dda (a) narrowness: findBrokenAnchors count is count-identical with the appended help text",
+    findBrokenAnchors(withHelp).length === findBrokenAnchors(withoutHelp).length);
+  check("card 0c474dda (a) narrowness: findOverlongAnchorIds count is count-identical with the appended help text",
+    findOverlongAnchorIds(withHelp).length === findOverlongAnchorIds(withoutHelp).length);
+  check("card 0c474dda (a) narrowness: findSigilSpaceAnchors count is count-identical with the appended help text",
+    findSigilSpaceAnchors(withHelp).length === findSigilSpaceAnchors(withoutHelp).length);
+}
+
+// --- card 0c474dda: isDecorativeSeparatorLine gains ASCII `=` — positive + negative control --------------
+{
+  // Positive: a `====... <label> ====...` ASCII banner (this repo's own test-corpus convention) directly
+  // preceding an anchor's own line must be recognized as a decorative divider — a real paragraph
+  // boundary, not "prose that doesn't end a sentence" — so the anchor is NOT flagged as embedded.
+  const bannerLines = [
+    "function f() {",
+    "  // ==================== (I) A SECTION BANNER ====================",
+    "  // @decision e0e0e0e1 — right after an ASCII = banner, must NOT be embedded",
+    "}",
+  ];
+  const bannerBlocks = extractCommentBlocks(bannerLines);
+  const bannerAnchors = findFileAnchors(bannerLines);
+  check("card 0c474dda: an ASCII `=` banner directly before an anchor is NOT flagged as embedded",
+    findEmbeddedAnchors(bannerLines, bannerBlocks, bannerAnchors).items.length === 0);
+
+  // Negative control: a SHORT run of `=` (< 6, e.g. ordinary code like `a == b`) must still NOT count as
+  // decorative — the class is length-gated, not "any `=` run excuses it" — so the exact same prevViolation
+  // shape (prose that doesn't end a sentence) is STILL flagged.
+  const shortEqualsLines = [
+    "function f() {",
+    "  // if (a == b) return early, no real divider here",
+    "  // @decision e0e0e0e2 — still embedded, the short == run is not a banner",
+    "}",
+  ];
+  const shortEqualsBlocks = extractCommentBlocks(shortEqualsLines);
+  const shortEqualsAnchors = findFileAnchors(shortEqualsLines);
+  check("card 0c474dda negative control: a SHORT run of `=` (< 6 chars) is still NOT decorative — the "
+    + "anchor right after it IS still flagged as embedded",
+    findEmbeddedAnchors(shortEqualsLines, shortEqualsBlocks, shortEqualsAnchors).items.length === 1);
+}
+
+// --- card 0c474dda (b): REAL-REPO regression pin — every OTHER check's non-test item set unchanged, -----
+// midSentenceAnchors' non-test set loses EXACTLY the 7 known false-positive sites and nothing else, and
+// the 5 newly-extended checks gain real test-corpus items (proves this isn't a vacuous before=after).
+// Pinned to THIS BRANCH's own base (the commit right before this card started — a332cbcf, card 298a1390's
+// own landing commit), never `HEAD` — see `loadCommentAnchorLintAt`'s own doc for why.
+{
+  const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
+  const PRE_0C474DDA_SHA = "a332cbcf4f9b4d189e1a064f40083188164ef89e";
+  const { mod: preFixMod, dir: preFixDir, reason: preFixSkipReason } = await loadCommentAnchorLintAt(repoRoot, PRE_0C474DDA_SHA);
+  if (preFixMod === null) {
+    console.log(`SKIP  card 0c474dda (b) real-repo regression pin: ${preFixSkipReason}`);
+  } else {
+    try {
+      const before = preFixMod.computeReport(repoRoot);
+      const after = computeReport(repoRoot);
+      const isTestPath = (f) => /[\\/](test|tests|e2e)[\\/]/.test(f);
+
+      const UNCHANGED_CHECKS = [
+        "brokenAnchors", "overlongAnchorIds", "sigilSpaceAnchors", "bareCommitAnchors", "pointerAnchors",
+        "overlongAnchorParagraphs", "embeddedAnchors", "splitAnchorParagraphs",
+      ];
+      for (const c of UNCHANGED_CHECKS) {
+        const beforeItems = JSON.stringify(before[c].items.filter((x) => !isTestPath(x.file)));
+        const afterItems = JSON.stringify(after[c].items.filter((x) => !isTestPath(x.file)));
+        check(`card 0c474dda (b) real-repo regression pin: ${c}'s non-test item set is byte-identical before vs after`,
+          beforeItems === afterItems);
+      }
+
+      // midSentenceAnchors (non-test): loses EXACTLY the 5 db.ts SQL + 2 pty/host.ts trailing sites card
+      // 298a1390 found false-flagged — nothing else moves.
+      const KNOWN_REMOVED_SITES = new Set([
+        "packages/daemon/src/db.ts:473", "packages/daemon/src/db.ts:523", "packages/daemon/src/db.ts:528",
+        "packages/daemon/src/db.ts:533", "packages/daemon/src/db.ts:1539",
+        "packages/daemon/src/pty/host.ts:12050", "packages/daemon/src/pty/host.ts:13702",
+      ]);
+      const beforeMidNonTest = before.midSentenceAnchors.items.filter((x) => !isTestPath(x.file));
+      const afterMidNonTest = after.midSentenceAnchors.items.filter((x) => !isTestPath(x.file));
+      const beforeKeys = new Set(beforeMidNonTest.map((x) => `${x.file}:${x.line}`));
+      const afterKeys = new Set(afterMidNonTest.map((x) => `${x.file}:${x.line}`));
+      check("card 0c474dda (b): every one of the 7 known false-positive sites was present before AND gone after",
+        [...KNOWN_REMOVED_SITES].every((k) => beforeKeys.has(k) && !afterKeys.has(k)));
+      const otherBeforeKeys = [...beforeKeys].filter((k) => !KNOWN_REMOVED_SITES.has(k));
+      check("card 0c474dda (b): every OTHER non-test midSentenceAnchors site is unmoved (nothing else was touched)",
+        otherBeforeKeys.length === afterKeys.size && otherBeforeKeys.every((k) => afterKeys.has(k)));
+
+      check("card 0c474dda (b): db.ts's 5 SQL sites specifically are gone from midSentenceAnchors",
+        !after.midSentenceAnchors.items.some((x) => x.file === "packages/daemon/src/db.ts" && [473, 523, 528, 533, 1539].includes(x.line)));
+      check("card 0c474dda (b): pty/host.ts's 2 trailing sites specifically are gone from midSentenceAnchors",
+        !after.midSentenceAnchors.items.some((x) => x.file === "packages/daemon/src/pty/host.ts" && [12050, 13702].includes(x.line)));
+      check("card 0c474dda (b): PresetPrompts.tsx:184's GENUINE JSX mid-sentence violation is STILL reported",
+        after.midSentenceAnchors.items.some((x) => x.file === "packages/web/src/components/PresetPrompts.tsx" && x.line === 184 && x.id === "6cefdf25"));
+
+      // The 4 newly-extended checks with a non-empty real test-corpus population gain items (proves this
+      // isn't a vacuous before=after). sigilSpaceAnchors is excluded: its real test-corpus population is
+      // genuinely 0 today (the only 2 real hits were this lint's own doc-example prose, now reworded away
+      // — see card 0c474dda's record) — its mechanism is proven by a dedicated fixture in section (c)
+      // below instead.
+      for (const c of ["pointerAnchors", "overlongAnchorParagraphs", "midSentenceAnchors", "embeddedAnchors"]) {
+        check(`card 0c474dda (b): ${c} gains test/tests/e2e items (the deliberate extension)`,
+          after[c].items.filter((x) => isTestPath(x.file)).length > before[c].items.filter((x) => isTestPath(x.file)).length);
+      }
+      check("card 0c474dda (b): sigilSpaceAnchors' real test-corpus population is exactly 0 today (not a bug — see the record)",
+        after.sigilSpaceAnchors.items.filter((x) => isTestPath(x.file)).length === 0);
+    } finally {
+      try { fs.rmSync(preFixDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+}
+
+// --- card 0c474dda (c): sigilSpaceAnchors/pointerAnchors/overlongAnchorParagraphs/midSentenceAnchors/ ----
+// embeddedAnchors extend into test/tests/e2e — CLI, with a fixture-noise negative control (a synthetic
+// occurrence inside a STRING LITERAL under test/ must still never flag) -----------------------------------
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-0c474dda-test-ext-"));
+  try {
+    const testFile = path.join(dir, "packages", "daemon", "test", "fixture.mjs");
+    fs.mkdirSync(path.dirname(testFile), { recursive: true });
+    fs.writeFileSync(testFile, [
+      "// @decision c1c1c1c1 — see docs/decisions/c1c1c1c1-x.md (a pointer phrase, in a REAL test comment)", // 1
+      "",                                                                                             // 2
+      "/**",                                                                                           // 3
+      " * @decision c2c2c2c2 — line one of a real test-file overlong anchor paragraph",                // 4
+      " * line two",                                                                                   // 5
+      " * line three",                                                                                 // 6
+      " * line four — now 4 lines, past the 3-line cap",                                               // 7
+      " */",                                                                                           // 8
+      "",                                                                                              // 9
+      "// prose that does not end a sentence @decision c3c3c3c3 — embedded mid-sentence in a test file", // 10
+      "",                                                                                              // 11
+      "/** preceding prose that does not end a sentence",                                              // 12
+      " * @decision c4c4c4c4 — embedded across a line boundary, in a REAL test-file comment",          // 13
+      " */",                                                                                           // 14
+    ].join("\n"));
+
+    const report = computeReport(dir);
+    check("card 0c474dda (c) CLI: a test-file pointerAnchors violation is reported",
+      report.pointerAnchors.items.some((p) => p.id === "c1c1c1c1" && p.file === "packages/daemon/test/fixture.mjs"));
+    check("card 0c474dda (c) CLI: a test-file overlongAnchorParagraphs violation is reported",
+      report.overlongAnchorParagraphs.items.some((o) => o.id === "c2c2c2c2"));
+    check("card 0c474dda (c) CLI: a test-file midSentenceAnchors violation is reported",
+      report.midSentenceAnchors.items.some((m) => m.id === "c3c3c3c3"));
+    check("card 0c474dda (c) CLI: a test-file embeddedAnchors violation is reported",
+      report.embeddedAnchors.items.some((e) => e.id === "c4c4c4c4"));
+    check("card 0c474dda (c) CLI: unanchoredLongBlocks/overlongAnchorIds/bareCommitAnchors/splitAnchorParagraphs "
+      + "stay empty for this test-scoped file (structurally forced, not content-dependent)",
+      report.unanchoredLongBlocks.count === 0 && report.overlongAnchorIds.count === 0
+      && report.bareCommitAnchors.count === 0 && report.splitAnchorParagraphs.count === 0);
+
+    // Negative control: the SAME two raw-line/anchor shapes, but inside a STRING LITERAL (never a real
+    // comment) under test/ — comment-scoping must exclude both.
+    const stringLitFile = path.join(dir, "packages", "daemon", "test", "fixture-string.mjs");
+    fs.writeFileSync(stringLitFile, [
+      'const fake = "@decision d1d1d1d1 — see docs/decisions/d1d1d1d1-x.md (fake pointer, in a STRING)";',
+      'const fake2 = "@decision sha: d2d2d2d2 — fake sigil-space, in a STRING";',
+    ].join("\n"));
+    const report2 = computeReport(dir);
+    check("card 0c474dda (c) negative control: a fake pointer phrase inside a test-file STRING LITERAL is NOT flagged",
+      !report2.pointerAnchors.items.some((p) => p.id === "d1d1d1d1"));
+    check("card 0c474dda (c) negative control: a fake sigil-space anchor inside a test-file STRING LITERAL is NOT flagged",
+      !report2.sigilSpaceAnchors.items.some((s) => s.match.includes("d2d2d2d2")));
+
+    // sigilSpaceAnchors positive control, standalone — the real repo's own corpus has zero genuine hits
+    // today (see card 0c474dda's record), so this is the mechanism proof.
+    const sigilTestFile = path.join(dir, "packages", "daemon", "test", "fixture-sigil.mjs");
+    fs.writeFileSync(sigilTestFile, "// @decision sha: d3d3d3d3 — a real sigil-space anchor in a test-file comment\n");
+    const report3 = computeReport(dir);
+    check("card 0c474dda (c) CLI: a real test-file sigilSpaceAnchors violation IS reported",
+      report3.sigilSpaceAnchors.items.some((s) => s.match.includes("d3d3d3d3") && s.file === "packages/daemon/test/fixture-sigil.mjs"));
+
+    const scriptPath = path.join(import.meta.dirname, "..", "assets", "comment-anchor-lint.mjs");
+    const cli = spawnSync(process.execPath, [scriptPath, dir], { encoding: "utf8" });
+    check("card 0c474dda (c) CLI subprocess: the real CLI invocation reports the test-file pointerAnchors violation",
+      cli.status === 0 && JSON.parse(cli.stdout).pointerAnchors.items.some((p) => p.id === "c1c1c1c1"));
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
