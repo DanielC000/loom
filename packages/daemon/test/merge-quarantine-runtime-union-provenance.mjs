@@ -1604,6 +1604,10 @@ try {
       // @decision 3b1944b6 (Round 4) — `unionQuarantineEntries` now ALSO sets this as an explicit own
       // property (even when `undefined`), exactly like `contributorRepoPaths` above — same reason.
       reducedContributorRepoPaths: undefined,
+      // @decision 6de79dc0 — `unionQuarantineEntries` now ALSO sets this as an explicit own property
+      // (even when `undefined`), exactly like `contributorRepoPaths`/`reducedContributorRepoPaths` above
+      // — same reason.
+      genuineContributorKeys: undefined,
       provenanceUnknown: undefined,
       provenanceTracked: undefined,
       // @decision 8db913e2 (Follow-up 43cf3b26) — `unionQuarantineEntries` now ALSO folds each side's own

@@ -44,6 +44,11 @@ const SCENARIOS = [
   "multiboot-recovery-once-readable",
   // Round 2 (Code Review `12c5623d`, NOT MERGEABLE on round 1) — the two MAJOR additions.
   "query-after-boot-reingests-real-record",
+  // Card 6de79dc0, CR3 (session d839b41f) — a dedicated pin for this reingest branch's own Round-3 fix
+  // (genuineContributorKeys routed through unionGenuineContributorKeysAbsorbing, never the wholesale
+  // `...reingested` adopt every other field here still uses) — the evidence record said this site had
+  // no dedicated test, only "covered by the full corpus re-run."
+  "query-after-boot-reingest-demotes-precise-gck",
   "transient-sibling-tmp-preserves-token",
   "transient-sibling-migrate-preserves-token",
   // Round 3-5 (Code Review `b939aead`, NOT MERGEABLE on round 2).
@@ -522,6 +527,50 @@ try {
     check("*** THE FIX (boot2) *** the REAL branch survives a full reboot too", activeAfterBoot2?.branch === "real-branch");
     check("*** THE FIX (round 4, boot2) *** boot2 shows ONLY the genuine token too", JSON.stringify([...(activeAfterBoot2?.tokens ?? [])].sort()) === JSON.stringify([realToken]));
     check("*** THE FIX (boot2) *** the REAL token survives a full reboot too", activeAfterBoot2?.tokens?.includes(realToken));
+
+  } else if (scenarioName === "query-after-boot-reingest-demotes-precise-gck") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Card 6de79dc0, CR3 (session d839b41f) — this reingest branch's own Round-3 fix routes
+    // `genuineContributorKeys` through `unionGenuineContributorKeysAbsorbing([entry, reingested])`
+    // instead of letting it ride through the wholesale `...reingested` spread every OTHER field here
+    // still uses. `entry` is always a placeholder (its own `genuineContributorKeys` is always
+    // `undefined`), so the absorbing rule ALWAYS resolves `undefined` — demoting even a PRECISE on-disk
+    // `genuineContributorKeys` to the broad legacy fallback, permanently. Reverting just that one field
+    // back to the wholesale adopt leaves every OTHER scenario in this file green (nothing else here
+    // asserts on this field) — this is the dedicated pin the card's own evidence record said was
+    // missing ("covered by the full corpus re-run," never a scenario that actually exercises this site).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const d = makeRealRepo("gck-reingest");
+    const kd = canonicalRepoLockKey(d);
+    const dFinal = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kd)}.json`);
+
+    // A real on-disk record carrying a PRECISE, non-empty genuineContributorKeys — simulating a genuine
+    // contributor fold that already happened before the unreadable-at-boot glitch (never produced by a
+    // bare enterMergeQuarantine(d) alone; hand-written directly, the same convention this card's own
+    // sibling-key test file uses for its hand-written-latch scenarios).
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    fs.writeFileSync(dFinal, JSON.stringify({
+      repoPath: d, branch: "real-branch", reason: "D's real reason — carries a precise gck already",
+      enteredAt: Date.now() - 60_000, tokens: ["real-token"],
+      identityAtRaise: kd, contributorRepoPaths: ["some-other-repo"], genuineContributorKeys: ["gck-reingest-other-key"],
+    }, null, 2) + "\n");
+
+    const inject = injectReadFailure(dFinal, "EACCES");
+    const boot1 = await freshBootModule();
+    boot1.reenterMergeQuarantinesAtBoot([d]);
+    inject.restore(); // the glitch lifts — final is genuinely readable again from here on
+
+    const activeAfterQuery = boot1.activeMergeQuarantineFor(d); // graduates the placeholder, hitting the reingest branch
+    check("(precondition) D re-ingests the real on-disk branch", activeAfterQuery?.branch === "real-branch");
+    check("*** THE FIX (card 6de79dc0, Round 3) *** a PRECISE on-disk genuineContributorKeys is demoted to undefined (broad fallback), never ridden through wholesale", activeAfterQuery?.genuineContributorKeys === undefined);
+
+    const onDiskAfterQuery = JSON.parse(fs.readFileSync(dFinal, "utf8"));
+    check("*** THE FIX *** the on-disk record's own genuineContributorKeys is ALSO demoted — the durable write matches the in-memory reconcile", onDiskAfterQuery.genuineContributorKeys === undefined);
+
+    const boot2 = await freshBootModule();
+    boot2.reenterMergeQuarantinesAtBoot([d]);
+    const activeAfterBoot2 = boot2.activeMergeQuarantineFor(d);
+    check("*** THE FIX (boot2) *** the demotion survives a full reboot too (never re-promoted back to precise)", activeAfterBoot2?.genuineContributorKeys === undefined);
 
   } else if (scenarioName === "transient-sibling-tmp-preserves-token" || scenarioName === "transient-sibling-migrate-preserves-token") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
