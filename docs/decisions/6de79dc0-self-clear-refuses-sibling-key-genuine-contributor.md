@@ -11,8 +11,9 @@ live-armed at — including `Kr` — destroying `R`'s own, genuinely separate, o
 is NESTED under a live-armed key; `Ks`/`Kr` are unrelated siblings, never an ancestor/descendant pair.
 
 **Evidence (full narrative, every round's own repro/fix/test, the exhaustive spread-audit table):**
-`docs/decisions/6de79dc0-self-clear-refuses-sibling-key-genuine-contributor-evidence.md` — kept separate
-to stay under the per-record injection byte cap. Read it before trusting any summary below.
+`docs/investigations/6de79dc0-self-clear-refuses-sibling-key-genuine-contributor/findings.md` — narrative
+incident register, kept out of this record to stay under the per-record injection byte cap. Read it
+before trusting any summary below.
 
 ## The fix (summary — see Evidence for the full history, including two corrections)
 

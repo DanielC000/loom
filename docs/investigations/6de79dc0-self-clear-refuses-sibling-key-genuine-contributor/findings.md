@@ -2,6 +2,9 @@
 
 Pointer target for `docs/decisions/6de79dc0-self-clear-refuses-sibling-key-genuine-contributor.md`'s own
 "Evidence" line. Nothing here is deleted from the main record's own history — it was moved, verbatim.
+Moved from `docs/decisions/6de79dc0-self-clear-refuses-sibling-key-genuine-contributor-evidence.md` into
+this narrative incident register (card `4db8ad48`) to resolve a one-record-file-per-id collision; content
+unchanged.
 
 ## Verified, not assumed: what `/clear(r)` actually does in this shape
 
