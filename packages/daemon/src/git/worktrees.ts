@@ -4670,6 +4670,54 @@ function normalizeMessageNewlines(message: string): string {
 }
 
 /**
+ * Pure-JS prediction of what `git commit -m <message>` will actually store as `%B`, under git's default
+ * `cleanup=whitespace` mode (the mode a non-interactive `-m`/`-F` commit gets — `cleanup=strip` only
+ * applies when the message is edited in `$EDITOR`). Measured (card 458028ae) to match real
+ * `git stripspace` (no flag — stripspace's own default is ALSO `whitespace`, not `strip`: it keeps `#`
+ * lines, unlike `--strip-comments`) byte-for-byte modulo stripspace's own single trailing newline on a
+ * non-empty result, which this function also adds.
+ *
+ * Rules (git's own `strbuf_stripspace`): normalize CRLF to LF first ({@link normalizeMessageNewlines});
+ * a line counts as blank ONLY when it is composed entirely of `[ \t\r]` (the SAME narrow class this
+ * function strips from a line's trailing end, never leading — an indented continuation keeps its indent)
+ * — NEVER a generic "whitespace" test: git's own blank-line classification works byte-by-byte and does
+ * NOT treat `\f`, `\v`, NBSP, U+2028 (line separator), or a BOM as blank, all MEASURED (card 458028ae) to
+ * survive as real content in `git stripspace`'s own output, unlike what a JS `String.prototype.trim()`
+ * call would wrongly collapse (it treats every one of those as whitespace). Drop every leading blank
+ * line; drop every trailing blank line; collapse an interior run of 2+ blank lines to exactly one. A
+ * `#`-prefixed line is ordinary content here (never specially dropped) — that removal is
+ * `cleanup=strip`'s own behavior, not `whitespace`'s, and this function must never acquire it.
+ *
+ * Used by `batch-merge.ts` to predict whether a to-be-landed candidate's own `finalMessage` will survive
+ * git's real cleanup with its Loom trailer paragraph still readable, BEFORE the commit is made — see
+ * {@link verifyLoomTrailersExactAndReadable}'s own caller in that file for why: once git has already
+ * cleaned the message, the paragraph boundary this predicts is sometimes unrecoverable (a tip whose own
+ * body reduces to nothing collapses the trailer into the subject with no second paragraph left to find).
+ * That caller ALSO pins `--cleanup=whitespace` explicitly on its own real commit calls — REQUIRED, not
+ * defense-in-depth: this predictor only ever models `whitespace` mode, and an ambient `commit.cleanup`
+ * config (e.g. `strip`, which additionally drops `#`-prefixed lines) can otherwise make the REAL commit
+ * diverge from what this function predicted, silently reopening the exact defect this card closes.
+ */
+export function predictGitCleanupWhitespace(message: string): string {
+  const BLANK_LINE_RE = /^[ \t\r]*$/;
+  const rawLines = normalizeMessageNewlines(message).split("\n");
+  const lines = rawLines.map((line) => {
+    const trailingStripped = line.replace(/[ \t\r]+$/, "");
+    return BLANK_LINE_RE.test(trailingStripped) ? "" : trailingStripped;
+  });
+  let start = 0;
+  while (start < lines.length && lines[start] === "") start++;
+  let end = lines.length;
+  while (end > start && lines[end - 1] === "") end--;
+  const out: string[] = [];
+  for (const l of lines.slice(start, end)) {
+    if (l === "" && out[out.length - 1] === "") continue; // collapse a run of 2+ blanks to one
+    out.push(l);
+  }
+  return out.length === 0 ? "" : `${out.join("\n")}\n`;
+}
+
+/**
  * Every line ANYWHERE in `message` (any paragraph) shaped like a RESERVED Loom trailer key (see
  * {@link matchReservedLoomTrailerLine}) — the raw material for an EXHAUSTIVE audit of Loom's reserved
  * namespace, unlike {@link parseLoomTrailerBlock}, which only structurally reads the FINAL paragraph's

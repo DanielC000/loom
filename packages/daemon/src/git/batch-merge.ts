@@ -2,7 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
-import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, type MergeEmptyKind, type WorktreeGateStamp, type GoneBranchLedgerFacts } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, predictGitCleanupWhitespace, type MergeEmptyKind, type WorktreeGateStamp, type GoneBranchLedgerFacts } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
@@ -762,6 +762,18 @@ async function landBranchCommitsIndividually(
     const { message: reservedStrippedMessage, strippedCount: reservedStrippedThisCommit } = stripReservedLoomTrailerLines(cleanedMessage);
     if (reservedStrippedThisCommit > 0) strippedReservedLineCount += reservedStrippedThisCommit;
     const finalMessage = isLast ? `${reservedStrippedMessage}\n\nLoom-Worker-Branch: ${branch}\n` : `${reservedStrippedMessage}\n`;
+    // @decision 458028ae — predict git's own commit cleanup here, before committing, and drop ONLY this
+    // candidate on any non-ok kind — a worker message that collapses to nothing but blank lines would
+    // otherwise promote the tip's trailer into the subject with no paragraph boundary left to recover it.
+    const expectedPlainTrailers: Record<string, string> = isLast ? { "Loom-Worker-Branch": branch } : {};
+    const predictedCleanup = verifyLoomTrailersExactAndReadable(predictGitCleanupWhitespace(finalMessage), expectedPlainTrailers);
+    if (!predictedCleanup.ok) {
+      await rollback();
+      return fail({
+        ok: false,
+        reason: `${branch}: commit ${sha.slice(0, 7)}'s message would land ${predictedCleanup.kind} after git's own commit cleanup (predicted) — dropping this branch rather than land an unreadable or forged trailer; it will be retried via the ordinary solo merge path`,
+      });
+    }
     // @decision 95940402 — capture the staged tree in this SAME pre-commit window as the parent pin
     // below (card c862f14c's load-bearing adjacency rule, ported from mergeBranchLocked): no git call may
     // land between this capture and the commit, or a later read can't prove it reflects what was staged.
@@ -776,7 +788,7 @@ async function landBranchCommitsIndividually(
       // @decision 24c0bdba — kill-confirmed: an orphaned child here must never later land onto whatever
       // this SAME worktree happens to be staging by the time it resumes (rollback, or the next candidate).
       await killableCanonicalRaw(
-        batchWorktreePath, ["commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage],
+        batchWorktreePath, ["commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "--cleanup=whitespace", "-m", finalMessage],
         timeoutMs, "git commit (batch land)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
       );
     } catch (e) {
@@ -873,7 +885,7 @@ async function landBranchCommitsIndividually(
       const amendedMessage = `${finalMessage.replace(/\s+$/, "")}\nLoom-Worker-Base: ${batchHeadBefore}\nLoom-Worker-PathSet: ${digest}\n`;
       // @decision 24c0bdba — kill-confirmed, same reasoning as the plain commit above.
       await killableCanonicalRaw(
-        batchWorktreePath, ["commit", "--amend", "-m", amendedMessage],
+        batchWorktreePath, ["commit", "--amend", "--cleanup=whitespace", "-m", amendedMessage],
         timeoutMs, "git commit --amend (batch land, pathset)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
       );
     } catch (e) {
@@ -972,7 +984,10 @@ async function landBranchCommitsIndividually(
     }
     trailerAdvisory = finalTrailerVerify.kind;
   }
-  const landedSubject = (finalVerify.body ?? "").split(/\r?\n/)[0]?.trim() ?? "";
+  // @decision 458028ae — no `.trim()`: it used JS's broad whitespace notion (not git's byte-narrow one),
+  // so a landed subject that was genuinely non-blank content to git (e.g. a lone `\f`) read empty here,
+  // which wrongly dropped an ALREADY-LANDED commit below and cascaded into a false batchHeadMoved.
+  const landedSubject = (finalVerify.body ?? "").split(/\r?\n/)[0] ?? "";
 
   // @decision bc2240d7 (round 2, card f01c219d) — runs UNCONDITIONALLY (no `mergeShas.length > 0` gate):
   // the 3-way merge absorbs an ordinary rename-following cherry-pick (batch-merge-robustness.mjs (7e))
