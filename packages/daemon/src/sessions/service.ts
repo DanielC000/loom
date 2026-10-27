@@ -25080,13 +25080,14 @@ export class SessionService {
   async confirmWorkerMergeTracked(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
     opts?: {
-      /** Card 361520a0, Half Four: skip the dead-owner eviction sweep below entirely. Set ONLY by
-       *  {@link confirmWorkerMergeUntilSettled}'s own internal retry loop — see that method's doc for the
-       *  incident this closes (a human Merge click against a since-dead-owner op re-evicted and re-minted
-       *  a genuinely running op on EVERY ~12s retry, each mint driving a real `git merge main` + a real
-       *  queued gate command, exhausting the daemon-global merge lane). Every OTHER caller (the MCP tool,
-       *  the loop's own FIRST call) omits this — the dead-owner check still runs exactly once per external
-       *  call sequence, unchanged from before this option existed. */
+      /** TEST-ONLY probe (`merge-rest-route-tracked.mjs` test 7); NO production caller — do not use to
+       *  bypass dead-owner recovery. Originally set by {@link confirmWorkerMergeUntilSettled}'s own
+       *  internal retry loop (Card 361520a0, Half Four — see that method's doc for the incident this
+       *  closed: a human Merge click against a since-dead-owner op re-evicted and re-minted a genuinely
+       *  running op on EVERY ~12s retry, each mint driving a real `git merge main` + a real queued gate
+       *  command, exhausting the daemon-global merge lane). Card 08e4b661 removed that retry loop entirely
+       *  — this param is retained only so test 7 can still exercise this method's own tolerance for a
+       *  stale, lineage-matching (not exact) caller as a standalone probe. */
       skipDeadOwnerRecovery?: boolean;
       /** Card 19256231: set ONLY by `mergeBatchTracked`'s own `runFallback` — the batch op's OWN `opId`,
        *  threaded straight through to `confirmWorkerMerge`'s `fallbackOfBatchOpId` param (see its doc)
@@ -25152,8 +25153,8 @@ export class SessionService {
     // @decision 33172f01 — evictDeadOwner only ever removes a RUNNING entry, so it's correctly a no-op
     // for a settled RETAINED view; attach() below still short-circuits to that cached outcome.
     //
-    // @decision 361520a0 — skipDeadOwnerRecovery skips this check on every retry after the first, or a
-    // retry storm evicts-and-re-mints a genuinely in-flight op every ~12s (fleet-wide merge-lane DoS).
+    // @decision 361520a0 — skipDeadOwnerRecovery is test-only (card 08e4b661: no production caller
+    // re-invokes this method anymore); do not use it to bypass dead-owner recovery in production.
     if (!opts?.skipDeadOwnerRecovery) {
       const existing = this.pendingOps.peek(key);
       if (existing && this.isManagerLineageDead(existing.managerSessionId) && this.isDeadOwnerOpStuck(existing)) {
@@ -25706,16 +25707,19 @@ export class SessionService {
    * gates — so a naive swap would silently truncate the REST route's long-standing "block until the real
    * outcome is known" contract and make the Review panel misreport a still-running merge as `merged:false`.
    *
-   * This loops the SAME `confirmWorkerMergeTracked` call: each re-call attaches to the identical already-
-   * running op under the SAME `merge:${workerSessionId}` key (see `PendingOpRegistry.attach`'s own
-   * contract — an existing RUNNING entry is never re-invoked, only raced again) rather than starting a
-   * second confirm, so this preserves the pre-existing synchronous REST contract while fully sharing the
-   * dedupe/tombstone machinery the MCP tool already gets.
+   * Calls `confirmWorkerMergeTracked` exactly ONCE. If that call degrades to `{settled:false, op}` (past
+   * `SYNC_ATTACH_BUDGET_MS`), this waits on THAT op's own `opId` via `pendingOps.awaitSettleByOpId`
+   * instead of re-invoking the closure — never a second confirm — preserving the pre-existing synchronous
+   * REST contract while fully sharing the dedupe/tombstone machinery the MCP tool already gets.
+   *
+   * @decision 08e4b661 — do not re-invoke `confirmWorkerMergeTracked` to recover a pending op's own
+   * verdict: a re-call landing after the first op settles+evicts mints a genuinely SECOND real op and
+   * silently reports ITS outcome/opId instead, dropping the first op's real result.
    *
    * @decision 6144fe32 — BOUNDED so a genuinely wedged op can't hang the HTTP handler forever:
    *
    * the ceiling is sized off `gateCommandTimeoutMs` (fallback `DEFAULT_REST_MERGE_CEILING_MS`) at 6x,
-   * which has to absorb both retry headroom and the real, un-gated git work around the gate step, not
+   * which has to absorb both wait headroom and the real, un-gated git work around the gate step, not
    * just gate attempts.
    */
   async confirmWorkerMergeUntilSettled(
@@ -25724,23 +25728,22 @@ export class SessionService {
     const gateTimeoutMs = this.resolveMergeGateTimeoutMs(workerSessionId);
     const ceilingMs = gateTimeoutMs != null ? gateTimeoutMs * 6 : SessionService.DEFAULT_REST_MERGE_CEILING_MS;
     const deadline = Date.now() + ceilingMs;
-    // FIRST call only: no skipDeadOwnerRecovery — this is the one legitimate moment to evict a genuinely
-    // stale zombie op left behind by an EARLIER call sequence (see confirmWorkerMergeTracked's own doc).
-    let r = await this.confirmWorkerMergeTracked(managerSessionId, workerSessionId, forceRemoveWorktree);
-    // EVERY RETRY: skipDeadOwnerRecovery:true (Code Review, card 361520a0, Half Four). `managerSessionId`
-    // here is the REST route's `worker.parentSessionId` — not necessarily the human actually driving this
-    // merge — and can be (or become, via a recycle/stop mid-wait) a dead session. Re-running the dead-owner
-    // check on every retry evicted the RUNNING op THIS SAME call sequence had itself minted moments earlier
-    // and re-minted a genuinely fresh confirmWorkerMerge invocation on every ~syncAttachBudgetMs poll — each
-    // one running a real `git merge main` and queuing a real gate command, with no cap: a human's single
-    // Merge click could drive the daemon-global merge lane into O(ceilingMs / syncAttachBudgetMs) real
-    // invocations. Skipping the check on every retry means this call sequence races the SAME op's
-    // settlement (attach()'s own dedupe — an already-running entry for `key` is never re-invoked) for its
-    // entire lifetime, exactly as intended.
-    while (!r.settled && Date.now() < deadline) {
-      r = await this.confirmWorkerMergeTracked(managerSessionId, workerSessionId, forceRemoveWorktree, { skipDeadOwnerRecovery: true });
-    }
-    return r;
+    // The one and only call to the closure — the SAME dead-owner-eviction opportunity (no
+    // skipDeadOwnerRecovery) this call sequence has always had on its first attempt.
+    const first = await this.confirmWorkerMergeTracked(managerSessionId, workerSessionId, forceRemoveWorktree);
+    if (first.settled) return first;
+    // @decision 08e4b661 / 89539537 — recover THIS op's own verdict by its opId, never by re-invoking the
+    // closure above a second time. `settled === undefined` means the entry is still running past
+    // `remaining`, OR (the one named residual — see the decision record) a DIFFERENT caller evicted it
+    // via `evictDeadOwner` in the narrow window before its orphaned `run()` wrote `settledByOpId` — either
+    // way, degrade exactly as a timed-out poll always has: report the SAME op this call originally
+    // attached to as still pending, never synthesize a result for a second op this call never minted.
+    const remaining = Math.max(0, deadline - Date.now());
+    const settled = await this.pendingOps.awaitSettleByOpId<ConfirmMergeResult>(first.op.opId, remaining);
+    if (!settled) return first;
+    return settled.ok
+      ? { settled: true, ok: true, value: settled.value, freshMint: first.freshMint }
+      : { settled: true, ok: false, error: settled.error, freshMint: first.freshMint };
   }
 
   /**

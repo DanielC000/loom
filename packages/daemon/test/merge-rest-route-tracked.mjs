@@ -205,16 +205,20 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
 
 // ── (4) THE CRITICAL FIX (Code Review, card 361520a0, Half Four): a human clicking Merge derives
 //        managerSessionId from worker.parentSessionId — a manager that need not be the one driving THIS
-//        merge, and can easily be dead (recycled/stopped) by the time the click lands. Before the fix, EVERY
-//        loop iteration inside confirmWorkerMergeUntilSettled re-ran confirmWorkerMergeTracked's per-call
+//        merge, and can easily be dead (recycled/stopped) by the time the click lands. HISTORICALLY (pre-
+//        card 361520a0's own fix), EVERY internal retry re-ran confirmWorkerMergeTracked's per-call
 //        dead-owner check, which evicted the RUNNING op it had itself minted moments earlier (its
 //        managerSessionId is the same dead manager on every check) and re-minted a genuinely fresh
 //        confirmWorkerMerge call — each one running a real `git merge main` and queuing a real gate command
-//        — on EVERY ~syncAttachBudgetMs poll. Reproduced here with the SAME shape the reviewer's own probe
-//        used: a tiny gateCommandTimeoutMs (6s ceiling) and a tiny syncAttachBudgetMs (50ms) so the loop
-//        genuinely iterates roughly 100+ times inside one confirmWorkerMergeUntilSettled call — a held-open
-//        gate (never resolves on its own) proves those iterations really are polling an in-flight op, not
-//        racing straight to settlement on the first try.
+//        — on EVERY ~syncAttachBudgetMs poll. Card 08e4b661 later removed the internal retry loop entirely
+//        (a pending result is now recovered by waiting on the first op's own opId, never by re-invoking the
+//        closure — see that card's own doc), so there is no "every retry" left to exercise: this scenario
+//        now proves the dead-owner check's own correctness (it must still fire exactly ONCE, on the single
+//        confirmWorkerMergeTracked call this makes, and never again) across the SAME long single wait the
+//        fixed code now uses to recover the op's real outcome — a tiny gateCommandTimeoutMs (6s ceiling)
+//        and a tiny syncAttachBudgetMs (50ms) so the first attach degrades to pending quickly, with a
+//        held-open gate (never resolves on its own) proving the wait genuinely spans the ceiling rather
+//        than racing straight to settlement on the first try.
 {
   const sfx = `dead-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-mrt-dead-${sfx}`);
@@ -227,10 +231,9 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
     syncAttachBudgetMs: 50,
   });
 
-  // Spy on console.warn to count the dead-owner eviction log line directly — the FIRST call mints a
-  // genuinely fresh op (nothing pre-existing to evict, so this must be 0 even on call 1), and every retry
-  // after that must skip the check entirely (opts.skipDeadOwnerRecovery) rather than re-evaluating it
-  // against the now-running op it just minted — so this must stay 0 across the WHOLE call, not just once.
+  // Spy on console.warn to count the dead-owner eviction log line directly — the single
+  // confirmWorkerMergeTracked call this whole confirmWorkerMergeUntilSettled call ever makes mints a
+  // genuinely fresh op (nothing pre-existing to evict), so this must stay 0 across the WHOLE call.
   let evictionWarnings = 0;
   const origWarn = console.warn;
   console.warn = (...args) => { if (String(args[0]).includes("had a dead owner")) evictionWarnings++; origWarn(...args); };
@@ -240,23 +243,23 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   const elapsedMs = Date.now() - startedAt;
   console.warn = origWarn;
 
-  check("(dead-owner) it genuinely looped for roughly the full 6s ceiling (proving MANY poll iterations happened, not a one-shot)",
+  check("(dead-owner) it genuinely waited roughly the full 6s ceiling (proving the wait spans the ceiling, not a one-shot)",
     elapsedMs >= 5000 && elapsedMs < 11000);
   check("(dead-owner) it gave up as NOT settled once the ceiling passed (the gate is still genuinely running)", pendingResult.settled === false);
   await gateSpawnedAtLeastOnce(() => gateCalls, "(dead-owner) gate spawned");
-  check("(dead-owner) CRITICAL — the real gate command ran EXACTLY ONCE despite ~100+ poll iterations against a dead-owner op", gateCalls === 1);
-  check("(dead-owner) the dead-owner eviction check never fired mid-loop (0 'had a dead owner' warnings)", evictionWarnings === 0);
+  check("(dead-owner) CRITICAL — the real gate command ran EXACTLY ONCE across the whole wait against a dead-owner op", gateCalls === 1);
+  check("(dead-owner) the dead-owner eviction check never fired during the wait (0 'had a dead owner' warnings)", evictionWarnings === 0);
   const deadRows = db.listPendingGateOps().filter((r) => r.key === `merge:${workerId}`);
   check("(dead-owner) CRITICAL — exactly ONE pending_gate_ops row exists — not the ~38-row eviction storm the pre-fix probe measured", deadRows.length === 1);
   check("(dead-owner) that one row is still 'pending' (the real op is genuinely still running, never evicted)", deadRows[0]?.state === "pending");
 
-  // Release the gate — the SAME op the whole loop was polling settles for real, proving this isn't merely
-  // "nothing bad happens because nothing ever runs": a real merge was genuinely in flight the whole time.
-  // waitBriefly (NOT a fixed sleep — polls the real settle signal) closes a DIFFERENT race than the one
-  // this test is about: the squash-merge/etc. after gateHold resolves is itself async, so re-attaching
+  // Release the gate — the SAME op the whole wait was waiting on settles for real, proving this isn't
+  // merely "nothing bad happens because nothing ever runs": a real merge was genuinely in flight the whole
+  // time. waitBriefly (NOT a fixed sleep — polls the real settle signal) closes a DIFFERENT race than the
+  // one this test is about: the squash-merge/etc. after gateHold resolves is itself async, so re-attaching
   // IMMEDIATELY can land while the op is still (legitimately) "running" under the dead manager — a FRESH
   // top-level confirmWorkerMergeUntilSettled call is entitled to its OWN one-time dead-owner check (this is
-  // two independent call sequences, not the internal retry loop Half Four fixes), so that race would evict
+  // two independent call sequences, not the single wait this card's own fix relies on), so that race would evict
   // and re-mint a SECOND real invocation for reasons unrelated to the bug under test. Waiting for the
   // real op to settle first isolates what this assertion is actually about: once the in-flight op is done,
   // a later re-attach must dedupe against its RETAINED result, never mint a new one.
@@ -281,7 +284,7 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
 
 // ── (5) POSITIVE CONTROL — the identical shape with a LIVE owner (Code Review, card 361520a0, Half Four:
 //        "the live-owner control must stay green too — that is your positive control that the test can tell
-//        the two apart"). Same tiny timings, same held-open gate, same ~100+ poll iterations — proves (4)'s
+//        the two apart"). Same tiny timings, same held-open gate, same long single wait — proves (4)'s
 //        assertions aren't vacuously true of every shape this harness can construct: a live owner was
 //        already never subject to the dead-owner eviction check (nothing to evict — isManagerLineageDead is
 //        false), so this must show the identical exactly-one-invocation result as (4), confirming the fix
@@ -318,11 +321,11 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
 
 // ── (6) THE FIX (card 257d534d) — the REST route's own real shape (worker.parentSessionId), but the
 //        manager RECYCLED mid-merge (a live successor, recycledFrom mgrId) rather than genuinely ending
-//        with no successor at all. Card 361520a0 Half Four's skipDeadOwnerRecovery flag (proven by (4))
-//        means the dead-owner check runs only ONCE per top-level confirmWorkerMergeUntilSettled call — its
-//        own FIRST internal attempt — and every retry inside that SAME call skips it; (4)'s single-call
-//        shape never actually exercises the check against an op that's ALREADY running, since nothing
-//        exists yet on that call's own first attempt. So this test fires TWO SEQUENTIAL top-level calls:
+//        with no successor at all. Post-card-08e4b661, each top-level confirmWorkerMergeUntilSettled call
+//        makes exactly ONE confirmWorkerMergeTracked call — the dead-owner check runs at most once per
+//        top-level call, period; (4)'s single-call shape never actually exercises the check against an op
+//        that's ALREADY running, since nothing exists yet on that call's own one attempt. So this test
+//        fires TWO SEQUENTIAL top-level calls:
 //        the FIRST mints the op fresh (nothing to evict — a genuinely fresh dead-owner check trivially
 //        finds nothing), then times out at the ceiling with the gate still held open; the SECOND is a
 //        BRAND-NEW call sequence whose own first internal attempt genuinely evaluates the dead-owner check
@@ -376,17 +379,20 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   check("(recycled-owner) still exactly ONE real gate invocation total across all three calls", gateCalls === 1);
 }
 
-// ── (7) card 164f7915, ROUND 2 (Code Review 2471d6b8 of commit 71022460) — the REST route's OWN retry
-//        loop captures `managerSessionId` from `worker.parentSessionId` ONCE (gateway/server.ts, BEFORE
-//        `confirmWorkerMergeUntilSettled`'s `while` loop ever starts) and reuses that SAME value on every
-//        internal retry — the loop never re-reads the worker row. A manager recycle landing MID-WAIT
-//        reparents a LIVE worker (`reparentLiveWorkers`) to a successor, so every retry AFTER that point
-//        carries an id that is lineage-matching but no longer EXACT. Round 1's own fix (an early exact-id
-//        refusal hoisted before `pendingOps.attach()` in `confirmWorkerMergeTracked`) answered every one
-//        of those retries 400 "not your worker" even while the already-running op it should have attached
-//        to kept going and genuinely landed the merge. Round 2 removes that early refusal: the retry loop
-//        must keep reporting STILL-WAITING (never refused) across the reparent, then settle for real once
-//        the gate releases.
+// ── (7) card 164f7915, ROUND 2 (Code Review 2471d6b8 of commit 71022460) — the REST route captures
+//        `managerSessionId` from `worker.parentSessionId` ONCE (gateway/server.ts, before
+//        `confirmWorkerMergeUntilSettled` is even called). A manager recycle landing MID-WAIT reparents a
+//        LIVE worker (`reparentLiveWorkers`) to a successor, so that captured id becomes lineage-matching
+//        but no longer EXACT. Round 1's own fix (an early exact-id refusal hoisted before
+//        `pendingOps.attach()` in `confirmWorkerMergeTracked`) answered a re-call on that stale id 400 "not
+//        your worker" even while the already-running op it should have attached to kept going and
+//        genuinely landed the merge. Round 2 removes that early refusal. Card 08e4b661 later removed the
+//        internal retry loop `confirmWorkerMergeUntilSettled` used to run on this id entirely — it now
+//        makes exactly ONE `confirmWorkerMergeTracked` call, then waits on that op's own opId, never
+//        re-reading the worker row or re-checking ownership again — so this scenario's own direct extra
+//        call below is now a STANDALONE probe of `confirmWorkerMergeTracked`'s own tolerance for a stale,
+//        lineage-matching (not exact) caller attaching to a running op, independent of whatever `pRest`
+//        itself is doing.
 {
   const sfx = `reparent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-mrt-reparent-${sfx}`);
@@ -414,9 +420,9 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   check("(rest-reparent) [setup] the LIVE worker WAS reparented to the successor mid-wait",
     reparented === 1 && db.getSession(workerId).parentSessionId === successorId);
 
-  // A direct retry call on the SAME (now stale) captured mgrId, mirroring exactly what the loop's own
-  // `while` body does internally — must be STILL-WAITING (lineage-attached to the running op), never
-  // refused as "not your worker".
+  // A direct, standalone call on the SAME (now stale) captured mgrId — see the header above for why this
+  // is no longer a mirror of anything `pRest` itself does internally — must be STILL-WAITING
+  // (lineage-attached to the running op), never refused as "not your worker".
   const oneRetry = await sessions.confirmWorkerMergeTracked(mgrId, workerId, undefined, { skipDeadOwnerRecovery: true });
   check("(rest-reparent) [ROUND 2] a retry on the stale captured id is STILL-WAITING, never refused as 'not your worker'",
     oneRetry.settled === false);
@@ -435,14 +441,14 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   const finalResult = await pRest;
   check("(rest-reparent) [ROUND 2] once released, the SAME in-flight op — attached across the reparent — settles and merges for real",
     finalResult.settled === true && finalResult.ok === true && finalResult.value?.merged === true);
-  check("(rest-reparent) exactly ONE real gate invocation across the whole retry loop, before AND after the reparent", gateCalls === 1);
+  check("(rest-reparent) exactly ONE real gate invocation across the whole wait, before AND after the reparent", gateCalls === 1);
 }
 
 // ── (8) card 47a22d40, THE PRODUCTION RACE ITSELF — RED ON MAIN: a dead owner whose op is STILL RUNNING
 //        (not abandoned — a real held-open gate proves it) must be ATTACHED to by a genuinely SEPARATE
 //        top-level call sequence, never evicted-and-reminted. Different shape than (4): (4) stays on ONE
-//        call sequence throughout (skipDeadOwnerRecovery:true after its own first check); this fires a
-//        SECOND, INDEPENDENT confirmWorkerMergeUntilSettled call while the FIRST is still genuinely
+//        top-level call sequence throughout (its single confirmWorkerMergeTracked call, then one wait);
+//        this fires a SECOND, INDEPENDENT confirmWorkerMergeUntilSettled call while the FIRST is still genuinely
 //        running — exactly what worker 2100dbc4's repro (card 19f959ea) hit. Pre-fix, call B's own
 //        dead-owner check evicts call A's op (dead ownership ALONE was sufficient, with no regard for
 //        whether the op is still progressing) and mints a FRESH confirmWorkerMerge that races the
@@ -490,7 +496,8 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   check("(attach) [setup] call A's op is tracked running under the dead manager", sessions.pendingOps.peek(`merge:${workerId}`)?.state === "running" && typeof opIdBeforeB === "string");
 
   // Call B: a SECOND, genuinely INDEPENDENT top-level call sequence against the SAME dead-owner worker —
-  // never `skipDeadOwnerRecovery` (internal-retry-only; see confirmWorkerMergeUntilSettled's own doc).
+  // never `skipDeadOwnerRecovery` (that option has no production caller post-card-08e4b661; see
+  // confirmWorkerMergeTracked's own doc on that param).
   // `confirmWorkerMergeTracked`'s dead-owner check runs SYNCHRONOUSLY with zero `await` between method
   // entry and the check (verified at source: its first real await is the verdictIdentity git read,
   // strictly AFTER the check) — so by the time this line returns control (captures a pending promise, no
