@@ -62,8 +62,11 @@ export type PendingOpOutcome = string;
  *  not about the resolved candidates; a re-fire must genuinely re-assemble, never replay a stale refusal.
  *  @decision b4cc7114 (round 2, M1) — "stranded-verification-refused": the stranded-work CHECK itself was
  *  refused (a commondir-trust mismatch), not a branch verdict; repairing the shared `.git` never moves the
- *  branch's HEAD, so a cached replay would serve the same stale refusal forever. Never cache or replay. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable", "canonical-repo-shallow", "batch-head-moved", "stranded-verification-refused"]);
+ *  branch's HEAD, so a cached replay would serve the same stale refusal forever. Never cache or replay.
+ *  @decision f2b4d684 (round 4/5) — "landed-tip-unverifiable": a solo retain, or a held-branch owed-range
+ *  refusal, caused by an UNVERIFIABLE trailer/git read (transient), never a late/moved commit. Never
+ *  cache or replay. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable", "canonical-repo-shallow", "batch-head-moved", "stranded-verification-refused", "landed-tip-unverifiable"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

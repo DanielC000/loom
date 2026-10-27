@@ -74,17 +74,23 @@ const ALLOWLIST = [
     "+ 1 UNRELATED namesake (computeStaleBase's own worktree-fork-point `info.baseSha`, from a real git merge-base call, never a trailer) — never reaches git either way"],
   ["git/worktrees.ts", "trailer-parse-chain", 1,
     "readLandedTipTrailer's own parse of a LANDING COMMIT's own Loom-Landed-Tip trailer — never attacker-controlled worker content (112b8d5d strips worker-authored subjects " +
-    "before this trailer is ever stamped). Flows to sessions/service.ts's heldRecordedTip -> resolveOwedRange's `base`, which DOES reach resolveGitRef/isAncestorCommit without " +
-    "this card's exact-match validation — judged NOT exploitable as the same ref-name forgery by this card's own Code Review (reviewer 201f0fa5); validating this producer is a " +
-    "SEPARATE follow-up card, deliberately not fixed here. Allowlisted so this guard can see it, not because it is proven safe by this guard."],
+    "before this trailer is ever stamped). Card f2b4d684 now routes this parse's own result through resolveExactTrailerObjectId, in this same function, before returning it — " +
+    "closing the gap b8122303's Code Review (reviewer 201f0fa5) left open here (flows to sessions/service.ts's heldRecordedTip -> resolveOwedRange's `base`, which reaches " +
+    "resolveGitRef/isAncestorCommit/computeOwedLanding). Allowlisted so this guard can see the producer parse; the validation itself is the very next line."],
   ["git/worktrees.ts", "readLandedTipTrailer(", 1, "the function's own declaration — this guard cannot distinguish a declaration from a call by text alone"],
   ["sessions/service.ts", "trailers.base", 1,
     "attributeStaleGenerationOwnLanding's eligibility gate only (decision c7dc99bf: never a value fed into any check) — never reaches git"],
   ["sessions/service.ts", "trailers.landedTip", 2,
     "1 truthy eligibility check + 1 validated read (verifyReviewedTipChain's own entry validation, resolveExactTrailerObjectId) — the site this card fixed"],
   ["sessions/service.ts", "readLandedTipTrailer(", 2,
-    "heldRecordedTip's fallback read (flows to resolveOwedRange's `base`, same not-this-card's-scope flow as the worktrees.ts producer entry above) " +
-    "+ pinnedTipForLandedSquash's read (flows to a finalize pin) — neither validated by this card; see the worktrees.ts producer entry's reason"],
+    "heldRecordedTip's fallback read (flows to resolveOwedRange's `base`) + pinnedTipForLandedSquash's read (flows to a finalize pin) — card f2b4d684 validates BOTH, " +
+    "transitively, at the shared producer (readLandedTipTrailer itself, see the worktrees.ts producer entry above), which returns a three-way ABSENT/VALID/UNVERIFIABLE " +
+    "result (CR round 3: the outer `git log` read throwing is ALSO UNVERIFIABLE now, not ABSENT) rather than collapsing a validation miss into the same `null` ABSENT uses. " +
+    "(round 6 correction) heldRecordedTip does NOT fold UNVERIFIABLE into null either — it returns a distinct `{tip:null, unverifiable:true}` pair, which its own " +
+    "chokepoint caller (isBranchHeld) and resolveOwedRange both read via `.unverifiable` to classify a transient/unverifiable cause as never-cacheable, distinct from " +
+    "a genuinely absent (`unverifiable:false`) tip, which stays an ordinary stable refusal. pinnedTipForLandedSquash does NOT fold it either, and (CR round 3) " +
+    "does NOT pin the SOLO_TIP_UNVERIFIABLE literal either — it returns `{}` (no landedTip key) so nothing trailer-derived is ever persisted into the retain event; round " +
+    "2's own fix pinned that literal, which a LATER call read back as a live git revision argument. See docs/decisions/f2b4d684-*.md for the full mapping + both repros."],
   ["mcp/orchestration.ts", ".baseSha", 1,
     "UNRELATED namesake — worker_spawn's STALE BRANCH BASE advisory text (`worker.staleBase.baseSha`), a human-readable string interpolation, never a git argv"],
   ["sessions/worker-prompt.ts", ".baseSha", 1,

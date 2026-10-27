@@ -123,7 +123,11 @@ check("(3) CONTROL getTaskMergedInfo: the real block's branch IS merged, at the 
 
 // ── (5) Loom-Landed-Tip ──────────────────────────────────────────────────────────────────────────────────────────
 {
-  const tip = HEX("e");
+  // Card f2b4d684 — readLandedTipTrailer now resolve-validates its value as a real, exact commit object
+  // (resolveExactTrailerObjectId), so a fake, shape-only hex string no longer round-trips; use a REAL,
+  // existing commit sha (baseSha) instead. HEX("f") below stays fake on purpose — it's quoted mid-body,
+  // never reaches the final block, so it's never read or validated at all.
+  const tip = baseSha;
   const solo = commit(`feat(x): solo\n\nbody quotes a tip:\nLoom-Landed-Tip: ${HEX("f")}\n\nLoom-Worker-Branch: loom/solo-x\nLoom-Landed-Tip: ${tip}\n`);
   check("(5) readLandedTipTrailer reads the REAL tip from the final block", (await readLandedTipTrailer(repo, solo)) === tip);
   const quotedOnly = commit(`feat(x): batch tip\n\nquoted:\nLoom-Worker-Branch: loom/q\nLoom-Landed-Tip: ${HEX("f")}\n\nLoom-Worker-Branch: loom/solo-y\n`);
@@ -137,7 +141,7 @@ check("(3) CONTROL getTaskMergedInfo: the real block's branch IS merged, at the 
   fs.writeFileSync(hook, `#!/bin/sh\ngit interpret-trailers --in-place --where start --trailer "Change-Id: I0123" "$1"\n`, { mode: 0o755 });
   const hookedTask = taskFor("hooked");
   const hooked = `loom/${taskKey(hookedTask)}`;
-  const tip = HEX("9");
+  const tip = baseSha; // card f2b4d684: readLandedTipTrailer now resolve-validates this as a real commit object
   const sha = commit(`feat(x): hooked landing\n\nbody\n\nLoom-Worker-Branch: ${hooked}\nLoom-Landed-Tip: ${tip}\n`);
   fs.rmSync(hook);
   const body = git(repo, `log -1 --format=%B ${sha}`);
@@ -160,7 +164,7 @@ check("(3) CONTROL getTaskMergedInfo: the real block's branch IS merged, at the 
 {
   const sobTask = taskFor("sob");
   const sob = `loom/${taskKey(sobTask)}`;
-  const tip = HEX("8");
+  const tip = baseSha; // card f2b4d684: readLandedTipTrailer now resolve-validates this as a real commit object
   const sha = commit(`feat(x): signed\n\nbody\n\nLoom-Worker-Branch: ${sob}\nLoom-Landed-Tip: ${tip}\nSigned-off-by: T <t@loom>\n`);
   check("(7) parseLoomTrailerBlock reads branch + tip with Signed-off-by after the block",
     parseLoomTrailerBlock(git(repo, `log -1 --format=%B ${sha}`))?.branch === sob);

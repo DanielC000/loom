@@ -7,21 +7,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `mergeGateInterval`, so it is the plain re-call shape, for ONE candidate, leaving the other candidate's
 // own lookup untouched.
 //
-// (C) readLandedTipTrailer THROW for candidate a's own LANDED SHA ONLY (resolved via a direct, read-only
-//     findLandedSquashCommit probe before the fault is installed — persistent, not one-shot): silently
-//     absorbed — a finalizes normally too, byte-identical outcome to the unfaulted control (started:true,
-//     terminal, no retain event). See the scope note below for exactly what this does and does not prove.
+// @decision f2b4d684 (CR round 3) — REVERSES this file's prior contract: an unreadable commit message
+// (the OUTER `git log -1 --format=%B` read throwing — exactly this scenario's fault) is now UNVERIFIABLE,
+// never ABSENT, so it RETAINS the branch instead of silently finalizing it.
 //
-// This file's own honest scope (Code Review c584521b on afa5940f): a BATCH-FF landing's own tip
-// commit never carries a `Loom-Landed-Tip:` trailer (only a SOLO squash writes it — worktrees.ts ~8737),
-// so in THIS fixture `readLandedTipTrailer`'s unfaulted call already returns `null` (no trailer present) —
-// identical to what the fault-induced catch-to-null ALSO returns. This scenario therefore pins ONLY "a
-// trailer-read failure is absorbed (fails safe to null, same as a genuine absence)" — it does NOT, and
-// cannot without a real solo-squash fixture (a materially bigger build, skipped per that review's own
-// explicit allowance), show a present trailer's value being DISCARDED in favor of `legacyTip`. The
-// dist-patch RED proof (readLandedTipTrailer's catch rethrowing instead of returning null) that confirms
-// this scenario CAN fail is a one-time manual verification, reported in the commit/PR, not part of this
-// file — a committed test must never itself patch `dist/`.
+// (C) readLandedTipTrailer THROW for candidate a's own LANDED SHA ONLY (resolved via a direct, read-only
+//     findLandedSquashCommit probe before the fault is installed — persistent, not one-shot): now RETAINS
+//     candidate a's branch (merge_branch_retained, not finalized) while candidate b — untouched by the
+//     fault — still finalizes normally. See the scope note below for exactly what this does and does not
+//     additionally prove.
+//
+// This file's own honest scope (Code Review c584521b on afa5940f, STILL true after the round-3 reversal):
+// a BATCH-FF landing's own tip commit never carries a `Loom-Landed-Tip:` trailer (only a SOLO squash
+// writes it — worktrees.ts ~8737), so in THIS fixture `readLandedTipTrailer`'s unfaulted call already
+// returns `null` (ABSENT: the message reads fine, genuinely no trailer field) — a DIFFERENT value than
+// what the fault now produces (UNVERIFIABLE: the message could not be read at all). This scenario proves
+// "an unreadable commit message retains, never falls through to a permissive legacy-tip finalize" — it
+// does NOT, and cannot without a real solo-squash fixture (a materially bigger build, skipped per that
+// review's own explicit allowance), show a PRESENT trailer VALUE being discarded; see
+// landed-tip-trailer-unverifiable-retains-branch.mjs for that proof, on a real solo squash.
 //
 // SPLIT (card 715ad688): the original combined file (A)+(B)+(C) ran ~49-56s solo-in-suite but was
 // SIGTERM-killed at the 120,000ms blanket ceiling under a real 966-file loaded gate (op 8a918209) —
@@ -130,7 +134,7 @@ async function landedFixture(label) {
 
 try {
   // (C) readLandedTipTrailer THROW, scoped EXACTLY to candidate a's own landed sha, PERSISTENT (every
-  // matching call is faulted, not just the first) — silently absorbed, no behavior change at all.
+  // matching call is faulted, not just the first) — CR round 3: now RETAINS a's branch, never absorbed.
   {
     const { P, db, a, b, o } = await landedFixture("rlt");
     // Resolve a's REAL landed sha first via a direct, read-only probe (content is already on main after
@@ -157,15 +161,16 @@ try {
     const r2 = await settle(ctx2.sessions.mergeBatchTracked(P.mgrId, [a.workerId, b.workerId]));
     const fb = r2.value?.value?.fallback ?? [];
     check("(C) the fault actually fired, scoped to a's exact landed sha", faultedCount >= 1);
-    check("(C) both candidates finalize normally (started:true, terminal, no retain)", fb.length === 2 && fb.every((f) => f.started === true));
-    check("(C) a's task reached a terminal lane (the trailer read failure was absorbed, not a gap)", db.getTask(a.taskId)?.columnKey !== "in_progress");
-    check("(C) no merge_branch_retained event for a (readLandedTipTrailer's own fail-safe null just falls through to the legacyTip read)", eventsOf(db, "merge_branch_retained", a.workerId).length === 0);
+    check("(C) both candidates still report started:true (the confirm WAS attempted, just degraded)", fb.length === 2 && fb.every((f) => f.started === true));
+    check("(C) THE FIX (CR round 3): a's branch is RETAINED (merge_branch_retained, source:solo) — the fail-closed sentinel for an unreadable trailer", eventsOf(db, "merge_branch_retained", a.workerId).some((e) => e.detail?.source === "solo"));
+    check("(C) a's task did NOT reach a terminal lane (retained, not finalized)", db.getTask(a.taskId)?.columnKey === "in_progress");
+    check("(C) b's branch was NOT retained and its task DID reach a terminal lane (untouched by a's fault)", eventsOf(db, "merge_branch_retained", b.workerId).length === 0 && db.getTask(b.taskId)?.columnKey !== "in_progress");
   }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a readLandedTipTrailer failure is silently absorbed (fails safe to null), no behavior change. See batch-fallback-already-landed-lookup-fault-injection-throw.mjs and -timeout.mjs for the resolveGitRef failure modes, which fail CLOSED instead. See card 31f8467c for the still-open question this leaves (started:false's real cause lies elsewhere)."
+  ? "\n✅ ALL PASS — a readLandedTipTrailer failure (the outer commit-message read itself) now fails CLOSED (retain), reversing this file's own pre-f2b4d684-round-3 contract. See batch-fallback-already-landed-lookup-fault-injection-throw.mjs and -timeout.mjs for the resolveGitRef failure modes, already fail-closed. See card 31f8467c for the still-open question this leaves (started:false's real cause lies elsewhere)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -7,7 +7,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //                   (merge base M1) keeps "x". Asserts main keeps other.txt == "x" AND loses extra-a.txt. Must be RED on 19d20dd4.
 //   (reunion-moved) same, but main moves DURING the (passing) gate: the first confirm is refused because main advanced, U1 stays, the re-confirm lands.
 //   (review-exact)  after U1 the review's `lateRange` lists ONLY what will land (extra-a.txt, the late-revert subject) — not main's own changes/subjects.
-//   (unverified)    the hold's release cannot be verified (a failing probe) ⇒ refused, "usually transient".
+//   (unverified)    the hold's release cannot be verified (a failing probe) ⇒ refused, a transient-git-error wording (round 5, card f2b4d684).
 //   (no-tip)        a retain event with no assembledTip/landedTip/landedSha ⇒ refused, names the missing range.
 //   (no-live-tip)   the branch ref cannot be read ⇒ refused.
 //   (no-gate)       the repo has no gateCommand ⇒ refused (the late-range union exists only on the gated path).
@@ -211,7 +211,11 @@ try {
     const rev = await mk({ heldProbeGitFactory: failing }).reviewWorkerMerge(mgrId, wA);
     check("(unverified) worker_merge warns that the release could not be verified and shows no late range", rev.lateRange === undefined && /could not be verified/.test(rev.warning ?? ""));
     const res = await mk({ heldProbeGitFactory: failing, runGate: async () => ({ passed: true }) }).confirmWorkerMerge(mgrId, wA);
-    check("(unverified) confirm REFUSES (usually transient, retry); main untouched, branch intact", res.merged === false && /usually transient, retry/.test(res.reason ?? "") && git(repo, "rev-parse HEAD") === mainBefore && !!git(repo, `rev-parse ${a.branch}`));
+    // @decision f2b4d684 (round 5) — reworded from "usually transient, retry" to the unified transient
+    // wording this card gives EVERY held-branch-unverifiable refusal; also now carries heldRangeUnverifiable
+    // so it classifies into NEVER_CACHED_OUTCOMES rather than a stably-cached plain "rejected".
+    check("(unverified) confirm REFUSES (a transient git error is possible — re-confirm once it clears); main untouched, branch intact", res.merged === false && /transient git error is possible/.test(res.reason ?? "") && git(repo, "rev-parse HEAD") === mainBefore && !!git(repo, `rev-parse ${a.branch}`));
+    check("(unverified) THE FIX: carries heldRangeUnverifiable:true", res.heldRangeUnverifiable === true);
   }
   {
     // Reads (service.ts): isBranchHeld's retain-selection (~21867, picks the LATEST `ts` event for the branch) picks THIS scenario's own malformed second event (ts = +5s), never the seeded one

@@ -223,7 +223,10 @@ try {
     const held = await addWorker(db, P, "c6h", { "src/c6h.ts": "export const c6h = 3;\n" });
     // Seam: mark the third candidate's branch as held (a retained, never-gated later commit), exactly what `isBranchHeld` reports for one.
     const origHeld = ctx.sessions.isBranchHeld.bind(ctx.sessions);
-    ctx.sessions.isBranchHeld = async (branch, ...rest) => branch === held.branch ? { retain: { detail: { assembledTip: null, liveTip: null, phase: "pre-stop" } }, gitUnverified: false } : origHeld(branch, ...rest);
+    // @decision f2b4d684 (round 7): isBranchHeld's return shape now carries `recorded` (the trailer read
+    // it made internally) instead of a derived `tipUnverifiable` boolean — this stub must match it or
+    // every real reader (e.g. mergeBatchTracked's own retainedOutstanding loop) throws on `.recorded.unverifiable`.
+    ctx.sessions.isBranchHeld = async (branch, ...rest) => branch === held.branch ? { retain: { detail: { assembledTip: null, liveTip: null, phase: "pre-stop" } }, gitUnverified: false, recorded: { tip: null, unverifiable: false } } : origHeld(branch, ...rest);
     const holder = occupySlot(ctx);
     const batchP = ctx.sessions.mergeBatchTracked(P.mgrId, [b1.workerId, b2.workerId, held.workerId]);
     const entry = await waitUntil(() => queuedMerge(ctx), { timeoutMs: 60000, intervalMs: 20, label: "merge-batch-cancelled-not-red (C6): the batch gate is queued" });

@@ -263,8 +263,13 @@ for (const variant of ["whole-file revert (N)", "partial revert (N2)"]) {
 }
 {
   const t = await setup(sfxOf("trailerblock"));
-  const a = "a".repeat(40), b = "b".repeat(40);
   const commitMsg = (name, msg) => { const f = path.join(path.dirname(t.repo), name); fs.writeFileSync(f, msg); t.git(`${GIT_ID} commit --allow-empty -q -F "${f.split(String.fromCharCode(92)).join("/")}"`); return t.git("rev-parse HEAD"); };
+  // Card f2b4d684 — readLandedTipTrailer now resolve-validates its parsed value as a real, exact commit
+  // object (resolveExactTrailerObjectId), so a bare shape-only fixture ("a".repeat(40)) no longer round-
+  // trips; use two REAL, distinct commit shas instead — this scenario is about PARAGRAPH SELECTION, not
+  // resolution, so any two real commits serve the same purpose the fabricated hex strings used to.
+  const a = commitMsg("base-a.txt", "base-a\n");
+  const b = commitMsg("base-b.txt", "base-b\n");
   const quoted = commitMsg("q.txt", `subj\n\nworker body quoting a trailer:\nLoom-Landed-Tip: ${a}\n\nLoom-Worker-Branch: q\nLoom-Worker-Base: ${b}\n`);
   const solo = commitMsg("s.txt", `subj2\n\nLoom-Worker-Branch: q\nLoom-Landed-Tip: ${b}\nLoom-Worker-Base: ${a}\n`);
   check("(O) a quoted Loom-Landed-Tip in the body (before the final trailer block) is NOT read as a trailer", (await readLandedTipTrailer(t.repo, quoted)) === null);

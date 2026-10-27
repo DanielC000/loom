@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -690,13 +690,17 @@ function describeBranchRetained(branch: string, assembledTip: string | null, liv
  * existing compare-and-swap (the same one the batch uses). A missing tip fails CLOSED: the sentinel below never equals a real ref, so finalize retains.
  */
 const SOLO_TIP_UNVERIFIABLE = "unverifiable-landed-tip";
-function describeSoloRetained(branch: string, landedTip: string | undefined, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined"): string {
+/** @decision f2b4d684 (round 4) — `tipUnverifiable` words an UNVERIFIABLE-trailer retain as "could not
+ *  confirm, re-confirm once it clears", never as a late/moved-commit comparison it cannot back. */
+function describeSoloRetained(branch: string, landedTip: string | undefined, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined", tipUnverifiable?: boolean): string {
   // Round 6, item #10: same reasoning as describeBranchRetained's identical branch — a QUARANTINED
   // finalize is a distinct, actionable cause; don't bury it under generic tip-comparison wording.
   if (reason === "quarantined") {
     return `${branch}: the canonical repo is QUARANTINED — NOT finalized: branch and worktree kept, no task move, no merge_done. A human must clear it: GET /internal/merge-quarantine/list, then POST /internal/merge-quarantine/clear-by-path (the project-resolved /clear works only if a registered project's repo resolves to this entry)`;
   }
-  const what = liveTip && landedTip
+  const what = tipUnverifiable
+    ? `${branch}: could not verify the landed tip (now ${liveTip?.slice(0, 8) ?? "unreadable"}); a transient git error is possible — re-confirm once it clears; if it persists, inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker`
+    : liveTip && landedTip
     ? `${branch} advanced after this merge landed (landed ${landedTip.slice(0, 8)}, now ${liveTip.slice(0, 8)}); the later commit(s) are NOT on main and were never gated or reviewed by this merge`
     : `${branch}: could not verify the branch tip against the landed one (landed ${landedTip?.slice(0, 8) ?? "unknown"}, now ${liveTip?.slice(0, 8) ?? "unreadable"})`;
   return phase === "ref-kept-after-finalize"
@@ -799,6 +803,13 @@ type MergeBatchResult = {
 type ConfirmMergeResult = {
   /** Card cc9bce38: set when a SOLO merge landed but finalize RETAINED the branch (its tip moved after the squash) — echoed into the `[loom:merge-done]`/`[loom:already-merged]` nudge, since the sync `warning` never reaches a manager on the async path. The branch is HELD (see `isBranchHeld`). */
   branchRetainedWarning?: string;
+  /** @decision f2b4d684 (round 4) — a `merged:true` retain caused by an UNVERIFIABLE landed-tip trailer,
+   *  never a genuine late/moved commit; classified `"landed-tip-unverifiable"` (`NEVER_CACHED_OUTCOMES`). */
+  landedTipUnverifiable?: boolean;
+  /** @decision f2b4d684 (round 5/6) — a `merged:false` refusal of an ALREADY-HELD branch whose release
+   *  status couldn't be VERIFIED (`resolveOwedRange`'s refusal, round 5, OR `finishAlreadyMerged`'s own
+   *  `heldAtFinish` refusal, round 6); never-cached `"landed-tip-unverifiable"`, as the sibling field. */
+  heldRangeUnverifiable?: boolean;
   merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked";
   warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string;
   gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[];
@@ -18970,7 +18981,9 @@ export class SessionService {
     const owedRefusal = owed.kind === "refuse" ? owed.reason
       : owed.kind === "range" && !gate ? `${branch} is HELD and owes a late range (${owed.base.slice(0, 8)}..${owed.tip.slice(0, 8)}), but this repo has no gateCommand, and the late range is landed only through the gated union of main — inspect it and cherry-pick it onto a follow-up card's worker`
       : undefined;
-    if (owedRefusal) return { merged: false, reason: `${owedRefusal}. Nothing was landed, finalized or deleted.`, notified: false, opId: thisOpId };
+    // @decision f2b4d684 (round 5) — a TRANSIENT owed-range refusal reuses the SAME never-cached
+    // classification as a retain-time unverifiable trailer: a re-confirm must re-derive, never replay.
+    if (owedRefusal) return { merged: false, reason: `${owedRefusal}. Nothing was landed, finalized or deleted.`, notified: false, opId: thisOpId, ...(owed.kind === "refuse" && owed.transient ? { heldRangeUnverifiable: true } : {}) };
     const owedBase = owed.kind === "range" ? owed.base : undefined;
 
     // OP-ID STAMPED ONTO EVERY EVENT (card 7d492f8b): merged in here — not at each call site — so no
@@ -21652,8 +21665,8 @@ export class SessionService {
       const amOwner = this.resolveLineageOwnerForWorker(managerSessionId, workerSessionId) ?? managerSessionId;
       // @decision cc9bce38 — NOT `merge.landedTip` alone: that is the tip mergeBranch froze and found EMPTY, which blesses a late revert. The squash's trailer wins (the ONE resolver); the frozen tip is only its legacy fallback.
       const amPin = await this.pinnedTipForLandedSquash(repoPath, branch, merge.sha, merge.landedTip);
-      const amGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId: amOwner, workerSessionId, taskId, branch, landedTip: amPin.landedTip, branchGone: amPin.branchGone, landedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
-      return this.finishAlreadyMerged({ managerSessionId: amOwner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, ...(amGuard.expectedBranchTip ? { expectedBranchTip: amGuard.expectedBranchTip } : {}), onBranchRetained: amGuard.onBranchRetained, retainedNote: amGuard.warning });
+      const amGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId: amOwner, workerSessionId, taskId, branch, landedTip: amPin.landedTip, branchGone: amPin.branchGone, landedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, tipUnverifiable: amPin.tipUnverifiable });
+      return this.finishAlreadyMerged({ managerSessionId: amOwner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, ...(amGuard.expectedBranchTip ? { expectedBranchTip: amGuard.expectedBranchTip } : {}), onBranchRetained: amGuard.onBranchRetained, retainedNote: amGuard.warning, tipUnverifiable: amGuard.tipUnverifiable });
     }
 
     // @decision 0771da77 — everything below runs AFTER the gate/merge awaits, so the manager captured at confirm
@@ -21858,7 +21871,7 @@ export class SessionService {
    * is accepted because every destructive site stays independently content-guarded (Pass A's branchContentLandedInCommit, the `--merged`-only ref
    * sweep, finishAlreadyMerged only after an empty squash) and a batch landing is itself gated.
    */
-  private async isBranchHeld(branch: string, repoPath: string, repoKey: string | null): Promise<{ retain: OrchestrationEvent; gitUnverified: boolean } | undefined> {
+  private async isBranchHeld(branch: string, repoPath: string, repoKey: string | null): Promise<{ retain: OrchestrationEvent; gitUnverified: boolean; recorded: { tip: string | null; unverifiable: boolean } } | undefined> {
     // Card a5be590f (rules + Do-nots: the repo-scope section of docs/decisions/42daa283-*.md) — the hold is scoped to (branch, repo): the branch name is `loom/<sha256(taskId)>` with no repo axis, so a task retargeted to a second repo re-spawns onto the SAME
     // name there. Every retain and merge_done event carries the `repoKey` it was filed for (null = the primary repo), and ONLY events in THIS caller's repo scope count — for the retain (no
     // false hold inherited from another repo) and for the release (another repo's merge_done cannot release this one). A LEGACY row with no `repoKey` key at all matches any scope (by branch only).
@@ -21872,34 +21885,60 @@ export class SessionService {
     // (solo `landedTip`, batch `assembledTip`; a retention that recorded none resolves it from the landed squash's trailer). A retention with nothing unlanded
     // (a transient unreadable tip, a sentinel, a ref-kept branch at the landed tip) releases itself. An unreadable or MISSING current tip stays held (fail closed; 42daa283).
     // RESIDUAL: a retention that recorded no tip on a squash with no trailer (pre-cc9bce38) has nothing to compare, so it stays held until a merge_done or a later squash.
-    const recordedTip = await this.heldRecordedTip(retain, repoPath);
+    // @decision f2b4d684 (round 7) — `recorded` is read ONCE and returned verbatim (not a derived
+    // boolean), so no caller re-reads the same trailer a second time within one evaluation — round 6's
+    // own boolean left resolveOwedRange with its own second read that could disagree under a fault.
+    const recorded = await this.heldRecordedTip(retain, repoPath);
     const currentTip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
     // A MISSING branch does NOT release (42daa283: a ref probe reads a transiently locked ref as missing, and a hand-deleted branch is harmless to keep reporting): only a
     // current tip that is READABLE and equals the recorded one releases.
-    if (recordedTip && currentTip && currentTip === recordedTip) return undefined;
-    if (!landedSha) return { retain, gitUnverified: false };
+    if (recorded.tip && currentTip && currentTip === recorded.tip) return undefined;
+    if (!landedSha) return { retain, gitUnverified: false, recorded };
     const later = await findLaterBranchSquash(repoPath, branch, landedSha, { timeoutMs: this.gitOpMs, gitFactory: this.heldProbeGitFactory });
     if (later === "found") return undefined;
-    return { retain, gitUnverified: later === "error" };
+    return { retain, gitUnverified: later === "error", recorded };
   }
-  /** The tip a retaining merge landed the branch at: a solo `landedTip`, a batch `assembledTip`, else the landed squash's `Loom-Landed-Tip` trailer; `null` when none is recorded. The ONE reader — {@link isBranchHeld} and {@link resolveOwedRange} both call it. */
-  private async heldRecordedTip(retain: OrchestrationEvent, repoPath: string): Promise<string | null> {
+  /**
+   * The tip a retaining merge landed the branch at: a solo `landedTip`, a batch `assembledTip`, else the landed squash's `Loom-Landed-Tip` trailer; `tip:null` when none is recorded.
+   * @decision f2b4d684 (round 7) — THE ONE caller is {@link isBranchHeld} (reads it ONCE, returns it as
+   * its own `recorded` field) — every other consumer reads THAT field, never re-calls this method (round
+   * 6's own second call in `resolveOwedRange` could disagree with the first under a transient fault).
+   */
+  private async heldRecordedTip(retain: OrchestrationEvent, repoPath: string): Promise<{ tip: string | null; unverifiable: boolean }> {
     const landedSha = typeof retain.detail?.landedSha === "string" ? retain.detail.landedSha : undefined;
-    return typeof retain.detail?.landedTip === "string" ? retain.detail.landedTip
-      : typeof retain.detail?.assembledTip === "string" ? retain.detail.assembledTip
-      : landedSha ? await readLandedTipTrailer(repoPath, landedSha, { timeoutMs: this.gitOpMs }) : null;
+    if (typeof retain.detail?.landedTip === "string") return { tip: retain.detail.landedTip, unverifiable: false };
+    if (typeof retain.detail?.assembledTip === "string") return { tip: retain.detail.assembledTip, unverifiable: false };
+    if (!landedSha) return { tip: null, unverifiable: false };
+    // @decision f2b4d684 (round 5) — threads the SAME test seam `isBranchHeld`'s own `findLaterBranchSquash`
+    // read already uses (`heldProbeGitFactory`'s own doc names this exact call as in scope); previously
+    // unwired, so a fault injected only via `alreadyLandedGitFactory` could never reach this read at all.
+    const r = await readLandedTipTrailer(repoPath, landedSha, { timeoutMs: this.gitOpMs, gitFactory: this.heldProbeGitFactory });
+    return r === TRAILER_TIP_UNVERIFIABLE ? { tip: null, unverifiable: true } : { tip: r, unverifiable: false };
   }
   /**
    * @decision 13fc5227 — THE one resolver of "what range a held branch still owes main" (review, confirm's union and the reviewed-tip walk all call it): `recordedTip..liveTip`,
    * never the fork-point range (a fork-point squash nets a late self-revert to nothing). FAIL CLOSED with `refuse` on an unreadable/non-ancestor tip; never a guess.
+   *
+   * @decision f2b4d684 (round 5) — a `refuse` from a TRANSIENT git read (`gitUnverified`, or
+   * `heldRecordedTip` coming back `unverifiable`) carries `transient:true`; a genuinely-absent/invalid
+   * recorded tip stays an ordinary, stably-cacheable refusal — a caller must classify the two distinctly.
    */
-  private async resolveOwedRange(branch: string, repoPath: string, repoKey: string | null): Promise<{ kind: "none" } | { kind: "range"; base: string; tip: string } | { kind: "refuse"; reason: string }> {
+  private async resolveOwedRange(branch: string, repoPath: string, repoKey: string | null): Promise<{ kind: "none" } | { kind: "range"; base: string; tip: string } | { kind: "refuse"; reason: string; transient?: boolean }> {
     const held = await this.isBranchHeld(branch, repoPath, repoKey);
     if (!held) return { kind: "none" };
     const guidance = "inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker";
-    if (held.gitUnverified) return { kind: "refuse", reason: `${branch} is HELD and its release could not be verified (reading main for a later Loom-Worker-Branch commit failed) — usually transient, retry; else ${guidance}` };
-    const base = await this.heldRecordedTip(held.retain, repoPath);
-    if (!base) return { kind: "refuse", reason: `${branch} is HELD but its retain event records no readable assembledTip/landedTip, so the range it still owes main cannot be determined — ${guidance}` };
+    // @decision f2b4d684 (round 6) — `transient:true` also covers PERMANENT causes (gc'd/forged/gone)
+    // with no automatic release path; append the manual remedy rather than stranding a manager.
+    const transientGuidance = `a transient git error is possible — re-confirm once it clears; if it persists, ${guidance}`;
+    if (held.gitUnverified) return { kind: "refuse", reason: `${branch} is HELD and its release could not be verified (reading main for a later Loom-Worker-Branch commit failed) — ${transientGuidance}`, transient: true };
+    // @decision f2b4d684 (round 7) — read ONCE: `held.recorded` IS isBranchHeld's own trailer read, never
+    // re-derived here. Round 6 still called heldRecordedTip a SECOND time for this value alone, and the
+    // two reads could disagree under a transient fault (CR6's `toctou-owed` repro).
+    if (!held.recorded.tip) {
+      if (held.recorded.unverifiable) return { kind: "refuse", reason: `${branch} is HELD but its recorded landed tip could not be verified — ${transientGuidance}`, transient: true };
+      return { kind: "refuse", reason: `${branch} is HELD but its retain event records no readable assembledTip/landedTip, so the range it still owes main cannot be determined — ${guidance}` };
+    }
+    const base = held.recorded.tip;
     const tip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
     if (!tip) return { kind: "refuse", reason: `${branch} is HELD and its current tip could not be read — ${guidance}` };
     let baseIsCommit = false;
@@ -21972,13 +22011,13 @@ export class SessionService {
     const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger: a.goneBranchLedger }));
     const alreadyLanded = looked.result;
     if (!alreadyLanded) return null;
-    const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded, repoKey: a.repoKey });
+    const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded, repoKey: a.repoKey, tipUnverifiable: looked.tipUnverifiable });
     return this.finishAlreadyMerged({
       managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, worktreePath: a.worktreePath, branch: a.branch, repoPath: a.repoPath, projectId: a.projectId,
       opId: a.opId, forceRemoveWorktree: a.forceRemoveWorktree, opStartedAt: a.opStartedAt, mergedSha: alreadyLanded, repoKey: a.repoKey,
       // @decision 293d418e — attribution only: the human-facing commit + merge_done.landedSha; mergedSha (persisted ship-state) and the pin stay on the lookup's sha.
       ...(a.gateSkipped ? { attributedSha: await findIntroducingSquashCommit(a.repoPath, a.branch, alreadyLanded, "HEAD", { timeoutMs: this.gitOpMs }) } : {}),
-      ...(guard.expectedBranchTip ? { expectedBranchTip: guard.expectedBranchTip } : {}), onBranchRetained: guard.onBranchRetained, retainedNote: guard.warning,
+      ...(guard.expectedBranchTip ? { expectedBranchTip: guard.expectedBranchTip } : {}), onBranchRetained: guard.onBranchRetained, retainedNote: guard.warning, tipUnverifiable: guard.tipUnverifiable,
       ...(a.gateSkipped ? { gateSkipped: a.gateSkipped } : {}),
     });
   }
@@ -21986,7 +22025,7 @@ export class SessionService {
    * @decision cc9bce38 — run a landed-squash lookup and resolve the tip to pin finalize to through {@link pinnedTipForLandedSquash}, with the branch tip read BEFORE and AFTER `check`
    * (trusted only when the same on both reads) as its legacy fallback.
    */
-  private async tipAcrossLandedCheck<T>(repoPath: string, branch: string, check: () => Promise<T>): Promise<{ result: T; landedTip?: string; branchGone?: boolean }> {
+  private async tipAcrossLandedCheck<T>(repoPath: string, branch: string, check: () => Promise<T>): Promise<{ result: T; landedTip?: string; branchGone?: boolean; tipUnverifiable?: boolean }> {
     const before = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     const result = await check();
     const after = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
@@ -22000,11 +22039,19 @@ export class SessionService {
    * call it; no caller computes its own). A branch confirmed gone has nothing to protect; else the squash's `Loom-Landed-Tip` trailer, which a content check or a fresh read can never
    * replace (both bless a late whole-file/partial revert); else the caller's LEGACY fallback (a stable read, or the tip a merge froze and found empty), which a squash with no trailer
    * (landed before this card) is stuck with. No tip at all fails closed at the caller (the sentinel).
+   *
+   * @decision f2b4d684 (CR round 3) — UNVERIFIABLE returns `{}` (no `landedTip` key), never `legacyTip`
+   * and never the `SOLO_TIP_UNVERIFIABLE` literal itself — persisting that literal (round 2) let a LATER
+   * call read it back as a live git revision argument, and made a transient fault permanent.
    */
-  private async pinnedTipForLandedSquash(repoPath: string, branch: string, squashSha: string | null | undefined, legacyTip?: string): Promise<{ landedTip?: string; branchGone?: boolean }> {
+  private async pinnedTipForLandedSquash(repoPath: string, branch: string, squashSha: string | null | undefined, legacyTip?: string): Promise<{ landedTip?: string; branchGone?: boolean; tipUnverifiable?: boolean }> {
     const live = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     if (!live && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }))) return { branchGone: true };
     const trailerTip = squashSha ? await readLandedTipTrailer(repoPath, squashSha, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }) : null;
+    // @decision f2b4d684 (round 4) — `tipUnverifiable:true` rides alongside the still-empty `{}` (no
+    // `landedTip`) so a caller can tell THIS cause apart from a genuine late/moved commit, without
+    // persisting the sentinel anywhere (see this method's own doc above for why that must never happen).
+    if (trailerTip === TRAILER_TIP_UNVERIFIABLE) return { tipUnverifiable: true };
     if (trailerTip) return { landedTip: trailerTip };
     return legacyTip ? { landedTip: legacyTip } : {};
   }
@@ -22014,15 +22061,22 @@ export class SessionService {
    * `isBranchHeld` definition, exactly like the batch's: a re-confirm that would squash to nothing (a late partial revert) is refused with cherry-pick
    * guidance instead of finalizing, so the late commit is never deleted.
    */
-  private soloFinalizeTipGuard(a: { opId: string; managerSessionId: string; workerSessionId: string; taskId: string | null; branch: string; landedTip: string | undefined; landedSha: string | null; branchGone?: boolean; repoKey: string | null }): {
-    expectedBranchTip: string | undefined; onBranchRetained: (liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined") => void; warning: () => string | undefined;
+  private soloFinalizeTipGuard(a: { opId: string; managerSessionId: string; workerSessionId: string; taskId: string | null; branch: string; landedTip: string | undefined; landedSha: string | null; branchGone?: boolean; repoKey: string | null; tipUnverifiable?: boolean }): {
+    expectedBranchTip: string | undefined; onBranchRetained: (liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined", causeUnverifiable?: boolean) => void; warning: () => string | undefined;
+    /** @decision f2b4d684 (round 4/7) — `true` once a retain fires AND EITHER `a.tipUnverifiable` OR the
+     *  firing call's own `causeUnverifiable` (round 7: finalizeMerge's own later re-check) was set; a
+     *  caller threads this into `ConfirmMergeResult.landedTipUnverifiable` (`NEVER_CACHED_OUTCOMES`). */
+    tipUnverifiable: () => boolean;
   } {
     let note: string | undefined;
+    let tipUnverifiableAtRetain = false;
     return {
       // A branch that is already gone has nothing to protect (no CAS); an unreadable/unstable tip fails CLOSED via the sentinel.
       expectedBranchTip: a.branchGone ? undefined : (a.landedTip ?? SOLO_TIP_UNVERIFIABLE),
-      onBranchRetained: (liveTip, phase, reason) => {
-        note = describeSoloRetained(a.branch, a.landedTip, liveTip, phase, reason);
+      onBranchRetained: (liveTip, phase, reason, causeUnverifiable) => {
+        const unverifiable = a.tipUnverifiable === true || causeUnverifiable === true;
+        note = describeSoloRetained(a.branch, a.landedTip, liveTip, phase, reason, unverifiable);
+        tipUnverifiableAtRetain = unverifiable;
         // eslint-disable-next-line no-console
         console.warn(`[worker_merge_confirm] op ${a.opId} ${note}`);
         try {
@@ -22034,6 +22088,7 @@ export class SessionService {
         } catch { /* audit-only — never fail the merge over a failed event write */ }
       },
       warning: () => note,
+      tipUnverifiable: () => tipUnverifiableAtRetain,
     };
   }
 
@@ -22054,12 +22109,16 @@ export class SessionService {
     expectedBranchTip?: string;
     /** `reason` (round 6, item #10): set to `"quarantined"` ONLY by `finalizeMerge`'s quarantine-refusal
      *  branch — every other retain cause (held branch, moved tip) omits it, unchanged. Lets a caller's own
-     *  human-facing text name the ACTUAL cause instead of a generic tip-comparison message. */
-    onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize", reason?: "quarantined") => void;
+     *  human-facing text name the ACTUAL cause instead of a generic tip-comparison message. `causeUnverifiable`
+     *  (round 7): forwarded verbatim — see {@link finalizeMerge}'s own doc on its param of the same name. */
+    onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize", reason?: "quarantined", causeUnverifiable?: boolean) => void;
     /** Forwarded verbatim into {@link finalizeMerge} (card 6796c9ea). */
     onWorktreeRetainedDirty?: (info: DirtyWorktreeRetained) => void;
     /** Card cc9bce38: the solo tip guard's retained-branch text (`soloFinalizeTipGuard().warning`), read AFTER finalize — folded into the result, and it rewords the `[loom:already-merged]` push. */
     retainedNote?: () => string | undefined;
+    /** @decision f2b4d684 (round 4) — the tip guard's own `tipUnverifiable()`: folded into
+     *  `ConfirmMergeResult.landedTipUnverifiable` so this retain cause is never verdict-cached. */
+    tipUnverifiable?: () => boolean;
     /** Card 293d418e: this finish ran WITHOUT the merge gate because the branch was proven already landed — said in the announcement + result, and stamped on `merge_done`. */
     gateSkipped?: "already-landed";
     /** Card 293d418e: the commit that INTRODUCED the branch's content (`findIntroducingSquashCommit`) — shown in the `[loom:already-merged]`/result text and stamped as `merge_done.landedSha` ONLY; never persisted, verified or pinned. */
@@ -22073,10 +22132,18 @@ export class SessionService {
     // durable trace (a later Loom-Worker-Branch commit on main / a newer merge_done) — see `isBranchHeld`.
     const heldAtFinish = await this.isBranchHeld(args.branch, args.repoPath, args.repoKey);
     if (heldAtFinish) {
+      // @decision f2b4d684 (round 6) — never cache this refusal plainly: a transient cause
+      // (gitUnverified/tipUnverifiable) must set heldRangeUnverifiable, and its wording must name that
+      // cause rather than falsely claiming a late commit exists.
+      // @decision f2b4d684 (round 6) — also covers PERMANENT causes (gc'd/forged/gone); append the
+      // manual remedy rather than stranding a manager with only a re-check suggestion.
+      const transientGuidance = "This is usually transient — retry worker_merge_confirm (or restart the daemon) to re-check. If it persists, inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker.";
       const reason = heldAtFinish.gitUnverified
-        ? `branch ${args.branch} is HELD by a merge retain (merge_batch or a solo worker_merge_confirm) and its release could not be VERIFIED: reading main for a later Loom-Worker-Branch commit (which would mean it was already landed) failed. Nothing was finalized or deleted. This is usually transient — retry worker_merge_confirm (or restart the daemon) to re-check.`
+        ? `branch ${args.branch} is HELD by a merge retain (merge_batch or a solo worker_merge_confirm) and its release could not be VERIFIED: reading main for a later Loom-Worker-Branch commit (which would mean it was already landed) failed. Nothing was finalized or deleted. ${transientGuidance}`
+        : heldAtFinish.recorded.unverifiable
+        ? `branch ${args.branch} is HELD by a merge retain (merge_batch or a solo worker_merge_confirm), but its recorded landed tip could not be VERIFIED (the \`Loom-Landed-Tip\` trailer could not be read or resolved), so whether a late commit genuinely landed on it cannot be determined. Nothing was finalized or deleted. ${transientGuidance}`
         : `branch ${args.branch} is HELD: a merge (a merge_batch or a solo worker_merge_confirm) retained it because commit(s) landed on it after that merge fixed its tip, and main carries no later Loom-Worker-Branch commit for it, so those were never gated or landed. Nothing was finalized or deleted. Review it with worker_merge (its \`lateRange\` shows the commits added after the landing), then land it with worker_merge_confirm, which lands exactly that late range (a real landing releases the hold). You reach THIS refusal instead when the finish found the branch's work already on main without landing the late range (a card sitting in the terminal column, or a late range that nets to nothing against main): inspect the branch and cherry-pick what is still owed onto a follow-up card's worker. The branch stays held until a real merge_done, a later Loom-Worker-Branch squash on main, or the branch tip returning to the tip that landed.`;
-      return { merged: false, reason, notified: false, opId: args.opId };
+      return { merged: false, reason, notified: false, opId: args.opId, ...((heldAtFinish.gitUnverified || heldAtFinish.recorded.unverifiable) ? { heldRangeUnverifiable: true } : {}) };
     }
     // @decision cc9bce38 — the success announcement is sent AFTER finalize (it may RETAIN the branch, and "finishing the cleanup" must never contradict that);
     // whether it is owed is decided BEFORE, since finalize itself files the merge_done this reads.
@@ -22123,6 +22190,9 @@ export class SessionService {
     }
     const finalizeResult = await this.finalizeMerge(args);
     const retainedText = args.retainedNote?.();
+    // @decision f2b4d684 (round 4) — read AFTER finalize, same timing as `retainedText` above: only
+    // meaningful once a retain actually fired (the tip guard's closure sets it there, never earlier).
+    const tipUnverifiableAtFinish = args.tipUnverifiable?.() === true;
     announce(retainedText);
     const nestedWarning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
     // Task 035fb673: same additive worktree-GC warning as the Green path (confirmWorkerMerge) — see its
@@ -22139,7 +22209,7 @@ export class SessionService {
     // notice instead; unconditionally `true` for every other caller, unchanged (see this method's own doc).
     const notified = !args.suppressNotify;
     return warning
-      ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified, warning, ...(args.gateSkipped ? { gateSkipped: args.gateSkipped } : {}), ...(retainedText ? { branchRetainedWarning: retainedText } : {}) }
+      ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified, warning, ...(args.gateSkipped ? { gateSkipped: args.gateSkipped } : {}), ...(retainedText ? { branchRetainedWarning: retainedText } : {}), ...(tipUnverifiableAtFinish ? { landedTipUnverifiable: true } : {}) }
       : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified };
   }
 
@@ -22260,7 +22330,7 @@ export class SessionService {
     //  a real non-reconciled merge_done OR the landed-squash git fact, and FAIL-CLOSED: a git read that errors keeps it held, flagged
     //  `gitUnverified`); the rules and Do-nots are in docs/decisions/42daa283-*.md, not restated here. A manager's own worker_merge_confirm
     //  on a held candidate stays allowed.
-    const retainedOutstanding = new Map<string, { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean; solo?: boolean }>();
+    const retainedOutstanding = new Map<string, { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean; tipUnverifiable: boolean; solo?: boolean }>();
     for (const cand of resolved) {
       const heldC = await this.isBranchHeld(cand.branch, finalRepoPath, cand.repoKey); // BRANCH-keyed (a recycle successor shares the branch)
       if (!heldC) continue;
@@ -22271,6 +22341,9 @@ export class SessionService {
         liveTip: typeof ev.detail?.liveTip === "string" ? ev.detail.liveTip : null,
         phase: (ev.detail?.phase as BranchAdvancedDuringGate["phase"] | undefined) ?? "pre-stop",
         gitUnverified: heldC.gitUnverified,
+        // @decision f2b4d684 (round 7, item 3) — threaded so heldReason can word this cause honestly
+        // instead of the generic "never gated" text an unverifiable-trailer cause used to get.
+        tipUnverifiable: heldC.recorded.unverifiable,
       });
     }
 
@@ -22359,10 +22432,11 @@ export class SessionService {
       // Card b801bad0 — `noStart` also accepts a STRING, an outcome-specific tail (branchDiverted's/unverified's own manager guidance) in place of the generic "batch cancelled" wording every no-start outcome used to carry regardless of which one applied.
       const tail = noStart ? ` (${typeof noStart === "string" ? noStart : "batch cancelled — not started"})` : "";
       const out: { workerSessionId: string; reason: string; started?: boolean }[] = [];
-      const heldReason = (h: { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean; solo?: boolean }) =>
-        h.gitUnverified
-          // The hold could not be RE-CHECKED (a git read of main failed), so this is NOT a confirmed genuine hold — say so.
-          ? `held, NOT re-attempted: ${h.solo ? describeSoloRetained(h.branch, h.assembledTip ?? undefined, h.liveTip, h.phase) : describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — its release could not be VERIFIED (reading main for a later Loom-Worker-Branch commit failed); this is usually transient, re-run merge_batch or restart the daemon to re-check`
+      const heldReason = (h: { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean; tipUnverifiable: boolean; solo?: boolean }) =>
+        // @decision f2b4d684 (round 7, item 3) — a transient cause (either source) must never get the
+        // generic "never gated" text below, and must always carry the manual-remedy fallback.
+        (h.gitUnverified || h.tipUnverifiable)
+          ? `held, NOT re-attempted: ${h.solo ? describeSoloRetained(h.branch, h.assembledTip ?? undefined, h.liveTip, h.phase) : describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — its release could not be VERIFIED (${h.gitUnverified ? "reading main for a later Loom-Worker-Branch commit failed" : "its recorded landed tip could not be read"}); this is usually transient, re-run merge_batch or restart the daemon to re-check — if it persists, inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker`
         : h.phase === "ref-kept-after-finalize"
           // FINALIZED: the worker is done and its worktree is gone, so worker_merge_confirm has nothing to act on.
           ? `held, NOT re-attempted: ${h.solo ? describeSoloRetained(h.branch, h.assembledTip ?? undefined, h.liveTip, h.phase) : describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — the branch ref still has commits that are NOT on main and were never gated; inspect it and cherry-pick its commits onto a follow-up card's worker`
@@ -25158,12 +25232,12 @@ export class SessionService {
               const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger: crGoneBranchLedger }).catch(() => null));
               const landedSha = crLooked.result;
               if (landedSha) {
-                const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null });
+                const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null, tipUnverifiable: crLooked.tipUnverifiable });
                 return this.finishAlreadyMerged({
                   managerSessionId, workerSessionId, taskId, worktreePath: worker.worktreePath ?? worker.cwd,
                   branch: worker.branch, repoPath: repo.path, projectId: project.id, opId, forceRemoveWorktree,
                   opStartedAt, mergedSha: landedSha, repoKey: worker.repoKey ?? null,
-                  ...(crGuard.expectedBranchTip ? { expectedBranchTip: crGuard.expectedBranchTip } : {}), onBranchRetained: crGuard.onBranchRetained, retainedNote: crGuard.warning,
+                  ...(crGuard.expectedBranchTip ? { expectedBranchTip: crGuard.expectedBranchTip } : {}), onBranchRetained: crGuard.onBranchRetained, retainedNote: crGuard.warning, tipUnverifiable: crGuard.tipUnverifiable,
                 });
               }
             }
@@ -25377,10 +25451,13 @@ export class SessionService {
         // @decision 62c4953a — `indexLockPresent` classifies distinctly too, same reasoning as
         // `quarantined`: a human removing the stale `.git/index.lock` must see a fresh re-confirm, never
         // a stale cached refusal from before it was removed.
+        // @decision f2b4d684 (round 4/5) — `landedTipUnverifiable`/`heldRangeUnverifiable` classify
+        // distinctly too, checked before the plain merged-else-rejected fallback: an UNVERIFIABLE trailer clearing (a transient git error,
+        // or a since-un-pruned gc) must see a fresh re-derive, never a stale cached retain replayed forever.
         // @decision c30952c1 — `worktreeGoneLandingUnconfirmed` classifies distinctly too, same reasoning:
         // the cause (a transient lookup glitch, or the worktree still being gone) is checked fresh on a
         // re-call, never replayed from cache.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : (outcome.value.landedTipUnverifiable || outcome.value.heldRangeUnverifiable) ? "landed-tip-unverifiable" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.
@@ -27045,7 +27122,10 @@ export class SessionService {
     /** `reason` (round 6, item #10): set to `"quarantined"` ONLY by `finalizeMerge`'s quarantine-refusal
      *  branch — every other retain cause (held branch, moved tip) omits it, unchanged. Lets a caller's own
      *  human-facing text name the ACTUAL cause instead of a generic tip-comparison message. */
-    onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize", reason?: "quarantined") => void;
+    /** `causeUnverifiable` (round 7): set ONLY by this method's own held-branch check below, when a
+     *  transient git-read fault (not a genuine retain) is why THIS call found the branch held — see that
+     *  call site's own doc for why this check cannot simply reuse an earlier caller's own snapshot. */
+    onBranchRetained?: (liveTip: string | null, phase: "at-finalize" | "ref-kept-after-finalize", reason?: "quarantined", causeUnverifiable?: boolean) => void;
     /**
      * Card 42daa283 — set ONLY by `confirmWorkerMerge`'s Green path: a real, just-created squash of the branch's LIVE tip is the one deliberate
      * way a HELD branch (see {@link isBranchHeld}) is landed, so its finalize may proceed and its `merge_done` releases the hold. Every other
@@ -27082,10 +27162,14 @@ export class SessionService {
       args.onBranchRetained?.(null, "at-finalize", "quarantined");
       return {};
     }
-    if (!args.releaseHold && await this.isBranchHeld(args.branch, args.repoPath, args.repoKey)) {
+    // @decision f2b4d684 (round 7) — DELIBERATELY a fresh, separate check (reusing an earlier snapshot
+    // would miss a genuinely new retain); its own transient-fault signal now flows into
+    // `causeUnverifiable` instead of being discarded (CR6's `toctou-finalize` repro).
+    const heldAtFinalize = args.releaseHold ? undefined : await this.isBranchHeld(args.branch, args.repoPath, args.repoKey);
+    if (heldAtFinalize) {
       // eslint-disable-next-line no-console
       console.warn(`[finalizeMerge] branch ${args.branch} is HELD by a merge retain (batch or solo) — NOT finalizing (no worktree removal, no branch delete, no task move, no merge_done)`);
-      args.onBranchRetained?.(null, "at-finalize");
+      args.onBranchRetained?.(null, "at-finalize", undefined, heldAtFinalize.gitUnverified || heldAtFinalize.recorded.unverifiable);
       return {};
     }
     if (args.expectedBranchTip) {
@@ -27833,6 +27917,10 @@ export class SessionService {
           // eslint-disable-next-line no-console
           console.warn(heldA.gitUnverified
             ? `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo) and its release could NOT be VERIFIED (a git read of main failed) — skipping its finalize this boot (branch/worktree kept; a later boot retries)`
+            // @decision f2b4d684 (round 7, item 5) — name the UNVERIFIABLE-trailer cause distinctly too,
+            // not just gitUnverified; both are "could not confirm," neither is a confirmed genuine hold.
+            : heldA.recorded.unverifiable
+            ? `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo), but its recorded landed tip could NOT be VERIFIED (the Loom-Landed-Tip trailer could not be read or resolved) — skipping its finalize this boot (branch/worktree kept; a later boot retries)`
             : `[reconcile] worker ${s.id} (branch ${s.branch}) is HELD by a merge retain (batch or solo) — skipping its finalize (branch/worktree kept for review)`);          continue;
         }
         // @decision 9ac3a739 — never key "already finalized" on branch presence or git commit time; key
@@ -27865,6 +27953,7 @@ export class SessionService {
               const sibGuard = this.soloFinalizeTipGuard({
                 opId: randomUUID(), managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
                 branch: s.branch, landedTip: paLooked.landedTip, branchGone: paLooked.branchGone, landedSha, repoKey: s.repoKey ?? null,
+                tipUnverifiable: paLooked.tipUnverifiable,
               });
               let tipMismatch = false;
               if (sibGuard.expectedBranchTip) {
@@ -27903,7 +27992,7 @@ export class SessionService {
         }
         // `landedSha` + `s.repoKey` (card 1eebc46a) are already resolved above (the squash-detection
         // lookup this pass exists to do) — free to persist, no extra git call.
-        const paGuard = this.soloFinalizeTipGuard({ opId: randomUUID(), managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId, branch: s.branch, landedTip: paLooked.landedTip, branchGone: paLooked.branchGone, landedSha, repoKey: s.repoKey ?? null });
+        const paGuard = this.soloFinalizeTipGuard({ opId: randomUUID(), managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId, branch: s.branch, landedTip: paLooked.landedTip, branchGone: paLooked.branchGone, landedSha, repoKey: s.repoKey ?? null, tipUnverifiable: paLooked.tipUnverifiable });
         // @decision 4ee527d1 — mirrors confirmWorkerMerge's/finishAlreadyMerged's own retireWorkerSession
         // call ahead of finalizeMerge (every OTHER finalizeMerge caller already does this) — Pass A was
         // the one gap.

@@ -4366,15 +4366,53 @@ async function branchContentLandedInCommit(
  * from main itself with no fresh read. A recovery caller pins its finalize CAS to THIS, never to a fresh read or a content check (both bless a late whole-file revert). A squash
  * with no trailer (pre-cc9bce38, or an unresolved head) falls back to a stable-tip read.
  */
-/** Reads the `Loom-Landed-Tip:` trailer off `sha`'s message via {@link parseLoomTrailerBlock}; `null` when absent or unreadable (fail safe: the caller falls back). */
+/**
+ * {@link readLandedTipTrailer}'s UNVERIFIABLE sentinel (card f2b4d684) — never hex-shaped, so it can
+ * never equal a real resolved tip and can never collide with a genuine `Loom-Landed-Tip` value. Distinct
+ * from `null`: `null` (ABSENT) means the commit message was read fine and genuinely carries no
+ * `Loom-Landed-Tip` field; this sentinel (UNVERIFIABLE) means EITHER a trailer was recorded but could not
+ * be verified as its own exact commit object, OR the commit message itself could not even be read (CR
+ * round 3 — an unreadable message is "could not confirm", never "confirmed nothing's there"). NOT safe
+ * to treat the same as ABSENT at every caller — see each caller's own doc for which treatment it needs,
+ * and never persist this literal string value anywhere a later read could feed it back into git argv or
+ * trust it verbatim (CR round 3's own Major: round 2 persisted it into a durable event's own field).
+ */
+export const TRAILER_TIP_UNVERIFIABLE = "\0trailer-tip-unverifiable\0";
+
+/**
+ * Reads the `Loom-Landed-Tip:` trailer off `sha`'s message via {@link parseLoomTrailerBlock}, then
+ * resolves it through {@link resolveExactTrailerObjectId} (never re-implemented here). Returns ONE of
+ * three states — `null` (ABSENT: the message was read fine but carries no `Loom-Landed-Tip` field at
+ * all), {@link TRAILER_TIP_UNVERIFIABLE} (UNVERIFIABLE: a trailer value was parsed but failed
+ * exact-object-id resolution, the validation call itself threw, OR the commit message could not even be
+ * read), or the resolved tip string (VALID) — never conflate the first two: a caller must choose its own
+ * treatment for UNVERIFIABLE rather than assume it is safe to fold into ABSENT (see each caller's own
+ * doc; `pinnedTipForLandedSquash` must NOT fold it).
+ *
+ * @decision f2b4d684 (round 6) — corrects this comment's own earlier claim: `heldRecordedTip` does NOT
+ * fold UNVERIFIABLE into ABSENT either — it returns a distinct `{tip:null, unverifiable:true}` pair that
+ * `resolveOwedRange`/`finishAlreadyMerged` classify as never-cacheable, unlike a genuinely absent tip.
+ *
+ * @decision f2b4d684 (CR round 3) — never re-validate a trailer value at a NEW call site instead of
+ * here, and never map the OUTER (log-read) catch to ABSENT: an unreadable commit message must stay
+ * UNVERIFIABLE, same as a failed validation call — both are "could not confirm", never "nothing to pin".
+ */
 export async function readLandedTipTrailer(repoPath: string, sha: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  let git: Pick<SimpleGit, "raw">, timeoutMs: number, body: string;
   try {
-    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    ({ git, timeoutMs } = boundedGit(repoPath, deps));
     // @decision 868e0135 — `--end-of-options` before `sha` (same measured reason as batch-merge.ts's own log -1 reads).
-    const body = await withTimeout(git.raw(["log", "-1", "--format=%B", "--end-of-options", sha]), timeoutMs, "git log -1 (landed-tip trailer)");
-    return parseLoomTrailerBlock(body)?.landedTip ?? null;
+    body = await withTimeout(git.raw(["log", "-1", "--format=%B", "--end-of-options", sha]), timeoutMs, "git log -1 (landed-tip trailer)");
   } catch {
-    return null;
+    return TRAILER_TIP_UNVERIFIABLE; // UNVERIFIABLE: couldn't even read the commit message — could not confirm either way
+  }
+  const parsed = parseLoomTrailerBlock(body)?.landedTip ?? null;
+  if (!parsed) return null; // ABSENT: the message parsed fine, but carries no Loom-Landed-Tip field
+  try {
+    const resolved = await resolveExactTrailerObjectId(git, timeoutMs, parsed);
+    return resolved ?? TRAILER_TIP_UNVERIFIABLE; // UNVERIFIABLE: present but failed exact-object-id resolution
+  } catch {
+    return TRAILER_TIP_UNVERIFIABLE; // UNVERIFIABLE: a trailer WAS parsed, but the validation call itself threw
   }
 }
 
