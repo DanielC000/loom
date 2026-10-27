@@ -74,6 +74,20 @@ async function setupDirty(p, ageDaysBack) {
   seed(p, { lastActivity: daysAgo(ageDaysBack) });
 }
 
+// Card fa56549d (item 1): STAGED (not merely untracked) dirt — per the b4cc7114 decision record's own
+// measured finding, an UNTRACKED file's status is commondir-INDEPENDENT (the index + working tree are
+// both local to the worktree's own admin dir), so only a STAGED file's comparison is actually reachable
+// through a redirected commondir's object database — the same reason scenario 1 in
+// worktree-commondir-redirect-gc.mjs needs staged dirt, not untracked, to demonstrate the real defeat.
+async function setupDirtyStaged(p, ageDaysBack) {
+  initRepo(p.repo, "# wrb dirty-staged\n");
+  const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
+  fs.writeFileSync(path.join(worktreePath, p.file), "staged-but-uncommitted work\n");
+  git(worktreePath, `add ${p.file}`);
+  p.worktreePath = worktreePath; p.branch = branch;
+  seed(p, { lastActivity: daysAgo(ageDaysBack) });
+}
+
 async function setupMerged(p) {
   initRepo(p.repo, "# wrb merged\n");
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
@@ -82,6 +96,22 @@ async function setupMerged(p) {
   execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "WRB-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: p.repo });
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p, { lastActivity: daysAgo(1) });
+}
+
+// Card fa56549d (item 1): redirect a worktree's OWN PRIVATE `.git/worktrees/<name>/commondir` pointer at a
+// PLAIN (unmodified) clone — same hijack mechanism as `worktree-commondir-redirect-gc.mjs`'s scenarios.
+// Discovers the real admin-dir name on disk rather than assuming it matches the worktree's basename.
+function redirectPrivateCommondir(mainRepo, worktreePath, decoyGitDir) {
+  // git's own `gitdir` back-pointer file uses forward slashes even on win32 — normalize separators (not
+  // case; these are real paths this process just created) before comparing.
+  const norm = (p) => p.replace(/\\/g, "/");
+  const expected = norm(path.join(worktreePath, ".git"));
+  const adminName = fs.readdirSync(path.join(mainRepo, ".git", "worktrees"))
+    .find((name) => norm(fs.readFileSync(path.join(mainRepo, ".git", "worktrees", name, "gitdir"), "utf8").trim()) === expected);
+  if (!adminName) throw new Error(`could not find the worktree admin dir for ${worktreePath}`);
+  const privateCommondir = path.join(mainRepo, ".git", "worktrees", adminName, "commondir");
+  try { fs.unlinkSync(privateCommondir); } catch { /* not hidden on every host; ignore */ }
+  fs.writeFileSync(privateCommondir, decoyGitDir + "\n");
 }
 
 async function setupProtectedLive(p) {
@@ -106,18 +136,20 @@ const A = mk("a", "feat.txt");   // unmerged commit, 5 days stale
 const B = mk("b", "work.txt");   // dirty/uncommitted, 2 days stale
 const C = mk("c", "done.txt");   // clean merged — negative control
 const D = mk("d", "live.txt");   // protected live worker with real unmerged commits — exclusion control
+const E = mk("e", "redir.txt");  // dirty/uncommitted, THEN its commondir is redirected after boot (fa56549d)
 
 const protectedSessionIds = new Set();
-for (const p of [A, B, C, D]) p.protectedSessionIds = protectedSessionIds;
+for (const p of [A, B, C, D, E]) p.protectedSessionIds = protectedSessionIds;
 
 try {
   await setupUnmergedCommit(A, 5);
   await setupDirty(B, 2);
   await setupMerged(C);
   await setupProtectedLive(D);
+  await setupDirtyStaged(E, 3);
 
   const r = await sessions.reconcileOrchestrationOnBoot(protectedSessionIds);
-  check("(pre) reconcile kept exactly 2 worktrees (A unmerged-commit + B dirty)", r.worktreesKept === 2);
+  check("(pre) reconcile kept exactly 3 worktrees (A unmerged-commit + B dirty + E dirty)", r.worktreesKept === 3);
   check("(pre) reconcile finished 1 merge (C)", r.mergesFinished === 1);
   check("(pre) C's worktree was actually removed", !fs.existsSync(C.worktreePath));
   check("(pre) D (protected) worktree untouched, still on disk", fs.existsSync(D.worktreePath));
@@ -126,7 +158,7 @@ try {
   const byPath = new Map(entries.map((e) => [e.worktreePath, e]));
 
   check("count matches entries.length", count === entries.length);
-  check("exactly 2 entries reported (A + B only)", entries.length === 2);
+  check("exactly 3 entries reported (A + B + E)", entries.length === 3);
 
   // (a) unmerged-commit worktree — full shape check.
   const a = byPath.get(A.worktreePath);
@@ -156,6 +188,14 @@ try {
     check("(b) projectId matches B's OWN project", b.projectId === B.projId);
     check("(b) projectName matches B's OWN project", b.projectName === B.projName);
     check("(b) projectId is NOT A's project", b.projectId !== A.projId);
+  }
+
+  // (e) Card fa56549d — dirty/uncommitted worktree, PRE-redirect: present, reason=dirty-tree, no refusal.
+  const ePre = byPath.get(E.worktreePath);
+  check("(e pre) dirty worktree PRESENT before any redirect", !!ePre);
+  if (ePre) {
+    check("(e pre) reason=dirty-tree", ePre.reason === "dirty-tree");
+    check("(e pre) verificationRefused is NOT set (no redirect yet)", ePre.verificationRefused === undefined);
   }
 
   // (c) NEGATIVE CONTROL: clean merged worktree — never appears (already reclaimed, and even if it
@@ -195,9 +235,36 @@ try {
   check("(filter) omitted projectId returns entries byte-identical to the unfiltered read", JSON.stringify(omitted.entries) === JSON.stringify(full.entries));
   check("(filter) omitted projectId returns the SAME object reference (no narrowing copy at all)", omitted === full);
 
+  // --- Card fa56549d (item 1, the actual bug this closes) — redirect E's PRIVATE commondir to a
+  // BELIEVABLE decoy (a clone of E.repo sharing every blob, plus a same-named branch with a pre-baked
+  // commit matching E's CURRENT staged content — same construction as scenario 1 in
+  // worktree-commondir-redirect-gc.mjs) AFTER boot already retained E. E's branch carries 0 commits
+  // (setupDirtyStaged never commits), so pre-fix BOTH of classifyRetainedWorktree's probes agree "no
+  // work" — silently dropping E from this surface. Post-fix: the read is refused (CanonicalGitRefusal)
+  // and E reappears, named distinctly.
+  const decoyE = path.join(os.tmpdir(), `loom-wrb-e-decoy-${sfx}`);
+  execSync(`git clone -q "${E.repo}" "${decoyE}"`);
+  git(decoyE, `checkout -q -b ${E.branch}`);
+  fs.writeFileSync(path.join(decoyE, E.file), "staged-but-uncommitted work\n"); // matching E's staged content
+  git(decoyE, `add ${E.file}`);
+  execSync(`git ${GIT_ID} commit -q -m "decoy: pre-baked matching blob"`, { cwd: decoyE });
+  redirectPrivateCommondir(E.repo, E.worktreePath, path.join(decoyE, ".git"));
+
+  const afterRedirect = await sessions.getRetainedWorktrees();
+  const eAfter = afterRedirect.entries.find((e) => e.worktreePath === E.worktreePath);
+  check("(e fixed) E is STILL present after the redirect (was SILENTLY DROPPED pre-fix)", !!eAfter);
+  if (eAfter) {
+    check("(e fixed) ...named as a verification refusal", eAfter.verificationRefused === true);
+    check("(e fixed) ...reason is still a valid dirty-tree/both value (never silently 'unmerged-commits' alone)", eAfter.reason === "dirty-tree" || eAfter.reason === "both");
+    // Card fa56549d (round 2, NIT2) — names the real refusal kind, never a blanket "commondir" claim for
+    // every classified kind; this scenario's redirect IS specifically a commondir redirect, so it says so.
+    check("(e fixed) ...refusalDetail names WHICH probe refused and the real kind (a redirected commondir)", typeof eAfter.refusalDetail === "string" && /dirty-tree probe refused \(a redirected commondir\)/.test(eAfter.refusalDetail));
+  }
+  try { fs.rmSync(decoyE, { recursive: true, force: true }); } catch { /* best-effort */ }
+
   // --- idempotent second read: re-deriving at read time gives the same answer without another boot ---
   const second = await sessions.getRetainedWorktrees();
-  check("(idem) a second read (no new boot) reports the same 2 entries", second.count === 2);
+  check("(idem) a second read (no new boot) reports the same 3 entries", second.count === 3);
 
   // --- read-time truth: cleaning up A by hand (simulating a human GC'ing it) removes it from the NEXT
   // read WITHOUT a new boot/reconcile — proves this isn't a boot-time-cached snapshot.
@@ -207,7 +274,7 @@ try {
   check("(read-time) B still reported (untouched)", afterManualCleanup.entries.some((e) => e.worktreePath === B.worktreePath));
 } finally {
   db.close();
-  for (const p of [A, B, C, D]) {
+  for (const p of [A, B, C, D, E]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }

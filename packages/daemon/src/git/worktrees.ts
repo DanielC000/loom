@@ -2854,6 +2854,10 @@ export interface DoneReportPrecheck {
    *  degrade below). A caller that needs to distinguish "verified N commits ahead" from "couldn't
    *  determine" must check this is a number before trusting it — a falsy/undefined value is NOT 0. */
   aheadCount?: number;
+  /** True ONLY when check (1)'s dirty-tree probe hit a classified commondir-trust refusal (never an
+   *  ordinary error/timeout) — names why `uncommitted` could not be verified, even though the result
+   *  still ALLOWs per decision 907b9f50. Omitted when not refused. */
+  verificationRefused?: boolean;
 }
 
 /**
@@ -2954,8 +2958,15 @@ export async function precheckWorkerDone(
   deps: BoundedGitDeps = {},
 ): Promise<DoneReportPrecheck> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site: a read-only dirty check.
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
+  // @decision fa56549d — threads the real trusted main (was the 3a5c5d4a advisory-read opt-out) so a
+  // redirected worktree commondir can no longer defeat this check unnoticed; the ALLOW-on-failure
+  // polarity itself stays UNCHANGED even for a classified refusal — 907b9f50's own ruling still applies.
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, deps.trustedMainRoot ?? defaultTrustedMainRoot(repoPath)));
+
+  // @decision fa56549d (round 2, SF2) — check (1)'s own refusal no longer short-circuits: check (2) reads
+  // the main repo, not the worktree, so falling through recovers the zeroAhead/aheadCount signal (and the
+  // no-commit role's auto-retire) an early return would otherwise lose.
+  let dirtyCheckVerificationRefused = false;
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see uncommittedWorkFiles).
@@ -2966,11 +2977,20 @@ export async function precheckWorkerDone(
     );
     const files = uncommittedWorkFiles(porcelainZ);
     if (files.length > 0) return { uncommitted: true, files, zeroAhead: false };
-  } catch {
-    return { uncommitted: false, files: [], zeroAhead: false }; // FAIL SAFE: never block a legitimate done
+  } catch (e) {
+    // @decision fa56549d — a classified refusal must never degrade SILENTLY: name it distinctly (the
+    // worktree, that commondir verification refused) even though the result still ALLOWs, per 907b9f50.
+    if (e instanceof CanonicalGitRefusal) {
+      dirtyCheckVerificationRefused = true;
+      // eslint-disable-next-line no-console
+      console.warn(`[precheck] worktree ${worktreePath} — its dirty-tree probe refused verification (${classifiedRefusalKindText(e)}); allowing done per decision 907b9f50, falling through to the ahead-count check (unaffected — reads the main repo, not this worktree) — the downstream readWorktreeUncommittedState/gcWorktreeDir check is the real backstop for a genuinely dirty worktree here.`);
+    }
+    // FAIL SAFE: never block a legitimate done on check (1)'s own failure — fall through to check (2)
+    // rather than returning early (round 1 wrongly returned here, losing the zeroAhead/aheadCount signal).
   }
 
-  // (2) Clean working tree. Is the assigned branch 0 commits ahead of base? → WARN-only signal.
+  // (2) Is the assigned branch 0 commits ahead of base? → WARN-only signal. Reached whether check (1)
+  //     found a clean tree OR could not be verified at all — see the round-2 note above.
   if (branch) {
     try {
       // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
@@ -2978,14 +2998,14 @@ export async function precheckWorkerDone(
         (await withTimeout(git.raw(["rev-list", "--count", "--end-of-options", `${base}..refs/heads/${branch}`]), timeoutMs, "git rev-list --count")).trim(),
         10,
       );
-      if (Number.isFinite(ahead) && ahead === 0) return { uncommitted: false, files: [], zeroAhead: true, aheadCount: 0 };
-      if (Number.isFinite(ahead)) return { uncommitted: false, files: [], zeroAhead: false, aheadCount: ahead };
+      if (Number.isFinite(ahead) && ahead === 0) return { uncommitted: false, files: [], zeroAhead: true, aheadCount: 0, ...(dirtyCheckVerificationRefused ? { verificationRefused: true } : {}) };
+      if (Number.isFinite(ahead)) return { uncommitted: false, files: [], zeroAhead: false, aheadCount: ahead, ...(dirtyCheckVerificationRefused ? { verificationRefused: true } : {}) };
     } catch {
-      return { uncommitted: false, files: [], zeroAhead: false }; // FAIL SAFE
+      return { uncommitted: false, files: [], zeroAhead: false, ...(dirtyCheckVerificationRefused ? { verificationRefused: true } : {}) }; // FAIL SAFE
     }
   }
 
-  return { uncommitted: false, files: [], zeroAhead: false };
+  return { uncommitted: false, files: [], zeroAhead: false, ...(dirtyCheckVerificationRefused ? { verificationRefused: true } : {}) };
 }
 
 // ── Codex worker auto-commit (board card 00a6cdd6) ──────────────────────────────────────────────────
@@ -3370,19 +3390,38 @@ export async function attemptCodexAutoCommit(
   return { attempted: true, committed: false, error: gitError(commitThrew) };
 }
 
+/** The richer sibling of {@link worktreeHasWork}: same checks, same fail-safe polarity, but names WHY a
+ *  fail-safe `hasWork:true` fired. `verificationRefused` is set ONLY for a classified
+ *  {@link CanonicalGitRefusal} — never for an ordinary error/timeout or a missing/unreadable branch.
+ *  @decision fa56549d — a sibling, never a signature change: ~15 existing boolean callers/tests must stay byte-identical. */
+export interface WorktreeWorkCheck {
+  hasWork: boolean;
+  verificationRefused?: boolean;
+  /** Present only when `verificationRefused` — names WHICH probe refused and the refusal's real kind
+   *  (never a blanket "commondir" for every kind — only an actual commondir redirect is worded that way).
+   *  @decision fa56549d (round 2, NIT2). */
+  refusalDetail?: string;
+}
+
+/** @decision fa56549d (round 2, NIT2) — names the real refusal kind (redirect vs other) so a caller never
+ *  defaults every classified refusal to "commondir". Exported for sessions/service.ts's own warnings. */
+export function classifiedRefusalKindText(e: unknown): string {
+  return describeGitFailure(e).commondirRedirect ? "a redirected commondir" : "a classified git refusal";
+}
+
 /** @decision 9cb0287a — SAFE-TO-DISCARD guard for boot-reconcile Pass B (the 2026-06-05 P0 data-loss fix);
  *  "work" = dirty tree OR branch ahead of base; FAILS SAFE to TRUE (assume work) — a wedged/locked check must
  *  never be why a live worktree is deleted.
  *
  *  Don't re-apply this to Pass A; its squash-trailer proof is the
  *  stronger replacement. */
-export async function worktreeHasWork(
+export async function worktreeHasWorkDetailed(
   repoPath: string,
   worktreePath: string,
   branch: string | null,
   base = "HEAD",
   deps: BoundedGitDeps = {},
-): Promise<boolean> {
+): Promise<WorktreeWorkCheck> {
   // boundedGit itself never throws on a bad repoPath (board card 0f965ab7 — it degrades to a git handle
   // whose methods reject instead), so the ops below already see that as an ordinary bounded failure and
   // fail safe through their own catches; no separate wrap is needed here.
@@ -3399,9 +3438,16 @@ export async function worktreeHasWork(
     const porcelainZ = await withTimeout(
       wt.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z",
     );
-    if (worktreeStatusHasWork(porcelainZ)) return true;
-  } catch {
-    return true; // bounded failure → fail SAFE (assume work, keep the dir)
+    if (worktreeStatusHasWork(porcelainZ)) return { hasWork: true };
+  } catch (e) {
+    // bounded failure → fail SAFE (assume work, keep the dir).
+    // @decision fa56549d — name a CLASSIFIED refusal distinctly, never for an ordinary error/timeout.
+    return {
+      hasWork: true,
+      ...(e instanceof CanonicalGitRefusal
+        ? { verificationRefused: true, refusalDetail: `the worktree's own dirty-tree probe refused (${classifiedRefusalKindText(e)})` }
+        : {}),
+    };
   }
 
   // (2) Branch ahead of the canonical base? Any commit reachable from the branch but not from `base`.
@@ -3411,19 +3457,38 @@ export async function worktreeHasWork(
   if (branch) {
     try {
       const branchTip = await resolveBranchTip(repoPath, branch, deps);
-      if (!branchTip) return true; // missing/unreadable branch → fail SAFE / has work
+      if (!branchTip) return { hasWork: true }; // missing/unreadable branch → fail SAFE / has work
       // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
       const ahead = parseInt(
         (await withTimeout(git.raw(["rev-list", "--count", "--end-of-options", `${base}..${branchTip}`]), timeoutMs, "git rev-list --count")).trim(),
         10,
       );
-      if (!Number.isFinite(ahead) || ahead > 0) return true; // NaN (parse error) or >0 → fail SAFE / has work
-    } catch {
-      return true; // bounded failure → fail SAFE
+      if (!Number.isFinite(ahead) || ahead > 0) return { hasWork: true }; // NaN (parse error) or >0 → fail SAFE / has work
+    } catch (e) {
+      // @decision fa56549d — this probe reads `boundedGit(repoPath, deps)` (the MAIN repo, directory-
+      // shaped `.git`), never the worktree-scoped `wt` handle — bounded failure → fail SAFE.
+      return {
+        hasWork: true,
+        ...(e instanceof CanonicalGitRefusal
+          ? { verificationRefused: true, refusalDetail: `the main repo's ahead-count probe refused (${classifiedRefusalKindText(e)})` }
+          : {}),
+      };
     }
   }
 
-  return false;
+  return { hasWork: false };
+}
+
+/** Thin boolean wrapper over {@link worktreeHasWorkDetailed}, preserving the original contract for every
+ *  existing caller that only needs the yes/no answer. */
+export async function worktreeHasWork(
+  repoPath: string,
+  worktreePath: string,
+  branch: string | null,
+  base = "HEAD",
+  deps: BoundedGitDeps = {},
+): Promise<boolean> {
+  return (await worktreeHasWorkDetailed(repoPath, worktreePath, branch, base, deps)).hasWork;
 }
 
 export interface StrandedWork {
@@ -9434,12 +9499,18 @@ export async function mergeMainIntoWorktree(
   // this function (the cheap reads above/below, and computeOwedLanding's own merge-tree probes) keeps the
   // plain `timeoutMs` — see this constant's own doc for why.
   const mergeTimeoutMs = Math.max(timeoutMs, deps.unionMergeTimeoutFloorMs ?? UNION_MERGE_TIMEOUT_FLOOR_MS);
-  // `wtGit` below is read-only (rev-parse/status/ls-files post-merge/post-abort inspection) — the actual
-  // mutating merge calls thread `repoPath` as `trustedMainRoot` explicitly via `killableCanonicalRaw`
-  // further down. `repoGit` reads `repoPath` itself (a DIRECTORY-shaped `.git`), which this opt-out never
-  // affects either way.
-  // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site.
-  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ));
+  // `wtGit` below is read-only (rev-parse/status/ls-files post-merge/post-abort inspection, plus the
+  // merge-base early-return and the owed-landing pre-checks) — the actual mutating merge calls separately
+  // thread `repoPath` as `trustedMainRoot` via `killableCanonicalRaw` further down, already protected.
+  // `repoGit` reads `repoPath` itself (a DIRECTORY-shaped `.git`), so this threading is a no-op for it
+  // either way; only `wtGit`'s worktree-scoped reads are newly verified.
+  // @decision fa56549d — was the 3a5c5d4a advisory-read opt-out (deferred by b4cc7114's own "Deferred"
+  // section); now threads the real trusted main, same pattern as worktreeHasWork/detectStrandedWork.
+  // @decision fa56549d (round 2, NIT1) — resolved ONCE, threaded into BOTH the reads below AND every
+  // killableCanonicalRaw call further down (which otherwise ignores deps.trustedMainRoot) — closes a
+  // split that's latent today only because no real caller sets deps.trustedMainRoot yet.
+  const resolvedTrustedMainRoot = deps.trustedMainRoot ?? defaultTrustedMainRoot(repoPath);
+  const makeGit = deps.gitFactory ?? ((p, ms) => canonicalGit(p, ms, undefined, undefined, undefined, resolvedTrustedMainRoot));
   const repoGit = makeGit(repoPath, timeoutMs);
   // @decision c30952c1 — a missing worktree makes this constructor THROW SYNCHRONOUSLY (simple-git's own
   //  `GitConstructError`); every caller of this function assumes a `{ok:false,...}` result, never a thrown
@@ -9550,12 +9621,11 @@ export async function mergeMainIntoWorktree(
       // it (scrubs editor/pager keys only, never the transport family) — an ambient `GIT_ASKPASS` (e.g.
       // VS Code's terminal) would throw "not permitted without allowUnsafeAskPass" otherwise.
       // `commit-tree` never touches a remote, so stripping the transport family here is safe.
-      // Same advisory-read posture as `wtGit` above: `commit-tree` writes a dangling object only (no ref
-      // moves), and a forged commondir here would just land the object in the wrong store, making the
-      // later `--ff-only` land (trustedMainRoot-protected, below) fail loudly on a missing object.
-      // @decision 3a5c5d4a (round 2, S2) — a reviewed advisory-read residual site.
+      // @decision fa56549d — was the 3a5c5d4a advisory-read opt-out; now threads trustedMainRoot so a
+      // redirected commondir refuses HERE (an earlier, clearer failure) instead of landing the dangling
+      // object in the wrong store and only failing later, loudly, at the already-protected `--ff-only`.
       const commitTreeGit = (Object.keys(identityEnv).length > 0 && !deps.gitFactory)
-        ? canonicalGit(worktreePath, timeoutMs, localReadGitEnv(nonInteractiveEnv(), identityEnv), undefined, undefined, undefined, BOUNDED_GIT_ADVISORY_READ)
+        ? canonicalGit(worktreePath, timeoutMs, localReadGitEnv(nonInteractiveEnv(), identityEnv), undefined, undefined, resolvedTrustedMainRoot)
         : wtGit;
       commit = (await withTimeout(
         commitTreeGit.raw(["commit-tree", landing.tree, "-p", tip, "-p", mainSha, "-m", `Merge main into branch (owed commits over ${owedBase.slice(0, 8)})`]),
@@ -9592,7 +9662,7 @@ export async function mergeMainIntoWorktree(
 
     for (let attempt = 1; ; attempt++) {
       try {
-        await killableCanonicalRaw(worktreePath, ["merge", "--ff-only", commit], mergeTimeoutMs, "git merge --ff-only (owed landing)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+        await killableCanonicalRaw(worktreePath, ["merge", "--ff-only", commit], mergeTimeoutMs, "git merge --ff-only (owed landing)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath, undefined, resolvedTrustedMainRoot);
         return { ok: true, merged: true, mainSha };
       } catch (e) {
         if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
@@ -9673,7 +9743,7 @@ export async function mergeMainIntoWorktree(
     // spawn-error-code check (`isTransientSpawnErrorCode`) can read its structured `.code`.
     let mergeErrObj: unknown;
     try {
-      await killableCanonicalRaw(worktreePath, ["merge", "--no-edit", mainSha], mergeTimeoutMs, "git merge main into worktree", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath);
+      await killableCanonicalRaw(worktreePath, ["merge", "--no-edit", mainSha], mergeTimeoutMs, "git merge main into worktree", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath, undefined, resolvedTrustedMainRoot);
     } catch (e) {
       if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
       if (treeDeathUnconfirmed(e)) {
@@ -9718,7 +9788,7 @@ export async function mergeMainIntoWorktree(
         } catch { /* unreadable — leave MERGE_HEAD in place rather than guess; the re-check below still fires */ }
         if (headSecondParent === mainSha) {
           try {
-            await killableCanonicalRaw(worktreePath, ["merge", "--quit"], timeoutMs, "git merge --quit (post-kill MERGE_HEAD cleanup)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+            await killableCanonicalRaw(worktreePath, ["merge", "--quit"], timeoutMs, "git merge --quit (post-kill MERGE_HEAD cleanup)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath, undefined, resolvedTrustedMainRoot);
           } catch (e) {
             if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, reason: e.message };
             if (treeDeathUnconfirmed(e)) {
@@ -9747,13 +9817,17 @@ export async function mergeMainIntoWorktree(
     try {
       conflicted = (await withTimeout(wtGit.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (worktree)")).trim() !== "";
     } catch (e) {
-      // Can't even determine the merge state — fail closed rather than assert a false "clean".
-      return { ok: false, reason: `failed to inspect worktree merge state: ${(e as Error).message}` };
+      // @decision fa56549d (round 2, SF1) — this read runs on EVERY plain-merge attempt, success included,
+      // so a refusal here can follow an ALREADY-LANDED merge — word it that way, never a bare "failed".
+      const d = describeGitFailure(e);
+      const landingAwareReason = `the merge of main may have already landed, but its post-merge state could not be inspected: ${d.text} — re-confirm to continue (the branch tip may have moved)`;
+      const isSpecificRefusalKind = d.commondirRedirect || d.pinMismatch || d.boundRepoIsWorktree || d.unpinned;
+      return { ok: false, reason: isSpecificRefusalKind ? canonicalFailureMessage(d, landingAwareReason) : landingAwareReason };
     }
 
     if (conflicted) {
       try {
-        await killableCanonicalRaw(worktreePath, ["merge", "--abort"], timeoutMs, "git merge --abort (worktree)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+        await killableCanonicalRaw(worktreePath, ["merge", "--abort"], timeoutMs, "git merge --abort (worktree)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath, undefined, resolvedTrustedMainRoot);
       } catch (e) {
         if (e instanceof RepoQuarantinedError) return { ok: false, quarantined: true, conflict: true, reason: `conflict cleanup (merge --abort) refused — canonical repo is quarantined: ${e.message}` };
         if (treeDeathUnconfirmed(e)) {
@@ -9773,7 +9847,7 @@ export async function mergeMainIntoWorktree(
       let abortQuarantined = false;
       let abortQuarantineReason = "";
       try {
-        await killableCanonicalRaw(worktreePath, ["merge", "--abort"], timeoutMs, "git merge --abort (worktree)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath);
+        await killableCanonicalRaw(worktreePath, ["merge", "--abort"], timeoutMs, "git merge --abort (worktree)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled, repoPath, undefined, resolvedTrustedMainRoot);
       } catch (e) {
         if (e instanceof RepoQuarantinedError) { abortQuarantined = true; abortQuarantineReason = e.message; }
         else if (treeDeathUnconfirmed(e)) {

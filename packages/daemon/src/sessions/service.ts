@@ -30,11 +30,11 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
-import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "../git/bounded.js";
+import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo, defaultTrustedMainRoot, CanonicalGitRefusal } from "../git/bounded.js";
 import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert, type MainlineEvidence, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter, unsafeBranchNameReason } from "../git/writer.js";
@@ -526,6 +526,14 @@ export interface RetainedWorktreeEntry {
   /** `git rev-list --count <workerBaseRef(reviewBaseSha)>..<branch>`, read live. `null` only when that
    *  probe itself failed/timed out (best-effort, observability-only — never blocks or excludes the entry). */
   commitsAhead: number | null;
+  /** True ONLY when this entry's `reason` was forced by a classified git refusal on the worktree's own
+   *  dirty-tree probe (never an ordinary error/timeout) — names WHY it reappeared here, rather than
+   *  reading as a genuinely dirty tree. Omitted (not `false`) when not refused.
+   *  @decision fa56549d — a NEW optional field; no existing test pins this surface's exact key set. */
+  verificationRefused?: boolean;
+  /** @decision fa56549d (round 2, NIT2) — present only when `verificationRefused`: the real refusal kind
+   *  (a redirected commondir vs any OTHER classified refusal), via {@link classifiedRefusalKindText}. */
+  refusalDetail?: string;
 }
 
 /** Default minimum idle time (card 1008e305, DoD-1) before a retained-but-dead worktree's `node_modules`
@@ -14625,7 +14633,11 @@ export class SessionService {
             warning =
               `your assigned branch '${worker.branch}' is 0 commits ahead of base — nothing to merge. ` +
               `Allowing the done (a real no-op task can legitimately report done), but if you intended to produce changes you likely forgot to commit them. ` +
-              `If a future done is a legitimate no-op (a review, an investigation with nothing to change, an out-of-repo deliverable), pass noChanges:true to suppress this warning and auto-retire cleanly.`;
+              `If a future done is a legitimate no-op (a review, an investigation with nothing to change, an out-of-repo deliverable), pass noChanges:true to suppress this warning and auto-retire cleanly.` +
+              // @decision fa56549d (round 2, SF2) — named cheaply (the string is already being built here):
+              // the uncommitted-files signal above could not be verified, so this zeroAhead/warn-only
+              // outcome rests on the ahead-count check alone, not a confirmed-clean working tree.
+              (precheck.verificationRefused ? ` (NOTE: this worktree's own dirty-tree probe could not be verified — the uncommitted-files check above was skipped, not confirmed clean.)` : "");
           }
         }
         // UNANCHORED-COMMENT-BLOCK nudge (card 9d0c004e, primary surface — worker_merge's review step
@@ -28315,9 +28327,14 @@ export class SessionService {
       const consensusReviewBaseSha = bReviewBaseConsensus.get(worktreeIdentityKey(worktreePath)) ?? null;
       const isReviewSpawn = consensusReviewBaseSha !== null;
       const base = workerBaseRef(consensusReviewBaseSha);
-      if (await worktreeHasWork(repoPath, worktreePath, s.branch ?? null, base, { timeoutMs: this.gitOpMs })) {
+      const workCheck = await worktreeHasWorkDetailed(repoPath, worktreePath, s.branch ?? null, base, { timeoutMs: this.gitOpMs });
+      if (workCheck.hasWork) {
+        // @decision fa56549d — a classified refusal must never degrade silently into the ordinary "holds
+        // work" wording; still KEPT either way (the GC decision itself is unchanged), only the log differs.
         // eslint-disable-next-line no-console
-        console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);
+        console.warn(workCheck.verificationRefused
+          ? `[reconcile] kept worktree ${worktreePath} — ${workCheck.refusalDetail} (treating as holding work) (Pass B)`
+          : `[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);
         worktreesKept++;
         // Record ONLY the near-free identity Pass B already has in hand (card 31df7e2f) — NO extra git
         // calls here. `reason`/`commitsAhead` are derived lazily, at read time, by getRetainedWorktrees.
@@ -28578,6 +28595,7 @@ export class SessionService {
         worktreePath: rec.worktreePath, branch: rec.branch, sessionId: rec.sessionId, taskId: rec.taskId,
         projectId: rec.projectId, projectName: rec.projectName, reviewBaseSha: rec.reviewBaseSha,
         lastActivityAt: rec.lastActivityAt, ageDays, reason: result.reason, commitsAhead: result.commitsAhead,
+        ...(result.verificationRefused ? { verificationRefused: true, refusalDetail: result.refusalDetail } : {}),
       });
     }
     return { count: entries.length, entries };
@@ -28803,14 +28821,25 @@ export class SessionService {
    */
   private async classifyRetainedWorktree(
     repoPath: string, worktreePath: string, branch: string | null, reviewBaseSha: string | null,
-  ): Promise<{ reason: RetainedWorktreeEntry["reason"]; commitsAhead: number | null } | null> {
+  ): Promise<{ reason: RetainedWorktreeEntry["reason"]; commitsAhead: number | null; verificationRefused?: boolean; refusalDetail?: string } | null> {
     const timeoutMs = this.gitOpMs ?? 15_000; // mirrors git/worktrees.ts's own GIT_OP_TIMEOUT_MS default
     let dirty: boolean;
+    let verificationRefused = false;
+    let refusalDetail: string | undefined;
     try {
-      const porcelainZ = await this.boundedGit(worktreePath, timeoutMs).raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]);
+      // @decision fa56549d — was `this.boundedGit` (a plain handle with NO commondir check at all); now
+      // routes through the SAME verified construction worktreeHasWork/precheckWorkerDone use, so a
+      // crafted decoy can no longer make this read silently agree "clean" and drop the entry.
+      const wt = canonicalGit(worktreePath, timeoutMs, undefined, undefined, undefined, defaultTrustedMainRoot(repoPath));
+      const porcelainZ = await wt.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]);
       dirty = worktreeStatusHasWork(porcelainZ);
-    } catch {
+    } catch (e) {
       dirty = true; // fail safe — an error means "don't know", not "clean"
+      if (e instanceof CanonicalGitRefusal) {
+        verificationRefused = true;
+        // @decision fa56549d (round 2, NIT2) — names the real kind, never a blanket "commondir".
+        refusalDetail = `the worktree's own dirty-tree probe refused (${classifiedRefusalKindText(e)})`;
+      }
     }
     let commitsAhead: number | null = null;
     if (branch) {
@@ -28831,7 +28860,7 @@ export class SessionService {
     const aheadOrUnknown = commitsAhead === null || commitsAhead > 0;
     if (!dirty && !aheadOrUnknown) return null; // both probes cleanly agree: no longer holds work
     const reason: RetainedWorktreeEntry["reason"] = dirty && aheadOrUnknown ? "both" : dirty ? "dirty-tree" : "unmerged-commits";
-    return { reason, commitsAhead };
+    return { reason, commitsAhead, ...(verificationRefused ? { verificationRefused: true, refusalDetail } : {}) };
   }
 
   /**
