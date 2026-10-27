@@ -773,10 +773,13 @@ function remediationTextFor(ownRepoPaths: string[], ambiguous: AmbiguousIdentiti
   //
   // @decision 6de79dc0 (Round 4) — `"unknown"` gets the SAME clause, hedged, instead of silence; see
   // {@link EntryOwnKeyOwnership}'s own doc for the two shapes this closes.
+  // @decision 3df24991 — never word this clause "owns THIS key": `ownKeyOwnership` is entry-level, so it
+  // can be "owned" for a DIFFERENT key than the one a caller's own refusal text names elsewhere — see the
+  // decision record for the self-contradiction that wording caused.
   const ownKeyAlsoReleasedClause = !noHonestClearByPathTarget ? "" : ownKeyOwnership === "owned"
-    ? ` Clearing a contributor this way can ALSO release ${JSON.stringify(ownRepoPaths)}'s own, separately-outstanding unconfirmed-kill quarantine in the same step (it genuinely owns this key) — confirm no process is still running under ${JSON.stringify(ownRepoPaths)} too, before clearing any contributor.`
+    ? ` Clearing a contributor this way can ALSO release ${JSON.stringify(ownRepoPaths)}'s own, separately-outstanding unconfirmed-kill quarantine in the same step (it genuinely owns at least one of its own currently-armed keys) — confirm no process is still running under ${JSON.stringify(ownRepoPaths)} too, before clearing any contributor.`
     : ownKeyOwnership === "unknown"
-      ? ` Clearing a contributor this way may ALSO release ${JSON.stringify(ownRepoPaths)}'s own, separately-outstanding unconfirmed-kill quarantine in the same step — Loom cannot tell whether it genuinely owns this key — confirm no process is still running under ${JSON.stringify(ownRepoPaths)} too, before clearing any contributor.`
+      ? ` Clearing a contributor this way may ALSO release ${JSON.stringify(ownRepoPaths)}'s own, separately-outstanding unconfirmed-kill quarantine in the same step — Loom cannot tell whether it genuinely owns any of its own currently-armed keys — confirm no process is still running under ${JSON.stringify(ownRepoPaths)} too, before clearing any contributor.`
       : "";
   const note = noHonestClearByPathTarget
     ? `clear-by-path cannot release this entry — including the listed path's own outstanding unconfirmed-kill quarantine — without also destroying a separately-raised contributor's own quarantine, and cannot address a contributor's own path either — clear each contributor's own quarantine directly FIRST, via the project-resolved POST /internal/merge-quarantine/clear for a project rooted at its own path (this may release everything at once, or only reduce this union's own membership without lifting anything by itself — if the listed path is still reported quarantined afterward, do the next step); once every contributor is cleared this way, clear-by-path with one of ${JSON.stringify(ownRepoPaths)} releases whatever still remains.${ownKeyAlsoReleasedClause}`

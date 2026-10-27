@@ -566,13 +566,13 @@ for (const order of ["ks-first", "kr-first"]) {
   const idResult = clearMergeQuarantineLatchFile(hashForKey(kr));
   console.log(`(hedge-legacy, ${order}) clearMergeQuarantineLatchFile(hash(kr)) -> ${JSON.stringify(idResult)}`);
   check(`(hedge-legacy, ${order}) clear-by-id(hash(Kr)) refuses`, idResult.ok === false);
-  check(`*** THE FIX (hedge-legacy, order=${order}) *** clear-by-id(hash(Kr)) names the HEDGED clause (LEGACY identityAtRaise)`, idResult.ok === false && idResult.reason?.includes("may ALSO release") && idResult.reason?.includes("Loom cannot tell whether it genuinely owns this key") && idResult.reason?.includes(s));
+  check(`*** THE FIX (hedge-legacy, order=${order}) *** clear-by-id(hash(Kr)) names the HEDGED clause (LEGACY identityAtRaise)`, idResult.ok === false && idResult.reason?.includes("may ALSO release") && idResult.reason?.includes("Loom cannot tell whether it genuinely owns any of its own currently-armed keys") && idResult.reason?.includes(s));
   check(`(hedge-legacy, ${order}) the text is the HEDGED variant, never the confident one`, idResult.ok === false && !idResult.reason?.includes("can ALSO release"));
 
   const arnq = assertRepoNotQuarantined(r);
   console.log(`(hedge-legacy, ${order}) assertRepoNotQuarantined(r) -> ${JSON.stringify(arnq)}`);
   check(`(hedge-legacy, ${order}) assertRepoNotQuarantined(r) refuses`, arnq.ok === false);
-  check(`*** THE FIX (hedge-legacy, order=${order}) *** assertRepoNotQuarantined(r) ALSO names the HEDGED clause`, arnq.ok === false && arnq.reason?.includes("may ALSO release") && arnq.reason?.includes("Loom cannot tell whether it genuinely owns this key") && arnq.reason?.includes(s));
+  check(`*** THE FIX (hedge-legacy, order=${order}) *** assertRepoNotQuarantined(r) ALSO names the HEDGED clause`, arnq.ok === false && arnq.reason?.includes("may ALSO release") && arnq.reason?.includes("Loom cannot tell whether it genuinely owns any of its own currently-armed keys") && arnq.reason?.includes(s));
   check(`(hedge-legacy, ${order}) assertRepoNotQuarantined(r)'s text is the HEDGED variant, never the confident one`, arnq.ok === false && !arnq.reason?.includes("can ALSO release"));
 }
 
@@ -594,13 +594,13 @@ for (const order of ["ks-first", "kr-first"]) {
   const idResult = clearMergeQuarantineLatchFile(hashForKey(kr));
   console.log(`(hedge-stale, ${order}) clearMergeQuarantineLatchFile(hash(kr)) -> ${JSON.stringify(idResult)}`);
   check(`(hedge-stale, ${order}) clear-by-id(hash(Kr)) refuses`, idResult.ok === false);
-  check(`*** THE FIX (hedge-stale, order=${order}) *** clear-by-id(hash(Kr)) names the HEDGED clause (STALE identityAtRaise)`, idResult.ok === false && idResult.reason?.includes("may ALSO release") && idResult.reason?.includes("Loom cannot tell whether it genuinely owns this key") && idResult.reason?.includes(s));
+  check(`*** THE FIX (hedge-stale, order=${order}) *** clear-by-id(hash(Kr)) names the HEDGED clause (STALE identityAtRaise)`, idResult.ok === false && idResult.reason?.includes("may ALSO release") && idResult.reason?.includes("Loom cannot tell whether it genuinely owns any of its own currently-armed keys") && idResult.reason?.includes(s));
   check(`(hedge-stale, ${order}) the text is the HEDGED variant, never the confident one`, idResult.ok === false && !idResult.reason?.includes("can ALSO release"));
 
   const arnq = assertRepoNotQuarantined(r);
   console.log(`(hedge-stale, ${order}) assertRepoNotQuarantined(r) -> ${JSON.stringify(arnq)}`);
   check(`(hedge-stale, ${order}) assertRepoNotQuarantined(r) refuses`, arnq.ok === false);
-  check(`*** THE FIX (hedge-stale, order=${order}) *** assertRepoNotQuarantined(r) ALSO names the HEDGED clause`, arnq.ok === false && arnq.reason?.includes("may ALSO release") && arnq.reason?.includes("Loom cannot tell whether it genuinely owns this key") && arnq.reason?.includes(s));
+  check(`*** THE FIX (hedge-stale, order=${order}) *** assertRepoNotQuarantined(r) ALSO names the HEDGED clause`, arnq.ok === false && arnq.reason?.includes("may ALSO release") && arnq.reason?.includes("Loom cannot tell whether it genuinely owns any of its own currently-armed keys") && arnq.reason?.includes(s));
   check(`(hedge-stale, ${order}) assertRepoNotQuarantined(r)'s text is the HEDGED variant, never the confident one`, arnq.ok === false && !arnq.reason?.includes("can ALSO release"));
 }
 
@@ -637,16 +637,22 @@ for (const order of ["ks-first", "kr-first"]) {
   check("(minor-stamp-legacy) nothing was lifted", result.liftedRepoPaths.length === 0);
 }
 
-// ===================== (entry-vs-perkey-discriminator) CR3 (session d839b41f) =====================
-// @decision 6de79dc0 (CR3, Round 4, Item 3) — refuseSelfClearStaleKeyContributors's own per-key
-// `entryOwnsKey` and the entry-level ownership fact are NOT value-equivalent; this PINS the current,
-// self-contradictory refusal text as a found residual, not fixed here. See the Evidence file.
-{
-  const s = freshRepo("perkey-discriminator-s");
-  const r = freshRepo("perkey-discriminator-r");
+// ===================== (entry-vs-perkey-discriminator) CR3 (session d839b41f) + 3df24991 fix =====================
+// @decision 3df24991 — refuseSelfClearStaleKeyContributors's own per-key `entryOwnsKey` and the
+// entry-level ownership fact are NOT value-equivalent; the fix is text-only. See the decision record.
+//
+// A real reboot's dir-scan order can insert a dual-armed entry's SECONDARY key before its PRIMARY one,
+// reaching this refusal via the key the entry does NOT itself own (originally pinned, not fixed, by
+// 6de79dc0's CR3 Round 4 Item 3 — see that card's own record for the original finding). Run in BOTH
+// insertion orders: only "kr-first" ever reaches the per-key `!entryOwnsKey` branch at all — in
+// "ks-first" the Map's own first-encountered key for S's identity IS ks, so `entryOwnsKey` is true and
+// the discriminator never fires — both orders must still produce non-contradictory text.
+for (const order of ["kr-first", "ks-first"]) {
+  const s = freshRepo(`perkey-discriminator-s-${order}`);
+  const r = freshRepo(`perkey-discriminator-r-${order}`);
   const ks = canonicalRepoLockKey(s);
   const kr = canonicalRepoLockKey(r);
-  if (ks === kr) throw new Error("perkey-discriminator: ks collided with kr — re-run");
+  if (ks === kr) throw new Error(`perkey-discriminator (${order}): ks collided with kr — re-run`);
 
   const entry = {
     repoPath: s, branch: "s-branch", reason: "perkey-discriminator synthetic union",
@@ -654,17 +660,30 @@ for (const order of ["ks-first", "kr-first"]) {
     identityAtRaise: ks, contributorRepoPaths: [r], genuineContributorKeys: [kr],
     armedKeys: [kr, ks],
   };
-  setActiveQuarantineTestOnly(kr, entry); // inserted FIRST — a brand-new key, never set before
-  setActiveQuarantineTestOnly(ks, entry); // inserted SECOND — activeQuarantines' own Map iteration now visits kr first
+  const [first, second] = order === "kr-first" ? [kr, ks] : [ks, kr];
+  setActiveQuarantineTestOnly(first, entry);
+  setActiveQuarantineTestOnly(second, entry); // activeQuarantines' own Map iteration now visits `first` ahead of `second`
 
-  check("(perkey-discriminator precondition) S is blocked", assertRepoNotQuarantined(s).ok === false);
-  check("(perkey-discriminator precondition) R is blocked (via contributorRepoPaths)", assertRepoNotQuarantined(r).ok === false);
+  check(`(perkey-discriminator, ${order} precondition) S is blocked`, assertRepoNotQuarantined(s).ok === false);
+  check(`(perkey-discriminator, ${order} precondition) R is blocked (via contributorRepoPaths)`, assertRepoNotQuarantined(r).ok === false);
 
   const result = clearMergeQuarantineReporting(s);
-  console.log(`(perkey-discriminator) clearMergeQuarantineReporting(s) -> ${JSON.stringify(result)}`);
-  check("(perkey-discriminator) self-clear(s) refuses", result.wasQuarantined === true && result.liftedRepoPaths.length === 0);
-  check("*** THE GAP (discriminated, pinned, NOT endorsed) *** the per-key clause reads \"does not own this key itself\"", result.reason?.includes("does not own this key itself"));
-  check("*** THE GAP (discriminated, pinned, NOT endorsed) *** the SAME text ALSO reads \"it genuinely owns this key\" — self-contradictory", result.reason?.includes("(it genuinely owns this key)"));
+  console.log(`(perkey-discriminator, ${order}) clearMergeQuarantineReporting(s) -> ${JSON.stringify(result)}`);
+  check(`(perkey-discriminator, ${order}) self-clear(s) refuses`, result.wasQuarantined === true && result.liftedRepoPaths.length === 0);
+  // *** THE FIX *** — never both a confident negative AND a confident positive about "this key" in the
+  // same sentence: the old wording ("does not own this key itself" ... "(it genuinely owns this key)")
+  // was self-contradictory; the new remediation wording is entry-level and says so explicitly.
+  check(`*** THE FIX (${order}) *** no occurrence of the self-contradicting \"(it genuinely owns this key)\" phrasing`, !result.reason?.includes("(it genuinely owns this key)"));
+  check(`*** THE FIX (${order}) *** no occurrence of the self-contradicting hedged \"owns this key\" phrasing`, !result.reason?.includes("whether it genuinely owns this key"));
+  if (order === "kr-first") {
+    // only this order actually reaches the per-key "does not own this key itself" clause at all
+    check(`*** THE FIX (${order}) *** the per-key clause still reads \"does not own this key itself\"`, result.reason?.includes("does not own this key itself"));
+    check(`*** THE FIX (${order}) *** the entry-level clause is now key-explicit: \"owns at least one of its own currently-armed keys\"`, result.reason?.includes("it genuinely owns at least one of its own currently-armed keys"));
+  } else {
+    // this order's own Map-first key IS S's real identityAtRaise, so entryOwnsKey is true throughout —
+    // the per-key clause asserts genuine ownership instead, consistently with the entry-level fact.
+    check(`*** THE FIX (${order}) *** the per-key clause reads \"genuinely owns this key itself\" (entryOwnsKey true in this order)`, result.reason?.includes("genuinely owns this key itself"));
+  }
 }
 
 console.log(failures === 0 ? "\n✅ ALL CHECKS PASS" : `\n❌ ${failures} CHECK(S) FAILED`);
