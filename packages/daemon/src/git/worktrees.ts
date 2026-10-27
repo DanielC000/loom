@@ -10734,6 +10734,33 @@ async function mergeBranchLocked(
     return { ok: true };
   };
 
+  // @decision f4da727f round 2 — probe moved BEFORE `git merge --squash` (read-only, index-independent):
+  // a refusal here must stay a clean no-op, never routed through resetOrSkip. Never write git config (or
+  // otherwise change what `git var` would report) between here and the commit call below.
+  //
+  // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into the commit's own explicit env
+  // at the call below — a pure JS object merge, never a git call, so the adjacency rule above still holds.
+  //
+  // @decision 3a5c5d4a (round 3, B2; round 4, B-1) — `repoPath` IS `cwd` here (the real canonical main);
+  // thread its resolved TOPLEVEL as `trustedMainRoot`, never bare `repoPath` — a subdir-bound project path
+  // has no `.git` of its own, and a healthy main checkout resolves right back to it.
+  let identityEnv: Record<string, string>;
+  try {
+    identityEnv = await resolveGitIdentityFallbackArgs(
+      repoPath, timeoutMs,
+      deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
+      nonInteractiveEnv(),
+      defaultTrustedMainRoot(repoPath),
+    );
+  } catch (e) {
+    // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
+    // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
+    // canonicalFailureMessage's own refusal branches already open with "refused,"/"refusing," —
+    // dropping "refused:" from this prefix avoids a literal doubled "refused: refused".
+    const identityProbeFailure = describeGitFailure(e);
+    return { ok: false, reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
+  }
+
   // Danger-window tracking (board card 5a7692a4): from HERE — right before `git merge --squash` (NOT
   // literally the attempt's first mutating git call — see merge-danger-window.ts's own doc on
   // enterMergeDangerWindow) — through every exit below (success, or a handled
@@ -10926,33 +10953,12 @@ async function mergeBranchLocked(
     let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n${resolvedBranchHead ? `Loom-Landed-Tip: ${resolvedBranchHead}\n` : ""}`;
     // Card fdc991be/2267e8fa: on a host where git can't resolve an identity for this commit (a fresh
     // end-user machine, or a CI runner), the squash commit below otherwise fails with "Author identity
-    // unknown" AFTER the gate has already run. Falls back via the ONE shared helper
-    // (resolveGitIdentityFallbackArgs, git/bounded.ts) ONLY when git itself can't determine an identity —
-    // a host whose own identity git CAN resolve commits byte-identically to before this change. Computed
-    // HERE, before the pathset capture below — two read-only `git var` probes, but the load-bearing
-    // adjacency rule on that capture (card c862f14c, just below) still forbids any git call between it and
-    // the commit, so this must not sit between them either.
-    // @decision 2267e8fa (card 7b59e981) — PER-ROLE env overrides, merged into the commit's own explicit env at the call
-    // below — a pure JS object merge, never a git call, so the adjacency rule above still holds.
-    // @decision 3a5c5d4a (round 3, B2; round 4, B-1) — `repoPath` IS `cwd` here (the real canonical
-    // main); thread its resolved TOPLEVEL as `trustedMainRoot`, never bare `repoPath` — a subdir-bound
-    // project path has no `.git` of its own, and a healthy main checkout resolves right back to it.
-    let identityEnv: Record<string, string>;
-    try {
-      identityEnv = await resolveGitIdentityFallbackArgs(
-        repoPath, timeoutMs,
-        deps.identityProbeGitFactory ?? (deps.gitFactory ? unpinnedProbeFactoryFromLegacy(deps.gitFactory) : undefined),
-        nonInteractiveEnv(),
-        defaultTrustedMainRoot(repoPath),
-      );
-    } catch (e) {
-      // canonicalFailureMessage keeps a classified canonical-git refusal's human guidance here too —
-      // `probeGitIdentResolvable` rethrows a CanonicalGitRefusal (e.g. a pinMismatch) verbatim.
-      // canonicalFailureMessage's own refusal branches already open with "refused,"/"refusing," —
-      // dropping "refused:" from this prefix avoids a literal doubled "refused: refused".
-      const identityProbeFailure = describeGitFailure(e);
-      return { ok: false, reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
-    }
+    // unknown" AFTER the gate has already run. `identityEnv` was already resolved before the squash
+    // (the probe moved earlier, above) — merged into the commit's own explicit env at the call below, a
+    // pure JS object merge, never a git call, so c862f14c's adjacency rule just below still holds.
+    // @decision f4da727f round 3 — a runtime `identityEnv === undefined` guard HERE would itself be a
+    // post-stage early return with no resetOrSkip, the exact shape 8336b903's Do-not forbids. No `|
+    // undefined` on its type instead — TypeScript's definite-assignment makes this a compile-time fact.
     // @decision c862f14c — stamps the path-set trailers from the STAGED index, never a follow-up amend
     // (caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between this
     // capture and the commit below, or it breaks the tree-identity the byte-identical-digest proof rests on.
