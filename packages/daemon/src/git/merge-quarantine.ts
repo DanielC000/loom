@@ -1515,9 +1515,29 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
         ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeysForReingest, `reconcileMarkedBasenameBeforeWrite-reingest(${entry.repoPath})`)
         : entry.resolvedKeys,
       armedKeys: entry.armedKeys,
+      // @decision 84c1046f — carry orphanLatchFiles forward from BOTH sides, never disk-only; never drop
+      // an in-memory accumulation this entry already owns.
+      orphanLatchFiles: entry.orphanLatchFiles || reingested.orphanLatchFiles
+        ? [...new Set([...(entry.orphanLatchFiles ?? []), ...(reingested.orphanLatchFiles ?? [])])]
+        : undefined,
+      // @decision 84c1046f — carry contributorRepoPaths forward from BOTH sides, never disk-only; a
+      // disk-only read silently drops a contributor folded in at runtime (clear-by-id then wrongly lifts
+      // that contributor's own quarantine). See the decision record.
+      contributorRepoPaths: entry.contributorRepoPaths || reingested.contributorRepoPaths
+        ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])]
+        : undefined,
+      // @decision 84c1046f — same carry-forward rule for this field's own sticky membership history
+      // (3b1944b6) — dropping it reopens 3b1944b6's second-clear-lifts-the-whole-union bug.
+      reducedContributorRepoPaths: entry.reducedContributorRepoPaths || reingested.reducedContributorRepoPaths
+        ? [...new Set([...(entry.reducedContributorRepoPaths ?? []), ...(reingested.reducedContributorRepoPaths ?? [])])]
+        : undefined,
       // @decision 4913e721 — OR in `entry`'s own (caller's live) mark too, never disk-only: the old code
       // discarded it outright, the same drop class db0a9db0's "carry forward at EVERY copy site" forbids.
       provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
+      // @decision 84c1046f — same OR-carry as provenanceUnknown just above: db0a9db0's own "carry forward
+      // at every copy/rebuild site" rule names this field too; never originates a fresh true here, only
+      // propagates one already true on either side.
+      provenanceTracked: entry.provenanceTracked || reingested.provenanceTracked ? true : undefined,
       // @decision 6de79dc0 (CR round 3, MINOR) — same absorbing helper `reconcileClearedEntryIfPlaceholder`
       // uses, not the wholesale `...reingested` adopt: `entry` is always a placeholder here, so this
       // always resolves `undefined` — a permanent, fail-closed demotion, never re-promoted later.
@@ -2130,6 +2150,9 @@ function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physica
     genuineContributorKeys,
     // @decision 4913e721 — OR in `entry`'s own (caller's live) mark too, never disk-only.
     provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
+    // @decision 84c1046f — same OR-carry rule as the sibling reingest arm in
+    // reconcileMarkedBasenameBeforeWrite; see that site's own comment.
+    provenanceTracked: entry.provenanceTracked || reingested.provenanceTracked ? true : undefined,
   };
 }
 
