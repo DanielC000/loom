@@ -2328,10 +2328,39 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   if (clearIdentity) {
     const finalBasename = path.basename(final);
     const foreignPending = pendingUnresolvedQuarantines.find((p) => p.sourceFile === finalBasename && directPathIdentity(p.entry.repoPath) !== clearIdentity);
-    if (foreignPending && quarantineFileRepoPathIdentity(final) !== clearIdentity) {
-      const r = protectOccupantContentBeforeDelete(final, foreignPending.entry.repoPath, clearIdentity, liftedKeys);
-      finalProtectOk = r.ok && finalProtectOk;
-      collectPersisted(r);
+    if (foreignPending) {
+      const contentIdentity = quarantineFileRepoPathIdentity(final);
+      if (contentIdentity !== clearIdentity) {
+        // @decision 69635a8d — never act on `foreignPending`'s own claim to `final` unverified: a boot-
+        // time degraded-entry eviction can durably mis-associate it with the WRONG physical file. Verify
+        // against `final`'s own real content (read once, above) first.
+        const pendingClaimIdentity = directPathIdentity(foreignPending.entry.repoPath);
+        const liftedEntryIdentity = clearedEntry ? directPathIdentity(clearedEntry.repoPath) : undefined;
+        if (contentIdentity !== undefined && contentIdentity !== pendingClaimIdentity
+          && liftedEntryIdentity !== undefined && contentIdentity === liftedEntryIdentity) {
+          // Case (b): the claim is STALE — `final` genuinely belongs to the entry THIS clear is itself
+          // lifting (`clearedEntry`), never to `foreignPending`'s own identity. Never protect under a false
+          // identity (that is exactly how a legacy union's own real record gets relocated out from under
+          // it instead of being cleanly lifted) — drop the stale claim outright so it can never misattribute
+          // this physical file again on a later clear or boot. A fresh `indexOf` immediately before the
+          // splice, never a precomputed index — mirrors every other removal site in this module (9c681680).
+          const staleIdx = pendingUnresolvedQuarantines.indexOf(foreignPending);
+          if (staleIdx !== -1) pendingUnresolvedQuarantines.splice(staleIdx, 1);
+          // eslint-disable-next-line no-console
+          console.error(`[merge-quarantine] dropping a stale pending claim on ${finalBasename}: tracked as belonging to '${foreignPending.entry.repoPath}', but its real on-disk content genuinely names '${clearedEntry!.repoPath}' (the entry this clear is itself lifting) — the pending claim was never correct (likely a boot-time degraded-eviction inference artifact); removed so it can never misattribute this physical file again.`);
+        } else {
+          // Case (a) (content confirms the pending claim), case (c) (content names a genuinely THIRD
+          // identity — protect under what the content itself says, never the stale pending label), or
+          // case (d) (unreadable/unparseable — `contentIdentity` is `undefined`; unchanged, fail-closed
+          // exactly as before this card: protect under the pending label, the only identity available).
+          const occupantRepoPath = contentIdentity !== undefined && contentIdentity !== pendingClaimIdentity
+            ? contentIdentity
+            : foreignPending.entry.repoPath;
+          const r = protectOccupantContentBeforeDelete(final, occupantRepoPath, clearIdentity, liftedKeys);
+          finalProtectOk = r.ok && finalProtectOk;
+          collectPersisted(r);
+        }
+      }
     }
   }
   if (clearedEntry) {
@@ -4988,6 +5017,16 @@ export function markLatchFileUnreadableTestOnly(basename: string): void {
  *  {@link setActiveQuarantineTestOnly}'s own doc for why the `TestOnly` suffix is load-bearing. */
 export function pushPendingQuarantineTestOnly(entry: MergeQuarantineEntry, sourceFile: string): void {
   pendingUnresolvedQuarantines.push({ entry, sourceFile });
+}
+
+/** TEST-ONLY: a read-only snapshot of the REAL, module-global {@link pendingUnresolvedQuarantines} array
+ *  as plain `{repoPath, sourceFile}` pairs — never the live entry object references, so a caller cannot
+ *  mutate the array through what it reads. Lets a test assert on the exact SET of (identity, sourceFile)
+ *  pairs currently pending, including a count (e.g. that a stale pair was dropped while a correct one for
+ *  the SAME identity survives), without a bespoke index-based probe. Never imported by `index.ts` — see
+ *  {@link setActiveQuarantineTestOnly}'s own doc for why the `TestOnly` suffix is load-bearing. */
+export function listPendingMergeQuarantinesTestOnly(): Array<{ repoPath: string; sourceFile: string }> {
+  return pendingUnresolvedQuarantines.map((p) => ({ repoPath: p.entry.repoPath, sourceFile: p.sourceFile }));
 }
 
 /**
