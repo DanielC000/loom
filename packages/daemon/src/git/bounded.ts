@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import childProcessModule, { spawn } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import { performance } from "node:perf_hooks";
 import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
 import { killGateProcessTree } from "../orchestration/gate-runner.js";
@@ -29,6 +31,134 @@ import { WIN_JOB_LAUNCHER_PATH, LOOM_HOME } from "../paths.js";
  * call-class timeout budgets, and whether/what non-interactive env is applied — see {@link
  * boundedSimpleGit}'s own doc), and folding those differences away would be a regression, not a fix.
  */
+
+/**
+ * @decision 293beb47 — never narrow the signature below to `pid` alone or widen it to any proper subset
+ * of {pid, stdout, stderr, stdin}: a real ENOENT spawn's `pid` is ALSO `undefined`, with real stdio, so
+ * only the ALL-FOUR-`undefined` check stays false-positive-free.
+ */
+const SPAWN_RESOURCE_EXHAUSTION_GUARD_WARNING = "[spawn-guard] spawn() returned with no pid/stdio — treating as fd exhaustion (EMFILE/ENFILE); stubbing stdio so the caller sees a classified spawn failure instead of an uncaught 'error' crash.";
+
+/**
+ * @decision 293beb47 — minted ONCE per process, never derivable by anything that didn't read this
+ * module's own memory: the shared `.git` is worker-writable, so a hook/stderr line forging the TEXT
+ * "Error: spawn git EMFILE" must never be classifiable — only an error THIS guard itself tagged can be.
+ */
+const SPAWN_GUARD_STACK_MARKER = `[loom-spawn-guard:${crypto.randomBytes(16).toString("hex")}]`;
+
+let emfileEnfileSpawnGuardInstalled = false;
+
+/**
+ * @decision 293beb47 — never stub stdio with a plain `EventEmitter` again: Node's real `_handle.onexit`
+ * calls `this.stdin.destroy()`, which a plain EventEmitter doesn't have — that TypeError is itself an
+ * uncaught exception, the exact crash this guard exists to prevent.
+ */
+function stubSpawnFailureStdio(child: ReturnType<typeof spawn>): void {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  stdout.end();
+  stderr.end();
+  // stdin is NOT pre-ended here (a caller's own synchronous `.write()`/`.end()` right after spawn still
+  // succeeds) — but it is NOT durably "open" either: Node's own real `onexit` destroys it one tick later
+  // regardless of anything this guard does, same as a genuine EMFILE/ENFILE. See the decision record.
+  const stdin = new PassThrough();
+  child.stdout = stdout as unknown as typeof child.stdout;
+  child.stderr = stderr as unknown as typeof child.stderr;
+  child.stdin = stdin as unknown as typeof child.stdin;
+  // @decision 293beb47 — never let a 'close' emitted after 'error' on this SAME child read as
+  // success: force its code non-zero even though real Node never actually emits (exitCode:0) here.
+  let sawErrorOnThisChild = false;
+  child.once("error", (err: NodeJS.ErrnoException) => {
+    sawErrorOnThisChild = true;
+    // @decision 293beb47 — tag the error's OWN stack, read by simple-git's 'error' listener (registered
+    // AFTER this one, so it observes the mutation) straight into its GitError's .message — never derive
+    // a classification from message TEXT alone; see classifySpawnResourceExhaustionCode's own doc.
+    if (typeof err?.stack === "string") err.stack += `\n${SPAWN_GUARD_STACK_MARKER}`;
+  });
+  const realEmit = child.emit.bind(child);
+  child.emit = ((event: string, ...emitArgs: unknown[]): boolean => {
+    if (event === "close" && sawErrorOnThisChild && emitArgs[0] === 0) {
+      return realEmit("close", -1, emitArgs[1]);
+    }
+    return realEmit(event, ...emitArgs);
+  }) as typeof child.emit;
+}
+
+/** Idempotent (module-level flag) and process-wide by necessity — see the decision record above this
+ *  file's import block for why there is no narrower chokepoint. Installed LAZILY, on this process's
+ *  first {@link boundedSimpleGit} call (never at bare module-load time — there is nothing to protect
+ *  until a `SimpleGit` instance is actually about to be constructed). */
+function installEmfileEnfileSpawnGuard(): void {
+  if (emfileEnfileSpawnGuardInstalled) return;
+  emfileEnfileSpawnGuardInstalled = true;
+  const realSpawn = childProcessModule.spawn;
+  childProcessModule.spawn = ((...args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
+    const child = realSpawn(...args);
+    if (child.pid === undefined && child.stdout === undefined && child.stderr === undefined && child.stdin === undefined) {
+      // eslint-disable-next-line no-console
+      console.warn(SPAWN_RESOURCE_EXHAUSTION_GUARD_WARNING);
+      stubSpawnFailureStdio(child);
+    }
+    return child;
+  }) as typeof spawn;
+  // @decision 293beb47 — never drop this call: simple-git's ESM build (what our ESM daemon actually
+  // resolves to) snapshots `spawn` at import time rather than reading `child_process.spawn` live, so
+  // without this re-sync the mutation above silently does nothing in production.
+  syncBuiltinESMExports();
+}
+
+/**
+ * @decision 293beb47 — never classify on message text alone or with `/m` again: a worker-plantable
+ * stderr line can forge this shape on ANY line of a real git failure's own message.
+ */
+const SPAWN_RESOURCE_EXHAUSTION_RE = /^Error: spawn[^\n]* (EMFILE|ENFILE)(?:\n|$)/;
+export function classifySpawnResourceExhaustionCode(e: unknown): "EMFILE" | "ENFILE" | undefined {
+  const message = (e as Error)?.message ?? "";
+  if (!message.includes(SPAWN_GUARD_STACK_MARKER)) return undefined;
+  const m = SPAWN_RESOURCE_EXHAUSTION_RE.exec(message);
+  return m ? (m[1] as "EMFILE" | "ENFILE") : undefined;
+}
+
+/** TEST-ONLY: appends this process's real spawn-guard marker to `e.message`, exactly as the real guard's
+ *  'error' handler appends it to `.stack` (which simple-git then copies verbatim into its own message) —
+ *  lets a unit test exercise the shape-matching regex above without a full real `ChildProcess` fixture.
+ *  Never called from production code. */
+export function tagErrorWithSpawnGuardMarkerForTest(e: Error): Error {
+  e.message = `${e.message}\n${SPAWN_GUARD_STACK_MARKER}`;
+  return e;
+}
+
+/**
+ * Wraps every method of a constructed `SimpleGit` instance so that ANY rejection classified by
+ * {@link classifySpawnResourceExhaustionCode} gets `.code` attached before it reaches the caller —
+ * applied unconditionally in {@link boundedSimpleGit} (not just on `.raw()`) because this codebase calls
+ * several OTHER simple-git methods directly on a `boundedSimpleGit`/`canonicalGit`-constructed instance
+ * (`.commit()`, `.status()`, `.revparse()`, `.log()`, `.diff()`, `.init()` — verified by grep, none of
+ * them chained/fluent; every call site awaits a single direct method call), not only `.raw()`.
+ * A non-promise return (e.g. simple-git's own synchronous `.env()`, which returns `this`) passes through
+ * completely untouched — only a thenable result is ever `.catch()`-wrapped.
+ */
+function withSpawnFailureClassification(git: SimpleGit): SimpleGit {
+  return new Proxy(git, {
+    get(target, prop, receiver) {
+      const v = Reflect.get(target, prop, receiver);
+      if (typeof v !== "function") return v;
+      return function (this: unknown, ...args: unknown[]): unknown {
+        const result = Reflect.apply(v as (...a: unknown[]) => unknown, target, args);
+        if (result && typeof (result as Promise<unknown>).catch === "function") {
+          return (result as Promise<unknown>).catch((e: unknown) => {
+            const code = classifySpawnResourceExhaustionCode(e);
+            if (code && e instanceof Error && (e as NodeJS.ErrnoException).code === undefined) {
+              (e as NodeJS.ErrnoException).code = code;
+            }
+            throw e;
+          });
+        }
+        return result;
+      };
+    },
+  }) as SimpleGit;
+}
 
 /**
  * Reject `p` after `ms` if it hasn't settled, so a git step is bounded even if the underlying promise
@@ -1288,12 +1418,16 @@ export function boundedSimpleGit(
   // allowUnsafeCustomBinary; suppressed (synchronous construction only) as benign, expected noise.
   const git = binary ? withConsoleWarnSuppressed(buildGit) : buildGit();
   const final = hasEnv ? git.env(scrubbedEnv as Record<string, string | undefined>) : git;
+  // @decision 293beb47 — unconditional, every instance: this is the ONE construction chokepoint, so it
+  // is the only place that can attach the EMFILE/ENFILE classification to every caller's method calls.
+  installEmfileEnfileSpawnGuard();
+  const classified = withSpawnFailureClassification(final);
   // @decision 5b50eede (round 4 follow-up, CR `201f0c7e`) — only when `binary` actually resolved: an
   // unresolved/POSIX instance never set `allowUnsafeCustomBinary` in the first place, so simple-git's own
   // default (`allowUnsafe:false`) already refuses `.customBinary()` with no wrapping needed here.
   return binary
-    ? refuseCustomBinaryProxy(final, "boundedSimpleGit: customBinary() is refused — this instance's git binary was resolved once at construction (win32's absolute-path resolution); construct a fresh boundedSimpleGit(...) instead of swapping the binary on an existing instance.")
-    : final;
+    ? refuseCustomBinaryProxy(classified, "boundedSimpleGit: customBinary() is refused — this instance's git binary was resolved once at construction (win32's absolute-path resolution); construct a fresh boundedSimpleGit(...) instead of swapping the binary on an existing instance.")
+    : classified;
 }
 
 /** Substring of simple-git's `WRONG_CHARS_ERR` (`custom-binary.plugin.ts`, verified against the installed
