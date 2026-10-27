@@ -18,7 +18,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { useOwnLoomHome, mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const loomHome = useOwnLoomHome("loom-mqcbp-");
+// {fresh:true}: this file assumes an EMPTY MERGE_QUARANTINE_DIR it never creates itself — under a
+// shared/inherited LOOM_HOME (e.g. run back-to-back with a sibling merge-quarantine-*.mjs file), a
+// bare useOwnLoomHome() reuse would see leftover latches from the PRIOR file and go RED on counts/
+// identity checks that assume nothing else wrote there yet (card d789791a).
+const loomHome = useOwnLoomHome("loom-mqcbp-", { fresh: true });
 requireHermeticEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
