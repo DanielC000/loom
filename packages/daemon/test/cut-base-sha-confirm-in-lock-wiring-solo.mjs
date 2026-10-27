@@ -131,7 +131,8 @@ try {
     const soloMergeGitFactory = (p) => {
       const g = simpleGit(p);
       return { raw: async (args) => {
-        if (args[0] === "merge-base" && args[1] === c1) {
+        // @decision 868e0135 — checkCutBaseAncestry's merge-base argv now carries --end-of-options; match c1 immediately after the marker (its real argv position).
+        if (args[0] === "merge-base" && args[args.indexOf("--end-of-options") + 1] === c1) {
           matchCount++;
           if (matchCount === 1) throw new Error("simulated transient git timeout (advisory probe only)");
         }
@@ -187,7 +188,8 @@ try {
     const soloMergeGitFactory = (p) => {
       const g = simpleGit(p);
       return { raw: async (args) => {
-        if (args[0] === "merge-base" && args[1] === c1) {
+        // @decision 868e0135 — same argv-shape note as above: match c1 immediately after the marker.
+        if (args[0] === "merge-base" && args[args.indexOf("--end-of-options") + 1] === c1) {
           matchCount++;
           if (matchCount === 2) { mbFails++; throw new Error("simulated transient git timeout"); }
         }

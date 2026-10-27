@@ -143,7 +143,9 @@ try {
     const alreadyLandedGitFactory = (repoPath, timeoutMs) => {
       const real = canonicalGit(repoPath, timeoutMs);
       return { raw: async (args) => {
-        if (args[0] === "log" && args[1] === "-1" && args[2] === "--format=%B" && args[3] === aLandedSha) {
+        // @decision 868e0135 — readLandedTipTrailer's argv now carries `--end-of-options` before the sha;
+        // match on the sha sitting immediately after the marker (its real argv position), not a fixed index.
+        if (args[0] === "log" && args[1] === "-1" && args[2] === "--format=%B" && args[args.indexOf("--end-of-options") + 1] === aLandedSha) {
           faultedCount++; // PERSISTENT — no one-shot gate — every call matching a's exact sha is faulted
           throw new Error("INJECTED FAULT (throw) readLandedTipTrailer");
         }

@@ -127,7 +127,9 @@ try {
     const batchFfGitFactory = (p) => {
       const g = simpleGit(p);
       return { raw: async (args) => {
-        if (args[0] === "merge-base" && args[1] === c0) {
+        // @decision 868e0135 — checkCutBaseAncestry's merge-base argv now carries --end-of-options before
+        // c0; match on c0 sitting immediately after the marker (its real argv position), not a fixed index.
+        if (args[0] === "merge-base" && args[args.indexOf("--end-of-options") + 1] === c0) {
           probeMatchCount++;
           throw new Error("simulated transient git timeout (batch probe, recurring)");
         }
@@ -232,7 +234,8 @@ try {
     const batchFfGitFactory = (p) => {
       const g = simpleGit(p);
       return { raw: async (args) => {
-        if (args[0] === "merge-base" && args[1] === atlasTip) {
+        // @decision 868e0135 — same argv-shape note as above: match atlasTip immediately after the marker.
+        if (args[0] === "merge-base" && args[args.indexOf("--end-of-options") + 1] === atlasTip) {
           matchCount++;
           if (matchCount === 1) throw new Error("simulated transient git timeout (batch advisory probe only)");
         }

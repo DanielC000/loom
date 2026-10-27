@@ -511,7 +511,8 @@ export function codescapeWorktreeId(taskId: string | null | undefined): string |
 export async function resolveGitRef(repoPath: string, ref: string, deps: BoundedGitDeps = {}): Promise<string | null> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const out = await withTimeout(git.raw(["rev-parse", "--verify", `${ref}^{commit}`]), timeoutMs, "git rev-parse --verify");
+    // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+    const out = await withTimeout(git.raw(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]), timeoutMs, "git rev-parse --verify");
     const sha = out.trim();
     return sha || null;
   } catch {
@@ -567,11 +568,15 @@ export async function findLaterBranchSquash(repoPath: string, branch: string, af
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     // Compare merge-base OUTPUT to afterSha (never `--is-ancestor`: simple-git resolves its exit-1 "no" as success — see batch-merge.ts).
-    const mb = (await withTimeout(git.raw(["merge-base", afterSha, "HEAD"]), timeoutMs, "git merge-base (later branch squash)")).trim();
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": `afterSha` is always a daemon-
+    // recorded landed sha, but an option-shaped value would otherwise re-enter merge-base's option parser.
+    const mb = (await withTimeout(git.raw(["merge-base", "--end-of-options", afterSha, "HEAD"]), timeoutMs, "git merge-base (later branch squash)")).trim();
     if (mb !== afterSha) return "error";
     // The grep is a PREFILTER only (card f62ef199); the verdict is the parsed final trailer block, so a commit that merely quotes the line never counts.
+    // @decision 868e0135 — `--end-of-options` immediately before the range (already the last positional):
+    // an option-shaped `afterSha` would otherwise risk the range token being misread by the revision parser.
     const out = await withTimeout(
-      git.raw(["log", "--fixed-strings", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%B%x1e", `${afterSha}..HEAD`]),
+      git.raw(["log", "--fixed-strings", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%B%x1e", "--end-of-options", `${afterSha}..HEAD`]),
       timeoutMs, "git log --grep (later branch squash)",
     );
     return out.split("\x1e").some((message) => parseLoomTrailerBlock(message)?.branch === branch) ? "found" : "none";
@@ -1035,7 +1040,8 @@ async function detectStaleBase(repoPath: string, branch: string, mainSha: string
   if (!behindBy || behindBy <= 0) return undefined;
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const baseSha = (await withTimeout(git.raw(["merge-base", `refs/heads/${branch}`, mainSha]), timeoutMs, "git merge-base")).trim();
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": mainSha is always rev-parse-derived; the other arg is already refs/heads/-qualified.
+    const baseSha = (await withTimeout(git.raw(["merge-base", "--end-of-options", `refs/heads/${branch}`, mainSha]), timeoutMs, "git merge-base")).trim();
     const filesRaw = await withTimeout(git.raw(["diff", "--name-only", baseSha, mainSha]), timeoutMs, "git diff --name-only");
     const allFiles = filesRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     return {
@@ -3572,7 +3578,8 @@ export async function detectCanonicalDirtyOverlap(
     }
     if (dirtyUnstaged.size === 0) return { overlap: false };
 
-    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branchRef]), timeoutMs, "git merge-base (canonical, dirty-overlap preflight)")).trim();
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": branchRef is already `refs/heads/${branch}`-qualified; HEAD is literal.
+    const mergeBase = (await withTimeout(git.raw(["merge-base", "--end-of-options", "HEAD", branchRef]), timeoutMs, "git merge-base (canonical, dirty-overlap preflight)")).trim();
     const changed = await changedPathsBetween(git, mergeBase, branchRef, timeoutMs);
     let overlapping = changed.filter((p) => dirtyUnstaged.has(p));
     if (overlapping.length === 0) return { overlap: false };
@@ -3653,7 +3660,8 @@ export async function detectCanonicalUntrackedOverlap(
     }
     if (untracked.size === 0) return { overlap: false };
 
-    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branchRef]), timeoutMs, "git merge-base (canonical, untracked-overlap preflight)")).trim();
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": same reason as the dirty-overlap preflight call above.
+    const mergeBase = (await withTimeout(git.raw(["merge-base", "--end-of-options", "HEAD", branchRef]), timeoutMs, "git merge-base (canonical, untracked-overlap preflight)")).trim();
     const changed = await changedPathsBetween(git, mergeBase, branchRef, timeoutMs);
     const candidates = changed.filter((p) => untracked.has(p));
     if (candidates.length === 0) return { overlap: false };
@@ -4362,7 +4370,8 @@ async function branchContentLandedInCommit(
 export async function readLandedTipTrailer(repoPath: string, sha: string, deps: BoundedGitDeps = {}): Promise<string | null> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const body = await withTimeout(git.raw(["log", "-1", "--format=%B", sha]), timeoutMs, "git log -1 (landed-tip trailer)");
+    // @decision 868e0135 — `--end-of-options` before `sha` (same measured reason as batch-merge.ts's own log -1 reads).
+    const body = await withTimeout(git.raw(["log", "-1", "--format=%B", "--end-of-options", sha]), timeoutMs, "git log -1 (landed-tip trailer)");
     return parseLoomTrailerBlock(body)?.landedTip ?? null;
   } catch {
     return null;
@@ -4989,7 +4998,10 @@ function repoTreeHasJsTsSourceFile(
   repoPath: string, treeish: string, timeoutMs: number,
 ): Promise<{ applicable: boolean; degradedReason?: string }> {
   return new Promise((resolve) => {
-    const child = spawn(resolveGitBinaryForSpawn(), [...CANONICAL_GIT_CONFIG_ARGS, "ls-tree", "-r", "--name-only", treeish], {
+    // @decision 868e0135 — `--end-of-options` before `treeish`: every caller resolves it from `rev-parse
+    // HEAD`/`union.mainSha` first (never caller input), but an option-shaped value would otherwise be
+    // read as an ls-tree flag, same class as `fullTreeEntries`'s identical shape above.
+    const child = spawn(resolveGitBinaryForSpawn(), [...CANONICAL_GIT_CONFIG_ARGS, "ls-tree", "-r", "--name-only", "--end-of-options", treeish], {
       cwd: repoPath,
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
@@ -6968,8 +6980,11 @@ export async function computeEmitCompareGate(
     // --name-status` call this function already makes unconditionally above.
     let repoIsInDomain: boolean;
     try {
+      // @decision 868e0135 — `--end-of-options` before `ref` (the `--` pathspec separator stays after it):
+      // `ref` is always a resolved sha (56c10535), but an option-shaped value would otherwise be consumed
+      // as an ls-tree flag, silently shifting the first pathspec into the tree-ish slot.
       const lsTreeOut = (await withTimeout(
-        git.raw(["ls-tree", "-d", "--name-only", ref, "--",
+        git.raw(["ls-tree", "-d", "--name-only", "--end-of-options", ref, "--",
           EMIT_COMPARE_SRC_PREFIX.slice(0, -1), EMIT_COMPARE_TEST_PREFIX.slice(0, -1),
           EMIT_COMPARE_ASSETS_PREFIX.slice(0, -1), EMIT_COMPARE_SCRIPTS_PREFIX.slice(0, -1)]),
         timeoutMs, "git ls-tree (emit-compare repo-domain check)",
@@ -7415,8 +7430,9 @@ async function resolveExactTrailerObjectId(
   git: Pick<SimpleGit, "raw">, timeoutMs: number, candidate: string,
 ): Promise<string | null> {
   if (!OBJECT_ID_SHAPE_RE.test(candidate)) return null;
+  // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
   const resolved = (await withTimeout(
-    git.raw(["-c", "core.warnAmbiguousRefs=false", "rev-parse", "--verify", "--quiet", `${candidate}^{object}`]),
+    git.raw(["-c", "core.warnAmbiguousRefs=false", "rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{object}`]),
     timeoutMs, "git rev-parse --verify --quiet (trailer-derived object existence)",
   )).trim();
   if (resolved === "" || resolved !== candidate) return null;
@@ -7614,8 +7630,9 @@ async function classifyAgainstLedgerUncached(
   // PRE-LEDGER (round 4): dropped round 3's first-parent precondition + cap entirely — see this
   // function's own doc for why a bare, unbounded ancestor check against the fixed boundary is sound.
   try {
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": both sha and boundary are resolved shas/ledger-internal values.
     const mb = (await withTimeout(
-      git.raw(["merge-base", sha, boundary]), timeoutMs, "git merge-base (ledger boundary check)",
+      git.raw(["merge-base", "--end-of-options", sha, boundary]), timeoutMs, "git merge-base (ledger boundary check)",
     )).trim();
     if (mb === sha) return "pre-ledger";
   } catch {
@@ -7629,8 +7646,9 @@ async function classifyAgainstLedgerUncached(
   // own first-parent range — see this function's own doc for why this replaces round 3's precondition.
   try {
     if (sha !== refTip) {
+      // @decision 868e0135 — `--end-of-options` right after "merge-base": same reason as the pre-ledger boundary check above.
       const mbRef = (await withTimeout(
-        git.raw(["merge-base", sha, refTip]), timeoutMs, "git merge-base (ledger ancestor-of-refTip check)",
+        git.raw(["merge-base", "--end-of-options", sha, refTip]), timeoutMs, "git merge-base (ledger ancestor-of-refTip check)",
       )).trim();
       if (mbRef !== sha) return "unrecorded"; // sha isn't even reachable (by any path) from refTip
     }
@@ -7936,8 +7954,9 @@ export async function findLandedSquashCommit(
           // @decision c0d0eac9 round 5 (CR4's reasoned point) — `git merge-base` with NO common ancestor
           // exits 1, empty output, no throw at all (empirically, via simple-git) — DEFINITIVE "unrelated",
           // never "error". Short-circuit here rather than feed an empty `mergeBase` into the content check.
+          // @decision 868e0135 — `--end-of-options` right after "merge-base": refs/heads/-qualified + a ledger candidate's own sha.
           const mergeBase = (await withTimeout(
-            git.raw(["merge-base", candidate.sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
+            git.raw(["merge-base", "--end-of-options", candidate.sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
           )).trim();
           if (mergeBase === "") return { passed: false, positiveProof: false, error: false, resolved: null };
           if (mergeBase === candidate.sha) return { passed: false, positiveProof: false, error: false, resolved: null };
@@ -8007,7 +8026,8 @@ export async function findIntroducingSquashCommit(
     if (at === -1) return landedSha;
     // @decision c0d0eac9 round 6 (finding 3) — was interpolated into the diff range below with no empty
     // check: "no common ancestor" would silently become `..branchRef`. Guard it like the loop's own below.
-    const landedMergeBase = (await withTimeout(git.raw(["merge-base", landedSha, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": branchRef is already refs/heads/-qualified; landedSha is a resolved sha.
+    const landedMergeBase = (await withTimeout(git.raw(["merge-base", "--end-of-options", landedSha, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
     if (!landedMergeBase) return landedSha; // no common ancestor — fails conservatively, same as any other ambiguity here
     const ownChanges = (await withTimeout(
       git.raw(["diff", "--name-only", `${landedMergeBase}..${branchRef}`]),
@@ -8016,7 +8036,8 @@ export async function findIntroducingSquashCommit(
     if (!ownChanges) return landedSha;
     let introducer = landedSha;
     for (const older of shas.slice(at + 1, at + 1 + INTRODUCING_COMMIT_MAX_OLDER)) {
-      const mergeBase = (await withTimeout(git.raw(["merge-base", older, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
+      // @decision 868e0135 — `--end-of-options` right after "merge-base": same reason as the landed-mergeBase call above.
+      const mergeBase = (await withTimeout(git.raw(["merge-base", "--end-of-options", older, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
       if (!mergeBase || mergeBase === older) break; // re-cut onto it: the branch descends from this commit
       // Attribution-only (decision 293d418e) — treats "error" the same as "fail" here, unlike the gating
       // walk's own tri-state handling; this function already fails conservatively (returns landedSha) on
@@ -8182,8 +8203,10 @@ export async function fullTreeEntries(
 ): Promise<Map<string, string> | null> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision 868e0135 — `--end-of-options` before `ref`: every caller passes an already-resolved sha
+    // (this function's own doc above), but an option-shaped value would otherwise be read as a flag.
     const out = await withTimeout(
-      git.raw(["ls-tree", "-r", "-z", ref]), timeoutMs, "git ls-tree -r (full tree entries)",
+      git.raw(["ls-tree", "-r", "-z", "--end-of-options", ref]), timeoutMs, "git ls-tree -r (full tree entries)",
     );
     const map = new Map<string, string>();
     for (const rec of out.split("\0")) {
@@ -8242,7 +8265,8 @@ export async function stampedPathsPlausible(
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const mergeBase = (await withTimeout(
-      git.raw(["merge-base", recordedTip, otherSha]), timeoutMs, "git merge-base (stamped-path plausibility)",
+      // @decision 868e0135 — `--end-of-options` right after "merge-base": both recordedTip/otherSha are resolved shas.
+      git.raw(["merge-base", "--end-of-options", recordedTip, otherSha]), timeoutMs, "git merge-base (stamped-path plausibility)",
     )).trim();
     if (!mergeBase) return false;
     const [recordedMap, mergeBaseMap] = await Promise.all([
@@ -8902,8 +8926,9 @@ async function resolveMergedCommitMapHit(
       // @decision c0d0eac9 round 5 — same classification as findLandedSquashCommit's own re-task-guard
       // merge-base: empty output (no common ancestor) is DEFINITIVE, never "error" — see that call's own
       // comment for the full reasoning.
+      // @decision 868e0135 — `--end-of-options` right after "merge-base": refs/heads/-qualified + a merged-commit-map hit's own sha.
       const mergeBase = (await withTimeout(
-        git.raw(["merge-base", hit.sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
+        git.raw(["merge-base", "--end-of-options", hit.sha, `refs/heads/${branch}`]), timeoutMs, "git merge-base",
       )).trim();
       if (mergeBase === "") return fail;
       if (mergeBase === hit.sha) return fail; // re-cut onto its own prior squash: live again, not landed
@@ -9129,8 +9154,9 @@ async function deriveWorkerCommitLogBody(
     // (GitConstructError, see scanMergedCommitMap's own doc) — kept INSIDE this try, not before it, so
     // that failure degrades this best-effort body exactly like every other failure mode below.
     const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision 868e0135 — `--end-of-options` immediately before the range (already the last positional): round-2 CR retracted the compound-suffix exemption this relied on.
     const raw = await withTimeout(
-      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..refs/heads/${branch}`]),
+      git.raw(["log", "--no-merges", "--reverse", "--format=%s", "--end-of-options", `${mergeBase}..refs/heads/${branch}`]),
       timeoutMs, "git log (canonical, worker commit-log body)",
     );
     subjects = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
@@ -9190,11 +9216,15 @@ export async function deriveOwnNonTipCommitSubjects(
   let all: string[];
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": `base`'s one caller always passes
+    // the literal "HEAD" and `refs/heads/${branch}` is already qualified, but an option-shaped `base`
+    // would otherwise be re-entered into merge-base's own option parser.
     const mergeBase = (await withTimeout(
-      git.raw(["merge-base", base, `refs/heads/${branch}`]), timeoutMs, "git merge-base (own non-tip commit subjects)",
+      git.raw(["merge-base", "--end-of-options", base, `refs/heads/${branch}`]), timeoutMs, "git merge-base (own non-tip commit subjects)",
     )).trim();
+    // @decision 868e0135 — `--end-of-options` immediately before the range (already the last positional): round-2 CR retracted the compound-suffix exemption this relied on.
     const raw = await withTimeout(
-      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..refs/heads/${branch}`]),
+      git.raw(["log", "--no-merges", "--reverse", "--format=%s", "--end-of-options", `${mergeBase}..refs/heads/${branch}`]),
       timeoutMs, "git log (canonical, own non-tip commit subjects)",
     );
     all = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
@@ -9337,7 +9367,8 @@ export async function mergeMainIntoWorktree(
   // below settle it either way.
   // A HELD branch (owedBase) never takes this shortcut: a worker's own merge of main can already contain main yet still carry a resurrected copy of what its late commit deleted.
   if (!owedBase) try {
-    const mergeBase = (await withTimeout(wtGit.raw(["merge-base", "HEAD", mainSha]), timeoutMs, "git merge-base (worktree)")).trim();
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": mainSha is always rev-parse-derived.
+    const mergeBase = (await withTimeout(wtGit.raw(["merge-base", "--end-of-options", "HEAD", mainSha]), timeoutMs, "git merge-base (worktree)")).trim();
     if (mergeBase === mainSha) return { ok: true, merged: false, mainSha };
   } catch { /* fall through to attempt the merge */ }
 
@@ -9388,8 +9419,10 @@ export async function mergeMainIntoWorktree(
       tip = (await wtRaw(["rev-parse", "--verify", "HEAD"])).trim();
       landing = await computeOwedLanding(wtRaw, owedBase, tip, mainSha, timeoutMs);
       if (!landing.ok) return { ok: false, ...(landing.kind === "conflict" ? { conflict: true } : {}), reason: describeOwedFailure(landing) };
-      const tipTree = (await wtRaw(["rev-parse", `${tip}^{tree}`])).trim();
-      const mainIsAncestor = (await wtRaw(["merge-base", tip, mainSha])).trim() === mainSha;
+      // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+      const tipTree = (await wtRaw(["rev-parse", "--verify", "--end-of-options", `${tip}^{tree}`])).trim();
+      // @decision 868e0135 — `--end-of-options` right after "merge-base": tip/mainSha are both rev-parse-derived in this worktree.
+      const mainIsAncestor = (await wtRaw(["merge-base", "--end-of-options", tip, mainSha])).trim() === mainSha;
       if (mainIsAncestor && landing.tree === tipTree) return { ok: true, merged: false, mainSha }; // the branch already IS main plus its owed commits
       // @decision 2267e8fa (card 7b59e981) — a one-off `canonicalGit` instance carries the fallback ONLY
       // when actually needed; `wtGit` is reused byte-identically otherwise, including under a test
@@ -9491,7 +9524,8 @@ export async function mergeMainIntoWorktree(
   // genuinely unfinished/conflicted merge leaves HEAD at its OLD tip, which this can never satisfy.
   const verifyUnionLanded = async (): Promise<boolean> => {
     try {
-      return (await withTimeout(wtGit.raw(["merge-base", "HEAD", mainSha]), timeoutMs, "git merge-base (verify landed)")).trim() === mainSha;
+      // @decision 868e0135 — `--end-of-options` right after "merge-base": mainSha is always rev-parse-derived.
+      return (await withTimeout(wtGit.raw(["merge-base", "--end-of-options", "HEAD", mainSha]), timeoutMs, "git merge-base (verify landed)")).trim() === mainSha;
     } catch { return false; }
   };
   const verifyWorktreeCleanAt = async (expectedHead: string): Promise<boolean> => {
@@ -9708,7 +9742,8 @@ export async function computeOwedLanding(
   const oid = /^[0-9a-f]{40,64}$/;
   const lines = (text: string) => text.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
   const identity = ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
-  const subjectOf = async (sha: string) => (await raw(["log", "-1", "--format=%s", sha])).trim();
+  // @decision 868e0135 — `--end-of-options` before `sha`: MEASURED, `git log -1 --format=%s --all` (option-shaped) would otherwise silently read some OTHER commit's subject instead of erroring.
+  const subjectOf = async (sha: string) => (await raw(["log", "-1", "--format=%s", "--end-of-options", sha])).trim();
   const merges = lines(await raw(["rev-list", "--merges", `${base}..${tip}`, "--not", main]));
   if (merges.length > MAX_MERGE_COMMITS_CHECKED) return { ok: false, kind: "merge", commit: merges[0]!, subject: await subjectOf(merges[0]!), why: `is one of ${merges.length} merge commits in the range (more than ${MAX_MERGE_COMMITS_CHECKED} are checked)` };
   for (const m of merges) {
@@ -9719,12 +9754,14 @@ export async function computeOwedLanding(
     let ownUnion = false;
     if (parents.length === 2 && depth < 8) {
       const inner = await computeOwedLanding(raw, base, parents[0]!, parents[1]!, timeoutMs, depth + 1);
-      ownUnion = inner.ok && inner.tree === (await raw(["rev-parse", `${m}^{tree}`])).trim();
+      // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+      ownUnion = inner.ok && inner.tree === (await raw(["rev-parse", "--verify", "--end-of-options", `${m}^{tree}`])).trim();
     }
     if (!ownUnion) return { ok: false, kind: "merge", commit: m, subject: await subjectOf(m), why };
   }
   const owed = lines(await raw(["rev-list", "--reverse", "--topo-order", "--no-merges", `${base}..${tip}`, "--not", main]));
-  const mainTree = (await raw(["rev-parse", `${main}^{tree}`])).trim();
+  // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+  const mainTree = (await raw(["rev-parse", "--verify", "--end-of-options", `${main}^{tree}`])).trim();
   let cur = main;
   let curTree = mainTree;
   const commits: { sha: string; subject: string; emptyOnMain: boolean }[] = [];
@@ -9798,7 +9835,8 @@ export async function verifyReviewedTipChain(
       if (parents.length !== 2) return { ok: false, reason: `${short(cur)} is not a merge of main (${parents.length} parent(s)) — a commit made after the review` };
       const [prev, m] = parents as [string, string];
       if (!(await reachable(m, mainRef))) return { ok: false, reason: `${short(cur)} merges ${short(m)}, which is not on main` };
-      const tree = (await raw(["rev-parse", `${cur}^{tree}`], "git rev-parse tree (reviewed-tip walk)")).trim();
+      // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+      const tree = (await raw(["rev-parse", "--verify", "--end-of-options", `${cur}^{tree}`], "git rev-parse tree (reviewed-tip walk)")).trim();
       // The daemon's union ran in the WORKTREE, so it used the BRANCH's attributes (e.g. `merge=union`); merge-tree here runs in canonical, so point it at `prev`'s tree.
       // `merge-tree --write-tree` exits 1 on a conflict WITHOUT throwing through simple-git: the conflicted tree oid is the first line and the conflict info follows —
       // so anything but exactly one oid line is a conflict, never a clean union.
@@ -10053,8 +10091,9 @@ export async function checkCutBaseAncestry(
 ): Promise<CutBaseAncestryCheck> {
   if (!cutBaseSha) return { ok: true, unknown: true };
   try {
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": cutBaseSha/targetTip are always recorded/resolved shas.
     const out = (await withTimeout(
-      git.raw(["merge-base", cutBaseSha, targetTip]), timeoutMs, "git merge-base (cut-base ancestry check)",
+      git.raw(["merge-base", "--end-of-options", cutBaseSha, targetTip]), timeoutMs, "git merge-base (cut-base ancestry check)",
     )).trim();
     return out === cutBaseSha ? { ok: true } : { ok: false, cutBaseSha };
   } catch (e) {
@@ -10089,7 +10128,8 @@ export async function verifyCommitParentAndTree(
     const parentLines = header.filter((l) => l.startsWith("parent "));
     if (parentLines.length !== 1) return { ok: false, body }; // exactly one parent
     if (parentLines[0]!.slice("parent ".length).trim() !== expectedParent) return { ok: false, body }; // and it must be ours
-    const tree = (await withTimeout(git.raw(["rev-parse", `${sha}^{tree}`]), timeoutMs, "git rev-parse <sha>^{tree} (canonical, own-commit tree verify)")).trim();
+    // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+    const tree = (await withTimeout(git.raw(["rev-parse", "--verify", "--end-of-options", `${sha}^{tree}`]), timeoutMs, "git rev-parse <sha>^{tree} (canonical, own-commit tree verify)")).trim();
     return { ok: tree === expectedTree, body };
   } catch {
     return { ok: false };

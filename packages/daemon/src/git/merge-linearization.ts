@@ -27,9 +27,12 @@ export async function mergeCommitBlocksLinearization(
   for (const p of parents.slice(1)) {
     // Compare `merge-base` OUTPUT to the parent's full sha rather than using `--is-ancestor`: simple-git
     // resolves a non-zero exit with empty stderr as success, so `--is-ancestor`'s exit-1 "no" would read as "yes".
+    // @decision 868e0135 — `--end-of-options` after "merge-base" (defense-in-depth: p/mainRef are always
+    // resolved shas, unreachable today). MEASURED: `--independent`/`--octopus` in mainRef's slot silently
+    // return p's own sha (single-commit-trivial) — never `--is-ancestor`, which exits 129 there instead.
     let onMain: boolean;
     try {
-      onMain = (await withTimeout(git.raw(["merge-base", p, mainRef]), timeoutMs, "git merge-base (batch land, parent on main)")).trim() === p;
+      onMain = (await withTimeout(git.raw(["merge-base", "--end-of-options", p, mainRef]), timeoutMs, "git merge-base (batch land, parent on main)")).trim() === p;
     } catch {
       onMain = false; // no common ancestor (exit 1) or a real error — fail closed
     }

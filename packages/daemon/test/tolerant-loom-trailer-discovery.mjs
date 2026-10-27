@@ -834,7 +834,8 @@ await mapListFloorScenario(20);
       const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
       return {
         raw: (args) => {
-          if (args[0] === "merge-base" && args[1] === decoySha) {
+          // @decision 868e0135 — classifyAgainstLedger's merge-base argv now carries --end-of-options; match decoySha immediately after the marker (its real argv position).
+          if (args[0] === "merge-base" && args[args.indexOf("--end-of-options") + 1] === decoySha) {
             throw new Error("(TRANSIENT-FAULT) injected transient failure");
           }
           return real.raw(args);
@@ -905,7 +906,8 @@ await mapListFloorScenario(20);
       const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
       return {
         raw: (args) => {
-          if (args[0] === "merge-base" && args[1] === s2Tip) {
+          // @decision 868e0135 — same argv-shape note: match s2Tip immediately after the marker.
+          if (args[0] === "merge-base" && args[args.indexOf("--end-of-options") + 1] === s2Tip) {
             throw new Error("(ERROR-ABORT) injected ledger pre-ledger-boundary failure");
           }
           return real.raw(args);
@@ -1153,7 +1155,8 @@ await mapListFloorScenario(20);
       const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
       return {
         raw: (args) => {
-          if (args[0] === "merge-base" && args[1] === t2Tip) {
+          // @decision 868e0135 — same argv-shape note: match t2Tip immediately after the marker.
+          if (args[0] === "merge-base" && args[args.indexOf("--end-of-options") + 1] === t2Tip) {
             throw new Error("(TOLERANT-ERROR-ABORT) injected ledger pre-ledger-boundary failure");
           }
           return real.raw(args);

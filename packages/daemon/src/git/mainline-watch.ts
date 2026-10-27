@@ -279,7 +279,8 @@ async function branchAuthoredTip(run: (args: string[]) => Promise<string>, ref: 
 /** The first parent of `sha`, or `null` (root commit / unreadable). */
 export async function readFirstParent(repoPath: string, sha: string, timeoutMs: number): Promise<string | null> {
   try {
-    const out = (await withTimeout(canonicalGit(repoPath, timeoutMs).raw(["rev-parse", "--verify", "--quiet", `${sha}^1`]), timeoutMs, "git rev-parse")).trim();
+    // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+    const out = (await withTimeout(canonicalGit(repoPath, timeoutMs).raw(["rev-parse", "--verify", "--quiet", "--end-of-options", `${sha}^1`]), timeoutMs, "git rev-parse")).trim();
     return /^[0-9a-f]{40,64}$/.test(out) ? out : null;
   } catch { return null; }
 }
@@ -290,7 +291,8 @@ export async function readFirstParent(repoPath: string, sha: string, timeoutMs: 
  * {@link readMainlineFacts} route the same check through its deadline-bounded runner: ONE helper, no second copy.
  */
 export async function isAncestorCommit(repoPath: string, ancestor: string, descendant: string, timeoutMs: number, run?: (args: string[]) => Promise<string>): Promise<boolean> {
-  const args = ["merge-base", ancestor, descendant];
+  // @decision 868e0135 — `--end-of-options` right after "merge-base": this is the exact shape the round-2 CR found invisible to the round-1 guard (a literal array assigned to a local, never inlined at a `.raw(`/`spawn(` call site).
+  const args = ["merge-base", "--end-of-options", ancestor, descendant];
   const out = (await (run ? run(args) : withTimeout(canonicalGit(repoPath, timeoutMs).raw(args), timeoutMs, "git merge-base"))).trim();
   return out === ancestor;
 }
@@ -313,7 +315,8 @@ export async function readMainlineFacts(repoPath: string, watermarkSha: string, 
   const facts: MainlineFacts = { branch: head.branch, tip: head.tip, reflog: null, forward: true, untrailered: [], loomTipHits: [], truncated: false, watermarkMissing: false };
   // @decision 4fa36502 — both reads compare git's OUTPUT, never an exit status (simple-git resolves a non-zero exit with empty stderr as success, bc2240d7), and ANY error here (timeout, spawn
   // failure, deadline) propagates: the caller fails open with W untouched. An error must never be filed as "W missing" or "rewound" — that would store W and absorb the move.
-  const resolved = (await run(["rev-parse", "--verify", "--quiet", `${watermarkSha}^{commit}`])).trim();
+  // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+  const resolved = (await run(["rev-parse", "--verify", "--quiet", "--end-of-options", `${watermarkSha}^{commit}`])).trim();
   if (!/^[0-9a-f]{40,64}$/.test(resolved)) {
     // @decision 4fa36502 — empty output is NOT proof: simple-git resolves an EXTERNALLY killed child (no exit code, empty stderr) as success with empty stdout. "Missing" needs git's OWN answer: `cat-file -t` REJECTS with its not-found message
     // for an absent object (a killed child cannot say that); a `commit` answer means the empty rev-parse was a kill; anything else is a read error.
@@ -331,7 +334,8 @@ export async function readMainlineFacts(repoPath: string, watermarkSha: string, 
   if (rl.length > MAINLINE_RANGE_CAP && !(facts.reflog ?? []).some((e) => e.sha === watermarkSha)) { facts.truncated = true; return facts; }
   // @decision 4fa36502 — NO derived fact (forward, …) short-circuits the range read and the loom-tip scan: a divergence has a well-defined `W..tip`, and the loom-tip signal is the only one that sees a forged-message bypass. Only the cap/deadline paths skip it.
   // First-parent range with messages (trailers).
-  const log = await run(["log", "--first-parent", `--max-count=${MAINLINE_RANGE_CAP + 1}`, "--format=%x1e%H%x1f%B", `${watermarkSha}..${head.tip}`]);
+  // @decision 868e0135 — `--end-of-options` immediately before the range (already the last positional): round-2 CR retracted the compound-suffix exemption this relied on.
+  const log = await run(["log", "--first-parent", `--max-count=${MAINLINE_RANGE_CAP + 1}`, "--format=%x1e%H%x1f%B", "--end-of-options", `${watermarkSha}..${head.tip}`]);
   const commits = log.split("\x1e").filter((r) => r.trim() !== "");
   if (commits.length > MAINLINE_RANGE_CAP) { facts.truncated = true; return facts; }
   for (const c of commits) {
@@ -365,7 +369,8 @@ async function collectLoomTipHits(run: (args: string[]) => Promise<string>, wate
   if (inRangeRefs.length === 0) return [];
   if (inRangeRefs.length > MAINLINE_LOOM_TIP_ARGS_CAP) return null;
   // ONE call for every candidate tip's message, not one per tip.
-  const bodies = (await run(["log", "--no-walk=unsorted", "--format=%x1e%H%x1f%B", ...new Set(inRangeRefs.map((r) => r.sha))])).split("\x1e").filter((r) => r.trim() !== "");
+  // @decision 868e0135 — `--end-of-options` immediately before the spread of shas: MEASURED byte-identical for a well-formed spread, fail-loud for an option-shaped member.
+  const bodies = (await run(["log", "--no-walk=unsorted", "--format=%x1e%H%x1f%B", "--end-of-options", ...new Set(inRangeRefs.map((r) => r.sha))])).split("\x1e").filter((r) => r.trim() !== "");
   const trailered = new Set(bodies.filter((b) => parseLoomTrailerBlock(b.split("\x1f")[1] ?? "")).map((b) => (b.split("\x1f")[0] ?? "").trim()));
   // The cap applies to what is LEFT after trailered (Loom-landed) tips are dropped — those need no reflog check.
   const candidates = inRangeRefs.filter((r) => !trailered.has(r.sha));
@@ -381,7 +386,8 @@ async function authoredTipHits(run: (args: string[]) => Promise<string>, candida
   if (candidates.length === 0) return []; // `git log -g` with no ref would walk HEAD's reflog
   const hits: string[] = [];
   const cap = MAINLINE_RANGE_CAP * candidates.length;
-  const lines = (await run(["log", "-g", `--max-count=${cap}`, "--format=%H%x1f%gs%x1f%gD", ...candidates.map((c) => c.ref)])).split("\n").filter(Boolean);
+  // @decision 868e0135 — `--end-of-options` immediately before the spread of refs: MEASURED byte-identical for a well-formed spread, fail-loud for an option-shaped member.
+  const lines = (await run(["log", "-g", `--max-count=${cap}`, "--format=%H%x1f%gs%x1f%gD", "--end-of-options", ...candidates.map((c) => c.ref)])).split("\n").filter(Boolean);
   if (lines.length >= cap) {
     for (const r of candidates) { if (await branchAuthoredTip(run, r.ref, r.sha)) hits.push(r.sha); }
     return hits;

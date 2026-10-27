@@ -293,8 +293,9 @@ async function landedTreeDivergesFromExpected(
   const expectedTree = mergeTreeOut[0]!;
   let landedTree: string;
   try {
+    // @decision 868e0135 — `--end-of-options` before landedSha: a resolved sha, but round-2 CR retracted the compound-suffix exemption this relied on.
     landedTree = (await withTimeout(
-      git.raw(["rev-parse", `${landedSha}^{tree}`]), timeoutMs, "git rev-parse tree (batch land, content-check)",
+      git.raw(["rev-parse", "--verify", "--end-of-options", `${landedSha}^{tree}`]), timeoutMs, "git rev-parse tree (batch land, content-check)",
     )).trim();
   } catch (e) {
     return { error: (e as Error).message };
@@ -375,7 +376,8 @@ async function landBranchCommitsIndividually(
     const resolved = pinnedTip ?? (await resolveBranchTip(batchWorktreePath, branch, deps));
     if (!resolved) return { ok: false, reason: `failed to resolve branch tip: ${branch} does not resolve to an exact refs/heads/${branch}` };
     branchTip = (await withTimeout(
-      git.raw(["rev-parse", "--verify", `${resolved}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
+      // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
+      git.raw(["rev-parse", "--verify", "--end-of-options", `${resolved}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
     )).trim();
   } catch (e) {
     // This read can carry a CanonicalGitRefusal (e.g. a commondir redirect) — route through
@@ -435,8 +437,10 @@ async function landBranchCommitsIndividually(
   // the same worker-writable-ref race this card's other fixes close, now for the merge-base/noop leg.
   let mergeBase: string;
   try {
+    // @decision 868e0135 — `--end-of-options` right after "merge-base": both are resolved shas, but an
+    // option-shaped value would otherwise re-enter merge-base's own option parser.
     mergeBase = (await withTimeout(
-      git.raw(["merge-base", batchHeadBefore, branchTip]), timeoutMs, "git merge-base (batch land)",
+      git.raw(["merge-base", "--end-of-options", batchHeadBefore, branchTip]), timeoutMs, "git merge-base (batch land)",
     )).trim();
   } catch (e) {
     const mergeBaseFailure = describeGitFailure(e);
@@ -709,10 +713,13 @@ async function landBranchCommitsIndividually(
     let authorEmail: string;
     let authorDate: string;
     try {
-      originalMessage = (await withTimeout(git.raw(["log", "-1", "--format=%B", sha]), timeoutMs, "git log -1 (batch land, original message)")).replace(/\s+$/, "");
-      authorName = (await withTimeout(git.raw(["log", "-1", "--format=%an", sha]), timeoutMs, "git log -1 (batch land, author name)")).trim();
-      authorEmail = (await withTimeout(git.raw(["log", "-1", "--format=%ae", sha]), timeoutMs, "git log -1 (batch land, author email)")).trim();
-      authorDate = (await withTimeout(git.raw(["log", "-1", "--format=%aI", sha]), timeoutMs, "git log -1 (batch land, author date)")).trim();
+      // @decision 868e0135 — `--end-of-options` before `sha` on all four reads: MEASURED, `git log -1
+      // --format=%B --all` silently succeeds and returns a DIFFERENT commit's message instead of erroring
+      // when `sha` is option-shaped.
+      originalMessage = (await withTimeout(git.raw(["log", "-1", "--format=%B", "--end-of-options", sha]), timeoutMs, "git log -1 (batch land, original message)")).replace(/\s+$/, "");
+      authorName = (await withTimeout(git.raw(["log", "-1", "--format=%an", "--end-of-options", sha]), timeoutMs, "git log -1 (batch land, author name)")).trim();
+      authorEmail = (await withTimeout(git.raw(["log", "-1", "--format=%ae", "--end-of-options", sha]), timeoutMs, "git log -1 (batch land, author email)")).trim();
+      authorDate = (await withTimeout(git.raw(["log", "-1", "--format=%aI", "--end-of-options", sha]), timeoutMs, "git log -1 (batch land, author date)")).trim();
     } catch (e) {
       await rollback();
       return fail({ ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${(e as Error).message}` });
@@ -881,10 +888,12 @@ async function landBranchCommitsIndividually(
       try {
         const headAfterAmendFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-amend-failure verify)")).trim();
         if (headAfterAmendFailure !== currentHead) {
+          // @decision 868e0135 — `--end-of-options` before each `^`-suffixed sha: round-2 CR retracted the compound-suffix exemption this relied on.
           const [expectedParent, actualParent, body] = await Promise.all([
-            withTimeout(git.raw(["rev-parse", `${currentHead}^`]), timeoutMs, "git rev-parse (batch land, post-amend-failure verify parent)"),
-            withTimeout(git.raw(["rev-parse", `${headAfterAmendFailure}^`]), timeoutMs, "git rev-parse (batch land, post-amend-failure verify parent)"),
-            withTimeout(git.raw(["log", "-1", "--format=%B", headAfterAmendFailure]), timeoutMs, "git log -1 (batch land, post-amend-failure verify)"),
+            withTimeout(git.raw(["rev-parse", "--verify", "--end-of-options", `${currentHead}^`]), timeoutMs, "git rev-parse (batch land, post-amend-failure verify parent)"),
+            withTimeout(git.raw(["rev-parse", "--verify", "--end-of-options", `${headAfterAmendFailure}^`]), timeoutMs, "git rev-parse (batch land, post-amend-failure verify parent)"),
+            // @decision 868e0135 — `--end-of-options` before `headAfterAmendFailure` (same measured reason as the original-message reads above).
+            withTimeout(git.raw(["log", "-1", "--format=%B", "--end-of-options", headAfterAmendFailure]), timeoutMs, "git log -1 (batch land, post-amend-failure verify)"),
           ]);
           amendLanded = expectedParent.trim() === actualParent.trim() && parseLoomTrailerBlock(body)?.branch === branch;
           if (amendLanded) currentHead = headAfterAmendFailure;
@@ -1011,8 +1020,9 @@ async function earliestAuthorDateMs(
   }
   let mergeBase: string;
   try {
+    // @decision 868e0135 — `--end-of-options` right after "merge-base" (same reason as batch land's own merge-base call above).
     mergeBase = (await withTimeout(
-      git.raw(["merge-base", baseSha, branchTip]), timeoutMs, "git merge-base (batch sort)",
+      git.raw(["merge-base", "--end-of-options", baseSha, branchTip]), timeoutMs, "git merge-base (batch sort)",
     )).trim();
   } catch {
     return undefined;
@@ -1020,8 +1030,10 @@ async function earliestAuthorDateMs(
   if (mergeBase === branchTip) return undefined; // nothing new to land — sort position is immaterial
   let out: string;
   try {
+    // @decision 868e0135 — `--format` moved BEFORE the range, with `--end-of-options` immediately before
+    // it (now last): MEASURED, the range-first order swallows a later `--end-of-options`-guarded flag.
     out = await withTimeout(
-      git.raw(["log", `${mergeBase}..${branchTip}`, "--format=%aI"]), timeoutMs, "git log (batch sort, author dates)",
+      git.raw(["log", "--format=%aI", "--end-of-options", `${mergeBase}..${branchTip}`]), timeoutMs, "git log (batch sort, author dates)",
     );
   } catch {
     return undefined;
