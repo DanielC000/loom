@@ -16,6 +16,26 @@ import "./_guard.mjs";
 // positional (not a combined range) and for the one bare ref `rev-list ... --not <ref>` protects — `--not`
 // must stay BEFORE the marker, which goes right after `--not`, never before the range.
 //
+// **POSITION, not mere presence (card 5c23ade1, read the decision record before trusting a shortened
+// restatement):** `--end-of-options` ends ALL subsequent option/pseudo-opt recognition from where it sits,
+// permanently, for the rest of argv — so a call is protected only when the marker sits BEFORE every risky
+// positional it's meant to cover, never merely somewhere in the array. The ONE exception is `rev-list`'s
+// own `--not <ref>`: a risky element directly after `--not` is protected by the marker placed RIGHT AFTER
+// `--not` (between `--not` and that ref) — a risky element BEFORE `--not` (the range/base argument region)
+// needs no position-based protection at all, per the carve-out above. Placing the marker BEFORE `--not`
+// fails the WHOLE call outright, regardless of what it would otherwise protect — it swallows `--not`'s own
+// sign-flip semantics (card 4b559feb measured a corrupted, wrong result, not merely a missed protection).
+//
+// **Module-level const-array spread resolution (card 5c23ade1):** a `const NAME = [<string literals>] (as
+// const)?;` declared at the TOP LEVEL of the scanned file and later spread as `[...NAME, x]` is resolved
+// inline for classification — its own literal elements (including a subcommand name hidden inside it) are
+// read as if they appeared directly in the array, closing the blind spot where such a spread made the
+// WHOLE call invisible to this guard (the subcommand skip never found a literal to match, since the
+// subcommand name lived inside the spread, not as a direct array element — e.g. `NAME_ONLY_DIFF_FLAGS` in
+// `worktrees.ts`). Only a spread whose target is itself a plain, ALL-literal array is resolved this way; an
+// unresolvable spread (anything else, including the dedicated `CANONICAL_GIT_CONFIG_ARGS` safe-spread
+// handled below) is left exactly as before.
+//
 // SCOPE: `packages/daemon/src/git/**/*.ts` text only (not the whole `src/`, per the card — these
 // subcommands' bare-ref-positional hazard is a git/** concern). `"grep"` is DELIBERATELY NOT monitored —
 // MEASURED (868e0135's own investigation): `--end-of-options` is not honored by `git grep`'s revision
@@ -33,6 +53,10 @@ import "./_guard.mjs";
 // @decision a4145c7a — never reintroduce hand-rolled bracket/quote/comment tracking, or the backward-char
 // array-literal-vs-subscript heuristic, in this guard: a real parser has no desync state to corrupt and
 // distinguishes element access from an array literal structurally, with no known exception.
+//
+// @decision 5c23ade1 — never read `--end-of-options` as protecting a call merely by being present anywhere;
+// it must sit before every risky positional it covers (the `--not`-adjacent exception above aside), and a
+// marker before `--not` fails the whole call outright.
 //
 // MATCHING RULE: parse the file with `ts.createSourceFile` (parent nodes set) and walk every
 // `ArrayLiteralExpression` node, whatever its position or callee — a nested array literal (inside another
@@ -67,8 +91,9 @@ import "./_guard.mjs";
 //     directly, anything chained after it (`` `x${v}`.slice(1) ``) is automatically NOT this shape — its
 //     node kind is a `CallExpression`/`PropertyAccessExpression`, never a `TemplateExpression` — so there is
 //     no separate "nothing chained after it" check left to write; the AST shape IS the check.
-//   - PROTECTED, no allowlist entry needed: the array also contains the literal string element
-//     `--end-of-options` (and, for `rev-parse` specifically, also `--verify`) anywhere in the array.
+//   - PROTECTED, no allowlist entry needed: `--end-of-options` sits BEFORE every risky positional it must
+//     cover (and, for `rev-parse`, `--verify` is ALSO present anywhere) — see card 5c23ade1's own position
+//     rule stated above for the `rev-list`/`--not` exception and its failure mode.
 //   - Otherwise FLAGGED: must match a judgment-curated `[file, subcommand, exact count, reason]` ALLOWLIST
 //     entry (occurrence-counted, same discipline as trailer-derived-value-git-argv-guard.mjs) — a new,
 //     unlisted occurrence fails loud, and so does a stale count in EITHER direction.
@@ -77,9 +102,10 @@ import "./_guard.mjs";
 // statements/calls, or recognizing a callee this guard was never told about; none is a parser limitation,
 // each is a genuine decision not to attempt data-flow analysis):
 //   - an argv array built by `.push`/spread assembly across SEVERAL statements, never one array literal;
-//   - a monitored subcommand named only inside a SPREAD CONSTANT defined elsewhere
-//     (`const LOG = ["log", ...]; git.raw([...LOG, sha])` — the array's own elements are just a spread and
-//     a bare variable, neither a literal subcommand name);
+//   - a monitored subcommand named only inside a spread constant declared OUTSIDE the scanned file (an
+//     import, or a non-literal initializer such as `.flatMap(...)`) — only a plain, ALL-literal `const`
+//     array declared at the TOP LEVEL of the SAME file is resolved (card 5c23ade1, see this file's own
+//     header); a cross-file or computed one stays exactly as unseen as before that card;
 //   - a subcommand held in a VARIABLE instead of a literal (`const MB = "merge-base"; git.raw([MB, a,
 //     b])` — `MB` is an `Identifier` node, not a `StringLiteral`, so classification never recognizes it);
 //   - a risky positional arriving via a CHAINED CALL on an otherwise-fully-literal array
@@ -141,26 +167,84 @@ function isQualifiedTemplate(el) {
   return true;
 }
 
-/** Index of the first element after skipping a leading run of: any spread, a `"-c", "<k>=<v>"` pair, any
- *  OTHER {@link GLOBAL_OPTS_WITH_VALUE} option (consuming its value), or a bare `-`-leading flag with no
- *  value — mirrors `bounded.ts`'s `walkGitGlobalPrefix` (see this file's header for the full rule). A `-c`
- *  not followed by a valid `"<k>=<v>"` literal pair halts the skip entirely (does not fall through to the
- *  generic value-option/bare-flag branches) — same as the pre-a4145c7a behavior, so a malformed `-c` is
- *  never silently reinterpreted as something else. */
-function skipGlobalConfigPairs(elements) {
+/** Card 5c23ade1 — resolves every TOP-LEVEL `const NAME = [<string literals>] (as const)?;` declared
+ *  directly in `sourceFile.statements` (never nested in a function/block — "module-level" per this card's
+ *  own DoD) into a `Map<name, string[]>`. Deliberately conservative: a declaration whose array contains ANY
+ *  non-string-literal element (a computed value, a nested spread, a variable) is NOT added at all — this
+ *  guard must never guess at a value it can't see in the text. `expr as const` is unwrapped via
+ *  `ts.isAsExpression` before checking for the array literal underneath. */
+function resolveModuleConstStringArrays(sourceFile) {
+  const map = new Map();
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isVariableStatement(stmt)) continue;
+    if (!(stmt.declarationList.flags & ts.NodeFlags.Const)) continue;
+    for (const decl of stmt.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+      let init = decl.initializer;
+      if (ts.isAsExpression(init)) init = init.expression;
+      if (!ts.isArrayLiteralExpression(init)) continue;
+      const texts = [];
+      let allLiteral = true;
+      for (const el of init.elements) {
+        if (ts.isStringLiteral(el)) texts.push(el.text);
+        else { allLiteral = false; break; }
+      }
+      if (allLiteral) map.set(decl.name.text, texts);
+    }
+  }
+  return map;
+}
+
+/** Card 5c23ade1 — converts one array literal's raw `ts.Expression[]` elements into a uniform
+ *  `{ text?: string, node?: ts.Expression }[]` so classification can see THROUGH a resolved module-level
+ *  const-array spread (see {@link resolveModuleConstStringArrays}) exactly as if its own literal elements
+ *  had appeared inline. A real string literal carries BOTH `text` and `node`; an expanded spread element
+ *  carries ONLY `text` (no original node to point at); anything else (an Identifier, a template, an
+ *  unresolved/unknown spread, the dedicated known-safe spread) carries only `node`, unchanged from before
+ *  this card. The known-safe spread is checked FIRST and kept as a single opaque item either way — it must
+ *  never be expanded even if it happened to also be resolvable. */
+function toItems(elements, constArrays) {
+  const items = [];
+  for (const el of elements) {
+    if (ts.isSpreadElement(el)) {
+      if (isKnownSafeSpread(el)) { items.push({ node: el }); continue; }
+      if (ts.isIdentifier(el.expression)) {
+        const resolved = constArrays.get(el.expression.text);
+        if (resolved) { for (const text of resolved) items.push({ text }); continue; }
+      }
+      items.push({ node: el });
+      continue;
+    }
+    if (ts.isStringLiteral(el)) { items.push({ text: el.text, node: el }); continue; }
+    items.push({ node: el });
+  }
+  return items;
+}
+
+/** Index of the first item after skipping a leading run of: any unresolved spread, a `"-c", "<k>=<v>"`
+ *  pair, any OTHER {@link GLOBAL_OPTS_WITH_VALUE} option (consuming its value), or a bare `-`-leading flag
+ *  with no value — mirrors `bounded.ts`'s `walkGitGlobalPrefix` (see this file's header for the full rule).
+ *  Operates on {@link toItems}' uniform item shape, not raw AST nodes, so a resolved const-array spread's
+ *  own expanded literal elements participate exactly like a real literal would. A `-c` not followed by a
+ *  valid `"<k>=<v>"` literal pair halts the skip entirely (does not fall through to the generic
+ *  value-option/bare-flag branches) — same as the pre-a4145c7a behavior, so a malformed `-c` is never
+ *  silently reinterpreted as something else. */
+function skipGlobalConfigPairs(items) {
   let i = 0;
-  while (i < elements.length) {
-    const el = elements[i];
-    if (ts.isSpreadElement(el)) { i += 1; continue; }
-    if (!ts.isStringLiteral(el)) break;
-    const text = el.text;
+  while (i < items.length) {
+    const item = items[i];
+    if (item.text === undefined) {
+      if (item.node && ts.isSpreadElement(item.node)) { i += 1; continue; }
+      break;
+    }
+    const text = item.text;
     if (text === "-c") {
-      const kv = elements[i + 1];
-      if (kv && ts.isStringLiteral(kv) && kv.text.includes("=")) { i += 2; continue; }
+      const kv = items[i + 1];
+      if (kv && kv.text !== undefined && kv.text.includes("=")) { i += 2; continue; }
       break;
     }
     if (GLOBAL_OPTS_WITH_VALUE.has(text)) {
-      if (i + 1 < elements.length) { i += 2; continue; }
+      if (i + 1 < items.length) { i += 2; continue; }
       break; // a value-taking option with nothing after it — malformed; stop rather than guess
     }
     if (text.startsWith("-")) { i += 1; continue; } // a bare flag with no value (e.g. --no-pager)
@@ -169,37 +253,120 @@ function skipGlobalConfigPairs(elements) {
   return i;
 }
 
-/** Classifies one array literal's elements (a plain JS array of `ts.Expression` nodes). `impliedSubcommand`
- *  (set only for a `.revparse([...])` call — see this file's header) bypasses the leading-literal skip and
- *  subcommand lookup entirely, since such a call's array carries no literal subcommand token at all.
- *  Returns `null` when the array doesn't name a monitored subcommand, or has no risky element at all (skip
- *  entirely — no flag, no allowlist noise). Otherwise `{ subcommand, protectedCall, risky }` —
- *  `protectedCall` is true when `--end-of-options` (and, for rev-parse, also `--verify`) is present
- *  anywhere in the array; `risky` lists the elements that are neither a plain string literal, the
- *  known-safe spread, nor a qualified literal-prefixed template. */
-function classifyCall(elements, impliedSubcommand) {
+/** Card 5c23ade1 — true for a TemplateExpression whose raw literal HEAD (not cooked) starts with `-`
+ *  (e.g. `` `--max-count=${n}` ``): this element is UNCONDITIONALLY read by git as the option it's written
+ *  to look like, regardless of where `--end-of-options` sits — there is no "re-interpretation" risk for an
+ *  element that was always, by its own hardcoded spelling, meant and read as a flag. Distinct from (and
+ *  narrower than) {@link isQualifiedTemplate}'s exemption, which covers the OPPOSITE prefix shape (a
+ *  literal non-`-` prefix proving the element is a REF, never a flag) — a `-`-leading prefix deliberately
+ *  stays OUT of that exemption (so a call with no `--end-of-options` ANYWHERE still flags it, matching this
+ *  file's own existing tests), but it needs no marker-POSITION protection once some marker exists
+ *  somewhere in the call (see {@link isProtectedPosition}). */
+function isSelfEvidentFlagTemplate(node) {
+  return !!node && ts.isTemplateExpression(node) && (node.head.rawText ?? "").startsWith("-");
+}
+
+/** Card 5c23ade1 — per-subcommand flags, beyond the leading-global-option {@link GLOBAL_OPTS_WITH_VALUE}
+ *  set, known to unconditionally consume the NEXT array element as their own value — git's CLI parser
+ *  binds that next token to the flag directly and never re-examines it as an independent option or ref, so
+ *  a risky element immediately following one of these needs no marker-position protection either (same
+ *  underlying mechanism as {@link isSelfEvidentFlagTemplate}, just triggered by the PRECEDING literal
+ *  instead of the element's own shape). Judgment-curated and deliberately keyed BY SUBCOMMAND, same posture
+ *  as GLOBAL_OPTS_WITH_VALUE/ALLOWLIST — `log`'s own `-n <count>` is the one real corpus need as of this
+ *  card (`worktrees.ts`'s `listMergedCommitsLookup`-family call); add the next one here, by hand, when it
+ *  arises, scoped to the subcommand it actually belongs to. */
+const KNOWN_VALUE_FLAGS_BY_SUBCOMMAND = new Map([["log", new Set(["-n"])]]);
+
+/** Card 5c23ade1 — true when the item immediately BEFORE `idx` is a KNOWN value-consuming flag: either a
+ *  LEADING {@link GLOBAL_OPTS_WITH_VALUE} member (e.g. `--git-dir <path>`, consumed the same way during
+ *  {@link skipGlobalConfigPairs}'s own subcommand search) or a {@link KNOWN_VALUE_FLAGS_BY_SUBCOMMAND}
+ *  member for THIS `subcommand`. Same underlying mechanism as {@link isSelfEvidentFlagTemplate}: the value
+ *  is bound to the flag directly by git's own parser and never independently re-examined, so its position
+ *  relative to any `--end-of-options` marker is immaterial. */
+function isKnownFlagValue(idx, items, subcommand) {
+  if (idx === 0) return false;
+  const prevText = items[idx - 1].text;
+  if (prevText === undefined) return false;
+  if (GLOBAL_OPTS_WITH_VALUE.has(prevText)) return true;
+  const set = KNOWN_VALUE_FLAGS_BY_SUBCOMMAND.get(subcommand);
+  return !!set && set.has(prevText);
+}
+
+/** Card 5c23ade1 — true when the risky item at `idx` is protected. Two SHAPE-level exemptions are checked
+ *  FIRST — {@link isSelfEvidentFlagTemplate} and {@link isKnownFlagValue} — each gated on `markerIdx !==
+ *  -1` (SOME `--end-of-options` must exist somewhere in the call; a call with NONE at all stays
+ *  conservatively flagged regardless of shape, matching this file's own existing tests), since neither
+ *  exemption depends on the marker's actual POSITION — both describe an element that was always going to
+ *  be read as a flag (or a flag's own value), never re-examined as an independent ref, however far the
+ *  marker sits from it. Otherwise the general POSITION rule: `--end-of-options` ends ALL subsequent
+ *  option/pseudo-opt parsing from where it sits, so protection requires the marker to be a real position
+ *  strictly BEFORE `idx` — except `rev-list`'s own `--not <ref>` carve-out (`notIdx !== -1`): a risky item
+ *  BEFORE `--not` needs no marker at all (card 4b559feb measured that region immune regardless of
+ *  placement), while one AFTER `--not` is protected only when the marker sits in the one exact slot right
+ *  after it (`markerIdx === notIdx + 1`). The caller has ALREADY failed the whole call, before this
+ *  function ever runs, when the marker sits before `--not` itself (it swallows `--not`'s own sign-flip
+ *  semantics). */
+function isProtectedPosition(idx, items, subcommand, markerIdx, notIdx) {
+  if (markerIdx !== -1 && (isSelfEvidentFlagTemplate(items[idx].node) || isKnownFlagValue(idx, items, subcommand))) {
+    return true;
+  }
+  if (notIdx !== -1) {
+    if (idx < notIdx) return true;
+    return markerIdx === notIdx + 1;
+  }
+  return markerIdx !== -1 && markerIdx < idx;
+}
+
+/** Classifies one array literal's already-expanded `items` (see {@link toItems}, which is what resolves a
+ *  module-level const-array spread before this function ever runs). `impliedSubcommand` (set only for a
+ *  `.revparse([...])` call — see this file's header) bypasses the leading-literal skip and subcommand
+ *  lookup entirely, since such a call's array carries no literal subcommand token at all. Returns `null`
+ *  when the array doesn't name a monitored subcommand, or has no risky element at all (skip entirely — no
+ *  flag, no allowlist noise). Otherwise `{ subcommand, protectedCall, risky }` — `risky` lists the elements
+ *  that are neither a plain string literal (real or resolved-via-spread), the known-safe spread, nor a
+ *  qualified literal-prefixed template. `protectedCall` is computed by POSITION, not mere presence (card
+ *  5c23ade1, see this file's header and {@link isProtectedPosition}): for `rev-parse`, `--verify` must be
+ *  present anywhere AND `--end-of-options` must sit before every risky item; for `rev-list` with a `--not`
+ *  present, a marker found BEFORE `--not` fails the whole call outright (it breaks `--not`'s own sign-flip
+ *  semantics) and otherwise every risky item must satisfy {@link isProtectedPosition}'s `--not`-aware rule;
+ *  every other subcommand (including `rev-list` with no `--not`) uses the plain "marker before every risky
+ *  item" rule. */
+function classifyCall(items, impliedSubcommand) {
   let subcommand;
   if (impliedSubcommand) {
     subcommand = impliedSubcommand;
   } else {
-    const firstIdx = skipGlobalConfigPairs(elements);
-    const first = elements[firstIdx];
-    if (!first || !ts.isStringLiteral(first)) return null;
+    const firstIdx = skipGlobalConfigPairs(items);
+    const first = items[firstIdx];
+    if (!first || first.text === undefined) return null;
     const match = MONITORED_SUBCOMMANDS.find((s) => first.text === s);
     if (!match) return null;
     subcommand = match;
   }
-  const literalNames = new Set(elements.filter(ts.isStringLiteral).map((e) => e.text));
-  const risky = elements.filter((e) => {
-    if (ts.isStringLiteral(e)) return false;
-    if (isKnownSafeSpread(e)) return false;
-    if (isQualifiedTemplate(e)) return false;
-    return true;
+  const literalNames = new Set(items.filter((it) => it.text !== undefined).map((it) => it.text));
+  const riskyIdxs = [];
+  const risky = [];
+  items.forEach((it, idx) => {
+    if (it.text !== undefined) return; // a real literal, or a resolved-via-spread one — never risky
+    if (it.node && isKnownSafeSpread(it.node)) return;
+    if (it.node && isQualifiedTemplate(it.node)) return;
+    riskyIdxs.push(idx);
+    risky.push(it.node ?? it);
   });
-  if (risky.length === 0) return null; // every non-literal element is exempt — nothing to flag
-  const hasEndOfOptions = literalNames.has("--end-of-options");
+  if (riskyIdxs.length === 0) return null; // every non-literal element is exempt — nothing to flag
+  const markerIdx = items.findIndex((it) => it.text === "--end-of-options");
   const hasVerify = literalNames.has("--verify");
-  const protectedCall = subcommand === "rev-parse" ? (hasEndOfOptions && hasVerify) : hasEndOfOptions;
+  let protectedCall;
+  if (subcommand === "rev-parse") {
+    protectedCall = hasVerify && riskyIdxs.every((idx) => isProtectedPosition(idx, items, subcommand, markerIdx, -1));
+  } else {
+    const notIdx = subcommand === "rev-list" ? items.findIndex((it) => it.text === "--not") : -1;
+    if (notIdx !== -1 && markerIdx !== -1 && markerIdx < notIdx) {
+      protectedCall = false; // marker placed before --not swallows it outright — never partially protected
+    } else {
+      protectedCall = riskyIdxs.every((idx) => isProtectedPosition(idx, items, subcommand, markerIdx, notIdx));
+    }
+  }
   return { subcommand, protectedCall, risky };
 }
 
@@ -246,11 +413,13 @@ function isRevparseArgArray(node) {
  *  risky, unprotected) array found — see this file's header MATCHING RULE for the full classification. */
 export function scanText(text, fileName = "scan.ts") {
   const sourceFile = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, /* setParentNodes */ true);
+  const constArrays = resolveModuleConstStringArrays(sourceFile);
   const hits = [];
   const visit = (node) => {
     if (ts.isArrayLiteralExpression(node)) {
       const impliedSubcommand = isRevparseArgArray(node) ? "rev-parse" : undefined;
-      const verdict = classifyCall(Array.from(node.elements), impliedSubcommand);
+      const items = toItems(Array.from(node.elements), constArrays);
+      const verdict = classifyCall(items, impliedSubcommand);
       if (verdict && !verdict.protectedCall) {
         const raw = node.getText(sourceFile);
         hits.push({ ...verdict, snippet: raw.replace(/\s+/g, " ").slice(0, 160) });
@@ -435,6 +604,76 @@ export function scanText(text, fileName = "scan.ts") {
   check("(C) 4b559feb NEGATIVE CONTROL: an unrelated subcommand sharing rev-list's own prefix " +
     "(\"rev-list-foo\") is never flagged",
     scanText(`git.raw(["rev-list-foo", someVar]);`).length === 0);
+
+  // @decision 5c23ade1 — POSITION, not mere presence: the four controls this card's own DoD names.
+  check("(C) 5c23ade1 RED: the marker placed AFTER the risky positional no longer protects it (the old " +
+    "presence-anywhere check used to pass this)",
+    scanText(`git.raw(["rev-list", "--count", someVar, "--end-of-options"]);`).some((h) => h.subcommand === "rev-list" && !h.protectedCall));
+  check("(C) 5c23ade1 RED: the SAME shape for a non-rev-list subcommand (merge-base) is also caught",
+    scanText(`git.raw(["merge-base", someVar, "HEAD", "--end-of-options"]);`).some((h) => h.subcommand === "merge-base" && !h.protectedCall));
+  check("(C) 5c23ade1 GREEN: the correct plain form — marker BEFORE the risky positional — still protects",
+    scanText(`git.raw(["merge-base", "--end-of-options", someVar, "HEAD"]);`).length === 0);
+  check("(C) 5c23ade1 RED: the marker placed BEFORE `--not` fails the whole call outright — it swallows " +
+    "--not's own sign-flip semantics (card 4b559feb measured a corrupted result, not merely a missed " +
+    "protection) — even though it technically precedes the earlier range positional too",
+    scanText(`git.raw(["rev-list", "--merges", \`\${base}..\${tip}\`, "--end-of-options", "--not", main]);`).some((h) => h.subcommand === "rev-list" && !h.protectedCall));
+  check("(C) 5c23ade1 GREEN: the correct --not form — marker right AFTER --not — stays protected " +
+    "(restated from the 4b559feb controls above, naming this card's own DoD item explicitly)",
+    scanText(`git.raw(["rev-list", "--merges", \`\${base}..\${tip}\`, "--not", "--end-of-options", main]);`).length === 0);
+  check("(C) 5c23ade1: a risky element with NO --not at all is unaffected by the --not-aware branch " +
+    "(no --not present, so the plain position rule alone decides) — marker after it stays flagged",
+    scanText(`git.raw(["rev-list", "--count", someVar, "--end-of-options", "HEAD"]);`).some((h) => h.subcommand === "rev-list" && !h.protectedCall));
+
+  // @decision 5c23ade1 — module-level const-array spread resolution.
+  check("(C) 5c23ade1 RED: a subcommand named only inside a module-level const spread, with a risky " +
+    "positional and no marker, is now VISIBLE and flagged (previously invisible: the scanner never found " +
+    "a literal subcommand to classify against at all)",
+    scanText(`const TEST_DIFF_FLAGS = ["diff", "--name-only"] as const;\ngit.raw([...TEST_DIFF_FLAGS, someVar]);`)
+      .some((h) => h.subcommand === "diff" && !h.protectedCall));
+  check("(C) 5c23ade1 GREEN: the SAME spread, with the marker correctly placed before the risky " +
+    "positional, is protected",
+    scanText(`const TEST_DIFF_FLAGS = ["diff", "--name-only"] as const;\ngit.raw([...TEST_DIFF_FLAGS, "--end-of-options", someVar]);`).length === 0);
+  check("(C) 5c23ade1 GREEN: a spread carrying a leading global-option pair (mirrors the real " +
+    "NAME_ONLY_DIFF_FLAGS corpus shape) still resolves the subcommand and protects correctly",
+    scanText(`const TEST_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames"] as const;\n` +
+      `git.raw([...TEST_FLAGS, "--end-of-options", \`\${base}..\${ref}\`]);`).length === 0);
+  check("(C) 5c23ade1 RED: the SAME leading-global-option spread shape with NO marker is flagged",
+    scanText(`const TEST_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames"] as const;\n` +
+      `git.raw([...TEST_FLAGS, \`\${base}..\${ref}\`]);`).some((h) => h.subcommand === "diff" && !h.protectedCall));
+  check("(C) 5c23ade1: a spread whose target array has ALL-literal elements and no risky positional at " +
+    "all is still correctly never flagged (nothing risky to protect)",
+    scanText(`const TEST_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames"] as const;\n` +
+      `git.raw([...TEST_FLAGS, "--cached", "HEAD"]);`).length === 0);
+  check("(C) 5c23ade1 NEGATIVE CONTROL: a spread of an UNRESOLVABLE identifier (no module-level const " +
+    "array declared for it in this text) is left exactly as before — unclassified, never flagged, since " +
+    "the scanner still can't find a literal subcommand",
+    scanText(`git.raw([...NOT_DECLARED_ANYWHERE, someVar]);`).length === 0);
+  check("(C) 5c23ade1 NEGATIVE CONTROL: a module-level const array containing a NON-literal element is " +
+    "NOT resolved (conservative — never guesses at a value it can't see in the text), so a spread of it " +
+    "stays exactly as unclassified as an unresolvable spread (the declaration's own literal is deliberately " +
+    "NOT a monitored subcommand, so it isn't independently flagged as its own, unrelated array-literal hit)",
+    scanText(`const MIXED = ["not-a-subcommand", someOtherVar];\ngit.raw([...MIXED, someVar]);`).length === 0);
+  check("(C) 5c23ade1: the dedicated known-safe `...CANONICAL_GIT_CONFIG_ARGS` spread is still handled by " +
+    "its own exemption, never by the new const-array resolution, even when (hypothetically) a same-named " +
+    "const WOULD otherwise resolve — it is never expanded",
+    scanText(`const CANONICAL_GIT_CONFIG_ARGS = ["-c", "core.useReplaceRefs=false"];\n` +
+      `spawn(resolveGitBinaryForSpawn(), [...CANONICAL_GIT_CONFIG_ARGS, "ls-tree", "-r", "--name-only", treeish]);`)
+      .some((h) => h.subcommand === "ls-tree" && !h.protectedCall));
+
+  // @decision 5c23ade1 — the two shape exemptions that keep the position rule from false-flagging a
+  // legitimate, already-safe flag (or a flag's own consumed value) sitting before the marker.
+  check("(C) 5c23ade1: a self-evident flag-shaped template (`--max-count=${n}`) before the marker needs " +
+    "no position protection of its own, as long as SOME marker exists in the call",
+    scanText("git.raw([\"log\", `--max-count=${n}`, \"--end-of-options\", `${a}..${b}`]);").length === 0);
+  check("(C) 5c23ade1: ...but with NO marker anywhere, the SAME self-evident flag template stays flagged " +
+    "(conservative: a call with zero protective infrastructure is never read as safe)",
+    scanText("git.raw([\"log\", `--output=${x}`]);").some((h) => h.subcommand === "log" && !h.protectedCall));
+  check("(C) 5c23ade1: a known value-consuming flag's own value (`log -n <count>`, the real " +
+    "MERGED_LOOKUP_SCAN_LIMIT corpus shape) needs no position protection either, once some marker exists",
+    scanText("git.raw([\"log\", `--format=${format}`, \"-n\", String(LIMIT), \"--end-of-options\", base]);").length === 0);
+  check("(C) 5c23ade1 NEGATIVE CONTROL: the SAME `-n`-value shape for a DIFFERENT subcommand (merge-base, " +
+    "which has no such flag) is NOT exempted — the exemption is deliberately keyed by subcommand",
+    scanText(`git.raw(["merge-base", "-n", someVar, "--end-of-options", "HEAD"]);`).some((h) => h.subcommand === "merge-base" && !h.protectedCall));
 }
 
 // ===================== (S) the real corpus ================================================================
