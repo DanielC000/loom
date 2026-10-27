@@ -31,6 +31,7 @@ import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { commitMessageArgvText } from "./_git-argv.mjs";
 
 // Card aac489a2: this file calls the REAL production createWorktree() (imported below), which resolves
 // WORKTREES_DIR as a SIBLING of LOOM_HOME (paths.ts) — a bare `node batch-merge-rollback-abort.mjs` run
@@ -109,8 +110,10 @@ try {
       const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
       return {
         raw: async (args) => {
+          // card 75199847: the message now rides `-F <tempfile>`, never `-m <text>` — read it via
+          // commitMessageArgvText (`_git-argv.mjs`) instead of scanning `args` for the literal text.
           if (Array.isArray(args) && args.includes("commit") && args.includes("--author") &&
-              args.some((x) => typeof x === "string" && x.startsWith("rc"))) {
+              commitMessageArgvText(args).startsWith("rc")) {
             throw new Error("simulated commit failure (test A)");
           }
           if (Array.isArray(args) && args.includes("reset") && args.includes("--hard")) {
@@ -237,8 +240,10 @@ try {
         const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
         return {
           raw: async (args) => {
+            // card 75199847: the message now rides `-F <tempfile>`, never `-m <text>` — read it via
+            // commitMessageArgvText (`_git-argv.mjs`) instead of scanning `args` for the literal text.
             if (Array.isArray(args) && args.includes("commit") && args.includes("--author") &&
-                args.some((x) => typeof x === "string" && x.startsWith("probe-c"))) {
+                commitMessageArgvText(args).startsWith("probe-c")) {
               throw new Error("simulated commit failure (test C)");
             }
             if (Array.isArray(args) && args.includes("reset") && args.includes("--hard")) {

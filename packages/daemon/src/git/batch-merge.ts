@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -317,6 +320,40 @@ async function landedTreeDivergesFromExpected(
     return { error: (e as Error).message };
   }
   return { paths: [...new Set(out.split("\n").map((s) => s.trim()).filter(Boolean))] };
+}
+
+/**
+ * Write `message` to a fresh, dedicated temp file for a single `git commit -F <path>` call — never the
+ * canonical repo's working tree or the batch worktree, both worker-writable trees a commit-message file
+ * has no business sitting in.
+ *
+ * @decision 75199847 — always `path.resolve(os.tmpdir())`, never bare `os.tmpdir()`: a relative
+ * `TEMP`/`TMP`/`TMPDIR` resolves differently for this process than for the git child reading `-F <path>`.
+ * Clean up the dir on a post-`mkdtemp` write failure, before re-throwing — never leave it orphaned.
+ */
+async function writeBatchCommitMessageFile(message: string): Promise<{ dir: string; file: string }> {
+  const dir = await fs.promises.mkdtemp(path.join(path.resolve(os.tmpdir()), "loom-batch-commit-"));
+  const file = path.join(dir, "message");
+  try {
+    await fs.promises.writeFile(file, message, "utf8");
+  } catch (e) {
+    cleanupBatchCommitMessageFile(dir);
+    throw e;
+  }
+  return { dir, file };
+}
+
+/**
+ * Best-effort, NON-BLOCKING cleanup of a {@link writeBatchCommitMessageFile} temp dir — fired without being
+ * awaited so it never blocks this function's own caller (a hot per-commit landing loop). Logged on
+ * failure, never thrown or retried — see this card's decision record for the accepted residual this
+ * leaves, and why `docs/decisions/bd9fc808-*.md`'s own guidance doesn't apply at this small a scale.
+ */
+function cleanupBatchCommitMessageFile(dir: string): void {
+  void fs.promises.rm(dir, { recursive: true, force: true }).catch((e: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] landBranchCommitsIndividually: failed to clean up commit-message temp file ${dir}: ${(e as Error).message}`);
+  });
 }
 
 /**
@@ -766,7 +803,18 @@ async function landBranchCommitsIndividually(
     // candidate on any non-ok kind — a worker message that collapses to nothing but blank lines would
     // otherwise promote the tip's trailer into the subject with no paragraph boundary left to recover it.
     const expectedPlainTrailers: Record<string, string> = isLast ? { "Loom-Worker-Branch": branch } : {};
-    const predictedCleanup = verifyLoomTrailersExactAndReadable(predictGitCleanupWhitespace(finalMessage), expectedPlainTrailers);
+    const predictedMessage = predictGitCleanupWhitespace(finalMessage);
+    // @decision 75199847 — do not rely on `verifyLoomTrailersExactAndReadable` alone to catch an EMPTY
+    // predicted message: with `{}` expected (the non-tip case) it reports `ok:true` vacuously, since
+    // nothing is expected — check emptiness here, first, instead.
+    if (predictedMessage === "") {
+      await rollback();
+      return fail({
+        ok: false,
+        reason: `${branch}: commit ${sha.slice(0, 7)}'s message would be empty after git's own commit cleanup (predicted) — git would abort this commit outright; dropping this branch rather than land into a generic failure; it will be retried via the ordinary solo merge path`,
+      });
+    }
+    const predictedCleanup = verifyLoomTrailersExactAndReadable(predictedMessage, expectedPlainTrailers);
     if (!predictedCleanup.ok) {
       await rollback();
       return fail({
@@ -774,42 +822,57 @@ async function landBranchCommitsIndividually(
         reason: `${branch}: commit ${sha.slice(0, 7)}'s message would land ${predictedCleanup.kind} after git's own commit cleanup (predicted) — dropping this branch rather than land an unreadable or forged trailer; it will be retried via the ordinary solo merge path`,
       });
     }
+    // @decision 75199847 — write via a temp file, never `-m`: a body over ~32K chars hits the Windows
+    // argv ceiling under `-m` (measured ENAMETOOLONG); `-F <file>` has no such limit. A write failure here
+    // drops the candidate (named reason below), same remedy as any other pre-commit drop in this function.
+    let messageFile: { dir: string; file: string };
+    try {
+      messageFile = await writeBatchCommitMessageFile(finalMessage);
+    } catch (e) {
+      await rollback();
+      return fail({ ok: false, reason: `${branch}: failed to write commit ${sha.slice(0, 7)}'s message to a temp file before landing — dropping this branch rather than fall back to passing it via argv; it will be retried via the ordinary solo merge path: ${(e as Error).message}` });
+    }
     // @decision 95940402 — capture the staged tree in this SAME pre-commit window as the parent pin
     // below (card c862f14c's load-bearing adjacency rule, ported from mergeBranchLocked): no git call may
     // land between this capture and the commit, or a later read can't prove it reflects what was staged.
     let preCommitTree: string;
+    // @decision 75199847 — declared above, OUTSIDE this try/finally: read again below, after it ends.
     try {
-      preCommitTree = (await withTimeout(git.raw(["write-tree"]), timeoutMs, "git write-tree (batch land, pre-commit tree capture)")).trim();
-    } catch (e) {
-      await rollback();
-      return fail({ ok: false, reason: `${branch}: failed to capture the staged tree before landing ${sha.slice(0, 7)}: ${(e as Error).message}` });
-    }
-    try {
-      // @decision 24c0bdba — kill-confirmed: an orphaned child here must never later land onto whatever
-      // this SAME worktree happens to be staging by the time it resumes (rollback, or the next candidate).
-      await killableCanonicalRaw(
-        batchWorktreePath, ["commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "--cleanup=whitespace", "-m", finalMessage],
-        timeoutMs, "git commit (batch land)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
-      );
-    } catch (e) {
-      // @decision bde5d1fe — already quarantined at the re-check (never THIS call's own kill) — refuse
-      // directly, same reasoning as the cherry-pick catch above.
-      if (e instanceof RepoQuarantinedError) {
-        return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — refused: canonical repo is quarantined: ${e.message}` };
+      try {
+        preCommitTree = (await withTimeout(git.raw(["write-tree"]), timeoutMs, "git write-tree (batch land, pre-commit tree capture)")).trim();
+      } catch (e) {
+        await rollback();
+        return fail({ ok: false, reason: `${branch}: failed to capture the staged tree before landing ${sha.slice(0, 7)}: ${(e as Error).message}` });
       }
-      // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill, same reasoning as the
-      // cherry-pick catch above.
-      if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`commit landing ${sha.slice(0, 7)} could not be confirmed dead after a kill`));
-        return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — its git process tree could not be confirmed dead after a kill; refusing further cleanup to avoid racing it, the batch worktree may need manual inspection: ${(e as Error).message}` };
+      try {
+        // @decision 24c0bdba — kill-confirmed: an orphaned child here must never later land onto whatever
+        // this SAME worktree happens to be staging by the time it resumes (rollback, or the next candidate).
+        await killableCanonicalRaw(
+          batchWorktreePath, ["commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "--cleanup=whitespace", "-F", messageFile.file],
+          timeoutMs, "git commit (batch land)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
+        );
+      } catch (e) {
+        // @decision bde5d1fe — already quarantined at the re-check (never THIS call's own kill) — refuse
+        // directly, same reasoning as the cherry-pick catch above.
+        if (e instanceof RepoQuarantinedError) {
+          return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — refused: canonical repo is quarantined: ${e.message}` };
+        }
+        // @decision 24c0bdba — fail CLOSED + QUARANTINE on an unconfirmed tree-kill, same reasoning as the
+        // cherry-pick catch above.
+        if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason(`commit landing ${sha.slice(0, 7)} could not be confirmed dead after a kill`));
+          return { ok: false, quarantined: true, reason: `${branch}: commit failed landing ${sha.slice(0, 7)} — its git process tree could not be confirmed dead after a kill; refusing further cleanup to avoid racing it, the batch worktree may need manual inspection: ${(e as Error).message}` };
+        }
+        // @decision 3a5c5d4a — same refusal short-circuit as the cherry-pick catch above.
+        const commitFailure = describeGitFailure(e);
+        if (commitFailure.refusal) {
+          return { ok: false, reason: `${branch}: ${canonicalFailureMessage(commitFailure, commitFailure.text)}` };
+        }
+        await rollback();
+        return fail({ ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` });
       }
-      // @decision 3a5c5d4a — same refusal short-circuit as the cherry-pick catch above.
-      const commitFailure = describeGitFailure(e);
-      if (commitFailure.refusal) {
-        return { ok: false, reason: `${branch}: ${canonicalFailureMessage(commitFailure, commitFailure.text)}` };
-      }
-      await rollback();
-      return fail({ ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` });
+    } finally {
+      cleanupBatchCommitMessageFile(messageFile.dir);
     }
     // FAIL CLOSED on an empty commit (card 43a9182d) — a BACKSTOP behind the explicit empty-stage probe
     // above (card 2eb78eb2), which already catches the ordinary "nothing staged" case before the manual
@@ -878,14 +941,19 @@ async function landBranchCommitsIndividually(
     // effort, matching {@link mergeBranchLocked}'s own PathSet capture: a failure here just omits both
     // trailers (the commit above already landed and stays valid without them, degrading to the existing
     // `trailer-only` tier) rather than failing an otherwise-successful branch.
+    let amendMessageFile: { dir: string; file: string } | undefined;
     try {
       // `currentHead` was just verified (above) to be this commit's own real sha — no need to re-query.
       const digest = await changedPathSetDigest(git, batchHeadBefore, currentHead, timeoutMs);
       computedPathSetDigest = digest;
       const amendedMessage = `${finalMessage.replace(/\s+$/, "")}\nLoom-Worker-Base: ${batchHeadBefore}\nLoom-Worker-PathSet: ${digest}\n`;
+      // @decision 75199847 — same -F switch as the plain commit above; a write failure here is treated
+      // exactly like the amend command itself failing below (soft-degrade, never a candidate drop) — the
+      // commit above already landed and stays valid without this best-effort follow-up stamp.
+      amendMessageFile = await writeBatchCommitMessageFile(amendedMessage);
       // @decision 24c0bdba — kill-confirmed, same reasoning as the plain commit above.
       await killableCanonicalRaw(
-        batchWorktreePath, ["commit", "--amend", "--cleanup=whitespace", "-m", amendedMessage],
+        batchWorktreePath, ["commit", "--amend", "--cleanup=whitespace", "-F", amendMessageFile.file],
         timeoutMs, "git commit --amend (batch land, pathset)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled, repoPath,
       );
     } catch (e) {
@@ -927,6 +995,8 @@ async function landBranchCommitsIndividually(
         console.warn(`[git] landBranchCommitsIndividually: Loom-Worker-Base/PathSet capture failed for ${branch} — ` +
           `commit lands without either trailer: ${(e as Error).message}`);
       }
+    } finally {
+      if (amendMessageFile) cleanupBatchCommitMessageFile(amendMessageFile.dir);
     }
   }
 

@@ -15,6 +15,27 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      proves the `--cleanup=whitespace` pin is load-bearing (without it, the real commit silently
 //      diverges from this predictor's own whitespace-mode assumption and the trailer goes unreadable).
 //
+// CARD 75199847 — the two follow-up shapes from 458028ae's own Code Review (session e8f1f410); see
+// docs/decisions/75199847-batch-commit-message-via-temp-file-and-named-empty-drop.md.
+// (F1) a NON-TIP commit (one of two on the same branch) whose message is empty: `expectedPlainTrailers`
+//      is `{}` for a non-tip, so the pre-fix predictor check passed vacuously and real git refused outright
+//      ("Aborting commit due to empty commit message") — proves the new explicit emptiness check drops the
+//      whole branch with a reason naming the real cause, before anything is committed.
+// (F2) a commit message well over the Windows ~32K `CreateProcess` argv ceiling lands successfully
+//      end-to-end (the `-F <tempfile>` switch has no such limit) with byte-identical content.
+// (F3) a commit-message temp-file WRITE failure (simulated via TEMP/TMP/TMPDIR pointed at a non-existent
+//      directory — the real seam `os.tmpdir()` reads live, no new DI surface) drops ONLY the affected
+//      candidate with a reason naming the failure, never falling back to `-m` or failing the whole batch.
+// (F4) Code Review round 2, S1 — a WRITE failure AFTER `mkdtemp` already succeeded must not leak the
+//      now-orphaned temp dir; proven via a monkey-patched `fs.promises.mkdtemp`/`writeFile` (the real
+//      shared `node:fs` singleton, no production DI change) that captures the created dir and fails the
+//      write exactly once.
+// (F5) Code Review round 2, S2 — a RELATIVE `TEMP`/`TMP`/`TMPDIR` must still land an intact message:
+//      `path.resolve(os.tmpdir())` resolves the relative value against THIS process's own cwd, so
+//      `process.chdir()` into a dedicated anchor dir, then point the env vars at a SHORT relative subdir
+//      name under it — the exact shape the reviewer reproduced `fatal: could not read log file` against
+//      pre-fix.
+//
 // Run: 1) build daemon (pnpm build), 2) node test/batch-merge-empty-tip-cleanup-drop.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -23,6 +44,7 @@ import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { waitUntil } from "./_wait.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${process.pid}`);
 useOwnLoomHome("bmetcd-home-");
 
@@ -255,12 +277,323 @@ try {
     check("(P1) the landed subject is the ORIGINAL comment-shaped line — whitespace mode keeps '#' lines, unlike the ambient strip config", p1Body.split(/\r?\n/)[0] === "# worker subject");
     check("(P1) canonical main advanced with both candidates' content", git(repo, "rev-parse", "HEAD") !== baseMainSha && fs.existsSync(path.join(repo, "p1-good.txt")) && fs.existsSync(path.join(repo, "p1-tip.txt")));
   }
+
+  // ── (F1) card 75199847 — a NON-TIP commit whose message is empty (`--allow-empty-message`), followed
+  //     by a normal tip commit on the SAME branch: `expectedPlainTrailers` is `{}` for a non-tip, so the
+  //     pre-fix predictor check passed vacuously and real git then refused outright. Proves the explicit
+  //     emptiness check drops the WHOLE branch (ALL-OR-NOTHING), never headMoved, before anything commits.
+  {
+    const repo = path.join(os.tmpdir(), `loom-bmetcd-f1-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# bmetcd-f1\n");
+    git(repo, "init", "-q"); git(repo, "config", "core.autocrlf", "false"); git(repo, "config", "user.email", "bmetcd@loom"); git(repo, "config", "user.name", "bmetcd");
+    commitAll(repo, "init", GIT_ID);
+    const baseMainSha = git(repo, "rev-parse", "HEAD");
+
+    const { worktreePath: goodWt, branch: goodBranch } = await createWorktree(repo, P.projId, `bmetcd-f1-good-${sfx}`);
+    registerForCleanup(goodWt);
+    fs.writeFileSync(path.join(goodWt, "f1-good.txt"), "good\n");
+    commitAll(goodWt, "feat(x): change f1 good", GIT_ID);
+
+    const { worktreePath: evilWt, branch: evilBranch } = await createWorktree(repo, P.projId, `bmetcd-f1-evil-${sfx}`);
+    registerForCleanup(evilWt);
+    // Commit 1 (NON-TIP): real staged content, EMPTY message.
+    fs.writeFileSync(path.join(evilWt, "f1-evil-1.txt"), "evil1\n");
+    git(evilWt, "add", "-A");
+    git(evilWt, "commit", "-q", "--allow-empty-message", "-m", "");
+    check("(F1) precondition: commit 1's own message really is empty", git(evilWt, "log", "-1", "--format=%B", "HEAD") === "");
+    // Commit 2 (TIP): ordinary message, real staged content — this branch now carries TWO commits.
+    fs.writeFileSync(path.join(evilWt, "f1-evil-2.txt"), "evil2\n");
+    commitAll(evilWt, "feat(x): f1 evil tip", GIT_ID);
+
+    const { worktreePath: batchWt } = await createWorktree(repo, P.projId, `bmetcd-f1-batch-${sfx}`);
+    registerForCleanup(batchWt);
+
+    const passGate = async () => ({ passed: true });
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [
+      { workerSessionId: "bmetcd-f1-good-w1", taskId: "bmetcd-f1-good-t1", branch: goodBranch, cutBaseSha: null },
+      { workerSessionId: "bmetcd-f1-evil-w1", taskId: "bmetcd-f1-evil-t1", branch: evilBranch, cutBaseSha: null },
+    ], passGate);
+
+    check("(F1) the batch still SUCCEEDS overall", result.ok === true);
+    check("(F1) the good candidate LANDED", result.landed.some((l) => l.branch === goodBranch));
+    check("(F1) the two-commit branch with an empty NON-TIP message was DROPPED WHOLESALE, never typed headMoved",
+      !result.landed.some((l) => l.branch === evilBranch) && result.dropped.some((d) => d.branch === evilBranch) && result.batchHeadMoved !== true);
+    // NOT just /empty/i — git's OWN generic refusal text ("Aborting commit due to empty commit message")
+    // also contains that word, so a bare /empty/i match passes vacuously even against the OLD generic
+    // commit-failed fallback (measured: this exact regex gave a false PASS pre-fix). Require the phrase
+    // unique to the NEW, named pre-commit drop instead.
+    check("(F1) the drop reason names the EMPTY-message cause specifically, via the new named pre-commit drop — not git's own generic refusal text surfacing through the old commit-failed fallback",
+      /would be empty after git.?s own commit cleanup/i.test(result.dropped.find((d) => d.branch === evilBranch)?.reason ?? ""));
+    check("(F1) canonical main advanced with ONLY the good candidate's content",
+      git(repo, "rev-parse", "HEAD") !== baseMainSha && fs.existsSync(path.join(repo, "f1-good.txt")) && !fs.existsSync(path.join(repo, "f1-evil-1.txt")) && !fs.existsSync(path.join(repo, "f1-evil-2.txt")));
+  }
+
+  // ── (F2) card 75199847 — a commit message well over the Windows ~32K `CreateProcess` argv ceiling lands
+  //     successfully end-to-end through the real batch landing path (the `-F <tempfile>` switch removes the
+  //     limit entirely; pre-fix this would ENAMETOOLONG and generically drop the candidate).
+  {
+    const repo = path.join(os.tmpdir(), `loom-bmetcd-f2-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# bmetcd-f2\n");
+    git(repo, "init", "-q"); git(repo, "config", "core.autocrlf", "false"); git(repo, "config", "user.email", "bmetcd@loom"); git(repo, "config", "user.name", "bmetcd");
+    commitAll(repo, "init", GIT_ID);
+    const baseMainSha = git(repo, "rev-parse", "HEAD");
+
+    const { worktreePath: bigWt, branch: bigBranch } = await createWorktree(repo, P.projId, `bmetcd-f2-big-${sfx}`);
+    registerForCleanup(bigWt);
+    fs.writeFileSync(path.join(bigWt, "f2-big.txt"), "big\n");
+    git(bigWt, "add", "-A");
+    const bigBody = "fix(x): a commit with a huge body\n\n" + "y".repeat(40_000) + "\n";
+    const bigMsgDir = fs.mkdtempSync(path.join(os.tmpdir(), "bmetcd-f2-msg-"));
+    registerForCleanup(bigMsgDir);
+    const bigMsgFile = path.join(bigMsgDir, "message");
+    fs.writeFileSync(bigMsgFile, bigBody, "utf8");
+    // Authored via `-F` here too (fixture setup, not the code under test): an ordinary `-m` of this size
+    // would hit the SAME Windows argv ceiling just constructing the worker's own original commit.
+    git(bigWt, "commit", "-q", "--cleanup=whitespace", "-F", bigMsgFile);
+    check("(F2) precondition: the worker's own commit message really is this large",
+      Buffer.byteLength(gitRaw(bigWt, "log", "-1", "--format=%B", "HEAD"), "utf8") > 32_768);
+
+    const { worktreePath: batchWt } = await createWorktree(repo, P.projId, `bmetcd-f2-batch-${sfx}`);
+    registerForCleanup(batchWt);
+
+    const passGate = async () => ({ passed: true });
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [
+      { workerSessionId: "bmetcd-f2-big-w1", taskId: "bmetcd-f2-big-t1", branch: bigBranch, cutBaseSha: null },
+    ], passGate);
+
+    check("(F2) the batch SUCCEEDS — a >32K commit message no longer hits the Windows argv ceiling", result.ok === true);
+    check("(F2) the huge-message candidate LANDED", result.landed.some((l) => l.branch === bigBranch));
+    const f2Entry = result.landed.find((l) => l.branch === bigBranch);
+    // Read via cat-file, never `git log --format=%B`: that pretty-print format appends its OWN extra
+    // trailing newline for DISPLAY, which is not part of the stored object — `%B` would read ONE byte
+    // longer than what git actually stored (measured directly, card 75199847's own investigation).
+    const f2RawCommit = f2Entry?.sha ? execFileSync("git", ["cat-file", "-p", f2Entry.sha], { cwd: repo }) : Buffer.alloc(0);
+    const f2HeaderEnd = f2RawCommit.indexOf("\n\n");
+    const f2LandedMessage = f2RawCommit.subarray(f2HeaderEnd + 2);
+    const bigBodyTrimmed = bigBody.replace(/\s+$/, "");
+    // A PREFIX check, not full equality: this branch's single commit also becomes the batch tip, so it
+    // additionally carries the Loom-Worker-Base/PathSet amend trailers (card d62dad73) after its own
+    // Loom-Worker-Branch line — exactly as every other single-commit scenario in this file lands. Checking
+    // the huge body landed byte-identical, un-truncated, as the message's own PREFIX is what this scenario
+    // is actually about; the trailer BLOCK itself is checked structurally below via the real reader.
+    const f2ExpectedPrefix = Buffer.from(`${bigBodyTrimmed}\n\n`, "utf8");
+    check("(F2) the landed message's huge body is BYTE-IDENTICAL to the worker's own body, un-truncated, as the message's own prefix",
+      f2LandedMessage.length >= f2ExpectedPrefix.length && Buffer.compare(f2LandedMessage.subarray(0, f2ExpectedPrefix.length), f2ExpectedPrefix) === 0);
+    const f2Trailer = f2Entry?.sha ? parseLoomTrailerBlock(git(repo, "log", "-1", "--format=%B", f2Entry.sha)) : null;
+    check("(F2) the trailer is readable and names the right branch", f2Trailer !== null && f2Trailer.branch === bigBranch);
+    check("(F2) canonical main advanced with the huge candidate's content", git(repo, "rev-parse", "HEAD") !== baseMainSha && fs.existsSync(path.join(repo, "f2-big.txt")));
+  }
+
+  // ── (F3) card 75199847 — a commit-message temp-file WRITE failure (simulated via TEMP/TMP/TMPDIR pointed
+  //     at a non-existent directory — the real seam `os.tmpdir()` reads live, no new DI surface added)
+  //     drops the affected candidate with a reason naming the failure, rather than silently falling back
+  //     to `-m` or crashing. NOTE: the broken env is process-global, so it would break EVERY candidate's
+  //     write in the SAME batch call — this runs the affected branch ALONE (never paired with a "good"
+  //     sibling in the SAME call, which the broken env would break identically), then separately re-lands
+  //     the SAME branch under the RESTORED env to prove both the drop and the restoration are real.
+  {
+    const repo = path.join(os.tmpdir(), `loom-bmetcd-f3-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# bmetcd-f3\n");
+    git(repo, "init", "-q"); git(repo, "config", "core.autocrlf", "false"); git(repo, "config", "user.email", "bmetcd@loom"); git(repo, "config", "user.name", "bmetcd");
+    commitAll(repo, "init", GIT_ID);
+    const baseMainSha = git(repo, "rev-parse", "HEAD");
+
+    const { worktreePath: wt, branch } = await createWorktree(repo, P.projId, `bmetcd-f3-${sfx}`);
+    registerForCleanup(wt);
+    fs.writeFileSync(path.join(wt, "f3.txt"), "f3\n");
+    commitAll(wt, "feat(x): change f3 — would land fine but for the induced temp-dir failure", GIT_ID);
+
+    const { worktreePath: batchWt1 } = await createWorktree(repo, P.projId, `bmetcd-f3-batch1-${sfx}`);
+    registerForCleanup(batchWt1);
+
+    // Derived from the REAL os.tmpdir() so the broken path stays valid-looking on either platform this
+    // suite runs on (Windows dev host, Ubuntu CI) — only its own nested segment doesn't exist.
+    const brokenTmp = path.join(os.tmpdir(), `bmetcd-f3-nonexistent-${sfx}`, "deeper", "still-deeper");
+    const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+    let brokenResult;
+    try {
+      process.env.TEMP = brokenTmp;
+      process.env.TMP = brokenTmp;
+      process.env.TMPDIR = brokenTmp;
+      const passGate = async () => ({ passed: true });
+      brokenResult = await runBatchedMerge(repo, batchWt1, baseMainSha, [
+        { workerSessionId: "bmetcd-f3-w1", taskId: "bmetcd-f3-t1", branch, cutBaseSha: null },
+      ], passGate);
+    } finally {
+      for (const k of ["TEMP", "TMP", "TMPDIR"]) {
+        if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+      }
+    }
+
+    check("(F3) under the broken temp dir, the ONLY candidate is DROPPED, never typed headMoved, never crashing the call",
+      !brokenResult.landed.some((l) => l.branch === branch) && brokenResult.dropped.some((d) => d.branch === branch) && brokenResult.batchHeadMoved !== true);
+    check("(F3) the drop reason names the temp-file write failure specifically",
+      /temp file/i.test(brokenResult.dropped.find((d) => d.branch === branch)?.reason ?? ""));
+    check("(F3) canonical main did NOT advance — nothing landed", git(repo, "rev-parse", "HEAD") === baseMainSha && !fs.existsSync(path.join(repo, "f3.txt")));
+
+    // Re-land the SAME branch under the now-RESTORED env — proves the earlier drop was really caused by
+    // the induced failure (not something permanently wrong with the branch/worktree), and that restoring
+    // TEMP/TMP/TMPDIR in the `finally` above genuinely took effect for later code in this same process.
+    const { worktreePath: batchWt2 } = await createWorktree(repo, P.projId, `bmetcd-f3-batch2-${sfx}`);
+    registerForCleanup(batchWt2);
+    const passGate2 = async () => ({ passed: true });
+    const restoredResult = await runBatchedMerge(repo, batchWt2, baseMainSha, [
+      { workerSessionId: "bmetcd-f3-w2", taskId: "bmetcd-f3-t2", branch, cutBaseSha: null },
+    ], passGate2);
+    check("(F3) the SAME branch lands fine once TEMP/TMP/TMPDIR are restored", restoredResult.ok === true && restoredResult.landed.some((l) => l.branch === branch));
+    check("(F3) canonical main now advances with its content", git(repo, "rev-parse", "HEAD") !== baseMainSha && fs.existsSync(path.join(repo, "f3.txt")));
+  }
+
+  // ── (F4) card 75199847 Code Review round 2, S1 — a WRITE failure AFTER mkdtemp already succeeded must
+  //     not leak the now-orphaned temp dir. Monkey-patches the real `fs.promises.mkdtemp`/`writeFile` (the
+  //     shared `node:fs` singleton — the compiled dist imports the SAME module object, no production DI
+  //     change) to capture which dir gets created and fail exactly once, restored in a `finally`
+  //     immediately after the call, before anything else in this file can observe the patch.
+  {
+    const repo = path.join(os.tmpdir(), `loom-bmetcd-f4-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# bmetcd-f4\n");
+    git(repo, "init", "-q"); git(repo, "config", "core.autocrlf", "false"); git(repo, "config", "user.email", "bmetcd@loom"); git(repo, "config", "user.name", "bmetcd");
+    commitAll(repo, "init", GIT_ID);
+    const baseMainSha = git(repo, "rev-parse", "HEAD");
+
+    const { worktreePath: wt, branch } = await createWorktree(repo, P.projId, `bmetcd-f4-${sfx}`);
+    registerForCleanup(wt);
+    fs.writeFileSync(path.join(wt, "f4.txt"), "f4\n");
+    commitAll(wt, "feat(x): change f4", GIT_ID);
+
+    const { worktreePath: batchWt } = await createWorktree(repo, P.projId, `bmetcd-f4-batch-${sfx}`);
+    registerForCleanup(batchWt);
+
+    const capturedDirs = [];
+    const realMkdtemp = fs.promises.mkdtemp;
+    const realWriteFile = fs.promises.writeFile;
+    let writeFailed = false;
+    fs.promises.mkdtemp = async (...a) => {
+      const dir = await realMkdtemp.apply(fs.promises, a);
+      if (path.basename(dir).startsWith("loom-batch-commit-")) capturedDirs.push(dir);
+      return dir;
+    };
+    fs.promises.writeFile = async (file, ...rest) => {
+      if (!writeFailed && typeof file === "string" && path.basename(file) === "message" &&
+          capturedDirs.some((d) => file.startsWith(d))) {
+        writeFailed = true;
+        throw new Error("simulated EACCES (test F4)");
+      }
+      return realWriteFile.apply(fs.promises, [file, ...rest]);
+    };
+
+    let result;
+    try {
+      const passGate = async () => ({ passed: true });
+      result = await runBatchedMerge(repo, batchWt, baseMainSha, [
+        { workerSessionId: "bmetcd-f4-w1", taskId: "bmetcd-f4-t1", branch, cutBaseSha: null },
+      ], passGate);
+    } finally {
+      fs.promises.mkdtemp = realMkdtemp;
+      fs.promises.writeFile = realWriteFile;
+    }
+
+    check("(F4) precondition: the simulated write failure actually fired", writeFailed === true);
+    check("(F4) precondition: a temp dir was actually created before the write failed", capturedDirs.length >= 1);
+    const f4Dropped = result.dropped.find((d) => d.branch === branch);
+    check("(F4) the candidate was DROPPED with a reason naming the temp-file write failure",
+      !result.landed.some((l) => l.branch === branch) && f4Dropped !== undefined && /temp file/i.test(f4Dropped.reason ?? ""));
+    // Cleanup is fire-and-forget (never awaited by production code) — poll via the shared waitUntil
+    // helper (never a hand-rolled fixed-wait-then-check loop) until it's provably gone.
+    const failedDir = capturedDirs[capturedDirs.length - 1];
+    let dirGone = false;
+    try {
+      await waitUntil(() => !fs.existsSync(failedDir), { timeoutMs: 5000, label: `(F4) temp dir ${failedDir} removed` });
+      dirGone = true;
+    } catch { /* dirGone stays false — reported below */ }
+    check("(F4) the orphaned temp dir from the FAILED write is cleaned up, never leaked", dirGone === true);
+  }
+
+  // ── (F5) card 75199847 Code Review round 2, S2 — a RELATIVE TEMP/TMP/TMPDIR must still land an intact
+  //     message. `os.tmpdir()` returns the env var VERBATIM; `path.resolve` resolves a relative value
+  //     against THIS process's own cwd — so `process.chdir()` into a dedicated anchor dir first, then
+  //     point TEMP/TMP/TMPDIR at a SHORT relative subdir name under it, matching the exact shape the
+  //     reviewer reproduced `fatal: could not read log file` against pre-fix. cwd and env are restored in
+  //     a `finally` immediately after the call. A monkey-patched `fs.promises.mkdtemp` (same technique as
+  //     F4, real shared `node:fs` singleton, no production DI change) captures the actual dir created, so
+  //     the test can assert it genuinely resolved under the anchor — not just that the batch happened to
+  //     succeed some other way.
+  {
+    const repo = path.join(os.tmpdir(), `loom-bmetcd-f5-${sfx}`);
+    fs.mkdirSync(repo, { recursive: true }); registerForCleanup(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "# bmetcd-f5\n");
+    git(repo, "init", "-q"); git(repo, "config", "core.autocrlf", "false"); git(repo, "config", "user.email", "bmetcd@loom"); git(repo, "config", "user.name", "bmetcd");
+    commitAll(repo, "init", GIT_ID);
+    const baseMainSha = git(repo, "rev-parse", "HEAD");
+
+    const { worktreePath: wt, branch } = await createWorktree(repo, P.projId, `bmetcd-f5-${sfx}`);
+    registerForCleanup(wt);
+    fs.writeFileSync(path.join(wt, "f5.txt"), "f5\n");
+    const f5Message = "feat(x): change f5 via a relative temp dir";
+    commitAll(wt, f5Message, GIT_ID);
+
+    const { worktreePath: batchWt } = await createWorktree(repo, P.projId, `bmetcd-f5-batch-${sfx}`);
+    registerForCleanup(batchWt);
+
+    // The anchor dir + its short relative subdir — created BEFORE perturbing cwd/env, so the repo/worktree
+    // setup above is entirely unaffected by either.
+    const anchorDir = path.join(os.tmpdir(), `loom-bmetcd-f5-anchor-${sfx}`);
+    fs.mkdirSync(anchorDir, { recursive: true }); registerForCleanup(anchorDir);
+    const relName = "tmp";
+    fs.mkdirSync(path.join(anchorDir, relName));
+
+    const capturedDirs = [];
+    const realMkdtemp = fs.promises.mkdtemp;
+    fs.promises.mkdtemp = async (...a) => {
+      const dir = await realMkdtemp.apply(fs.promises, a);
+      if (path.basename(dir).startsWith("loom-batch-commit-")) capturedDirs.push(dir);
+      return dir;
+    };
+
+    const originalCwd = process.cwd();
+    const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+    let result;
+    try {
+      process.chdir(anchorDir);
+      process.env.TEMP = relName;
+      process.env.TMP = relName;
+      process.env.TMPDIR = relName;
+      const passGate = async () => ({ passed: true });
+      result = await runBatchedMerge(repo, batchWt, baseMainSha, [
+        { workerSessionId: "bmetcd-f5-w1", taskId: "bmetcd-f5-t1", branch, cutBaseSha: null },
+      ], passGate);
+    } finally {
+      process.chdir(originalCwd);
+      for (const k of ["TEMP", "TMP", "TMPDIR"]) {
+        if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+      }
+      fs.promises.mkdtemp = realMkdtemp;
+    }
+
+    check("(F5) precondition: a temp dir was actually created (mkdtemp resolved to SOMEWHERE)", capturedDirs.length >= 1);
+    const anchorTmpAbs = path.join(anchorDir, relName);
+    check("(F5) the temp dir genuinely resolved under the anchor's relative subdir — proving the relative TEMP/TMP/TMPDIR was actually exercised, not silently bypassed",
+      capturedDirs.every((d) => path.isAbsolute(d) && (d === anchorTmpAbs || d.startsWith(anchorTmpAbs + path.sep))));
+    check("(F5) the batch SUCCEEDS under a relative TEMP/TMP/TMPDIR", result.ok === true);
+    check("(F5) the candidate LANDED", result.landed.some((l) => l.branch === branch));
+    const f5Entry = result.landed.find((l) => l.branch === branch);
+    const f5Body = f5Entry?.sha ? git(repo, "log", "-1", "--format=%B", f5Entry.sha) : "";
+    check("(F5) the landed message's subject is the worker's ORIGINAL, intact message — never truncated or corrupted by the relative resolution",
+      f5Body.split(/\r?\n/)[0] === f5Message);
+    const f5Trailer = f5Entry?.sha ? parseLoomTrailerBlock(f5Body) : null;
+    check("(F5) the trailer is readable and names the right branch", f5Trailer !== null && f5Trailer.branch === branch);
+    check("(F5) canonical main advanced with the candidate's content", git(repo, "rev-parse", "HEAD") !== baseMainSha && fs.existsSync(path.join(repo, "f5.txt")));
+  }
 } finally {
   // no shared canonical repo to restore — every scenario above creates its OWN throwaway `repo`,
   // registered for cleanup individually.
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a tip commit whose message is empty or reduces to nothing but blank lines drops ONLY that candidate (never headMoved) before anything is committed, via both an ordinary --allow-empty-message authoring path and a commit-tree-authored blank-first-line path; the rest of the batch lands normally; the dropped candidate's own later solo retry lands with a fully readable trailer; a genuinely non-blank tip (a lone form-feed, after a stale quoted trailer is stripped) is never over-dropped; and the --cleanup=whitespace pin overrides an ambient commit.cleanup=strip repo config so a #-subject tip still lands readable (card 458028ae)."
+  ? "\n✅ ALL PASS — a tip commit whose message is empty or reduces to nothing but blank lines drops ONLY that candidate (never headMoved) before anything is committed, via both an ordinary --allow-empty-message authoring path and a commit-tree-authored blank-first-line path; the rest of the batch lands normally; the dropped candidate's own later solo retry lands with a fully readable trailer; a genuinely non-blank tip (a lone form-feed, after a stale quoted trailer is stripped) is never over-dropped; the --cleanup=whitespace pin overrides an ambient commit.cleanup=strip repo config so a #-subject tip still lands readable (card 458028ae); a NON-TIP commit's empty message is now caught and named explicitly rather than falling through to a generic git refusal; a >32K commit message lands byte-identical via -F with no argv ceiling; a commit-message temp-file write failure drops only the affected candidate with a named reason; a write failure after mkdtemp already succeeded never leaks the orphaned temp dir; and a RELATIVE TEMP/TMP/TMPDIR still lands an intact message (card 75199847)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

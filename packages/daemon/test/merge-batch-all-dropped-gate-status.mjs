@@ -23,6 +23,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { commitMessageArgvText } from "./_git-argv.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -110,8 +111,10 @@ try {
     const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
     return {
       raw: async (args) => {
+        // card 75199847: the message now rides `-F <tempfile>`, never `-m <text>` — read it via
+        // commitMessageArgvText (`_git-argv.mjs`) instead of scanning `args` for the literal text.
         if (Array.isArray(args) && args.includes("commit") && args.includes("--author") &&
-            args.some((x) => typeof x === "string" && x.includes("rollback-unverified-c"))) {
+            commitMessageArgvText(args).includes("rollback-unverified-c")) {
           throw new Error("simulated commit failure (service-level rollback-unverified, section 3)");
         }
         if (Array.isArray(args) && args.includes("reset") && args.includes("--hard")) {
