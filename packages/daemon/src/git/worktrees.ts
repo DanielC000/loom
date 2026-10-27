@@ -8234,6 +8234,9 @@ export async function findIntroducingSquashCommit(
  * ALL commits on `base` carrying a `Loom-Worker-Branch: <branch>` trailer, newest-first, with parsed trailers — never breaks on the first
  * match and never applies {@link findLandedSquashCommit}'s re-task guard. READ-ONLY; a caller must still verify each candidate's CONTENT.
  * @decision e5458ccd — never use for gating/finalize; a trailer match alone does not attribute to any one generation sharing this branch.
+ * @decision 1e7d6956 — only {@link isWithTimeoutExpiry}/{@link isSpawnLevelFailure} throw
+ * {@link GitTransientReadFailure}; a {@link CanonicalGitRefusal} or any other failure stays definitive
+ * (`[]`) — see this card's own decision record for the full classification + why.
  */
 export async function findAllLandedTrailerCommits(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
@@ -8259,7 +8262,13 @@ export async function findAllLandedTrailerCommits(
       if (parsed?.branch === branch) found.push({ sha: record.slice(0, sepIdx).trim(), trailers: parsed });
     }
     return found;
-  } catch {
+  } catch (e) {
+    // @decision 1e7d6956 — explicit, not folded into the generic fallback below (mirrors the
+    // fullTreeEntries/resolveObjectKind idiom): a refusal is a trust-boundary fact, never a host hiccup.
+    if (e instanceof CanonicalGitRefusal) return [];
+    if (isWithTimeoutExpiry(e) || isSpawnLevelFailure(e)) {
+      throw new GitTransientReadFailure(`findAllLandedTrailerCommits: discovery (git log --grep) failed for branch ${branch} at ${base} (treated as transient)`);
+    }
     return [];
   }
 }
@@ -10101,7 +10110,9 @@ export async function verifyReviewedTipChain(
   // @decision e5458ccd — do not call this for stale-generation attribution without passing the resolved
   // mainline watermark ref here; every confirm-path caller omits it (default "HEAD", byte-identical).
   mainRef = "HEAD",
-): Promise<{ ok: true; hops: number } | { ok: false; reason: string }> {
+  // @decision 1e7d6956 — `transient` (ok:false only) is ADDITIVE; a caller that only reads `.ok`/`.reason`
+  // (both merge-confirm callers, deliberately) is unaffected — see this card's own decision record.
+): Promise<{ ok: true; hops: number } | { ok: false; reason: string; transient?: true }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   // Replace refs are ignored on EVERY call by the shared `canonicalGit` factory (`core.useReplaceRefs=false`), not per call site.
   const raw = (args: string[], label: string) => withTimeout(git.raw(args), timeoutMs, label);
@@ -10144,7 +10155,12 @@ export async function verifyReviewedTipChain(
     }
     return { ok: false, reason: `more than ${REVIEWED_TIP_WALK_MAX_HOPS} steps between the reviewed tip and the branch tip` };
   } catch (e) {
-    return { ok: false, reason: `could not verify (${(e as Error).message.split("\n")[0]})` };
+    // @decision 1e7d6956 — a CanonicalGitRefusal, and any other failure not matching the two host-condition
+    // checks below, stays definitive (no `transient`) — see this card's own decision record for why.
+    const reason = `could not verify (${(e as Error).message.split("\n")[0]})`;
+    if (e instanceof CanonicalGitRefusal) return { ok: false, reason };
+    if (isWithTimeoutExpiry(e) || isSpawnLevelFailure(e)) return { ok: false, reason, transient: true };
+    return { ok: false, reason };
   }
 }
 

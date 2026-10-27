@@ -911,6 +911,26 @@ try {
   function restoreSubtree(bakPath) {
     fs.renameSync(bakPath, bakPath.slice(0, -".bak".length));
   }
+  // Card 1e7d6956 (Code Review round 2, item 1): same idiom as corruptOneSubtree above, but for the
+  // COMMIT object itself rather than one of its tree entries — makes `git log`/`rev-list` genuinely fail
+  // ("could not read <sha>") the moment a walk tries to open this exact commit, a REAL git fatal (never
+  // a refusal, never a timeout, never a spawn-level failure). Never restored (nothing in this file needs
+  // the object back) — the whole repo dir is removed in the caller's own `finally` anyway.
+  function corruptCommitObject(repoPath, commitSha) {
+    const objPath = path.join(repoPath, ".git", "objects", commitSha.slice(0, 2), commitSha.slice(2));
+    fs.renameSync(objPath, `${objPath}.bak`);
+  }
+  // Card 1e7d6956 (Code Review round 2, item 1): same idiom, but for a commit's own TOP-LEVEL tree object
+  // (resolved via `<sha>^{tree}` BEFORE renaming) — makes `git rev-parse --verify <sha>^{tree}` (and
+  // anything else that needs to read that tree) genuinely fail with a real git fatal, while the commit
+  // object itself (and its own parent links) stays fully readable.
+  function corruptCommitTree(repoPath, commitSha) {
+    // execFileSync (array argv, no shell) — never a shell-string execSync here: cmd.exe treats `^` as
+    // its own escape char on Windows and would silently eat it out of `<sha>^{tree}`.
+    const treeSha = execFileSync("git", ["rev-parse", `${commitSha}^{tree}`], { cwd: repoPath }).toString().trim();
+    const objPath = path.join(repoPath, ".git", "objects", treeSha.slice(0, 2), treeSha.slice(2));
+    fs.renameSync(objPath, `${objPath}.bak`);
+  }
   async function setupSawTransientOrdering(tag, repo, { genuineCandidateExists }) {
     const ctx = await baseSetup(tag, repo);
     const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
@@ -1141,52 +1161,408 @@ try {
     }
   }
 
-  // --- DISCOVERY_TIMEOUT_ESCALATES (RENAMED from round 2's UNCAUGHT_ESCALATES, which claimed the WRONG
-  // mechanism — see this card's own decision record, S1, for the full audit of why no live seam reaches
-  // attributeStaleGenerationOwnLanding's outer catch-all at all).
+  // Card 1e7d6956: a gitFactory that behaves like real git EXCEPT for a raw() call whose args satisfy
+  // `shouldFail` — those instead spawn a REAL simple-git instance pointed at a nonexistent binary, the
+  // SAME genuine ENOENT process-level spawn failure (isSpawnLevelFailure) the (spawn-failure) block above
+  // proves classifies as transient, never a crafted/synthetic error. `() => true` fails EVERY call through
+  // this factory — safe when the factory itself is already scoped to ONE call site (the new
+  // staleGenerationDiscoveryGitFactory/staleGenerationChainGitFactory test seams), never a global override.
+  function scopedSpawnFailGitFactory(shouldFail) {
+    return (repoPath, blockTimeoutMs) => {
+      const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
+      const bad = simpleGit(repoPath, { binary: "loom-sglt-nonexistent-git-xyz", timeout: { block: blockTimeoutMs } });
+      return { raw: (args) => (shouldFail(args) ? bad.raw(args) : real.raw(args)) };
+    };
+  }
+
+  // Card 1e7d6956 (Code Review round 2, item 2): a gitFactory that behaves like real git EXCEPT for a
+  // raw() call whose args satisfy `shouldHang` — that one call returns a promise that NEVER settles, so
+  // the OUTER `withTimeout` race (never simple-git's own command-level timeout) is what actually wins,
+  // producing the exact "exceeded Nms (hung git child?)" shape `isWithTimeoutExpiry` matches.
+  function scopedNeverSettleGitFactory(shouldHang) {
+    return (repoPath, blockTimeoutMs) => {
+      const real = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
+      return { raw: (args) => (shouldHang(args) ? new Promise(() => { /* never settles */ }) : real.raw(args)) };
+    };
+  }
+
+  // --- DISCOVERY_SPAWN_FAIL_RETRIES (card 1e7d6956; RENAMED from DISCOVERY_TIMEOUT_ESCALATES — Code
+  // Review round 2, item 2: that name was wrong on both halves — this fixture exercises a SPAWN-LEVEL
+  // failure (isSpawnLevelFailure), never a timeout, and it does NOT escalate on boot 1; it retries).
   //
-  // @decision 05915fc7 — round 3 S1: proves the EARLY `candidates.length === 0` no-match return
-  // escalates, never the outer catch-all.
+  // A discovery-level transient failure reads "transient" and retries, never an immediate definitive
+  // escalation; the OLD global-gitOpMs mechanism this fixture used to use never actually proved that, see
+  // docs/decisions/05915fc7-*.md round 3 S1 for the full history of why.
   //
-  // Isolated into its OWN fresh Db/SessionService pair (never the shared `db`/`sessions`) — a global
-  // `gitOpMs=1` forces a REAL timeout on the candidate-discovery `git log` call itself, which would
-  // otherwise also hit every OTHER already-tracked row in the shared DB if run through `sessions`. ---
+  // Isolated into its OWN fresh Db/SessionService pair (never the shared `db`/`sessions`) — the
+  // `staleGenerationDiscoveryGitFactory` test seam (card 1e7d6956) fails ONLY worker X's own discovery
+  // call (matched by X's own `--grep=Loom-Worker-Branch: <branch>` argv), via a REAL spawn-level ENOENT,
+  // never a global `gitOpMs` override — `05915fc7` itself found that bleeds across every row a shared
+  // SessionService instance tracks. Worker Y, an ordinary already-landed worker in the SAME boot/DB,
+  // proves the fault stays scoped to X: Y still finalizes normally in the same boot. ---
   {
-    const R_DISCOVERY_TIMEOUT = path.join(os.tmpdir(), `loom-sglt-disctimeout-${sfx}`);
-    const dbDiscoveryTimeoutPath = path.join(os.tmpdir(), `loom-sglt-disctimeout-db-${sfx}.db`);
-    let dbDiscoveryTimeout;
+    const R_DISCOVERY_SPAWN_FAIL = path.join(os.tmpdir(), `loom-sglt-spawnfail-disc-${sfx}`);
+    const dbDiscoverySpawnFailPath = path.join(os.tmpdir(), `loom-sglt-spawnfail-disc-db-${sfx}.db`);
+    let dbDiscoverySpawnFail;
     try {
-      initRepo(R_DISCOVERY_TIMEOUT);
-      dbDiscoveryTimeout = new Db(dbDiscoveryTimeoutPath);
-      const sessionsDiscoveryTimeout = new SessionService(dbDiscoveryTimeout, pty, new OrchestrationControl(), { gitOpMs: 1 });
-      const projId = `sglt-disctimeout-proj-${sfx}`, agentId = `sglt-disctimeout-agent-${sfx}`, taskId = `sglt-disctimeout-task-${sfx}`;
-      const mgrId = `sglt-disctimeout-mgr-${sfx}`, workerXId = `sglt-disctimeout-workerx-${sfx}`;
-      dbDiscoveryTimeout.insertProject({ id: projId, name: "SGLT-disctimeout", repoPath: R_DISCOVERY_TIMEOUT, vaultPath: R_DISCOVERY_TIMEOUT, config: {}, createdAt: now, archivedAt: null });
-      dbDiscoveryTimeout.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
-      dbDiscoveryTimeout.insertTask({ id: taskId, projectId: projId, title: "SGLT-disctimeout", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
-      dbDiscoveryTimeout.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_DISCOVERY_TIMEOUT, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
-      const genesisSha = git(R_DISCOVERY_TIMEOUT, "rev-parse HEAD");
-      dbDiscoveryTimeout.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
-      const first = await createWorktree(R_DISCOVERY_TIMEOUT, projId, taskId);
-      dbDiscoveryTimeout.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
-      fs.writeFileSync(path.join(first.worktreePath, "uc.txt"), "uc content\n");
+      initRepo(R_DISCOVERY_SPAWN_FAIL);
+      dbDiscoverySpawnFail = new Db(dbDiscoverySpawnFailPath);
+      const projId = `sglt-spawnfail-proj-${sfx}`, agentId = `sglt-spawnfail-agent-${sfx}`, taskId = `sglt-spawnfail-task-${sfx}`;
+      const mgrId = `sglt-spawnfail-mgr-${sfx}`, workerXId = `sglt-spawnfail-workerx-${sfx}`, workerYId = `sglt-spawnfail-workery-${sfx}`;
+      dbDiscoverySpawnFail.insertProject({ id: projId, name: "SGLT-spawnfail", repoPath: R_DISCOVERY_SPAWN_FAIL, vaultPath: R_DISCOVERY_SPAWN_FAIL, config: {}, createdAt: now, archivedAt: null });
+      dbDiscoverySpawnFail.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbDiscoverySpawnFail.insertTask({ id: taskId, projectId: projId, title: "SGLT-spawnfail", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbDiscoverySpawnFail.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_DISCOVERY_SPAWN_FAIL, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_DISCOVERY_SPAWN_FAIL, "rev-parse HEAD");
+      dbDiscoverySpawnFail.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+
+      // Worker X: a genuine landing exists (content-match arm, same shape BOUND_ATTEMPTS's own X uses) —
+      // so a cleared boot can prove RETRY, THEN SUCCESS, not just "stops escalating".
+      const first = await createWorktree(R_DISCOVERY_SPAWN_FAIL, projId, taskId);
+      dbDiscoverySpawnFail.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "spawnfail.txt"), "spawnfail content\n");
       commitAll(first.worktreePath, "c1 real", GIT_ID);
       const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
-      // A re-task reusing X's own path/branch — the SAME "stale generation" shape every other scenario uses.
-      const second = await createWorktree(R_DISCOVERY_TIMEOUT, projId, taskId);
-      const workerYId = `sglt-disctimeout-workery-${sfx}`;
-      dbDiscoveryTimeout.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
-      dbDiscoveryTimeout.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["uc.txt"] } });
-      dbDiscoveryTimeout.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+      fs.writeFileSync(path.join(R_DISCOVERY_SPAWN_FAIL, "spawnfail.txt"), "spawnfail content\n"); // byte-identical to reviewedTip's own
+      commitAll(R_DISCOVERY_SPAWN_FAIL, [`chore(unrelated): spawnfail landing`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${genesisSha}`], GIT_ID);
 
-      const ucResult = await sessionsDiscoveryTimeout.reconcileOrchestrationOnBoot(new Set());
-      console.log("DISCOVERY_TIMEOUT_ESCALATES reconcile result:", JSON.stringify(ucResult));
-      check("(DISCOVERY_TIMEOUT_ESCALATES) a timeout during candidate DISCOVERY itself escalates on the FIRST boot via the early zero-candidates no-match return — never the outer catch-all (round 2's claim, withdrawn; see card 1e7d6956 for the tracked gap that this early return doesn't classify as transient)",
-        dbDiscoveryTimeout.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated && e.kind === "definitive"));
-      check("(DISCOVERY_TIMEOUT_ESCALATES) never attributed", !dbDiscoveryTimeout.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+      // A re-task reusing X's own path/branch — the SAME "stale generation" shape every other scenario
+      // uses. Y is an ORDINARY already-landed worker (squash-merged directly onto the canonical repo,
+      // like BOUND_ATTEMPTS's own Y) — never a stale generation itself, so its own finalize goes through
+      // Pass A's ordinary already-landed detection, never `findAllLandedTrailerCommits` at all.
+      const second = await createWorktree(R_DISCOVERY_SPAWN_FAIL, projId, taskId);
+      dbDiscoverySpawnFail.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+      fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+      commitAll(second.worktreePath, "y", GIT_ID);
+      execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "SGLT-spawnfail-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: R_DISCOVERY_SPAWN_FAIL });
+
+      dbDiscoverySpawnFail.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["spawnfail.txt"] } });
+      dbDiscoverySpawnFail.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+      dbDiscoverySpawnFail.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+
+      // Boot 1: X's own discovery grep args are targeted — a REAL ENOENT spawn failure, scoped to X's own
+      // branch name only (never matches Y's own merge, which never reaches discovery at all).
+      const discoveryFailFactory = scopedSpawnFailGitFactory((args) => Array.isArray(args) && args.includes(`--grep=Loom-Worker-Branch: ${first.branch}`));
+      const sessionsDiscoverySpawnFail = new SessionService(dbDiscoverySpawnFail, pty, new OrchestrationControl(), { staleGenerationDiscoveryGitFactory: discoveryFailFactory });
+      const sfResult = await sessionsDiscoverySpawnFail.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_SPAWN_FAIL_RETRIES reconcile result (boot 1, discovery fault):", JSON.stringify(sfResult));
+      check("(DISCOVERY_SPAWN_FAIL_RETRIES boot 1) a spawn-level failure during candidate DISCOVERY itself reads transient, NOT an immediate definitive escalation",
+        dbDiscoverySpawnFail.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && !e.escalated && e.kind === "transient" && e.attempts === 1));
+      check("(DISCOVERY_SPAWN_FAIL_RETRIES boot 1) never attributed yet", !dbDiscoverySpawnFail.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+      check("(DISCOVERY_SPAWN_FAIL_RETRIES boot 1) the boot-summary staleGenerationTransient counter includes this row", sfResult.staleGenerationTransient >= 1);
+      check("(DISCOVERY_SPAWN_FAIL_RETRIES boot 1) worker Y (an ordinary already-landed worker) still finalizes normally in the SAME boot — the fault stays scoped to X",
+        dbDiscoverySpawnFail.listEventsForWorker(workerYId).some((ev) => ev.kind === "merge_done"));
+
+      // Boot 2 (retry, then success): a FRESH SessionService over the SAME durable DB, this time with NO
+      // discovery fault at all (undefined ⇒ real git) — mirrors a real daemon restart after the host
+      // condition clears. X's own genuine landing (committed above) is now discoverable and attributes.
+      const sessionsDiscoverySpawnFailClean = new SessionService(dbDiscoverySpawnFail, pty, new OrchestrationControl());
+      const sfResult2 = await sessionsDiscoverySpawnFailClean.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_SPAWN_FAIL_RETRIES reconcile result (boot 2, cleared):", JSON.stringify(sfResult2));
+      check("(DISCOVERY_SPAWN_FAIL_RETRIES boot 2) retry succeeds: X is now ATTRIBUTED once discovery can actually run",
+        dbDiscoverySpawnFail.listEventsForWorker(workerXId).some((ev) => ev.kind === "merge_done" && ev.detail?.staleGenerationAttributed === true));
     } finally {
-      try { dbDiscoveryTimeout?.close(); } catch { /* best-effort */ }
-      for (const p of [R_DISCOVERY_TIMEOUT, dbDiscoveryTimeoutPath]) {
+      try { dbDiscoverySpawnFail?.close(); } catch { /* best-effort */ }
+      for (const p of [R_DISCOVERY_SPAWN_FAIL, dbDiscoverySpawnFailPath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- DISCOVERY_TIMEOUT_TRANSIENT (card 1e7d6956, Code Review round 2, item 2): the OTHER transient
+  // trigger, isWithTimeoutExpiry, was never exercised by any fixture (confirmed by the reviewer: removing
+  // isWithTimeoutExpiry from the classification left every stale-generation test green). The seam
+  // factory's own raw() call for X's own discovery grep NEVER settles — so withTimeout's own synthetic
+  // "exceeded Nms (hung git child?)" timeout is what actually wins the race, never simple-git's own
+  // command-level timeout — producing the EXACT shape isWithTimeoutExpiry matches. A small gitOpMs (the
+  // floor, 1000ms) is scoped to this ONE isolated pair only, never a shared/global override. ---
+  {
+    const R_DISCOVERY_TIMEOUT_TRANSIENT = path.join(os.tmpdir(), `loom-sglt-disc-timeout-t-${sfx}`);
+    const dbDiscoveryTimeoutTransientPath = path.join(os.tmpdir(), `loom-sglt-disc-timeout-t-db-${sfx}.db`);
+    let dbDiscoveryTimeoutTransient;
+    try {
+      initRepo(R_DISCOVERY_TIMEOUT_TRANSIENT);
+      dbDiscoveryTimeoutTransient = new Db(dbDiscoveryTimeoutTransientPath);
+      const projId = `sglt-disc-timeout-t-proj-${sfx}`, agentId = `sglt-disc-timeout-t-agent-${sfx}`, taskId = `sglt-disc-timeout-t-task-${sfx}`;
+      const mgrId = `sglt-disc-timeout-t-mgr-${sfx}`, workerXId = `sglt-disc-timeout-t-workerx-${sfx}`;
+      dbDiscoveryTimeoutTransient.insertProject({ id: projId, name: "SGLT-disc-timeout-t", repoPath: R_DISCOVERY_TIMEOUT_TRANSIENT, vaultPath: R_DISCOVERY_TIMEOUT_TRANSIENT, config: {}, createdAt: now, archivedAt: null });
+      dbDiscoveryTimeoutTransient.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbDiscoveryTimeoutTransient.insertTask({ id: taskId, projectId: projId, title: "SGLT-disc-timeout-t", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbDiscoveryTimeoutTransient.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_DISCOVERY_TIMEOUT_TRANSIENT, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_DISCOVERY_TIMEOUT_TRANSIENT, "rev-parse HEAD");
+      dbDiscoveryTimeoutTransient.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+
+      const first = await createWorktree(R_DISCOVERY_TIMEOUT_TRANSIENT, projId, taskId);
+      dbDiscoveryTimeoutTransient.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "disctimeoutt.txt"), "disc timeout transient content\n");
+      commitAll(first.worktreePath, "c1 real", GIT_ID);
+      const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+      const second = await createWorktree(R_DISCOVERY_TIMEOUT_TRANSIENT, projId, taskId);
+      const workerYId = `sglt-disc-timeout-t-workery-${sfx}`;
+      dbDiscoveryTimeoutTransient.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+
+      dbDiscoveryTimeoutTransient.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["disctimeoutt.txt"] } });
+      dbDiscoveryTimeoutTransient.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      const neverSettleFactory = scopedNeverSettleGitFactory((args) => Array.isArray(args) && args.includes(`--grep=Loom-Worker-Branch: ${first.branch}`));
+      // gitOpMs:1000 is the service's own GIT_TIMEOUT_FLOOR_MS (the lowest value it accepts) — scoped to
+      // THIS isolated pair only, never a shared/global override across other scenarios' own rows.
+      const sessionsDiscoveryTimeoutTransient = new SessionService(dbDiscoveryTimeoutTransient, pty, new OrchestrationControl(), { gitOpMs: 1000, staleGenerationDiscoveryGitFactory: neverSettleFactory });
+      const dttResult = await sessionsDiscoveryTimeoutTransient.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_TIMEOUT_TRANSIENT reconcile result:", JSON.stringify(dttResult));
+      check("(DISCOVERY_TIMEOUT_TRANSIENT) a genuine withTimeout expiry during candidate DISCOVERY itself reads transient, NOT an immediate definitive escalation",
+        dbDiscoveryTimeoutTransient.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && !e.escalated && e.kind === "transient" && e.attempts === 1));
+      check("(DISCOVERY_TIMEOUT_TRANSIENT) never attributed", !dbDiscoveryTimeoutTransient.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbDiscoveryTimeoutTransient?.close(); } catch { /* best-effort */ }
+      for (const p of [R_DISCOVERY_TIMEOUT_TRANSIENT, dbDiscoveryTimeoutTransientPath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- DISCOVERY_DEFINITIVE (card 1e7d6956, Code Review round 2, item 1): a REAL git fatal during
+  // candidate DISCOVERY (a corrupted ancestor commit object, hit mid-walk — never a refusal, never a
+  // timeout, never a spawn-level failure) must classify DEFINITIVE, escalating on the FIRST boot — never
+  // folding into the transient give-up bucket. No custom gitFactory needed — a REAL, deterministic
+  // object corruption, same idiom as corruptOneSubtree/corruptCommitObject above. ---
+  {
+    const R_DISCOVERY_DEFINITIVE = path.join(os.tmpdir(), `loom-sglt-discdef-${sfx}`);
+    const dbDiscoveryDefinitivePath = path.join(os.tmpdir(), `loom-sglt-discdef-db-${sfx}.db`);
+    let dbDiscoveryDefinitive;
+    try {
+      initRepo(R_DISCOVERY_DEFINITIVE);
+      dbDiscoveryDefinitive = new Db(dbDiscoveryDefinitivePath);
+      const sessionsDiscoveryDefinitive = new SessionService(dbDiscoveryDefinitive, pty, new OrchestrationControl());
+      const projId = `sglt-discdef-proj-${sfx}`, agentId = `sglt-discdef-agent-${sfx}`, taskId = `sglt-discdef-task-${sfx}`;
+      const mgrId = `sglt-discdef-mgr-${sfx}`, workerXId = `sglt-discdef-workerx-${sfx}`;
+      dbDiscoveryDefinitive.insertProject({ id: projId, name: "SGLT-discdef", repoPath: R_DISCOVERY_DEFINITIVE, vaultPath: R_DISCOVERY_DEFINITIVE, config: {}, createdAt: now, archivedAt: null });
+      dbDiscoveryDefinitive.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbDiscoveryDefinitive.insertTask({ id: taskId, projectId: projId, title: "SGLT-discdef", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbDiscoveryDefinitive.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_DISCOVERY_DEFINITIVE, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+      // Advance main with an intermediate commit (to be corrupted) THEN a final tip the watermark points
+      // at — discovery's own unbounded `git log <base>` walk must still traverse the intermediate commit
+      // to reach genesis, hitting the corruption mid-walk, even though the watermark's own tip (a plain
+      // `rev-parse`, never a history walk) resolves fine.
+      fs.writeFileSync(path.join(R_DISCOVERY_DEFINITIVE, "mid.txt"), "mid\n");
+      commitAll(R_DISCOVERY_DEFINITIVE, "main advances (mid, to be corrupted)", GIT_ID);
+      const midSha = git(R_DISCOVERY_DEFINITIVE, "rev-parse HEAD");
+      fs.writeFileSync(path.join(R_DISCOVERY_DEFINITIVE, "final.txt"), "final\n");
+      commitAll(R_DISCOVERY_DEFINITIVE, "main advances (final tip)", GIT_ID);
+      const finalSha = git(R_DISCOVERY_DEFINITIVE, "rev-parse HEAD");
+      dbDiscoveryDefinitive.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: finalSha }));
+
+      const first = await createWorktree(R_DISCOVERY_DEFINITIVE, projId, taskId);
+      dbDiscoveryDefinitive.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "discdef.txt"), "discdef content\n");
+      commitAll(first.worktreePath, "c1 real", GIT_ID);
+      const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+      const second = await createWorktree(R_DISCOVERY_DEFINITIVE, projId, taskId);
+      const workerYId = `sglt-discdef-workery-${sfx}`;
+      dbDiscoveryDefinitive.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+
+      dbDiscoveryDefinitive.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["discdef.txt"] } });
+      dbDiscoveryDefinitive.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      // Corrupt ONLY after every git operation in this repo (both worktree creations) is done — matches
+      // corruptOneSubtree's own ordering discipline above.
+      corruptCommitObject(R_DISCOVERY_DEFINITIVE, midSha);
+
+      const ddResult = await sessionsDiscoveryDefinitive.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_DEFINITIVE reconcile result:", JSON.stringify(ddResult));
+      check("(DISCOVERY_DEFINITIVE) a REAL git fatal during candidate DISCOVERY (a corrupted ancestor commit, never a refusal/timeout/spawn failure) classifies DEFINITIVE and escalates on the FIRST boot",
+        dbDiscoveryDefinitive.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated && e.kind === "definitive"));
+      check("(DISCOVERY_DEFINITIVE) never attributed", !dbDiscoveryDefinitive.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbDiscoveryDefinitive?.close(); } catch { /* best-effort */ }
+      for (const p of [R_DISCOVERY_DEFINITIVE, dbDiscoveryDefinitivePath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- CHAIN_TRANSIENT (card 1e7d6956): a transient failure in the landedTip arm's own
+  // verifyReviewedTipChain call now folds into sawTransient (round 3 S2(b)'s own "checked:true" wording
+  // was dishonest for exactly this case — closed here as a side effect). Isolated pair + the NEW
+  // `staleGenerationChainGitFactory` test seam (card 1e7d6956); it fails UNCONDITIONALLY since it is
+  // already scoped to ONE call site by construction, so no args-matching predicate is needed. ---
+  {
+    const R_CHAIN_TRANSIENT = path.join(os.tmpdir(), `loom-sglt-chaintrans-${sfx}`);
+    const dbChainTransientPath = path.join(os.tmpdir(), `loom-sglt-chaintrans-db-${sfx}.db`);
+    let dbChainTransient;
+    try {
+      initRepo(R_CHAIN_TRANSIENT);
+      dbChainTransient = new Db(dbChainTransientPath);
+      const chainFailFactory = scopedSpawnFailGitFactory(() => true);
+      const sessionsChainTransient = new SessionService(dbChainTransient, pty, new OrchestrationControl(), { staleGenerationChainGitFactory: chainFailFactory });
+      const projId = `sglt-chaintrans-proj-${sfx}`, agentId = `sglt-chaintrans-agent-${sfx}`, taskId = `sglt-chaintrans-task-${sfx}`;
+      const mgrId = `sglt-chaintrans-mgr-${sfx}`, workerXId = `sglt-chaintrans-workerx-${sfx}`;
+      dbChainTransient.insertProject({ id: projId, name: "SGLT-chaintrans", repoPath: R_CHAIN_TRANSIENT, vaultPath: R_CHAIN_TRANSIENT, config: {}, createdAt: now, archivedAt: null });
+      dbChainTransient.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbChainTransient.insertTask({ id: taskId, projectId: projId, title: "SGLT-chaintrans", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbChainTransient.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_CHAIN_TRANSIENT, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_CHAIN_TRANSIENT, "rev-parse HEAD");
+      dbChainTransient.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+
+      const first = await createWorktree(R_CHAIN_TRANSIENT, projId, taskId);
+      dbChainTransient.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "chaintrans.txt"), "chaintrans content\n");
+      commitAll(first.worktreePath, "c1 real", GIT_ID);
+      const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+      // A candidate carrying Loom-Landed-Tip (the landedTip arm) — its own content/validity doesn't
+      // matter: staleGenerationChainGitFactory fails EVERY verifyReviewedTipChain call unconditionally,
+      // before any real content is ever read.
+      fs.writeFileSync(path.join(R_CHAIN_TRANSIENT, "chaintrans.txt"), "chaintrans content\n");
+      commitAll(R_CHAIN_TRANSIENT, [`chore(unrelated): chaintrans landing`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${reviewedTip}`], GIT_ID);
+
+      const second = await createWorktree(R_CHAIN_TRANSIENT, projId, taskId);
+      const workerYId = `sglt-chaintrans-workery-${sfx}`;
+      dbChainTransient.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+
+      dbChainTransient.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["chaintrans.txt"] } });
+      dbChainTransient.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      const ctResult = await sessionsChainTransient.reconcileOrchestrationOnBoot(new Set());
+      console.log("CHAIN_TRANSIENT reconcile result:", JSON.stringify(ctResult));
+      check("(CHAIN_TRANSIENT) a spawn-level failure inside the landedTip arm's own verifyReviewedTipChain call reads transient, folded into sawTransient — never an immediate definitive escalation",
+        dbChainTransient.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && !e.escalated && e.kind === "transient" && e.attempts === 1));
+      check("(CHAIN_TRANSIENT) never attributed", !dbChainTransient.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbChainTransient?.close(); } catch { /* best-effort */ }
+      for (const p of [R_CHAIN_TRANSIENT, dbChainTransientPath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- CHAIN_DEFINITIVE (card 1e7d6956, Code Review round 2, item 1): a REAL git fatal inside the
+  // landedTip arm's own verifyReviewedTipChain walk (a corrupted tree object on the union commit itself,
+  // never a refusal/timeout/spawn failure) must classify DEFINITIVE — chain.transient stays unset, so
+  // this candidate contributes neither an attribution nor a transient miss; the loop finishes with
+  // sawTransient:false, escalating definitively on the FIRST boot. No custom gitFactory needed — a REAL,
+  // deterministic object corruption, same idiom as corruptCommitTree above. ---
+  {
+    const R_CHAIN_DEFINITIVE = path.join(os.tmpdir(), `loom-sglt-chaindef-${sfx}`);
+    const dbChainDefinitivePath = path.join(os.tmpdir(), `loom-sglt-chaindef-db-${sfx}.db`);
+    let dbChainDefinitive;
+    try {
+      initRepo(R_CHAIN_DEFINITIVE);
+      dbChainDefinitive = new Db(dbChainDefinitivePath);
+      const sessionsChainDefinitive = new SessionService(dbChainDefinitive, pty, new OrchestrationControl());
+      const projId = `sglt-chaindef-proj-${sfx}`, agentId = `sglt-chaindef-agent-${sfx}`, taskId = `sglt-chaindef-task-${sfx}`;
+      const mgrId = `sglt-chaindef-mgr-${sfx}`, workerXId = `sglt-chaindef-workerx-${sfx}`;
+      dbChainDefinitive.insertProject({ id: projId, name: "SGLT-chaindef", repoPath: R_CHAIN_DEFINITIVE, vaultPath: R_CHAIN_DEFINITIVE, config: {}, createdAt: now, archivedAt: null });
+      dbChainDefinitive.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbChainDefinitive.insertTask({ id: taskId, projectId: projId, title: "SGLT-chaindef", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbChainDefinitive.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_CHAIN_DEFINITIVE, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_CHAIN_DEFINITIVE, "rev-parse HEAD");
+      dbChainDefinitive.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+
+      const first = await createWorktree(R_CHAIN_DEFINITIVE, projId, taskId);
+      dbChainDefinitive.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x real work\n");
+      commitAll(first.worktreePath, "x", GIT_ID);
+      const xTip = git(first.worktreePath, "rev-parse HEAD");
+
+      fs.writeFileSync(path.join(R_CHAIN_DEFINITIVE, "main-advance.txt"), "main moved on\n");
+      commitAll(R_CHAIN_DEFINITIVE, "main advances", GIT_ID);
+      const mTip = git(R_CHAIN_DEFINITIVE, "rev-parse HEAD");
+
+      // A genuine worktree-side union (same shape GENUINE/setupGenuineUnionNoOverlap uses) — unionTip
+      // lives only on first.branch's own ref, never on main's own ancestry, so corrupting ITS tree later
+      // never touches anything discovery's own history walk needs to read.
+      execSync(`git ${GIT_ID} merge -q --no-edit ${mTip}`, { cwd: first.worktreePath });
+      const unionTip = git(first.worktreePath, "rev-parse HEAD");
+
+      execSync(`git ${GIT_ID} merge --squash ${first.branch}`, { cwd: R_CHAIN_DEFINITIVE });
+      commitAll(R_CHAIN_DEFINITIVE, [`chore(unrelated): chaindef landing`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${unionTip}\nLoom-Worker-Base: ${mTip}`], GIT_ID);
+
+      const second = await createWorktree(R_CHAIN_DEFINITIVE, projId, taskId);
+      const workerYId = `sglt-chaindef-workery-${sfx}`;
+      dbChainDefinitive.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+
+      dbChainDefinitive.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip, filesChangedPaths: ["x.txt"] } });
+      dbChainDefinitive.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      // Corrupt only after every other git operation in this repo (including the re-task's own second
+      // worktree creation) is done — matches corruptOneSubtree's own ordering discipline above.
+      corruptCommitTree(R_CHAIN_DEFINITIVE, unionTip);
+
+      const cdResult = await sessionsChainDefinitive.reconcileOrchestrationOnBoot(new Set());
+      console.log("CHAIN_DEFINITIVE reconcile result:", JSON.stringify(cdResult));
+      check("(CHAIN_DEFINITIVE) a REAL git fatal inside the landedTip arm's own chain walk (a corrupted tree, never a refusal/timeout/spawn failure) classifies DEFINITIVE and escalates on the FIRST boot",
+        dbChainDefinitive.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated && e.kind === "definitive"));
+      check("(CHAIN_DEFINITIVE) never attributed", !dbChainDefinitive.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbChainDefinitive?.close(); } catch { /* best-effort */ }
+      for (const p of [R_CHAIN_DEFINITIVE, dbChainDefinitivePath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- DISCOVERY_BOUND_ATTEMPTS (card 1e7d6956, mirroring 05915fc7 round 3's own BOUND_ATTEMPTS shape
+  // below): a PERSISTENT discovery-level transient (the SAME staleGenerationDiscoveryGitFactory fault,
+  // never cleared across boots) still escalates once attempts crosses the threshold, through the EXISTING
+  // bounded-escalation machinery — no parallel path. Isolated into its OWN fresh Db/SessionService pair
+  // with a LOW override, same reason BOUND_ATTEMPTS itself is isolated. ---
+  {
+    const R_DBOUND = path.join(os.tmpdir(), `loom-sglt-dbound-${sfx}`);
+    const dbDBoundPath = path.join(os.tmpdir(), `loom-sglt-dbound-db-${sfx}.db`);
+    let dbDBound;
+    try {
+      initRepo(R_DBOUND);
+      dbDBound = new Db(dbDBoundPath);
+      const projId = `sglt-dbound-proj-${sfx}`, agentId = `sglt-dbound-agent-${sfx}`, taskId = `sglt-dbound-task-${sfx}`;
+      const mgrId = `sglt-dbound-mgr-${sfx}`, workerXId = `sglt-dbound-workerx-${sfx}`;
+      dbDBound.insertProject({ id: projId, name: "SGLT-dbound", repoPath: R_DBOUND, vaultPath: R_DBOUND, config: {}, createdAt: now, archivedAt: null });
+      dbDBound.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbDBound.insertTask({ id: taskId, projectId: projId, title: "SGLT-dbound", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbDBound.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_DBOUND, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_DBOUND, "rev-parse HEAD");
+      dbDBound.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+      const first = await createWorktree(R_DBOUND, projId, taskId);
+      dbDBound.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "dbound.txt"), "dbound content\n");
+      commitAll(first.worktreePath, "c1 real", GIT_ID);
+      const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+      const second = await createWorktree(R_DBOUND, projId, taskId);
+      const workerYId = `sglt-dbound-workery-${sfx}`;
+      dbDBound.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+
+      dbDBound.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["dbound.txt"] } });
+      dbDBound.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      const DBOUND_ATTEMPTS = 2; // low, so a 3-boot run proves the full bound/no-rebound shape fast
+      const discoveryFailFactory = scopedSpawnFailGitFactory((args) => Array.isArray(args) && args.includes(`--grep=Loom-Worker-Branch: ${first.branch}`));
+      const sessionsDBound = new SessionService(dbDBound, pty, new OrchestrationControl(), { staleGenerationTransientEscalateAttempts: DBOUND_ATTEMPTS, staleGenerationDiscoveryGitFactory: discoveryFailFactory });
+
+      const d1 = await sessionsDBound.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_BOUND_ATTEMPTS reconcile result (boot 1):", JSON.stringify(d1));
+      check(`(DISCOVERY_BOUND_ATTEMPTS boot 1) tracked as transient, not yet escalated (attempt 1 of ${DBOUND_ATTEMPTS})`,
+        dbDBound.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && !e.escalated && e.kind === "transient" && e.attempts === 1));
+
+      const d2 = await sessionsDBound.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_BOUND_ATTEMPTS reconcile result (boot 2, crosses threshold):", JSON.stringify(d2));
+      check("(DISCOVERY_BOUND_ATTEMPTS boot 2) escalates on crossing the attempts threshold",
+        dbDBound.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated && e.kind === "transient" && e.attempts === DBOUND_ATTEMPTS));
+      check("(DISCOVERY_BOUND_ATTEMPTS boot 2) the one-shot escalation nudge fired exactly once",
+        warnsMatching("escalated [loom:merge-orphaned]").filter((w) => w.includes(workerXId.slice(0, 8)) && w.includes("past the transient give-up threshold (one-shot)")).length === 1);
+
+      const d3 = await sessionsDBound.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_BOUND_ATTEMPTS reconcile result (boot 3, no re-nudge):", JSON.stringify(d3));
+      check("(DISCOVERY_BOUND_ATTEMPTS boot 3) stays escalated, sticky",
+        dbDBound.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated));
+      check("(DISCOVERY_BOUND_ATTEMPTS boot 3) the one-shot nudge did NOT re-fire a second time",
+        warnsMatching("escalated [loom:merge-orphaned]").filter((w) => w.includes(workerXId.slice(0, 8)) && w.includes("past the transient give-up threshold (one-shot)")).length === 1);
+    } finally {
+      try { dbDBound?.close(); } catch { /* best-effort */ }
+      for (const p of [R_DBOUND, dbDBoundPath]) {
         try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
       }
     }

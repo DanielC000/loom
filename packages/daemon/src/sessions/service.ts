@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -2899,6 +2899,14 @@ export class SessionService {
    *  serves BOTH the EARLY short-circuit near the top of `confirmWorkerMerge` AND the `if (preLanded)`
    *  finalize shortcut further down — a test arming this factory sees all three call sites. */
   private readonly preLandedLookupGitFactory?: BoundedGitDeps["gitFactory"];
+  /** @decision 1e7d6956 — TEST SEAM, same style as {@link preLandedLookupGitFactory}: threaded ONLY into
+   *  `attributeStaleGenerationOwnLanding`'s own `findAllLandedTrailerCommits` call — see this card's own
+   *  decision record. `undefined` ⇒ real `canonicalGit`, byte-identical to before this seam existed. */
+  private readonly staleGenerationDiscoveryGitFactory?: BoundedGitDeps["gitFactory"];
+  /** @decision 1e7d6956 — TEST SEAM, same style as {@link staleGenerationDiscoveryGitFactory}: threaded
+   *  ONLY into `attributeStaleGenerationOwnLanding`'s own landedTip-arm `verifyReviewedTipChain` call.
+   *  `undefined` ⇒ real `canonicalGit`, byte-identical to before this seam existed. */
+  private readonly staleGenerationChainGitFactory?: BoundedGitDeps["gitFactory"];
   /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
    *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
    *  copy that could drift from {@link SPAWN_OP_RETAIN_MS} on a future change to either. Rounds to the
@@ -3388,6 +3396,12 @@ export class SessionService {
        *  own preLanded-computing `findLandedSquashCommit` calls AND `finishSoloAlreadyLanded`'s own
        *  internal re-lookup (the early short-circuit + the finalize shortcut) — see the field's own doc. */
       preLandedLookupGitFactory?: BoundedGitDeps["gitFactory"];
+      /** TEST SEAM (card 1e7d6956): git factory for `attributeStaleGenerationOwnLanding`'s own
+       *  `findAllLandedTrailerCommits` discovery call only — see the field's own doc. */
+      staleGenerationDiscoveryGitFactory?: BoundedGitDeps["gitFactory"];
+      /** TEST SEAM (card 1e7d6956): git factory for `attributeStaleGenerationOwnLanding`'s own landedTip-arm
+       *  `verifyReviewedTipChain` call only — see the field's own doc. */
+      staleGenerationChainGitFactory?: BoundedGitDeps["gitFactory"];
       /** TEST SEAM (card cee17efe): the dist-importer check's own build step — see {@link distImporterCheckBuild}'s own doc. */
       distImporterCheckBuild?: (worktreePath: string, cancelSignal?: AbortSignal) => Promise<{ ok: boolean; reason?: string }>;
       /** TEST SEAM (card cee17efe, round-3 ruling 3): the dist-importer check's own worktree cut — see {@link distImporterCheckCreateWorktree}'s own doc. */
@@ -3424,6 +3438,8 @@ export class SessionService {
     this.unionMergeGitFactory = opts?.unionMergeGitFactory;
     this.alreadyLandedGitFactory = opts?.alreadyLandedGitFactory;
     this.preLandedLookupGitFactory = opts?.preLandedLookupGitFactory;
+    this.staleGenerationDiscoveryGitFactory = opts?.staleGenerationDiscoveryGitFactory;
+    this.staleGenerationChainGitFactory = opts?.staleGenerationChainGitFactory;
     this.heldProbeGitFactory = opts?.heldProbeGitFactory;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
@@ -20331,6 +20347,8 @@ export class SessionService {
             // busy main); always pass the branch's owed-base as an extra union base, or a HELD branch's
             // own re-union of main falsely reads as stale too.
             if (landingCheckRan && landingCheckPreHead !== heldStamp.head) {
+              // @decision 1e7d6956 — deliberately ignores `chain.transient`: refusing a landing on ANY
+              // chain failure (transient included) is the correct, conservative behavior here.
               const chain = await verifyReviewedTipChain(repoPath, landingCheckPreHead!, heldStamp.head, { timeoutMs: this.gitOpMs }, this.extraUnionBasesForOwedBase(owedBase));
               if (!chain.ok) {
                 const why = `the worktree changed with a new commit while the ungated landing check was running (or while it queued/waited for the repo guard) — ${chain.reason} — its verdict no longer covers the tree that would be squashed; nothing was squashed; re-run worker_merge_confirm to re-check against the current tree`;
@@ -22083,6 +22101,8 @@ export class SessionService {
       // mergeMainIntoWorktree's `owedBase`), so the walk must accept that base too — derived through the
       // SAME helper the landing-check stale re-check uses, so the two cannot drift apart.
       const owed = await this.resolveOwedRange(branch, repoPath, repoKey);
+      // @decision 1e7d6956 — deliberately ignores `chain.transient`: refusing to merge on ANY chain
+      // failure (transient included) is the correct, conservative behavior here (bbccf470).
       const chain = await verifyReviewedTipChain(repoPath, recorded, live, { timeoutMs: this.gitOpMs }, this.extraUnionBasesForOwedBase(owed.kind === "range" ? owed.base : undefined));
       if (chain.ok) return { state: "unmoved", tip: live };
       why = chain.reason;
@@ -27557,19 +27577,29 @@ export class SessionService {
     // staleGenerationTransientEscalateAttempts boots OR staleGenerationTransientEscalateMs elapsed
     // (mirrors mergeReconcileEscalateAttempts/_Ms), it escalates for real, exactly once.
     if (attribution.kind === "transient") {
+      // @decision 1e7d6956 — an empty candidateShas means candidate DISCOVERY itself failed (no
+      // candidate was ever listed to check), never "zero candidates checked" — word it honestly,
+      // distinct from the per-candidate case below.
+      const candidatesClause = attribution.candidateShas.length > 0
+        ? `candidate(s) [${attribution.candidateShas.map((sha) => sha.slice(0, 8)).join(", ")}] against this worker's own recorded tip`
+        : null;
+      const transientReasonText = candidatesClause
+        ? `a transient git read failure prevented verifying ${candidatesClause}`
+        : `candidate discovery (git log --grep) failed with a transient git read failure`;
       const entry = this.db.recordStaleGenerationUnresolved(
         s.id, { branch, taskId, projectId: project.id },
-        `a transient git read failure prevented verifying candidate(s) [${attribution.candidateShas.map((sha) => sha.slice(0, 8)).join(", ")}] against this worker's own recorded tip`,
+        transientReasonText,
         "transient",
       );
       const ageMs = Date.now() - new Date(entry.firstDetectedAt).getTime();
       const crossedThreshold = entry.attempts >= this.staleGenerationTransientEscalateAttempts || ageMs >= this.staleGenerationTransientEscalateMs;
       // eslint-disable-next-line no-console
-      console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — a transient git read failure prevented verifying candidate(s) [${attribution.candidateShas.map((sha) => sha.slice(0, 8)).join(", ")}] against this worker's own recorded tip this boot (attempt ${entry.attempts}); ${crossedThreshold ? "past the give-up threshold, escalating" : "retrying next boot, no escalation yet"}`);
+      console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — ${transientReasonText} this boot (attempt ${entry.attempts}); ${crossedThreshold ? "past the give-up threshold, escalating" : "retrying next boot, no escalation yet"}`);
       if (!entry.escalated && crossedThreshold) {
         const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
         const ageDays = Math.max(0, Math.round(ageMs / 86_400_000));
-        const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and ${entry.attempts} consecutive boot(s) over ~${ageDays} day(s) have each hit a TRANSIENT git read failure trying to verify candidate(s) [${attribution.candidateShas.map((sha) => sha.slice(0, 8)).join(", ")}] against this worker's own recorded tip — never a definitive content mismatch, so Loom cannot rule out this eventually self-healing, but it has gone on long enough to need a human look (an oversized tree, a persistent host I/O problem, or a git timeout that needs raising). Loom will keep retrying every boot regardless; this alert will not repeat.`
+        const escalationWhat = candidatesClause ? `verify ${candidatesClause}` : `run candidate discovery (git log --grep)`;
+        const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and ${entry.attempts} consecutive boot(s) over ~${ageDays} day(s) have each hit a TRANSIENT git read failure trying to ${escalationWhat} — never a definitive content mismatch, so Loom cannot rule out this eventually self-healing, but it has gone on long enough to need a human look (an oversized tree, a persistent host I/O problem, or a git timeout that needs raising). Loom will keep retrying every boot regardless; this alert will not repeat.`
           + this.buildStampSuffix(this.resolveDeployStaleness());
         try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
         this.db.markStaleGenerationEscalated(s.id);
@@ -27687,7 +27717,17 @@ export class SessionService {
     try {
       // @decision e5458ccd — verify OLDEST-first: a coincidental later match must never win over this
       // worker's own true landing.
-      const candidates = [...await findAllLandedTrailerCommits(repoPath, branch, base, { timeoutMs: this.gitOpMs })].reverse();
+      // @decision 1e7d6956 — findAllLandedTrailerCommits never lets a CanonicalGitRefusal escape (it
+      // swallows one internally to `[]`) and never throws anything else — the only exception reaching
+      // here is GitTransientReadFailure; anything else rethrows to the generic outer catch below.
+      let discovered: Awaited<ReturnType<typeof findAllLandedTrailerCommits>>;
+      try {
+        discovered = await findAllLandedTrailerCommits(repoPath, branch, base, { timeoutMs: this.gitOpMs, gitFactory: this.staleGenerationDiscoveryGitFactory });
+      } catch (e) {
+        if (e instanceof GitTransientReadFailure) return { kind: "transient", candidateShas: [] };
+        throw e;
+      }
+      const candidates = [...discovered].reverse();
       if (candidates.length === 0) return { kind: "no-match", checked: false };
       // reviewedTip's own tree is loop-invariant across every candidate below — read it ONCE (AFTER the
       // empty-candidates check above, round 2: a session with no eligible candidates pays nothing for
@@ -27739,7 +27779,7 @@ export class SessionService {
           // @decision e5458ccd — Round 3 item 1: pass the SAME resolved mainline watermark ref the
           // candidate scan above used, never the function's own bare-"HEAD" default — canonical is a
           // shared checkout that can be diverted off the real mainline at the instant reconcile runs.
-          const chain = await verifyReviewedTipChain(repoPath, reviewedTip, candidate.trailers.landedTip, { timeoutMs: this.gitOpMs }, [], base);
+          const chain = await verifyReviewedTipChain(repoPath, reviewedTip, candidate.trailers.landedTip, { timeoutMs: this.gitOpMs, gitFactory: this.staleGenerationChainGitFactory }, [], base);
           // @decision c7dc99bf — chain.ok alone never attributes: it proves nothing about candidate.sha's
           // own content. Content-check against the review-time stamped filesChangedPaths, never the
           // candidate's own trailer.
@@ -27748,6 +27788,10 @@ export class SessionService {
             // on "attributed" — the net only ever REJECTS a positive attribution, so paying its cost
             // against an already-failed candidate is pure waste (measured: it dominated the old order).
             result = await tryAttribute(candidate.sha, "union-chain");
+          } else if (chain.transient) {
+            // @decision 1e7d6956 — fold a transient chain-walk failure into the SAME sawTransient
+            // accumulation the content-check arms use, rather than silently skipping it as before.
+            result = { kind: "miss", transient: true };
           }
         } else if (candidate.trailers.base) {
           // @decision c7dc99bf — `candidate.trailers.base` is only an ELIGIBILITY gate here (does this
