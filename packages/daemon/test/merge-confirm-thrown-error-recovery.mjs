@@ -11,31 +11,38 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // signal at all: every plausible response (re-dispatch, re-merge) risks redoing work that's already done.
 //
 // This file does NOT try to reproduce the exact dead-owner eviction race (merge-rest-route-tracked.mjs
-// block (4) already covers that path end-to-end, at its own ~4% natural rate) — it tests the actual FIX
-// directly and deterministically: confirmWorkerMerge can throw for ANY reason, at ANY point, including
-// after a squash already landed (this method's own long-standing doc says so) — so the recovery wired into
-// confirmWorkerMergeTracked's `run` callback must behave correctly regardless of WHY the throw happened, not
-// just for this one specific race shape. A thrown exception is forced deterministically via the injectable
-// `runGate` seam (an infra bug in the gate runner itself, never wrapped in a try/catch — confirms it
-// propagates straight out of confirmWorkerMerge, verified by reading the source at the call site).
+// block (4) already covers that path end-to-end, at its own ~4% natural rate) — the injected `runGate`
+// seam here forces a thrown exception deterministically, but ONLY when the branch's content is NOT yet
+// on main (scenario (B) below) — confirmWorkerMerge's own EARLY `findLandedSquashCommit` preflight
+// short-circuits BEFORE ever reaching the gate whenever the content IS already there (verified by
+// instrumentation; see docs/decisions/7f86c02f-*.md's "Honest scope" section), so scenario (A) below
+// exercises that separate, non-throwing short-circuit's own idempotency instead — not a thrown-then-recovered
+// race. The ACTUAL "throws after a real landing, recovery also broken" shape is covered deterministically
+// in the sibling file merge-confirm-post-squash-throw-recovery.mjs instead, via a different seam
+// (patching `finalizeMerge`/`tipAcrossLandedCheck` directly).
 //
 // Proves:
-//   (A) RECOVERABLE: the branch's work is ALREADY on main (a real `git merge --squash` + the exact
-//       `Loom-Worker-Branch:` trailer confirmWorkerMerge's own mergeBranch writes) when confirmWorkerMerge
-//       throws — the recovery re-derives the truth from git and reports a REAL `merged:true`
-//       (ALREADY_MERGED), pushes `[loom:already-merged]`, and NEVER a `[loom:merge-failed]`/
-//       `[loom:merge-unknown]` echo for work that actually landed.
-//   (B) NEGATIVE CONTROL — genuinely unknown: the SAME thrown error, but the branch's work is NOT anywhere
-//       on main — the recovery correctly finds nothing, rethrows, and the manager gets an honest
-//       `[loom:merge-unknown]` nudge (never silently swallowed, and — the DoD's own words — NEVER
-//       `[loom:merge-failed]`, since a thrown exception can never prove the merge genuinely failed).
+//   (A) the branch's work is ALREADY on main (a real `git merge --squash` + the exact
+//       `Loom-Worker-Branch:` trailer confirmWorkerMerge's own mergeBranch writes) BEFORE
+//       confirmWorkerMerge ever runs — the early preflight finds it and resolves a REAL `merged:true`
+//       (ALREADY_MERGED, `gateSkipped:"already-landed"`) without ever reaching the gate, pushes
+//       `[loom:already-merged]`, and a later re-confirm stays idempotent (one `merge_done`, no double
+//       squash, task done).
+//   (B) NEGATIVE CONTROL — genuinely unknown: a real thrown error (the branch's work is NOT anywhere on
+//       main, so the early preflight finds nothing and the gate genuinely runs and throws) — the
+//       recovery correctly finds nothing, rethrows, and the manager gets an honest `[loom:merge-unknown]`
+//       nudge (never silently swallowed, and — the DoD's own words — NEVER `[loom:merge-failed]`, since
+//       a thrown exception can never prove the merge genuinely failed); a plain re-confirm genuinely
+//       re-attempts rather than replaying the stale "unknown" (card 7f86c02f).
+//   (C) a genuinely "unknown" confirm whose worktree then vanishes (an external cleanup) resolves the
+//       EXACT `worktreeGoneLandingUnconfirmed` shape on re-confirm, never a crash, hang, or orphaned op
+//       (card 7f86c02f condition 2).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-thrown-error-recovery.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mtr-home-${Date.now()}-${process.pid}`);
@@ -63,21 +70,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TEST_SYNC_BUDGET_MS = 100;
 const SLOW_THROW_MS = 400;
 
-// OBSERVED-PROGRESS SETTLE WAIT (card 01207cf7): the original `pendingOps.waitBriefly(key, 8000)` races the
-// op's real settle against a SINGLE fixed sleep — under host contention the recovery's own git/worktree work
-// (findLandedSquashCommit, finishAlreadyMerged) can legitimately outlast any one guessed budget, and a miss
-// there fell straight through to a SECOND confirmWorkerMergeTracked call with only TEST_SYNC_BUDGET_MS(100ms)
-// left to wait, misreporting a still-in-flight (but correct) recovery as "failed to settle" — the exact
-// specimen captured in gate op d3464e9f (3 downstream FAILs, all from one settling timeout; every control in
-// the same block PASSED, proving the daemon itself behaved correctly). Poll the registry's own OBSERVABLE
-// `peek()` state instead (mirrors merge-confirm-dead-owner-recovery.mjs's proven pattern) — this re-checks
-// reality every 10ms rather than betting once on a duration, and `waitUntil`'s own grace window (see
-// _wait.mjs) still fails loudly — just later — for a GENUINE hang, so this is not a weakened assertion.
-async function waitForMergeSettle(sessions, workerId, label) {
-  await waitUntil(() => sessions.pendingOps.peek(`merge:${workerId}`)?.state !== "running", {
-    label: `${label} merge op leaves 'running' (real recovery observed to settle)`,
-    timeoutMs: 30_000,
-  });
+// SETTLE-BY-OPID RECOVERY (card 7f86c02f, per decision 89539537 — "await-settle-by-opid-not-re-invoke"):
+// a `{settled:false}` degrade must be recovered by awaiting THAT SPECIFIC op's own settlement, read by
+// opId off the registry, never by re-calling the tracked closure a second time. The old pattern here
+// (poll `peek()` for "left running", then issue a second plain `confirmWorkerMergeTracked` call to read
+// the result) was SAFE only while every outcome this file exercises was cacheable — once "unknown" (card
+// 7f86c02f) joined NEVER_CACHED_OUTCOMES, a second plain call in scenario (B) no longer attaches to the
+// first op at all: it mints a genuinely SECOND real op (another real runGate throw), which can itself
+// still be running past this file's own tiny TEST_SYNC_BUDGET_MS and degrade to pending AGAIN — silently
+// reporting a second run's non-settlement as "the confirm did not settle". `awaitSettleByOpId` reads the
+// one op this file's own `pending` call actually minted, by its own opId, sidestepping that entirely.
+async function settleByOpId(sessions, opId, label) {
+  const settled = await sessions.pendingOps.awaitSettleByOpId(opId, 30_000);
+  if (!settled) throw new Error(`${label}: op ${opId} did not settle within 30000ms`);
+  return settled.ok ? { settled: true, ok: true, value: settled.value } : { settled: true, ok: false, error: settled.error };
 }
 
 function makePtyStub() {
@@ -129,7 +135,7 @@ async function setup(sfx, { preLand } = {}) {
 // ── (A) RECOVERABLE: confirmWorkerMerge throws, but the branch's work is ALREADY on main ──────────────
 {
   const sfx = `a-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  const { db, mgrId, workerId, repo } = await setup(sfx, { preLand: true });
+  const { db, mgrId, workerId, repo, taskId } = await setup(sfx, { preLand: true });
   const headBefore = git(repo, "rev-parse HEAD");
   const pty = makePtyStub();
   const sessions = new SessionService(db, pty, new OrchestrationControl(), {
@@ -141,12 +147,10 @@ async function setup(sfx, { preLand } = {}) {
   check("(A) degrades to pending past the tiny sync budget (forces the real async completion-nudge path)", pending.settled === false);
   // Not a nudge-text poll: the recovery path's [loom:already-merged] push fires from INSIDE
   // finishAlreadyMerged, partway through its own body (before its pty.stop/finalizeMerge tail) — well
-  // BEFORE the op itself genuinely settles in the registry. Waiting on the nudge text alone raced that
-  // tail (observed directly: a second confirmWorkerMergeTracked call landing in that window found the op
-  // still 'running' and degraded to pending AGAIN). Wait for the real settle signal instead (see
-  // waitForMergeSettle above) — mirrors merge-confirm-dead-owner-recovery.mjs's own proven pattern.
-  await waitForMergeSettle(sessions, workerId, "(A)");
-  const result = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  // BEFORE the op itself genuinely settles in the registry. Read this SPECIFIC op's own settlement by
+  // opId (see settleByOpId above) rather than polling peek() + a second plain call — mirrors
+  // merge-confirm-dead-owner-recovery.mjs's proven pattern, upgraded per decision 89539537.
+  const result = await settleByOpId(sessions, pending.op.opId, "(A)");
   check("(A) the confirm settles (not a hung pending)", result.settled === true);
   check("(A) it recovers to a REAL merged:true — never reports the landed work as failed", result.ok === true && result.value?.merged === true);
   check("(A) classified as ALREADY_MERGED (the same idempotent path a stale retry uses)", result.ok === true && result.value?.emptyKind === "ALREADY_MERGED");
@@ -158,6 +162,14 @@ async function setup(sfx, { preLand } = {}) {
   check("(A) NEGATIVE CONTROL — zero [loom:merge-failed] nudges for work that actually landed", failedNudges.length === 0);
   check("(A) NEGATIVE CONTROL — zero [loom:merge-unknown] nudges either — this case is NOT unknown, it's proven merged", unknownNudges.length === 0);
   check("(A) POSITIVE — exactly one [loom:already-merged] nudge fired", alreadyMergedNudges.length === 1);
+
+  // @decision 7f86c02f — a genuinely FRESH re-confirm after ALREADY_MERGED must also finish idempotently;
+  // see that record's "Honest scope" section (this scenario does NOT exercise a thrown-confirm race).
+  const result2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(A re-confirm) a plain re-confirm after ALREADY_MERGED still finishes idempotently (merged:true)", result2.settled === true && result2.ok === true && result2.value?.merged === true);
+  check("(A re-confirm) EXACTLY ONE merge_done event total — the re-confirm never files a duplicate", db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_done").length === 1);
+  check("(A re-confirm) canonical repo STILL gained no new commit after the re-confirm — never squashed twice", git(repo, "rev-parse HEAD") === headBefore);
+  check("(A re-confirm) the task moved to a terminal (done) column", db.getTask(taskId)?.columnKey === "done");
 
   db.close();
 }
@@ -175,11 +187,11 @@ async function setup(sfx, { preLand } = {}) {
 
   const pending = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
   check("(B) degrades to pending past the tiny sync budget (forces the real async completion-nudge path)", pending.settled === false);
-  // Same OBSERVED-PROGRESS wait as (A) — see waitForMergeSettle above (card 01207cf7 DoD-5: this block
-  // shares (A)'s forced-pending → fixed-wait shape and is equally exposed under host contention, even
-  // though it did not fire in the specimen that filed this card).
-  await waitForMergeSettle(sessions, workerId, "(B)");
-  const result = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  // Card 7f86c02f: read THIS op by opId (settleByOpId above) rather than polling peek() + a second plain
+  // call — "unknown" is now a NEVER_CACHED_OUTCOMES member, so a second plain confirmWorkerMergeTracked
+  // call here would no longer attach to this op; it would mint a genuinely SECOND real run instead,
+  // silently reporting that second run's own (possibly still-pending) state as this op's result.
+  const result = await settleByOpId(sessions, pending.op.opId, "(B)");
   check("(B) the confirm settles", result.settled === true);
   check("(B) recovery correctly found nothing to recover — the throw surfaces (ok:false)", result.settled === true && result.ok === false);
   check("(B) canonical repo untouched — recovery never invents a merge", git(repo, "rev-parse HEAD") === headBefore);
@@ -191,10 +203,83 @@ async function setup(sfx, { preLand } = {}) {
   check("(B) the nudge explicitly says this is NOT a confirmed failure", unknownNudges[0] && /NOT a confirmed failure/.test(unknownNudges[0].text));
   check("(B) the nudge still carries the real thrown error text (diagnostic, not vague)", unknownNudges[0] && /Cannot use simple-git on a directory that does not exist/.test(unknownNudges[0].text));
 
+  // Card 7f86c02f, condition 1 (the core repro's end-to-end sibling): a plain re-confirm after a
+  // GENUINELY unknown outcome must also genuinely re-attempt, never replay the stale "unknown" — mirrors
+  // the moved/re-fire semantics id10/id13 prove at the registry level, end-to-end through the real
+  // confirmWorkerMerge recovery path. Same runGate stub (always throws), so the re-attempt settles
+  // "unknown" again too — the point is that it is a FRESH run, not a cache hit.
+  // GUARD AGAINST A PRE-FIX CRASH (not just a false pass): pre-fix, "unknown" dedupe-hits, so `pending2`
+  // settles IMMEDIATELY as a cache hit (no `.op` field at all) — reading `pending2.op.opId` unguarded
+  // would throw a TypeError here and abort the whole file before scenario (C) below ever runs. Check
+  // `.settled` first and branch, so the RED proof actually reaches (and reds) every later assertion
+  // instead of crashing out on this one.
+  const pending2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(B re-confirm) a plain re-confirm after 'unknown' degrades to pending too — it is genuinely re-running, not an instant cache hit", pending2.settled === false);
+  const result2 = pending2.settled === false && pending2.op?.opId
+    ? await settleByOpId(sessions, pending2.op.opId, "(B re-confirm)")
+    : pending2;
+  check("(B re-confirm) it is a GENUINELY FRESH op, not the first one replayed", pending2.settled === false && pending2.op?.opId !== undefined && pending2.op.opId !== pending.op.opId);
+  check("(B re-confirm) the fresh re-attempt also settles ok:false (the stub always throws) — never a cacheHit", result2.settled === true && result2.ok === false);
+  check("(B re-confirm) canonical repo STILL untouched after the re-attempt", git(repo, "rev-parse HEAD") === headBefore);
+  const unknownNudgesAfterReconfirm = pty.calls.filter((c) => c.sessionId === mgrId && /\[loom:merge-unknown\]/.test(c.text));
+  check("(B re-confirm) a SECOND, independent [loom:merge-unknown] nudge fired for the fresh re-attempt (not deduped/suppressed)", unknownNudgesAfterReconfirm.length === 2);
+
+  db.close();
+}
+
+// ── (C) card 7f86c02f, condition 2: the 5s TTL retained-map loss ───────────────────────────────────────
+// "unknown" is now excluded from BOTH caches — the never-expiring until-superseded map AND (via
+// `usableRetainedHit`'s own NEVER_CACHED_OUTCOMES check) the brief TTL `retained` map decision 33172f01
+// added specifically to stop an accidental duplicate re-confirm from re-running against a torn-down
+// worktree. A re-confirm landing WITHIN that 5s window (MERGE_OP_RETAIN_MS), after an "unknown", whose
+// worktree has since genuinely disappeared (an external cleanup/GC, independent of this confirm's own
+// flow), must settle to a SANE, NAMED outcome — never crash, never hang, never leave an orphaned pending
+// op stuck under the key forever.
+{
+  const sfx = `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const { db, mgrId, workerId, repo, taskId, worktreePath } = await setup(sfx, { preLand: false });
+  const pty = makePtyStub();
+  let gateCalls = 0;
+  const sessions = new SessionService(db, pty, new OrchestrationControl(), {
+    runGate: async () => { gateCalls++; await sleep(SLOW_THROW_MS); throw new Error("Cannot use simple-git on a directory that does not exist"); },
+    syncAttachBudgetMs: TEST_SYNC_BUDGET_MS,
+  });
+
+  const pending = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(C) degrades to pending past the tiny sync budget", pending.settled === false);
+  const result = await settleByOpId(sessions, pending.op.opId, "(C)");
+  check("(C) first confirm settles ok:false ('unknown')", result.settled === true && result.ok === false);
+  check("(C) runGate invoked exactly once so far", gateCalls === 1);
+
+  // Simulate the worktree disappearing between the first "unknown" settle and the second re-confirm —
+  // e.g. a sibling cleanup/GC process tearing it down independently of this confirm's own flow.
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  check("(C setup) the worktree is genuinely gone on disk", !fs.existsSync(worktreePath));
+
+  // WELL within MERGE_OP_RETAIN_MS (5s) — exactly the window 33172f01's TTL retained-map guard used to
+  // cover for "unknown"; it no longer does (card 7f86c02f), so this is a genuinely fresh re-attempt.
+  // CR finding (reproduced 3/3 via the reviewer's own fixture): this does NOT re-throw and does NOT
+  // re-invoke the gate — confirmWorkerMerge's own EARLY worktree-existence check refuses first, before
+  // any gate lane, with the SAME typed `worktreeGoneLandingUnconfirmed` shape worker_merge_confirm's own
+  // "SIXTH DELIBERATE EXCEPTION" describes. That is the ONE real, fixed outcome — assert exactly it, not
+  // an either/or with a thrown re-attempt (the either/or previously let a pre-fix cache REPLAY of the
+  // first call's thrown error — itself `result2.error instanceof Error` — pass this check undetected).
+  const pending2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const result2 = pending2.settled ? pending2 : await settleByOpId(sessions, pending2.op.opId, "(C re-confirm)");
+  check("(C re-confirm) the re-confirm SETTLES — never hangs, never an unhandled rejection at the call site", result2.settled === true);
+  check("(C re-confirm) resolves EXACTLY the worktree-gone-landing-unconfirmed shape — ok:true, merged:false", result2.ok === true && result2.value?.merged === false && result2.value?.worktreeGoneLandingUnconfirmed === true);
+  check("(C re-confirm) NEVER a cacheHit — a genuinely fresh refusal, not a replayed 'unknown'", result2.cacheHit === undefined);
+  check("(C re-confirm) runGate was NOT re-invoked — the worktree-gone check refuses before any gate lane", gateCalls === 1);
+  check("(C re-confirm) the task stays in_progress — never finalized", db.getTask(taskId)?.columnKey === "in_progress");
+  check("(C re-confirm) ZERO merge_done events total — nothing was ever finalized", db.listEventsForWorker(workerId).filter((e) => e.kind === "merge_done").length === 0);
+  const rejectedNudges = pty.calls.filter((c) => c.sessionId === mgrId && /\[loom:merge-rejected\]/.test(c.text));
+  check("(C re-confirm) exactly one [loom:merge-rejected] nudge fired for the re-confirm", rejectedNudges.length === 1);
+  check("(C re-confirm) peek's own outcome names worktree-gone-landing-unconfirmed", sessions.pendingOps.peek(`merge:${workerId}`)?.outcome === "worktree-gone-landing-unconfirmed");
+
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a thrown confirmWorkerMerge error is never reported as a flat merge-failed: confirmWorkerMergeTracked's recovery re-derives the truth from git and reports a real 'merged' when the work is already on main (never re-merging, never a bogus failed/unknown nudge), and honestly reports 'unknown' (never 'failed', never silent) when the outcome genuinely cannot be determined either way."
+  ? "\n✅ ALL PASS — a thrown confirmWorkerMerge error is never reported as a flat merge-failed: confirmWorkerMergeTracked's recovery re-derives the truth from git and reports a real 'merged' when the work is already on main (never re-merging, never a bogus failed/unknown nudge), honestly reports 'unknown' (never 'failed', never silent) when the outcome genuinely cannot be determined either way, a plain re-confirm after 'unknown' genuinely re-attempts rather than replaying it (never cached, in either cache), and a re-confirm whose worktree has since vanished still settles sanely rather than hanging or crashing."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

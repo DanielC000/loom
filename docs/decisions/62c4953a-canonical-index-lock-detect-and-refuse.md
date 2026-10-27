@@ -93,11 +93,15 @@ operation. The owner's ruling is to surface this to a human instead.
 ## Round 2 (Code Review `6ed0d5da`) — additional "Do not"s
 
 - Do not let `CanonicalIndexLockPresentError` escape uncaught from ANY `{checkIndexLock: true}` call site
-  — an uncaught throw classifies as `"unknown"` (NOT in `NEVER_CACHED_OUTCOMES`) and gets cached/replayed
-  by the until-superseded verdict cache, silently blocking a re-confirm even after the lock is removed
-  (B1: `confirmWorkerMerge`'s preflight, `sessions/service.ts`, caught only `RepoQuarantinedError` before
-  this round). Every opted-in call site must catch it and return its own typed `indexLockPresent: true`
-  shape.
+  — an uncaught throw classifies as `"unknown"`. **Correction (card 7f86c02f, which added `"unknown"` to
+  `NEVER_CACHED_OUTCOMES`): the original reasoning here — "gets cached/replayed by the until-superseded
+  verdict cache, silently blocking a re-confirm even after the lock is removed" — no longer holds; a
+  re-confirm now genuinely re-attempts instead of replaying a stale `"unknown"`.** The underlying
+  requirement is unchanged for a different reason: an uncaught throw still loses the specific, typed
+  `indexLockPresent: true` shape (the exact path/reason text this error carries) in favor of the generic
+  `"unknown"` wording — a worse diagnostic, not a caching hazard. Every opted-in call site must still
+  catch it and return its own typed `indexLockPresent: true` shape (B1: `confirmWorkerMerge`'s preflight,
+  `sessions/service.ts`, caught only `RepoQuarantinedError` before this round).
 - Do not add a NEW canonical-index-touching call site (a `withCanonicalIndexLock` caller, or any future
   one) without deciding its `checkIndexLock` value AND adding its row to the Scope table above — an
   undecided caller silently inherits the default (`false`, no check), which is wrong for one that actually

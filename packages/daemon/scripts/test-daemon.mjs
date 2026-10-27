@@ -955,6 +955,7 @@ const TEST_TIMEOUT_MS = 120_000;
 // splits did not stop the kills); the no-blanket-raise principle above stands. The nine 300s entries below
 // carrying "card a9119abf" are sized off in-suite max pass + tail, NOT off a solo-times-N factor.
 const TEST_TIMEOUT_OVERRIDES = {
+  "merge-confirm-post-squash-throw-recovery": 300_000, // card 7f86c02f (Code Review follow-up S2): 10 real createWorktree + confirmWorkerMergeTracked/mergeBatchTracked scenarios (pre/post x solo/solo-after-5s/batch/concurrent, plus 2 probe-throws variants), one with a deliberate 5.6s sleep past MERGE_OP_RETAIN_MS. Measured solo, foreground, single lane: 119.47s and 120.66s (n=2, 2026-10-27, one host) — right at the 120s blanket ceiling. 300k gives ~2.5x the slower solo run (120.66s).
   "comment-anchor-lint": 300_000, // card 04d9f322: the file grew a new real-repo regression-pin section (a
     // second whole-repo computeReport pass, pinned against a historical sha) plus new fixture tests; no
     // prior override, now past the 120s blanket ceiling. Measured solo, foreground, single lane: 121.6s

@@ -1107,6 +1107,80 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(thrown, TTL map is not a second door) a re-call WITHIN the retainMs window, with an unresolvable identity, still mints fresh — never served from the TTL retained map — announced as identity-unresolved", calls === 2 && r2.ok === false && r2.error instanceof MarkerError && r2.error.message === "a different failure" && r2.cacheHit === undefined && r2.freshMint?.reason === "identity-unresolved");
 }
 
+// Card 7f86c02f (id10-id13) — "unknown" (a thrown confirmWorkerMerge whose own race-recovery re-derive
+// could not prove either way whether the squash had landed, per decision 479f449f) is now a
+// NEVER_CACHED_OUTCOMES member, same family as "landed-tip-unverifiable"/"fork-point-unverified": a
+// DEFINED, MATCHED identity must never dedupe-hit it, unlike id5/id8/id9 above (which cover an
+// UNRESOLVABLE/undefined identity — card 3a460d4a's own, narrower fix). This mirrors `classifyOutcome`'s
+// real shape in sessions/service.ts (`!outcome.ok ? (… NotYourWorkerError … : "unknown") : …`).
+const classifyUnknown = (outcome) => (!outcome.ok ? "unknown" : outcome.value.merged ? "merged" : "rejected");
+
+// (id10) THE CORE REPRO: a plain re-confirm at the IDENTICAL, DEFINED identity — long after the TTL
+// display window — must genuinely re-run, never replay the cached "unknown". Proves RED against the
+// pre-fix NEVER_CACHED_OUTCOMES (missing "unknown" would dedupe-hit here; verified via negative-control
+// below and via a temporary revert, see the DoD's own negative-control proof).
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const opts = { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-ID10", identityOptional: false, classifyOutcome: classifyUnknown };
+  const r1 = await reg.attach("id10", "merge", "mgr1", 200, async () => { calls++; throw new Error("gate threw"); }, undefined, opts);
+  check("(id10 precondition) first call ran once, thrown, classified unknown", calls === 1 && r1.ok === false);
+  await waitUntil(() => reg.peek("id10") === undefined, { label: "id10 TTL'd display view expired" });
+  const r2 = await reg.attach("id10", "merge", "mgr1", 200, async () => { calls++; throw new Error("gate threw again"); }, undefined, opts);
+  check("(id10) a plain re-confirm at the SAME, DEFINED identity genuinely re-runs — \"unknown\" is never cached or replayed (card 7f86c02f)", calls === 2 && r2.ok === false && r2.cacheHit === undefined);
+  check("(id10) never written to the cache at all (not merely unreadable) — nothing to compare against, so the re-run announces genuinely-new, not identity-mismatch", r2.freshMint?.reason === "genuinely-new");
+}
+
+// (id11) NEGATIVE CONTROL: an ordinary "rejected" outcome (NOT in NEVER_CACHED_OUTCOMES) under the
+// IDENTICAL harness/identity shape DOES cache and replay — proves (id10) is discriminating on the
+// "unknown" classification specifically, not vacuously green because nothing ever caches under
+// classifyUnknown.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const opts = { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-ID11", identityOptional: false, classifyOutcome: classifyUnknown };
+  const r1 = await reg.attach("id11", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "real rejection", opId: "op-1" }; }, undefined, opts);
+  check("(id11 precondition) first call ran once, classified rejected", calls === 1 && r1.value.merged === false);
+  await waitUntil(() => reg.peek("id11") === undefined, { label: "id11 TTL'd display view expired" });
+  const r2 = await reg.attach("id11", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, opts);
+  check("(id11 negative control) an ordinary 'rejected' outcome IS cached/replayed under this exact harness — (id10) is discriminating, not vacuous", calls === 1 && r2.cacheHit !== undefined && r2.value.merged === false && r2.value.opId === "op-1");
+}
+
+// (id12) LESSON 267, MOVED-TIP: "unknown" at identity A, then a genuinely NEW commit (identity B) — the
+// re-confirm must mint fresh at B. Because "unknown" is never WRITTEN to the cache at all (id10 above),
+// there is nothing to compare identities against, so this also announces genuinely-new (never
+// identity-mismatch) — asserted explicitly so a future change that starts writing "unknown" again would
+// be caught here by a flipped freshMint reason, not just by a spuriously-passing cache-hit check.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const r1 = await reg.attach("id12", "merge", "mgr1", 200, async () => { calls++; throw new Error("gate threw"); }, undefined, { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-TIP-A", identityOptional: false, classifyOutcome: classifyUnknown });
+  check("(id12 precondition) first call ran once at tip A, thrown, classified unknown", calls === 1 && r1.ok === false);
+  const r2 = await reg.attach("id12", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-TIP-B", identityOptional: false, classifyOutcome: classifyUnknown });
+  check("(id12 moved-tip) a NEW commit (different identity) after an 'unknown' always mints fresh", calls === 2 && r2.cacheHit === undefined && r2.value.merged === true);
+  check("(id12 moved-tip) announced genuinely-new (nothing was ever cached to mismatch against)", r2.freshMint?.reason === "genuinely-new");
+}
+
+// (id13) LESSON 267, RE-FIRE-AFTER-CLEAR: "unknown", then a re-confirm that this time genuinely lands
+// (classified "merged", cacheable) at the SAME identity, then a THIRD re-confirm at that SAME identity
+// hits the REAL cached "merged" verdict — proving this fix doesn't disable caching for this key going
+// forward. This is the complement to (id11)'s negative control: (id11) proves an ordinary cacheable
+// outcome caches when it's the FIRST call; this proves it ALSO caches correctly immediately after an
+// "unknown" that preceded it on the exact same key/identity.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const opts = { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-ID13", identityOptional: false, classifyOutcome: classifyUnknown };
+  const r1 = await reg.attach("id13", "merge", "mgr1", 200, async () => { calls++; throw new Error("transient"); }, undefined, opts);
+  check("(id13 precondition) first call ran once, thrown, classified unknown", calls === 1 && r1.ok === false);
+  await waitUntil(() => reg.peek("id13") === undefined, { label: "id13 TTL'd display view expired (1st)" });
+  const r2 = await reg.attach("id13", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, opts);
+  check("(id13) the re-confirm after 'unknown' genuinely re-ran (never a cache hit) and this time landed for real", calls === 2 && r2.cacheHit === undefined && r2.value.merged === true && r2.value.opId === "op-2");
+  await waitUntil(() => reg.peek("id13") === undefined, { label: "id13 TTL'd display view expired (2nd)" });
+  const r3 = await reg.attach("id13", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "should not run", opId: "op-3" }; }, undefined, opts);
+  check("(id13 RE-FIRE-AFTER-CLEAR) a THIRD re-confirm at the SAME identity now hits the REAL cached 'merged' verdict from call 2 — caching for this key still works after an 'unknown'", calls === 2 && r3.cacheHit !== undefined && r3.value.merged === true && r3.value.opId === "op-2");
+}
+
 // --- FRESH-MINT REASON ANNOUNCEMENT (card 615967c5 — the cached-verdict-legibility fix; renamed by card
 // a98f97bd from "base-advanced" to "identity-mismatch" — an OBSERVED field, not an assertion of cause):
 // a caller must never read an invisible re-run as a cached verdict. `attach()`'s result now carries
