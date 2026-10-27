@@ -205,6 +205,15 @@ try {
     'export async function load() {\n  return await import("../dist/git/worktrees.js");\n}\n');
   fs.writeFileSync(path.join(helperCtlDir, "_wrapper-of-unsafe.mjs"),
     'export { x } from "./_unsafe-helper.mjs";\n');
+  // Card 2c215ede canary: `depthAt` (above) does its OWN `'`/`"` quote-state tracking across the WHOLE
+  // (comment-stripped) helper text, with no reset at a line boundary — so a mid-line `/* ... */` comment
+  // containing an odd number of apostrophes (one the shared `_strip-comments.mjs` used to leave verbatim)
+  // could desync it: a phantom quote opens inside the comment, swallows the `if`-block's own closing `}`
+  // (never decrementing depth back to 0), and the GENUINELY top-level, unguarded `await import(...)` below
+  // reads as nested (depth 1) instead — silently un-flagging a real violation. Fixed at the shared-helper
+  // level (card 2c215ede); this pins that the fix actually reaches THIS consumer's own quote tracker.
+  fs.writeFileSync(path.join(helperCtlDir, "_apostrophe-comment-unsafe-helper.mjs"),
+    "if (false) { /* it's never taken */ }\nawait import(\"../dist/git/worktrees.js\");\n");
 
   ctl("hidden top-level dist import in a STATICALLY-imported local helper (hoisting beats this file's own useOwnLoomHome)",
     `import { x } from "./_unsafe-helper.mjs";\nuseOwnLoomHome("x-");\n${IMPORT}`, "fail", helperCtlDir);
@@ -216,6 +225,9 @@ try {
     `import { x } from "./_unsafe-helper.mjs";\nimport { requireHermeticEnv } from "./_guard.mjs";\nrequireHermeticEnv({ port: true });\n${IMPORT}`, "pass-b", helperCtlDir);
   ctl("(negative) a DYNAMIC import of the same unsafe helper is NOT chased (it isn't hoisted — order already governs it)",
     `useOwnLoomHome("x-");\nconst { x } = await import("./_unsafe-helper.mjs");\n${IMPORT}`, "pass-a", helperCtlDir);
+  ctl("(card 2c215ede) a mid-line apostrophe-bearing comment BEFORE the unsafe helper's own top-level dist "
+    + "import does not desync depthAt — the genuinely-unguarded import is still found and flagged",
+    `import { x } from "./_apostrophe-comment-unsafe-helper.mjs";\nuseOwnLoomHome("x-");\n${IMPORT}`, "fail", helperCtlDir);
 } finally {
   fs.rmSync(helperCtlDir, { recursive: true, force: true });
 }

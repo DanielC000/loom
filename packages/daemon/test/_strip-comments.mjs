@@ -47,16 +47,39 @@
 //       a net improvement — reverted rather than kept. Would need the same real lexer/parser distinguishing
 //       regex-literal delimiters from string/template delimiters that gap (a) already needs; not attempted
 //       here for the same reason.
+//   (c) Card 2c215ede: a `/*` formed the SAME way gap (a)'s `//` is — a regex literal's own content, e.g.
+//       an escaped slash immediately followed by a `*` quantifier (`/\/*$/`, `/a\/*b/`) — used to be
+//       misread as an unclosed mid-line comment opener, catastrophically dropping the REST OF THE FILE
+//       (no specimen in the corpus, but reproduced directly). That SHAPE is now mitigated (a `/*` whose
+//       `/` is immediately preceded by `\` is never treated as a comment opener), but a `/*` arising from
+//       an UNESCAPED `/` adjacent to `*` inside a character class (e.g. `/[/*]/`, valid JS — no escaping
+//       needed inside `[...]`) is still not distinguished from a real comment opener, and remains the
+//       same catastrophic-swallow risk — no current specimen in the corpus either (checked by hand,
+//       card 2c215ede). Would need the same real lexer/parser context gap (a) already needs; not
+//       attempted, for the same reason — see (8)/(9) below for the pinned proof of both the mitigated and
+//       the still-open shape.
 // NOT a general-purpose JS/TS comment stripper; sufficient for this codebase's own `//`/`/** ` comment
 // convention plus same-line strings, which is the population MEASURED to actually matter for the 20
 // scanners this card hardens.
+//
+// @decision 2c215ede — never revert `stripLineComments`'s per-line (never cross-line) `inTemplate`
+// backtick toggle without re-running the full before/after real-corpus diff: it closes a real
+// catastrophic-swallow regression (a `/**` glob inside a backtick template read as an unclosed comment).
 export function stripComments(source) {
-  const state = { inBlock: false };
+  const state = { inBlock: false, midlineBlock: false };
   const kept = [];
   for (const raw of source.split("\n")) {
     const trimmed = raw.trim();
     if (state.inBlock) {
       if (trimmed.includes("*/")) state.inBlock = false;
+      continue;
+    }
+    if (state.midlineBlock) {
+      // Continuing a mid-line block comment that didn't close on the line it opened on.
+      const closeIdx = raw.indexOf("*/");
+      if (closeIdx === -1) continue; // still inside the comment; drop the whole line
+      state.midlineBlock = false;
+      kept.push(stripLineComments(raw.slice(closeIdx + 2), state));
       continue;
     }
     if (trimmed.startsWith("//")) continue;
@@ -65,35 +88,59 @@ export function stripComments(source) {
       continue;
     }
     if (trimmed.startsWith("*")) continue; // JSDoc/block-comment continuation
-    kept.push(stripTrailingLineComment(raw));
+    kept.push(stripLineComments(raw, state));
   }
   return kept.join("\n");
 }
 
-/** Scans `raw` character-by-character tracking `"`/`'` quote state (with backslash-escape handling), and
- *  cuts the line at the first `//` that is NOT inside an open quote and NOT preceded by `:` (the URL
- *  guard, e.g. `https://`). Deliberately does NOT track `` ` `` as a quote char — see this file's own
- *  "deliberately deferred gap (b)" doc above for why a backtick can't be treated as a reliable quote
- *  delimiter without a real tokenizer (it collides with backtick used as ordinary regex-literal content). */
-function stripTrailingLineComment(raw) {
+/** Scans `raw` character-by-character tracking `"`/`'` quote state (with backslash-escape handling),
+ *  removing every mid-line `/* ... *\/` span that is NOT inside an open quote AND NOT inside a backtick
+ *  template literal (see this file's own card 2c215ede doc above for why a `/**` glob inside a template,
+ *  e.g. `` `Edit(${glob}/**)` ``, must never be read as an unclosed comment opener), then cuts the
+ *  remainder at the first `//` that is NOT inside an open `"`/`'` quote and NOT preceded by `:` (the URL
+ *  guard, e.g. `https://`) — that trailing-`//` check is UNCHANGED from before this card and does NOT
+ *  consider backtick at all, exactly like the pre-existing "deliberately deferred gap (b)" this file's own
+ *  header names. `inTemplate` is a PER-LINE backtick-parity toggle, reset to `false` at the start of every
+ *  call (one call per physical line) — it can only ever misjudge content on the SAME line it occurs on,
+ *  never a later one, which is what makes it safe where gap (b)'s own CROSS-LINE backtick tracker was not
+ *  (see this file's header doc for that history). `state.midlineBlock` is set (and `raw` truncated at the
+ *  opener) when a mid-line `/*`, found OUTSIDE a template, has no closing `*\/` before EOL — the caller's
+ *  outer loop carries that into the next line(s). */
+function stripLineComments(raw, state) {
   let quote = null;
-  for (let i = 0; i < raw.length; i++) {
+  let inTemplate = false;
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
     const c = raw[i];
     if (quote) {
-      if (c === "\\") { i++; continue; }
+      if (c === "\\") { out += raw.slice(i, i + 2); i += 2; continue; }
       if (c === quote) quote = null;
+      out += c; i++; continue;
+    }
+    if (inTemplate) {
+      if (c === "\\") { out += raw.slice(i, i + 2); i += 2; continue; }
+      if (c === "`") inTemplate = false;
+      out += c; i++; continue;
+    }
+    if (c === "`") { inTemplate = true; out += c; i++; continue; }
+    if (c === '"' || c === "'") { quote = c; out += c; i++; continue; }
+    if (c === "/" && raw[i + 1] === "*" && raw[i - 1] !== "\\") {
+      const closeIdx = raw.indexOf("*/", i + 2);
+      if (closeIdx === -1) { state.midlineBlock = true; return out; }
+      i = closeIdx + 2; // drop the whole mid-line comment span; keep scanning after it
       continue;
     }
-    if (c === '"' || c === "'") { quote = c; continue; }
     if (c === "/" && raw[i + 1] === "/" && raw[i - 1] !== ":") {
       // Preserve a trailing CR exactly like the OLD `String#replace(/(?<!:)\/\/.*/, "")` implementation
       // did: `.` never matches `\r`/`\n`, so that regex's own match never consumed a trailing `\r` on a
-      // CRLF-terminated line — a naive `raw.slice(0, i)` here would silently normalize CRLF -> LF on
-      // every line carrying a trailing comment. MEASURED (card 36afbbdd manager review round 2): this
-      // exact divergence hit 40+ real src/**/*.ts files before this fix.
+      // CRLF-terminated line — a naive cut here would silently normalize CRLF -> LF on every line carrying
+      // a trailing comment. MEASURED (card 36afbbdd manager review round 2): this exact divergence hit
+      // 40+ real src/**/*.ts files before that fix.
       const tail = raw.endsWith("\r") ? "\r" : "";
-      return raw.slice(0, i) + tail;
+      return out + tail;
     }
+    out += c; i++;
   }
-  return raw;
+  return out;
 }

@@ -458,6 +458,41 @@ class FixtureRouter {
   check("(1h) NEGATIVE: a helper returning `.concat(x.map(projectFields))` IS still flagged", helperLeaks("this.db.listAllProjects().concat(x.map(projectFields))") === 1);
 }
 
+// ============================= (1i) card 2c215ede canary — mid-line comment desync =============================
+// `isInsideQuotedRegion` (above) does its OWN `'`/`"` quote-state tracking across a multi-line `ok(...)`
+// payload (via `extractParenArgs`), reset only per-CALL, never per-line. A mid-line `/* ... */` comment
+// containing an odd number of apostrophes used to survive the shared `_strip-comments.mjs` strip
+// verbatim, opening a phantom quote that never closes — so a GENUINE bare reference to an unsafe
+// block-local var, appearing on a LATER line of the SAME payload, would read as "inside a string" and go
+// silently unflagged. Fixed at the shared-helper level (card 2c215ede); this pins that the fix reaches
+// THIS consumer's own quote tracker — unlike the fixtures above, this one runs the REAL `stripComments`
+// first, mirroring the real corpus scan (the fixtures above skip it because none of them carry a comment).
+{
+  const MIDLINE_APOSTROPHE_LEAK = `
+class FixtureRouter {
+  buildServer() {
+    const server = new McpServer();
+    server.registerTool(
+      "fixture_never_real_midline_comment",
+      { inputSchema: strictShape({}) },
+      async ({ projectId }) => {
+        const p = db.getProject(projectId);
+        return ok({
+          note: "fine", /* it's just a note */
+          leak: p,
+        });
+      },
+    );
+    return server;
+  }
+}
+`;
+  const { leaks: midlineLeaks } = findWholeProjectLeaks(stripComments(MIDLINE_APOSTROPHE_LEAK));
+  check("(1i) a mid-line apostrophe-bearing comment earlier in the SAME payload does not desync "
+    + "isInsideQuotedRegion — the genuinely-unmasked bare `p` reference on a later line is still flagged",
+    midlineLeaks.some((l) => l.tool === "fixture_never_real_midline_comment"));
+}
+
 // ============================= (2) THE REAL SCAN — mcp/*.ts today =============================
 {
   const allLeaks = [];
