@@ -149,6 +149,24 @@ async function loadCommentAnchorLintAt(repoRoot, sha) {
   return { mod, dir, reason: null };
 }
 
+/**
+ * Materialize the FULL repo tree as it existed at a FIXED, NAMED commit `sha` into a fresh temp dir —
+ * `git archive` piped into `tar -x` (both via `execFileSync`'s own `input`/stdout buffers, never a shell
+ * pipe, so this works identically on Windows and POSIX with no shell-quoting hazard). `computeReport`
+ * walks real files on disk (`fs.readdirSync`), so comparing it against a FIXED sha needs the sha's own
+ * file CONTENT on disk, not just its lint-script source (unlike `loadCommentAnchorLintAt` above, which
+ * only needs the one file). Returns the temp dir path; the caller owns cleanup (`fs.rmSync`).
+ *
+ * @decision 40424783 — used ONLY for midSentenceAnchors' own non-test comparison below; freezes it
+ * against future drift. See the decision record for why the live-repo version of that comparison broke.
+ */
+function materializeTreeAt(repoRoot, sha) {
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cal-frozen-tree-"));
+  const archiveBuf = execFileSync("git", ["archive", sha], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 300 });
+  execFileSync("tar", ["-x", "-C", dest], { input: archiveBuf, maxBuffer: 1024 * 1024 * 300 });
+  return dest;
+}
+
 // --- pure-function tests: extractCommentBlocks / findFileAnchors -----------------------------------
 
 {
@@ -2438,14 +2456,24 @@ try {
       }
 
       // midSentenceAnchors (non-test): loses EXACTLY the 5 db.ts SQL + 2 pty/host.ts trailing sites card
-      // 298a1390 found false-flagged — nothing else moves.
+      // 298a1390 found false-flagged — nothing else moves. Frozen to the SAME base-sha tree on BOTH sides
+      // (card 40424783 — see its own record): the live tree keeps growing ordinary trailing-comment
+      // anchors the fix correctly excludes, which widened this diff with no real regression.
       const KNOWN_REMOVED_SITES = new Set([
         "packages/daemon/src/db.ts:473", "packages/daemon/src/db.ts:523", "packages/daemon/src/db.ts:528",
         "packages/daemon/src/db.ts:533", "packages/daemon/src/db.ts:1539",
         "packages/daemon/src/pty/host.ts:12050", "packages/daemon/src/pty/host.ts:13702",
       ]);
-      const beforeMidNonTest = before.midSentenceAnchors.items.filter((x) => !isTestPath(x.file));
-      const afterMidNonTest = after.midSentenceAnchors.items.filter((x) => !isTestPath(x.file));
+      const frozenTreeDir = materializeTreeAt(repoRoot, PRE_0C474DDA_SHA);
+      let frozenBefore, frozenAfter;
+      try {
+        frozenBefore = preFixMod.computeReport(frozenTreeDir);
+        frozenAfter = computeReport(frozenTreeDir);
+      } finally {
+        try { fs.rmSync(frozenTreeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+      const beforeMidNonTest = frozenBefore.midSentenceAnchors.items.filter((x) => !isTestPath(x.file));
+      const afterMidNonTest = frozenAfter.midSentenceAnchors.items.filter((x) => !isTestPath(x.file));
       const beforeKeys = new Set(beforeMidNonTest.map((x) => `${x.file}:${x.line}`));
       const afterKeys = new Set(afterMidNonTest.map((x) => `${x.file}:${x.line}`));
       check("card 0c474dda (b): every one of the 7 known false-positive sites was present before AND gone after",
@@ -2455,11 +2483,11 @@ try {
         otherBeforeKeys.length === afterKeys.size && otherBeforeKeys.every((k) => afterKeys.has(k)));
 
       check("card 0c474dda (b): db.ts's 5 SQL sites specifically are gone from midSentenceAnchors",
-        !after.midSentenceAnchors.items.some((x) => x.file === "packages/daemon/src/db.ts" && [473, 523, 528, 533, 1539].includes(x.line)));
+        !afterMidNonTest.some((x) => x.file === "packages/daemon/src/db.ts" && [473, 523, 528, 533, 1539].includes(x.line)));
       check("card 0c474dda (b): pty/host.ts's 2 trailing sites specifically are gone from midSentenceAnchors",
-        !after.midSentenceAnchors.items.some((x) => x.file === "packages/daemon/src/pty/host.ts" && [12050, 13702].includes(x.line)));
+        !afterMidNonTest.some((x) => x.file === "packages/daemon/src/pty/host.ts" && [12050, 13702].includes(x.line)));
       check("card 0c474dda (b): PresetPrompts.tsx:184's GENUINE JSX mid-sentence violation is STILL reported",
-        after.midSentenceAnchors.items.some((x) => x.file === "packages/web/src/components/PresetPrompts.tsx" && x.line === 184 && x.id === "6cefdf25"));
+        afterMidNonTest.some((x) => x.file === "packages/web/src/components/PresetPrompts.tsx" && x.line === 184 && x.id === "6cefdf25"));
 
       // The 4 newly-extended checks with a non-empty real test-corpus population gain items (proves this
       // isn't a vacuous before=after). sigilSpaceAnchors is excluded: its real test-corpus population is
