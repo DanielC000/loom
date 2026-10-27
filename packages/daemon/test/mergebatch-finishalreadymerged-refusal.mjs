@@ -6,6 +6,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // a planted `batch_merge_branch_retained` event — asserting `finishRefused`/`landed` exclusion, the nudge,
 // that a RE-FIRE while the cause persists is a genuine CACHE REPLAY, and that `worker_merge_confirm`
 // called DIRECTLY on the candidate (never a `merge_batch` re-fire) is the real remedy.
+// SCENARIO (T2), RED-FIRST FOR CARD d240fceb (docs/decisions/d240fceb-*.md): extends (T) one step further
+// — the fault CLEARS, with NO `worker_merge_confirm` on x in between, and `merge_batch` is re-fired a
+// SECOND and (after confirming x) a THIRD time. Asserts the re-fire replays run 1 (no re-assembly,
+// observed via `freshMint`'s absence and the opId staying identical to run 1's — NOT via the injected
+// `runGate`'s own call count, which a CR found does not discriminate in this 2-candidate shape), y's
+// `merge_done` count stays at 1, `worker_merge_confirm` on x still finalizes it, and the THIRD re-fire
+// (after x is confirmed) is ALSO a cache replay that never reads "nothing landed cleanly" — proving the
+// batch's own history, not a fresh re-derivation, is what a re-fire now serves.
+// SCENARIO (T3), RED-FIRST FOR CARD d240fceb's CR (session f16ef8c1): the MAJOR fix — a cached
+// `finishRefused` candidate only counts as finished while its branch tip is PROVABLY unchanged; a LATE
+// commit on x after the fault clears must make a re-fire fall through to a genuinely FRESH run (never a
+// cache replay that would silently hide it), landing the late commit via the ordinary solo fallback.
+// Also unit-tests the extracted, exported pure note-building helpers (`cacheHitNote`,
+// `buildFinishRefusedNote`, mcp/orchestration.js) directly against synthetic input (card d240fceb, m1/m3)
+// — cheaper than driving the full MCP tool registration just to pin their text.
 // Run: 1) pnpm build, 2) node packages/daemon/test/mergebatch-finishalreadymerged-refusal.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -26,6 +41,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { cacheHitNote, buildFinishRefusedNote } = await import("../dist/mcp/orchestration.js");
 
 const GIT_ID = "-c user.email=mbfr@loom -c user.name=mbfr";
 const now = () => new Date().toISOString();
@@ -122,6 +138,144 @@ try {
     const confirmed = await svc.confirmWorkerMergeTracked(mgrId, x.workerId);
     check("(T) worker_merge_confirm on x resolved ok", confirmed.settled && confirmed.ok);
     check("(T) worker_merge_confirm on x actually finalized it (worktree now gone)", !fs.existsSync(x.worktreePath));
+  }
+
+  // ── SCENARIO (T2), RED-FIRST FOR CARD d240fceb: re-fire AFTER the fault clears, with NO prior
+  // worker_merge_confirm on x — the exact gap scenario (T) above does not cover (it clears the fault only
+  // to call confirmWorkerMergeTracked directly, never a re-fire). Before the fix: `candidateFinished(x)`
+  // is false (worktree present, task not terminal) and `retainedOutstanding.has(x)` is false too
+  // (isBranchHeld's own release-scan already saw x as released, from the start — the gap is specifically
+  // that finishAlreadyMerged's LATER heldAtFinish check has no corresponding release-arm in isBranchHeld's
+  // model) — so `batchAlreadyFinished` is false and the re-fire re-assembles from scratch.
+  {
+    const x = await cut("t2x"), y = await cut("t2y");
+    fileRetain(x, initSha, initSha);
+    execSync(`git ${GIT_ID} commit -q --allow-empty -m "chore: release marker" -m "Loom-Worker-Branch: ${x.branch}"`, { cwd: repo });
+    const pre = mainTip();
+    let armed = () => mainTip() !== pre;
+    const probeFactory = (rp) => ({ raw: async (args) => {
+      if (args[0] === "merge-base" && armed()) throw new Error("injected merge-base fault (test)");
+      return execFileSync("git", args, { cwd: rp, encoding: "utf8" });
+    } });
+    let gateCalls = 0;
+    const svc = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      runGate: async () => { gateCalls++; return { passed: true }; },
+      gateOpRetainMs: 0, syncAttachBudgetMs: 120_000, heldProbeGitFactory: probeFactory,
+    });
+
+    const r1 = await svc.mergeBatchTracked(mgrId, [x.workerId, y.workerId]);
+    check("(T2) run 1 resolved ok, x finishRefused, y landed", r1.settled && r1.ok &&
+      r1.value?.finishRefused?.length === 1 && r1.value.finishRefused[0].workerSessionId === x.workerId &&
+      r1.value?.landed?.length === 1 && r1.value.landed[0].workerSessionId === y.workerId);
+    check("(T2) run 1 genuinely ran the gate once", gateCalls === 1);
+
+    const mergeDoneCountFor = (who) => db.listEventsForWorker(who.workerId).filter((e) => e.kind === "merge_done").length;
+    const yBefore = mergeDoneCountFor(y);
+
+    // Clear the fault WITHOUT confirming x — this is the exact step scenario (T) skips.
+    armed = () => false;
+    check("(T2) x still neither finished nor pre-assembly-held after the clear (worktree present, task not terminal)",
+      fs.existsSync(x.worktreePath) && db.getTask(x.taskId)?.columnKey === "in_progress");
+
+    // (a)+(b): the re-fire must be a cache REPLAY of run 1, not a fresh re-assembly. gateCalls alone does
+    // NOT discriminate here (CR, session f16ef8c1): in this 2-candidate shape both candidates drop before
+    // the gate even on a FRESH re-assembly (x's cherry-pick is empty, y's branch is already gone), so
+    // gateCalls stays at 1 either way. The real discriminators are `freshMint` (set ONLY on a genuinely
+    // fresh run, never alongside `cacheHit`) and the `opId` staying the SAME as run 1's (a fresh mint
+    // always gets a NEW opId; a cache hit re-serves the original op's own result, opId included).
+    const r2 = await svc.mergeBatchTracked(mgrId, [x.workerId, y.workerId]);
+    check("(T2) re-fire after the clear IS a cache replay (cacheHit present)", !!r2.cacheHit);
+    check("(T2) re-fire carries NO freshMint (mutually exclusive with a cache hit)", r2.freshMint === undefined);
+    check("(T2) re-fire's opId is UNCHANGED from run 1's (same op served, not a fresh mint)", r1.value?.opId !== undefined && r2.value?.opId === r1.value?.opId);
+    check("(T2) re-fire did NOT run the gate again (no re-assembly)", gateCalls === 1);
+    check("(T2) re-fire's value still names x in finishRefused and y in landed (replay of run 1)",
+      r2.value?.finishRefused?.some((f) => f.workerSessionId === x.workerId) &&
+      r2.value?.landed?.some((l) => l.workerSessionId === y.workerId));
+    check("(T2) re-fire is NOT the misleading 'nothing landed cleanly' shape", r2.value?.ok !== false || r2.value?.landed?.length !== 0);
+    // (c): y's merge_done count is unaffected — the replay never re-touches y at all.
+    check(`(T2) y's merge_done count stayed at ${yBefore} (no duplicate, no re-assembly fallback)`, mergeDoneCountFor(y) === yBefore);
+    // x is untouched by the replay — it never re-evaluated x live.
+    check("(T2) x's worktree is still untouched by the replay itself", fs.existsSync(x.worktreePath));
+
+    // (d): worker_merge_confirm on x directly is STILL the real remedy, independent of the batch cache.
+    const confirmed = await svc.confirmWorkerMergeTracked(mgrId, x.workerId);
+    check("(T2) worker_merge_confirm on x resolved ok", confirmed.settled && confirmed.ok);
+    check("(T2) worker_merge_confirm on x actually finalized it (worktree now gone)", !fs.existsSync(x.worktreePath));
+    const xMergeDoneAfterConfirm = mergeDoneCountFor(x);
+    check("(T2) x got exactly ONE merge_done from the real confirm (no duplicate)", xMergeDoneAfterConfirm === 1);
+
+    // THIRD re-fire, now AFTER x is genuinely confirmed: must STILL be a cache replay (never a fresh
+    // mint — gateCalls stays at 1), and must NEVER read as "nothing landed cleanly" even though x is now
+    // truly finished too (this is the exact misleading-forever-cached shape d240fceb measured on main
+    // before this fix: once both candidates satisfy candidateFinished, a stale "every candidate dropped"
+    // verdict minted by a messy re-assembly would replay forever; this fix never mints that verdict at all).
+    const r3 = await svc.mergeBatchTracked(mgrId, [x.workerId, y.workerId]);
+    check("(T2) THIRD re-fire (after confirming x) is STILL a cache replay", !!r3.cacheHit);
+    check("(T2) THIRD re-fire carries NO freshMint either", r3.freshMint === undefined);
+    check("(T2) THIRD re-fire's opId is STILL run 1's — never a fresh mint, even post-confirm", r3.value?.opId === r1.value?.opId);
+    check("(T2) THIRD re-fire did NOT run the gate again either", gateCalls === 1);
+    check("(T2) THIRD re-fire is NEVER the 'nothing landed cleanly' verdict", r3.value?.reason !== "nothing landed cleanly into the batch — every candidate was dropped");
+    check("(T2) THIRD re-fire's merge_done count for x is unchanged (no re-touch)", mergeDoneCountFor(x) === xMergeDoneAfterConfirm);
+    check(`(T2) THIRD re-fire's merge_done count for y is unchanged (still ${yBefore})`, mergeDoneCountFor(y) === yBefore);
+  }
+
+  // ── SCENARIO (T3), RED-FIRST FOR CARD d240fceb's CR (session f16ef8c1) — THE MAJOR FIX: a LATE commit
+  // on a finishRefused candidate must NEVER be hidden by the replay. x commits a genuinely new, unlanded
+  // change (`late.txt`) onto its branch AFTER the fault clears, before any re-fire — the live-tip check
+  // (resolveBranchTip vs the cached finishRefused entry's own `assembledTip`, its branch tip AT ASSEMBLY
+  // time — never `sha`, the landed/rewritten commit on main) must see the mismatch and fall through to a
+  // FRESH run, which lands `late.txt` via the ordinary per-candidate solo fallback (the same mechanism
+  // that already made this safe pre-fix — see the record's "CR correction").
+  {
+    const x = await cut("t3x"), y = await cut("t3y");
+    fileRetain(x, initSha, initSha);
+    execSync(`git ${GIT_ID} commit -q --allow-empty -m "chore: release marker" -m "Loom-Worker-Branch: ${x.branch}"`, { cwd: repo });
+    const pre = mainTip();
+    let armed = () => mainTip() !== pre;
+    const probeFactory = (rp) => ({ raw: async (args) => {
+      if (args[0] === "merge-base" && armed()) throw new Error("injected merge-base fault (test)");
+      return execFileSync("git", args, { cwd: rp, encoding: "utf8" });
+    } });
+    let gateCalls = 0;
+    const svc = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      runGate: async () => { gateCalls++; return { passed: true }; },
+      gateOpRetainMs: 0, syncAttachBudgetMs: 120_000, heldProbeGitFactory: probeFactory,
+    });
+
+    const r1 = await svc.mergeBatchTracked(mgrId, [x.workerId, y.workerId]);
+    check("(T3) run 1 resolved ok, x finishRefused, y landed", r1.settled && r1.ok &&
+      r1.value?.finishRefused?.length === 1 && r1.value.finishRefused[0].workerSessionId === x.workerId);
+
+    // Clear the fault, THEN commit a genuinely new, unlanded change onto x's branch.
+    armed = () => false;
+    fs.writeFileSync(path.join(x.worktreePath, "late.txt"), "late\n");
+    commitAll(x.worktreePath, "feat(test): late", GIT_ID);
+    const lateSha = git(x.worktreePath, ["rev-parse", "HEAD"]);
+    check("(T3) x's live tip has genuinely moved past the cached finishRefused entry's own assembledTip",
+      lateSha !== r1.value.finishRefused[0].assembledTip);
+
+    const r2 = await svc.mergeBatchTracked(mgrId, [x.workerId, y.workerId]);
+    check("(T3) re-fire with a late commit is NOT a cache replay (falls through to a fresh run)", !r2.cacheHit);
+    // The solo fallback finalizes via a real squash — a NEW commit, not `lateSha` itself (same shape the
+    // batch's own cherry-pick-based landing uses) — so the real proof is the CONTENT landing, not an
+    // ancestor check on the original pre-squash commit id.
+    check("(T3) late.txt's own content actually landed on main (never silently hidden)", lateSha !== mainTip() && git(repo, ["ls-tree", "--name-only", "HEAD"]).split("\n").includes("late.txt"));
+    check("(T3) x's worktree was finalized by the fresh run's own fallback (not left stranded)", !fs.existsSync(x.worktreePath));
+    const termKey = svc.columnKeyForProjectRole(projId, "terminal");
+    check("(T3) x's task actually reached a terminal column", db.getTask(x.taskId)?.columnKey === termKey);
+  }
+
+  // ── UNIT TESTS: the extracted pure note-building helpers (card d240fceb, m1/m3) ─────────────────────
+  {
+    const soloNote = cacheHitNote({ identity: "abc123" }, "op-1");
+    check("(unit) solo cacheHitNote still names forceRemoveWorktree directly", /re-call with forceRemoveWorktree:true/.test(soloNote));
+    const batchNote = cacheHitNote({ identity: "abc123" }, "op-1", "worker_merge_confirm");
+    check("(unit) batch cacheHitNote names worker_merge_confirm, not a nonexistent merge_batch param", /worker_merge_confirm/.test(batchNote) && !/re-call with forceRemoveWorktree:true/.test(batchNote));
+
+    check("(unit) buildFinishRefusedNote returns undefined for an empty/absent list", buildFinishRefusedNote(undefined) === undefined && buildFinishRefusedNote([]) === undefined);
+    const frNote = buildFinishRefusedNote([{ workerSessionId: "w1", taskId: "t1", branch: "loom/abc", sha: "deadbeef", reason: "held" }]);
+    check("(unit) buildFinishRefusedNote is worded historically, not as an unconditional present-tense claim",
+      /AS OF THAT RUN/.test(frNote) && /CURRENT state/.test(frNote) && /worker_merge_confirm on w1/.test(frNote));
   }
 
   // ── SCENARIO (P): PERMANENT heldAtFinish refusal, via a REAL planted retain (no injected fault) ──────

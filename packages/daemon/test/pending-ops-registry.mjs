@@ -1381,6 +1381,27 @@ const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.
     check("(owner-until-superseded-refuses) [documented limitation] isOwner received undefined — this cache stores no managerSessionId", sawExisting === undefined);
   }
 
+  // (peek-until-superseded-value) card d240fceb — the new read-only, identity-ungated accessor: returns
+  // the cached value ONLY for an ok:true settled verdict under the exact key; undefined for no entry, a
+  // non-ok (thrown-error) entry, or a still-RUNNING op.
+  {
+    const reg = new PendingOpRegistry();
+    const classify = () => "landed";
+    check("(peek-until-superseded-value) no entry yet → undefined", reg.peekUntilSupersededVerdictValue("pusv1") === undefined);
+    // An explicit, caller-held gate — never a sleep — makes "still running" an OBSERVABLE fact (the real
+    // op structurally CANNOT settle before this test resolves `releaseRun`), not a timing race.
+    let releaseRun;
+    const gate = new Promise((resolve) => { releaseRun = resolve; });
+    await reg.attach("pusv1", "merge", "mgr1", 20, async () => { await gate; return { landed: true }; }, undefined, { retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+    check("(peek-until-superseded-value) still genuinely RUNNING (gate not yet released) → undefined", reg.peekUntilSupersededVerdictValue("pusv1") === undefined);
+    releaseRun();
+    await waitUntil(() => reg.peekUntilSupersededVerdictValue("pusv1") !== undefined, { label: "pusv1 real op settles" });
+    check("(peek-until-superseded-value) settled ok:true → returns the raw value", reg.peekUntilSupersededVerdictValue("pusv1")?.landed === true);
+
+    await reg.attach("pusv2", "merge", "mgr1", 200, async () => { throw new Error("nope"); }, undefined, { retainMs: 5, retainVerdictUntilSuperseded: true, retainErrors: true, classifyOutcome: classify });
+    check("(peek-until-superseded-value) settled ok:false (thrown) → undefined, never the raw error", reg.peekUntilSupersededVerdictValue("pusv2") === undefined);
+  }
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation and never letting two concurrent rejecting callers mint two concurrent real ops for the same key, and (card e3e40167) opts.onOpMinted fires exactly once per genuinely fresh entry — fast OR slow path, BEFORE run() ever executes, never on a retry or a retained-cache hit — while opts.onSettle fires for EVERY genuine settle (fast or surfaced-pending, unlike onSettledAfterPending which is surfaced-pending-only), strictly BEFORE onSettledAfterPending in the same callback, with the same identity-guard protection against a clobbered/evicted op's late settle. CARD 4aedde84: a settled result served from EITHER cache read (the never-expiring until-superseded map, or the TTL'd retained map) now carries a POSITIVE `cacheHit` field (with the identity it was validated against, when known) instead of leaving the caller to infer a cache hit from freshMint's absence — mutually exclusive with freshMint by construction, absent entirely from the pending shape (a cache hit can never occur on that branch)."
   : `\n❌ ${failures} FAILURE(S).`);

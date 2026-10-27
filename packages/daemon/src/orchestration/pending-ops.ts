@@ -407,6 +407,17 @@ export class PendingOpRegistry {
     return hit ? projectView(hit) : undefined;
   }
 
+  /** @decision d240fceb — never consult identity here; never widen this into a general-purpose cache read.
+   *
+   *  Read-only peek into `untilSupersededVerdicts`, keyed exactly like `attach()`'s own cache. Returns the
+   *  cached value ONLY for an `ok:true` settled verdict under `key` — `undefined` for no entry, an
+   *  `ok:false` (thrown-error) entry, or a still-RUNNING op (reads `untilSupersededVerdicts` alone, never
+   *  `entries`). No side effects: no eviction, no owner check, no `bypassRetained` interaction, no write. */
+  peekUntilSupersededVerdictValue<T>(key: string): T | undefined {
+    const v = this.untilSupersededVerdicts.get(key);
+    return v && v.rawOutcome.ok ? (v.rawOutcome.value as T) : undefined;
+  }
+
   /** Wait UP TO `ms` for the op keyed `key` to leave "running" state — the bounded settle-wait
    *  `gate_cancel` (card 8d585277) needs after asking an already-running gate to stop: a manager-facing
    *  tool call must answer promptly, never hang for however long the underlying `gateTimeoutMs` backstop

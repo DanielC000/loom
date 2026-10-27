@@ -7,6 +7,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // `this.finishAlreadyMerged(` call site in `sessions/service.ts` genuinely consumes the result: a
 // return/arrow-return, a binding later read via `.merged`, or a destructure including `merged` — never a
 // bare discarded statement, an omitted-`merged` destructure, an unused binding, or a zero-param `.then(`.
+//
+// NAMED LIMITS (card d240fceb, m4) — this guard does NOT catch every way the result could be discarded:
+// - `findFinishAlreadyMergedCalls` matches ONLY a literal `this.finishAlreadyMerged(` receiver — a
+//   `.bind(this)`-produced alias, a computed `this["finishAlreadyMerged"](`, or a renamed receiver (e.g.
+//   `const self = this; self.finishAlreadyMerged(...)`) is invisible to it entirely. None of the real
+//   call sites use any of these shapes today; a future one adopting one would need its own check.
+// - `identifierLaterReadsMerged` is SCOPE-BLIND BY DESIGN (see its own doc) — it matches `<name>.merged`
+//   anywhere later in the WHOLE file by name alone, not by actual binding/scope. A same-named but
+//   unrelated local in a different function would falsely satisfy this guard for an otherwise-unused
+//   binding.
+// - A `.then(cb)` whose callback takes a parameter is accepted (`"then-with-param"`) WITHOUT checking
+//   whether that parameter is ever actually read in the callback body — see the comment at that branch.
+//   `.then((r) => {})` (parameter declared, never used) passes this guard exactly like a genuine consumer.
+// These are accepted, documented gaps, not a baseline to silence a real finding against — tighten the
+// check (or escalate) rather than adding a new call site to an allowlist.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

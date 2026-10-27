@@ -694,7 +694,7 @@ function describeBranchRetained(branch: string, assembledTip: string | null, liv
 /** @decision e8e98d43 — the remedy is `worker_merge_confirm` on THIS candidate, never a `merge_batch`
  *  re-fire, mirroring the established `branchAdvancedDuringGate` nudge wording below, not the
  *  pre-assembly `heldReason` helper's (a genuinely different case: never batched at all). */
-function describeBranchRetainedCauseUnverifiableSuffix(causeUnverifiable: boolean | undefined, workerSessionId?: string): string {
+export function describeBranchRetainedCauseUnverifiableSuffix(causeUnverifiable: boolean | undefined, workerSessionId?: string): string {
   return causeUnverifiable
     ? ` — its release could not be VERIFIED (finalizeMerge's own later isBranchHeld check could not confirm the branch's landed-tip trailer); this is usually transient — run worker_merge_confirm on ${workerSessionId ?? "this worker"} to re-check (re-firing merge_batch will NOT re-evaluate it) — if it persists, inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker`
     : "";
@@ -721,7 +721,7 @@ function describeSoloRetained(branch: string, landedTip: string | undefined, liv
     ? `${what} — FINALIZED; only the branch ref was kept because it moved. The worktree is gone, so worker_merge_confirm cannot land it: cherry-pick its late commit(s) onto a follow-up card's worker (the branch stays HELD until then).`
     : `${what} — NOT finalized: branch and worktree kept, no task move. Review it with worker_merge, then land it with worker_merge_confirm.`;
 }
-type MergeBatchResult = {
+export type MergeBatchResult = {
   ok: boolean;
   /** @decision c85f842d — keep `opId` OPTIONAL, unlike the solo path's — this method has real early
    *  bail-outs (ownership/repo-mismatch, too-few-candidates, no gateCommand) with no op minted yet. */
@@ -736,7 +736,11 @@ type MergeBatchResult = {
    *  branch are all untouched), but counted in `landedCount` above (a true git fact either way). */
   // `heldRangeUnverifiable` mirrors `ConfirmMergeResult`'s own field: `true` = a TRANSIENT read fault
   // (never cached — see `classifyOutcome` below); absent = a genuine, stable hold for a human to resolve.
-  finishRefused?: { workerSessionId: string; taskId: string | null; branch: string; sha: string; reason: string; heldRangeUnverifiable?: boolean }[];
+  // `assembledTip` (card d240fceb's CR) — the candidate's OWN branch tip at assembly time (the sha
+  // cherry-picked from, distinct from `sha`, which is the LANDED commit on canonical main) — this is what
+  // `batchAlreadyFinished`'s own cached-replay widening compares a later live branch-tip read against,
+  // never `sha` (comparing against the landed/rewritten commit would never match the original branch ref).
+  finishRefused?: { workerSessionId: string; taskId: string | null; branch: string; sha: string; assembledTip: string | null; reason: string; heldRangeUnverifiable?: boolean }[];
   /** `started` (card 2c16447b): `true` = the per-branch `worker_merge_confirm` was actually kicked off (running,
    *  settled, or attached to an in-flight op); `false` = it was NOT started (`reason` then says why — e.g. the
    *  worker is no longer this manager's lineage, or the confirm threw before admission). Absent only on the
@@ -22585,7 +22589,22 @@ export class SessionService {
     // @decision 42daa283 — a HELD (retained) candidate counts as finished for this purpose: its branch tip is expected to differ
     //  from the identity a cached verdict was minted under, and without this a same-ids re-fire would identity-mismatch into a
     //  fresh op instead of returning the cached retained verdict. It is never assembled or confirmed either way (see above).
-    const batchAlreadyFinished = chosen.every((c) => candidateFinished(c) || retainedOutstanding.has(c.workerSessionId));
+    //
+    // @decision d240fceb — a cached `finishRefused` candidate counts as finished ONLY while its branch
+    //  tip is provably unchanged since that verdict; a resolution failure or an already-flagged moved tip
+    //  fails toward a FRESH run, never toward a replay — that is what would silently hide a late commit.
+    const cachedFinishRefused = this.pendingOps.peekUntilSupersededVerdictValue<MergeBatchResult>(batchKey)?.finishRefused ?? [];
+    const finishRefusedStillAtCachedTip = new Set<string>();
+    for (const f of cachedFinishRefused) {
+      const cand = chosen.find((c) => c.workerSessionId === f.workerSessionId);
+      if (!cand || reviewMoved.has(cand.workerSessionId)) continue;
+      if (!f.assembledTip) continue; // unresolvable at mint time — fail toward a fresh run
+      try {
+        const liveTip = await resolveBranchTip(finalRepoPath, cand.branch, { timeoutMs: this.gitOpMs });
+        if (liveTip && liveTip === f.assembledTip) finishRefusedStillAtCachedTip.add(cand.workerSessionId);
+      } catch { /* fail toward a fresh run, never toward replay */ }
+    }
+    const batchAlreadyFinished = chosen.every((c) => candidateFinished(c) || retainedOutstanding.has(c.workerSessionId) || finishRefusedStillAtCachedTip.has(c.workerSessionId));
     let verdictIdentity: string | undefined;
     if (!batchAlreadyFinished) {
       try {
@@ -23457,7 +23476,7 @@ export class SessionService {
             // ran): never push this candidate into `landed` — report it via `finishRefused` instead.
             if (amResult.merged === false) {
               console.warn(`[mergeBatch] op ${opId} ${lb.branch}: finishAlreadyMerged REFUSED to finalize — ${amResult.reason ?? "no reason captured"}`);
-              finishRefused.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, reason: amResult.reason ?? "finishAlreadyMerged refused with no reason captured", ...(amResult.heldRangeUnverifiable ? { heldRangeUnverifiable: true } : {}) });
+              finishRefused.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, assembledTip: lb.assembledTip ?? null, reason: amResult.reason ?? "finishAlreadyMerged refused with no reason captured", ...(amResult.heldRangeUnverifiable ? { heldRangeUnverifiable: true } : {}) });
               continue;
             }
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
