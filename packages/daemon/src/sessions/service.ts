@@ -668,7 +668,13 @@ type GateRejectionDetail = {
  *  - "ref-kept-after-finalize": the CAS ref delete refused after finalize had already run — FINALIZED, only the ref kept. */
 /** Card bbccf470 — {@link SessionService.reviewedTipVerdict}'s result. `tip` is the live branch tip that verdict read (null when unreadable) — the batch pins THAT sha. */
 type ReviewedTipVerdict = { state: "never-reviewed" | "unmoved"; tip: string | null } | { state: "moved"; reviewed: string | null; live: string | null; text: string; why: string; tip: string | null };
-type BranchAdvancedDuringGate = { assembledTip: string | null; liveTip: string | null; phase: "pre-stop" | "at-finalize" | "ref-kept-after-finalize" };
+type BranchAdvancedDuringGate = {
+  assembledTip: string | null; liveTip: string | null; phase: "pre-stop" | "at-finalize" | "ref-kept-after-finalize";
+  /** @decision f2b4d684 — set when THIS retain's cause is an UNVERIFIABLE landed-tip trailer read at
+   *  finalize time, never a genuine moved/late commit (mirrors `ConfirmMergeResult.landedTipUnverifiable`
+   *  for the solo path). `undefined` (never a fabricated `false`) otherwise. */
+  causeUnverifiable?: boolean;
+};
 /** One line naming what happened to a batch candidate whose tip moved. An UNREADABLE live tip is a different fact from a
  *  moved one (nothing was proven about a commit), so it is worded as a failed verification. */
 function describeBranchRetained(branch: string, assembledTip: string | null, liveTip: string | null, phase: BranchAdvancedDuringGate["phase"], reason?: "quarantined"): string {
@@ -684,6 +690,14 @@ function describeBranchRetained(branch: string, assembledTip: string | null, liv
   return phase === "ref-kept-after-finalize"
     ? `${what} — FINALIZED; only the branch ref was kept because it moved`
     : `${what} — NOT finalized; branch and worktree kept, worker kept (${phase === "pre-stop" ? "live" : "stopped"})`;
+}
+/** @decision e8e98d43 — the remedy is `worker_merge_confirm` on THIS candidate, never a `merge_batch`
+ *  re-fire, mirroring the established `branchAdvancedDuringGate` nudge wording below, not the
+ *  pre-assembly `heldReason` helper's (a genuinely different case: never batched at all). */
+function describeBranchRetainedCauseUnverifiableSuffix(causeUnverifiable: boolean | undefined, workerSessionId?: string): string {
+  return causeUnverifiable
+    ? ` — its release could not be VERIFIED (finalizeMerge's own later isBranchHeld check could not confirm the branch's landed-tip trailer); this is usually transient — run worker_merge_confirm on ${workerSessionId ?? "this worker"} to re-check (re-firing merge_batch will NOT re-evaluate it) — if it persists, inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker`
+    : "";
 }
 /**
  * @decision cc9bce38 — the solo confirm's finalize is pinned to the tip its squash (or empty-check) actually ran on, through `finalizeMerge`'s
@@ -714,8 +728,15 @@ type MergeBatchResult = {
   opId?: string;
   landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained; trailerAdvisory?: "displaced" | "unreadable" }[];
   /** @decision 553ea58c — use `landedCount`, the real git-verified total, never `landed.length` — that
-   *  array under-reports if a worker session row was hard-deleted between selection and finalize. */
+   *  array under-reports on a hard-deleted session row, or a `finishRefused` candidate below: either way
+   *  the content genuinely landed, just without Loom-side cleanup. */
   landedCount?: number;
+  /** @decision e8e98d43 — a candidate the fast-forward DID land on main, but whose `finishAlreadyMerged`
+   *  call REFUSED to finalize (always `heldAtFinish` today). Excluded from `landed` (the task/worktree/
+   *  branch are all untouched), but counted in `landedCount` above (a true git fact either way). */
+  // `heldRangeUnverifiable` mirrors `ConfirmMergeResult`'s own field: `true` = a TRANSIENT read fault
+  // (never cached — see `classifyOutcome` below); absent = a genuine, stable hold for a human to resolve.
+  finishRefused?: { workerSessionId: string; taskId: string | null; branch: string; sha: string; reason: string; heldRangeUnverifiable?: boolean }[];
   /** `started` (card 2c16447b): `true` = the per-branch `worker_merge_confirm` was actually kicked off (running,
    *  settled, or attached to an in-flight op); `false` = it was NOT started (`reason` then says why — e.g. the
    *  worker is no longer this manager's lineage, or the confirm threw before admission). Absent only on the
@@ -23356,6 +23377,9 @@ export class SessionService {
           }
 
           const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number; strippedReservedLineCount?: number; branchAdvancedDuringGate?: BranchAdvancedDuringGate; worktreeRetainedDirty?: DirtyWorktreeRetained; trailerAdvisory?: "displaced" | "unreadable" }[] = [];
+          // @decision e8e98d43 — a candidate a `finishAlreadyMerged` call REFUSED to finalize (see
+          // `MergeBatchResult.finishRefused`'s own doc) — never pushed to `landed` above.
+          const finishRefused: NonNullable<MergeBatchResult["finishRefused"]> = [];
           for (const lb of result.landed) {
             const worker = this.db.getSession(lb.workerSessionId);
             if (!worker) continue;
@@ -23384,15 +23408,17 @@ export class SessionService {
             let liveTip: string | null = null;
             try { liveTip = (await resolveBranchTip(finalRepoPath, lb.branch, { timeoutMs: this.gitOpMs })) ?? null; } catch { liveTip = null; }
             // Records the retain durably (Q5: daemon-authored decisions get audited) + in the log; the landed row carries the flag.
-            const noteRetained = (phase: BranchAdvancedDuringGate["phase"], live: string | null, reason?: "quarantined"): BranchAdvancedDuringGate => {
-              const flag: BranchAdvancedDuringGate = { assembledTip: lb.assembledTip ?? null, liveTip: live, phase };
+            // `causeUnverifiable` (card e8e98d43, M1): forwarded from finalizeMerge's own `onBranchRetained`
+            // call — see `describeBranchRetainedCauseUnverifiableSuffix`'s own doc for why it's a suffix.
+            const noteRetained = (phase: BranchAdvancedDuringGate["phase"], live: string | null, reason?: "quarantined", causeUnverifiable?: boolean): BranchAdvancedDuringGate => {
+              const flag: BranchAdvancedDuringGate = { assembledTip: lb.assembledTip ?? null, liveTip: live, phase, ...(causeUnverifiable ? { causeUnverifiable: true } : {}) };
               // eslint-disable-next-line no-console
-              console.warn(`[mergeBatch] op ${opId} ${describeBranchRetained(lb.branch, flag.assembledTip, flag.liveTip, phase, reason)}`);
+              console.warn(`[mergeBatch] op ${opId} ${describeBranchRetained(lb.branch, flag.assembledTip, flag.liveTip, phase, reason)}${describeBranchRetainedCauseUnverifiableSuffix(causeUnverifiable, lb.workerSessionId)}`);
               try {
                 this.db.appendEvent({
                   id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "batch_merge_branch_retained",
                   workerSessionId: lb.workerSessionId, taskId: lb.taskId,
-                  detail: { opId, branch: lb.branch, assembledTip: flag.assembledTip, liveTip: flag.liveTip, phase, landedSha: lb.sha, repoKey: worker.repoKey ?? null },
+                  detail: { opId, branch: lb.branch, assembledTip: flag.assembledTip, liveTip: flag.liveTip, phase, landedSha: lb.sha, repoKey: worker.repoKey ?? null, ...(causeUnverifiable ? { causeUnverifiable: true } : {}) },
                 });
               } catch { /* audit-only — never fail the batch over a failed event write */ }
               return flag;
@@ -23407,7 +23433,7 @@ export class SessionService {
             let lateRetained: BranchAdvancedDuringGate | undefined;
             // Card 6796c9ea: uncommitted edits made in the candidate worktree while the gate ran — finalize keeps the worktree and says so here.
             let dirtyRetained: DirtyWorktreeRetained | undefined;
-            await this.finishAlreadyMerged({
+            const amResult = await this.finishAlreadyMerged({
               // @decision 2c16447b — the worker's CURRENT lineage owner, so the post-merge purge/cap-drain
               // reach a recycled successor instead of a dead predecessor (falls back to the captured id).
               managerSessionId: this.resolveLineageOwnerForWorker(managerSessionId, lb.workerSessionId) ?? managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
@@ -23418,13 +23444,20 @@ export class SessionService {
               // @decision 0eaaa693 — stamp cutBaseUnknown on this candidate's own merge_done when it
               // carried no recorded cut base (a legacy worker) — the fork-point check was grandfathered.
               ...(lb.cutBaseSha == null ? { cutBaseUnknown: true } : {}),
-              onBranchRetained: (live, phase, reason) => { lateRetained = noteRetained(phase, live, reason); },
+              onBranchRetained: (live, phase, reason, causeUnverifiable) => { lateRetained = noteRetained(phase, live, reason, causeUnverifiable); },
               onWorktreeRetainedDirty: (info) => {
                 dirtyRetained = info;
                 // eslint-disable-next-line no-console
                 console.warn(`[mergeBatch] op ${opId} ${lb.branch}: ${dirtyWorktreeRetainedWarning(info, worker.worktreePath ?? worker.cwd)}`);
               },
             });
+            // @decision e8e98d43 — the ONLY `finishAlreadyMerged` refusal is `heldAtFinish` (no finalize
+            // ran): never push this candidate into `landed` — report it via `finishRefused` instead.
+            if (amResult.merged === false) {
+              console.warn(`[mergeBatch] op ${opId} ${lb.branch}: finishAlreadyMerged REFUSED to finalize — ${amResult.reason ?? "no reason captured"}`);
+              finishRefused.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, reason: amResult.reason ?? "finishAlreadyMerged refused with no reason captured", ...(amResult.heldRangeUnverifiable ? { heldRangeUnverifiable: true } : {}) });
+              continue;
+            }
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
             // Claude-Session trailer that got stripped before landing — surface it to the calling manager
             // rather than leaving it as a console.warn only the host log would show.
@@ -23440,6 +23473,7 @@ export class SessionService {
           ], opId);
           return {
             ok: true, opId, landed, landedCount: result.landed.length, fallback,
+            ...(finishRefused.length ? { finishRefused } : {}),
             phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
             // Card 67030bb9: a retry-assisted batch landing is WEAKER evidence than an ordinary clean batch
             // pass — see `MergeBatchResult.retryWarning`'s own doc. `result.landed.length` (not the
@@ -23558,8 +23592,12 @@ export class SessionService {
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo state UNKNOWN — check 'git --no-pager log' in the repo for a batch fast-forward before assuming nothing landed.`
           : outcome.value.ok
           ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${landedTotal(outcome.value)} branch(es) on main: ${landedList(outcome.value.landed)}.` +
-            (outcome.value.landed.some((l) => l.branchAdvancedDuringGate) ? ` BRANCH TIP MOVED AFTER ASSEMBLY (the extra commit is NOT on main and was never gated): ${outcome.value.landed.filter((l) => l.branchAdvancedDuringGate).map((l) => describeBranchRetained(l.branch, l.branchAdvancedDuringGate!.assembledTip, l.branchAdvancedDuringGate!.liveTip, l.branchAdvancedDuringGate!.phase)).join("; ")}. For a NOT-finalized branch: review the new commit with worker_merge, then land it with worker_merge_confirm — re-firing merge_batch will NOT land it.` : "") +
+            (outcome.value.landed.some((l) => l.branchAdvancedDuringGate) ? ` BRANCH TIP MOVED AFTER ASSEMBLY (the extra commit is NOT on main and was never gated): ${outcome.value.landed.filter((l) => l.branchAdvancedDuringGate).map((l) => `${describeBranchRetained(l.branch, l.branchAdvancedDuringGate!.assembledTip, l.branchAdvancedDuringGate!.liveTip, l.branchAdvancedDuringGate!.phase)}${describeBranchRetainedCauseUnverifiableSuffix(l.branchAdvancedDuringGate!.causeUnverifiable, l.workerSessionId)}`).join("; ")}. For a NOT-finalized branch: review the new commit with worker_merge, then land it with worker_merge_confirm — re-firing merge_batch will NOT land it.` : "") +
             (outcome.value.landed.some((l) => l.worktreeRetainedDirty) ? ` WORKTREE RETAINED (uncommitted work, or its status could not be read; the merge itself landed): ${outcome.value.landed.filter((l) => l.worktreeRetainedDirty).map((l) => l.branch).join(", ")}.` : "") +
+            // @decision e8e98d43 — a `finishRefused` candidate's content IS on main (counted in
+            // `landedTotal` above) but was never finalized; name it here too or the "landed N" count and
+            // the enumerated `landedList` would silently disagree with no explanation.
+            (outcome.value.finishRefused?.length ? ` FINISH REFUSED (fast-forwarded onto main but NOT finalized — task/worktree/worker untouched): ${outcome.value.finishRefused.map((f) => `task ${f.taskId ?? "none"} (branch ${f.branch}): ${f.reason} — run worker_merge_confirm on ${f.workerSessionId} to re-check (re-firing merge_batch will NOT re-evaluate it)`).join("; ")}.` : "") +
             (outcome.value.fallback.length ? ` ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}` : "") +
             // Card 67030bb9: the ONE place an async batch settle is announced (per this callback's own
             // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync
@@ -23663,6 +23701,9 @@ export class SessionService {
         // IS replayed) — same canonical-checkout-fact reasoning as branchDiverted/unverified above.
         // @decision 043d83d2 — `batchHeadMoved` is a fact about the worker-writable worktree ref, same
         // never-cached reasoning as `branchDiverted` — a human-cleared ref must never replay a stale refusal.
+        // @decision e8e98d43 — a `finishRefused` candidate (either cause) stays plain "landed"
+        // (cacheable), same as `branchAdvancedDuringGate`/`worktreeRetainedDirty`: recovery is
+        // `worker_merge_confirm` on that candidate, never a `merge_batch` re-fire.
         classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.batchHeadMoved ? "batch-head-moved" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.

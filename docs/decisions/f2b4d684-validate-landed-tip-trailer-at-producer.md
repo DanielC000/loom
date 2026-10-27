@@ -246,8 +246,15 @@ discarded entirely: `finalizeMerge`'s held-check only ever called `args.onBranch
 genuine moved-tip comparison) and no `landedTipUnverifiable` flag — cached as plain `"merged"` forever.
 CR6's own repro: `repro6.mjs toctou-finalize 3`.
 
-**The ruling: READ THE HOLD ONCE PER CONFIRM — but "once" means something different at each of the two
-sites, and both choices are documented here on purpose (CR6 asked which design and why):**
+**The ruling: READ THE HOLD ONCE PER HELD EVALUATION — NOT once per confirm (corrected 2026-10-27, card
+`e8e98d43` M2; the heading below, and commit `bdaec4b7`'s own immutable subject, both overclaimed this as
+a single per-confirm count). A single `confirmWorkerMerge` pass can call `isBranchHeld` up to FIVE times:
+`resolveOwedRange` (called directly, and also via `reviewedTipVerdict`'s own two call sites —
+`confirmWorkerMerge`'s early REVIEWED-TIP REFUSAL check and its later squash-time check — each one its own
+read), `finishAlreadyMerged`'s `heldAtFinish`, and `finalizeMerge`'s own later held check. Each of those
+FIVE evaluations is now genuinely a single read within itself (the real fix, below) — "once" describes
+EACH EVALUATION, never the confirm as a whole, and both choices below are documented on purpose (CR6 asked
+which design and why):**
 - **`resolveOwedRange` (bug #1): TRUE single-read, no second call at all.** `isBranchHeld` now reads
   `heldRecordedTip` ONCE and returns the result VERBATIM as its own `recorded: {tip, unverifiable}` field
   (replacing the flat `tipUnverifiable` boolean round 6 introduced). `resolveOwedRange` uses
@@ -266,16 +273,21 @@ sites, and both choices are documented here on purpose (CR6 asked which design a
   firing call's own `causeUnverifiable`) — so it classifies correctly (never-cached `landedTipUnverifiable`)
   without removing the check's own real defense-in-depth value.
 
-**Consumer table — every `isBranchHeld` / `heldRecordedTip` read site, round 7's final shape:**
+**Consumer table — every `isBranchHeld` / `heldRecordedTip` read site, round 7's final shape (corrected
+2026-10-27, card `e8e98d43` M2/nit — two rows below were wrong, and two real read sites were missing
+entirely; see the new dated section at the end of this record for how each was verified):**
 
 | Call site | Reads `isBranchHeld` | Reads `heldRecordedTip` directly | Round 7 change |
 |---|---|---|---|
 | `resolveOwedRange` | once | never (round 7: removed) | stopped re-reading; uses `held.recorded` |
+| `reviewWorkerMerge` (the manager-facing `worker_merge` preview; via `resolveOwedRange`) | once | never | unchanged — a read-only preview, not a verdict cache |
+| `confirmWorkerMerge`'s REVIEWED-TIP REFUSAL check (via `reviewedTipVerdict` → `resolveOwedRange`) | once | never | unchanged |
+| `confirmWorkerMerge`'s later, squash-time check (a SECOND `reviewedTipVerdict` call site, via `resolveOwedRange`) | once | never | unchanged |
 | `finishAlreadyMerged`'s `heldAtFinish` | once | never | unchanged (round 6's own single read) |
 | `finalizeMerge`'s own held check | once, LATER, separate | never | now threads its own fault into `onBranchRetained`'s `causeUnverifiable` |
 | `mergeBatchTracked`'s per-candidate retain loop (`retainedOutstanding`) | once per candidate | never | now also captures `recorded.unverifiable` for `heldReason`'s wording (item 3, below) |
-| `finalizeMerge`'s own (batch/Green-path) `releaseHold` short-circuit | skipped entirely when `releaseHold:true` | never | unchanged |
-| Boot-reconcile Pass A (`heldA`) | once | never | unchanged — a per-boot retry, not a verdict cache, out of scope for both bugs |
+| `finalizeMerge`'s own `releaseHold` short-circuit (Green-path ONLY — `releaseHold:true` is passed by exactly one caller, the solo fresh-squash confirm; the batch/ALREADY_MERGED finalize path never sets it) | skipped entirely when `releaseHold:true` | never | unchanged |
+| Boot-reconcile Pass A (`heldA`) | once | never | round 7 (item 5) ADDED a distinct unverifiable-cause branch to its own log wording, naming `recorded.unverifiable` alongside `gitUnverified` — this row previously, wrongly, said "unchanged" |
 | Branch-reclaim sweep | once (truthy check only) | never | unchanged |
 | `isBranchHeld` itself | — (producer) | once, internally | now returns `recorded` verbatim instead of a derived boolean |
 
@@ -429,3 +441,32 @@ ruling explains.
   match another fixture's own measured ordinal for a superficially similar scenario (verified directly:
   this round's own (g) scenario needed ordinal 4 against its fixture, not the ordinal 3 CR6's own
   `repro6.mjs` needed against a differently-shaped one).
+
+## 2026-10-27 correction (card `e8e98d43`, M2 + nit) — three documentation defects, all verified against source
+
+Found while fixing a SEPARATE, unrelated defect in this round's own consumer (`mergeBatchTracked`'s
+`finishAlreadyMerged` discard — see card `e8e98d43`'s own record, `docs/decisions/e8e98d43-*.md`). None of
+these change this record's actual DESIGN (round 3's three-state split, round 7's single-read-per-evaluation
+fix) — they correct this record's own PROSE, which had drifted from what the code actually does.
+
+1. **"READ THE HOLD ONCE PER CONFIRM" overclaimed.** The heading above (and commit `bdaec4b7`'s own
+   immutable subject — commits cannot be rewritten, so only this record is corrected) stated a single
+   per-confirm count. Traced every `isBranchHeld(` call site in `sessions/service.ts`: a single
+   `confirmWorkerMerge` pass can reach it up to FIVE times — `resolveOwedRange` (direct), `reviewedTipVerdict`
+   at TWO separate call sites (both via `resolveOwedRange`), `finishAlreadyMerged`'s `heldAtFinish`, and
+   `finalizeMerge`'s own later held check. The TRUE fix (round 7) is that each of those five evaluations is
+   now genuinely a single read WITHIN ITSELF — never that the confirm as a whole reads the hold once.
+   Reworded above.
+2. **The consumer table's `releaseHold` row said "(batch/Green-path)."** Verified against source
+   (`sessions/service.ts`): exactly ONE call site ever passes `releaseHold:true` to `finalizeMerge` — the
+   solo GREEN (fresh-squash) confirm. The batch path's own `finishAlreadyMerged` → `finalizeMerge` call
+   never sets it. Row corrected to "Green-path ONLY."
+3. **The consumer table's Boot-reconcile Pass A row said "unchanged."** Verified against source: round 7
+   (item 5) DID add a distinct `recorded.unverifiable` branch to Pass A's own `console.warn` ternary — the
+   SAME "name the unverifiable-trailer cause distinctly, not just gitUnverified" change this record's own
+   item 3 (above) describes for the batch `heldReason` helper. Row corrected.
+4. **Two real read sites were missing from the table entirely.** `reviewWorkerMerge` (the manager-facing
+   `worker_merge` preview tool, which calls `resolveOwedRange` directly to show `lateRange`/`heldWarning`)
+   and `confirmWorkerMerge`'s own TWO `reviewedTipVerdict` call sites (the early REVIEWED-TIP REFUSAL check
+   and the later squash-time check) were never listed, even though all three reach `isBranchHeld` through
+   `resolveOwedRange`. Added as three new rows.
