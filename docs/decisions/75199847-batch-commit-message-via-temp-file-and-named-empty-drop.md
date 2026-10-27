@@ -189,3 +189,12 @@ affected site was found beyond the three above.
 - Do not claim a locked file "hangs" as the reason `cleanupBatchCommitMessageFile` is fire-and-forget — it
   normally fails FAST (`EBUSY`/`EPERM`). The real justification is simpler: cleanup must never block the
   hot per-commit loop, full stop, regardless of how the removal fails.
+
+## Follow-up
+
+Card `697be64a` extended this card's `-F`-via-tempfile mechanism to `GitWriter.commit()` (the human REST /
+Platform Lead / operator git-commit path), which had the same unbounded-`-m` defect. See
+`docs/decisions/697be64a-gitwriter-commit-via-temp-file.md` for that card's own record — including the
+helper rename/move (`writeBatchCommitMessageFile`/`cleanupBatchCommitMessageFile` → exported
+`writeCommitMessageFile`/`cleanupCommitMessageFile` in `writer.ts`, with a new `prefix` param) and a named,
+unfixed finding about `mergeBranchLocked`'s solo-squash path.

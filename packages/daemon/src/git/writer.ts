@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { SimpleGit } from "simple-git";
 import {
@@ -334,6 +335,45 @@ export function commitIdentityHostWarning(host: string | null, email: string | n
 }
 
 /**
+ * Write `message` to a fresh, dedicated temp file for a single `git commit -F <path>` call — never the
+ * canonical repo's working tree or a worktree, both worker-writable trees a commit-message file has no
+ * business sitting in. `prefix` is the caller's own `mkdtemp` prefix (each caller keeps its own, so a
+ * test that captures temp dirs by prefix — e.g. the batch-landing path's own fixtures — keeps matching
+ * after this extraction).
+ *
+ * @decision 75199847 — always `path.resolve(os.tmpdir())`, never bare `os.tmpdir()`: a relative
+ * `TEMP`/`TMP`/`TMPDIR` resolves differently for this process than for the git child reading `-F <path>`.
+ * Clean up the dir on a post-`mkdtemp` write failure, before re-throwing — never leave it orphaned.
+ *
+ * @decision 697be64a — do not re-derive a second `-F`-via-tempfile helper for a new commit-message
+ * caller; reuse this one (own `prefix`) — the batch-only original left `GitWriter.commit` on unbounded
+ * `-m`, hitting the same Windows argv ceiling this helper exists to remove.
+ */
+export async function writeCommitMessageFile(message: string, prefix: string): Promise<{ dir: string; file: string }> {
+  const dir = await fs.promises.mkdtemp(path.join(path.resolve(os.tmpdir()), prefix));
+  const file = path.join(dir, "message");
+  try {
+    await fs.promises.writeFile(file, message, "utf8");
+  } catch (e) {
+    cleanupCommitMessageFile(dir);
+    throw e;
+  }
+  return { dir, file };
+}
+
+/**
+ * Best-effort, NON-BLOCKING cleanup of a {@link writeCommitMessageFile} temp dir — fired without being
+ * awaited so it never blocks this function's own caller. Logged on failure, never thrown or retried —
+ * see card 75199847's decision record for the accepted residual this leaves at this small a scale.
+ */
+export function cleanupCommitMessageFile(dir: string): void {
+  void fs.promises.rm(dir, { recursive: true, force: true }).catch((e: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] cleanupCommitMessageFile: failed to clean up commit-message temp file ${dir}: ${(e as Error).message}`);
+  });
+}
+
+/**
  * Bounded, non-interactive git WRITE operations for the project repo. Each method returns a structured
  * {@link GitWriteResult} (never throws for an expected git failure) and is wrapped in {@link withTimeout}
  * so a wedged child can't hang the daemon.
@@ -643,8 +683,20 @@ export class GitWriter {
     // "commit message required" — same shape as the original guard, just evaluated on what will actually
     // be committed.
     if (!cleanedMessage.trim()) return { ok: false, error: "commit message required" };
+    // @decision 697be64a — write via a temp file, never `-m`; a write failure is a named refusal, never a
+    // fallback to `-m`. Written BEFORE the lock below — no repo mutation has happened yet to undo.
+    //
+    // Code Review: force a trailing LF on — unlike `-m`'s own argv value (always line-completed by git
+    // itself), a bare `-F <file>` is used VERBATIM under an ambient `commit.cleanup=verbatim`
+    // (repo/global/system), landing without one otherwise. See `docs/decisions/697be64a-*.md`.
+    let messageFile: { dir: string; file: string };
+    try {
+      messageFile = await writeCommitMessageFile(`${cleanedMessage.trim()}\n`, "loom-git-commit-");
+    } catch (e) {
+      return { ok: false, error: `failed to write commit message to a temp file: ${(e as Error).message}` };
+    }
     const homeRefusal = await this.refuseIfOperationalHome();
-    if (homeRefusal) return homeRefusal;
+    if (homeRefusal) { cleanupCommitMessageFile(messageFile.dir); return homeRefusal; }
     // @decision 24c0bdba (round 6) — see checkout()'s identical comment above: the try/catch must wrap
     // the WHOLE withCanonicalIndexLock(...) call, not just its callback.
     try {
@@ -678,13 +730,13 @@ export class GitWriter {
           }
           const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
           const oversizedWarning = this.oversizedStagedWarning(staged.files, maxFileBytes);
-          // With `paths`, `git commit -m <message> -- <paths>` (no simple-git parser involved any more —
+          // With `paths`, `git commit -F <messageFile> -- <paths>` (no simple-git parser involved any more —
           // the hash below is always read back via `rev-parse HEAD`) commits just those paths even if
           // something else was already staged; without, the whole index as before. `--` matches `add`'s
           // own pathspec separator above (code review of a8dbb159: paths are already validated against a
           // leading `-`, so this is defense-in-depth, not a correctness fix).
           try {
-            await killableCanonicalRaw(this.repoPath, ["commit", "-m", cleanedMessage.trim(), ...(paths ? ["--", ...paths] : [])], this.localMs, "git commit", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
+            await killableCanonicalRaw(this.repoPath, ["commit", "-F", messageFile.file, ...(paths ? ["--", ...paths] : [])], this.localMs, "git commit", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             quarantineOnUnconfirmedKill(e, "git commit");
             throw e;
@@ -708,6 +760,8 @@ export class GitWriter {
       );
     } catch (e) {
       return { ok: false, error: gitError(e) };
+    } finally {
+      cleanupCommitMessageFile(messageFile.dir);
     }
   }
 

@@ -1,13 +1,10 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
 import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, predictGitCleanupWhitespace, type MergeEmptyKind, type WorktreeGateStamp, type GoneBranchLedgerFacts } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
-import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
+import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, writeCommitMessageFile, cleanupCommitMessageFile } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
 import { mergeCommitBlocksLinearization, MAX_MERGE_COMMITS_CHECKED } from "./merge-linearization.js";
 import { isMergeGateRed } from "../orchestration/gate-semaphore.js";
@@ -322,39 +319,9 @@ async function landedTreeDivergesFromExpected(
   return { paths: [...new Set(out.split("\n").map((s) => s.trim()).filter(Boolean))] };
 }
 
-/**
- * Write `message` to a fresh, dedicated temp file for a single `git commit -F <path>` call — never the
- * canonical repo's working tree or the batch worktree, both worker-writable trees a commit-message file
- * has no business sitting in.
- *
- * @decision 75199847 — always `path.resolve(os.tmpdir())`, never bare `os.tmpdir()`: a relative
- * `TEMP`/`TMP`/`TMPDIR` resolves differently for this process than for the git child reading `-F <path>`.
- * Clean up the dir on a post-`mkdtemp` write failure, before re-throwing — never leave it orphaned.
- */
-async function writeBatchCommitMessageFile(message: string): Promise<{ dir: string; file: string }> {
-  const dir = await fs.promises.mkdtemp(path.join(path.resolve(os.tmpdir()), "loom-batch-commit-"));
-  const file = path.join(dir, "message");
-  try {
-    await fs.promises.writeFile(file, message, "utf8");
-  } catch (e) {
-    cleanupBatchCommitMessageFile(dir);
-    throw e;
-  }
-  return { dir, file };
-}
-
-/**
- * Best-effort, NON-BLOCKING cleanup of a {@link writeBatchCommitMessageFile} temp dir — fired without being
- * awaited so it never blocks this function's own caller (a hot per-commit landing loop). Logged on
- * failure, never thrown or retried — see this card's decision record for the accepted residual this
- * leaves, and why `docs/decisions/bd9fc808-*.md`'s own guidance doesn't apply at this small a scale.
- */
-function cleanupBatchCommitMessageFile(dir: string): void {
-  void fs.promises.rm(dir, { recursive: true, force: true }).catch((e: unknown) => {
-    // eslint-disable-next-line no-console
-    console.warn(`[git] landBranchCommitsIndividually: failed to clean up commit-message temp file ${dir}: ${(e as Error).message}`);
-  });
-}
+// @decision 697be64a — the commit-message-via-temp-file helpers this card introduced moved to
+// `writer.ts` (`writeCommitMessageFile`/`cleanupCommitMessageFile`, imported above) so
+// `GitWriter.commit` can reuse them — never re-derive a second copy here.
 
 /**
  * Land ONE candidate branch's own commits, INDIVIDUALLY, onto `batchWorktreePath`'s current HEAD — the
@@ -827,7 +794,7 @@ async function landBranchCommitsIndividually(
     // drops the candidate (named reason below), same remedy as any other pre-commit drop in this function.
     let messageFile: { dir: string; file: string };
     try {
-      messageFile = await writeBatchCommitMessageFile(finalMessage);
+      messageFile = await writeCommitMessageFile(finalMessage, "loom-batch-commit-");
     } catch (e) {
       await rollback();
       return fail({ ok: false, reason: `${branch}: failed to write commit ${sha.slice(0, 7)}'s message to a temp file before landing — dropping this branch rather than fall back to passing it via argv; it will be retried via the ordinary solo merge path: ${(e as Error).message}` });
@@ -872,7 +839,7 @@ async function landBranchCommitsIndividually(
         return fail({ ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` });
       }
     } finally {
-      cleanupBatchCommitMessageFile(messageFile.dir);
+      cleanupCommitMessageFile(messageFile.dir);
     }
     // FAIL CLOSED on an empty commit (card 43a9182d) — a BACKSTOP behind the explicit empty-stage probe
     // above (card 2eb78eb2), which already catches the ordinary "nothing staged" case before the manual
@@ -950,7 +917,7 @@ async function landBranchCommitsIndividually(
       // @decision 75199847 — same -F switch as the plain commit above; a write failure here is treated
       // exactly like the amend command itself failing below (soft-degrade, never a candidate drop) — the
       // commit above already landed and stays valid without this best-effort follow-up stamp.
-      amendMessageFile = await writeBatchCommitMessageFile(amendedMessage);
+      amendMessageFile = await writeCommitMessageFile(amendedMessage, "loom-batch-commit-");
       // @decision 24c0bdba — kill-confirmed, same reasoning as the plain commit above.
       await killableCanonicalRaw(
         batchWorktreePath, ["commit", "--amend", "--cleanup=whitespace", "-F", amendMessageFile.file],
@@ -996,7 +963,7 @@ async function landBranchCommitsIndividually(
           `commit lands without either trailer: ${(e as Error).message}`);
       }
     } finally {
-      if (amendMessageFile) cleanupBatchCommitMessageFile(amendMessageFile.dir);
+      if (amendMessageFile) cleanupCommitMessageFile(amendMessageFile.dir);
     }
   }
 

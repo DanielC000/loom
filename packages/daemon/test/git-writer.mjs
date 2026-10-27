@@ -7,6 +7,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { GitWriter, nonInteractiveEnv, stripClaudeSessionTrailer, unsafeBranchNameShapeReason } from "../dist/git/writer.js";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -400,6 +401,238 @@ const w = new GitWriter(repo);
   }
   // contentionRoot's own manual finally-block rmSync removed here: mkdtempManaged already registered it
   // for guaranteed cleanup at process exit (card 995be21f).
+}
+
+// 12. card 697be64a — GitWriter.commit() now passes its message via `-F <tempfile>`, never `-m`, removing
+//     the same Windows CreateProcess argv ceiling (~32766 chars, ENAMETOOLONG) card 75199847 already
+//     removed from the batch-landing path. Mirrors that card's own proof shape for this caller.
+{
+  const bigRoot = fs.realpathSync(mkdtempManaged("loom-git-writer-bigmsg-"));
+  const bigRepo = path.join(bigRoot, "repo");
+  fs.mkdirSync(bigRepo);
+  const bgit = (...args) => execFileSync("git", args, { cwd: bigRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  bgit("init");
+  bgit("config", "user.email", "loom-test@example.com");
+  bgit("config", "user.name", "loom-test");
+  bgit("config", "commit.gpgsign", "false");
+  fs.writeFileSync(path.join(bigRepo, "seed.txt"), "seed\n");
+  bgit("add", "-A");
+  bgit("commit", "-m", "initial");
+  const bw = new GitWriter(bigRepo);
+
+  // `git log --format=%B` appends its OWN extra trailing newline for display (card 75199847's "Do not" —
+  // never use it for a byte-for-byte comparison); read the raw object via `cat-file -p` and slice off the
+  // header (up to the first blank-line separator) instead.
+  const bodyFromCatFile = (raw) => {
+    const idx = raw.indexOf("\n\n");
+    return idx === -1 ? "" : raw.slice(idx + 2);
+  };
+
+  // (12a) A >32K message — well over the Windows argv ceiling — must land byte-identical via the real
+  // GitWriter.commit(), never ENAMETOOLONG. Code Review: this RED is WINDOWS-ONLY — Linux's own
+  // per-argument limit (MAX_ARG_STRLEN, ~128KiB) sits well above this 40,000-char message, so a pre-fix
+  // `-m` call would NOT reproduce ENAMETOOLONG there; it still exercises the fixed `-F` code path and
+  // still proves byte-identity on every OS, just without a RED precondition off Windows.
+  fs.writeFileSync(path.join(bigRepo, "big1.txt"), "big message test\n");
+  const bigMessage = `fix(git): a message far longer than any reasonable subject line\n\n${"x".repeat(40_000)}\n`;
+  const bigResult = await bw.commit(bigMessage);
+  check("(12a) a >32K commit message succeeds via -F (no ENAMETOOLONG — Windows-only RED, see comment above)", bigResult.ok === true);
+  const landedBig = bgit("cat-file", "-p", bigResult.hash ?? "HEAD");
+  check("(12a) the landed message is byte-identical to the source (via git cat-file -p)", bodyFromCatFile(landedBig) === bigMessage);
+
+  // (12b) byte-identity: -m vs -F, routed through the REAL GitWriter.commit() (Code Review) — not a bare
+  // git call — under GitWriter.commit's own actual invocation (no `--cleanup` flag at all). HERMETIC
+  // against ambient host config (Code Review): isolates HOME/USERPROFILE to a scratch dir, blocks the
+  // system config (GIT_CONFIG_NOSYSTEM=1), and points GIT_CONFIG_GLOBAL at a non-existent file, so no
+  // real user/global/system `commit.cleanup` can leak into the result. Each repo ALSO pins
+  // `commit.cleanup` explicitly — "verbatim" (no cleanup at all; the mode the Code Review found 13/143
+  // cases diverge under, pre-fix) and "strip" (git's default when a message IS edited) — covering both
+  // reachable cleanup modes rather than whatever this host happens to have ambiently. `-m`'s own argv
+  // value is ALWAYS line-completed by git itself regardless of cleanup mode; a bare `-F <file>` is used
+  // VERBATIM under `commit.cleanup=verbatim` specifically, which is why the production fix force-appends
+  // exactly one trailing `\n` to the written message (`writer.ts`'s `commit()`) — see this section's own
+  // RED/GREEN proof note for how that fix is independently verified.
+  const savedHermeticEnv = {
+    HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE,
+    GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+  };
+  const isoHome = fs.realpathSync(mkdtempManaged("loom-git-writer-isohome-"));
+  process.env.HOME = isoHome;
+  process.env.USERPROFILE = isoHome;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  process.env.GIT_CONFIG_GLOBAL = path.join(isoHome, "nonexistent-gitconfig");
+  try {
+    const matrixCases = [
+      { label: "CRLF body", msg: "feat(x): crlf body\r\n\r\nLine one.\r\nLine two.\r\n" },
+      { label: "non-ASCII body", msg: "fix(x): unicode\n\nÜnïcödé body — ✓ done.\n" },
+      { label: "a #-prefixed subject", msg: "#not-a-comment: looks like a comment\n\nBody text.\n" },
+      { label: "a trailer block", msg: "chore(x): trailers\n\nBody.\n\nLoom-Worker-Branch: loom/deadbeef\n" },
+      { label: "no trailing newline", msg: "docs(x): no trailing newline\n\nBody with no trailing newline" },
+    ];
+    for (const cleanupMode of ["verbatim", "strip"]) {
+      const matrixRoot = fs.realpathSync(mkdtempManaged(`loom-git-writer-matrix-${cleanupMode}-`));
+      const matrixRepo = path.join(matrixRoot, "repo");
+      fs.mkdirSync(matrixRepo);
+      const xgit = (...args) => execFileSync("git", args, { cwd: matrixRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
+      xgit("init");
+      xgit("config", "user.email", "loom-test@example.com");
+      xgit("config", "user.name", "loom-test");
+      xgit("config", "commit.gpgsign", "false");
+      xgit("config", "commit.cleanup", cleanupMode);
+      fs.writeFileSync(path.join(matrixRepo, "seed.txt"), "seed\n");
+      xgit("add", "-A");
+      xgit("commit", "-m", "initial");
+      const mw = new GitWriter(matrixRepo);
+
+      for (const { label, msg } of matrixCases) {
+        // -m BASELINE: a real, unmocked `git commit -m` under this repo's pinned cleanup mode — given the
+        // SAME bytes GitWriter.commit() itself writes to the `-F` temp file (`cleanedMessage.trim() +
+        // "\n"`; none of these matrix cases carry a Claude-Session trailer, so `cleanedMessage === msg`
+        // here), never the raw `msg`. Under `commit.cleanup=verbatim` specifically, `.trim()` can eat a
+        // trailing `\r` along with the `\n` it's removing — comparing against the UN-trimmed `msg` would
+        // wrongly fault the real fix for a difference that `.trim()` itself introduces on BOTH sides
+        // (production applies that same `.trim()` before either `-m` or `-F` ever sees the message).
+        const expectedMessage = `${msg.trim()}\n`;
+        fs.writeFileSync(path.join(matrixRepo, "f.txt"), `content for ${label} (${cleanupMode})\n`);
+        xgit("add", "-A");
+        xgit("commit", "-m", expectedMessage);
+        const mBody = bodyFromCatFile(xgit("cat-file", "-p", "HEAD"));
+        xgit("reset", "--hard", "HEAD~1");
+
+        // -F via the REAL GitWriter.commit() — proves what production actually does, not a bare git call.
+        fs.writeFileSync(path.join(matrixRepo, "f.txt"), `content for ${label} (${cleanupMode})\n`);
+        const fResult = await mw.commit(msg);
+        check(`(12b ${cleanupMode}/${label}) GitWriter.commit() succeeds`, fResult.ok === true);
+        const fBody = bodyFromCatFile(xgit("cat-file", "-p", "HEAD"));
+        xgit("reset", "--hard", "HEAD~1");
+
+        check(`(12b ${cleanupMode}/${label}) -m and -F (via the real GitWriter.commit()) land byte-identical bodies`, mBody === fBody);
+      }
+    }
+  } finally {
+    for (const [k, v] of Object.entries(savedHermeticEnv)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+
+  // (12c) A commit-message temp-file write failure is a NAMED refusal, never a silent fallback to -m —
+  // monkey-patches the real shared `node:fs` singleton (same technique as the batch path's own F4 test),
+  // targeting only the "message" file under a dir whose prefix matches GitWriter.commit's own
+  // `writeCommitMessageFile(..., "loom-git-commit-")` call.
+  {
+    fs.writeFileSync(path.join(bigRepo, "refuse1.txt"), "should not commit — write will fail\n");
+    const capturedDirs = [];
+    const realMkdtemp = fs.promises.mkdtemp;
+    const realWriteFile = fs.promises.writeFile;
+    let writeFailed = false;
+    fs.promises.mkdtemp = async (...a) => {
+      const dir = await realMkdtemp.apply(fs.promises, a);
+      if (path.basename(dir).startsWith("loom-git-commit-")) capturedDirs.push(dir);
+      return dir;
+    };
+    fs.promises.writeFile = async (file, ...rest) => {
+      if (!writeFailed && typeof file === "string" && path.basename(file) === "message" &&
+          capturedDirs.some((d) => file.startsWith(d))) {
+        writeFailed = true;
+        throw new Error("simulated EACCES (test 12c)");
+      }
+      return realWriteFile.apply(fs.promises, [file, ...rest]);
+    };
+    let refusalResult;
+    try {
+      refusalResult = await bw.commit("should not commit — write will fail");
+    } finally {
+      fs.promises.mkdtemp = realMkdtemp;
+      fs.promises.writeFile = realWriteFile;
+    }
+    check("(12c) precondition: the simulated write failure actually fired", writeFailed === true);
+    check("(12c) precondition: a temp dir was actually created before the write failed", capturedDirs.length >= 1);
+    check("(12c) a temp-file write failure is a NAMED refusal naming 'temp file', never a throw",
+      refusalResult.ok === false && /temp file/i.test(refusalResult.error ?? ""));
+    check("(12c) the refusal never fell back to passing the message via -m",
+      !bgit("log", "--pretty=%s").includes("should not commit"));
+    const failedDir = capturedDirs[capturedDirs.length - 1];
+    let dirGone = false;
+    try {
+      await waitUntil(() => !fs.existsSync(failedDir), { timeoutMs: 5000, label: `(12c) temp dir ${failedDir} removed` });
+      dirGone = true;
+    } catch { /* dirGone stays false — reported below */ }
+    check("(12c) the orphaned temp dir from the FAILED write is cleaned up, never leaked", dirGone === true);
+  }
+
+  // (12d) The commit-message temp dir is cleaned up on the ORDINARY success path too, not just on
+  // failure — capture it the same way, let a real commit land, then confirm it's gone afterward.
+  {
+    fs.writeFileSync(path.join(bigRepo, "cleanup1.txt"), "ordinary commit for cleanup check\n");
+    const capturedDirs = [];
+    const realMkdtemp = fs.promises.mkdtemp;
+    fs.promises.mkdtemp = async (...a) => {
+      const dir = await realMkdtemp.apply(fs.promises, a);
+      if (path.basename(dir).startsWith("loom-git-commit-")) capturedDirs.push(dir);
+      return dir;
+    };
+    let okResult;
+    try {
+      okResult = await bw.commit("ordinary commit for cleanup check");
+    } finally {
+      fs.promises.mkdtemp = realMkdtemp;
+    }
+    check("(12d) precondition: the ordinary commit succeeded", okResult.ok === true);
+    check("(12d) precondition: a temp dir was captured", capturedDirs.length === 1);
+    let dirGoneOk = false;
+    try {
+      await waitUntil(() => !fs.existsSync(capturedDirs[0]), { timeoutMs: 5000, label: `(12d) temp dir ${capturedDirs[0]} removed` });
+      dirGoneOk = true;
+    } catch { /* dirGoneOk stays false — reported below */ }
+    check("(12d) the commit-message temp dir is cleaned up after an ORDINARY successful commit too", dirGoneOk === true);
+  }
+
+  // (12e) Code Review item 4 — the commit-message temp dir is cleaned up on the `refuseIfOperationalHome()`
+  // EARLY RETURN too, not just the ordinary success/failure paths above. Forces that refusal via its own
+  // LOOM_HOME-independent branch — an EMPTY git-resolved toplevel (`resolveOperationalHomeToplevelRefusal`'s
+  // `!toplevel` arm, decision f9360c84 round 2) via an injected `gitFactory` — so this never touches the
+  // real ambient LOOM_HOME (see git-writer-operational-home-guard.mjs for the dedicated LOOM_HOME-path
+  // proof of the refusal mechanism itself; this test only proves THIS card's cleanup fires on that path).
+  {
+    const homeRefusalRoot = fs.realpathSync(mkdtempManaged("loom-git-writer-homerefusal-"));
+    const homeRefusalRepo = path.join(homeRefusalRoot, "repo");
+    fs.mkdirSync(homeRefusalRepo);
+    const hgit = (...args) => execFileSync("git", args, { cwd: homeRefusalRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
+    hgit("init");
+    hgit("config", "user.email", "loom-test@example.com");
+    hgit("config", "user.name", "loom-test");
+    hgit("config", "commit.gpgsign", "false");
+    fs.writeFileSync(path.join(homeRefusalRepo, "seed.txt"), "seed\n");
+    hgit("add", "-A");
+    hgit("commit", "-m", "initial");
+    fs.writeFileSync(path.join(homeRefusalRepo, "f.txt"), "should be refused before any real commit\n");
+
+    const emptyToplevelGitFactory = () => ({ revparse: async () => "" });
+    const hw = new GitWriter(homeRefusalRepo, { gitFactory: emptyToplevelGitFactory });
+
+    const capturedDirs = [];
+    const realMkdtemp = fs.promises.mkdtemp;
+    fs.promises.mkdtemp = async (...a) => {
+      const dir = await realMkdtemp.apply(fs.promises, a);
+      if (path.basename(dir).startsWith("loom-git-commit-")) capturedDirs.push(dir);
+      return dir;
+    };
+    let homeRefusalResult;
+    try {
+      homeRefusalResult = await hw.commit("should be refused before any real commit");
+    } finally {
+      fs.promises.mkdtemp = realMkdtemp;
+    }
+    check("(12e) precondition: a temp dir was captured before the refusal", capturedDirs.length === 1);
+    check("(12e) the operational-home refusal fires (forced via an empty git-resolved toplevel)", homeRefusalResult.ok === false);
+    check("(12e) nothing was actually committed", !hgit("log", "--pretty=%s").includes("should be refused"));
+    let dirGoneHome = false;
+    try {
+      await waitUntil(() => !fs.existsSync(capturedDirs[0]), { timeoutMs: 5000, label: `(12e) temp dir ${capturedDirs[0]} removed` });
+      dirGoneHome = true;
+    } catch { /* dirGoneHome stays false — reported below */ }
+    check("(12e) the commit-message temp dir is cleaned up on the homeRefusal early return too", dirGoneHome === true);
+  }
 }
 
 console.log(failures === 0 ? "\nALL PASS — git writer + bounded/non-interactive guards hold, incl. concurrent-writer/index.lock contention degrading to a clean structured error, never a wedge." : `\n${failures} FAILURE(S).`);
