@@ -263,9 +263,12 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
   check("(S11 batch) OUTCOME: nothing carrying the replacement's content landed via merge_batch", landed !== "EVIL");
 }
 
-// ── (squash-refusal) the canonical `merge --squash` catch: a bad driver key visible ONLY from the CANONICAL checkout (its own `config.worktree` under
-// extensions.worktreeConfig) — the worker worktree's union-forward never sees it, so the refusal first fires at the canonical squash. It must read as a plain
-// "refused, nothing changed" (the squash never started), NOT as a recovery alarm from a cleanup `reset --hard` that was refused too, and leave canonical untouched.
+// ── (squash-refusal) a bad driver key visible ONLY from the CANONICAL checkout (its own `config.worktree` under
+// extensions.worktreeConfig) — the worker worktree's union-forward never sees it. Card f4da727f moved the
+// identity-fallback probe before the squash, so the probe's own canonicalGit call (against the same canonical
+// repoPath) is now what first sees this key and refuses, never the squash itself. The refusal must still read
+// as "refused, nothing changed" (nothing was ever staged), now prefixed "identity-fallback probe: ", NOT as a
+// recovery alarm from a cleanup `reset --hard` that was refused too, and leave canonical untouched.
 {
   const W = await world("squashrefuse");
   const wt = W.w.a.worktreePath;
@@ -279,7 +282,7 @@ for (const kind of ["config", "eqname", "empty", "rawbyte"]) {
   const r = await settled(W.sessions.confirmWorkerMergeTracked(W.mgrId, W.w.a.sid));
   console.log(`      squash-refusal reason: ${String(r?.reason).slice(0, 320)}`);
   check("(squash-refusal) the confirm is refused (merged:false)", r?.merged === false);
-  check("(squash-refusal) the reason STARTS with \"refused, nothing changed\" and names the offending key", typeof r?.reason === "string" && r.reason.startsWith("refused, nothing changed") && r.reason.includes("merge.a=b.driver"));
+  check("(squash-refusal) the reason CONTAINS \"refused, nothing changed\" (now prefixed \"identity-fallback probe: \" since f4da727f) and names the offending key", typeof r?.reason === "string" && r.reason.includes("refused, nothing changed") && r.reason.includes("merge.a=b.driver"));
   check("(squash-refusal) NO recovery-alarm wording (a refused cleanup reset must not read as canonical residue)", typeof r?.reason === "string" && !/residue|needs recovery|reset --hard|cleanup|git merge --squash failed/i.test(r.reason));
   check("(squash-refusal) canonical HEAD is unchanged", git(W.repo, "rev-parse HEAD") === headBefore);
   check("(squash-refusal) canonical index and tracked worktree are clean (no staged residue)", git(W.repo, "diff --cached --name-only") === "" && git(W.repo, "status --porcelain --untracked-files=no") === "");
