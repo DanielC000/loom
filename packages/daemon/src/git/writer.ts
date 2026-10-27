@@ -718,8 +718,10 @@ export class GitWriter {
    *  trailing slash, a leading `./`, or a glob like `*.md` all scope differently under git than under a
    *  naive `startsWith`; card 8d49c36c review). */
   private async preExistingResidue(git: WriterGit, paths?: string[]): Promise<string[]> {
+    // @decision 4b559feb — `--end-of-options` before the optional pathspec spread: a stray option-shaped
+    // path would otherwise be re-entered into diff's own option parser. MEASURED byte-identical either way.
     const out = await withTimeout(
-      git.raw(["diff", "--cached", "--name-only", ...(paths ? ["--", ...paths] : [])]),
+      git.raw(["diff", "--cached", "--name-only", "--end-of-options", ...(paths ? ["--", ...paths] : [])]),
       this.localMs,
       "git diff --cached --name-only (pre-existing residue)",
     );
@@ -839,8 +841,11 @@ export class GitWriter {
           git.raw(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), this.localMs, "git rev-parse @{u}",
         )).trim();
         if (upstream) {
+          // @decision 4b559feb — `--end-of-options` before the range: `upstream` is git's own
+          // `@{u}` resolution, but an option-shaped value would otherwise be re-entered into rev-list's
+          // own option parser.
           const count = parseInt(
-            (await withTimeout(git.raw(["rev-list", "--count", `${upstream}..HEAD`]), this.localMs, "git rev-list --count")).trim(), 10,
+            (await withTimeout(git.raw(["rev-list", "--count", "--end-of-options", `${upstream}..HEAD`]), this.localMs, "git rev-list --count")).trim(), 10,
           );
           if (Number.isFinite(count)) ahead = count;
         }

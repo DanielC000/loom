@@ -362,7 +362,10 @@ async function collectLoomTipHits(run: (args: string[]) => Promise<string>, wate
   const refs = (await run(["for-each-ref", `--count=${MAINLINE_LOOM_REF_CAP + 1}`, "--format=%(objectname) %(refname)", "refs/heads/loom/"])).split("\n").filter(Boolean);
   if (refs.length > MAINLINE_LOOM_REF_CAP) return null;
   if (refs.length === 0) return [];
-  const all = (await run(["rev-list", `--max-count=${MAINLINE_RANGE_CAP + 1}`, `${watermarkSha}..${tip}`])).split("\n").filter(Boolean);
+  // @decision 4b559feb — `--end-of-options` right before the range: both sides are already durable/
+  // reflog-derived shas, but an option-shaped value would otherwise be re-entered into rev-list's own
+  // pseudo-revision recognition.
+  const all = (await run(["rev-list", `--max-count=${MAINLINE_RANGE_CAP + 1}`, "--end-of-options", `${watermarkSha}..${tip}`])).split("\n").filter(Boolean);
   if (all.length > MAINLINE_RANGE_CAP) return null;
   const inRange = new Set(all);
   const inRangeRefs = refs.map((r) => { const i = r.indexOf(" "); return { sha: r.slice(0, i), ref: r.slice(i + 1) }; }).filter((r) => inRange.has(r.sha));

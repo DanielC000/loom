@@ -306,8 +306,11 @@ async function landedTreeDivergesFromExpected(
   // `--is-ancestor` forms elsewhere in this file.
   let out: string;
   try {
+    // @decision 4b559feb — `--end-of-options` before the first tree-ish positional: both are already
+    // resolved tree ids, but an option-shaped value would otherwise be re-entered into diff's own option
+    // parser; a single marker protects both trailing positionals.
     out = await withTimeout(
-      git.raw(["diff", "--name-only", expectedTree, landedTree]),
+      git.raw(["diff", "--name-only", "--end-of-options", expectedTree, landedTree]),
       timeoutMs, "git diff --name-only (batch land, content-check)",
     );
   } catch (e) {
@@ -459,8 +462,11 @@ async function landBranchCommitsIndividually(
 
   let commitShas: string[];
   try {
+    // @decision 4b559feb — `--end-of-options` right before the range: both sides are resolved shas, but
+    // an option-shaped value embedded in the range would otherwise be re-entered into rev-list's own
+    // pseudo-revision recognition (e.g. `--all`).
     const out = await withTimeout(
-      git.raw(["rev-list", "--reverse", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list (batch land, commit range)",
+      git.raw(["rev-list", "--reverse", "--end-of-options", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list (batch land, commit range)",
     );
     commitShas = out.split("\n").map((s) => s.trim()).filter(Boolean);
   } catch (e) {
@@ -475,8 +481,9 @@ async function landBranchCommitsIndividually(
   // carries resolution content silently loses it; dropping every merge broke cancel-then-rebatch.
   let mergeShas: string[];
   try {
+    // @decision 4b559feb — `--end-of-options` right before the range, same reason as the commit-range read above.
     mergeShas = (await withTimeout(
-      git.raw(["rev-list", "--merges", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --merges (batch land, merge-commit probe)",
+      git.raw(["rev-list", "--merges", "--end-of-options", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --merges (batch land, merge-commit probe)",
     )).split("\n").map((s) => s.trim()).filter(Boolean);
   } catch (e) {
     const mergeProbeFailure = describeGitFailure(e);
@@ -491,8 +498,9 @@ async function landBranchCommitsIndividually(
   }
   if (mergeShas.length > 0) {
     try {
+      // @decision 4b559feb — `--end-of-options` right before the range, same reason as the commit-range read above.
       commitShas = (await withTimeout(
-        git.raw(["rev-list", "--reverse", "--no-merges", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --no-merges (batch land, commit range)",
+        git.raw(["rev-list", "--reverse", "--no-merges", "--end-of-options", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --no-merges (batch land, commit range)",
       )).split("\n").map((s) => s.trim()).filter(Boolean);
     } catch (e) {
       const noMergeRangeFailure = describeGitFailure(e);
@@ -690,8 +698,10 @@ async function landBranchCommitsIndividually(
     const expectedParentForThisCommit = currentHead;
     let stagedPaths: string;
     try {
+      // @decision 4b559feb — `--end-of-options` before the bare ref positional: `expectedParentForThisCommit`
+      // is pinned HEAD, but an option-shaped value would otherwise be re-entered into diff's own option parser.
       stagedPaths = await withTimeout(
-        git.raw(["diff", "--cached", "--name-only", expectedParentForThisCommit]), timeoutMs, "git diff --cached --name-only (batch land, empty-stage probe)",
+        git.raw(["diff", "--cached", "--name-only", "--end-of-options", expectedParentForThisCommit]), timeoutMs, "git diff --cached --name-only (batch land, empty-stage probe)",
       );
     } catch (e) {
       await rollback();

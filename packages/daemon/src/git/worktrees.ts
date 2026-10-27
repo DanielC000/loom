@@ -917,8 +917,10 @@ async function recutStaleReusedBranch(
   // is treated the same as an unparseable count below — never re-cut.
   const branchTip = await resolveBranchTip(repoPath, branch, deps);
   if (!branchTip) return { recut: false };
+  // @decision 4b559feb — `--end-of-options` before the range: both sides are resolved shas, but an
+  // option-shaped value would otherwise be re-entered into rev-list's own option parser.
   const aheadRaw = await withTimeout(
-    repoGit.raw(["rev-list", "--count", `${mainSha}..${branchTip}`]), repoTimeoutMs, "git rev-list --count (ahead of main)",
+    repoGit.raw(["rev-list", "--count", "--end-of-options", `${mainSha}..${branchTip}`]), repoTimeoutMs, "git rev-list --count (ahead of main)",
   );
   // FAIL SAFE: only re-cut a PROVABLY-empty branch (0 ahead). A recovery branch (>0 ahead) OR a malformed/
   // unparseable count (NaN) → leave the branch EXACTLY as-is; never let a bad count fall through to the
@@ -1042,7 +1044,9 @@ async function detectStaleBase(repoPath: string, branch: string, mainSha: string
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     // @decision 868e0135 — `--end-of-options` right after "merge-base": mainSha is always rev-parse-derived; the other arg is already refs/heads/-qualified.
     const baseSha = (await withTimeout(git.raw(["merge-base", "--end-of-options", `refs/heads/${branch}`, mainSha]), timeoutMs, "git merge-base")).trim();
-    const filesRaw = await withTimeout(git.raw(["diff", "--name-only", baseSha, mainSha]), timeoutMs, "git diff --name-only");
+    // @decision 4b559feb — `--end-of-options` before the first bare ref positional: both are resolved
+    // shas, but an option-shaped value would otherwise be re-entered into diff's own option parser.
+    const filesRaw = await withTimeout(git.raw(["diff", "--name-only", "--end-of-options", baseSha, mainSha]), timeoutMs, "git diff --name-only");
     const allFiles = filesRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     return {
       baseSha, behindBy,
@@ -2969,8 +2973,9 @@ export async function precheckWorkerDone(
   // (2) Clean working tree. Is the assigned branch 0 commits ahead of base? → WARN-only signal.
   if (branch) {
     try {
+      // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
       const ahead = parseInt(
-        (await withTimeout(git.raw(["rev-list", "--count", `${base}..refs/heads/${branch}`]), timeoutMs, "git rev-list --count")).trim(),
+        (await withTimeout(git.raw(["rev-list", "--count", "--end-of-options", `${base}..refs/heads/${branch}`]), timeoutMs, "git rev-list --count")).trim(),
         10,
       );
       if (Number.isFinite(ahead) && ahead === 0) return { uncommitted: false, files: [], zeroAhead: true, aheadCount: 0 };
@@ -3407,8 +3412,9 @@ export async function worktreeHasWork(
     try {
       const branchTip = await resolveBranchTip(repoPath, branch, deps);
       if (!branchTip) return true; // missing/unreadable branch → fail SAFE / has work
+      // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
       const ahead = parseInt(
-        (await withTimeout(git.raw(["rev-list", "--count", `${base}..${branchTip}`]), timeoutMs, "git rev-list --count")).trim(),
+        (await withTimeout(git.raw(["rev-list", "--count", "--end-of-options", `${base}..${branchTip}`]), timeoutMs, "git rev-list --count")).trim(),
         10,
       );
       if (!Number.isFinite(ahead) || ahead > 0) return true; // NaN (parse error) or >0 → fail SAFE / has work
@@ -3470,8 +3476,9 @@ export async function detectStrandedWork(
     //     normal path — not stranded, regardless of what the worktree is checked out on.
     // card 967eb326 — qualify as refs/heads/ so a same-named tag can never win over the real branch
     // (a bare revision resolves a same-named tag first; see docs/decisions/2a6a292a-* "Round 13").
+    // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
     const assignedAhead = parseInt(
-      (await withTimeout(git.raw(["rev-list", "--count", `${mainSha}..refs/heads/${assignedBranch}`]), timeoutMs, "git rev-list --count assigned")).trim(),
+      (await withTimeout(git.raw(["rev-list", "--count", "--end-of-options", `${mainSha}..refs/heads/${assignedBranch}`]), timeoutMs, "git rev-list --count assigned")).trim(),
       10,
     );
     if (Number.isFinite(assignedAhead) && assignedAhead > 0) return { stranded: false };
@@ -3511,8 +3518,9 @@ export async function detectStrandedWork(
       : "HEAD";
     if (wtBranchRef === `refs/heads/${assignedBranch}`) return { stranded: false }; // same branch ⇒ no divergence
 
+    // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
     const wtAhead = parseInt(
-      (await withTimeout(wt.raw(["rev-list", "--count", `${mainSha}..HEAD`]), timeoutMs, "git rev-list --count worktree")).trim(),
+      (await withTimeout(wt.raw(["rev-list", "--count", "--end-of-options", `${mainSha}..HEAD`]), timeoutMs, "git rev-list --count worktree")).trim(),
       10,
     );
     if (!Number.isFinite(wtAhead) || wtAhead <= 0) return { stranded: false }; // nothing committed anywhere ⇒ nothing to strand
@@ -3860,7 +3868,9 @@ export async function computeWorktreeGateStamp(worktreePath: string, deps: Bound
     // Best-effort: a `diff HEAD` failure still yields a (slightly weaker, porcelain-only) comparable hash
     // rather than aborting the whole stamp — the outer try/catch is reserved for a genuinely unreadable
     // worktree (rev-parse/status themselves failing).
-    const diff = await withTimeout(git.raw(["diff", "HEAD", "--", ...files]), timeoutMs, "gate-stamp diff HEAD").catch(() => "");
+    // @decision 4b559feb — `--end-of-options` before `HEAD`: no risky ref here (HEAD is a literal,
+    // `files` are pathspecs after `--`), kept for guard-satisfaction consistency; MEASURED harmless.
+    const diff = await withTimeout(git.raw(["diff", "HEAD", "--end-of-options", "--", ...files]), timeoutMs, "gate-stamp diff HEAD").catch(() => "");
     const canonical = workEntries.map((e) => `${e.status} ${e.oldPath ?? ""}\0${e.path}`).join("\n");
     const dirtyHash = createHash("sha256").update(canonical).update(diff).digest("hex");
     return { head, dirty: true, dirtyHash };
@@ -4087,7 +4097,9 @@ async function diffNameStatus(git: Pick<SimpleGit, "raw">, range: string, timeou
   const map = new Map<string, DiffstatFile["status"]>();
   const SINGLE_PATH_STATUS = new Set(["A", "M", "D", "T", "U", "X", "B"]);
   try {
-    const raw = await withTimeout(git.raw(["diff", "--name-status", "-z", range]), timeoutMs, "git diff --name-status -z (diffBranch)");
+    // @decision 4b559feb — never drop this marker: a left-side `--output=`/`-O`/`--src-prefix=` value is
+    // matched by PREFIX (not exact equality), so unguarded it silently writes a file or discards the diff.
+    const raw = await withTimeout(git.raw(["diff", "--name-status", "-z", "--end-of-options", range]), timeoutMs, "git diff --name-status -z (diffBranch)");
     const tokens = raw.split("\0");
     let i = 0;
     while (i < tokens.length) {
@@ -4132,7 +4144,9 @@ export async function diffBranch(
   const range = `${base}...${branchTip}`; // 3-dot: changes on `branch` since the merge-base with `base`
   // @decision fdf09672 — machine-readable `-z` numstat, never `--stat`'s DISPLAY text (`diffSummary()`'s
   // own call) — see parseNumstatZ's own doc + the full record for the verified defects this replaces.
-  const numstatOut = await withTimeout(git.raw(["diff", "--numstat", "-z", range]), timeoutMs, "git diff --numstat -z (diffBranch summary)");
+  // @decision 4b559feb — never drop this marker: a left-side `--output=`/`-O`/`--src-prefix=` value is
+  // matched by PREFIX (not exact equality), so unguarded it silently writes a file or discards the diff.
+  const numstatOut = await withTimeout(git.raw(["diff", "--numstat", "-z", "--end-of-options", range]), timeoutMs, "git diff --numstat -z (diffBranch summary)");
   const allFiles: DiffstatFile[] = parseNumstatZ(numstatOut);
 
   // OPTIONAL status enrichment (includeStatus): a second, best-effort `git diff --name-status` call,
@@ -4174,10 +4188,13 @@ export async function diffBranch(
   // @decision fdf09672 — `--literal-pathspecs` (never add where there is no `--` pathspec) and
   // `-c core.quotepath=false` (a patch's `+++`/`---` lines stay C-quoted under `-z` too) are GLOBAL
   // flags, must precede the subcommand — every patch call here goes through `.raw([...])`.
+  // @decision 4b559feb — never drop this marker on either branch: a left-side `--output=`/`-O`/
+  // `--src-prefix=` value is matched by PREFIX, so unguarded it silently writes a file or discards the
+  // diff; MEASURED harmless alongside `--literal-pathspecs` and a trailing `--` pathspec.
   const patch = includePatch
     ? filtering
-      ? (files.length > 0 ? await withTimeout(git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", range, "--", ...new Set(files.flatMap((f) => f.renameFrom !== undefined ? [f.file, f.renameFrom] : [f.file]))]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
-      : await withTimeout(git.raw(["-c", "core.quotepath=false", "diff", range]), timeoutMs, "git diff (diffBranch patch)")
+      ? (files.length > 0 ? await withTimeout(git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", "--end-of-options", range, "--", ...new Set(files.flatMap((f) => f.renameFrom !== undefined ? [f.file, f.renameFrom] : [f.file]))]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
+      : await withTimeout(git.raw(["-c", "core.quotepath=false", "diff", "--end-of-options", range]), timeoutMs, "git diff (diffBranch patch)")
     : "";
 
   // pathGlob matched ZERO of the N actually-changed files: without this, the result is `filesChanged:0`
@@ -4347,13 +4364,17 @@ async function branchContentLandedInCommit(
     // @decision 56c10535 — qualified: a bare `branch` revision resolves a same-named tag ahead of
     // the real branch (refs/tags/ outranks refs/heads/), which would misclassify ALREADY_MERGED.
     const branchRef = `refs/heads/${branch}`;
+    // @decision 4b559feb — never drop this marker: a left-side `--output=`/`-O`/`--src-prefix=` value in
+    // `mergeBase` is matched by PREFIX, so unguarded it silently writes a file or discards the diff.
     const changedFiles = (await withTimeout(
-      git.raw(["diff", "--name-only", `${mergeBase}..${branchRef}`]), timeoutMs, "git diff --name-only (content check)",
+      git.raw(["diff", "--name-only", "--end-of-options", `${mergeBase}..${branchRef}`]), timeoutMs, "git diff --name-only (content check)",
     )).trim();
     if (!changedFiles) return "pass"; // branch has no changes of its own relative to its fork point — vacuously landed
     const files = changedFiles.split("\n").filter(Boolean);
+    // @decision 4b559feb — `--end-of-options` before `sha` protects both trailing positionals: `sha`
+    // is untrusted, and `branchRef` reaches the array as a plain variable, not a literal template.
     const diffOutput = (await withTimeout(
-      git.raw(["diff", "--name-only", sha, branchRef, "--", ...files]), timeoutMs, "git diff --name-only (content check, candidate vs branch)",
+      git.raw(["diff", "--name-only", "--end-of-options", sha, branchRef, "--", ...files]), timeoutMs, "git diff --name-only (content check, candidate vs branch)",
     )).trim();
     return diffOutput === "" ? "pass" : "fail"; // no output ⇒ zero difference on any of the branch's own paths ⇒ content matches
   } catch {
@@ -5551,9 +5572,9 @@ export const STATIC_GUARD_REPO_PATHS = [
   // Card b8122303: a corpus-wide, comment-stripped scan of packages/daemon/src/**/*.ts asserting no
   // expression reading a trailer-derived value (`trailers.base`/`trailers.landedTip`/`trailers.pathSet`/
   // `.baseSha`) reaches a git argv anywhere except a named, allowlisted site — see the guard's own header
-  // and docs/decisions/b8122303-*.md. Belongs here on the same ground as remote-trust-single-predicate-
-  // guard.mjs/harness-adapter-claude-literal-guard.mjs above: an explicit, self-contained comment-stripped
-  // whole-file scan, immune by construction to a comment-only diff.
+  // and docs/decisions/b8122303-*.md.
+  // @decision 4b559feb — kept as a reviewer-chosen OVER-INCLUSION on the trust-boundary ground (never
+  // weakens the reduced gate; runs in ~1s) — never "owner-directed" (no owner request verified).
   "packages/daemon/test/trailer-derived-value-git-argv-guard.mjs",
 ];
 
@@ -6779,8 +6800,10 @@ export async function changedDaemonSrcTsPathsForCommit(
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   let out: string;
   try {
+    // @decision 4b559feb — `--end-of-options` before `${sha}^`: a caller-supplied landed-commit sha; the
+    // RETRACTED compound-suffix exemption (868e0135) applies — `${sha}^` has no safe literal prefix.
     out = (await withTimeout(
-      git.raw(["diff", "--name-status", "--no-renames", `${sha}^`, sha, "--", "packages/daemon/src"]),
+      git.raw(["diff", "--name-status", "--no-renames", "--end-of-options", `${sha}^`, sha, "--", "packages/daemon/src"]),
       timeoutMs, "git diff --name-status (dist-importer-check)",
     )).trim();
   } catch {
@@ -7506,8 +7529,9 @@ async function verifyPersistedPathSet(
     } else {
       // @decision c0d0eac9 round 6 (finding 2) — `${sha}^` throws for a PARENTLESS (root) commit — a
       // real shape (a candidate merged on as a second parent). Read the parent list first instead.
+      // @decision 4b559feb — `--end-of-options` before `sha`: defense-in-depth, same class as 868e0135.
       const parentsOut = (await withTimeout(
-        git.raw(["rev-list", "--parents", "-n1", sha]), timeoutMs, "git rev-list --parents -n1 (path-set verify parent)",
+        git.raw(["rev-list", "--parents", "-n1", "--end-of-options", sha]), timeoutMs, "git rev-list --parents -n1 (path-set verify parent)",
       )).trim();
       const tokens = parentsOut.split(/\s+/).filter(Boolean);
       // @decision c0d0eac9 round 7 (finding 3) — `sha` is already known-real (it came from the same
@@ -7698,8 +7722,9 @@ async function classifyAgainstLedgerUncached(
     if (ledger.rowsByTips([sha]).some((row) => row.tip === sha)) return "recorded";
     if (sha === refTip) return "unrecorded"; // no further candidates possible when sha IS refTip
 
+    // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
     const out = await withTimeout(
-      git.raw(["rev-list", "--ancestry-path", `--max-count=${GONE_BRANCH_LEDGER_CHAIN_SCAN_CAP + 1}`, `${sha}..${refTip}`]),
+      git.raw(["rev-list", "--ancestry-path", `--max-count=${GONE_BRANCH_LEDGER_CHAIN_SCAN_CAP + 1}`, "--end-of-options", `${sha}..${refTip}`]),
       timeoutMs, "git rev-list --ancestry-path (ledger candidate tips)",
     );
     const candidateTips = out.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -7729,9 +7754,10 @@ async function classifyAgainstLedgerUncached(
     }
 
     // Round 5 fix 1(c): spawn the actual membership walk only for rows the prune above could not rule out.
+    // @decision 4b559feb — `--end-of-options` before the range: defense-in-depth, same class as 868e0135.
     for (const row of survivors) {
       const out2 = await withTimeout(
-        git.raw(["rev-list", "--first-parent", `${row.base}..${row.tip}`]),
+        git.raw(["rev-list", "--first-parent", "--end-of-options", `${row.base}..${row.tip}`]),
         timeoutMs, "git rev-list --first-parent (ledger row-membership check)",
       );
       const rowMembers = out2.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -8067,8 +8093,10 @@ export async function findIntroducingSquashCommit(
     // @decision 868e0135 — `--end-of-options` right after "merge-base": branchRef is already refs/heads/-qualified; landedSha is a resolved sha.
     const landedMergeBase = (await withTimeout(git.raw(["merge-base", "--end-of-options", landedSha, branchRef]), timeoutMs, "git merge-base (attribution)")).trim();
     if (!landedMergeBase) return landedSha; // no common ancestor — fails conservatively, same as any other ambiguity here
+    // @decision 4b559feb — never drop this marker: a left-side `--output=`/`-O`/`--src-prefix=` value in
+    // `landedMergeBase` is matched by PREFIX, so unguarded it silently writes a file or discards the diff.
     const ownChanges = (await withTimeout(
-      git.raw(["diff", "--name-only", `${landedMergeBase}..${branchRef}`]),
+      git.raw(["diff", "--name-only", "--end-of-options", `${landedMergeBase}..${branchRef}`]),
       timeoutMs, "git diff --name-only (attribution)",
     )).trim();
     if (!ownChanges) return landedSha;
@@ -8204,8 +8232,10 @@ export async function machineReadablePathSet(
 ): Promise<{ paths: string[] } | { truncated: true }> {
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision 4b559feb — never drop this marker: a left-side `--output=`/`-O`/`--src-prefix=` value is
+    // matched by PREFIX (not exact equality), so unguarded it silently writes a file or discards the diff.
     const out = await withTimeout(
-      git.raw(["diff", "--name-status", "-z", range]),
+      git.raw(["diff", "--name-status", "-z", "--end-of-options", range]),
       timeoutMs, "git diff --name-status -z (machine-readable path set)",
     );
     return parseNameStatusZ(out);
@@ -9782,13 +9812,17 @@ export async function computeOwedLanding(
   const identity = ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
   // @decision 868e0135 — `--end-of-options` before `sha`: MEASURED, `git log -1 --format=%s --all` (option-shaped) would otherwise silently read some OTHER commit's subject instead of erroring.
   const subjectOf = async (sha: string) => (await raw(["log", "-1", "--format=%s", "--end-of-options", sha])).trim();
-  const merges = lines(await raw(["rev-list", "--merges", `${base}..${tip}`, "--not", main]));
+  // @decision 4b559feb — `--end-of-options` right after `--not`, before `main`: `--not` must stay BEFORE
+  // the marker (MEASURED: any earlier placement swallows `--not` itself, flipping the range's sign too).
+  // The range needs no marker of its own — see the decision record for why.
+  const merges = lines(await raw(["rev-list", "--merges", `${base}..${tip}`, "--not", "--end-of-options", main]));
   if (merges.length > MAX_MERGE_COMMITS_CHECKED) return { ok: false, kind: "merge", commit: merges[0]!, subject: await subjectOf(merges[0]!), why: `is one of ${merges.length} merge commits in the range (more than ${MAX_MERGE_COMMITS_CHECKED} are checked)` };
   for (const m of merges) {
     const why = await mergeCommitBlocksLinearization({ raw: raw as unknown as SimpleGit["raw"] }, m, main, timeoutMs);
     if (!why) continue;
     // Loom's own union commit (parents [previous tip, main-at-the-time], tree = that tip plus main plus the owed commits) legitimately differs from a plain merge; accept exactly that shape.
-    const parents = lines(await raw(["rev-list", "--parents", "-n", "1", m])).flatMap((l) => l.split(/\s+/)).slice(1);
+    // @decision 4b559feb — `--end-of-options` before `m`: a sha read back from the `rev-list --merges` call above.
+    const parents = lines(await raw(["rev-list", "--parents", "-n", "1", "--end-of-options", m])).flatMap((l) => l.split(/\s+/)).slice(1);
     let ownUnion = false;
     if (parents.length === 2 && depth < 8) {
       const inner = await computeOwedLanding(raw, base, parents[0]!, parents[1]!, timeoutMs, depth + 1);
@@ -9797,7 +9831,8 @@ export async function computeOwedLanding(
     }
     if (!ownUnion) return { ok: false, kind: "merge", commit: m, subject: await subjectOf(m), why };
   }
-  const owed = lines(await raw(["rev-list", "--reverse", "--topo-order", "--no-merges", `${base}..${tip}`, "--not", main]));
+  // @decision 4b559feb — `--end-of-options` right after `--not`, same placement/reason as the `merges` read above.
+  const owed = lines(await raw(["rev-list", "--reverse", "--topo-order", "--no-merges", `${base}..${tip}`, "--not", "--end-of-options", main]));
   // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
   const mainTree = (await raw(["rev-parse", "--verify", "--end-of-options", `${main}^{tree}`])).trim();
   let cur = main;
@@ -9838,7 +9873,9 @@ export async function diffOwedLanding(repoPath: string, tip: string, owedBase: s
     if (!landing.ok) return { failure: landing };
     // @decision fdf09672 — `-z` + parseNumstatZ, never a hand-rolled line/regex parse of plain `--numstat`
     // text (which C-quotes a non-ASCII path and collapses a rename into unusable "old => new" text).
-    const files = parseNumstatZ(await raw(["diff", "--numstat", "-z", landing.mainTree, landing.tree]));
+    // @decision 4b559feb — `--end-of-options` before the first tree-ish positional: both are computed
+    // tree ids, but a single marker protects both trailing positionals, same class as 868e0135.
+    const files = parseNumstatZ(await raw(["diff", "--numstat", "-z", "--end-of-options", landing.mainTree, landing.tree]));
     const insertions = files.reduce((s, f) => s + f.insertions, 0);
     const deletions = files.reduce((s, f) => s + f.deletions, 0);
     return { filesChanged: files.length, insertions, deletions, files, commits: landing.commits, commitSubjects: landing.commits.map((c) => c.subject) };
@@ -9856,7 +9893,9 @@ export async function verifyReviewedTipChain(
   // Replace refs are ignored on EVERY call by the shared `canonicalGit` factory (`core.useReplaceRefs=false`), not per call site.
   const raw = (args: string[], label: string) => withTimeout(git.raw(args), timeoutMs, label);
   // `rev-list -n1 A ^B` prints a commit iff A is NOT reachable from B (a real git error throws, unlike `merge-base --is-ancestor`'s exit 1).
-  const reachable = async (a: string, from: string) => (await raw(["rev-list", "-n1", a, `^${from}`], "git rev-list (reviewed-tip reachability)")).trim() === "";
+  // @decision 4b559feb — `--end-of-options` before `a`: `^${from}` is already a qualified, exempt
+  // template (literal "^" prefix); `a` is the one bare positional needing protection.
+  const reachable = async (a: string, from: string) => (await raw(["rev-list", "-n1", "--end-of-options", a, `^${from}`], "git rev-list (reviewed-tip reachability)")).trim() === "";
   const short = (x: string) => x.slice(0, 8);
   try {
     // @decision b8122303 — `live` may be a trailer-derived value (e.g. `Loom-Landed-Tip`) that is only
@@ -9869,7 +9908,8 @@ export async function verifyReviewedTipChain(
     for (let hops = 0; hops <= REVIEWED_TIP_WALK_MAX_HOPS; hops++) {
       if (cur === reviewed) return { ok: true, hops };
       if (await reachable(cur, mainRef) && await reachable(reviewed, cur)) return { ok: true, hops };
-      const parents = (await raw(["rev-list", "--parents", "-n1", cur], "git rev-list --parents (reviewed-tip walk)")).trim().split(/\s+/).slice(1);
+      // @decision 4b559feb — `--end-of-options` before `cur`: defense-in-depth, same class as 868e0135.
+      const parents = (await raw(["rev-list", "--parents", "-n1", "--end-of-options", cur], "git rev-list --parents (reviewed-tip walk)")).trim().split(/\s+/).slice(1);
       if (parents.length !== 2) return { ok: false, reason: `${short(cur)} is not a merge of main (${parents.length} parent(s)) — a commit made after the review` };
       const [prev, m] = parents as [string, string];
       if (!(await reachable(m, mainRef))) return { ok: false, reason: `${short(cur)} merges ${short(m)}, which is not on main` };

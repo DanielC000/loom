@@ -239,8 +239,11 @@ export async function detectUnanchoredAddedCommentBlocks(
     // @decision fdf09672 — both GLOBAL flags precede the subcommand, via `.raw([...])` never `.diff([...])`.
     // `-c core.quotepath=false` is REQUIRED here: `-z` has NO effect on a unified patch's `+++`/`---`
     // lines, which `parseAddedLineNumbers` below reads to key its added-lines map.
+    // @decision 4b559feb — `--end-of-options` right before `range`: `base` may be caller-supplied; an
+    // option-shaped value would otherwise be re-entered into diff's own option parser. MEASURED:
+    // byte-identical for a well-formed three-dot range, fail-loud for an option-shaped one.
     const patch = await withTimeout(
-      git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", range, "--", ...pathspecPaths]), timeoutMs, "git diff (unanchored-comment-blocks, scoped)",
+      git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", "--end-of-options", range, "--", ...pathspecPaths]), timeoutMs, "git diff (unanchored-comment-blocks, scoped)",
     );
     if (!patch) return { blocks: [], truncated: false, totalCount: 0, minLines };
 

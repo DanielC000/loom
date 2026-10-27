@@ -1,14 +1,22 @@
 import "./_guard.mjs";
-// Card 868e0135 — SOURCE-TEXT guard (no daemon, no build beyond tsc, no real git): no array LITERAL in
-// `packages/daemon/src/git/**` naming `merge-base`, `ls-tree`, `log`, or `rev-parse` as its subcommand (the
-// first plain-string element, optionally after a leading run of global options — see MATCHING RULE below)
-// may carry an UNPROTECTED bare (non-string-literal) ref/base positional, except a named, allowlisted site.
-// docs/decisions/868e0135-*.md has the full mechanism this guard backstops: `--end-of-options` (plus
-// `--verify` for `rev-parse`, abbda4f5's own shape) immediately before the positional closes the class of
-// bug where an option-shaped value (`--all`, `--independent`, …) is re-entered into the subcommand's own
-// option parser instead of being treated as a literal ref.
+// Cards 868e0135/4b559feb — SOURCE-TEXT guard (no daemon, no build beyond tsc, no real git): no array
+// LITERAL in `packages/daemon/src/git/**` naming `merge-base`, `ls-tree`, `log`, `rev-parse`, `rev-list`,
+// or `diff` as its subcommand (the first plain-string element, optionally after a leading run of global
+// options — see MATCHING RULE below) may carry an UNPROTECTED bare (non-string-literal) ref/base
+// positional, except a named, allowlisted site. docs/decisions/868e0135-*.md and docs/decisions/
+// 4b559feb-*.md have the full mechanism this guard backstops: `--end-of-options` (plus `--verify` for
+// `rev-parse`, abbda4f5's own shape) immediately before the positional closes the class of bug where an
+// option-shaped value (`--all`, `--independent`, …) is re-entered into the subcommand's own option parser
+// instead of being treated as a literal ref. **`rev-list`/`diff` carve-out (card 4b559feb, read the
+// decision record before trusting a shortened restatement):** a COMBINED two/three-dot range string
+// (`` `${a}..${b}` ``) can never literally equal a flag spelling (it never starts with `-` unless its OWN
+// head is itself option-shaped), so `--end-of-options` is MEASURED to change nothing about that shape's
+// real safety — it is still added to those call sites for guard-satisfaction/defense-in-depth consistency,
+// never because it closes a real gap there. The marker DOES close a real gap for a true SEPARATE bare
+// positional (not a combined range) and for the one bare ref `rev-list ... --not <ref>` protects — `--not`
+// must stay BEFORE the marker, which goes right after `--not`, never before the range.
 //
-// SCOPE: `packages/daemon/src/git/**/*.ts` text only (not the whole `src/`, per the card — these 4
+// SCOPE: `packages/daemon/src/git/**/*.ts` text only (not the whole `src/`, per the card — these
 // subcommands' bare-ref-positional hazard is a git/** concern). `"grep"` is DELIBERATELY NOT monitored —
 // MEASURED (868e0135's own investigation): `--end-of-options` is not honored by `git grep`'s revision
 // parser and ACTIVELY BREAKS the well-formed case (`git grep -I -l -E <pat> --end-of-options <ref> --
@@ -96,7 +104,7 @@ const GIT_SRC = path.join(here, "..", "src", "git");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-export const MONITORED_SUBCOMMANDS = ["merge-base", "ls-tree", "log", "rev-parse"];
+export const MONITORED_SUBCOMMANDS = ["merge-base", "ls-tree", "log", "rev-parse", "rev-list", "diff"];
 
 /** A risky, unprotected call appended to the END of a file's own text (in memory only) — a whole-file
  *  parse-and-scan smoke test: confirms this guard still finds a real hit at EOF in a real file, rather
@@ -404,6 +412,29 @@ export function scanText(text, fileName = "scan.ts") {
     "entirely rather than guessing — \"-c\" itself is then checked as the (non-monitored) subcommand, so " +
     "nothing is flagged",
     scanText(`git.raw(["-c", someVar, "merge-base", riskyVar]);`).length === 0);
+
+  // @decision 4b559feb — rev-list/diff joined MONITORED_SUBCOMMANDS; the same shapes above now apply to
+  // both, plus the rev-list `--not` placement rule (see this file's own header).
+  check("(C) 4b559feb: a bare-variable rev-list array with no --end-of-options is risky",
+    scanText(`git.raw(["rev-list", "--count", someVar]);`).some((h) => h.subcommand === "rev-list" && !h.protectedCall));
+  check("(C) 4b559feb: the SAME rev-list call with --end-of-options present is not flagged",
+    scanText(`git.raw(["rev-list", "--count", "--end-of-options", someVar]);`).length === 0);
+  check("(C) 4b559feb: a bare-variable diff array with no --end-of-options is risky",
+    scanText(`git.raw(["diff", "--name-only", someVar, otherVar]);`).some((h) => h.subcommand === "diff" && !h.protectedCall));
+  check("(C) 4b559feb: the SAME diff call with --end-of-options present is not flagged",
+    scanText(`git.raw(["diff", "--name-only", "--end-of-options", someVar, otherVar]);`).length === 0);
+  check("(C) 4b559feb: a combined range template with no literal prefix stays FLAGGED for rev-list too " +
+    "(the matcher doesn't know the range shape is independently safe — see this file's header)",
+    scanText("git.raw([\"rev-list\", \"--count\", `${a}..${b}`]);").some((h) => h.subcommand === "rev-list" && !h.protectedCall));
+  check("(C) 4b559feb: rev-list `--not <ref>` with the marker placed right AFTER `--not` is PROTECTED " +
+    "(this is the real, measured-correct placement — see computeOwedLanding's own call sites)",
+    scanText(`git.raw(["rev-list", "--merges", \`\${base}..\${tip}\`, "--not", "--end-of-options", main]);`).length === 0);
+  check("(C) 4b559feb: rev-list `--not <ref>` with NO marker at all is still flagged (the bare `main` " +
+    "positional after --not is the real risk)",
+    scanText(`git.raw(["rev-list", "--merges", \`\${base}..\${tip}\`, "--not", main]);`).some((h) => h.subcommand === "rev-list" && !h.protectedCall));
+  check("(C) 4b559feb NEGATIVE CONTROL: an unrelated subcommand sharing rev-list's own prefix " +
+    "(\"rev-list-foo\") is never flagged",
+    scanText(`git.raw(["rev-list-foo", someVar]);`).length === 0);
 }
 
 // ===================== (S) the real corpus ================================================================
@@ -443,6 +474,6 @@ export function scanText(text, fileName = "scan.ts") {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — no unlisted bare-ref-positional site reaches merge-base/ls-tree/log/rev-parse unprotected"
+  ? "\n✅ ALL PASS — no unlisted bare-ref-positional site reaches merge-base/ls-tree/log/rev-parse/rev-list/diff unprotected"
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

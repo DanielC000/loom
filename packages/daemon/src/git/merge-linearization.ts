@@ -18,8 +18,11 @@ export async function mergeCommitBlocksLinearization(
 ): Promise<string | undefined> {
   let parents: string[];
   try {
+    // @decision 4b559feb — `--end-of-options` before `mergeSha`: it is always a sha read back from a
+    // prior `rev-list --merges` call, but an option-shaped value would otherwise be re-entered into
+    // rev-list's own option parser.
     parents = (await withTimeout(
-      git.raw(["rev-list", "--parents", "-n", "1", mergeSha]), timeoutMs, "git rev-list --parents (batch land, merge parents)",
+      git.raw(["rev-list", "--parents", "-n", "1", "--end-of-options", mergeSha]), timeoutMs, "git rev-list --parents (batch land, merge parents)",
     )).trim().split(/\s+/).slice(1);
   } catch (e) {
     return `could not be inspected (${(e as Error).message})`;

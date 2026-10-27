@@ -53,7 +53,7 @@ const worktreesUrl = pathToFileURL(path.join(__dirname, "..", "dist", "git", "wo
 const linUrl = pathToFileURL(path.join(__dirname, "..", "dist", "git", "merge-linearization.js")).href;
 const {
   fullTreeEntries, deriveOwnNonTipCommitSubjects, findLaterBranchSquash,
-  computeEmitCompareGate, repoTreeReferencesInertPrefix,
+  computeEmitCompareGate, repoTreeReferencesInertPrefix, computeOwedLanding,
 } = await import(worktreesUrl);
 const { mergeCommitBlocksLinearization } = await import(linUrl);
 const { simpleGit } = await import("simple-git");
@@ -208,6 +208,98 @@ try {
     let compoundFailed = false;
     try { git(repo, `rev-parse --verify --end-of-options --all^^{tree}`); } catch { compoundFailed = true; }
     check("(0j) MECHANISM: an option-shaped compound value (\"--all^{tree}\") fails loud with --verify present", compoundFailed);
+
+    // @decision 4b559feb — (0k) is REV-LIST ONLY; a combined range is immune there. Corrected: that does
+    // NOT generalize to `diff` — (0k2) below is genuinely exploitable, marker IS load-bearing.
+    let rangeUnguardedFailed = false;
+    try { git(repo, `rev-list --count ${headWithSrc}..--all`); } catch { rangeUnguardedFailed = true; }
+    let rangeGuardedFailed = false;
+    try { git(repo, `rev-list --count --end-of-options ${headWithSrc}..--all`); } catch { rangeGuardedFailed = true; }
+    check("(0k) MECHANISM (rev-list only): a combined range `<sha>..--all` ALREADY fails loud with NO " +
+      "marker at all (git's ref-DWIM never resolves the embedded \"--all\" as the --all FLAG — only as a " +
+      "literal ref name, which doesn't exist in this repo)", rangeUnguardedFailed);
+    check("(0k) MECHANISM (rev-list only): the SAME call WITH the marker fails loud identically — the " +
+      "marker changes nothing for this shape, for rev-list specifically", rangeGuardedFailed);
+
+    // (0k2) For DIFF, the SAME combined-range shape IS genuinely exploitable on the LEFT side, via a
+    // value-taking option matched by PREFIX (`--output=`/`-O`/`--src-prefix=`/`--dst-prefix=`) rather than
+    // exact flag equality — it never needs the whole positional to resolve as a revision first. Found by
+    // Code Review (session 858caa53) after the (0k) finding above was wrongly generalized from rev-list to
+    // diff without separately re-measuring diff's own option surface.
+    const scratchDir = mkdtempManaged("loom-baf-diffout-");
+    const victimPath = path.join(scratchDir, "victim.txt");
+    const victimTarget = `${victimPath}..master`; // the FULL text after "--output=" becomes the filename
+    try {
+      if (fs.existsSync(victimTarget)) fs.unlinkSync(victimTarget);
+      execSync(`git diff --name-only "--output=${victimPath}..master"`, { cwd: repo }); // unguarded
+      check("(0k2) MECHANISM: unguarded `diff --name-only --output=<path>..master` SILENTLY WRITES a " +
+        "file literally named \"<path>..master\" to disk — a real, unprompted file-write side effect " +
+        "from a caller-influenced range value never intended as a filesystem path",
+        fs.existsSync(victimTarget));
+    } finally {
+      if (fs.existsSync(victimTarget)) fs.unlinkSync(victimTarget);
+    }
+    let diffOutputGuardedFailed = false;
+    try {
+      git(repo, `diff --name-only --end-of-options "--output=${victimPath}..master"`);
+    } catch { diffOutputGuardedFailed = true; }
+    check("(0k2) FIX: the SAME call WITH the marker fails loud instead, and writes NOTHING",
+      diffOutputGuardedFailed && !fs.existsSync(victimTarget));
+    fs.rmSync(scratchDir, { recursive: true, force: true });
+
+    // (0l) A TRUE SEPARATE bare positional (not a combined range) — the real, closed vulnerability class
+    // for rev-list: an unguarded option-shaped value IS silently reinterpreted as the real flag.
+    const unguardedParents = execSync(`git rev-list --parents -n1 --all`, { cwd: repo }).toString();
+    check("(0l) MECHANISM: `rev-list --parents -n1 --all` (unguarded, a bare SEPARATE positional) " +
+      "SILENTLY SUCCEEDS, treating \"--all\" as the real --all flag instead of a literal (invalid) ref " +
+      "name — exactly the dangerous misinterpretation this card closes",
+      unguardedParents.trim().length > 0);
+    let guardedParentsFailed = false;
+    try { git(repo, `rev-list --parents -n1 --end-of-options --all`); } catch { guardedParentsFailed = true; }
+    check("(0l) MECHANISM: guarded, the SAME call fails loud instead", guardedParentsFailed);
+    check("(0l) POSITIVE CONTROL: guarded `rev-list --parents -n1 --end-of-options <sha>` is byte-" +
+      "identical to the unguarded call for a well-formed sha",
+      git(repo, `rev-list --parents -n1 --end-of-options ${headWithSrc}`) === git(repo, `rev-list --parents -n1 ${headWithSrc}`));
+
+    // (0m) `rev-list ... <range> --not <ref>` — THE CARD'S OWN NAMED HARD CASE. `--not` must stay BEFORE
+    // the marker (it is a real flag, not a value) — the marker goes right after `--not`, protecting only
+    // the ref that follows it. Proves THREE things: the correct placement is byte-identical for a
+    // well-formed ref; the correct placement fails loud for an option-shaped ref; and the NAIVE
+    // placement (marker before the range, swallowing `--not` itself) silently corrupts a well-formed
+    // call's own result — not just "also insecure", genuinely WRONG even with no attacker involved.
+    execSync(`git checkout -q -b notmain`, { cwd: repo });
+    fs.writeFileSync(path.join(repo, "nm.txt"), "nm\n");
+    execSync(`git add -A && git ${GIT_ID} commit -q -m notmain-work`, { cwd: repo });
+    const notmainTip = git(repo, "rev-parse HEAD");
+    execSync(`git checkout -q master`, { cwd: repo });
+    const wellFormedUnnotted = git(repo, `rev-list --reverse --no-merges ${headWithSrc}..${notmainTip}`);
+    const wellFormedCorrect = git(repo, `rev-list --reverse --no-merges ${headWithSrc}..${notmainTip} --not --end-of-options ${headWithSrc}`);
+    check("(0m) POSITIVE CONTROL: the CORRECT placement (marker right after --not) is byte-identical to " +
+      "the unguarded call for a well-formed --not ref",
+      wellFormedCorrect === wellFormedUnnotted);
+    let notRefFailedCorrect = false;
+    try { git(repo, `rev-list --reverse --no-merges ${headWithSrc}..${notmainTip} --not --end-of-options --all`); } catch { notRefFailedCorrect = true; }
+    check("(0m) MECHANISM: the CORRECT placement fails loud for an option-shaped --not ref (\"--all\")", notRefFailedCorrect);
+    // THE ACTUAL PRE-FIX VULNERABILITY: no marker at all. An option-shaped --not ref ("--all") is
+    // silently reinterpreted as the real --all flag, which here wrongly excludes EVERY ref's own history
+    // (including notmainTip's own commit) instead of failing — a SILENT WRONG (empty) result, not an error.
+    const unprotectedNotAll = execSync(`git rev-list --reverse --no-merges ${headWithSrc}..${notmainTip} --not --all`, { cwd: repo }).toString();
+    check("(0m) MECHANISM (the real pre-fix bug): with NO marker at all, `--not --all` silently succeeds " +
+      "(exit 0) and wrongly returns EMPTY — \"--all\" excluded everything, including notmainTip's own " +
+      "commit, instead of being rejected as an invalid literal ref name",
+      unprotectedNotAll.trim() === "" && wellFormedUnnotted.trim() !== "");
+    // MEASURED (corrects an initial prediction): the naive placement does not silently misbehave — it
+    // outright FAILS, even for a perfectly well-formed, non-malicious call (`--not` is itself still
+    // recognized by git's revision walker once past the marker, which then refuses it as "an option
+    // after non-option arguments"). So the correct placement isn't just the secure one — it's the only
+    // one that makes the well-formed, ordinary case work at all.
+    let naivePlacementFailed = false;
+    try { git(repo, `rev-list --reverse --no-merges --end-of-options ${headWithSrc}..${notmainTip} --not ${headWithSrc}`); } catch { naivePlacementFailed = true; }
+    check("(0m) MECHANISM (the shape this card's own DoD warns against): the NAIVE placement (marker " +
+      "BEFORE the range, so `--not` is reached only AFTER non-option content) fails outright even for " +
+      "a well-formed, non-malicious call — proving the reorder is load-bearing for correctness, not " +
+      "merely for security",
+      naivePlacementFailed);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -380,13 +472,43 @@ try {
       "reports false — this repo's own real JS/TS corpus (packages/daemon/src/x.ts) never reads a " +
       "\"docs\" prefix", legit === false);
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SECTION 7 (card 4b559feb) — computeOwedLanding, the ONE real exported function whose own argv
+  // carries the `--not <main>` shape. Drives the real function directly (not just the pure-git mechanism
+  // in Section 0's 0k/0l/0m) against real git, both for a well-formed `main` and a malicious one.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const repo = newRepo("owed");
+    const base = git(repo, "rev-parse HEAD"); // owedBase: before the branch diverges
+    execSync(`git checkout -q -b heldbranch`, { cwd: repo });
+    fs.writeFileSync(path.join(repo, "h1.txt"), "h1\n");
+    execSync(`git add -A && git ${GIT_ID} commit -q -m "held work"`, { cwd: repo });
+    const tip = git(repo, "rev-parse HEAD"); // the HELD branch's own tip — ahead of main
+    execSync(`git checkout -q master`, { cwd: repo }); // main stays at `base`
+
+    const handle2 = simpleGit(repo);
+    const raw = (args) => handle2.raw(args);
+
+    const legitLanding = await computeOwedLanding(raw, base, tip, base, 15000);
+    check("(7) POSITIVE CONTROL: computeOwedLanding(base, tip, main=<the real main, well-formed>) " +
+      "correctly reports the one owed commit",
+      legitLanding.ok === true && legitLanding.commits.length === 1 && legitLanding.commits[0].sha === tip);
+
+    let maliciousRejected = false, maliciousMsg = "";
+    try { await computeOwedLanding(raw, base, tip, "--all", 15000); } catch (e) { maliciousRejected = true; maliciousMsg = e.message; }
+    check("(7) FIX: computeOwedLanding(base, tip, main=\"--all\") REJECTS (fails loud) instead of " +
+      "silently treating \"--all\" as the real flag and computing a wrong owed-commit set — the exact " +
+      "real-function proof of the 0m mechanism above",
+      maliciousRejected && /revision|option|argument/i.test(maliciousMsg));
+  }
 } finally {
   // mkdtempManaged's own exit hooks are the real backstop; this just lets a solo run print success/failure
   // without waiting for process exit to confirm cleanup actually happened.
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every merge-base/ls-tree/log site 868e0135 touches behaves correctly for both a " +
-    "well-formed and an option-shaped base/ref/branch."
+  ? "\n✅ ALL PASS — every merge-base/ls-tree/log/rev-list/diff site 868e0135/4b559feb touches behaves " +
+    "correctly for both a well-formed and an option-shaped base/ref/branch."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
