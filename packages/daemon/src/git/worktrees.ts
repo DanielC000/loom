@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
-import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError, unsafeBranchNameShapeReason } from "./writer.js";
+import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError, unsafeBranchNameShapeReason, writeCommitMessageFile, cleanupCommitMessageFile } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, canonicalFailureMessage, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot, type CheckCommondirTrustOpts } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
@@ -10922,88 +10922,109 @@ async function mergeBranchLocked(
     // both told apart from each other and from "verified" (the one case `landedBase` is defined).
     const classifyLandedVerify = (landedBase: string | undefined): "verified" | "rejected" | "uncaptured" =>
       (preCommitHead === undefined || stagedTree === undefined) ? "uncaptured" : (landedBase !== undefined ? "verified" : "rejected");
-    // @decision 24c0bdba — kill-confirmed: a "failure" here can still mean the commit landed anyway (a
-    // post-commit hook outliving the timeout) — re-verify via HEAD and report truthfully, never assume.
+    // @decision 8336b903 — reuse writeCommitMessageFile/cleanupCommitMessageFile (git/writer.ts) for the
+    // squash subject too; never a second -F-via-tempfile helper, and never a fallback to -m on write failure.
+    let messageFile: { dir: string; file: string };
     try {
-      await killableCanonicalRaw(repoPath, ["commit", "-m", message], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled);
+      messageFile = await writeCommitMessageFile(message, "loom-squash-commit-");
     } catch (e) {
-      // @decision bde5d1fe — already quarantined at the re-check; refuse directly, never re-raise. Name
-      // the real staged residue the squash already left behind (Code Review of b4315b52, item 4) so a
-      // human knows a `git reset --hard` is needed once cleared, or the NEXT merge refuses at entry too.
-      // @decision 8d8fa497 — set `quarantined:true` on this and the following branch too.
-      if (e instanceof RepoQuarantinedError) {
-        return {
-          ok: false,
-          reason: `squash commit refused — canonical repo is quarantined: ${e.message} — canonical now ` +
-            `holds ${branch}'s STAGED squash residue (the squash itself already landed in the index before ` +
-            `this refusal); once the quarantine clears, run \`git reset --hard\` in the canonical repo FIRST, ` +
-            `or every later solo merge attempt will itself refuse at the staged-dirty-tree entry check`,
-          quarantined: true,
-        };
-      }
-      // Code Review (card 24c0bdba, finding B1 residual): the tree-kill's OWN confirmation can itself come
-      // back unconfirmed (a descendant not reaped within grace) — fail CLOSED + QUARANTINE, never touch
-      // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.
-      if (treeDeathUnconfirmed(e)) {
-        raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("squash commit could not be confirmed dead after a kill"), opId);
-        return {
-          ok: false,
-          reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message} — the commit may have already landed despite this failure (the real git child's own commit may have completed before or after the kill could be confirmed); canonical repo may need manual inspection, but once a human clears the quarantine, simply retrying this merge will detect any already-landed content as ALREADY_MERGED and finalize without creating a duplicate commit`,
-          quarantined: true,
-        };
-      }
-      // m1 (Code Review): a bare "HEAD moved" is not enough to trust as OUR commit — verify it is
-      // EXACTLY the commit this attempt would have made before claiming ok:true; otherwise report the
-      // ambiguity by name rather than silently discarding or silently trusting an unverified movement.
-      // @decision 2a6a292a round 21 (card aa7677fa round 3) — parent+tree AND (card f224632d) the
-      // trailer namespace, both via `verifyLandedAsOwnCommit` — never a bare re-read trailer, forgeable
-      // by anyone with `.git` write access.
-      if (preCommitHead !== undefined) {
-        let headAfterFailure: string | undefined;
-        let landedBase: string | undefined;
-        let trailerAdvisory: "displaced" | "unreadable" | undefined;
-        try {
-          headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit-failure verify)")).trim();
-          if (headAfterFailure !== preCommitHead) ({ landedBase, trailerAdvisory } = await verifyLandedAsOwnCommit(headAfterFailure));
-        } catch { /* unknown — fall through to the ordinary failure/cleanup path below */ }
-        if (headAfterFailure !== undefined && headAfterFailure !== preCommitHead) {
-          if (landedBase !== undefined) {
-            // HEAD moved despite the reported failure — the commit landed (and its real git child is now
-            // CONFIRMED dead, so nothing can land AFTER this point), verified as OUR commit specifically.
-            // Recover it truthfully rather than reporting a false failure.
-            const verified = await verifyLandedOnMainline(headAfterFailure);
-            if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
-            return { ok: true, sha: headAfterFailure, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
-          }
+      const cleanup = await resetOrSkip("commit-message-write-failure cleanup");
+      return {
+        ok: false,
+        reason: `failed to write the squash commit message to a temp file: ${(e as Error).message}` +
+          (cleanup ? ` (${cleanup.message})` : "; canonical repo restored to its pre-merge state."),
+        ...(cleanup?.quarantined ? { quarantined: true } : {}),
+        ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
+      };
+    }
+    // Everything from here on is wrapped so the temp file is cleaned up on EVERY exit — success, a caught
+    // commit failure, or an uncaught killableCanonicalRaw timeout/kill — never just the happy path.
+    try {
+      // @decision 24c0bdba — kill-confirmed: a "failure" here can still mean the commit landed anyway (a
+      // post-commit hook outliving the timeout) — re-verify via HEAD and report truthfully, never assume.
+      try {
+        await killableCanonicalRaw(repoPath, ["commit", "-F", messageFile.file], timeoutMs, "git commit (canonical, squash-merge)", deps.gitFactory, { ...nonInteractiveEnv(), ...identityEnv }, onTreeDeathSettled);
+      } catch (e) {
+        // @decision bde5d1fe — already quarantined at the re-check; refuse directly, never re-raise. Name
+        // the real staged residue the squash already left behind (Code Review of b4315b52, item 4) so a
+        // human knows a `git reset --hard` is needed once cleared, or the NEXT merge refuses at entry too.
+        // @decision 8d8fa497 — set `quarantined:true` on this and the following branch too.
+        if (e instanceof RepoQuarantinedError) {
           return {
             ok: false,
-            reason: `squash commit failed (${(e as Error).message}), but HEAD moved to ${headAfterFailure} afterwards in a way this merge cannot verify as its own (expected parent ${preCommitHead}, tree ${stagedTree ?? "(not captured)"}) — canonical repo needs manual inspection`,
+            reason: `squash commit refused — canonical repo is quarantined: ${e.message} — canonical now ` +
+              `holds ${branch}'s STAGED squash residue (the squash itself already landed in the index before ` +
+              `this refusal); once the quarantine clears, run \`git reset --hard\` in the canonical repo FIRST, ` +
+              `or every later solo merge attempt will itself refuse at the staged-dirty-tree entry check`,
+            quarantined: true,
           };
         }
+        // Code Review (card 24c0bdba, finding B1 residual): the tree-kill's OWN confirmation can itself come
+        // back unconfirmed (a descendant not reaped within grace) — fail CLOSED + QUARANTINE, never touch
+        // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.
+        if (treeDeathUnconfirmed(e)) {
+          raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("squash commit could not be confirmed dead after a kill"), opId);
+          return {
+            ok: false,
+            reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message} — the commit may have already landed despite this failure (the real git child's own commit may have completed before or after the kill could be confirmed); canonical repo may need manual inspection, but once a human clears the quarantine, simply retrying this merge will detect any already-landed content as ALREADY_MERGED and finalize without creating a duplicate commit`,
+            quarantined: true,
+          };
+        }
+        // m1 (Code Review): a bare "HEAD moved" is not enough to trust as OUR commit — verify it is
+        // EXACTLY the commit this attempt would have made before claiming ok:true; otherwise report the
+        // ambiguity by name rather than silently discarding or silently trusting an unverified movement.
+        // @decision 2a6a292a round 21 (card aa7677fa round 3) — parent+tree AND (card f224632d) the
+        // trailer namespace, both via `verifyLandedAsOwnCommit` — never a bare re-read trailer, forgeable
+        // by anyone with `.git` write access.
+        if (preCommitHead !== undefined) {
+          let headAfterFailure: string | undefined;
+          let landedBase: string | undefined;
+          let trailerAdvisory: "displaced" | "unreadable" | undefined;
+          try {
+            headAfterFailure = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit-failure verify)")).trim();
+            if (headAfterFailure !== preCommitHead) ({ landedBase, trailerAdvisory } = await verifyLandedAsOwnCommit(headAfterFailure));
+          } catch { /* unknown — fall through to the ordinary failure/cleanup path below */ }
+          if (headAfterFailure !== undefined && headAfterFailure !== preCommitHead) {
+            if (landedBase !== undefined) {
+              // HEAD moved despite the reported failure — the commit landed (and its real git child is now
+              // CONFIRMED dead, so nothing can land AFTER this point), verified as OUR commit specifically.
+              // Recover it truthfully rather than reporting a false failure.
+              const verified = await verifyLandedOnMainline(headAfterFailure);
+              if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
+              return { ok: true, sha: headAfterFailure, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
+            }
+            return {
+              ok: false,
+              reason: `squash commit failed (${(e as Error).message}), but HEAD moved to ${headAfterFailure} afterwards in a way this merge cannot verify as its own (expected parent ${preCommitHead}, tree ${stagedTree ?? "(not captured)"}) — canonical repo needs manual inspection`,
+            };
+          }
+        }
+        const cleanup = await resetOrSkip("commit-failure cleanup");
+        return { ok: false, reason: cleanup ? `squash commit failed: ${(e as Error).message} (${cleanup.message})` : `squash commit failed: ${(e as Error).message}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
       }
-      const cleanup = await resetOrSkip("commit-failure cleanup");
-      return { ok: false, reason: cleanup ? `squash commit failed: ${(e as Error).message} (${cleanup.message})` : `squash commit failed: ${(e as Error).message}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
-    }
-    // Re-read HEAD after a successful commit. NOT "unconditionally reached from both branches": a failure
-    // now returns straight out of the catch above, having already re-verified truthfully via its own HEAD
-    // re-read (the commit call is kill-confirmed, so the git child is confirmed dead before either branch
-    // is taken — `withTimeout`'s old settle-independent-of-the-child risk no longer applies here).
-    //
-    // This read is a plain confirm-what-landed step, guarding against THIS read itself failing, mirroring
-    // {@link landBranchCommitsIndividually}'s own post-loop read (`git/batch-merge.ts`): read once, and
-    // fail LOUD (`ok:false`) if that read itself fails, rather than returning a value that might no longer
-    // be what HEAD actually points at.
-    try {
-      const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
-      const verified = await verifyLandedOnMainline(sha);
-      if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
-      // @decision 2a6a292a round 21 (card aa7677fa round 3) — a racer can move HEAD between `git commit`
-      // settling and this read; verify `sha` is OUR commit before a caller treats it as a ledger/trust
-      // fact — undefined here means "unverified", never a refusal.
-      const { landedBase, trailerAdvisory } = await verifyLandedAsOwnCommit(sha);
-      return { ok: true, sha, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
-    } catch (e) {
-      return { ok: false, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
+      // Re-read HEAD after a successful commit. NOT "unconditionally reached from both branches": a failure
+      // now returns straight out of the catch above, having already re-verified truthfully via its own HEAD
+      // re-read (the commit call is kill-confirmed, so the git child is confirmed dead before either branch
+      // is taken — `withTimeout`'s old settle-independent-of-the-child risk no longer applies here).
+      //
+      // This read is a plain confirm-what-landed step, guarding against THIS read itself failing, mirroring
+      // {@link landBranchCommitsIndividually}'s own post-loop read (`git/batch-merge.ts`): read once, and
+      // fail LOUD (`ok:false`) if that read itself fails, rather than returning a value that might no longer
+      // be what HEAD actually points at.
+      try {
+        const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
+        const verified = await verifyLandedOnMainline(sha);
+        if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
+        // @decision 2a6a292a round 21 (card aa7677fa round 3) — a racer can move HEAD between `git commit`
+        // settling and this read; verify `sha` is OUR commit before a caller treats it as a ledger/trust
+        // fact — undefined here means "unverified", never a refusal.
+        const { landedBase, trailerAdvisory } = await verifyLandedAsOwnCommit(sha);
+        return { ok: true, sha, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
+      } catch (e) {
+        return { ok: false, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
+      }
+    } finally {
+      cleanupCommitMessageFile(messageFile.dir);
     }
 
   } finally {
