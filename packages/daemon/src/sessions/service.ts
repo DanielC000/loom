@@ -22209,7 +22209,9 @@ export class SessionService {
     for (let i = 0; i < this.finalizeWorkerDeathPolls && this.pty.isAlive(args.workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    const finalizeResult = await this.finalizeMerge(args);
+    // @decision e34d475c (round 6, card 1f395ce9) — this is the ONE call site that sets
+    // `suppressMergeDoneOnReplay`; see that record's round-6 section.
+    const finalizeResult = await this.finalizeMerge({ ...args, suppressMergeDoneOnReplay: true });
     const retainedText = args.retainedNote?.();
     // @decision f2b4d684 (round 4) — read AFTER finalize, same timing as `retainedText` above: only
     // meaningful once a retain actually fired (the tip guard's closure sets it there, never earlier).
@@ -27181,6 +27183,12 @@ export class SessionService {
      * append commits, with the seq it was just assigned. Every other caller omits it — unchanged.
      */
     onMergeDoneAppended?: (branch: string, repoKey: string | null, seq: number) => void;
+    /**
+     * @decision e34d475c (round 6, card 1f395ce9) — set ONLY by `finishAlreadyMerged`'s own call; see
+     * that record's round-6 section for the reader audit and why this can only suppress a true replay's
+     * duplicate `merge_done`, never a worker's first-ever finalize through this method.
+     */
+    suppressMergeDoneOnReplay?: boolean;
   }): Promise<{
     nestedRepoBlock?: { paths: string[]; truncated: boolean };
     /** Card 6796c9ea: the worktree was kept because it holds uncommitted work / its status was unreadable. */
@@ -27266,7 +27274,8 @@ export class SessionService {
         // inference; a merge_request-only worker moved to terminal by hand then also skips a
         // legitimately-due reingest. Narrow, pre-existing, low-consequence — not fixed here.
         //
-        hadPriorMergeDone = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
+        const workerEvents = this.db.listEventsForWorker(args.workerSessionId);
+        hadPriorMergeDone = workerEvents.some((e) => e.kind === "merge_done");
         const alreadyFinalized = args.taskId != null && hadPriorMergeDone;
         if (args.taskId && !alreadyFinalized) {
           const task = this.db.getTask(args.taskId);
@@ -27293,15 +27302,31 @@ export class SessionService {
             this.db.updateTask(args.taskId, { ...(landingKey ? { columnKey: landingKey } : {}), ...shipPatch });
           }
         }
-        // @decision e34d475c — this merge_done append stays UNCONDITIONAL on every finalize call, replay
-        // or not; do not guard it without first re-deriving AND auditing every READER of this event kind,
-        // not just the writer count — an unaudited counting reader would silently break.
-        const mergeDoneSeq = this.db.appendEvent({
-          id: randomUUID(), ts: new Date().toISOString(),
-          managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-          taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}), ...(args.cutBaseUnknown ? { cutBaseUnknown: true } : {}) },
+        // @decision e34d475c (round 7, card 1f395ce9) — unconditional for every caller except
+        // finishAlreadyMerged's own replay route (scoped to this exact task+branch AND, when both sides
+        // carry one, the landed sha) — see that record's round-7 section.
+        const replayMergeDoneForThisBranch = !!args.suppressMergeDoneOnReplay && workerEvents.some((e) => {
+          if (e.kind !== "merge_done" || e.taskId !== args.taskId) return false;
+          if (!(e.detail?.branch == null || e.detail.branch === args.branch)) return false;
+          const priorSha = e.detail?.mergedSha;
+          // A DISTINCT landing on the SAME worker+task+branch (two separate squashes, e.g. a dirty-
+          // retained finalize followed by the worker committing more and landing again) must NOT be
+          // treated as a replay of the FIRST one just because task+branch match — compare the landed sha
+          // too, whenever both sides carry one. Falls back to the task+branch-only match (today's
+          // pre-round-7 behaviour) only when either side lacks a sha (a legacy row, or a defensive
+          // caller that omitted mergedSha) — the same "fail toward today's behaviour, never toward a
+          // newly-invented one" posture round 3's own legacy-branch fallback already set.
+          if (priorSha != null && args.mergedSha != null) return priorSha === args.mergedSha;
+          return true;
         });
-        args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
+        if (!replayMergeDoneForThisBranch) {
+          const mergeDoneSeq = this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(),
+            managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
+            taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.mergedSha ? { mergedSha: args.mergedSha } : {}), ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}), ...(args.cutBaseUnknown ? { cutBaseUnknown: true } : {}) },
+          });
+          args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
+        }
         // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
         // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped
         // keying is safe here). Best-effort, right after the merge_done append above so this fires on every

@@ -194,6 +194,91 @@ from `reconcileOrchestrationOnBoot`'s existing `gitDeps` param (card `6ee48e4d`)
 `gitFactory` spy that `deleteBranch`'s own `git branch -D` is never attempted across any of the 3 boots —
 RED-proofed against pre-round-5 code (the spy records the call every boot).
 
+## Round 6 (card `1f395ce9`) — the ALREADY_MERGED re-finalize route stops filing a duplicate `merge_done`
+
+Round 4's own Do-not (below) required a reader audit before this append could ever be guarded. Card
+`1f395ce9` (triage note 2026-10-27T08:34Z, "gen 449 RULING") did that audit and reproduced the duplicate on
+main (`28f53284`): three reachable routes re-invoke `finishAlreadyMerged` for a worker+task+branch already
+finalized once — a `forceRemoveWorktree:true` re-confirm, a direct `confirmWorkerMerge` call (bypassing
+`confirmWorkerMergeTracked`'s pendingOps cache entirely), and a plain re-confirm after that process-local
+cache is gone (e.g. a daemon restart — the realistic production route). Each filed a SECOND `merge_done`.
+
+**The audit (re-derived fresh, current `src`):** every reader is presence/`.some()`-based or latest-wins
+(`db.ts`'s `buildLatestEventSeqMap`/`buildWorkerEventPresenceMap`, `mcp/orchestration.ts`,
+`idle-watcher.ts`, `companion/attention-push.ts`) — none counts. The interval counter, `gate_history`, and
+the dist-importer advisory are UNREACHABLE on this path at all (`recordMergeGateOutcome` gates on
+`!merge.noop`, and an ALREADY_MERGED finish is always `merge.noop === true`). The board's merged state and
+the `[loom:already-merged]` nudge were already deduped (`alreadyFinalizedBefore`, `!alreadyFinalized`
+gating the column move). The two REAL effects: `orchestration/alert-webhook.ts` hooks `Db.appendEvent`
+unconditionally, so a project subscribed to `merge_done` got a duplicate external POST per duplicate
+event; and a cosmetic duplicate row in the web `auditReplay` timeline.
+
+**Fix:** guard at the chokepoint, not a blanket `finalizeMerge` change. `finalizeMerge` gained
+`suppressMergeDoneOnReplay`, set ONLY at `finishAlreadyMerged`'s own single call into it — never by the
+Green path's own direct `finalizeMerge` call, never reached by boot-reconcile (round 2 above already
+routes it through the cleanup-only tail, bypassing `finalizeMerge` entirely for an already-finalized row).
+Inside the `betweenRemovalAndDelete` callback, a SECOND, narrower predicate runs over the SAME
+`listEventsForWorker` array already read for `hadPriorMergeDone` (no new query): a `merge_done` matching
+`taskId === args.taskId && (detail.branch == null || detail.branch === args.branch)` — the identical
+task+branch scoping (with round 3's legacy null-branch fallback) this record's own round 2 established for
+`alreadyFinalized`, never bare worker-id presence. Only the `appendEvent` call (and its moot
+`onMergeDoneAppended` invocation — only Pass A passes that callback, and Pass A never reaches this route)
+is skipped; `purgeQueuedWorkerReportNudgesOnMerge` and the pre-existing `hadPriorMergeDone`/`alreadyFinalized`
+gate (column-move, ship-state, codescape-reingest skip) are untouched.
+
+**The one direction this guard can err, and why it's the safe one:** the predicate can only ever SUPPRESS
+an append for a `merge_done` that genuinely already exists for this exact (workerSessionId, taskId,
+branch) — it can never suppress a worker's FIRST-EVER finalize reaching `finishAlreadyMerged`, because a
+first finalize has no prior `merge_done` to match in the first place. Proven for the batch route with a
+REAL `mergeBatchTracked` landing (every batch candidate's own `finishAlreadyMerged` call is, by
+construction, a first finalize — `alreadyFinalized` is `false` every time, per
+`merge-batch-completion-notice.mjs`'s own root-cause doc). The crash-recovery route (`confirmWorkerMerge`'s
+own catch path, ~service.ts:25277, reached when `findLandedSquashCommit` proves the content already
+landed after a throw) is structurally identical — nothing upstream of that throw could have recorded a
+`merge_done` for this worker — and is covered by the SAME chokepoint-level proof rather than a second
+dedicated fixture, since the guard's decision depends only on event history, never on which of the 4 outer
+call sites reached it.
+
+Tests: `packages/daemon/test/merge-done-replay-dedup.mjs` (RED-proofed against pre-round-6 code: all three
+replay routes duplicated `merge_done` and the alert-webhook POST; a batch-shaped replay also duplicated).
+
+## Round 7 (Code Review on `89b942f4`) — round 6's predicate was LANDING-BLIND; two of its own claims corrected
+
+Round 6's predicate matched on `(taskId, branch)` alone — it could not tell "a replay of THIS landing"
+apart from "a genuinely DISTINCT second landing on the same worker+task+branch." Reproduced (fixture F3):
+landing 1 finalizes with the worktree retained DIRTY (an untracked file) — the branch survives, `merge_done`
+#1 is filed. The worker commits the leftover and lands AGAIN (landing 2, a real, different squash sha) —
+but landing 2's OWN finalize never ran (the same crash-recovery shape production hits at ~service.ts:25277).
+A later plain re-confirm takes the ALREADY_MERGED route, and round 6's guard wrongly matched landing 2
+against landing 1's own `merge_done` (same task, same branch) and suppressed landing 2's — the branch's
+SECOND real landing silently never reached the event log, the webhook, or the audit trail.
+
+**Fix:** every `merge_done` now ALSO stamps `detail.mergedSha` (`args.mergedSha`, unconditionally whenever
+the caller has one — every caller already does, via `merge.sha`/`lb.sha`/`landedSha`). The suppression
+predicate now requires `priorMergeDone.detail.mergedSha === args.mergedSha` whenever BOTH sides carry a
+sha; the `(taskId, branch)` match alone is now only the fallback for a legacy row (or a defensive caller)
+with no sha on one side — same "fail toward today's behaviour" posture round 3's own legacy-branch
+fallback already established. Verified the fix's own precondition holds: the ALREADY_MERGED route's sha
+lookup (`findLandedSquashCommit`/the squash's own trailer) resolves the SAME sha across repeat calls for
+one real landing — a replay of landing 2 re-resolves `args.mergedSha` to landing 2's own sha every time, so
+the sha-match predicate fires correctly on a genuine replay and not otherwise.
+
+**Two round-6 claims corrected, not silently — this record keeps them visible rather than erasing them:**
+1. *"The predicate can only ever SUPPRESS an append for a `merge_done` that genuinely already exists for
+   this exact (workerSessionId, taskId, branch)"* — FALSE as stated: task+branch match alone does not
+   prove "genuinely already exists" for THIS landing, only for SOME prior landing on that branch; fixture
+   F3 is the counterexample. True only with round 7's sha-match condition attached.
+2. *"The crash-recovery route ... is structurally identical [to a first finalize] — nothing upstream of
+   that throw could have recorded a `merge_done` for this worker"* — FALSE as a blanket claim: the
+   crash-recovery route can ALSO be reached for a worker's SECOND (or later) distinct landing, exactly
+   fixture F3's shape (something WAS already recorded — landing 1's own `merge_done` — yet landing 2 must
+   still get its own). The route is first-finalize-CAPABLE, not first-finalize-EXCLUSIVE; what actually
+   makes the guard safe for it is round 7's sha match, never an assumption about what came before.
+
+Tests: `packages/daemon/test/merge-done-replay-dedup.mjs`'s Section 4 (fixture F3, RED-proofed against
+round-6-only code: a distinct second landing was wrongly suppressed, and its sha never appeared on either
+of the two `merge_done` events since there weren't two).
+
 ## Do not
 
 - Do not match `alreadyFinalized` on `task AND branch` unconditionally — a legacy `merge_done` row with
@@ -222,10 +307,18 @@ RED-proofed against pre-round-5 code (the spy records the call every boot).
   outcome; a second, ungated copy is exactly how this card's own Major regressed.
 - Do not wrap `finalizeWorktreeAndBranch`'s `betweenRemovalAndDelete` callback in a try/catch — a throw
   inside it must propagate and skip the delete, not be swallowed.
-- Do not add a replay guard around `finalizeMerge`'s `merge_done` append without first re-deriving AND
-  auditing the READER population above (not just the writer count) — an unaudited reader that counts
-  rather than checks presence of this event would silently break the moment the append stopped firing
-  unconditionally.
+- Do not add a FURTHER replay guard around `finalizeMerge`'s `merge_done` append (e.g. widening round 6/7's
+  guard to the Green path or boot-reconcile) without first re-deriving AND auditing the READER population
+  above (not just the writer count) — an unaudited reader that counts rather than checks presence of this
+  event would silently break the moment the append stopped firing unconditionally. Round 6 did this audit
+  and guards ONLY the `finishAlreadyMerged` replay route — that route's own guard is done; a NEW scope
+  needs its own fresh audit.
+- Do not match the `finishAlreadyMerged` replay-suppression predicate on `(taskId, branch)` alone (round
+  6's own original shape) — a genuinely DISTINCT second landing on the same worker+task+branch (e.g. a
+  dirty-retained landing 1, then the worker commits more and lands again) must get its OWN `merge_done`,
+  and task+branch match alone cannot tell that case apart from a true replay (round 7, fixture F3). Compare
+  `detail.mergedSha` too whenever both the prior event and this call carry one; fall back to the bare
+  task+branch match only when either side lacks a sha.
 - Do not assume `deleteBranch` being idempotent (swallowing an already-gone ref) is enough to call it
   unconditionally from the cleanup-only path (round 5) — idempotent still means a real `git branch -D`
   subprocess runs on every boot forever; the cleanup-only caller must pass `skipDeleteWhenBranchGone` and
