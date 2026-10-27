@@ -1831,9 +1831,10 @@ const MERGE_RECONCILE_WEDGED_KEY = "merge_reconcile_wedged";
  * kept as its OWN key rather than folded into that one: this tracks a DIFFERENT, non-repoKey condition
  * (a stale-generation worker's own merge_request could not be unambiguously attributed to a landed
  * commit by its recorded reviewed tip, after a re-task reused its worktree path) and a future reader
- * must not assume every entry here is a repoKey problem. Unlike the repoKey wedge, this condition does
- * not heal by retrying (the git history it reads from does not change), so the caller escalates on
- * FIRST detection, not after a grace period — this tracker exists purely to make that one-shot.
+ * must not assume every entry here is a repoKey problem.
+ *
+ * @decision 05915fc7 — "escalates on FIRST detection, no grace period" (this doc's original claim) was
+ * FALSE: attribution recomputes every boot; only the nudge was one-shot. See this card's own record.
  */
 const STALE_GENERATION_UNRESOLVED_KEY = "stale_generation_merge_unresolved";
 
@@ -1879,9 +1880,11 @@ export interface MergeReconcileWedgeEntry {
 /**
  * One stale-generation worker (card 21b53e6a) whose own `merge_request` could not be unambiguously
  * attributed to a landed commit by its recorded reviewed tip, after a re-task reused its worktree
- * path. Keyed on `sessionId`. Unlike {@link MergeReconcileWedgeEntry}, there is no attempts/age
- * threshold — the caller escalates on first detection (see {@link STALE_GENERATION_UNRESOLVED_KEY}'s
- * own doc for why), so `escalated` is the only thing this entry's reader needs to check.
+ * path. Keyed on `sessionId`. `kind` reflects the MOST RECENT boot's own classification, not a history.
+ *
+ * @decision 05915fc7 — round 2: "no attempts/age threshold, escalate on first detection" (this
+ * interface's old doc) now holds ONLY for `kind:"definitive"`. `kind:"transient"` has its own bounded
+ * give-up (see `resolveStaleGenerationOwnLanding`'s own decision record for the full kind-flip semantics).
  */
 export interface StaleGenerationUnresolvedEntry {
   sessionId: string;
@@ -1889,6 +1892,8 @@ export interface StaleGenerationUnresolvedEntry {
   taskId: string | null;
   projectId: string;
   reason: string;
+  /** @decision 05915fc7 — the CURRENT boot's own classification; see this interface's own doc above. */
+  kind: "definitive" | "transient";
   firstDetectedAt: string;
   lastAttemptAt: string;
   attempts: number;
@@ -5154,19 +5159,26 @@ export class Db {
   // --- stale-generation own-landing-unresolved tracking (card 21b53e6a; app_meta JSON array, mirrors
   // the merge-reconcile-wedge block above in SHAPE only — see STALE_GENERATION_UNRESOLVED_KEY's own doc
   // for why this is a separate key rather than folded into that one) ---
-  /** Every currently-tracked stale-generation-unresolved session. Corrupt/missing blob → empty (never throws). */
+  /**
+   * Every currently-tracked stale-generation-unresolved session. Corrupt/missing blob → empty (never throws).
+   * @decision 05915fc7 — round 3 (B1): an absent `kind` (a pre-card legacy row) is legacy "definitive",
+   * never a reason to drop the row — see this card's own decision record for the upgrade-boot incident.
+   */
   listStaleGenerationUnresolved(): StaleGenerationUnresolvedEntry[] {
     const raw = this.getMeta(STALE_GENERATION_UNRESOLVED_KEY);
     if (!raw) return [];
     try {
       const v: unknown = JSON.parse(raw);
       if (Array.isArray(v)) {
-        return v.filter(
-          (e): e is StaleGenerationUnresolvedEntry =>
-            !!e && typeof e.sessionId === "string" && typeof e.projectId === "string" &&
-            typeof e.firstDetectedAt === "string" && typeof e.lastAttemptAt === "string" &&
-            typeof e.attempts === "number" && typeof e.reason === "string" && typeof e.escalated === "boolean",
-        );
+        return v
+          .filter(
+            (e): e is Omit<StaleGenerationUnresolvedEntry, "kind"> & { kind?: "definitive" | "transient" } =>
+              !!e && typeof e.sessionId === "string" && typeof e.projectId === "string" &&
+              typeof e.firstDetectedAt === "string" && typeof e.lastAttemptAt === "string" &&
+              typeof e.attempts === "number" && typeof e.reason === "string" && typeof e.escalated === "boolean" &&
+              (e.kind === undefined || e.kind === "definitive" || e.kind === "transient"),
+          )
+          .map((e): StaleGenerationUnresolvedEntry => ({ ...e, kind: e.kind ?? "definitive" }));
       }
     } catch { /* corrupt blob ⇒ empty (like listMergeReconcileWedges) */ }
     return [];
@@ -5175,21 +5187,24 @@ export class Db {
    * Record ONE more boot's sighting of `sessionId`'s own unresolved merge_request — upsert: a first
    * sighting creates the entry (`attempts:1`, `escalated:false`); a repeat bumps `attempts`/
    * `lastAttemptAt` while keeping the original `firstDetectedAt`. Pure bookkeeping — this method never
-   * decides escalation; unlike {@link recordMergeReconcileWedgeAttempt}'s caller, the caller here
-   * escalates on `!entry.escalated` alone, with no attempts/age grace period (see this key's own doc).
+   * decides escalation; the caller's own policy differs by `kind` (see {@link StaleGenerationUnresolvedEntry}'s
+   * own doc) — `"definitive"` escalates on `!entry.escalated` alone, `"transient"` has its own bounded
+   * give-up on top. `kind` is stamped fresh on EVERY call (the caller's current boot classification),
+   * never merged with a prior value.
    * Round 2 (card 21b53e6a): there is no more git-based attribution attempt to fail here — a stale
    * generation with its own `merge_request` always escalates, so `reason` now explains WHY no DB-only
    * resolution is attempted at all, never a specific lookup failure.
    */
   recordStaleGenerationUnresolved(
     sessionId: string, ctx: { branch: string | null; taskId: string | null; projectId: string }, reason: string,
+    kind: "definitive" | "transient",
   ): StaleGenerationUnresolvedEntry {
     const now = new Date().toISOString();
     const list = this.listStaleGenerationUnresolved();
     const existing = list.find((e) => e.sessionId === sessionId);
     const updated: StaleGenerationUnresolvedEntry = existing
-      ? { ...existing, ...ctx, lastAttemptAt: now, attempts: existing.attempts + 1, reason }
-      : { sessionId, ...ctx, firstDetectedAt: now, lastAttemptAt: now, attempts: 1, reason, escalated: false };
+      ? { ...existing, ...ctx, lastAttemptAt: now, attempts: existing.attempts + 1, reason, kind }
+      : { sessionId, ...ctx, firstDetectedAt: now, lastAttemptAt: now, attempts: 1, reason, kind, escalated: false };
     this.setMeta(STALE_GENERATION_UNRESOLVED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), updated]));
     return updated;
   }

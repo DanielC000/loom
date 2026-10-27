@@ -8322,15 +8322,13 @@ export function parseNameStatusZ(out: string): { paths: string[] } | { truncated
   let bytes = 0;
   let i = 0;
   while (i < tokens.length) {
-    const status = tokens[i];
+    const status = tokens[i]!; // i < tokens.length, and tokens is pre-filtered to non-empty strings (noUncheckedIndexedAccess)
     i++;
-    if (!status) return { truncated: true };
     // R/C (rename/copy) rows carry TWO paths (old, new); every other status carries exactly one.
     const need = status[0] === "R" || status[0] === "C" ? 2 : 1;
     if (i + need > tokens.length) return { truncated: true }; // declared fields run past the stream end
     for (let k = 0; k < need; k++) {
-      const p = tokens[i + k];
-      if (!p) return { truncated: true };
+      const p = tokens[i + k]!; // i+k < tokens.length (checked above), and non-empty (noUncheckedIndexedAccess)
       paths.push(p);
       bytes += Buffer.byteLength(p, "utf8");
       if (paths.length > FILES_CHANGED_PATHS_MAX_COUNT || bytes > FILES_CHANGED_PATHS_MAX_BYTES) return { truncated: true };
@@ -8357,6 +8355,72 @@ export async function machineReadablePathSet(
   }
 }
 
+/** A thrown marker for a genuine git/host read failure on an object ALREADY confirmed (via
+ *  {@link resolveObjectKind}) to exist and be tree-ish — mirrors the existing {@link CanonicalGitRefusal}
+ *  precedent rather than a third state folded into `fullTreeEntries`'s own `Map | null` return.
+ *  @decision 05915fc7 — see this card's own decision record for why a thrown signal is right HERE even
+ *  though round 1 rejected that shape for `stampedPathsPlausible`/`recordedTipContentLanded`'s own
+ *  public return types. */
+export class GitTransientReadFailure extends Error {
+  constructor(message: string) { super(message); this.name = "GitTransientReadFailure"; }
+}
+
+/** True iff `e` is the error {@link withTimeout} itself raises on expiry — a fixed, English string WE
+ *  author (`git/bounded.ts`), never git's own locale-dependent stderr. */
+function isWithTimeoutExpiry(e: unknown): boolean {
+  return e instanceof Error && /exceeded \d+ms \(hung git child\?\)/.test(e.message);
+}
+
+/** True iff `e` is a PROCESS-LEVEL spawn failure matching Node's own `/^Error: spawn /`-prefixed, deferred
+ *  `'error'`-event shape (verified for ENOENT) rather than git itself running and exiting non-zero — a
+ *  HOST condition, never a fact about the object. Detection is precise, not a guess: see
+ *  {@link resolveObjectKind}'s own decision-record entry for the full, empirically-verified mechanism and
+ *  why it's locale-independent.
+ *
+ *  @decision 05915fc7 — round 3 correction: `EMFILE`/`ENFILE` are NOT verified to match this shape (a
+ *  resource-exhaustion failure during stdio-pipe setup is an earlier, different failure point) — do not
+ *  assume this function covers them; see this card's own record (S4).
+ *
+ *  @decision 05915fc7 — round 2 ruling 2: round 1's own "any non-timeout failure ⇒ missing" was too
+ *  broad; a spawn failure must classify as transient, same as a timeout. */
+function isSpawnLevelFailure(e: unknown): boolean {
+  return e instanceof Error && /^Error: spawn /.test(e.message);
+}
+
+/** git object types `ls-tree -r`/`merge-base` can operate on without git itself refusing outright. */
+const TREE_ISH_TYPES = new Set(["tree", "commit", "tag"]);
+
+/**
+ * Resolves `ref`'s object type via `git cat-file -t`, as a pre-check before a call that NEEDS `ref` to be
+ * a real, tree-ish object — a bare `ls-tree -r`/`merge-base` failure can't otherwise tell "this object
+ * genuinely doesn't exist / isn't tree-ish" (deterministic, never changes on retry) apart from "a
+ * transient git/host condition on one that does" (may well clear on a later boot).
+ * - `{kind:"ok", type}` — cat-file succeeded; `type` is git's own object-type string.
+ * - `{kind:"missing"}` — DEFINITIVE: git itself ran this command and exited non-zero — the ref does not
+ *   resolve to any object at all, deterministically, on retry.
+ * - `{kind:"transient"}` — our own {@link withTimeout} expiry, OR a process-level spawn failure (see
+ *   {@link isSpawnLevelFailure}) — neither proves anything about whether the object exists.
+ * Throws {@link CanonicalGitRefusal} unchanged — never classified either way.
+ * @decision 05915fc7 — the full classification mechanism (incl. the exact simple-git error shapes this
+ * was verified against) lives in this card's own decision record, not restated here.
+ */
+async function resolveObjectKind(
+  repoPath: string, ref: string, deps: BoundedGitDeps,
+): Promise<{ kind: "ok"; type: string } | { kind: "missing" } | { kind: "transient" }> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    // @decision 868e0135 — `--end-of-options` before `ref`: every caller passes an already-resolved sha.
+    const out = await withTimeout(
+      git.raw(["cat-file", "-t", "--end-of-options", ref]), timeoutMs, "git cat-file -t (object kind pre-check)",
+    );
+    return { kind: "ok", type: out.trim() };
+  } catch (e) {
+    if (e instanceof CanonicalGitRefusal) throw e;
+    if (isWithTimeoutExpiry(e) || isSpawnLevelFailure(e)) return { kind: "transient" };
+    return { kind: "missing" };
+  }
+}
+
 /**
  * Full recursive tree listing of `ref` as `path -> "<mode> <type> <sha>"`, via ONE `git ls-tree -r -z
  * <ref>` call with NO pathspec argument at all — so no hazardous name (a literal backslash, bracket/brace
@@ -8378,10 +8442,19 @@ export async function machineReadablePathSet(
  * @decision 1cf79e64 — fails closed to `null` on any read failure, a malformed record (a line with no tab
  * separator), a decoded key containing U+FFFD, or a duplicate decoded key — the WHOLE map is untrustworthy
  * then, never a partial one that looks complete.
+ * @decision 05915fc7 — round 2: `null` now means ONLY "definitive" — a missing/non-tree-ish `ref` (via
+ * {@link resolveObjectKind}) or untrusted content (the checks above, unchanged). A GENUINE read failure on
+ * a pre-confirmed-good object instead THROWS {@link GitTransientReadFailure}; a `CanonicalGitRefusal` is
+ * re-thrown unchanged either way. See this card's own decision record for the full reasoning.
  */
 export async function fullTreeEntries(
   repoPath: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<Map<string, string> | null> {
+  const kindResult = await resolveObjectKind(repoPath, ref, deps); // throws CanonicalGitRefusal unchanged
+  if (kindResult.kind === "transient") {
+    throw new GitTransientReadFailure(`fullTreeEntries: object-kind pre-check for ${ref} could not confirm whether it exists (treated as transient)`);
+  }
+  if (kindResult.kind === "missing" || !TREE_ISH_TYPES.has(kindResult.type)) return null; // DEFINITIVE
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     // @decision 868e0135 — `--end-of-options` before `ref`: every caller passes an already-resolved sha
@@ -8400,8 +8473,10 @@ export async function fullTreeEntries(
       map.set(p, rec.slice(0, tab)); // path -> "<mode> <type> <sha>"
     }
     return map;
-  } catch {
-    return null;
+  } catch (e) {
+    if (e instanceof CanonicalGitRefusal) throw e;
+    // the pre-check above already confirmed `ref` exists and is tree-ish — any failure HERE is anomalous.
+    throw new GitTransientReadFailure(`fullTreeEntries: ls-tree -r failed for a pre-confirmed tree-ish ${ref}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -8437,13 +8512,21 @@ export async function fullTreeEntries(
  * @decision 1cf79e64 — now built on the shared {@link fullTreeEntries} helper instead of its own bespoke
  * `--name-only` tree-set read; `recordedTipEntries`, when passed, is used in place of a fresh read of
  * `recordedTip`'s own tree (the caller's shared-read optimization — see that function's own doc).
+ * @decision 05915fc7 — round 2: `recordedTip`/`otherSha` are pre-checked via {@link resolveObjectKind}
+ * before `merge-base` ever runs — a missing/non-tree-ish object on either side is DEFINITIVE (`false`),
+ * never `"transient"`. `null` from `fullTreeEntries` is likewise now always definitive.
  */
 export async function stampedPathsPlausible(
   repoPath: string, recordedTip: string, otherSha: string, paths: string[], deps: BoundedGitDeps = {},
   recordedTipEntries?: Map<string, string> | null,
-): Promise<boolean> {
+): Promise<boolean | "transient"> {
   if (paths.length === 0) return true;
   try {
+    for (const sha of [recordedTip, otherSha]) {
+      const kindResult = await resolveObjectKind(repoPath, sha, deps); // throws CanonicalGitRefusal unchanged
+      if (kindResult.kind === "transient") return "transient";
+      if (kindResult.kind === "missing" || !TREE_ISH_TYPES.has(kindResult.type)) return false; // DEFINITIVE
+    }
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const mergeBase = (await withTimeout(
       // @decision 868e0135 — `--end-of-options` right after "merge-base": both recordedTip/otherSha are resolved shas.
@@ -8454,13 +8537,16 @@ export async function stampedPathsPlausible(
       recordedTipEntries !== undefined ? recordedTipEntries : fullTreeEntries(repoPath, recordedTip, deps),
       fullTreeEntries(repoPath, mergeBase, deps),
     ]);
-    if (!recordedMap || !mergeBaseMap) return false;
+    if (!recordedMap || !mergeBaseMap) return false; // DEFINITIVE — see fullTreeEntries's own doc
     for (const p of paths) {
       if (!recordedMap.has(p) && !mergeBaseMap.has(p)) return false;
     }
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    // @decision 05915fc7 — a refusal is definitive; a GitTransientReadFailure (from fullTreeEntries) or
+    // any other failure on this pre-confirmed-good pair is a transient git/host condition — retry, never escalate.
+    if (e instanceof CanonicalGitRefusal) return false;
+    return "transient";
   }
 }
 
@@ -8480,23 +8566,28 @@ export async function stampedPathsPlausible(
  * @decision 1cf79e64 — do not reintroduce a pathspec-based diff here: a literal backslash in a stamped
  * path defeats ANY pathspec (no flag/magic/env override exists) and silently reads as a vacuous content
  * match for a candidate that genuinely omits that file, or even an unrelated candidate entirely.
+ * @decision 05915fc7 — round 2: a `null` from `fullTreeEntries` is now ALWAYS definitive (`"no-match"`)
+ * — a genuine read failure on a pre-confirmed-good object instead throws `GitTransientReadFailure`.
  */
 export async function recordedTipContentLanded(
   repoPath: string, recordedTip: string, candidateSha: string, files: string[], deps: BoundedGitDeps = {},
   recordedTipEntries?: Map<string, string> | null,
-): Promise<"attributed" | "no-match"> {
+): Promise<"attributed" | "no-match" | "transient"> {
   if (files.length === 0) return "no-match";
   try {
     const recordedMap = recordedTipEntries !== undefined ? recordedTipEntries : await fullTreeEntries(repoPath, recordedTip, deps);
-    if (!recordedMap) return "no-match";
+    if (!recordedMap) return "no-match"; // DEFINITIVE — see fullTreeEntries's own doc
     const candidateMap = await fullTreeEntries(repoPath, candidateSha, deps);
     if (!candidateMap) return "no-match";
     for (const p of files) {
       if (recordedMap.get(p) !== candidateMap.get(p)) return "no-match";
     }
     return "attributed";
-  } catch {
-    return "no-match";
+  } catch (e) {
+    // @decision 05915fc7 — a refusal is definitive (escalate, never retry); a GitTransientReadFailure
+    // (or any other failure reaching here) is transient — retry, never escalate.
+    if (e instanceof CanonicalGitRefusal) return "no-match";
+    return "transient";
   }
 }
 

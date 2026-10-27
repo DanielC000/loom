@@ -2989,6 +2989,20 @@ export class SessionService {
   private readonly mergeReconcileEscalateMs: number;
   private static readonly DEFAULT_MERGE_RECONCILE_ESCALATE_ATTEMPTS = 3;
   private static readonly DEFAULT_MERGE_RECONCILE_ESCALATE_MS = 24 * 60 * 60_000; // 1 day
+  /**
+   * Card 05915fc7 (round 2, S1): the SAME give-up shape as {@link mergeReconcileEscalateAttempts}/
+   * {@link mergeReconcileEscalateMs} above, for a stale-generation attribution attempt stuck on a
+   * TRANSIENT git/host read failure (never a definitive one — that still escalates on first detection,
+   * unchanged). A new, independently-tunable pair rather than literally sharing the merge-reconcile
+   * wedge's own fields: the two conditions differ in kind (a wedged repoKey can never self-heal at all;
+   * this one genuinely can), even though they share the SAME retry cadence — both are re-attempted only
+   * once per daemon BOOT, never on a tighter in-process sweep timer, which is why the same 3-attempts/
+   * 1-day shape is apt here too. See this card's own decision record for the full reasoning.
+   */
+  private readonly staleGenerationTransientEscalateAttempts: number;
+  private readonly staleGenerationTransientEscalateMs: number;
+  private static readonly DEFAULT_STALE_GENERATION_TRANSIENT_ESCALATE_ATTEMPTS = 3;
+  private static readonly DEFAULT_STALE_GENERATION_TRANSIENT_ESCALATE_MS = 24 * 60 * 60_000; // 1 day
   /** The armed background sweep timer, or null when nothing is currently wedged (self-arms/disarms). */
   private wedgeSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** Agent Runs R3 run-webhook delivery (injectable for tests; defaults to a bounded fetch + 5s cap). */
@@ -3321,6 +3335,7 @@ export class SessionService {
       snapshotGateReflogs?: typeof snapshotGateReflogs;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
       mergeReconcileEscalateAttempts?: number; mergeReconcileEscalateMs?: number;
+      staleGenerationTransientEscalateAttempts?: number; staleGenerationTransientEscalateMs?: number;
       codescape?: CodescapeSupervisor;
       gateOpRetainMs?: number;
       gateCancelVerifyMs?: number;
@@ -3397,6 +3412,8 @@ export class SessionService {
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
     this.mergeReconcileEscalateAttempts = opts?.mergeReconcileEscalateAttempts ?? SessionService.DEFAULT_MERGE_RECONCILE_ESCALATE_ATTEMPTS;
     this.mergeReconcileEscalateMs = opts?.mergeReconcileEscalateMs ?? SessionService.DEFAULT_MERGE_RECONCILE_ESCALATE_MS;
+    this.staleGenerationTransientEscalateAttempts = opts?.staleGenerationTransientEscalateAttempts ?? SessionService.DEFAULT_STALE_GENERATION_TRANSIENT_ESCALATE_ATTEMPTS;
+    this.staleGenerationTransientEscalateMs = opts?.staleGenerationTransientEscalateMs ?? SessionService.DEFAULT_STALE_GENERATION_TRANSIENT_ESCALATE_MS;
     this.runWebhookPost = opts?.runWebhookPost ?? defaultRunWebhookPost;
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
     this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
@@ -27429,7 +27446,7 @@ export class SessionService {
     s: Session, project: Project, eventPresence: WorkerEventPresence | undefined,
     mainlineRefCache: Map<string, ReturnType<SessionService["resolveMainlineWatermarkRef"]>>,
     mainlineRefResolvesCache: Map<string, boolean>,
-  ): Promise<"attributed" | "escalated" | "no-op"> {
+  ): Promise<"attributed" | "escalated" | "no-op" | "transient"> {
     if (!eventPresence?.hasMergeRequest || !s.branch || !s.taskId) return "no-op";
     // @decision 21b53e6a — round 3: never escalate (or attempt to attribute) a merge_request already
     // followed by this row's OWN merge_rejected/merge_cancelled — that is a DECIDED outcome, not a stuck landing.
@@ -27460,7 +27477,7 @@ export class SessionService {
 
     const attribution = reviewedTip
       ? await this.attributeStaleGenerationOwnLanding(s, project, branch, reviewedTip, mainlineRefCache, mainlineRefResolvesCache, filesChangedPaths)
-      : { kind: "no-match" as const };
+      : { kind: "no-match" as const, checked: false as const };
     if (attribution.kind === "attributed") {
       // @decision e5458ccd — `detail.branch` stays OMITTED here, never the shared branch string — every
       // branch-scoped reader keys on that field matching the real name, so this is excluded by construction.
@@ -27482,14 +27499,51 @@ export class SessionService {
       console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — mainline watermark unreadable/unresolvable this boot; retrying next boot, no escalation`);
       return "no-op";
     }
+    // @decision 05915fc7 — round 2 S1: bounded now, not silent-forever — past
+    // staleGenerationTransientEscalateAttempts boots OR staleGenerationTransientEscalateMs elapsed
+    // (mirrors mergeReconcileEscalateAttempts/_Ms), it escalates for real, exactly once.
+    if (attribution.kind === "transient") {
+      const entry = this.db.recordStaleGenerationUnresolved(
+        s.id, { branch, taskId, projectId: project.id },
+        `a transient git read failure prevented verifying candidate(s) [${attribution.candidateShas.map((sha) => sha.slice(0, 8)).join(", ")}] against this worker's own recorded tip`,
+        "transient",
+      );
+      const ageMs = Date.now() - new Date(entry.firstDetectedAt).getTime();
+      const crossedThreshold = entry.attempts >= this.staleGenerationTransientEscalateAttempts || ageMs >= this.staleGenerationTransientEscalateMs;
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — a transient git read failure prevented verifying candidate(s) [${attribution.candidateShas.map((sha) => sha.slice(0, 8)).join(", ")}] against this worker's own recorded tip this boot (attempt ${entry.attempts}); ${crossedThreshold ? "past the give-up threshold, escalating" : "retrying next boot, no escalation yet"}`);
+      if (!entry.escalated && crossedThreshold) {
+        const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
+        const ageDays = Math.max(0, Math.round(ageMs / 86_400_000));
+        const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and ${entry.attempts} consecutive boot(s) over ~${ageDays} day(s) have each hit a TRANSIENT git read failure trying to verify candidate(s) [${attribution.candidateShas.map((sha) => sha.slice(0, 8)).join(", ")}] against this worker's own recorded tip — never a definitive content mismatch, so Loom cannot rule out this eventually self-healing, but it has gone on long enough to need a human look (an oversized tree, a persistent host I/O problem, or a git timeout that needs raising). Loom will keep retrying every boot regardless; this alert will not repeat.`
+          + this.buildStampSuffix(this.resolveDeployStaleness());
+        try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
+        this.db.markStaleGenerationEscalated(s.id);
+        // eslint-disable-next-line no-console
+        console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — escalated [loom:merge-orphaned] to ${target.slice(0, 8)} past the transient give-up threshold (one-shot)`);
+      }
+      // @decision 05915fc7 — round 2 ruling 3: STICKY — once escalated (by either this threshold or an
+      // earlier definitive miss), every later boot keeps reporting "escalated" even if THIS boot's own
+      // read came back merely transient; a definitive→transient flip must never un-escalate.
+      return entry.escalated || crossedThreshold ? "escalated" : "transient";
+    }
 
     const zeroDelta = attribution.kind === "zero-delta";
+    const checked = attribution.kind === "no-match" ? attribution.checked : false;
     // @decision c7dc99bf — round 4: zero-delta now means the REVIEW-TIME stamped path set was empty — a
     // fact Loom recorded at review time, not something this path recomputes against any anchor.
+    // @decision 05915fc7 — round 2 N1: the generic "checked every landed commit" wording was FALSE for a
+    // `CanonicalGitRefusal` or an unresolvable repo/stamp — nothing was ever examined on those paths.
+    // `checked` (threaded from `attributeStaleGenerationOwnLanding`) now distinguishes the two honestly.
+    // @decision 05915fc7 — round 3 S2: the `!checked` wording below no longer names a cause it cannot
+    // verify (a discovery timeout/spawn failure reaches `checked:false` the same way a refusal does, and
+    // a chain-check failure can make `checked:true` equally misleading) — see this card's own record.
     const reason = zeroDelta
       ? "stale generation has its own unresolved merge_request, but its own review recorded no changes of its own at all — there is nothing of its own to attribute to any landing"
-      : "stale generation has its own unresolved merge_request — the shared branch/worktree now belong to a different generation, and no landed commit's content could be verified against this worker's own recorded tip, so no DB-only attribution was made";
-    const entry = this.db.recordStaleGenerationUnresolved(s.id, { branch, taskId, projectId: project.id }, reason);
+      : checked
+      ? "stale generation has its own unresolved merge_request — the shared branch/worktree now belong to a different generation, and no landed commit's content could be verified against this worker's own recorded tip, so no DB-only attribution was made"
+      : "stale generation has its own unresolved merge_request — no candidate could be attributed, and Loom could not confirm whether this was a definitive miss or a read failure during discovery or verification";
+    const entry = this.db.recordStaleGenerationUnresolved(s.id, { branch, taskId, projectId: project.id }, reason, "definitive");
     if (!entry.escalated) {
       const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
       // @decision 21b53e6a — round 3: never let this nudge's `git log --grep` hint imply the branch is
@@ -27501,7 +27555,9 @@ export class SessionService {
       // ever needed checking against any candidate.
       const checkedNote = zeroDelta
         ? "Loom found this worker's own review recorded no changes of its own at all, so there is nothing of its own work to attribute to any landed commit"
-        : "Loom checked every landed commit on this branch for a content match against this worker's own recorded tip and found none it could verify";
+        : checked
+        ? "Loom checked every landed commit on this branch for a content match against this worker's own recorded tip and found none it could verify"
+        : "no candidate could be attributed; Loom could not confirm whether this was a definitive miss or a read failure during discovery or verification";
       const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path${tipNote}, active from ${s.createdAt} to ${s.lastActivity}. ${checkedNote} — the shared branch/worktree now belong to a different generation, so there is no further safe DB-only way to resolve it automatically, and no dedicated action exists to close just this alert. The branch name ${branch} is SHARED with the current generation — \`git log --grep "Loom-Worker-Branch: ${branch}"\` on the project's mainline will also match the CURRENT generation's own, later landing, not just this worker's; use this worker's own recorded tip and its createdAt→lastActivity window above to tell the generations apart. If this worker's own work is found there, this alert is stale and can be ignored (or the task closed by hand if it is otherwise idle); if not, the work may need to be redone.`
         + this.buildStampSuffix(this.resolveDeployStaleness());
       try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
@@ -27517,9 +27573,11 @@ export class SessionService {
    * against every commit on `branch`'s shared name carrying a `Loom-Worker-Branch` trailer, OLDEST first (a
    * coincidental later match must never win over this worker's own true landing — the branch name may carry
    * more than one generation's landing). READ-ONLY: never touches the worktree or branch ref, never calls
-   * `finalizeMerge`. `"no-match"` covers an unresolvable repo or any git error (fail closed); `"watermark-
-   * unresolved"` is a transient watermark read failure (retry next boot, no escalation — see the caller);
-   * `"zero-delta"` is a recorded tip with no content of its own to attribute (see the caller).
+   * `finalizeMerge`. `"no-match"` covers an unresolvable repo or a definitive git outcome (a genuine content/
+   * path mismatch, or a `CanonicalGitRefusal`); `"transient"` is a git/host read failure on an otherwise-
+   * known-good object (timeout, a failed ls-tree) that may well succeed on a later boot; `"watermark-
+   * unresolved"` is a transient watermark read failure (same no-escalation posture — see the caller for
+   * both); `"zero-delta"` is a recorded tip with no content of its own to attribute (see the caller).
    *
    * @decision e5458ccd — `extraUnionBases` is always `[]` here: a branch HELD at this worker's own confirm
    * time is a documented, accepted gap that escalates instead of risking a wrong attribution.
@@ -27527,6 +27585,10 @@ export class SessionService {
    * @decision c7dc99bf — round 4: `filesChangedPaths` (the REVIEW-TIME stamped path set) is the content
    * check's pathspec taken AS-IS, never re-derived from any anchor (live ref or trust record) at reconcile
    * time — rounds 1-3 each found a new way to forge whichever anchor fed that re-derivation.
+   *
+   * @decision 05915fc7 — a transient miss never counts as definitive for that candidate (a later clean
+   * attribution still wins); a `CanonicalGitRefusal` is the one exception and is always definitive. See
+   * this card's own decision record for the full transient-vs-definitive classification.
    */
   private async attributeStaleGenerationOwnLanding(
     s: Session, project: Project, branch: string, reviewedTip: string,
@@ -27537,10 +27599,11 @@ export class SessionService {
     | { kind: "attributed"; sha: string; via: "union-chain" | "content-match" }
     | { kind: "zero-delta" }
     | { kind: "watermark-unresolved" }
-    | { kind: "no-match" }
+    | { kind: "transient"; candidateShas: string[] }
+    | { kind: "no-match"; checked: boolean }
   > {
     let repoPath: string;
-    try { repoPath = resolveRepoByKey(project, s.repoKey).path; } catch { return { kind: "no-match" }; }
+    try { repoPath = resolveRepoByKey(project, s.repoKey).path; } catch { return { kind: "no-match", checked: false }; }
     // @decision e5458ccd — never scan bare "HEAD": resolve the SAME stored mainline watermark ref Pass A
     // uses, and refuse attribution on an unreadable/unresolvable watermark. A watermark NEVER YET
     // STAMPED (`ref` undefined, same as Pass A) still falls back to "HEAD" — the one legitimate case.
@@ -27565,21 +27628,59 @@ export class SessionService {
     // @decision c7dc99bf — round 4: the own-files pathspec is the review-time stamped set, never
     // re-derived here at all — absent/truncated/malformed is unknown (escalate); an empty set is a
     // genuine zero-delta (escalate, distinct reason); neither needs a git call or a trust record.
-    if (filesChangedPaths === null) return { kind: "no-match" };
+    if (filesChangedPaths === null) return { kind: "no-match", checked: false };
     if (filesChangedPaths.length === 0) return { kind: "zero-delta" };
     try {
       // @decision e5458ccd — verify OLDEST-first: a coincidental later match must never win over this
       // worker's own true landing.
       const candidates = [...await findAllLandedTrailerCommits(repoPath, branch, base, { timeoutMs: this.gitOpMs })].reverse();
-      if (candidates.length === 0) return { kind: "no-match" };
+      if (candidates.length === 0) return { kind: "no-match", checked: false };
       // reviewedTip's own tree is loop-invariant across every candidate below — read it ONCE (AFTER the
       // empty-candidates check above, round 2: a session with no eligible candidates pays nothing for
       // this) and share it with every recordedTipContentLanded/stampedPathsPlausible call in both arms.
-      // @decision 1cf79e64 — a failed read here means every candidate would fail closed anyway; short-
-      // circuit immediately with today's existing "no-match" kind, never a new one.
-      const recordedTipEntries = await fullTreeEntries(repoPath, reviewedTip, { timeoutMs: this.gitOpMs });
-      if (!recordedTipEntries) return { kind: "no-match" };
+      // @decision 05915fc7 — superseding 1cf79e64's own note here: a refusal still escalates, but any
+      // OTHER failure (timeout, a failed ls-tree) may well succeed on a later boot, so it's "transient".
+      let recordedTipEntries: Map<string, string> | null;
+      try {
+        recordedTipEntries = await fullTreeEntries(repoPath, reviewedTip, { timeoutMs: this.gitOpMs });
+      } catch (e) {
+        if (e instanceof CanonicalGitRefusal) return { kind: "no-match", checked: false };
+        return { kind: "transient", candidateShas: candidates.map((c) => c.sha) };
+      }
+      // @decision 05915fc7 — round 2: a `null` from `fullTreeEntries` is now ALWAYS definitive (missing/
+      // non-tree-ish reviewedTip, or untrusted content) — a genuine transient failure THROWS instead (see
+      // the catch above), so there is no `null` case left here that means "transient".
+      if (!recordedTipEntries) return { kind: "no-match", checked: false };
+
+      // @decision 05915fc7 — exhaustive switches below (a `never`-typed default) so a future third state
+      // on either helper's return type is a COMPILE ERROR here, never a silently-unhandled value.
+      const tryAttribute = async (
+        candidateSha: string, via: "union-chain" | "content-match",
+      ): Promise<{ kind: "attributed"; sha: string; via: "union-chain" | "content-match" } | { kind: "miss"; transient: boolean }> => {
+        const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidateSha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
+        switch (contentResult) {
+          case "transient": return { kind: "miss", transient: true };
+          case "no-match": return { kind: "miss", transient: false };
+          case "attributed": {
+            // @decision c7dc99bf — round 5 ruling c: a stamped path absent from BOTH reviewedTip's own
+            // tree and its merge-base with this candidate means the stamp and the repo disagree — never
+            // trust the content check's verdict for a candidate that fails this.
+            const plausible = await stampedPathsPlausible(repoPath, reviewedTip, candidateSha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
+            switch (plausible) {
+              case "transient": return { kind: "miss", transient: true };
+              case false: return { kind: "miss", transient: false };
+              case true: return { kind: "attributed", sha: candidateSha, via };
+              default: { const _exhaustive: never = plausible; throw new Error(`attributeStaleGenerationOwnLanding: unreachable stampedPathsPlausible result ${String(_exhaustive)}`); }
+            }
+          }
+          default: { const _exhaustive: never = contentResult; throw new Error(`attributeStaleGenerationOwnLanding: unreachable recordedTipContentLanded result ${String(_exhaustive)}`); }
+        }
+      };
+
+      let sawTransient = false;
+      const transientShas: string[] = [];
       for (const candidate of candidates) {
+        let result: Awaited<ReturnType<typeof tryAttribute>> | null = null;
         if (candidate.trailers.landedTip) {
           // @decision e5458ccd — Round 3 item 1: pass the SAME resolved mainline watermark ref the
           // candidate scan above used, never the function's own bare-"HEAD" default — canonical is a
@@ -27592,29 +27693,23 @@ export class SessionService {
             // @decision c7dc99bf — round 6: content-check FIRST, confirm with stampedPathsPlausible only
             // on "attributed" — the net only ever REJECTS a positive attribution, so paying its cost
             // against an already-failed candidate is pure waste (measured: it dominated the old order).
-            const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
-            if (contentResult === "attributed") {
-              // @decision c7dc99bf — round 5 ruling c: a stamped path absent from BOTH reviewedTip's own
-              // tree and its merge-base with this candidate means the stamp and the repo disagree — never
-              // trust the content check's verdict for a candidate that fails this.
-              const plausible = await stampedPathsPlausible(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
-              if (plausible) return { kind: "attributed", sha: candidate.sha, via: "union-chain" };
-            }
+            result = await tryAttribute(candidate.sha, "union-chain");
           }
         } else if (candidate.trailers.base) {
           // @decision c7dc99bf — `candidate.trailers.base` is only an ELIGIBILITY gate here (does this
           // candidate look like a Loom landing shape at all), never a trusted value fed into the check.
           // Round 6: same content-check-first ordering as the landedTip arm above.
-          const contentResult = await recordedTipContentLanded(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
-          if (contentResult === "attributed") {
-            const plausible = await stampedPathsPlausible(repoPath, reviewedTip, candidate.sha, filesChangedPaths, { timeoutMs: this.gitOpMs }, recordedTipEntries);
-            if (plausible) return { kind: "attributed", sha: candidate.sha, via: "content-match" };
-          }
+          result = await tryAttribute(candidate.sha, "content-match");
         }
+        if (result?.kind === "attributed") return result;
+        if (result?.kind === "miss" && result.transient) { sawTransient = true; transientShas.push(candidate.sha); }
       }
-      return { kind: "no-match" };
+      // @decision 05915fc7 — `checked: true` here is the ONE honest case: the loop ran to completion and
+      // genuinely examined every candidate's content. Every OTHER `no-match` return above means nothing
+      // was ever examined (an unresolvable repo/stamp, zero candidates, or the hoisted read failing).
+      return sawTransient ? { kind: "transient", candidateShas: transientShas } : { kind: "no-match", checked: true };
     } catch {
-      return { kind: "no-match" };
+      return { kind: "no-match", checked: false };
     }
   }
 
@@ -27658,7 +27753,7 @@ export class SessionService {
   // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
   // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
   // prove Pass A's early-out never spawns git for an already-finalized worker.
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesReviewForkReclaimed: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number; staleGenerationUnresolvedEscalated: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesReviewForkReclaimed: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number; staleGenerationUnresolvedEscalated: number; staleGenerationTransient: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     // @decision dd494a9b — precompute both maps for Pass A (per-session calls were 96% of a ~7-min boot
@@ -27749,6 +27844,7 @@ export class SessionService {
       }
     }
     let staleGenerationUnresolvedEscalated = 0; // card 21b53e6a: a stale generation's OWN unresolved merge_request — escalated once via [loom:merge-orphaned], never attributed (round 2)
+    let staleGenerationTransient = 0; // card 05915fc7 (round 2 S1): a transient git read failure, below the give-up threshold — retrying next boot, not yet escalated
     let mergesFinished = 0;
     let mergesHeld = 0; // card a5be590f: Pass A candidates skipped because their branch is HELD (a merge retained it) — surfaced in the result, not only a console.warn
     let mergesFailed = 0;
@@ -27852,6 +27948,7 @@ export class SessionService {
         if (staleGeneration) {
           const outcome = await this.resolveStaleGenerationOwnLanding(s, project, eventPresence, mainlineRefCache, mainlineRefResolvesCache);
           if (outcome === "escalated") staleGenerationUnresolvedEscalated++;
+          else if (outcome === "transient") staleGenerationTransient++; // card 05915fc7 (round 2 S1): below the give-up threshold — still retrying, not yet escalated
           continue;
         }
         // Card 6f73da1a: a worker that NEVER requested a merge at all (no `merge_request` event on
@@ -28562,7 +28659,7 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${staleAsideLeftovers.length} renamed-aside stale worktree dir(s) found under WORKTREES_DIR — never auto-deleted; see GET /api/worktrees/stale-leftovers to review and reclaim.`);
     }
-    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesReviewForkReclaimed, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero, staleGenerationUnresolvedEscalated };
+    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesReviewForkReclaimed, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero, staleGenerationUnresolvedEscalated, staleGenerationTransient };
   }
 
   /**

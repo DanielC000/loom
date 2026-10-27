@@ -58,10 +58,20 @@ the whole map is untrustworthy then, never a partial one that looks complete (sa
 that tree ONCE and shares it, instead of each function re-reading it per candidate. `recordedTip`'s own
 tree never changes across the candidate loop in `attributeStaleGenerationOwnLanding`
 (`sessions/service.ts`), so that caller now hoists one `fullTreeEntries` call before the loop and threads
-the result into every `recordedTipContentLanded`/`stampedPathsPlausible` call in both trailer arms. A
-failed hoisted read short-circuits the whole attribution attempt to `{kind:"no-match"}` immediately,
-using the existing error kind — no new kind was introduced (the transient-vs-definitive split for this
-path is card `05915fc7`'s own scope, not this one's).
+the result into every `recordedTipContentLanded`/`stampedPathsPlausible` call in both trailer arms.
+
+**Superseded by card `05915fc7`:** a failed hoisted read used to short-circuit the whole attribution
+attempt to `{kind:"no-match"}` immediately, on the reasoning that every candidate would fail closed anyway
+so no new kind was needed. That reasoning no longer holds in full — `05915fc7` found it meant a mere
+GENUINE git/host read failure (a timeout, a spawn error) on this ONE read escalated the row exactly like a
+real, never-resolving content mismatch would. A failed read is now classified more finely (round 2, via a
+`cat-file -t` pre-check, `resolveObjectKind`): a `CanonicalGitRefusal`, or a reviewedTip that genuinely does
+not resolve to any object (or resolves to something non-tree-ish), STILL stays `{kind:"no-match",
+checked:false}` (definitive, never retryable — a missing/wrong-type object is just as permanent as a real
+refusal); only a GENUINE git/host read failure on a reviewedTip the pre-check confirmed exists and is
+tree-ish now reports `{kind:"transient", candidateShas: [...]}`, so the row retries next boot rather than
+escalating on what may have been a mere timeout or host hiccup. See `docs/decisions/05915fc7-*.md` for the
+full mechanism (including the round-2 Code Review that found round 1's own first pass at this too broad).
 
 `stampedPathsPlausible` itself is otherwise unchanged in behavior — it still separately reads a
 merge-base tree (candidate-dependent, so it cannot be hoisted), and it remains necessary: a stamped path
@@ -143,8 +153,8 @@ express this at all, the test documents that limitation inline rather than silen
 
 Moved inside the `try` block, after `findAllLandedTrailerCommits` resolves and its own empty-candidates
 check returns, so a session with genuinely zero candidates never pays for the reviewedTip tree read at
-all. Fail-closed semantics are unchanged: a session that reaches the hoisted read and has it fail still
-returns `{kind:"no-match"}` immediately, before the candidate loop.
+all. (Card `05915fc7` later changed WHAT a failed hoisted read returns — see "Superseded by card
+`05915fc7`" above — but not this hoisting position.)
 
 ### Minor 3: two PIPELINE-level scenarios, through the real `attributeStaleGenerationOwnLanding`
 

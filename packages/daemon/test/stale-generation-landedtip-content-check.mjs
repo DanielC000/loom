@@ -56,6 +56,8 @@ import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { commitAll } from "./_git-commit.mjs";
+import { sleepPast } from "./_wait.mjs"; // card 05915fc7 round 3 (S3): proves the BOUND_AGE wait is a real floor, not a guess
+import simpleGit from "simple-git"; // card 05915fc7 round 2: a REAL spawn-level failure via a bogus binary (the gitFactory test seam)
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-c7dc99bf-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -65,9 +67,16 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, verifyReviewedTipChain, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, machineReadablePathSet, parseNameStatusZ, FILES_CHANGED_PATHS_MAX_COUNT, FILES_CHANGED_PATHS_MAX_BYTES } = await import("../dist/git/worktrees.js");
 const { mainlineWatermarkKey } = await import("../dist/git/mainline-watch.js");
+// Card 05915fc7: CanonicalGitRefusal injection (via the documented test-seam registerCommondirTrustPinLookup)
+// and console capture, same idiom as merge-reconcile-wedge.mjs's own warnsMatching/infosMatching.
+const { CanonicalGitRefusal, registerCommondirTrustPinLookup } = await import("../dist/git/bounded.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const warns = [];
+const realWarn = console.warn;
+console.warn = (...a) => { warns.push(a.join(" ")); realWarn(...a); };
+const warnsMatching = (needle) => warns.filter((w) => w.includes(needle));
 const GIT_ID = "-c user.email=sglt@loom -c user.name=sglt";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const now = new Date().toISOString();
@@ -711,7 +720,12 @@ try {
   // --- PIPELINE_BACKSLASH / PIPELINE_HOISTED_READ_FAILS (card 1cf79e64 round 2, Code Review minor 3):
   // F4's own repro, but through the REAL reconcileOrchestrationOnBoot pipeline end-to-end (not a direct
   // recordedTipContentLanded call), plus a scenario that exercises the HOISTED fullTreeEntries(reviewedTip)
-  // read's own failure path specifically (reviewedTip is a sha that never resolves in the repo at all). ---
+  // read's own failure path specifically (reviewedTip is a sha that never resolves in the repo at all).
+  // Card 05915fc7 round 2 (Code Review B1): a sha that never resolves is now classified DEFINITIVE, not
+  // transient — `resolveObjectKind`'s own `cat-file -t` pre-check sees git actually run and exit non-zero
+  // for a genuinely missing object, which is deterministic on retry, never a host condition. So this once
+  // again asserts "escalates", same as PIPELINE_BACKSLASH — see `docs/decisions/05915fc7-*.md`'s own
+  // round-2 section for why round 1's "accepted never-clearing transient residual" framing was wrong. ---
   async function setupPipelineBackslashOmission(tag, repo) {
     const ctx = await baseSetup(tag, repo);
     const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
@@ -778,11 +792,645 @@ try {
 
       const pipeHrfMergeDone = db.listEventsForWorker(PIPE_HRF.workerXId).find((ev) => ev.kind === "merge_done");
       check("(PIPELINE_HOISTED_READ_FAILS) never attributed (the hoisted reviewedTip tree read never resolves)", !pipeHrfMergeDone);
-      check("(PIPELINE_HOISTED_READ_FAILS) escalated — the whole attribution attempt fails closed before any candidate's own content is ever examined", db.listStaleGenerationUnresolved().some((e) => e.sessionId === PIPE_HRF.workerXId));
+      // Card 05915fc7 round 2: a missing object is DEFINITIVE (git ran cat-file -t and exited non-zero,
+      // never a host condition) — escalates exactly like PIPELINE_BACKSLASH, never "transient".
+      check("(PIPELINE_HOISTED_READ_FAILS) escalated — a missing reviewedTip object is DEFINITIVE, not transient",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === PIPE_HRF.workerXId && e.escalated && e.kind === "definitive"));
       check("(PIPELINE_HOISTED_READ_FAILS) worker Y is still independently finalized, unaffected", db.listEventsForWorker(PIPE_HRF.workerYId).some((ev) => ev.kind === "merge_done"));
     } finally {
       for (const dir of [R_PIPE_BS, R_PIPE_HRF]) {
         try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- PIPELINE_REFUSAL (card 05915fc7): a CanonicalGitRefusal is DEFINITIVE, never transient — it must
+  // escalate exactly like a real content mismatch, never retry, and never throw out of
+  // attributeStaleGenerationOwnLanding/resolveStaleGenerationOwnLanding. `ls-tree`/`merge-base` can never be
+  // made to refuse via the merge-driver path (both are in canRunMergeDriver's PURE_READ_SUBCOMMANDS
+  // allowlist — confirmed by reading git/bounded.ts) or via an ordinary unpinned/FILE-shaped-.git commondir
+  // mismatch (checkCommondirTrust passes trivially for this test's plain directory-shaped .git with no
+  // trustedMainRoot) — so this uses the ONE real lever that DOES refuse unconditionally regardless of
+  // subcommand or advisory-read: a durable commondir-trust PIN (checked before any shape dispatch),
+  // registered via the documented test-seam `registerCommondirTrustPinLookup` (the same function
+  // index.ts calls once at daemon boot in production), returning a `toplevel` that deliberately does not
+  // match this repo's real one. ---
+  async function setupPipelineRefusal(tag, repo) {
+    const ctx = await baseSetup(tag, repo);
+    const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
+    fs.writeFileSync(path.join(first.worktreePath, "refusal-real.txt"), "real\n");
+    commitAll(first.worktreePath, "c1 real", GIT_ID);
+    const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+    fs.writeFileSync(path.join(repoPath, "refusal-real.txt"), "real\n");
+    commitAll(repoPath, [`chore(unrelated): refusal landing`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${ctx.genesisSha}`], GIT_ID);
+    const xLandedSha = git(repoPath, "rev-parse HEAD");
+
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["refusal-real.txt"] } });
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+    const y = await finishWithRetask(ctx);
+    return { ...ctx, ...y, reviewedTip, xLandedSha };
+  }
+  {
+    const R_PIPE_REFUSAL = path.join(os.tmpdir(), `loom-sglt-pipe-refusal-${sfx}`);
+    try {
+      const PIPE_REFUSAL = await setupPipelineRefusal("pipe-refusal", R_PIPE_REFUSAL);
+      // Register the pin ONLY for this one repoPath, right before the boot that must see it refuse — every
+      // OTHER repoPath this file uses returns null, so no other scenario is affected by this registration.
+      const bogusToplevel = path.join(os.tmpdir(), `loom-sglt-refusal-bogus-toplevel-${sfx}`);
+      registerCommondirTrustPinLookup((p) => p === R_PIPE_REFUSAL
+        ? { toplevel: bogusToplevel, pinnedAt: now, source: "bind", projectId: PIPE_REFUSAL.projId, repoKey: "primary" }
+        : null);
+
+      let threwOutOfReconcile = null;
+      let r4;
+      try { r4 = await sessions.reconcileOrchestrationOnBoot(new Set()); } catch (e) { threwOutOfReconcile = e; }
+      console.log("PIPELINE_REFUSAL reconcile result:", JSON.stringify(r4));
+      check("(PIPELINE_REFUSAL) the CanonicalGitRefusal never escaped reconcileOrchestrationOnBoot as a thrown exception", threwOutOfReconcile === null);
+
+      const pipeRefusalMergeDone = db.listEventsForWorker(PIPE_REFUSAL.workerXId).find((ev) => ev.kind === "merge_done");
+      check("(PIPELINE_REFUSAL) never attributed — a refused repo can never verify any candidate's content", !pipeRefusalMergeDone);
+      check("(PIPELINE_REFUSAL) escalated — a CanonicalGitRefusal is DEFINITIVE, exactly like a real content mismatch, never transient",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === PIPE_REFUSAL.workerXId));
+      // NOTE: unlike every other scenario in this file, worker Y's OWN independent finalize ALSO routes
+      // through canonicalGit against this SAME repoPath, so the pin refuses Y's finalize too while it's
+      // registered — that's expected (the pin refuses every canonicalGit call against the repo, not just
+      // this card's attribution path), not asserted here; Y's recovery is proven below once the pin clears.
+
+      // Residual-shape control, mirroring PIPELINE_HOISTED_READ_FAILS's own second-boot proof: unlike a
+      // transient miss, a refusal's escalation is ONE-SHOT — a second boot with the SAME refusing pin still
+      // registered must not re-escalate a second time (the existing one-shot markStaleGenerationEscalated
+      // guard, unrelated to this card, but worth confirming the refusal path still respects it).
+      const escalatedCountBefore = db.listStaleGenerationUnresolved().filter((e) => e.sessionId === PIPE_REFUSAL.workerXId).length;
+      let r4b;
+      try { r4b = await sessions.reconcileOrchestrationOnBoot(new Set()); } catch (e) { threwOutOfReconcile = e; }
+      console.log("PIPELINE_REFUSAL reconcile result (2nd boot):", JSON.stringify(r4b));
+      check("(PIPELINE_REFUSAL) the CanonicalGitRefusal never escaped a second reconcile either", threwOutOfReconcile === null);
+      check("(PIPELINE_REFUSAL) the escalation row is NOT duplicated on a second boot (one-shot, unrelated to this card but worth confirming unchanged)",
+        db.listStaleGenerationUnresolved().filter((e) => e.sessionId === PIPE_REFUSAL.workerXId).length === escalatedCountBefore);
+
+      // Clear the pin and reconcile a THIRD time: Y's own, independent finalize was only ever blocked by
+      // the refusal (never by anything this card changed) and now recovers on its own.
+      registerCommondirTrustPinLookup(undefined);
+      let r4c;
+      try { r4c = await sessions.reconcileOrchestrationOnBoot(new Set()); } catch (e) { threwOutOfReconcile = e; }
+      console.log("PIPELINE_REFUSAL reconcile result (3rd boot, pin cleared):", JSON.stringify(r4c));
+      check("(PIPELINE_REFUSAL) no throw on the 3rd boot either", threwOutOfReconcile === null);
+      check("(PIPELINE_REFUSAL) worker Y finalizes once the refusal clears — Y's own finalize was only ever blocked by the pin, nothing this card changed",
+        db.listEventsForWorker(PIPE_REFUSAL.workerYId).some((ev) => ev.kind === "merge_done"));
+    } finally {
+      registerCommondirTrustPinLookup(undefined);
+      try { fs.rmSync(R_PIPE_REFUSAL, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }
+
+  // --- SAWTRANSIENT ordering (card 05915fc7): a transient miss on one candidate must never stop the scan
+  // or count as definitive for THAT candidate — later candidates are still checked, and a later clean
+  // attribution always wins. Only when EVERY candidate misses, and at least one of those misses was
+  // transient, does the whole attempt report "transient". Both built on a REAL, deterministic (no timing
+  // dependency) per-candidate transient trigger: a candidate commit whose own tree references a
+  // subdirectory whose loose git object is then deleted from the ODB — `git ls-tree -r` on THAT candidate
+  // genuinely fails (a real git error, not a CanonicalGitRefusal), while an untouched candidate is
+  // unaffected. The corrupted subdirectory is removed again before the NEXT candidate is committed, so
+  // later candidates never reference the deleted object. ---
+  // MOVES the object aside (never deletes) and returns the backup path, so a caller that needs the
+  // failure to later CLEAR (RETRY_SUCCEEDS, below) can restore it with restoreSubtree(); a caller that
+  // never calls that (SAWT_WINS/SAWT_ALLMISS) just leaves it aside — harmless, the whole repo dir is
+  // removed in their own `finally` anyway.
+  function corruptOneSubtree(repoPath, candidateSha, dirName) {
+    const lsTreeOut = execSync(`git ls-tree ${candidateSha}`, { cwd: repoPath }).toString();
+    const line = lsTreeOut.split("\n").find((l) => l.endsWith(`\t${dirName}`));
+    if (!line) throw new Error(`corruptOneSubtree: no tree entry named "${dirName}" in ${candidateSha}`);
+    const subtreeSha = line.trim().split(/\s+/)[2];
+    const objPath = path.join(repoPath, ".git", "objects", subtreeSha.slice(0, 2), subtreeSha.slice(2));
+    const bakPath = `${objPath}.bak`;
+    fs.renameSync(objPath, bakPath); // the ONE thing that makes `git ls-tree -r <candidateSha>` genuinely fail
+    return bakPath;
+  }
+  function restoreSubtree(bakPath) {
+    fs.renameSync(bakPath, bakPath.slice(0, -".bak".length));
+  }
+  async function setupSawTransientOrdering(tag, repo, { genuineCandidateExists }) {
+    const ctx = await baseSetup(tag, repo);
+    const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
+    fs.writeFileSync(path.join(first.worktreePath, "ordering.txt"), "ordering content\n");
+    commitAll(first.worktreePath, "c1 real", GIT_ID);
+    const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+    // Candidate 1 (OLDEST — checked FIRST): will be corrupted, but ONLY after every later git operation
+    // in this repo is done — deleting a tree object git's own HEAD still references breaks EVERY later
+    // `git add`/`git commit` in this working copy (git needs to read HEAD's tree to diff against it), so
+    // committing candidate1 itself, and candidate2 on top of it, must both happen while it's still intact.
+    // Never write "ordering.txt" here at all — it's irrelevant (candidate1 never finishes its own read)
+    // and, more importantly, `finishWithRetask`'s own Y-worktree is cut from THIS branch's shared history
+    // (the re-task reuses X's branch — see 21b53e6a's own decision record) which already carries
+    // "ordering.txt" via `reviewedTip` above; a SECOND, independent add of the same filename on repoPath's
+    // own lineage is an add/add merge conflict risk the moment its content ever differs from reviewedTip's.
+    fs.mkdirSync(path.join(repoPath, "sub1"), { recursive: true });
+    fs.writeFileSync(path.join(repoPath, "sub1", "leaf.txt"), `leaf-${tag}-${sfx}\n`); // unique -> unique, deletable subtree object
+    commitAll(repoPath, [`chore(unrelated): candidate1 (will be corrupted)`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${ctx.genesisSha}`], GIT_ID);
+    const candidate1Sha = git(repoPath, "rev-parse HEAD");
+    fs.rmSync(path.join(repoPath, "sub1"), { recursive: true, force: true }); // candidate2 must never reference "sub1" at all
+
+    // Candidate 2 (SECOND — checked after candidate1): either a genuine landing that matches reviewedTip's
+    // own "ordering.txt" BYTE-FOR-BYTE (so Y's later squash-merge of the SAME filename, from the shared
+    // branch history above, is a no-op add/add that git auto-resolves since both sides agree — the
+    // "transient then attributed" order), or OMITS "ordering.txt" entirely (a definitive miss via absence,
+    // never present on repoPath's own lineage at all until Y's later merge cleanly ADDS it with no
+    // conflict — the "all-miss-with-a-transient" order, no genuine candidate anywhere in this scan).
+    if (genuineCandidateExists) fs.writeFileSync(path.join(repoPath, "ordering.txt"), "ordering content\n");
+    commitAll(repoPath, [`chore(unrelated): candidate2 (${genuineCandidateExists ? "genuine" : "definitive miss"})`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${ctx.genesisSha}`], GIT_ID);
+    const candidate2Sha = git(repoPath, "rev-parse HEAD");
+
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["ordering.txt"] } });
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+    const y = await finishWithRetask(ctx); // ALSO commits (worker Y's own squash) on top of candidate2 — must run before the corruption too
+    corruptOneSubtree(repoPath, candidate1Sha, "sub1"); // the LAST git write this repo ever does in this setup
+    return { ...ctx, ...y, reviewedTip, candidate1Sha, candidate2Sha };
+  }
+  {
+    const R_SAWT_WINS = path.join(os.tmpdir(), `loom-sglt-sawt-wins-${sfx}`);
+    const R_SAWT_ALLMISS = path.join(os.tmpdir(), `loom-sglt-sawt-allmiss-${sfx}`);
+    try {
+      const SAWT_WINS = await setupSawTransientOrdering("sawt-wins", R_SAWT_WINS, { genuineCandidateExists: true });
+      const SAWT_ALLMISS = await setupSawTransientOrdering("sawt-allmiss", R_SAWT_ALLMISS, { genuineCandidateExists: false });
+
+      const r5 = await sessions.reconcileOrchestrationOnBoot(new Set());
+      console.log("SAWTRANSIENT reconcile result:", JSON.stringify(r5));
+
+      // --- transient (candidate1) then attributed (candidate2) ⇒ overall attributed ---
+      const sawtWinsMergeDone = db.listEventsForWorker(SAWT_WINS.workerXId).find((ev) => ev.kind === "merge_done");
+      check("(SAWT_WINS) a later clean attribution wins over an earlier transient miss",
+        sawtWinsMergeDone?.detail?.staleGenerationAttributed === true && sawtWinsMergeDone?.detail?.attributedLandedSha === SAWT_WINS.candidate2Sha);
+      check("(SAWT_WINS) never escalated — the transient candidate1 was superseded by a real attribution",
+        db.listStaleGenerationUnresolved().every((e) => e.sessionId !== SAWT_WINS.workerXId));
+      check("(SAWT_WINS) worker Y is still independently finalized, unaffected", db.listEventsForWorker(SAWT_WINS.workerYId).some((ev) => ev.kind === "merge_done"));
+
+      // --- transient (candidate1) + definitive miss (candidate2), no genuine candidate anywhere ⇒ transient, no escalation ---
+      const sawtAllmissMergeDone = db.listEventsForWorker(SAWT_ALLMISS.workerXId).find((ev) => ev.kind === "merge_done");
+      check("(SAWT_ALLMISS) never attributed — no genuine candidate exists in this scan", !sawtAllmissMergeDone);
+      // Card 05915fc7 round 2 S1: a transient miss is now TRACKED (not escalated below the give-up
+      // threshold) — present in the list with escalated:false, kind:"transient", attempts:1.
+      check("(SAWT_ALLMISS) never escalated — at least one of the all-miss candidates was transient, so the whole attempt is 'transient', not 'no-match'",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === SAWT_ALLMISS.workerXId && !e.escalated && e.kind === "transient" && e.attempts === 1));
+      check("(SAWT_ALLMISS) the transient no-op names candidate1 (the one that was genuinely transient), logged",
+        warnsMatching("stale-generation own-landing").some((w) => w.includes(SAWT_ALLMISS.workerXId.slice(0, 8)) && w.includes(SAWT_ALLMISS.candidate1Sha.slice(0, 8)) && w.includes("transient")));
+      check("(SAWT_ALLMISS) worker Y is still independently finalized, unaffected", db.listEventsForWorker(SAWT_ALLMISS.workerYId).some((ev) => ev.kind === "merge_done"));
+    } finally {
+      for (const dir of [R_SAWT_WINS, R_SAWT_ALLMISS]) {
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- RETRY_SUCCEEDS (card 05915fc7, the original DoD's own requirement): a transient failure on one
+  // boot must retry — and genuinely SUCCEED — on a later boot once the transient condition clears, against
+  // the EXACT SAME underlying data (unlike PIPELINE_HOISTED_READ_FAILS's own permanently-unresolvable
+  // residual). Uses the SAME real, deterministic per-candidate corruption technique as SAWT_WINS/
+  // SAWT_ALLMISS above, but MOVES the subtree object aside rather than deleting it — boot 1 sees a
+  // genuinely failed `ls-tree -r` on the one candidate; restoring the object before boot 2 clears the
+  // condition for real, so boot 2's attribution is a genuine content-check success, not a mock. (An
+  // earlier draft of this test forced the failure via a global, instance-wide `gitOpMs=1` timeout instead
+  // — rejected: `reconcileOrchestrationOnBoot` reconciles EVERY worker in the shared DB in one pass, so a
+  // global timeout also broke candidate DISCOVERY — `findAllLandedTrailerCommits`, which this card's own
+  // scope never touched — for unrelated, already-settled scenarios, producing a spurious escalation
+  // elsewhere that had nothing to do with this test. Flagged separately as its own finding.) ---
+  async function setupRetrySucceeds(tag, repo) {
+    const ctx = await baseSetup(tag, repo);
+    const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
+    fs.writeFileSync(path.join(first.worktreePath, "retry.txt"), "retry content\n");
+    commitAll(first.worktreePath, "c1 real", GIT_ID);
+    const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+    fs.mkdirSync(path.join(repoPath, "sub-retry"), { recursive: true });
+    fs.writeFileSync(path.join(repoPath, "sub-retry", "leaf.txt"), `leaf-${tag}-${sfx}\n`);
+    fs.writeFileSync(path.join(repoPath, "retry.txt"), "retry content\n"); // byte-identical to reviewedTip's own — see SAWT's own note on why this matters for Y's later squash-merge
+    commitAll(repoPath, [`chore(unrelated): retry-succeeds landing`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${ctx.genesisSha}`], GIT_ID);
+    const xLandedSha = git(repoPath, "rev-parse HEAD");
+    fs.rmSync(path.join(repoPath, "sub-retry"), { recursive: true, force: true });
+
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["retry.txt"] } });
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+    const y = await finishWithRetask(ctx); // commits more — must run before the corruption below
+    const bakPath = corruptOneSubtree(repoPath, xLandedSha, "sub-retry");
+    return { ...ctx, ...y, reviewedTip, xLandedSha, bakPath };
+  }
+  {
+    const R_RETRY_SUCCEEDS = path.join(os.tmpdir(), `loom-sglt-retry-succeeds-${sfx}`);
+    try {
+      const RETRY_SUCCEEDS = await setupRetrySucceeds("retry-succeeds", R_RETRY_SUCCEEDS);
+
+      const r6 = await sessions.reconcileOrchestrationOnBoot(new Set());
+      console.log("RETRY_SUCCEEDS reconcile result (boot 1, candidate tree corrupted):", JSON.stringify(r6));
+      check("(RETRY_SUCCEEDS boot 1) never attributed — the candidate's own tree read genuinely fails",
+        !db.listEventsForWorker(RETRY_SUCCEEDS.workerXId).find((ev) => ev.kind === "merge_done"));
+      // Card 05915fc7 round 2 S1: tracked (present, escalated:false, kind:"transient"), not escalated —
+      // the first of up to staleGenerationTransientEscalateAttempts boots before a real give-up.
+      check("(RETRY_SUCCEEDS boot 1) never escalated — a failed ls-tree is transient, retried next boot, never a one-shot escalation",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === RETRY_SUCCEEDS.workerXId && !e.escalated && e.kind === "transient" && e.attempts === 1));
+      check("(RETRY_SUCCEEDS boot 1) the transient no-op names this worker and the corrupted candidate sha, logged",
+        warnsMatching("stale-generation own-landing").some((w) => w.includes(RETRY_SUCCEEDS.workerXId.slice(0, 8)) && w.includes(RETRY_SUCCEEDS.xLandedSha.slice(0, 8)) && w.includes("transient")));
+
+      // Boot 2: restore the corrupted object — the SAME underlying data now attributes correctly.
+      restoreSubtree(RETRY_SUCCEEDS.bakPath);
+      const r7 = await sessions.reconcileOrchestrationOnBoot(new Set());
+      console.log("RETRY_SUCCEEDS reconcile result (boot 2, candidate tree restored):", JSON.stringify(r7));
+      const retrySucceedsMergeDone = db.listEventsForWorker(RETRY_SUCCEEDS.workerXId).find((ev) => ev.kind === "merge_done");
+      check("(RETRY_SUCCEEDS boot 2) attributed once the transient condition genuinely clears, against the SAME data as boot 1",
+        retrySucceedsMergeDone?.detail?.staleGenerationAttributed === true && retrySucceedsMergeDone?.detail?.attributedLandedSha === RETRY_SUCCEEDS.xLandedSha);
+      // The boot-1 tracking row has no "clear on success" mechanism (unchanged, pre-existing) — it just
+      // sits unescalated; a successful attribution short-circuits before ever touching it again.
+      check("(RETRY_SUCCEEDS boot 2) never escalated", db.listStaleGenerationUnresolved().some((e) => e.sessionId === RETRY_SUCCEEDS.workerXId && !e.escalated));
+      check("(RETRY_SUCCEEDS) worker Y is still independently finalized, unaffected", db.listEventsForWorker(RETRY_SUCCEEDS.workerYId).some((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { fs.rmSync(R_RETRY_SUCCEEDS, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }
+
+  // --- KINDFLIP (card 05915fc7, round 2, Code Review ruling 3): a row's "kind" is its MOST RECENT boot's
+  // own classification, not a history. Two flips, both through the real pipeline:
+  // - transient → definitive: a corrupted candidate (transient, boot 1) whose object is then restored
+  //   but whose REAL content genuinely mismatches (definitive, boot 2) must escalate on that FIRST
+  //   definitive boot, regardless of how few/many prior transient attempts there were (never gated on
+  //   staleGenerationTransientEscalateAttempts — that threshold is transient-only).
+  // - definitive → transient: a genuine mismatch (definitive, boot 1, escalates immediately) whose
+  //   candidate is THEN corrupted (transient, boot 2) must stay escalated — `escalated` is sticky
+  //   regardless of kind, and the nudge must not re-fire a second time. ---
+  async function setupKindFlipTransientToDefinitive(tag, repo) {
+    const ctx = await baseSetup(tag, repo);
+    const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
+    fs.writeFileSync(path.join(first.worktreePath, "kf.txt"), "reviewed content\n");
+    commitAll(first.worktreePath, "c1 real", GIT_ID);
+    const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+    // "kf.txt" is deliberately OMITTED here (never written on repoPath at all) — a genuine mismatch via
+    // ABSENCE, same pattern SAWT_ALLMISS uses above, so Y's LATER squash-merge (which inherits "kf.txt"
+    // through X's own branch history) can cleanly ADD it with no add/add conflict against this candidate.
+    fs.mkdirSync(path.join(repoPath, "sub-kf"), { recursive: true });
+    fs.writeFileSync(path.join(repoPath, "sub-kf", "leaf.txt"), `leaf-${tag}-${sfx}\n`);
+    commitAll(repoPath, [`chore(unrelated): kindflip t2d candidate`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${ctx.genesisSha}`], GIT_ID);
+    const candidateSha = git(repoPath, "rev-parse HEAD");
+
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["kf.txt"] } });
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+    const y = await finishWithRetask(ctx);
+    const bakPath = corruptOneSubtree(repoPath, candidateSha, "sub-kf"); // boot 1 sees this as transient
+    return { ...ctx, ...y, reviewedTip, candidateSha, bakPath };
+  }
+  async function setupKindFlipDefinitiveToTransient(tag, repo) {
+    const ctx = await baseSetup(tag, repo);
+    const { first, mgrId, workerXId, taskId, repo: repoPath } = ctx;
+    fs.writeFileSync(path.join(first.worktreePath, "kf2.txt"), "reviewed content\n");
+    commitAll(first.worktreePath, "c1 real", GIT_ID);
+    const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+    // "kf2.txt" is deliberately OMITTED here too (same collision-avoidance reasoning as T2D above) — a
+    // genuine mismatch via absence, readable cleanly on boot 1 (not corrupted yet).
+    fs.mkdirSync(path.join(repoPath, "sub-kf2"), { recursive: true });
+    fs.writeFileSync(path.join(repoPath, "sub-kf2", "leaf.txt"), `leaf-${tag}-${sfx}\n`);
+    commitAll(repoPath, [`chore(unrelated): kindflip d2t candidate`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${ctx.genesisSha}`], GIT_ID);
+    const candidateSha = git(repoPath, "rev-parse HEAD");
+    // deliberately NOT corrupted yet — boot 1 reads this cleanly and finds a genuine mismatch (definitive).
+
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["kf2.txt"] } });
+    db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+    const y = await finishWithRetask(ctx);
+    return { ...ctx, ...y, reviewedTip, candidateSha, repoPath };
+  }
+  {
+    const R_KF_T2D = path.join(os.tmpdir(), `loom-sglt-kf-t2d-${sfx}`);
+    const R_KF_D2T = path.join(os.tmpdir(), `loom-sglt-kf-d2t-${sfx}`);
+    try {
+      const KF_T2D = await setupKindFlipTransientToDefinitive("kf-t2d", R_KF_T2D);
+      const KF_D2T = await setupKindFlipDefinitiveToTransient("kf-d2t", R_KF_D2T);
+
+      const r8 = await sessions.reconcileOrchestrationOnBoot(new Set());
+      console.log("KINDFLIP reconcile result (boot 1):", JSON.stringify(r8));
+      check("(KF_T2D boot 1) tracked as transient, not escalated",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === KF_T2D.workerXId && !e.escalated && e.kind === "transient"));
+      check("(KF_D2T boot 1) a genuine mismatch escalates immediately (definitive, first boot)",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === KF_D2T.workerXId && e.escalated && e.kind === "definitive" && e.attempts === 1));
+      // Full id, never a sliced prefix — KF_T2D and KF_D2T share the SAME "sglt-kf-" prefix at 8 chars.
+      const kfD2tEscalationsAfterBoot1 = warnsMatching("escalated [loom:merge-orphaned]").filter((w) => w.includes(KF_D2T.workerXId)).length;
+
+      // T2D: restore the object — the candidate is now readable, and its REAL content genuinely
+      // mismatches reviewedTip's. D2T: NOW corrupt the (already-escalated) candidate's own subtree.
+      restoreSubtree(KF_T2D.bakPath);
+      corruptOneSubtree(KF_D2T.repoPath, KF_D2T.candidateSha, "sub-kf2");
+
+      const r9 = await sessions.reconcileOrchestrationOnBoot(new Set());
+      console.log("KINDFLIP reconcile result (boot 2):", JSON.stringify(r9));
+      check("(KF_T2D boot 2) transient → definitive: escalates on this FIRST definitive boot, even though only 1 prior transient attempt (well below the give-up threshold)",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === KF_T2D.workerXId && e.escalated && e.kind === "definitive"));
+      check("(KF_T2D) never attributed — it was always a genuine mismatch, not a transient candidate that would eventually match",
+        !db.listEventsForWorker(KF_T2D.workerXId).find((ev) => ev.kind === "merge_done"));
+      check("(KF_D2T boot 2) definitive → transient: STAYS escalated — a later transient reading never un-escalates",
+        db.listStaleGenerationUnresolved().some((e) => e.sessionId === KF_D2T.workerXId && e.escalated && e.kind === "transient"));
+      const kfD2tEscalationsAfterBoot2 = warnsMatching("escalated [loom:merge-orphaned]").filter((w) => w.includes(KF_D2T.workerXId)).length;
+      check("(KF_D2T) the escalation nudge did NOT re-fire a second time on the later transient boot",
+        kfD2tEscalationsAfterBoot2 === kfD2tEscalationsAfterBoot1 && kfD2tEscalationsAfterBoot1 === 1);
+    } finally {
+      for (const dir of [R_KF_T2D, R_KF_D2T]) {
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- DISCOVERY_TIMEOUT_ESCALATES (RENAMED from round 2's UNCAUGHT_ESCALATES, which claimed the WRONG
+  // mechanism — see this card's own decision record, S1, for the full audit of why no live seam reaches
+  // attributeStaleGenerationOwnLanding's outer catch-all at all).
+  //
+  // @decision 05915fc7 — round 3 S1: proves the EARLY `candidates.length === 0` no-match return
+  // escalates, never the outer catch-all.
+  //
+  // Isolated into its OWN fresh Db/SessionService pair (never the shared `db`/`sessions`) — a global
+  // `gitOpMs=1` forces a REAL timeout on the candidate-discovery `git log` call itself, which would
+  // otherwise also hit every OTHER already-tracked row in the shared DB if run through `sessions`. ---
+  {
+    const R_DISCOVERY_TIMEOUT = path.join(os.tmpdir(), `loom-sglt-disctimeout-${sfx}`);
+    const dbDiscoveryTimeoutPath = path.join(os.tmpdir(), `loom-sglt-disctimeout-db-${sfx}.db`);
+    let dbDiscoveryTimeout;
+    try {
+      initRepo(R_DISCOVERY_TIMEOUT);
+      dbDiscoveryTimeout = new Db(dbDiscoveryTimeoutPath);
+      const sessionsDiscoveryTimeout = new SessionService(dbDiscoveryTimeout, pty, new OrchestrationControl(), { gitOpMs: 1 });
+      const projId = `sglt-disctimeout-proj-${sfx}`, agentId = `sglt-disctimeout-agent-${sfx}`, taskId = `sglt-disctimeout-task-${sfx}`;
+      const mgrId = `sglt-disctimeout-mgr-${sfx}`, workerXId = `sglt-disctimeout-workerx-${sfx}`;
+      dbDiscoveryTimeout.insertProject({ id: projId, name: "SGLT-disctimeout", repoPath: R_DISCOVERY_TIMEOUT, vaultPath: R_DISCOVERY_TIMEOUT, config: {}, createdAt: now, archivedAt: null });
+      dbDiscoveryTimeout.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbDiscoveryTimeout.insertTask({ id: taskId, projectId: projId, title: "SGLT-disctimeout", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbDiscoveryTimeout.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_DISCOVERY_TIMEOUT, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_DISCOVERY_TIMEOUT, "rev-parse HEAD");
+      dbDiscoveryTimeout.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+      const first = await createWorktree(R_DISCOVERY_TIMEOUT, projId, taskId);
+      dbDiscoveryTimeout.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "uc.txt"), "uc content\n");
+      commitAll(first.worktreePath, "c1 real", GIT_ID);
+      const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+      // A re-task reusing X's own path/branch — the SAME "stale generation" shape every other scenario uses.
+      const second = await createWorktree(R_DISCOVERY_TIMEOUT, projId, taskId);
+      const workerYId = `sglt-disctimeout-workery-${sfx}`;
+      dbDiscoveryTimeout.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+      dbDiscoveryTimeout.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["uc.txt"] } });
+      dbDiscoveryTimeout.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      const ucResult = await sessionsDiscoveryTimeout.reconcileOrchestrationOnBoot(new Set());
+      console.log("DISCOVERY_TIMEOUT_ESCALATES reconcile result:", JSON.stringify(ucResult));
+      check("(DISCOVERY_TIMEOUT_ESCALATES) a timeout during candidate DISCOVERY itself escalates on the FIRST boot via the early zero-candidates no-match return — never the outer catch-all (round 2's claim, withdrawn; see card 1e7d6956 for the tracked gap that this early return doesn't classify as transient)",
+        dbDiscoveryTimeout.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated && e.kind === "definitive"));
+      check("(DISCOVERY_TIMEOUT_ESCALATES) never attributed", !dbDiscoveryTimeout.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbDiscoveryTimeout?.close(); } catch { /* best-effort */ }
+      for (const p of [R_DISCOVERY_TIMEOUT, dbDiscoveryTimeoutPath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- UPGRADE_LEGACY_BLOB (card 05915fc7, round 3, B1 — BLOCKING, reproduced): a row written by
+  // pre-card `main` carries NO `kind` field at all. Round 2's own type guard on
+  // listStaleGenerationUnresolved REQUIRED kind ∈ {"definitive","transient"}, so every such legacy row
+  // was filtered out as corrupt on the first boot after upgrade — recordStaleGenerationUnresolved's own
+  // upsert (`list.find(...)` against the now-empty list) then re-created an already-escalated worker's
+  // row FRESH (`escalated:false`), firing a DUPLICATE [loom:merge-orphaned] nudge, while a second,
+  // unrelated legacy row (no live session to ever touch it again) was silently dropped from the blob
+  // entirely. The literal meta key below MUST match STALE_GENERATION_UNRESOLVED_KEY in db.ts exactly —
+  // it is not exported (module-private), so this is a deliberate, hand-kept duplicate, not an import. ---
+  {
+    // NB: "legacy" is already a taken tag/prefix in this file (the LEGACY/setupLegacyNoFilesChangedPaths
+    // scenario, R_LEGACY, above) — this block uses "ul" (UPGRADE_LEGACY_BLOB) throughout to avoid
+    // colliding on the SAME temp directory path (same `sfx` for the whole file).
+    const R_UL = path.join(os.tmpdir(), `loom-sglt-ul-${sfx}`);
+    const dbUlPath = path.join(os.tmpdir(), `loom-sglt-ul-db-${sfx}.db`);
+    let dbUl;
+    try {
+      initRepo(R_UL);
+      dbUl = new Db(dbUlPath);
+      const sessionsUl = new SessionService(dbUl, pty, new OrchestrationControl());
+      const projId = `sglt-ul-proj-${sfx}`, agentId = `sglt-ul-agent-${sfx}`, taskId = `sglt-ul-task-${sfx}`;
+      const mgrId = `sglt-ul-mgr-${sfx}`, workerXId = `sglt-ul-workerx-${sfx}`, workerYId = `sglt-ul-workery-${sfx}`;
+      const orphanSessionId = `sglt-ul-orphan-${sfx}`; // deliberately never inserted as a real session row
+      dbUl.insertProject({ id: projId, name: "SGLT-ul", repoPath: R_UL, vaultPath: R_UL, config: {}, createdAt: now, archivedAt: null });
+      dbUl.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbUl.insertTask({ id: taskId, projectId: projId, title: "SGLT-ul", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbUl.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_UL, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_UL, "rev-parse HEAD");
+      dbUl.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+      const first = await createWorktree(R_UL, projId, taskId);
+      dbUl.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "x.txt"), "x real work, never actually landed\n");
+      commitAll(first.worktreePath, "x", GIT_ID);
+      const xTip = git(first.worktreePath, "rev-parse HEAD"); // X's own reviewed tip — never merged anywhere
+
+      // A deterministic, DEFINITIVE miss every boot (the same shape FORGED uses above): a forged commit
+      // whose Loom-Landed-Tip equals xTip (so the trailer-value chain check trivially succeeds) but whose
+      // own content never actually carries "x.txt" — recordedTipContentLanded always reads "no-match".
+      fs.writeFileSync(path.join(R_UL, "pwned.txt"), "unrelated garbage, nothing to do with X's real work\n");
+      commitAll(R_UL, [`chore(unrelated): forged commit`, `Loom-Worker-Branch: ${first.branch}\nLoom-Landed-Tip: ${xTip}`], GIT_ID);
+
+      dbUl.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: xTip, filesChangedPaths: ["x.txt"] } });
+      dbUl.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      // Re-task Y (same pattern as finishWithRetask, inlined for this isolated db) — needed only so X
+      // registers as a "stale generation" at all (currentGenerationIds keys on path/branch reuse).
+      const second = await createWorktree(R_UL, projId, taskId);
+      dbUl.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+      fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+      commitAll(second.worktreePath, "y", GIT_ID);
+      execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "SGLT-ul-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: R_UL });
+      dbUl.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+
+      // Seed the MAIN-shaped (pre-card) blob DIRECTLY — no `kind` field on either row, exactly what a
+      // real pre-upgrade `app_meta` row looks like.
+      const earlierIso = new Date(Date.parse(now) - 86_400_000).toISOString();
+      const legacyBlob = [
+        { sessionId: workerXId, branch: first.branch, taskId, projectId: projId, reason: "legacy pre-upgrade reason A", firstDetectedAt: earlierIso, lastAttemptAt: earlierIso, attempts: 5, escalated: true },
+        { sessionId: orphanSessionId, branch: null, taskId: null, projectId: projId, reason: "legacy pre-upgrade reason B (orphaned, no live session)", firstDetectedAt: earlierIso, lastAttemptAt: earlierIso, attempts: 3, escalated: false },
+      ];
+      dbUl.setMeta("stale_generation_merge_unresolved", JSON.stringify(legacyBlob));
+
+      const ulResult = await sessionsUl.reconcileOrchestrationOnBoot(new Set());
+      console.log("UPGRADE_LEGACY_BLOB reconcile result:", JSON.stringify(ulResult));
+
+      const postBoot = dbUl.listStaleGenerationUnresolved();
+      check("(UPGRADE_LEGACY_BLOB) every pre-upgrade row survives the boot — none dropped for lacking a `kind` field",
+        postBoot.length === 2 && postBoot.some((e) => e.sessionId === workerXId) && postBoot.some((e) => e.sessionId === orphanSessionId));
+      const xEntry = postBoot.find((e) => e.sessionId === workerXId);
+      check("(UPGRADE_LEGACY_BLOB) the already-escalated worker STAYS escalated (never resets to false)",
+        xEntry?.escalated === true);
+      check("(UPGRADE_LEGACY_BLOB) its attempts count is PRESERVED and incremented from the legacy value, never reset to 1",
+        xEntry?.attempts === 6);
+      check("(UPGRADE_LEGACY_BLOB) its kind now reads 'definitive' (the only kind that ever existed pre-card)",
+        xEntry?.kind === "definitive");
+      const orphanEntry = postBoot.find((e) => e.sessionId === orphanSessionId);
+      check("(UPGRADE_LEGACY_BLOB) the orphaned row (no live session) is left completely UNTOUCHED",
+        orphanEntry?.escalated === false && orphanEntry?.attempts === 3 && orphanEntry?.reason === "legacy pre-upgrade reason B (orphaned, no live session)");
+      check("(UPGRADE_LEGACY_BLOB) no DUPLICATE nudge fires for the already-escalated worker this boot",
+        warnsMatching("escalated [loom:merge-orphaned]").filter((w) => w.includes(workerXId.slice(0, 8))).length === 0);
+      check("(UPGRADE_LEGACY_BLOB) never (re-)attributed", !dbUl.listEventsForWorker(workerXId).find((ev) => ev.kind === "merge_done"));
+      check("(UPGRADE_LEGACY_BLOB) worker Y is still independently finalized, unaffected", dbUl.listEventsForWorker(workerYId).some((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbUl?.close(); } catch { /* best-effort */ }
+      for (const p of [R_UL, dbUlPath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- BOUND_ATTEMPTS (card 05915fc7, round 3, S3): the transient give-up THRESHOLD itself, driven
+  // through real boots — no escalation through attempts 1..N-1, EXACTLY one nudge at boot N (crossing
+  // staleGenerationTransientEscalateAttempts), and no re-nudge at boot N+1. Isolated into its OWN fresh
+  // Db/SessionService pair (never the shared `db`/`sessions`) so the LOW override here never affects any
+  // other scenario's own attempt counting. Reuses the SAME real, deterministic per-candidate move-aside
+  // corruption as RETRY_SUCCEEDS above, but — unlike that scenario — never restores the object at all:
+  // this one needs the SAME transient condition to persist across every boot it drives. ---
+  {
+    const R_BOUND = path.join(os.tmpdir(), `loom-sglt-bound-${sfx}`);
+    const dbBoundPath = path.join(os.tmpdir(), `loom-sglt-bound-db-${sfx}.db`);
+    let dbBound;
+    try {
+      initRepo(R_BOUND);
+      dbBound = new Db(dbBoundPath);
+      const BOUND_ATTEMPTS = 2; // low, so a 3-boot run proves the full bound/no-rebound shape fast
+      const sessionsBound = new SessionService(dbBound, pty, new OrchestrationControl(), { staleGenerationTransientEscalateAttempts: BOUND_ATTEMPTS });
+      const projId = `sglt-bound-proj-${sfx}`, agentId = `sglt-bound-agent-${sfx}`, taskId = `sglt-bound-task-${sfx}`;
+      const mgrId = `sglt-bound-mgr-${sfx}`, workerXId = `sglt-bound-workerx-${sfx}`, workerYId = `sglt-bound-workery-${sfx}`;
+      dbBound.insertProject({ id: projId, name: "SGLT-bound", repoPath: R_BOUND, vaultPath: R_BOUND, config: {}, createdAt: now, archivedAt: null });
+      dbBound.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbBound.insertTask({ id: taskId, projectId: projId, title: "SGLT-bound", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbBound.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_BOUND, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_BOUND, "rev-parse HEAD");
+      dbBound.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+      const first = await createWorktree(R_BOUND, projId, taskId);
+      dbBound.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "bound.txt"), "bound content\n");
+      commitAll(first.worktreePath, "c1 real", GIT_ID);
+      const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+      fs.mkdirSync(path.join(R_BOUND, "sub-bound"), { recursive: true });
+      fs.writeFileSync(path.join(R_BOUND, "sub-bound", "leaf.txt"), `leaf-bound-${sfx}\n`);
+      fs.writeFileSync(path.join(R_BOUND, "bound.txt"), "bound content\n"); // byte-identical to reviewedTip's own
+      commitAll(R_BOUND, [`chore(unrelated): bound landing`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${genesisSha}`], GIT_ID);
+      const xLandedSha = git(R_BOUND, "rev-parse HEAD");
+      fs.rmSync(path.join(R_BOUND, "sub-bound"), { recursive: true, force: true });
+
+      dbBound.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["bound.txt"] } });
+      dbBound.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      const second = await createWorktree(R_BOUND, projId, taskId);
+      dbBound.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+      fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+      commitAll(second.worktreePath, "y", GIT_ID);
+      execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "SGLT-bound-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: R_BOUND });
+      dbBound.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+
+      corruptOneSubtree(R_BOUND, xLandedSha, "sub-bound"); // never restored — persists across every boot below
+
+      // Boot 1 of BOUND_ATTEMPTS: tracked, transient, not yet escalated.
+      const b1 = await sessionsBound.reconcileOrchestrationOnBoot(new Set());
+      console.log("BOUND_ATTEMPTS reconcile result (boot 1):", JSON.stringify(b1));
+      check(`(BOUND_ATTEMPTS boot 1) tracked as transient, not yet escalated (attempt 1 of ${BOUND_ATTEMPTS})`,
+        dbBound.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && !e.escalated && e.kind === "transient" && e.attempts === 1));
+      check("(BOUND_ATTEMPTS boot 1) the boot-summary staleGenerationTransient counter includes this row", b1.staleGenerationTransient >= 1);
+      check("(BOUND_ATTEMPTS boot 1) the boot-summary staleGenerationUnresolvedEscalated counter does NOT include this row yet", b1.staleGenerationUnresolvedEscalated === 0);
+
+      // Boot 2: attempts reaches BOUND_ATTEMPTS — crosses the threshold, escalates exactly once.
+      const b2 = await sessionsBound.reconcileOrchestrationOnBoot(new Set());
+      console.log("BOUND_ATTEMPTS reconcile result (boot 2, crosses threshold):", JSON.stringify(b2));
+      check("(BOUND_ATTEMPTS boot 2) escalates on crossing the attempts threshold",
+        dbBound.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated && e.kind === "transient" && e.attempts === BOUND_ATTEMPTS));
+      check("(BOUND_ATTEMPTS boot 2) the boot-summary staleGenerationUnresolvedEscalated counter now includes this row", b2.staleGenerationUnresolvedEscalated >= 1);
+      check("(BOUND_ATTEMPTS boot 2) the one-shot escalation nudge fired exactly once",
+        warnsMatching("escalated [loom:merge-orphaned]").filter((w) => w.includes(workerXId.slice(0, 8)) && w.includes("past the transient give-up threshold (one-shot)")).length === 1);
+
+      // Boot 3 (N+1): still escalated, sticky — the nudge does NOT re-fire a second time.
+      const b3 = await sessionsBound.reconcileOrchestrationOnBoot(new Set());
+      console.log("BOUND_ATTEMPTS reconcile result (boot 3, no re-nudge):", JSON.stringify(b3));
+      check("(BOUND_ATTEMPTS boot 3) stays escalated, sticky",
+        dbBound.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && e.escalated));
+      check("(BOUND_ATTEMPTS boot 3) the one-shot nudge did NOT re-fire a second time",
+        warnsMatching("escalated [loom:merge-orphaned]").filter((w) => w.includes(workerXId.slice(0, 8)) && w.includes("past the transient give-up threshold (one-shot)")).length === 1);
+      check("(BOUND_ATTEMPTS) worker Y is still independently finalized, unaffected", dbBound.listEventsForWorker(workerYId).some((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbBound?.close(); } catch { /* best-effort */ }
+      for (const p of [R_BOUND, dbBoundPath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  // --- BOUND_AGE (card 05915fc7, round 3, S3): the AGE leg of the give-up threshold
+  // (ageMs >= staleGenerationTransientEscalateMs) fires independently of the attempts leg — the attempts
+  // threshold is set deliberately UNREACHABLE in 2 boots here, so only the age leg can possibly cross it.
+  // sleepPast proves the real wait genuinely outlasts the Ms threshold rather than trusting a comment
+  // (see fixed-wait-witness-guard.mjs / _wait.mjs's own doc). ---
+  {
+    const R_BOUND_AGE = path.join(os.tmpdir(), `loom-sglt-bound-age-${sfx}`);
+    const dbBoundAgePath = path.join(os.tmpdir(), `loom-sglt-bound-age-db-${sfx}.db`);
+    let dbBoundAge;
+    try {
+      initRepo(R_BOUND_AGE);
+      dbBoundAge = new Db(dbBoundAgePath);
+      const AGE_MS = 50;
+      const sessionsBoundAge = new SessionService(dbBoundAge, pty, new OrchestrationControl(), {
+        staleGenerationTransientEscalateAttempts: 1000, // deliberately unreachable in 2 boots
+        staleGenerationTransientEscalateMs: AGE_MS,
+      });
+      const projId = `sglt-boundage-proj-${sfx}`, agentId = `sglt-boundage-agent-${sfx}`, taskId = `sglt-boundage-task-${sfx}`;
+      const mgrId = `sglt-boundage-mgr-${sfx}`, workerXId = `sglt-boundage-workerx-${sfx}`, workerYId = `sglt-boundage-workery-${sfx}`;
+      dbBoundAge.insertProject({ id: projId, name: "SGLT-boundage", repoPath: R_BOUND_AGE, vaultPath: R_BOUND_AGE, config: {}, createdAt: now, archivedAt: null });
+      dbBoundAge.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+      dbBoundAge.insertTask({ id: taskId, projectId: projId, title: "SGLT-boundage", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      dbBoundAge.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: R_BOUND_AGE, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      const genesisSha = git(R_BOUND_AGE, "rev-parse HEAD");
+      dbBoundAge.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: genesisSha }));
+      const first = await createWorktree(R_BOUND_AGE, projId, taskId);
+      dbBoundAge.insertSession({ id: workerXId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: xLastActivityFor(now), lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
+      fs.writeFileSync(path.join(first.worktreePath, "age.txt"), "age content\n");
+      commitAll(first.worktreePath, "c1 real", GIT_ID);
+      const reviewedTip = git(first.worktreePath, "rev-parse HEAD");
+
+      fs.mkdirSync(path.join(R_BOUND_AGE, "sub-age"), { recursive: true });
+      fs.writeFileSync(path.join(R_BOUND_AGE, "sub-age", "leaf.txt"), `leaf-boundage-${sfx}\n`);
+      fs.writeFileSync(path.join(R_BOUND_AGE, "age.txt"), "age content\n");
+      commitAll(R_BOUND_AGE, [`chore(unrelated): boundage landing`, `Loom-Worker-Branch: ${first.branch}\nLoom-Worker-Base: ${genesisSha}`], GIT_ID);
+      const xLandedSha = git(R_BOUND_AGE, "rev-parse HEAD");
+      fs.rmSync(path.join(R_BOUND_AGE, "sub-age"), { recursive: true, force: true });
+
+      dbBoundAge.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_request", detail: { branch: first.branch, tip: reviewedTip, filesChangedPaths: ["age.txt"] } });
+      dbBoundAge.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerXId, taskId, kind: "merge_landing_started", detail: {} });
+
+      const second = await createWorktree(R_BOUND_AGE, projId, taskId);
+      dbBoundAge.insertSession({ id: workerYId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: yCreatedAtFor(now), lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
+      fs.writeFileSync(path.join(second.worktreePath, "y.txt"), "y work\n");
+      commitAll(second.worktreePath, "y", GIT_ID);
+      execSync(`git ${GIT_ID} merge --squash ${second.branch} && git ${GIT_ID} commit -q -m "SGLT-boundage-y" -m "Loom-Worker-Branch: ${second.branch}"`, { cwd: R_BOUND_AGE });
+      dbBoundAge.appendEvent({ id: randomUUID(), ts: now, managerSessionId: mgrId, workerSessionId: workerYId, taskId, kind: "merge_request", detail: { branch: second.branch } });
+
+      corruptOneSubtree(R_BOUND_AGE, xLandedSha, "sub-age"); // never restored — persists for both boots below
+
+      const a1 = await sessionsBoundAge.reconcileOrchestrationOnBoot(new Set());
+      console.log("BOUND_AGE reconcile result (boot 1):", JSON.stringify(a1));
+      check("(BOUND_AGE boot 1) tracked as transient, not yet escalated (age not yet past the Ms threshold)",
+        dbBoundAge.listStaleGenerationUnresolved().some((e) => e.sessionId === workerXId && !e.escalated && e.kind === "transient"));
+
+      await sleepPast(AGE_MS + 100, AGE_MS, "past staleGenerationTransientEscalateMs"); // proves elapsed > AGE_MS, not a guess
+
+      const a2 = await sessionsBoundAge.reconcileOrchestrationOnBoot(new Set());
+      console.log("BOUND_AGE reconcile result (boot 2, age threshold crossed):", JSON.stringify(a2));
+      const ageEntry = dbBoundAge.listStaleGenerationUnresolved().find((e) => e.sessionId === workerXId);
+      check("(BOUND_AGE boot 2) escalates via the AGE leg alone — attempts is still far below its own (deliberately unreachable) threshold",
+        ageEntry?.escalated === true && ageEntry?.kind === "transient" && ageEntry.attempts < 1000);
+      check("(BOUND_AGE) worker Y is still independently finalized, unaffected", dbBoundAge.listEventsForWorker(workerYId).some((ev) => ev.kind === "merge_done"));
+    } finally {
+      try { dbBoundAge?.close(); } catch { /* best-effort */ }
+      for (const p of [R_BOUND_AGE, dbBoundAgePath]) {
+        try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* best-effort */ }
       }
     }
   }
@@ -1220,7 +1868,101 @@ try {
       emptyFilesResult === "no-match");
     try { fs.rmSync(efRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
+
+  // --- Direct proof (card 05915fc7, round 2, Code Review B1 — adapted from the reviewer's own fixture at
+  // C:\Users\danie\.loom\tmp\scratch\7b1fc7f6-e627-4eff-a7c9-e341be6e77f8\fx.mjs): every DEFINITIVE shape
+  // the round-1 classification wrongly read as "transient" must now read as a definitive miss instead —
+  // (a)/(b) a non-UTF-8 path anywhere in a candidate's tree, (c) a missing reviewedTip, (d1) a missing
+  // candidate, (d2) a blob sha given where a tree-ish was expected — while (e) a genuine timeout against a
+  // REAL, EXISTING, tree-ish object still reads "transient". ---
+  {
+    const bu2Repo = path.join(os.tmpdir(), `loom-sglt-b1-definitive-${sfx}`);
+    fs.mkdirSync(bu2Repo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: bu2Repo });
+    fs.writeFileSync(path.join(bu2Repo, "a.txt"), "a\n");
+    commitAll(bu2Repo, "base", GIT_ID);
+    const bu2Base = git(bu2Repo, "rev-parse HEAD");
+    fs.writeFileSync(path.join(bu2Repo, "a.txt"), "a2\n");
+    commitAll(bu2Repo, "reviewed", GIT_ID);
+    const bu2Reviewed = git(bu2Repo, "rev-parse HEAD");
+    // (a)/(b): candidate matches reviewed's a.txt exactly, PLUS a non-UTF-8-named file planted via
+    // plumbing (a worker can land exactly this) — `cand`'s own tree is poisoned WHOLE, not just at a.txt.
+    const bu2Blob = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: bu2Repo, input: "x\n" }).toString().trim();
+    execFileSync("git", ["update-index", "--index-info"], {
+      cwd: bu2Repo,
+      input: Buffer.concat([Buffer.from(`100644 ${bu2Blob}\t`), Buffer.from([0x63, 0x61, 0x66, 0xe9]), Buffer.from(".txt\n")]),
+    });
+    execFileSync("git", [...GIT_ID.split(" "), "commit", "-qm", "candidate with latin-1 name"], { cwd: bu2Repo });
+    const bu2Cand = git(bu2Repo, "rev-parse HEAD");
+
+    const bu2FteCand = await fullTreeEntries(bu2Repo, bu2Cand);
+    check("(B1 a/b setup) fullTreeEntries(candidate) is STILL null — the poisoned-content mechanism itself is unchanged by this round",
+      bu2FteCand === null);
+    const bu2Content = await recordedTipContentLanded(bu2Repo, bu2Reviewed, bu2Cand, ["a.txt"]);
+    check("(B1 a/b) recordedTipContentLanded against a candidate with a non-UTF-8-named file ANYWHERE in its tree is 'no-match' (DEFINITIVE), never 'transient' — the object itself exists and is tree-ish, cat-file -t confirms it",
+      bu2Content === "no-match");
+
+    // (c): reviewedTip is a sha that never resolves in this repo at all.
+    const bu2MissingTip = "1".repeat(40);
+    const bu2MissingTipContent = await recordedTipContentLanded(bu2Repo, bu2MissingTip, bu2Cand, ["a.txt"]);
+    check("(B1 c) recordedTipContentLanded against a MISSING reviewedTip is 'no-match' (DEFINITIVE) — cat-file -t genuinely ran and reported it doesn't exist",
+      bu2MissingTipContent === "no-match");
+
+    // (d1): candidateSha is a sha that never resolves in this repo at all.
+    const bu2MissingCand = "2".repeat(40);
+    const bu2MissingCandContent = await recordedTipContentLanded(bu2Repo, bu2Reviewed, bu2MissingCand, ["a.txt"]);
+    check("(B1 d1) recordedTipContentLanded against a MISSING candidate is 'no-match' (DEFINITIVE)",
+      bu2MissingCandContent === "no-match");
+    const bu2MissingCandPlausible = await stampedPathsPlausible(bu2Repo, bu2Reviewed, bu2MissingCand, ["a.txt"]);
+    check("(B1 d1) stampedPathsPlausible against a MISSING otherSha is false (DEFINITIVE), never 'transient' — pre-checked before merge-base ever runs",
+      bu2MissingCandPlausible === false);
+
+    // (d2): a BLOB sha given where a tree-ish (commit) was expected — cat-file -t succeeds with type
+    // "blob", which is deliberately NOT in TREE_ISH_TYPES.
+    const bu2BlobContent = await recordedTipContentLanded(bu2Repo, bu2Reviewed, bu2Blob, ["a.txt"]);
+    check("(B1 d2) recordedTipContentLanded against a BLOB sha (not tree-ish) is 'no-match' (DEFINITIVE)",
+      bu2BlobContent === "no-match");
+    const bu2BlobPlausible = await stampedPathsPlausible(bu2Repo, bu2Reviewed, bu2Blob, ["a.txt"]);
+    check("(B1 d2) stampedPathsPlausible against a BLOB sha is false (DEFINITIVE)", bu2BlobPlausible === false);
+
+    // (e) control: a genuine timeout against a REAL, EXISTING, tree-ish object still reads "transient" —
+    // the pre-check succeeds (the object genuinely exists and is tree-ish), so the SUBSEQUENT failure is
+    // anomalous, not a fact about the object. 1ms is far below what a real git ls-tree spawn can complete in.
+    const bu2TimeoutContent = await recordedTipContentLanded(bu2Repo, bu2Reviewed, bu2Cand, ["a.txt"], { timeoutMs: 1 });
+    check("(B1 e control) a genuine timeout against a real, existing, tree-ish object still reads 'transient', never 'no-match'",
+      bu2TimeoutContent === "transient");
+
+    try { fs.rmSync(bu2Repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+
+  // --- Direct proof (card 05915fc7, round 2, Code Review ruling 2): a PROCESS-LEVEL spawn failure (no
+  // git exit code at all — ENOENT on the git binary) must read as TRANSIENT, never DEFINITIVE, even
+  // against a real, existing, tree-ish object. Injected via the real `deps.gitFactory` seam with a real
+  // simple-git instance pointed at a nonexistent binary — a REAL spawn failure, not a crafted message. ---
+  {
+    const spRepo = path.join(os.tmpdir(), `loom-sglt-spawnfail-${sfx}`);
+    fs.mkdirSync(spRepo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: spRepo });
+    fs.writeFileSync(path.join(spRepo, "a.txt"), "a\n");
+    commitAll(spRepo, "base", GIT_ID);
+    const spTip = git(spRepo, "rev-parse HEAD");
+    fs.writeFileSync(path.join(spRepo, "a.txt"), "a2\n");
+    commitAll(spRepo, "candidate", GIT_ID);
+    const spCand = git(spRepo, "rev-parse HEAD");
+    const badGitFactory = (repoPath, blockTimeoutMs) => simpleGit(repoPath, { binary: "loom-sglt-nonexistent-git-xyz", timeout: { block: blockTimeoutMs } });
+
+    const spContent = await recordedTipContentLanded(spRepo, spTip, spCand, ["a.txt"], { gitFactory: badGitFactory, timeoutMs: 5000 });
+    check("(spawn-failure) recordedTipContentLanded under a nonexistent git binary (a real ENOENT spawn failure) reads 'transient', never 'no-match'",
+      spContent === "transient");
+    const spPlausible = await stampedPathsPlausible(spRepo, spTip, spCand, ["a.txt"], { gitFactory: badGitFactory, timeoutMs: 5000 });
+    check("(spawn-failure) stampedPathsPlausible under the same nonexistent git binary reads 'transient', never false",
+      spPlausible === "transient");
+
+    try { fs.rmSync(spRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
 } finally {
+  console.warn = realWarn;
+  registerCommondirTrustPinLookup(undefined); // never leave a test pin registered past this file's own run
   for (const dir of [R_FORGED, R_GENUINE, R_OVERLAP, R_LEGACY, R_FB_LANDEDTIP, R_FB_NOLANDEDTIP, R_ZERODELTA, R_REFMOVE, R_SCOPED, R_RENAME, R_REVERT, R_LAG]) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
