@@ -50,6 +50,7 @@ const {
   listActiveMergeQuarantines, MERGE_QUARANTINE_DIR, enterMergeQuarantine, clearMergeQuarantineByToken,
   clearMergeQuarantineByRecordedPath, clearMergeQuarantineLatchFile, quarantineLatchFileIdsFor,
   clearMergeQuarantine, assertRepoNotQuarantined, ownedKeysIncluding, clearMergeQuarantineByKey,
+  pushPendingQuarantineTestOnly,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -869,10 +870,10 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // CARD 7a7e041b, MIXED SCENARIO ("7a7e041b-mixed") — `final` physically holds TWO tokens: one already
-  // tombstoned (an unrelated, fully-cleared raise that happens to reuse the identical token string — the
-  // tombstone set is keyed on the string alone, exactly like production), the other never cleared at
-  // all. The fix must drop ONLY the tombstoned token from the copy-aside, never discard the still-
-  // legitimately-outstanding survivor and never keep the dead one either.
+  // tombstoned (fully cleared under d's OWN identity earlier this process, per card 8bc779f0's own
+  // identity-scoped clearedTokens), the other never cleared at all. The fix must drop ONLY the
+  // tombstoned token from the copy-aside, never discard the still-legitimately-outstanding survivor and
+  // never keep the dead one either.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r = makeToplevelRepo("7a7e041b-mixed");
@@ -881,11 +882,12 @@ try {
   const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
   const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
 
-  // Mint a token via a wholly UNRELATED repo and fully clear it — this durably tombstones that exact
-  // string in `clearedTokens`, with no connection at all to r/d/finalPath below.
-  const scratch = makeToplevelRepo("7a7e041b-mixed-scratch");
-  const deadTok = enterMergeQuarantine(scratch, "scratch-branch", "scratch raise — becomes the tombstoned token");
-  clearMergeQuarantineByToken(scratch, deadTok);
+  // @decision 8bc779f0 (round 3) — clearedTokens is identity-scoped now; mint+clear deadTok under `d`'s
+  // OWN identity (never an unrelated scratch repo), via a pending-entry push (never a real raise at
+  // `d`'s own path, so it can't collide with r/d/finalPath's own canonical key below).
+  const deadTok = `mixed-dead-token-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  pushPendingQuarantineTestOnly({ repoPath: d, branch: "d-scratch-branch", reason: "d raise — becomes the tombstoned token", enteredAt: Date.now(), tokens: [deadTok] }, `d-scratch-pending-${Date.now()}.json`);
+  clearMergeQuarantineByToken(d, deadTok);
   check("(mixed precondition) deadTok is lifted in-process (tombstoned)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(deadTok));
 
   // Hand-write `final` directly (never loaded into THIS process's memory at all — d is never booted),
@@ -2333,12 +2335,16 @@ try {
   // this downstream, with or without this card's fix) — asserts the copy-aside is skipped outright, as
   // fully tombstoned, never resurrected ----
   {
-  const scratch8 = makeToplevelRepo("tombstoned-scratch8");
-  const tombTok = enterMergeQuarantine(scratch8, "scratch-branch", "scratch raise — becomes the tombstoned token");
-  clearMergeQuarantineByToken(scratch8, tombTok);
+  const r8 = makeToplevelRepo("tombstoned-r8");
+  const z8 = path.join(r8, "gone-z8");
+  // @decision 8bc779f0 (round 3) — clearedTokens is identity-scoped now; mint+clear tombTok under z8's
+  // OWN identity (never an unrelated scratch repo), via a pending-entry push (never a real raise at
+  // z8's own path, so it can't collide with d8/r8's own canonical key below).
+  const tombTok = `tombstoned-legacy-tok-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  pushPendingQuarantineTestOnly({ repoPath: z8, branch: "z8-scratch-branch", reason: "z8 raise — becomes the tombstoned token", enteredAt: Date.now(), tokens: [tombTok] }, `z8-scratch-pending-${Date.now()}.json`);
+  clearMergeQuarantineByToken(z8, tombTok);
   check("(tombstoned precondition) tombTok is lifted in-process (tombstoned)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tombTok));
 
-  const r8 = makeToplevelRepo("tombstoned-r8");
   const d8 = path.join(r8, "sub-d8");
   fs.mkdirSync(d8, { recursive: true });
   fs.writeFileSync(path.join(d8, "placeholder.txt"), "sub\n");
@@ -2349,7 +2355,6 @@ try {
 
   const Kr8hash = createHash("sha256").update(Kr8).digest("hex").slice(0, 24);
   const finalPath = path.join(MERGE_QUARANTINE_DIR, `${Kr8hash}.json`);
-  const z8 = path.join(r8, "gone-z8");
   fs.writeFileSync(finalPath, JSON.stringify({
     repoPath: z8, branch: "z8-branch", reason: "a stale leftover naming a different identity, holding an ALREADY-TOMBSTONED legacy token",
     enteredAt: Date.now(), tokens: [], token: tombTok,
@@ -2419,11 +2424,12 @@ try {
   const KrAhash = createHash("sha256").update(KrA).digest("hex").slice(0, 24);
   const dA = path.join(rA, "gone-subdir");
 
-  // T: mint via a wholly UNRELATED scratch repo and fully clear it — tombstones this exact string in
-  // `clearedTokens`, with no connection at all to rA/dA below.
-  const scratchA = makeToplevelRepo("probeA-scratch");
-  const tombTokA = enterMergeQuarantine(scratchA, "scratch-branch", "scratch raise — becomes the tombstoned token");
-  clearMergeQuarantineByToken(scratchA, tombTokA);
+  // @decision 8bc779f0 (round 3) — clearedTokens is identity-scoped now; mint+clear tombTokA under dA's
+  // OWN identity (never an unrelated scratch repo), via a pending-entry push (never a real raise at
+  // dA's own path, so it can't collide with dA's own canonical-key arming below).
+  const tombTokA = `probeA-dead-tok-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  pushPendingQuarantineTestOnly({ repoPath: dA, branch: "dA-scratch-branch", reason: "dA raise — becomes the tombstoned token", enteredAt: Date.now(), tokens: [tombTokA] }, `dA-scratch-pending-${Date.now()}.json`);
+  clearMergeQuarantineByToken(dA, tombTokA);
   check("(probeA precondition) tombTokA is lifted in-process (tombstoned)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tombTokA));
 
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });

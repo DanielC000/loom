@@ -449,16 +449,21 @@ const keptUnreadableLatchFiles = new Set<string>();
 const unreadablePlaceholderTokens = new Set<string>();
 
 /**
- * Every token THIS PROCESS has deliberately cleared — populated EXCLUSIVELY by
- * {@link tombstoneIfNotSurviving} (round 4; never add to this `Set` directly from any other site —
+ * Every token THIS PROCESS has deliberately cleared, keyed by token, mapped to the SET of
+ * {@link directPathIdentity}-normalized identities whose own clear tombstoned it — populated EXCLUSIVELY
+ * by {@link tombstoneIfNotSurviving} (round 4; never add to this `Map` directly from any other site —
  * see that function's own doc for why). Tokens are random v4 UUIDs, minted once by
  * {@link enterMergeQuarantine} and never re-minted for a different raise — so membership here can never
- * produce a false positive against a later, unrelated raise.
+ * produce a false positive against a later, unrelated raise OF THE SAME IDENTITY.
+ *
+ * @decision 8bc779f0 (round 3) — a bare `Set<string>` let Y's clear tombstone a token that also bleeds
+ * (`398f476c`/`f575cebf`) into X's own record, wrongly excluding it there too; every reader now requires
+ * the record's own identity and only honors a tombstone attributed to that SAME identity.
  *
  * Subtracted from every union of ON-DISK tokens ({@link reconcileMarkedBasenameBeforeWrite}, and so
  * transitively {@link foldInOnDiskTokensIfMarked}) so a STALE copy of `final`'s own bytes — written
  * before this process's own clear durably removed the token, then read back by a LATER reconciliation —
- * can never resurrect a token this process already knows is gone.
+ * can never resurrect a token this process already knows is gone FOR THAT SAME IDENTITY.
  *
  * In-memory only, reset on a reboot — safe: a reboot re-reads disk fresh (no earlier in-process read to
  * contradict), and a genuinely-destroyed token's own durable write already removed it from disk before
@@ -469,7 +474,7 @@ const unreadablePlaceholderTokens = new Set<string>();
  * introduced: a partial clear's own cleared token could be read back from a STALE pre-clear copy of
  * `final` by a LATER reconciliation, even after this process's own durable write had already removed it.
  */
-const clearedTokens = new Set<string>();
+const clearedTokens = new Map<string, Set<string>>();
 
 /**
  * @decision 8db913e2 (round 4, CR3 BLOCKER 1) — THE ONE place any token is ever added to
@@ -509,14 +514,23 @@ const clearedTokens = new Set<string>();
  * tombstoning `token` itself unconditionally on top of the shared, gated call. This is still not a
  * special case of the single invariant above — it is the single invariant, applied twice, to two
  * different questions ("is the final destroyed" vs. "is the owner's own token gone").
+ *
+ * @decision 8bc779f0 (round 3) — `clearingIdentity` REQUIRED, no default: normalized HERE via
+ * {@link directPathIdentity}, the one normalization point every caller relies on (pass a raw `repoPath`
+ * or an already-normalized one — both collapse to the same key).
  */
-function tombstoneIfNotSurviving(tokens: string[], touchedFinalBasenames: string[] = []): void {
+function tombstoneIfNotSurviving(tokens: string[], clearingIdentity: string, touchedFinalBasenames: string[] = []): void {
   if (tokens.length === 0) return;
   if (touchedFinalBasenames.some((b) => keptUnreadableLatchFiles.has(b))) return;
   const surviving = new Set<string>();
   for (const entry of activeQuarantines.values()) for (const t of entry.tokens) surviving.add(t);
   for (const p of pendingUnresolvedQuarantines) for (const t of p.entry.tokens) surviving.add(t);
-  for (const t of tokens) if (!surviving.has(t)) clearedTokens.add(t);
+  const identity = directPathIdentity(clearingIdentity);
+  for (const t of tokens) {
+    if (surviving.has(t)) continue;
+    const owners = clearedTokens.get(t);
+    if (owners) owners.add(identity); else clearedTokens.set(t, new Set([identity]));
+  }
 }
 
 /** Every `pendingUnresolvedQuarantines` index satisfying `pred` — never just the first (card 188b145f,
@@ -1236,7 +1250,7 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
     // @decision 8db913e2 (Follow-up 0dc514dc) — "resolvable ⇒ safe" assumes the occupant's own backing lives at ITS OWN key —
     // false if an earlier graduation write there failed. Content-based, reusing THIS read (never a
     // second one): only a real token overlap with a surviving OTHER entry means this file is load-bearing.
-    const { surviving } = readSurvivingOnDiskTokens(existing);
+    const { surviving } = readSurvivingOnDiskTokens(existing, existing.repoPath);
     if (survivingTokenHolderRepoPaths(surviving, directPathIdentity(ownIdentityRepoPath), final).length === 0) return { state: "none" };
     return { state: "occupant", repoPath: existing.repoPath };
   }
@@ -1279,7 +1293,7 @@ function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuar
   // @decision 8db913e2 (Follow-up 25f6a7dc) — route through the SHARED reader, never a re-derived inline parser: skipping its
   // empty-array-falls-back-to-legacy-`token` fix here wrongly treats an already-incorporated legacy token
   // as foreign, minting a redundant protect copy-aside. See the decision record.
-  const { raw: existingTokens } = readSurvivingOnDiskTokens(existing);
+  const { raw: existingTokens } = readSurvivingOnDiskTokens(existing, existing.repoPath);
   if (existingTokens.length > 0 && existingTokens.some((t) => clearedEntry.tokens.includes(t))) return { state: "none" }; // already incorporated
   return { state: "occupant", repoPath: existing.repoPath };
 }
@@ -1327,14 +1341,32 @@ function wouldOverwriteDifferentUnresolvableOccupant(final: string, entry: Merge
  *
  * @decision 8db913e2 (Follow-up 5b55149b) — an EMPTY `tokens` array also falls back to legacy `token`, never treated as a
  * valid (if empty) array. See the decision record's Follow-up section.
+ *
+ * @decision 8bc779f0 (round 3) — `recordIdentity` REQUIRED (nullable): this record's own `repoPath`,
+ * normalized HERE (same one point as {@link tombstoneIfNotSurviving}). A token is only subtracted when
+ * tombstoned UNDER THIS SAME identity, never globally. `undefined` (repoPath not yet validated) fails
+ * CLOSED: nothing subtracted, every on-disk token survives.
  */
-function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }): { raw: string[]; surviving: string[] } {
+function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }, recordIdentity: string | undefined): { raw: string[]; surviving: string[] } {
   const raw = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
     ? parsed.tokens
     : typeof parsed.token === "string" ? [parsed.token] : [];
   // @decision 8db913e2 (round 3) — never let a stale on-disk copy resurrect a token THIS PROCESS already
   // deliberately cleared; see clearedTokens' own doc comment for why subtracting it here is safe.
-  return { raw, surviving: raw.filter((t) => !clearedTokens.has(t)) };
+  const identity = recordIdentity !== undefined ? directPathIdentity(recordIdentity) : undefined;
+  return { raw, surviving: raw.filter((t) => !(identity !== undefined && clearedTokens.get(t)?.has(identity))) };
+}
+
+/**
+ * `true` iff `token` was tombstoned UNDER `recordIdentity` specifically — the same identity-scoped check
+ * {@link readSurvivingOnDiskTokens} applies internally, exposed for the three sites that inline their own
+ * `clearedTokens` membership test (a coverage proof needing the RAW on-disk array, never `.surviving`
+ * alone — see each site's own doc). `undefined` fails CLOSED: never tombstoned for an unknown identity.
+ *
+ * @decision 8bc779f0 (round 3)
+ */
+function tokenTombstonedForIdentity(token: string, recordIdentity: string | undefined): boolean {
+  return recordIdentity !== undefined && !!clearedTokens.get(token)?.has(directPathIdentity(recordIdentity));
 }
 
 /**
@@ -1352,7 +1384,7 @@ function readFinalOnDiskSurvivingTokens(final: string): string[] {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { return []; }
   if (!isReadableLatchRecord(parsed)) return []; // e.g. the bare literal `null`
-  return readSurvivingOnDiskTokens(parsed).surviving;
+  return readSurvivingOnDiskTokens(parsed, typeof parsed.repoPath === "string" ? parsed.repoPath : undefined).surviving;
 }
 
 /**
@@ -1379,7 +1411,7 @@ export function confirmedDurableBackingElsewhere(entry: MergeQuarantineEntry, to
     try { parsed = JSON.parse(raw); } catch { continue; }
     if (!isReadableLatchRecord(parsed)) continue; // e.g. the bare literal `null`
     if (typeof parsed.repoPath !== "string" || directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) continue;
-    if (readSurvivingOnDiskTokens(parsed).surviving.includes(token)) return true;
+    if (readSurvivingOnDiskTokens(parsed, parsed.repoPath).surviving.includes(token)) return true;
   }
   return false;
 }
@@ -1514,6 +1546,10 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
   if (isUnreadablePlaceholderEntry(entry) && !isPlaceholderEntryShape(parsed)
     && typeof parsed.branch === "string" && typeof parsed.reason === "string") {
     const reingested = latchEntryFromParsedRecord(parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string });
+    // @decision 8bc779f0 — apply the SAME clearedTokens tombstone filter the generic branch below
+    // already applies via readSurvivingOnDiskTokens; `reingested.tokens` alone is unfiltered raw disk
+    // content. See the decision record.
+    const { surviving: reingestedSurvivingTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
     const finalOwnHashForReingest = path.basename(final, ".json");
     // @decision db0a9db0 (round 4) — run the SAME detector every other re-parse site uses, on the
     // REINGESTED record (its own disk-sourced keys), before anything below overrides them — never force
@@ -1532,7 +1568,9 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
       ...reingested,
       // @decision 2dd97aaa (Follow-up 58957b1e) — filter `dropped.tokens` AFTER the union, same posture
       // as writePendingDivertFile's own re-read-and-union branch.
-      tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingested.tokens])].filter((t) => !dropped.tokens.has(t)),
+      // @decision 8bc779f0 — `reingestedSurvivingTokens` (never bare `reingested.tokens`): already
+      // excludes every `clearedTokens` member, same as the generic branch's own `resurrectable` below.
+      tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingestedSurvivingTokens])].filter((t) => !dropped.tokens.has(t)),
       resolvedKey: entry.resolvedKey,
       resolvedKeys: onDiskKeysForReingest.length > 0
         ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeysForReingest, `reconcileMarkedBasenameBeforeWrite-reingest(${entry.repoPath})`)
@@ -1581,7 +1619,7 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
       genuineContributorKeys: unionGenuineContributorKeysAbsorbing([entry, reingested]),
     };
   }
-  const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed);
+  const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
   // @decision 8db913e2 (Follow-up 150aed7b) — exclude the key `final`'s OWN basename hash names, never
   // a recomputed `canonicalRepoLockKey(entry.repoPath)` (82032b5c/97cff6db's own rule: this write may
   // target a SECONDARY key via `targetKey`, which can differ from entry's own repoPath-derived key).
@@ -2181,8 +2219,12 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
   // @decision 8db913e2 (Follow-up 25f6a7dc) — tests the RAW on-disk tokens, each covered by being cleared NOW (candidateTokens)
   // or ALREADY tombstoned (clearedTokens) — never `.surviving` alone, which folds "already cleared"
   // silently into the array instead of deciding it here. See the decision record.
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
-  return onDiskTokens.every((t) => candidateTokens.includes(t) || clearedTokens.has(t));
+  // @decision 8bc779f0 (round 3) — `recordIdentity` (this record's OWN repoPath, `undefined` when not a
+  // validated string) scopes the clearedTokens half — a token cleared under a DIFFERENT identity must
+  // never count as coverage for THIS record. `undefined` fails CLOSED (never covered by clearedTokens).
+  const recordIdentity = typeof parsed.repoPath === "string" ? parsed.repoPath : undefined;
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, recordIdentity);
+  return onDiskTokens.every((t) => candidateTokens.includes(t) || tokenTombstonedForIdentity(t, recordIdentity));
 }
 
 /**
@@ -2209,6 +2251,9 @@ function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physica
   if (typeof parsed.repoPath !== "string" || directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) return entry; // a different identity — never ours to adopt
   if (isPlaceholderEntryShape(parsed) || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return entry; // still not genuine content
   const reingested = latchEntryFromParsedRecord(parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string });
+  // @decision 8bc779f0 — the SAME tombstone gap reconcileMarkedBasenameBeforeWrite's own reingest
+  // branch had: `reingested.tokens` alone is unfiltered raw disk content. See the decision record.
+  const { surviving: reingestedSurvivingTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
   const finalOwnHash = path.basename(physicalPath, ".json");
   // @decision db0a9db0 (round 4) — run the SAME detector every other re-parse site uses, on the
   // REINGESTED record's own disk-sourced keys, mirroring reconcileMarkedBasenameBeforeWrite's own
@@ -2234,11 +2279,13 @@ function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physica
   const genuineContributorKeys = unionGenuineContributorKeysAbsorbing([entry, reingested]);
   return {
     ...reingested,
-    // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too (it can already carry a REAL
-    // raiser's own token, unioned in before this basename ever became readable), filtering OUT every
-    // {@link unreadablePlaceholderTokens} member — the SAME two rules reconcileMarkedBasenameBeforeWrite's
-    // own placeholder branch already applies.
-    tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingested.tokens])],
+    // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too, filtering OUT every
+    // {@link unreadablePlaceholderTokens} member, the SAME rule reconcileMarkedBasenameBeforeWrite's own
+    // placeholder branch applies.
+    //
+    // @decision 8bc779f0 — `reingestedSurvivingTokens` (never bare `reingested.tokens`): already
+    // excludes every `clearedTokens` member.
+    tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingestedSurvivingTokens])],
     resolvedKey: entry.resolvedKey,
     resolvedKeys: onDiskKeys.length > 0
       ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeys, `reconcileClearedEntryIfPlaceholder(${entry.repoPath})`)
@@ -3003,7 +3050,7 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   try { parsed = JSON.parse(raw); } catch { return { ok: true }; } // corrupt — nothing to protect
   if (!isReadableLatchRecord(parsed)) return { ok: true }; // e.g. the bare literal `null` — nothing to protect
   if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return { ok: true };
-  const { raw: rawTokens, surviving: survivingTokens } = readSurvivingOnDiskTokens(parsed);
+  const { raw: rawTokens, surviving: survivingTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
   // @decision 8db913e2 (Follow-up 7a7e041b) — every real on-disk token was already deliberately cleared by
   // THIS process — there is no owner left to protect, so skip the copy-aside entirely rather than persist
   // an empty or random-token record. See this function's own jsdoc above for why this is safe.
@@ -3330,14 +3377,14 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
     // protect-copy just failed to write); gated on `!protectOk` so a transient-duplicate copy never
     // reaches it. Reuses `parsed` — never a second read.
     if (protectOk) return false;
-    const { surviving } = readSurvivingOnDiskTokens(parsed);
+    const { surviving } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
     if (survivingTokenHolderRepoPaths(surviving, directPathIdentity(ownRepoPath)).length === 0) return false;
     return true; // still held elsewhere — divert, never overwrite blind
   }
   // @decision 8db913e2 (Follow-up 25f6a7dc) — route through the SHARED reader, never a re-derived inline parser: see
   // `unincorporatedOccupantRepoPathAt`'s own matching fix for why skipping its empty-array fallback here
   // wrongly treats an already-incorporated legacy token as foreign. See the decision record.
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
   // Already incorporated via token overlap — see this function's own doc comment above.
   if (onDiskTokens.length > 0 && onDiskTokens.some((t) => ownTokens.includes(t))) return false;
   // A different, still-unresolvable identity physically occupies `final` right now (confirmed by THIS
@@ -3409,7 +3456,7 @@ function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { stat
     return { state: "unsafe" }; // corrupt
   }
   if (!isReadableLatchRecord(parsed) || typeof parsed.repoPath !== "string") return { state: "unsafe" };
-  const { surviving } = readSurvivingOnDiskTokens(parsed);
+  const { surviving } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
   const entry: MergeQuarantineEntry = {
     repoPath: parsed.repoPath,
     branch: typeof parsed.branch === "string" ? parsed.branch : "",
@@ -3984,12 +4031,16 @@ function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: Merge
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { return false; }
   if (!isReadableLatchRecord(parsed)) return false; // e.g. the bare literal `null`
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
+  // @decision 8bc779f0 (round 3) — `orphanFile` can genuinely belong to a DIFFERENT identity than
+  // `updated` (that's the whole point of an orphan reference) — scope the clearedTokens half to ITS own
+  // repoPath, never `updated`'s. `undefined` (not a validated string) fails CLOSED (never accounted-for).
+  const recordIdentity = typeof parsed.repoPath === "string" ? parsed.repoPath : undefined;
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, recordIdentity);
   // @decision eedf16f5 — `droppedTokens` (never named `clearedTokens`, the SEPARATE module-level global
   // tombstone set below) is the FULL overlap set THIS call drops — shadowing that global here would
   // silently disable its own fallback on the next line. See the decision record.
   const accountedFor = new Set([...updated.tokens, ...droppedTokens]);
-  return onDiskTokens.every((t) => accountedFor.has(t) || clearedTokens.has(t));
+  return onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, recordIdentity));
 }
 
 /**
@@ -4175,7 +4226,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       }
       // @decision 8db913e2 (round 4) — tombstone `token` HERE, after the splice/delete above already
       // removed every in-memory trace of this pending entry — see `tombstoneIfNotSurviving`'s own doc.
-      tombstoneIfNotSurviving([token]);
+      tombstoneIfNotSurviving([token], identity);
       sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile);
       // @decision 8db913e2 (Follow-up f2cc5f18) — `live.entry.tokens` captured via the `live` binding
       // resolved above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
@@ -4216,7 +4267,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     live.entry = updated;
     // @decision 8db913e2 (round 4) — tombstone `token` HERE, before the write loop below, same reason
     // as `clearActiveEntryTokenAtKey`'s own identical placement.
-    tombstoneIfNotSurviving([token]);
+    tombstoneIfNotSurviving([token], identity);
     const writtenBasenames = new Set<string>([live.sourceFile]);
     // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens`
     // (DEFENSIVE — `64283e06`'s own posture: unreachable today, see that record).
@@ -4320,7 +4371,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       // eslint-disable-next-line no-console
       console.warn(`[merge-quarantine] a token-clear's own full lift at key ${key} also kept ${result.contentKeptRepoPaths.length} orphan file reference(s) alive, content-parsed as belonging to (no human route reaches this path — logging only): ${result.contentKeptRepoPaths.map((rp) => `'${rp}'`).join(", ")}`);
     }
-    tombstoneIfNotSurviving([token]);
+    tombstoneIfNotSurviving([token], entry.repoPath);
     return;
   }
   // @decision 6be6c9ff — derive via {@link liveArmedKeys}, before `updated` so it can be stamped onto it
@@ -4339,7 +4390,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // @decision 8db913e2 (round 4) — tombstone `token` HERE: the in-memory update above already reflects
   // its removal, so the scan correctly finds nothing surviving. Doing this BEFORE the write loop below
   // lets that write's own chokepoint union correctly exclude `token` too (closes CR2's own B1 shape).
-  tombstoneIfNotSurviving([token]);
+  tombstoneIfNotSurviving([token], entry.repoPath);
   // @decision bde5d1fe (Code Review of eae23ebe) — a sweep may only run AFTER a durable write of the
   // state that supersedes it has succeeded, never before: sweeping THEN failing this write would leave
   // NOTHING durable for a repo whose only prior copy was this same tmp.
@@ -4576,11 +4627,13 @@ function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]):
   try { parsed = JSON.parse(raw); } catch { return { safe: true }; } // genuinely corrupt debris — nothing real to lose
   if (!isReadableLatchRecord(parsed)) return { safe: true }; // e.g. the bare literal `null` — same "nothing real" case
   const parsedRepoPath = typeof parsed.repoPath === "string" ? parsed.repoPath : undefined;
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed);
+  // @decision 8bc779f0 (round 3) — scope the clearedTokens half to `parsedRepoPath` (this orphan's OWN
+  // identity, can genuinely differ from the clearer's own) — `undefined` fails CLOSED (never accounted-for).
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, parsedRepoPath);
   const armableByPass1 = parsedRepoPath !== undefined && typeof parsed.branch === "string" && typeof parsed.reason === "string";
   if (armableByPass1 && onDiskTokens.length === 0) return { safe: false, parsedRepoPath }; // genuine, legacy-shaped, PASS 1 would re-arm it — never delete
   const accountedFor = new Set(candidateTokens);
-  const safe = onDiskTokens.every((t) => accountedFor.has(t) || clearedTokens.has(t));
+  const safe = onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, parsedRepoPath));
   return { safe, parsedRepoPath };
 }
 
@@ -4761,7 +4814,7 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
       // genuinely the clearer's own data — never foreign, so never protected here; report its own
       // tokens back, tagged to THIS exact file, so an identity-wide clear's trailing sweep can treat
       // them as accounted for ONLY when checking this same file — never any other file at this hash.
-      ownTokensByFile.push({ sourceFile: f, tokens: readSurvivingOnDiskTokens(parsed).surviving });
+      ownTokensByFile.push({ sourceFile: f, tokens: readSurvivingOnDiskTokens(parsed, parsed.repoPath).surviving });
       continue;
     }
     if (isRepoPathCurrentlyResolvable(parsed.repoPath)) continue; // a resolvable leftover is safe to overwrite today
@@ -5465,7 +5518,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
-  tombstoneIfNotSurviving(candidateTokens, [...touchedFinalBasenames, ...sourceFilesToSweep.map((s) => s.sourceFile)]);
+  tombstoneIfNotSurviving(candidateTokens, identity, [...touchedFinalBasenames, ...sourceFilesToSweep.map((s) => s.sourceFile)]);
   // @decision 2dd97aaa — a content-kept claimant whose own file no longer exists BY THE TIME this clear
   // returns (e.g. swept by a later step of this same call) is a ghost, never a real claim — drop it here,
   // right before this function's own result is built, rather than report a keep nothing backs any more.
@@ -6335,7 +6388,7 @@ function tryClearMergeQuarantineByOwnIdentity(
       if (folded.unattributed) anyKeptUnattributed = true;
     }
     for (const rp of orphanContentKept.keys()) keptContentRepoPaths.add(rp);
-    tombstoneIfNotSurviving(pendingCandidateTokens, pendingTouchedBasenames);
+    tombstoneIfNotSurviving(pendingCandidateTokens, identity, pendingTouchedBasenames);
   }
   // @decision 3b1944b6 — an EXPLICIT no-match signal, never an inferred one: `repoPath` has no
   // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
@@ -7276,16 +7329,21 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision 8db913e2 (round 4) — candidates + touched basenames for the ONE tombstone call below,
     // made after every mutation in this block is already applied — see `tombstoneIfNotSurviving`'s doc.
     const pendingCandidateTokens: string[] = [];
-    const pendingTouchedBasenames: string[] = [];
     // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — every identity THIS call is already
     // clearing (882d6cff's multi-claimant shape can span several) — excluded from the orphan-sweep's own
     // true-referencer check below, same reason as ByKey/ByRecordedPath's own single-identity exclusion.
     const matchedIdentities = new Set(matchedPending.map((p) => directPathIdentity(p.entry.repoPath)));
+    // @decision 8bc779f0 (round 3) — `matchedPending` can span SEVERAL distinct identities; tombstone
+    // each one's OWN tokens under ITS OWN clearingIdentity, never the flat set under one arbitrary identity.
+    const byIdentityForTombstone = new Map<string, { tokens: string[]; basenames: string[] }>();
     // @decision 9cabd143 (round 2, item 1) — each pending entry's own sourceFile is OWNED by the entry
     // being cleared, never gated on check (1) — see sweepOwnLatchFileUnlessOwnedElsewhere's own doc.
     for (const pending of matchedPending) {
       pendingCandidateTokens.push(...pending.entry.tokens);
-      pendingTouchedBasenames.push(pending.sourceFile);
+      const pendingIdentity = directPathIdentity(pending.entry.repoPath);
+      const bucket = byIdentityForTombstone.get(pendingIdentity);
+      if (bucket) { bucket.tokens.push(...pending.entry.tokens); bucket.basenames.push(pending.sourceFile); }
+      else byIdentityForTombstone.set(pendingIdentity, { tokens: [...pending.entry.tokens], basenames: [pending.sourceFile] });
       for (const f of pending.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
       // @decision 656fdf39 (CR 66fad7ed round 2) — `pending.entry` was already re-ingested at the top of
       // this function when still placeholder-shaped, so `.tokens` here is the real, reconciled set.
@@ -7305,7 +7363,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       if (folded.unattributed) anyKeptUnattributed = true;
     }
     for (const rp of orphanContentKept.keys()) keptContentRepoPaths.add(rp);
-    tombstoneIfNotSurviving(pendingCandidateTokens, pendingTouchedBasenames);
+    for (const [bucketIdentity, bucket] of byIdentityForTombstone) tombstoneIfNotSurviving(bucket.tokens, bucketIdentity, bucket.basenames);
     // Belt-and-suspenders: sweep this id's own final (if any) and any remaining tmp residue directly, in
     // case something under this exact id sits on disk but was never captured as an in-memory pending
     // entry (e.g. a sibling tmp this process never parsed).
