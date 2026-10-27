@@ -109,10 +109,21 @@ function freshMintNote(freshMint: FreshMintInfo): string {
         return `a prior verdict for this worker exists for the SAME commit ${freshMint.priorIdentity}, but the project's merge-gate switch has changed since it was earned — ` +
           "so this call is running under the current setting FOR REAL, not replaying that verdict from cache. This is a genuinely new run, not a cache hit.";
       }
-      return `a prior verdict for this worker exists but describes commit ${freshMint.priorIdentity ?? "an earlier state"}; ` +
-        `this call found the branch now at ${freshMint.currentIdentity ?? "a different commit"} (e.g. the worker pushed a new commit, a sibling's squash moved it, or sometimes this call's own union-merge ` +
+      // @decision 3a460d4a — both identities are DEFINED here by construction (the registry only produces
+      // "identity-mismatch" when both resolved) — never fall back to a vague string that would also,
+      // wrongly, read as honest for the unresolved case ("identity-unresolved", below).
+      return `a prior verdict for this worker exists but describes commit ${freshMint.priorIdentity}; ` +
+        `this call found the branch now at ${freshMint.currentIdentity} (e.g. the worker pushed a new commit, a sibling's squash moved it, or sometimes this call's own union-merge ` +
         "since that verdict) — so it is being gated FOR REAL, not replayed from " +
         "cache. This is a genuinely new gate run, not a cache hit.";
+    // @decision 3a460d4a — DISTINCT from "identity-mismatch": an identity could not be resolved at all
+    // here, not two different commits compared. Never claim a commit "moved" — there is none to name.
+    case "identity-unresolved":
+      return freshMint.priorIdentity !== undefined
+        ? `a prior verdict for this worker exists for commit ${freshMint.priorIdentity}, but this call could not resolve the branch's CURRENT identity (e.g. a transient git read error) — ` +
+          "with no way to confirm it still describes the same commit, the cached verdict was not trusted and this re-ran for real rather than risk replaying a stale answer. This is a genuinely new gate run, not a cache hit."
+        : "this call could not resolve this worker's identity (e.g. a transient git read error), and no prior verdict's identity could be confirmed either — " +
+          "the cached verdict was not trusted and this re-ran for real rather than risk replaying a stale answer. This is a genuinely new gate run, not a cache hit.";
     case "main-advanced":
       // @decision c06f876a — same commit, different mainline: a genuinely different tree to gate, not a re-roll.
       return `a prior verdict for this worker exists for the SAME commit ${freshMint.priorIdentity ?? "(unknown)"}, but the mainline has advanced since it was earned ` +

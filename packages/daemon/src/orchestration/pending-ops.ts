@@ -147,8 +147,11 @@ interface Entry<T> {
 export interface FreshMintInfo {
   /** `"main-advanced"` (card c06f876a) is NEVER produced by this registry (it only compares opaque strings): a caller that
    *  folds a mainline tip into its identity may re-label an `"identity-mismatch"` whose branch component matches but
-   *  whose main component differs. */
-  reason: "identity-mismatch" | "forced" | "genuinely-new" | "main-advanced";
+   *  whose main component differs.
+   *  @decision 3a460d4a — `"identity-unresolved"` (one or both sides `undefined`) is distinct from
+   *  `"identity-mismatch"` (two DEFINED, different identities): a caller's note must never claim a tip
+   *  "moved" when neither side ever resolved. */
+  reason: "identity-mismatch" | "identity-unresolved" | "forced" | "genuinely-new" | "main-advanced";
   priorIdentity?: string;
   /** Set ONLY by a caller that re-labels to `"main-advanced"` (card c06f876a): the mainline tips the prior verdict was
    *  earned against and this call resolved, for reporting. */
@@ -572,8 +575,11 @@ export class PendingOpRegistry {
    * caller-supplied string (for merge: the branch's freshly-resolved HEAD sha) — the cache read above
    * requires THIS call's identity to match the identity recorded at the cached verdict's OWN settle time; a
    * mismatch is a MISS (falls through to a fresh mint, bypassing the TTL'd `retained` fallback too — see
-   * the class doc for why). Omit it and the dedupe stays identity-agnostic (`undefined` matches only
-   * `undefined`), exactly as `retainVerdictUntilSuperseded` behaved before this opt existed.
+   * the class doc for why).
+   *
+   * @decision 3a460d4a — omitting it (or an unresolvable identity falling back to `undefined`) is ALSO a
+   * miss, never a match: `undefined` never matches `undefined` here. A caller that genuinely wants the
+   * comparison skipped has `opts.identityOptional` for exactly that, explicitly.
    *
    * `opts.identityOptional` (card 1555e361 CR follow-up, Round 2 — the finalized-worker false-mismatch):
    * a PER-CALL override that skips the identity comparison entirely and trusts the cached verdict
@@ -727,15 +733,19 @@ export class PendingOpRegistry {
       // this file's own top-level doc) — so there is nothing left here for a read-side gate to filter out.
       //
       // IDENTITY-GATED (card 1555e361 CR follow-up — see the class doc's "IDENTITY-GATED SUPERSEDE"
-      // section): a cache hit only counts as a HIT when THIS call's `opts.verdictIdentity` matches the
-      // identity recorded at the cached verdict's OWN settle time (`undefined === undefined` for a caller
-      // that never opts into identity tracking — unaffected), OR `opts.identityOptional` says the
-      // comparison doesn't apply to this call at all (see that opt's own doc — the finalized-worker
-      // false-mismatch this ROUND 2 fixes). A genuine mismatch is a MISS: `untilSupersededMiss` below ALSO
-      // skips the TTL'd `retained` fallback just past this block, because that map was written at the exact
-      // same (now-stale) settle and would otherwise silently serve the identical wrong answer for its own
-      // few-second window — a mismatch here must fall all the way through to a fresh mint, not merely to
-      // the next cache.
+      // section): a cache hit only counts as a HIT when THIS call's `opts.verdictIdentity` is a DEFINED
+      // string that matches the identity recorded at the cached verdict's OWN settle time, OR
+      // `opts.identityOptional` says the comparison doesn't apply to this call at all (see that opt's own
+      // doc — the finalized-worker false-mismatch this ROUND 2 fixes).
+      //
+      // @decision 3a460d4a — `undefined` never matches `undefined` here: a caller's own unresolvable
+      // identity must fail closed to a fresh mint, never dedupe-hit a stale verdict. `identityOptional` is
+      // the one sanctioned way to skip the comparison, explicitly, per call.
+      //
+      // A genuine mismatch is a MISS: `untilSupersededMiss` below ALSO skips the TTL'd `retained` fallback
+      // just past this block, because that map was written at the exact same (now-stale) settle and would
+      // otherwise silently serve the identical wrong answer for its own few-second window — a mismatch here
+      // must fall all the way through to a fresh mint, not merely to the next cache.
       // `priorVerdict` is read UNCONDITIONALLY whenever this `key` opted in — even under `bypassRetained`,
       // which only gates whether it's SERVED (below), never whether it's LOOKED AT. A plain `Map.get` has
       // no side effect, so this costs nothing and is what lets a FORCED fresh mint still report what it
@@ -743,7 +753,7 @@ export class PendingOpRegistry {
       let untilSupersededMiss = false;
       const priorVerdict = opts?.retainVerdictUntilSuperseded ? this.untilSupersededVerdicts.get(key) : undefined;
       if (priorVerdict && !opts?.bypassRetained) {
-        if (opts?.identityOptional || priorVerdict.identity === opts?.verdictIdentity) {
+        if (opts?.identityOptional || (priorVerdict.identity !== undefined && priorVerdict.identity === opts?.verdictIdentity)) {
           // OWNER CHECK — UNTIL-SUPERSEDED HIT (card 94725dcb): `existing` is `undefined` here by
           // construction — this cache stores no `managerSessionId` (see OwnerCheck's own doc / the
           // decision record's named limitation). Harmless for every caller today, which doesn't consult it.
@@ -789,12 +799,17 @@ export class PendingOpRegistry {
       // BOTH cache reads above missed, so a genuinely new op is about to run — record WHY, purely for
       // reporting (this never feeds back into the decision above). `opts?.retainVerdictUntilSuperseded`
       // false/omitted (every kind but merge, today) leaves this `undefined` — byte-identical to before.
+      // @decision 3a460d4a — a miss where either side's identity is `undefined` is `"identity-unresolved"`,
+      // never `"identity-mismatch"`: the latter asserts two DEFINED identities differed, which is false
+      // here and would mislead a caller's note into claiming a tip "moved" when nothing was ever resolved.
       const freshMint: FreshMintInfo | undefined = !opts?.retainVerdictUntilSuperseded
         ? undefined
         : opts?.bypassRetained
         ? { reason: "forced", ...(priorVerdict?.identity !== undefined ? { priorIdentity: priorVerdict.identity } : {}) }
         : untilSupersededMiss
-        ? { reason: "identity-mismatch", priorIdentity: priorVerdict?.identity }
+        ? (priorVerdict?.identity === undefined || opts?.verdictIdentity === undefined)
+          ? { reason: "identity-unresolved", priorIdentity: priorVerdict?.identity }
+          : { reason: "identity-mismatch", priorIdentity: priorVerdict?.identity }
         : { reason: "genuinely-new" };
       const fresh: Entry<T> = {
         opId: randomUUID(), kind, key, managerSessionId, startedAt: new Date().toISOString(),

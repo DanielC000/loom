@@ -856,14 +856,18 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
 
 // THE FIX: the SAME shape, WITH retainVerdictUntilSuperseded — a re-call long after retainMs has elapsed
 // must NOT mint a fresh op; it must return the ORIGINAL cached verdict.
+// Card 3a460d4a: this block tests the retention mechanism, not identity — give it a DEFINED, consistent
+// verdictIdentity on both calls (no real caller omits it; see docs/decisions/3a460d4a-*.md) so it keeps
+// exercising the until-superseded dedupe without leaning on the now-fixed undefined-matches-undefined gap.
 {
   const reg = new PendingOpRegistry();
   let calls = 0;
-  const r1 = await reg.attach("dv1", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "build gate failed", opId: "op-1" }; }, undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+  const dv1Opts = { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-DV1", classifyOutcome: classify };
+  const r1 = await reg.attach("dv1", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "build gate failed", opId: "op-1" }; }, undefined, dv1Opts);
   check("(durable dedupe) first op ran once and settled rejected", calls === 1 && r1.value.opId === "op-1");
   await sleep(80); // WELL past retainMs (30ms) — the display-facing retained view has long since expired
   check("(durable dedupe) precondition: the DISPLAY-facing retained view is gone (peek reverts on schedule)", reg.peek("dv1") === undefined);
-  const r2 = await reg.attach("dv1", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+  const r2 = await reg.attach("dv1", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, dv1Opts);
   check("(durable dedupe) a re-call LONG AFTER retainMs still does NOT mint a fresh op — no second gate run", calls === 1);
   check("(durable dedupe) the re-call returns the ORIGINAL cached verdict, not a fresh one", r2.settled === true && r2.ok === true && r2.value.opId === "op-1" && r2.value.merged === false);
 }
@@ -874,16 +878,19 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
 // precondition check above (peek() is gone at 80ms while the dedupe still holds) — this block makes the
 // SAME point for a MERGED (not rejected) outcome, and asserts it explicitly as its own check rather than as
 // a precondition.
+// Card 3a460d4a: same reasoning as (durable dedupe) above — a DEFINED, consistent verdictIdentity, not
+// identity under test here.
 {
   const reg = new PendingOpRegistry();
-  await reg.attach("dv2", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, { retainMs: 20, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+  const dv2Opts = { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-DV2", classifyOutcome: classify };
+  await reg.attach("dv2", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, dv2Opts);
   check("(decoupling) immediately after settle, the display-facing peek() shows the merged verdict", reg.peek("dv2")?.outcome === "merged");
   // Anchored to the OBSERVABLE eviction itself (waitUntil), not a blind sleep guarding this negative-
   // sounding label — see fixed-wait-negative-guard.mjs / memory fixed-wait-polarity-negative-assertions-
   // fail-silently for why a fixed sleep here would be unfalsifiable in one trial.
   await waitUntil(() => reg.peek("dv2") === undefined, { label: "dv2 display view evicted after its retainMs window" });
   check("(decoupling) after the display window elapses, peek() reverts to undefined — cosmetic clearing is UNCHANGED by opting into durable dedupe", reg.peek("dv2") === undefined);
-  const r2 = await reg.attach("dv2", "merge", "mgr1", 200, async () => ({ merged: false, reason: "should not run", opId: "op-2" }), undefined, { retainMs: 20, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+  const r2 = await reg.attach("dv2", "merge", "mgr1", 200, async () => ({ merged: false, reason: "should not run", opId: "op-2" }), undefined, dv2Opts);
   check("(decoupling) yet a re-call still safely returns the original cached verdict, never a fresh run", r2.value.opId === "op-1" && r2.value.merged === true);
 }
 
@@ -891,23 +898,26 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
 // be lost): the legitimate retry-after-rejection path MUST still work. opts.bypassRetained (the
 // forceRemoveWorktree:true analog) must bypass the DURABLE cache exactly as it already bypasses the TTL'd
 // one — a fix that makes re-running a rejected branch impossible is worse than the trap it replaces.
+// Card 3a460d4a: same reasoning — a DEFINED, consistent verdictIdentity across every call in this block
+// (bypassRetained, not identity, is what's under test here).
 {
   const reg = new PendingOpRegistry();
   let calls = 0;
-  const r1 = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "build gate failed", opId: "op-1" }; }, undefined, { retainMs: 200, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+  const dv3Opts = { retainMs: 200, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-DV3", classifyOutcome: classify };
+  const r1 = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "build gate failed", opId: "op-1" }; }, undefined, dv3Opts);
   check("(retry-still-works) first op ran once and was rejected", calls === 1 && r1.value.merged === false);
   // A PLAIN re-call (no bypass), still well within the TTL window even — must dedupe-hit, proving the
   // durable cache is genuinely active and not merely untested here.
-  const rPlain = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "should-not-run" }; }, undefined, { retainMs: 200, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+  const rPlain = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "should-not-run" }; }, undefined, dv3Opts);
   check("(retry-still-works) precondition: an unflagged re-call dedupe-hits (does not itself re-run)", calls === 1 && rPlain.value.opId === "op-1");
   // NOW the manager fixes the issue and genuinely retries — forceRemoveWorktree:true → bypassRetained:true.
-  const rForced = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { retainMs: 200, retainVerdictUntilSuperseded: true, classifyOutcome: classify, bypassRetained: true });
+  const rForced = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { ...dv3Opts, bypassRetained: true });
   check("(retry-still-works) a FORCED re-call DOES invoke run() again — the durable cache is bypassed, not permanently stuck on the rejection", calls === 2 && rForced.value.opId === "op-2");
   check("(retry-still-works) the forced call's own fresh (successful) result is what comes back", rForced.value.merged === true);
   // SUPERSEDE: a later NON-forced call must dedupe against the NEW (forced) outcome, not resurrect the
   // stale rejected one — proves the durable map's `.set()` overwrite (not a separate eviction) is what
   // "until superseded" actually means.
-  const rAfter = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "should not run either", opId: "op-3" }; }, undefined, { retainMs: 200, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
+  const rAfter = await reg.attach("dv3", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "should not run either", opId: "op-3" }; }, undefined, dv3Opts);
   check("(retry-still-works) a later unflagged call dedupes against the NEW (forced, successful) verdict, not the stale rejection", calls === 2 && rAfter.value.opId === "op-2" && rAfter.value.merged === true);
 }
 
@@ -999,9 +1009,11 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(identityFromValue) value carries no derived identity (gate never ran) → the minting call's verdictIdentity stands and still dedupe-hits", c2 === 1 && hit2.value.opId === "op-1" && hit2.cacheHit?.identity === "sha-PRE");
 }
 
-// Identity-agnostic backward compat: a caller that opts into retainVerdictUntilSuperseded but never passes
-// verdictIdentity (undefined on every call) behaves exactly as before this option existed — undefined
-// matches undefined, so the durable dedupe still fires unconditionally.
+// Card 3a460d4a: `undefined` NEVER matches `undefined` in the identity comparison, even for a caller
+// that never passes verdictIdentity on either call (identityOptional:false on both). This block used to
+// assert the OPPOSITE ("backward compat", a cache hit) — that was the bug this card fixes: no real
+// caller has this shape (both real callers always attempt resolution and only fall back to `undefined`
+// on a genuine failure, which must fail closed, not dedupe-hit — see docs/decisions/3a460d4a-*.md).
 {
   const reg = new PendingOpRegistry();
   let calls = 0;
@@ -1010,7 +1022,89 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   // identity blocks.
   await waitUntil(() => reg.peek("id4") === undefined, { label: "id4 TTL'd display view expired" });
   const r2 = await reg.attach("id4", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, classifyOutcome: classify });
-  check("(identity omitted, backward compat) no verdictIdentity on either call still dedupe-hits — undefined matches undefined", calls === 1 && r2.value.opId === "op-1");
+  check("(identity omitted) no verdictIdentity on either call is a MISS, not a hit — undefined never matches undefined — mints a genuinely fresh op, announced as identity-unresolved (never the misleading identity-mismatch)", calls === 2 && r2.value.opId === "op-2" && r2.freshMint?.reason === "identity-unresolved");
+}
+
+// Card 3a460d4a (id5) — the hermetic repro this card's investigation used: an UNRESOLVABLE identity
+// (verdictIdentity:undefined, simulating a thrown/unresolvable git read, exactly as both real production
+// callers' own "fail-safe: undefined identity never dedupe-hits" comments describe) must NEVER dedupe-hit
+// a prior settle's equally-unresolvable identity, with identityOptional explicitly false on both calls —
+// the live defect card 3a460d4a fixes. A THIRD call proves identityOptional:true is unaffected and still
+// legitimately bypasses the comparison (the one sanctioned escape hatch, used by both real callers for
+// their own already-finished/batch-finished case).
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const opts = { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: undefined, identityOptional: false, classifyOutcome: classify };
+  const r1 = await reg.attach("id5", "merge", "mgr1", 200, async () => { calls++; return { merged: true, landed: ["A"], opId: "op-1" }; }, undefined, opts);
+  check("(unresolvable identity) first op ran once", calls === 1 && r1.value.opId === "op-1");
+  await waitUntil(() => reg.peek("id5") === undefined, { label: "id5 TTL'd display view expired" });
+  const r2 = await reg.attach("id5", "merge", "mgr1", 200, async () => { calls++; return { merged: true, landed: ["A", "B"], opId: "op-2" }; }, undefined, opts);
+  check("(unresolvable identity) a SECOND unresolvable-identity call, identityOptional:false, mints FRESH — never dedupe-hits the stale verdict — announced as identity-unresolved", calls === 2 && r2.value.opId === "op-2" && r2.freshMint?.reason === "identity-unresolved" && r2.cacheHit === undefined);
+  // identityOptional:true on the THIRD call is the one sanctioned bypass — still dedupe-hits (unaffected).
+  const r3 = await reg.attach("id5", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "should not run", opId: "op-3" }; }, undefined, { ...opts, identityOptional: true });
+  check("(unresolvable identity, identityOptional:true) the sanctioned bypass still dedupe-hits — unaffected by this card's fix", calls === 2 && r3.value.opId === "op-2" && r3.cacheHit !== undefined);
+}
+
+// Card 3a460d4a (id6) — the TTL'd `retained` map is NOT a second door into the same bug for a key using
+// retainVerdictUntilSuperseded: a second call landing WITHIN the TTL retainMs window, with an
+// unresolvable/mismatched identity, must still mint fresh rather than being served from `retained` (which
+// never itself consults identity). See docs/decisions/3a460d4a-*.md's "second door" analysis.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  await reg.attach("id6", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-1" }; }, undefined, { retainMs: 5000, retainVerdictUntilSuperseded: true, verdictIdentity: undefined, identityOptional: false, classifyOutcome: classify });
+  // Still well within the 5000ms retainMs window — if the TTL'd `retained` map were reachable here
+  // (bypassing the until-superseded miss), THIS is exactly where it would wrongly serve the stale op-1.
+  const r2 = await reg.attach("id6", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { retainMs: 5000, retainVerdictUntilSuperseded: true, verdictIdentity: undefined, identityOptional: false, classifyOutcome: classify });
+  check("(TTL map is not a second door) a re-call WITHIN the retainMs window, with an unresolvable identity, still mints fresh — never served from the TTL retained map — announced as identity-unresolved", calls === 2 && r2.value.opId === "op-2" && r2.cacheHit === undefined && r2.freshMint?.reason === "identity-unresolved");
+}
+
+// Card 3a460d4a (id7) — the MIXED variant: a prior verdict exists under a DEFINED identity, and this
+// call's own resolution fails (undefined). Still a miss (never matches the prior defined identity), and
+// still "identity-unresolved" — never "identity-mismatch", which would wrongly claim two commits were
+// compared when only one side ever resolved.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const r1 = await reg.attach("id7", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "build gate failed", opId: "op-1" }; }, undefined, { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-ID7", identityOptional: false, classifyOutcome: classify });
+  check("(mixed: prior defined) first op ran once, rejected at sha-ID7", calls === 1 && r1.value.opId === "op-1");
+  await waitUntil(() => reg.peek("id7") === undefined, { label: "id7 TTL'd display view expired" });
+  const r2 = await reg.attach("id7", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: undefined, identityOptional: false, classifyOutcome: classify });
+  check("(mixed: current unresolved) a re-call whose OWN identity resolution fails never matches the prior DEFINED identity — mints fresh, announced as identity-unresolved", calls === 2 && r2.value.opId === "op-2" && r2.cacheHit === undefined && r2.freshMint?.reason === "identity-unresolved" && r2.freshMint?.priorIdentity === "sha-ID7");
+}
+
+// Card 3a460d4a (Code Review follow-up, id8) — the SAME two-undefined-identities miss, but on the ok:false
+// (THROWN) settle arm — only id5/id6 above covered ok:true. The thrown branch has its own, separate
+// `untilSupersededVerdicts.set()` write (pending-ops.ts's `(err) => {...}` settle handler) and its own
+// identity source (`opts.verdictIdentity` directly — there is no settled VALUE to derive one from), so it
+// needs its own proof rather than being assumed covered by the ok:true case. LONG-LIVED arm: well past the
+// TTL `retained` window, so only the never-expiring `untilSupersededVerdicts` map could serve a hit.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const opts = { retainMs: 20, retainVerdictUntilSuperseded: true, verdictIdentity: undefined, identityOptional: false, classifyOutcome: classify };
+  class MarkerError extends Error { constructor(m) { super(m); this.marker = "id8-first"; } }
+  const r1 = await reg.attach("id8", "merge", "mgr1", 200, async () => { calls++; throw new MarkerError("build gate failed"); }, undefined, opts);
+  check("(thrown, long-lived) first op ran once, failed", calls === 1 && r1.ok === false && r1.error instanceof MarkerError && r1.error.marker === "id8-first");
+  await waitUntil(() => reg.peek("id8") === undefined, { label: "id8 TTL'd display view expired" });
+  const r2 = await reg.attach("id8", "merge", "mgr1", 200, async () => { calls++; throw new MarkerError("a different failure"); }, undefined, opts);
+  check("(thrown, long-lived) a SECOND unresolvable-identity call, well past the TTL window, mints FRESH — never dedupe-hits the stale thrown verdict — announced as identity-unresolved", calls === 2 && r2.ok === false && r2.error instanceof MarkerError && r2.error.message === "a different failure" && r2.cacheHit === undefined && r2.freshMint?.reason === "identity-unresolved");
+}
+
+// Card 3a460d4a (Code Review follow-up, id9) — same thrown-arm coverage as id8, but the TTL arm: the
+// re-call lands WITHIN the retainMs window, proving the thrown branch's TTL `retained` map is ALSO not a
+// second door (mirrors id6, which only covered the ok:true write).
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const opts = { retainMs: 5000, retainVerdictUntilSuperseded: true, retainErrors: true, verdictIdentity: undefined, identityOptional: false, classifyOutcome: classify };
+  class MarkerError extends Error { constructor(m) { super(m); this.marker = "id9-first"; } }
+  await reg.attach("id9", "merge", "mgr1", 200, async () => { calls++; throw new MarkerError("build gate failed"); }, undefined, opts);
+  // Still well within the 5000ms retainMs window — if the TTL'd `retained` map were reachable here
+  // (bypassing the until-superseded miss), THIS is exactly where it would wrongly serve the stale throw.
+  const r2 = await reg.attach("id9", "merge", "mgr1", 200, async () => { calls++; throw new MarkerError("a different failure"); }, undefined, opts);
+  check("(thrown, TTL map is not a second door) a re-call WITHIN the retainMs window, with an unresolvable identity, still mints fresh — never served from the TTL retained map — announced as identity-unresolved", calls === 2 && r2.ok === false && r2.error instanceof MarkerError && r2.error.message === "a different failure" && r2.cacheHit === undefined && r2.freshMint?.reason === "identity-unresolved");
 }
 
 // --- FRESH-MINT REASON ANNOUNCEMENT (card 615967c5 — the cached-verdict-legibility fix; renamed by card
@@ -1164,11 +1258,17 @@ const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.
 // SAME opId and the SAME stale "cancelled by manager … via gate_cancel" reason — the exact live incident
 // (mgr #113, 2026-08-04) — so the check below FAILS. Only once `attach()` actually checks the classified
 // outcome before writing does the re-call mint a genuinely fresh op instead.
+// Card 3a460d4a (Code Review follow-up): a DEFINED, consistent verdictIdentity on both calls — omitting
+// it (as this block used to) made the "re-call mints fresh" assertion unfalsifiable against the veto this
+// block exists to prove: with BOTH sides undefined, card 3a460d4a's own fix now forces a fresh mint
+// regardless of whether the NEVER_CACHED_OUTCOMES veto on the write still works, so a broken veto could no
+// longer turn this RED. A defined, MATCHING identity restores that: if the veto breaks, the write happens
+// anyway and a matching identity on the re-call DOES dedupe-hit, exposing the regression again.
 {
   const reg = new PendingOpRegistry();
   let calls = 0;
   const cancelOutcome = { merged: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager mgr1 via gate_cancel", opId: "op-1" };
-  const opts = { retainMs: 30, retainVerdictUntilSuperseded: true, classifyOutcome: classifyWithCancel };
+  const opts = { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-CV1", classifyOutcome: classifyWithCancel };
   const r1 = await reg.attach("cv1", "merge", "mgr1", 200, async () => { calls++; return cancelOutcome; }, undefined, opts);
   check("(cancel-not-cached) the cancelled op settled once", calls === 1 && r1.value.cancelled === true);
   await waitUntil(() => reg.peek("cv1") === undefined, { label: "cv1 TTL'd display view expired" });
@@ -1182,11 +1282,12 @@ const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.
 // FIRST and could still dedupe-serve a cancelled outcome inside its own short window if its read weren't
 // ALSO gated on the same classified "cancelled" string — reproduced here well within the window, on
 // PRE-FIX code this check also fails for the same reason as above.
+// Card 3a460d4a (Code Review follow-up): same reasoning as cv1 above — a DEFINED, consistent identity.
 {
   const reg = new PendingOpRegistry();
   let calls = 0;
   const cancelOutcome = { merged: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager mgr1 via gate_cancel", opId: "op-1" };
-  const opts = { retainMs: 500, retainVerdictUntilSuperseded: true, classifyOutcome: classifyWithCancel };
+  const opts = { retainMs: 500, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-CV2", classifyOutcome: classifyWithCancel };
   await reg.attach("cv2", "merge", "mgr1", 200, async () => { calls++; return cancelOutcome; }, undefined, opts);
   // STILL WELL WITHIN the 500ms retainMs window — exactly where the 5s-window trap the card's DoD-1
   // calls out would replay the stale cancellation if the retained-map read weren't also gated.
@@ -1198,8 +1299,11 @@ const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.
 // still be cached and still be served to a plain re-call, with the SAME classifyWithCancel in play — the
 // "cancelled" sentinel must discriminate cancellation from merged/rejected, not widen into "don't cache
 // anything unusual."
+// Card 3a460d4a: a DEFINED, consistent verdictIdentity — the cancelled-vs-cached discrimination under
+// test here is orthogonal to identity, and cv4/cv5 are separate registries/keys so sharing one value is
+// safe.
 {
-  const mergeOpts = { retainMs: 30, retainVerdictUntilSuperseded: true, classifyOutcome: classifyWithCancel };
+  const mergeOpts = { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-CV45", classifyOutcome: classifyWithCancel };
   // A genuine REJECTION (merged:false, no cancelled flag) still dedupes past the display window.
   {
     const reg = new PendingOpRegistry();
