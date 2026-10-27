@@ -171,9 +171,10 @@ try {
     // routes to reduceForeignUnionContributor, which removes dSub from contributorRepoPaths and records
     // it in reducedContributorRepoPaths instead. Its own `ownedKeys` write loop IS the first write to
     // reach the chokepoint since readability returned, and it DOES durably reconcile the physical file
-    // (confirmed below, via the on-disk JSON) — but it leaves `activeQuarantines`'s own in-memory slot
-    // pointing at the PRE-reconcile object instead of updating it to match (a separate, pre-existing
-    // defect, carded separately — not this card's own fix, and not asserted here as correct behavior).
+    // (confirmed below, via the on-disk JSON) — and, as of card 4e987303, it now also re-points
+    // `activeQuarantines`'s own in-memory slot to match the reconciled object via `writeLatchAndAdopt`
+    // (see docs/decisions/4e987303-adopt-the-entry-a-reconciling-write-actually-persisted.md) — the
+    // "(s2 precondition)" check below for this is now a POSITIVE assertion, not an unasserted gap.
     // NOTE: reduceForeignUnionContributor stamps `directPathIdentity(repoPath)` into
     // reducedContributorRepoPaths (a NORMALIZED identity, lowercased on win32 — existing, pre-this-card
     // behavior, unrelated to the fix) — contributorRepoPaths instead stores the RAW repoPath string.
@@ -184,11 +185,15 @@ try {
     check("(s2 sanity) reduceForeignUnionContributor reports wasQuarantined:true", reduceResult.wasQuarantined === true);
     check("(s2 sanity) reduceForeignUnionContributor lifts NOTHING", (reduceResult.liftedRepoPaths ?? []).length === 0);
     check("(s2 precondition) reducedContributorRepoPaths is set in memory right after the reduce", names(activeMergeQuarantineFor2(sSub)?.reducedContributorRepoPaths, dSub));
-    note("(s2) the in-memory activeQuarantines entry stays the pre-reconcile placeholder here — a separately-carded, pre-existing gap in reduceForeignUnionContributor itself, not asserted either way by this test.");
+    // UPDATED (card 4e987303 — this note's own prior claim is now FALSE, corrected here rather than left
+    // stale per that card's own "relabel/update 84c1046f's '(s2 precondition)' note" DoD item): the
+    // in-memory activeQuarantines entry no longer stays the pre-reconcile placeholder — reduceForeignUnionContributor
+    // now routes its write through writeLatchAndAdopt, which re-points memory to whatever the reconcile
+    // actually persisted. See docs/decisions/4e987303-adopt-the-entry-a-reconciling-write-actually-persisted.md.
+    check("(s2) *** 4e987303 *** the in-memory entry is NO LONGER the pre-reconcile placeholder — it matches disk", activeMergeQuarantineFor2(sSub)?.placeholder !== true && (activeMergeQuarantineFor2(sSub)?.tokens ?? []).includes("s-genuine-token-2"));
 
-    // Read the DURABLE on-disk JSON directly, rather than the in-memory entry, since the in-memory slot
-    // is NOT updated to match (see the note above) — the disk content is what actually proves the
-    // reingest branch ran.
+    // Read the DURABLE on-disk JSON directly too — still the authoritative proof the reingest branch ran
+    // durably (memory now matches it, per the check just above, but disk is the ground truth either way).
     const onDiskAfterReduce = JSON.parse(fs.readFileSync(finalPath, "utf8"));
     check("(s2 sanity) the on-disk JSON carries sSub's own genuine token (reingest ran durably)", (onDiskAfterReduce.tokens ?? []).includes("s-genuine-token-2"));
     check("(s2 sanity) the on-disk JSON is no longer the placeholder shape (reingest replaced it)", !onDiskAfterReduce.branch?.includes("UNREADABLE"));
