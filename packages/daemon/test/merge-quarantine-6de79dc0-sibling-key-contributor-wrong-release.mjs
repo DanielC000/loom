@@ -33,6 +33,7 @@ const {
   clearMergeQuarantineByRecordedPath, clearMergeQuarantineLatchFile, assertRepoNotQuarantined,
   directPathIdentity, MERGE_QUARANTINE_DIR, reenterMergeQuarantinesAtBoot, quarantineLatchIdFor,
   pushPendingQuarantineTestOnly, PLACEHOLDER_BRANCH_UNREADABLE, setActiveQuarantineTestOnly,
+  alsoReleasedRepoPaths, alsoReleasedWarningFor,
 } = await import(mergeQuarantineModuleUrl);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -136,6 +137,14 @@ function checkPrecondition(tag, s, r) {
   check("*** VERIFIED, NOT ASSUMED (explore-clear-r) *** /clear(r) ALSO lifts s (the whole union, exactly as the refusal text above now discloses)", liftedIdentities.has(directPathIdentity(s)));
   check("(explore-clear-r) r reads clear afterward", assertRepoNotQuarantined(r).ok === true);
   check("(explore-clear-r) s reads clear afterward too", assertRepoNotQuarantined(s).ok === true);
+
+  // @decision 1872935d (card 1872935d, the Lead's A+D ruling) — A keeps this release exactly as above;
+  // D is this post-hoc disclosure: the identity swept up BEYOND the one addressed (r) must be named.
+  const alsoReleased = alsoReleasedRepoPaths(result.liftedRepoPaths, [r]);
+  const alsoReleasedWarning = alsoReleasedWarningFor(alsoReleased);
+  check("*** THE FIX (card 1872935d, option D) *** alsoReleasedRepoPaths names exactly s, never r itself", alsoReleased.length === 1 && directPathIdentity(alsoReleased[0]) === directPathIdentity(s));
+  check("*** THE FIX *** alsoReleasedWarning is a string naming s and the confirm-no-process wording", typeof alsoReleasedWarning === "string" && alsoReleasedWarning.includes(s) && alsoReleasedWarning.toLowerCase().includes("confirm no process"));
+  check("(explore-clear-r) the warning is explicitly POST-HOC, never a pre-action prompt", alsoReleasedWarning.toLowerCase().includes("already happened"));
 }
 
 // ===================== (owner) non-regression — S clearing itself with NO sibling-key contributor still =====================
@@ -155,6 +164,136 @@ function checkPrecondition(tag, s, r) {
   check("(owner, non-regression) /clear(s) with no sibling-key contributor still fully releases", result.liftedRepoPaths.length > 0);
   check("(owner, non-regression) s reads clear afterward", assertRepoNotQuarantined(s).ok === true);
   check("(owner, non-regression) ySub reads clear afterward too", assertRepoNotQuarantined(ySub).ok === true);
+
+  // @decision 1872935d — negative control for the disclosure added by option D: an ordinary same-key
+  // bare-subdirectory contributor (ySub) is PART OF what `/clear(s)` addresses (clear-by-path with s's
+  // own path is understood to cover its own same-key union), so nothing is "also released" here.
+  const alsoReleased = alsoReleasedRepoPaths(result.liftedRepoPaths, [s]);
+  check("*** NEGATIVE CONTROL (owner) *** alsoReleasedRepoPaths is empty for an ordinary same-key self-clear", alsoReleased.length === 0);
+  check("*** NEGATIVE CONTROL (owner) *** alsoReleasedWarningFor returns undefined for an empty input", alsoReleasedWarningFor(alsoReleased) === undefined);
+}
+
+// A real `.git` repo created INSIDE an already-existing directory (never its own top-level tmp dir) — for
+// the (nested-inner)/(enclosing) fixtures below, where one genuinely separate repo's own directory must
+// physically sit inside the other's.
+function nestedRepo(parentDir, subdirName, tag) {
+  const d = path.join(parentDir, subdirName);
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, "README.md"), `# ${tag}\n`);
+  execSync(`git init -q && git config user.email mq6de79dc0@loom && git config user.name mq6de79dc0`, { cwd: d });
+  commitAll(d, "init", GIT_ID);
+  return d;
+}
+
+// ===================== (nested-inner) CR round 2, MAJOR — a genuinely separate repo NESTED INSIDE the =====================
+// ===================== addressed one must still be reported, never hidden by mere path nesting =====================
+// @decision 1872935d (CR round 2) — Round 1's `isNestedUnderKey`-based exclusion hid this: `other` here is
+// textually inside `addr`'s own directory, but genuinely owns its OWN key (its own `.git`) — the physical
+// nesting is irrelevant; only `canonicalRepoLockKey` equality may exclude it, and here the keys differ.
+{
+  const addr = freshRepo("nested-inner-addr"); // raises SECOND, the contributor — this is what we clear
+  const other = nestedRepo(addr, "nested-other-repo", "nested-inner-other"); // raises FIRST, the union owner; lives INSIDE addr's own directory
+  const kAddr = canonicalRepoLockKey(addr);
+  const kOther = canonicalRepoLockKey(other);
+  if (kAddr === kOther) throw new Error("(nested-inner): kAddr collided with kOther — re-run");
+
+  enterMergeQuarantine(other, "other-branch", "1872935d (nested-inner): other raises first, genuinely owns its own key, nested inside addr's own directory");
+  const otherFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kOther)}.json`);
+  const otherOnDisk = JSON.parse(fs.readFileSync(otherFile, "utf8"));
+  fs.writeFileSync(otherFile, JSON.stringify({ ...otherOnDisk, resolvedKey: kAddr }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  enterMergeQuarantine(addr, "addr-branch", "1872935d (nested-inner): addr raises second, genuinely, at its own real key");
+
+  const otherEntry = activeMergeQuarantineFor(other);
+  check("(nested-inner precondition) other is dual-armed [Kother, Kaddr]", (() => {
+    const keys = new Set(otherEntry?.armedKeys ?? []);
+    return keys.has(kOther) && keys.has(kAddr);
+  })());
+  check("(nested-inner precondition) addr is folded in as a contributor", !!otherEntry?.contributorRepoPaths?.includes(addr));
+
+  const result = clearMergeQuarantineReporting(addr);
+  check("(nested-inner) addr is lifted", result.liftedRepoPaths.some((rp) => directPathIdentity(rp) === directPathIdentity(addr)));
+  check("(nested-inner) other is ALSO lifted (pre-existing, accepted release-everything design)", result.liftedRepoPaths.some((rp) => directPathIdentity(rp) === directPathIdentity(other)));
+  const alsoReleased = alsoReleasedRepoPaths(result.liftedRepoPaths, [addr]);
+  check("*** THE FIX (CR round 2, MAJOR) *** a genuinely separate repo NESTED INSIDE the addressed one IS reported, never hidden by nesting", alsoReleased.length === 1 && directPathIdentity(alsoReleased[0]) === directPathIdentity(other));
+}
+
+// ===================== (enclosing) CR round 2, MAJOR — a genuinely separate repo that ENCLOSES the =====================
+// ===================== addressed one must also be reported, never hidden by mere path nesting =====================
+// The mirror direction of (nested-inner): here `other` is the ANCESTOR, `addr` lives inside `other`'s own
+// directory. Round 1's bidirectional nesting check hid this shape too (checked both directions).
+{
+  const other = freshRepo("enclosing-other"); // raises FIRST, the union owner — ENCLOSES addr's own directory
+  const addr = nestedRepo(other, "enclosed-addr-repo", "enclosing-addr"); // raises SECOND, the contributor — this is what we clear
+  const kOther = canonicalRepoLockKey(other);
+  const kAddr = canonicalRepoLockKey(addr);
+  if (kAddr === kOther) throw new Error("(enclosing): kAddr collided with kOther — re-run");
+
+  enterMergeQuarantine(other, "other-branch", "1872935d (enclosing): other raises first, genuinely owns its own key, encloses addr's own directory");
+  const otherFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kOther)}.json`);
+  const otherOnDisk = JSON.parse(fs.readFileSync(otherFile, "utf8"));
+  fs.writeFileSync(otherFile, JSON.stringify({ ...otherOnDisk, resolvedKey: kAddr }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  enterMergeQuarantine(addr, "addr-branch", "1872935d (enclosing): addr raises second, genuinely, at its own real key");
+
+  const otherEntry = activeMergeQuarantineFor(other);
+  check("(enclosing precondition) other is dual-armed [Kother, Kaddr]", (() => {
+    const keys = new Set(otherEntry?.armedKeys ?? []);
+    return keys.has(kOther) && keys.has(kAddr);
+  })());
+  check("(enclosing precondition) addr is folded in as a contributor", !!otherEntry?.contributorRepoPaths?.includes(addr));
+
+  const result = clearMergeQuarantineReporting(addr);
+  check("(enclosing) addr is lifted", result.liftedRepoPaths.some((rp) => directPathIdentity(rp) === directPathIdentity(addr)));
+  check("(enclosing) other is ALSO lifted (pre-existing, accepted release-everything design)", result.liftedRepoPaths.some((rp) => directPathIdentity(rp) === directPathIdentity(other)));
+  const alsoReleased = alsoReleasedRepoPaths(result.liftedRepoPaths, [addr]);
+  check("*** THE FIX (CR round 2, MAJOR) *** a genuinely separate repo that ENCLOSES the addressed one IS reported, never hidden by nesting", alsoReleased.length === 1 && directPathIdentity(alsoReleased[0]) === directPathIdentity(other));
+}
+
+// ===================== (id-multi-claimant) CR round 2, MINOR — clear-by-id's own disclosure for the =====================
+// ===================== 882d6cff multi-claimant PENDING shape: two genuinely different-keyed repos sharing =====================
+// ===================== one crafted latch id must name the one NOT addressed, never nothing =====================
+// @decision 1872935d (CR round 2, MINOR) — gateway/server.ts's {id} route used to pass `liftedRepoPaths`
+// against itself (always dead); fixed to source "addressed" from the function's own new
+// `addressedRepoPaths` field. See the decision record's "Round 2" section for the full mechanism.
+{
+  const addr = freshRepo("id-multi-addr");
+  const other = freshRepo("id-multi-other");
+  if (canonicalRepoLockKey(addr) === canonicalRepoLockKey(other)) throw new Error("(id-multi-claimant): keys collided — re-run");
+  const sharedSourceFile = "pending-aaaaaaaaaaaaaaaaaaaaaaaa.json"; // PENDING_DIVERT_RE-shaped
+  pushPendingQuarantineTestOnly({
+    repoPath: addr, branch: "addr-branch", reason: "1872935d (id-multi-claimant): addr", enteredAt: Date.now(), tokens: ["addr-token"],
+  }, sharedSourceFile);
+  pushPendingQuarantineTestOnly({
+    repoPath: other, branch: "other-branch", reason: "1872935d (id-multi-claimant): other", enteredAt: Date.now() - 1000, tokens: ["other-token"],
+  }, sharedSourceFile);
+  const sharedId = createHash("sha256").update(sharedSourceFile).digest("hex").slice(0, 24);
+
+  const result = clearMergeQuarantineLatchFile(sharedId);
+  check("(id-multi-claimant) clear-by-id succeeds (ok:true) — no ambiguity refusal for this shape", result.ok === true);
+  if (result.ok) {
+    check("(id-multi-claimant) BOTH genuinely different-keyed identities are lifted (882d6cff's own shape)", result.liftedRepoPaths.some((rp) => directPathIdentity(rp) === directPathIdentity(addr)) && result.liftedRepoPaths.some((rp) => directPathIdentity(rp) === directPathIdentity(other)));
+    const alsoReleased = alsoReleasedRepoPaths(result.liftedRepoPaths, result.addressedRepoPaths ?? []);
+    check("*** THE FIX (CR round 2, MINOR) *** the clear-by-id disclosure names the OTHER, genuinely different-keyed identity — never dead", alsoReleased.length === 1);
+  }
+}
+
+// ===================== (key-throws-unit) Lead review after CR round 2 — a failed ADDRESSED key walk must =====================
+// ===================== never let the addressed path report ITSELF as "also released" =====================
+// @decision 1872935d (Lead review after CR round 2) — pure unit test: `canonicalRepoLockKey` cannot be
+// made to throw with any cheap real input (verified empirically), so `keyFn` is driven directly as the
+// test seam it exists for. See the decision record's "Round 2"/Lead-review addendum for the full bug.
+{
+  const addressedPath = "C:\\fake\\addressed-repo";
+  const otherPath = "C:\\fake\\genuinely-other-repo";
+  const throwingKeyFn = (p) => {
+    if (p === addressedPath) throw new Error("(key-throws-unit) simulated key-walk failure for the addressed path");
+    return p; // otherPath's own "key" — anything that differs from a thrown/undefined value
+  };
+  const alsoReleased = alsoReleasedRepoPaths([addressedPath, otherPath], [addressedPath], throwingKeyFn);
+  check("*** THE FIX (Lead review) *** the addressed path is NOT reported even though its own key walk throws", !alsoReleased.includes(addressedPath));
+  check("*** THE FIX (Lead review) *** a genuinely different lifted path IS still reported despite the addressed-side failure", alsoReleased.includes(otherPath));
+  check("(key-throws-unit) exactly one entry reported", alsoReleased.length === 1);
 }
 
 // ===================== (pre-fix-field-less) a union formed BEFORE this card's own fix shipped — =====================

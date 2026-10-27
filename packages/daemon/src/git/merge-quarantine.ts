@@ -6728,6 +6728,58 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, queriedRepoPath: st
   return `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`;
 }
 
+/**
+ * Which identities in `liftedRepoPaths` were released as a SIDE EFFECT of addressing `addressedRepoPaths`
+ * — never one of the identity/identities the human actually named, and never one sharing the SAME
+ * canonical key (an ordinary same-key bare-subdirectory contributor, `3be11be4`'s own CASE 1/2
+ * ancestor-collapse shape, is not a separately-outstanding quarantine worth a confirm-no-process warning —
+ * only a genuinely SEPARATE repo, with a genuinely different key, is).
+ *
+ * @decision 1872935d (CR round 2, MAJOR) — compares by {@link canonicalRepoLockKey}, NEVER path nesting
+ * (Round 1's `isNestedUnderKey` check hid a genuinely separate repo's release whenever it was nested
+ * inside, or enclosed, the addressed path). See the decision record's "Round 2" section for the full fix.
+ *
+ * @decision 1872935d (Lead review after CR round 2) — an exact {@link directPathIdentity} match against
+ * `addressedRepoPaths` is ALSO excluded, independent of key resolution (otherwise a failed ADDRESSED key
+ * walk reports the addressed path as "also released" against itself). `keyFn` is a TEST SEAM only.
+ */
+export function alsoReleasedRepoPaths(liftedRepoPaths: string[], addressedRepoPaths: string[], keyFn: (repoPath: string) => string = canonicalRepoLockKey): string[] {
+  const safeKey = (p: string): string | undefined => {
+    try { return keyFn(p); } catch { return undefined; }
+  };
+  const addressedKeys = addressedRepoPaths.map(safeKey);
+  const addressedIdentities = addressedRepoPaths.map(directPathIdentity);
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const rp of liftedRepoPaths) {
+    const identity = directPathIdentity(rp);
+    if (addressedIdentities.includes(identity)) continue;
+    const liftedKey = safeKey(rp);
+    const sameKeyAsAddressed = liftedKey !== undefined && addressedKeys.some((k) => k !== undefined && k === liftedKey);
+    if (sameKeyAsAddressed || seen.has(identity)) continue;
+    seen.add(identity);
+    result.push(rp);
+  }
+  return result;
+}
+
+/**
+ * Human-readable, POST-HOC disclosure for a non-empty {@link alsoReleasedRepoPaths} result — same
+ * confirm-no-process voice `remediationTextFor`'s own `ownKeyAlsoReleasedClause` (card 6de79dc0) uses for
+ * its PRE-action warning. This is the AFTER-the-fact twin: the clear has already run, so this never asks a
+ * human to confirm anything before acting — only after, honestly labeled as such. Returns `undefined` for
+ * an empty input so a caller can `...(warning ? { alsoReleasedWarning: warning } : {})`.
+ *
+ * @decision 1872935d — see {@link alsoReleasedRepoPaths}'s own doc for why this exists.
+ */
+export function alsoReleasedWarningFor(alsoReleased: string[]): string | undefined {
+  if (alsoReleased.length === 0) return undefined;
+  return `This clear ALSO released ${alsoReleased.length} other, separately-outstanding unconfirmed-kill ` +
+    `quarantine${alsoReleased.length === 1 ? "" : "s"} (${alsoReleased.map((p) => `'${p}'`).join(", ")}) that ` +
+    `had been folded into the same union — this already happened (a POST-HOC report, never a pre-action ` +
+    `prompt), so confirm no process is still running under ${JSON.stringify(alsoReleased)} too.`;
+}
+
 /** Thin wrapper over {@link clearMergeQuarantine} for the project-resolved `/internal/merge-quarantine/clear`
  *  route (card c0be9bf9) — that route's own job ends at resolving projectId/repoKey down to a `repoPath`
  *  and calling this.
@@ -6845,7 +6897,7 @@ const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
  * names only an identity actually freed, never one still blocked by its own independent (d4b25feb) record
  * — `stillQuarantined`/`reason` name that case instead of a silently-false success.
  */
-export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; stillQuarantined?: true; refusedBeforeClear?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
+export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; addressedRepoPaths?: string[]; stillQuarantined?: true; refusedBeforeClear?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
   if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
     return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list)` };
   }
@@ -6955,6 +7007,9 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     }
     return {
       ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath],
+      // @decision 1872935d (CR round 2, MINOR) — the identity the id itself resolves to (activeMatch's
+      // own key), never `liftedRepoPaths` itself — passing a field against itself made the disclosure dead.
+      addressedRepoPaths: [activeMatch.entry.repoPath],
       stillBlockedCoOccupants: activeStillBlocked,
       ...(activeRelocated.length > 0 ? { reason: relocatedCoOccupantsReason(activeRelocated) } : {}),
       ...activeLatchKeptFields,
@@ -7101,11 +7156,18 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       if (after) stillBlockedReasons.push(stillQuarantinedReason(after, repoPath));
       else liftedRepoPaths.push(repoPath);
     }
+    // @decision 1872935d (CR round 2, MINOR) — `matchedRepoPaths[0]` as the one reference identity "the
+    // id resolves to" (never the full set — that would be self-referential, the dead-field bug this
+    // closes). See the decision record's "Round 2" section for why there is no better single value.
+    //
     // @decision 182c01cc (round 2/4) — this branch's own sweep mechanisms never relocate a foreign
     // occupant to a new latch — there is no relocated-co-occupant mechanism reachable here — but a kept
     // one is real (round 4 fix: `keptCoOccupants`, never a hard-coded `[]`).
+    const [firstMatchedRepoPath] = matchedRepoPaths;
     return {
-      ok: true, wasQuarantined: true, liftedRepoPaths, stillBlockedCoOccupants: [...keptCoOccupants.values()],
+      ok: true, wasQuarantined: true, liftedRepoPaths,
+      ...(firstMatchedRepoPath !== undefined ? { addressedRepoPaths: [firstMatchedRepoPath] } : {}),
+      stillBlockedCoOccupants: [...keptCoOccupants.values()],
       ...(stillBlockedReasons.length > 0 ? { stillQuarantined: true, reason: stillBlockedReasons.join(" ") } : {}),
       ...(keptRepoPaths.size > 0 || anyKeptUnattributed || keptContentRepoPaths.size > 0 ? { latchKept: true as const } : {}),
       ...(keptRepoPaths.size > 0 || anyKeptUnattributed ? { referencingRepoPaths: [...keptRepoPaths] } : {}),
