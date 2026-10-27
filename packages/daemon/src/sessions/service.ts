@@ -941,6 +941,24 @@ type ConfirmMergeResult = {
    *  (missing, or an unreadable/ambiguous `refs/heads/<branch>`); nothing was ever attempted, classified
    *  `"branch-tip-unresolvable"`, `NEVER_CACHED_OUTCOMES` — a re-confirm genuinely re-attempts. */
   branchTipUnresolvable?: boolean;
+  /** Card 08c36dae (F1) — a canonical-git TRUST refusal: commondir redirect, pin mismatch, unpinned root,
+   *  OR a live/unsafe-named merge-driver config refusal (`assertNoLiveMergeDrivers`/`defaultPrefixBuilder`,
+   *  `git/bounded.ts` ~L2053/~L2078) — every `CanonicalGitRefusal` kind, not only the commondir-trust
+   *  ones. Raised structurally (`instanceof CanonicalGitRefusal`, never a message-text match) by either
+   *  the pre-squash identity-fallback probe or the squash's own trust check; nothing was ever attempted,
+   *  classified `"canonical-trust-refusal"`, `NEVER_CACHED_OUTCOMES`. */
+  canonicalTrustRefusal?: boolean;
+  /** Card 08c36dae (F2) — the squash commit failed and canonical HEAD then moved to a sha this merge
+   *  could not verify as its own (deliberately left unreset — see
+   *  docs/decisions/f4da727f-identity-fallback-probe-runs-before-the-squash.md's "Do not" — to avoid
+   *  destroying possibly-foreign work). Unlike every other refusal above, "canonical repo untouched" is
+   *  FALSE here. Classified `"head-moved-unverified"`, `NEVER_CACHED_OUTCOMES`. */
+  headMovedUnverified?: boolean;
+  /** Card 08c36dae — the squash commit itself SUCCEEDED, but the confirmatory re-read of HEAD afterward
+   *  failed, so this merge never learned the landed sha. Distinct from `headMovedUnverified`: there is
+   *  no doubt this is this merge's own commit. Classified `"squash-landed-unread"`,
+   *  `NEVER_CACHED_OUTCOMES`. */
+  squashLandedUnread?: boolean;
   /** @decision d69d4858 — the canonical checkout was off the expected mainline branch; mirrors
    *  `mergeBatchTracked`'s own `branchDiverted`/`unverified`, same `NEVER_CACHED_OUTCOMES` strings. */
   branchDiverted?: boolean;
@@ -21633,6 +21651,36 @@ export class SessionService {
         evt("merge_rejected", { reason: "branch_tip_unresolvable", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, branchTipUnresolvable: true };
       }
+      // @decision 08c36dae — never re-explain canonicalFailureMessage's own remedy here; `merge.reason`
+      // already carries it verbatim. This branch only drops the misleading "Re-task a rebase" suffix for
+      // a canonical-git TRUST refusal, which no rebase of the branch can fix.
+      if (merge.canonicalTrustRefusal) {
+        const why = merge.reason ?? "canonical-git trust refusal";
+        const detailText = `${why}; nothing was squashed — canonical repo and worktree are untouched. This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it.`;
+        const { suppressed, sha } = await rejectNotify("canonical_trust_refusal", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "canonical_trust_refusal", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, canonicalTrustRefusal: true };
+      }
+      // @decision 08c36dae — never claim "canonical repo untouched" here: HEAD moved and the content is
+      // unconfirmed (it may be foreign, or our own commit whose verification itself failed). Nothing
+      // blocks a later merge; `advanceMainlineWatermark`'s landing-trust-freeze alerts once one lands.
+      if (merge.headMovedUnverified) {
+        const why = merge.reason ?? "squash commit failed, and canonical HEAD moved afterwards in a way this merge cannot verify as its own";
+        const detailText = `${why} The canonical repo is NOT confirmed untouched — HEAD moved to a commit this merge could not verify as its own (it may be a foreign write, or it may genuinely be this merge's own commit whose verification itself could not run). A human should inspect it${merge.divertedSha ? ` (\`git show ${merge.divertedSha}\`)` : ""}; a rebase of this branch will not help either way. Nothing currently blocks a further merge on this repo, but the mainline trust record is also NOT advanced on this path — once some LATER landing on this repo succeeds, expect a HIGH mainline-moved alert naming this commit; that alert is about this merge's own attempt, and a human mainline-watermark reset clears it. Worktree retained.`;
+        const { suppressed, sha } = await rejectNotify("head_moved_unverified", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "head_moved_unverified", sha, ...(merge.divertedSha ? { divertedSha: merge.divertedSha } : {}), ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, headMovedUnverified: true, divertedSha: merge.divertedSha };
+      }
+      // @decision 08c36dae — never say "canonical repo untouched" here. A re-confirm detects
+      // ALREADY_MERGED but does NOT clear the mainline trust freeze below — the real fix is carded
+      // separately, never fix it by treating this ALREADY_MERGED as a trust-restoring event.
+      if (merge.squashLandedUnread) {
+        const why = merge.reason ?? "the squash commit landed, but this merge could not re-read HEAD to confirm or report its sha";
+        const detailText = `${why} The commit DID land — canonical repo is NOT untouched. A plain re-confirm should detect this as already merged rather than landing a duplicate; if a re-confirm instead attempts a fresh squash, stop and inspect the canonical checkout's HEAD by hand before letting it proceed. The mainline trust record is NOT advanced on this path — neither this refusal nor a re-confirm's ALREADY_MERGED records it — so expect a HIGH mainline-moved alert naming this exact commit once some LATER landing on this repo succeeds; that alert is about this own commit, not a foreign write, and a human mainline-watermark reset clears it. Worktree retained.`;
+        const { suppressed, sha } = await rejectNotify("squash_landed_unread", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "squash_landed_unread", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, squashLandedUnread: true };
+      }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
       // the REASON STRING itself, not from a second ad-hoc boolean — `merge.dirtyOverlap` only ever covers
@@ -25549,7 +25597,10 @@ export class SessionService {
         // @decision c30952c1 — `worktreeGoneLandingUnconfirmed` classifies distinctly too, same reasoning:
         // the cause (a transient lookup glitch, or the worktree still being gone) is checked fresh on a
         // re-call, never replayed from cache.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : (outcome.value.landedTipUnverifiable || outcome.value.heldRangeUnverifiable) ? "landed-tip-unverifiable" : outcome.value.merged ? "merged" : "rejected"),
+        // @decision 08c36dae — `canonicalTrustRefusal`/`headMovedUnverified`/`squashLandedUnread` must
+        // classify distinctly here too (never fall through to "rejected"), or they get cached under the
+        // unchanged (branch-tip, main-tip) verdictIdentity and a cleared condition replays stale forever.
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.canonicalTrustRefusal ? "canonical-trust-refusal" : outcome.value.headMovedUnverified ? "head-moved-unverified" : outcome.value.squashLandedUnread ? "squash-landed-unread" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : (outcome.value.landedTipUnverifiable || outcome.value.heldRangeUnverifiable) ? "landed-tip-unverifiable" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

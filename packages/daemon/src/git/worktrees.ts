@@ -10155,7 +10155,7 @@ export async function mergeBranch(
   // what excludes `undefined` — TS1016 forbids a bare required param after these optional ones): an
   // omitting caller now gets the SAME logged legacy/grandfathered path as explicit `null`, never a silent skip.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalRepoShallow?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalRepoShallow?: boolean; canonicalTrustRefusal?: boolean; headMovedUnverified?: boolean; squashLandedUnread?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -10436,7 +10436,7 @@ async function mergeBranchLocked(
   // @decision 0eaaa693 (round 5) — same required-`string | null` posture as {@link mergeBranch}'s own
   // param; see that signature's comment for why `= null` (not a bare `?`) is what achieves it here.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalTrustRefusal?: boolean; headMovedUnverified?: boolean; squashLandedUnread?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -10758,7 +10758,14 @@ async function mergeBranchLocked(
     // canonicalFailureMessage's own refusal branches already open with "refused,"/"refusing," —
     // dropping "refused:" from this prefix avoids a literal doubled "refused: refused".
     const identityProbeFailure = describeGitFailure(e);
-    return { ok: false, reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
+    // @decision 08c36dae — never classify `canonicalTrustRefusal` by matching this reason STRING; always
+    // the structural `instanceof CanonicalGitRefusal` check below (a worker-plantable hook can forge
+    // stderr text).
+    return {
+      ok: false,
+      reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}`,
+      ...(e instanceof CanonicalGitRefusal ? { canonicalTrustRefusal: true } : {}),
+    };
   }
 
   // Danger-window tracking (board card 5a7692a4): from HERE — right before `git merge --squash` (NOT
@@ -10794,7 +10801,10 @@ async function mergeBranchLocked(
     }
     // A canonicalGit refusal is thrown BEFORE any git process runs: the squash never started, so the canonical repo is exactly as it entered. Say so — and do NOT
     // run the reset/probes below (they are exec-capable and would be refused too, dressing a clean refusal up as "the canonical repo needs recovery").
-    if (squashRefusalDetail !== undefined) return { ok: false, reason: canonicalFailureMessage(squashRefusalDetail, squashRefusalDetail.text) };
+    // @decision 08c36dae — `squashRefusalDetail` is only ever set from `e instanceof CanonicalGitRefusal`
+    // above (structural, never a message-text match) — `canonicalTrustRefusal` here carries the same
+    // guarantee as the identity-probe site's own flag.
+    if (squashRefusalDetail !== undefined) return { ok: false, canonicalTrustRefusal: true, reason: canonicalFailureMessage(squashRefusalDetail, squashRefusalDetail.text) };
     // Conflict? Unmerged index entries are the reliable signal. Under --squash there is no MERGE_HEAD, so
     // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
     // This probe used to be bare/uncaught (card 9e77050f): a throw here rejected mergeBranchLocked with no
@@ -11090,8 +11100,13 @@ async function mergeBranchLocked(
               if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
               return { ok: true, sha: headAfterFailure, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
             }
+            // @decision 08c36dae — never claim "canonical repo untouched" for this branch: HEAD moved and
+            // the content there is unconfirmed. Left unreset deliberately (see decision 8336b903's sibling
+            // f4da727f record) — a hard reset here could destroy possibly-foreign work.
             return {
               ok: false,
+              headMovedUnverified: true,
+              divertedSha: headAfterFailure,
               reason: `squash commit failed (${(e as Error).message}), but HEAD moved to ${headAfterFailure} afterwards in a way this merge cannot verify as its own (expected parent ${preCommitHead}, tree ${stagedTree ?? "(not captured)"}) — canonical repo needs manual inspection`,
             };
           }
@@ -11118,7 +11133,9 @@ async function mergeBranchLocked(
         const { landedBase, trailerAdvisory } = await verifyLandedAsOwnCommit(sha);
         return { ok: true, sha, subject, landedTip: resolvedBranchHead, landedBase, landedVerify: classifyLandedVerify(landedBase), ...(trailerAdvisory ? { trailerAdvisory } : {}) };
       } catch (e) {
-        return { ok: false, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
+        // @decision 08c36dae — the commit already succeeded here; never say "canonical repo untouched"
+        // for this — a real commit DID land, only this confirmatory HEAD re-read failed.
+        return { ok: false, squashLandedUnread: true, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
       }
     } finally {
       cleanupCommitMessageFile(messageFile.dir);
