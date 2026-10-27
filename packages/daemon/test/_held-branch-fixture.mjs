@@ -18,10 +18,10 @@ import { randomUUID } from "node:crypto";
  * (all three are private methods), by batch-merge-late-range-commits.mjs's own (equivalence check)
  * scenario — the ONE place that equivalence is proved; a caller of this helper cites that scenario rather
  * than re-deriving the proof.
- * `landedSha` deliberately does NOT need its own `Loom-Worker-Branch` trailer: isBranchHeld's git-fact
- * release arm (`findLaterBranchSquash`) only greps commits STRICTLY AFTER `landedSha` for that trailer,
- * never `landedSha`'s own message — so a plain commit standing in for "the batch's own squash of this
- * candidate" is inert here, confirmed by the equivalence scenario reaching the SAME held verdict.
+ * `landedSha` deliberately carries no `Loom-Worker-Branch` trailer. `findLaterBranchSquash` (isBranchHeld's
+ * release arm) only greps commits STRICTLY AFTER `landedSha`, so the missing trailer doesn't affect it —
+ * but `findLandedSquashCommit` (service.ts ~19072/19199/19639/21367/21374) DOES grep for it on the confirm
+ * path; its absence was only MEASURED inert for batch-merge-late-range-commits.mjs's 7 scenarios (outcome-compared), not proven in general.
  */
 export function seedHeldBranch(db, { managerSessionId, workerSessionId, taskId, branch, assembledTip, liveTip, landedSha, phase = "pre-stop" }) {
   db.appendEvent({

@@ -1,7 +1,7 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // A HELD BRANCH OWES MAIN ITS COMMITS, NOT A MERGE BASE (card 13fc5227, Code Review round 2). worker_merge_confirm lands the NON-MERGE commits of assembledTip..liveTip that main does not
 // reach, cherry-picked onto current main; worker_merge shows exactly that commit list and the diffstat of that result, from the same computation (review == landing).
-// Fixture as in batch-merge-late-range-landing.mjs: A adds feature-a.txt + extra-a.txt; a real merge_batch retains it after the gate adds a late commit `late-revert` (removes extra-a.txt).
+// Fixture as in batch-merge-late-range-landing.mjs: A adds feature-a.txt + extra-a.txt; only the (equivalence check) scenario below runs a real merge_batch that retains it after the gate adds a late commit `late-revert` (removes extra-a.txt) — every other scenario seeds the HELD state via seedHeldBranch instead.
 //   (m0)        main gets pre.txt (M0) BEFORE the batch; the worker then runs `git merge --no-ff M0` on A and commits late-z.txt. A merge of an OLDER main commit must not make the late revert
 //               vanish: main ends WITHOUT extra-a.txt, WITH late-z.txt and pre.txt. (The reviewer's reproduction; wrong on 89e67375.)
 //   (worker-merge) the worker merges CURRENT main (which re-adds extra-a.txt in the merge commit) and then commits late-z.txt: the late revert must still land. (Wrong on 19d20dd4 and 89e67375.)
@@ -316,8 +316,8 @@ try {
     check("(eq) the REAL-event branch resolves to a late range with exactly [late-revert]", !!revReal.lateRange && sameSet(revReal.lateRange.commitSubjects, ["late-revert"]));
     check("(eq) the SEEDED-event branch resolves to a late range with exactly [late-revert] — the SAME shape", !!revSeeded.lateRange && sameSet(revSeeded.lateRange.commitSubjects, ["late-revert"]));
     check("(eq) both late ranges report their own single file removed, proving resolveOwedRange treated both holds identically",
-      revReal.lateRange.files.length === 1 && revSeeded.lateRange.files.length === 1 &&
-      revReal.lateRange.files[0].file === "extra-a.txt" && revSeeded.lateRange.files[0].file === "extra-a2.txt");
+      revReal.lateRange?.files?.length === 1 && revSeeded.lateRange?.files?.length === 1 &&
+      revReal.lateRange?.files?.[0]?.file === "extra-a.txt" && revSeeded.lateRange?.files?.[0]?.file === "extra-a2.txt");
 
     const resReal = await mk({ runGate: async () => gateOk }).confirmWorkerMerge(mgrId, wA);
     const resSeeded = await mk({ runGate: async () => gateOk }).confirmWorkerMerge(mgrId, wA2);
