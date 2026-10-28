@@ -151,86 +151,19 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { register } from "node:module";
-
-// Card 944eeaed: a test-only ESM loader hook (Node's `node:module` `register()`, stable since Node 20.6 —
-// a genuine module-customization-hooks seam, not a mock) that intercepts `node:child_process` ONLY when
-// it's imported by the real compiled `dist/deploy-staleness.js` (never by this test file's OWN `execSync`
-// import above, nor by anything else in this process) and swaps in a thin passthrough wrapper around the
-// REAL `execFileSync`. Every call that isn't deliberately armed via `globalThis.__dsGitFault` (or its
-// sibling `globalThis.__dsDiffFault`, card 89a454b2) falls straight through to the real `execFileSync`, so
-// every scenario in this file that doesn't explicitly arm one of the faults is byte-for-byte unaffected by
-// this hook's mere presence. Used below at (23m-fault-proof) to prove — by actually injecting a transient
-// `ETIMEDOUT`-shaped failure into ONE of `computeAncestorBehaviouralMatch`'s own per-file `git show` calls
-// — that this failure mode is swallowed to `builtContentMatchesHead:null` while `available` stays `true`,
-// a shape the top-level `isTransientGitTimeout` retry below structurally cannot see (it only ever inspects
-// `available`). Card 89a454b2: `__dsDiffFault` is a SECOND, independent one-shot fault targeting the SAME
-// function's own leading, unconditional `git diff --name-status` call — the real-world hazard that can
-// starve the `show`-fault below of ever firing under genuine host load (see (23m-fault-proof) itself for
-// the full mechanism and the RED/GREEN proof that motivated adding it).
-// A bare PATH shim (prepending a directory holding a `git.cmd`/`git.bat` to PATH) does NOT work for this:
-// Node's own `execFileSync`/`spawnSync` refuses to resolve a bare command name to a shell file without
-// `shell:true` (the CVE-2024-27980 fix) — confirmed empirically while building this fixture, the same
-// conclusion 52ce4b2d separately reached for simple-git's own spawn path.
-const CP_FAULT_HOOK_SOURCE = `
-export async function resolve(specifier, context, nextResolve) {
-  if (specifier === "node:child_process" && /deploy-staleness\\.js$/.test(context.parentURL ?? "")) {
-    return { url: "virtual:deploy-staleness-cp-fault", shortCircuit: true };
-  }
-  return nextResolve(specifier, context);
-}
-export async function load(url, context, nextLoad) {
-  if (url === "virtual:deploy-staleness-cp-fault") {
-    const src = \`
-      import { execFileSync as real } from "node:child_process";
-      // Card b5416a46: deploy-staleness.ts now resolves an absolute git.exe on win32 (via
-      // resolveGitBinaryForSpawn()) instead of the bare literal "git", so this match can no longer pin an
-      // exact string — it matches any path whose basename (case-insensitive, optional .exe) is "git".
-      // The backslash count below looks wrong but isn't: this text sits inside TWO nested template
-      // literals (this whole CP_FAULT_HOOK_SOURCE string, then this "src" string within it), each of
-      // which collapses "\\\\" to one real backslash — verified empirically against the real two-level
-      // load path (not just a standalone sweep) before landing; don't "simplify" the backslash count
-      // without re-verifying against a live run, the same way this count was derived.
-      const isGitBinary = (f) => /(^|[\\\\\\\\/])git(\\\\.exe)?$/i.test(f);
-      // Card 89a454b2: a SECOND, independent one-shot fault — globalThis.__dsDiffFault — matched on the
-      // literal "--name-status" arg, which (verified: grepped the whole module) is unique to
-      // computeAncestorBehaviouralMatch's own LEADING, unconditional git diff --name-status call
-      // (deploy-staleness.ts, before the per-file show loop the fault above watches). This simulates a
-      // REAL, uninjected ETIMEDOUT on that leading call — the exact mechanism that starves the show-fault
-      // below of ever firing under genuine host load (card 89a454b2's own investigation). Checked FIRST,
-      // same ordering as production's real call sequence (diff before any show).
-      // NOTE: this comment deliberately avoids backtick characters — this text is nested TWO template-
-      // literal levels deep (CP_FAULT_HOOK_SOURCE's own literal, then this src literal within it); a single
-      // backslash-escaped backtick here only survives the outer level and still closes the INNER literal
-      // early, which is exactly the syntax break this note exists to prevent recurring.
-      export const execFileSync = (file, args, opts) => {
-        const diffFault = globalThis.__dsDiffFault;
-        if (diffFault && diffFault.armed && isGitBinary(file) && Array.isArray(args) && args.includes("--name-status") && diffFault.fired < diffFault.maxFires) {
-          diffFault.fired++;
-          const sab = new Int32Array(new SharedArrayBuffer(4));
-          Atomics.wait(sab, 0, 0, diffFault.delayMs);
-          const err = new Error("spawnSync git ETIMEDOUT");
-          err.code = "ETIMEDOUT";
-          throw err;
-        }
-        const fault = globalThis.__dsGitFault;
-        if (fault && fault.armed && isGitBinary(file) && Array.isArray(args) && args.includes("show") && fault.fired < fault.maxFires) {
-          fault.fired++;
-          const sab = new Int32Array(new SharedArrayBuffer(4));
-          Atomics.wait(sab, 0, 0, fault.delayMs);
-          const err = new Error("spawnSync git ETIMEDOUT");
-          err.code = "ETIMEDOUT";
-          throw err;
-        }
-        return real(file, args, opts);
-      };
-    \`;
-    return { format: "module", source: src, shortCircuit: true };
-  }
-  return nextLoad(url, context);
-}
-`;
-register("data:text/javascript," + encodeURIComponent(CP_FAULT_HOOK_SOURCE), import.meta.url);
+// Card 2888badf: the fault-injection hook (+ the isTransientGitTimeout classifier + the bounded-retry
+// loop) used to live inline here — extracted to a shared helper so served-status.mjs's own real-tree
+// probe can reuse the IDENTICAL mechanism instead of a second hand-copied hook that would drift from this
+// one on its own clock. See that file's own header for the full mechanism (three independent one-shot
+// faults: __dsGitFault/__dsDiffFault, used below, plus __dsLogFault, used only by served-status.mjs).
+import {
+  installDeployStalenessFaultHook,
+  isTransientGitTimeout,
+  withGitTimeoutRetry,
+  GIT_TIMEOUT_RETRY_MIN_ATTEMPTS,
+  GIT_TIMEOUT_RETRY_DEADLINE_MS,
+} from "./_deploy-staleness-fault.mjs";
+installDeployStalenessFaultHook();
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -267,9 +200,6 @@ const { computeDeployStaleness: computeDeployStalenessRawUnwrapped, newestMtimeM
 // load, so this suite retries ONLY the specific, narrowly-matched transient-timeout shape, a small FIXED
 // number of times — logging every retried attempt so it is visible in gate output, never silent — and
 // still fails loud if the evidence doesn't support a timeout, never masking a real regression.
-// Card 8d8fa497: renamed from `_MAX_ATTEMPTS` — this is a MINIMUM attempt count, not a cap (see the
-// GIT_TIMEOUT_RETRY_DEADLINE_MS doc below for why a bare count can't be the real bound on its own).
-const GIT_TIMEOUT_RETRY_MIN_ATTEMPTS = 3;
 // Just under production's own GIT_TIMEOUT_MS (1000ms), with slack for scheduling jitter right at the
 // boundary. Used only where production swallows the specific git error (no reason string to key off) and
 // elapsed wall time is the sole available evidence that a timeout — not a fast, unrelated failure — is
@@ -287,26 +217,17 @@ const GIT_TIMEOUT_EVIDENCE_MS = 900;
 // `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS` real attempts regardless of the deadline — a single slow attempt must
 // never be reported as "exhausted" having retried zero times — and callers that pass no `deadlineAt` at
 // all (every OTHER call site in this file) get the exact pre-existing behavior: a fixed
-// `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS`-count cap, unaffected by this card.
-const GIT_TIMEOUT_RETRY_DEADLINE_MS = 60_000;
-// Unambiguous: computeDeployStaleness's own `unavailable()` call sites set this EXACT reasonKind/reason
-// shape only when its one unconditional `runGit` call throws (see deploy-staleness.ts's own `unavailable`
-// call sites) — never for an intentional, non-timeout unavailable state (e.g. no .git, a missing dist
-// entry), which carry a different reasonKind or reason text and must never be retried.
-const isTransientGitTimeout = (result) =>
-  result?.available === false && result?.reasonKind === "could-not-measure" && /ETIMEDOUT/i.test(result?.reason ?? "");
+// `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS`-count cap, unaffected by this card. (`GIT_TIMEOUT_RETRY_MIN_ATTEMPTS`/
+// `GIT_TIMEOUT_RETRY_DEADLINE_MS`/`isTransientGitTimeout` now live in the shared `_deploy-staleness-fault.mjs`
+// helper — card 2888badf — imported above; this function is now a thin wrapper so served-status.mjs's
+// identical-shaped retry can't drift from this one.)
 // `deadlineAt` (a `performance.now()`-scale timestamp) is OPTIONAL — omitted, this behaves exactly as
 // before (a fixed `GIT_TIMEOUT_RETRY_MIN_ATTEMPTS`-count cap). Passed down by `computeAtCapWithRetry` so
 // its own deadline also governs THIS function's inner retries, see the doc above.
 function computeDeployStalenessRaw(options, deadlineAt) {
-  let attempt = 1;
-  for (;;) {
-    const result = computeDeployStalenessRawUnwrapped(options);
-    const deadlinePassed = deadlineAt === undefined || performance.now() >= deadlineAt;
-    if (!isTransientGitTimeout(result) || (attempt >= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS && deadlinePassed)) return result;
+  return withGitTimeoutRetry(computeDeployStalenessRawUnwrapped, options, deadlineAt, (attempt, result) => {
     console.log(`RETRY (${attempt}) computeDeployStaleness hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
-    attempt++;
-  }
+  });
 }
 // Card 944eeaed: a THIRD git-timeout exposure, after 74ac7d4e's top-level `isTransientGitTimeout` retry
 // above and (23o)'s soundness-walk fix below. `computeAncestorBehaviouralMatch`'s own per-file `git show`

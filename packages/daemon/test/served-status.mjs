@@ -57,7 +57,18 @@ process.env.LOOM_WEB_DIST = fakeDist;
 import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 import { commitDateAfterBuild } from "./_served-status-fixture-dates.mjs";
+// Card 2888badf: same shared fault-injection hook + isTransientGitTimeout classifier + bounded-retry loop
+// test/deploy-staleness.mjs uses — see that helper's own header for the full mechanism. Must be installed
+// BEFORE the dynamic import of ../dist/deploy-staleness.js below (it intercepts node:child_process only
+// as THAT module imports it).
+import {
+  installDeployStalenessFaultHook,
+  isTransientGitTimeout,
+  withGitTimeoutRetry,
+  GIT_TIMEOUT_RETRY_MIN_ATTEMPTS,
+} from "./_deploy-staleness-fault.mjs";
 requireHermeticEnv();
+installDeployStalenessFaultHook();
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -113,7 +124,16 @@ const call = async (name, args) => JSON.parse((await client.callTool({ name, arg
 // checkout) and anchor fixture commit dates relative to its real distBuiltAt, so the STALE/CLEAN split is
 // deterministic either way without hardcoding an assumption about which single file is newest.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const realBuildProbe = computeDeployStaleness();
+// Card 2888badf: this probe runs against the REAL checkout's real git history (no repoRoot override) —
+// the exact call that recurrently hit production's GIT_TIMEOUT_MS=1000ms bound under host load
+// (advisories 42b589a2, 996ed67b: "could not read daemon-src/shared commit history: spawnSync
+// …git.exe ETIMEDOUT", then an implausible-distBuiltAt throw below). Wrapped in the SAME bounded,
+// classified retry test/deploy-staleness.mjs's own real-tree-adjacent calls already use — a GENUINE
+// "not a source checkout" (reasonKind:"not-applicable") is never retried and still throws exactly as
+// before; see (4-setup-fault-proof) below for the deterministic injected-fault proof of both halves.
+const realBuildProbe = withGitTimeoutRetry(computeDeployStaleness, {}, undefined, (attempt, result) => {
+  console.log(`RETRY (${attempt}) (4-setup) real-tree probe hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
+});
 check("(4-setup) real-tree probe: this checkout's own daemon dist is a real source checkout" + reasonSuffix(realBuildProbe), realBuildProbe.available === true);
 const realDistMtimeMs = new Date(realBuildProbe.distBuiltAt).getTime();
 // Card c241d54b — SECONDARY hardening (the production fix is in deploy-staleness.ts itself): refuse an
@@ -124,6 +144,58 @@ const realDistMtimeMs = new Date(realBuildProbe.distBuiltAt).getTime();
 if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
   throw new Error(`(4-setup) real-tree probe returned an implausible distBuiltAt (${realBuildProbe.distBuiltAt}) — refusing to derive GIT_AUTHOR_DATE fixture dates from it`);
 }
+
+// ===================== (4-setup-fault-proof) card 2888badf =====================
+// Prove the retry wrapper above actually retries a transient git ETIMEDOUT on the SAME call this probe
+// makes — via a deterministic INJECTED fault (globalThis.__dsLogFault, see
+// test/_deploy-staleness-fault.mjs), never real host load. RED: the raw, UNWRAPPED call under one armed
+// fault reproduces the exact reported failure shape with no retry wrapper present. GREEN: the identical
+// one-shot fault, now absorbed by withGitTimeoutRetry. Plus two negative controls: a fault that never
+// clears still fails loud (the retry never masks a persistent failure), and a genuine "not a source
+// checkout" (reasonKind:"not-applicable") is never classified as transient and is never retried.
+{
+  const FAULT_DELAY_MS = 50; // no elapsed-time heuristic reads this here — just simulates "some slowness".
+
+  // RED.
+  globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 1, delayMs: FAULT_DELAY_MS };
+  const redResult = computeDeployStaleness();
+  check("(4-setup-fault-proof) RED: an injected one-shot git-log ETIMEDOUT reproduces the reported failure shape (available:false, could-not-measure, ETIMEDOUT) with no retry wrapper present" + reasonSuffix(redResult),
+    isTransientGitTimeout(redResult));
+  check("(4-setup-fault-proof) RED: the injected fault actually fired exactly once (proves it's the fault firing, not an unrelated failure)", globalThis.__dsLogFault.fired === 1);
+
+  // GREEN: a FRESH one-shot fault (fired reset) — attempt 1 hits it; a LATER attempt (a real git call) must
+  // succeed. The injected fault itself only ever fires ONCE (maxFires:1, deterministic — it's checked
+  // before any real subprocess spawns, so host load can't change that), but the real git call on a later
+  // attempt could itself, independently and coincidentally, hit a REAL (uninjected) transient timeout under
+  // genuine host load — exactly the condition this whole fix exists to absorb — so `greenRetries` is
+  // asserted as "at least 1", never "exactly 1": a higher count still proves the wrapper retried its way
+  // past the injected fault, just with extra real-world noise on top.
+  globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 1, delayMs: FAULT_DELAY_MS };
+  let greenRetries = 0;
+  const greenResult = withGitTimeoutRetry(computeDeployStaleness, {}, undefined, () => { greenRetries++; });
+  check("(4-setup-fault-proof) GREEN: the SAME injected fault no longer fails the probe once wrapped in the bounded retry" + reasonSuffix(greenResult),
+    greenResult.available === true);
+  check("(4-setup-fault-proof) GREEN: it genuinely took at least one retry to get there (proves the wrapper, not luck), and the injected fault itself fired exactly once (deterministic, host-load-independent)", greenRetries >= 1 && globalThis.__dsLogFault.fired === 1);
+
+  // NEGATIVE CONTROL 1: a fault that never clears must still fail loud after exactly
+  // GIT_TIMEOUT_RETRY_MIN_ATTEMPTS real attempts — never silently masking a persistent failure.
+  globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 999, delayMs: FAULT_DELAY_MS };
+  let exhaustedRetries = 0;
+  const exhaustedResult = withGitTimeoutRetry(computeDeployStaleness, {}, undefined, () => { exhaustedRetries++; });
+  check(`(4-setup-fault-proof) NEGATIVE CONTROL: a fault that never clears still fails loud after exactly GIT_TIMEOUT_RETRY_MIN_ATTEMPTS (${GIT_TIMEOUT_RETRY_MIN_ATTEMPTS}) real attempts, never silently succeeding` + reasonSuffix(exhaustedResult),
+    exhaustedResult.available === false && exhaustedRetries === GIT_TIMEOUT_RETRY_MIN_ATTEMPTS - 1 && globalThis.__dsLogFault.fired === GIT_TIMEOUT_RETRY_MIN_ATTEMPTS);
+  globalThis.__dsLogFault = { armed: false, fired: 0, maxFires: 0, delayMs: 0 };
+
+  // NEGATIVE CONTROL 2: a genuine "not a source checkout" must never be classified as a transient
+  // timeout and must never be retried — the card's own "timeout vs. real unavailability" requirement.
+  const noGitDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-svst-nogit-"));
+  let notApplicableRetries = 0;
+  const notApplicableResult = withGitTimeoutRetry(computeDeployStaleness, { repoRoot: noGitDir }, undefined, () => { notApplicableRetries++; });
+  check("(4-setup-fault-proof) NEGATIVE CONTROL: a real not-a-source-checkout result is never classified as a transient timeout and is never retried" + reasonSuffix(notApplicableResult),
+    notApplicableResult.available === false && notApplicableResult.reasonKind === "not-applicable" && notApplicableRetries === 0);
+  fs.rmSync(noGitDir, { recursive: true, force: true });
+}
+
 // Positive control (DoD 2): dist/index.js's own mtime must NOT equal the directory-wide build clock on
 // a real incremental build — if they coincide, this checkout's dist doesn't exhibit the class of bug this
 // card fixes, and comparing a fixture to a fixture (the old test's blind spot) would be all we could prove.
