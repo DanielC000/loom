@@ -33,8 +33,8 @@ type TaskEditPatch = {
   title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean;
   repoKey?: string | null; parentId?: string | null; baseVersion?: number;
 };
-// A live lane's card order now lives beside `prio` in components/priority, because the Atlas tree's
-// own card rows read the SAME order (lib/atlasHome.ts's `openCardsForTree`, card 3b563642).
+// A live lane's card order lives beside `prio` in components/priority — see that comment for why it
+// is not in this file.
 // Done columns sort most-recently-done first. `updatedAt` (ISO string → lexical compare is chronological)
 // is the stand-in for completion time; tie-break on position then id so equal-timestamp cards never
 // reshuffle on the 3s refetch (deterministic, no flicker).

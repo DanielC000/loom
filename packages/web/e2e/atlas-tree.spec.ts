@@ -34,6 +34,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "./fixtures/daemon";
+import { nodeTabKeys } from "./helpers/nodeTabs";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
@@ -95,6 +96,42 @@ function nodeTabsUnderTest(): Map<string, string> {
   expect(rows.length,
     `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} entries`
     + ` — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
+  return new Map(rows.map((r) => [r.from, r.key]));
+}
+
+// ── The FIFTH home a destination can have (card ec1aa18e) ─────────────────────────────────────
+// Card 25c08fba made ten project surfaces TABS on the project node while leaving each one a tree row
+// as well. The owner's feedback ended that: a destination the project node already carries as a tab
+// is no longer a row, so the project tier lists what is RUNNING instead of a second copy of the tab
+// row. Those addresses are therefore in none of the four buckets above, and need their own.
+//
+// Parsed from the same source, the same way, with a raw-marker control of its own. The control
+// counts `to: "` rather than `key: "` deliberately: the two HOME tabs address the node's own path
+// through the `PROJECT_NODE_PATH` constant and a template literal, so they carry no quoted `to` for
+// the pattern to find — and they are not re-homed addresses, which is exactly what this bucket is
+// about. Matching 8 of 10 `key:` markers would look like a dropping pattern; matching 8 of 8 quoted
+// `to:`s is the real claim. `isRehomedProjectTab` in src/nav.tsx draws the same line in the app.
+function parseProjectNodeTabs(): { rows: NodeTab[]; rawMarkers: number; block: string } {
+  const src = readFileSync(NAV_SOURCE, "utf8");
+  const start = src.indexOf("export const PROJECT_NODE_TABS");
+  if (start < 0) throw new Error(`no PROJECT_NODE_TABS declaration found in ${NAV_SOURCE}`);
+  const end = src.indexOf("\n];", start);
+  if (end < 0) throw new Error(`PROJECT_NODE_TABS in ${NAV_SOURCE} has no closing "];"`);
+  const block = src.slice(start, end);
+  const rawMarkers = (block.match(/\bto:\s*"/g) ?? []).length;
+  const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*label:\s*"[^"]*",\s*to:\s*"([^"]+)"/g)]
+    .map((m) => ({ key: m[1] ?? "", from: m[2] ?? "" }));
+  return { rows, rawMarkers, block };
+}
+
+/** The declared project tabs (`from` → `key`), with the parse's own controls at the call site. */
+function projectNodeTabsUnderTest(): Map<string, string> {
+  const { rows, rawMarkers, block } = parseProjectNodeTabs();
+  expect(rows.length, `the PROJECT_NODE_TABS parse found no re-homed rows. Block:\n${block}`)
+    .toBeGreaterThan(0);
+  expect(rows.length,
+    `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} quoted`
+    + ` addresses — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
   return new Map(rows.map((r) => [r.from, r.key]));
 }
 
@@ -383,15 +420,23 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // Card 5afd71bd added the FOURTH: a destination may be RETIRED, which is no home at all — its
     // address redirects to the node that absorbed it. Derived the same way, and VERIFIED by the
     // redirect itself below, so a declared retirement whose address still renders a page fails here.
+    // Card ec1aa18e added the FIFTH: a destination may be a PROJECT node tab, which since that card
+    // is also no longer a tree row. Derived and verified exactly as the Workspace tabs are.
     const nodeTabs = nodeTabsUnderTest();
+    const projectTabs = projectNodeTabsUnderTest();
     const retirements = retirementsUnderTest();
-    // Read on the Workspace node itself — the tree renders on every Atlas route, but the tab row is
-    // that node's own chrome and exists nowhere else.
-    await page.goto(loomDaemon.baseURL + "/home");
-    await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
-    const renderedTabs = new Set(await page.locator('[data-testid="atlas-node-tabs"] [role="tab"]')
-      .evaluateAll((els) => els.map((el) => (el.getAttribute("data-testid") ?? "").replace(/^atlas-tab-/, ""))));
-    expect(renderedTabs.size, "the Workspace node's tab-row collector found no tabs at all").toBeGreaterThan(2);
+    // Read on each node itself — the tree renders on every Atlas route, but a tab row is that node's
+    // own chrome and exists nowhere else. Both nodes are read on their OWN default (Overview) tab,
+    // which is the one tab carrying no KPI strip and therefore the one where card d4350286's
+    // width-derived overflow has nothing to fold: the whole declared set is in the row here.
+    const renderedTabsOn = async (nodePath: string, min: number) => {
+      await page.goto(loomDaemon.baseURL + nodePath);
+      await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
+      const keys = new Set(await nodeTabKeys(page));
+      expect(keys.size, `the ${nodePath} node's tab collector found no tabs at all`).toBeGreaterThan(min);
+      return keys;
+    };
+    const renderedTabs = await renderedTabsOn("/home", 2);
     const tabbedSet = new Set<string>();
     for (const [from, key] of nodeTabs) {
       expect(renderedTabs.has(key),
@@ -399,20 +444,38 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         + ` — tabs: ${JSON.stringify([...renderedTabs])}`).toBe(true);
       tabbedSet.add(from);
     }
+    const renderedProjectTabs = await renderedTabsOn("/project", 2);
+    const projectTabbedSet = new Set<string>();
+    for (const [from, key] of projectTabs) {
+      expect(renderedProjectTabs.has(key),
+        `src/nav.tsx declares ${from} as the "${key}" project node tab, which the node does not render`
+        + ` — tabs: ${JSON.stringify([...renderedProjectTabs])}`).toBe(true);
+      projectTabbedSet.add(from);
+    }
+    await page.goto(loomDaemon.baseURL + "/home");
+    await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
 
     const homedSet = new Set(treeRoutes);
     const unhomedSet = new Set(unhomedRoutes);
     const retiredSet = new Set(retirements.keys());
     const placesFor = (route: string) =>
-      [homedSet.has(route), unhomedSet.has(route), tabbedSet.has(route), retiredSet.has(route)]
-        .filter(Boolean).length;
+      [homedSet.has(route), unhomedSet.has(route), tabbedSet.has(route), projectTabbedSet.has(route),
+        retiredSet.has(route)].filter(Boolean).length;
     for (const route of railRoutes) {
       expect(placesFor(route),
-        `the classic destination ${route} is in ${placesFor(route)} of the four Atlas placements — it`
-        + ` must be in EXACTLY one (a tree node, a "not yet re-homed" entry, a Workspace node tab, or`
-        + ` retired). nodes: ${JSON.stringify(treeRoutes)}; escape hatch: ${JSON.stringify(unhomedRoutes)};`
-        + ` node tabs: ${JSON.stringify([...tabbedSet])}; retired: ${JSON.stringify([...retiredSet])}`).toBe(1);
+        `the classic destination ${route} is in ${placesFor(route)} of the five Atlas placements — it`
+        + ` must be in EXACTLY one (a tree node, a "not yet re-homed" entry, a Workspace node tab, a`
+        + ` PROJECT node tab, or retired). nodes: ${JSON.stringify(treeRoutes)};`
+        + ` escape hatch: ${JSON.stringify(unhomedRoutes)}; workspace tabs: ${JSON.stringify([...tabbedSet])};`
+        + ` project tabs: ${JSON.stringify([...projectTabbedSet])}; retired: ${JSON.stringify([...retiredSet])}`)
+        .toBe(1);
     }
+    // POSITIVE CONTROL on the new bucket, the same shape the retired bucket carries below: a reading
+    // of zero would make its disjunct dead and let a destination that simply fell out of the tree
+    // pass as "a project tab" without being one.
+    expect([...projectTabbedSet].filter((r) => railRoutes.includes(r)).length,
+      "no rail destination is a project node tab, so that branch of the partition never runs")
+      .toBeGreaterThan(0);
     // The escape hatch is GONE (card 5afd71bd deleted the disclosure along with the last two
     // destinations it held), so its disjunct above is now dead ON PURPOSE — and that is asserted
     // rather than left implicit, because a dead disjunct nobody states is indistinguishable from a
@@ -443,10 +506,15 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // Card 0d0c6cee's own claim, stated positively rather than left implicit in the partition: a
     // cross-project destination is NOT a tree row any more.
     expect(treeRoutes, "the Inbox destination is still an Atlas tree row").not.toContain("/inbox");
+    // Card ec1aa18e's own claim, stated the same way: a destination the project node carries as a
+    // TAB is not a tree row either — the rail lists what is running, not the tab row again.
+    expect(treeRoutes, "the Board destination is still an Atlas tree row, which card ec1aa18e removed")
+      .not.toContain("/board");
     // ...with a positive control, since an absence reads the same from a broken collector: the node
     // collector DOES still see the two destinations that deliberately stayed.
     expect(treeRoutes, "the tree node collector missed the Platform node").toContain("/platform");
-    expect(treeRoutes, "the tree node collector missed the project-tier Board node").toContain("/board");
+    expect(treeRoutes, "the tree node collector missed the project-tier Overview node")
+      .toContain("/overview");
 
     // (b) Every EXTRA node must be an address src/nav.tsx declares as an Atlas home — a node
     //     pointing at a page that does not exist, or a typo'd `to`, is in neither set and fails.
@@ -461,13 +529,14 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         + ` declare as an Atlas home`).toContain(extra);
     }
     //     The other direction, as the same partition: a declared home is a node, an escape-hatch
-    //     entry, or a Workspace node tab — never missing from all three. (The workspace Settings home
-    //     is a `ROOT_TABS` row in the approved design, so card 41eab0eb made it the Settings tab.)
+    //     entry, or a node tab — never missing from all of them. (The workspace Settings home is a
+    //     `ROOT_TABS` row in the approved design, so card 41eab0eb made it the Settings tab; the
+    //     Agents home is a `PROJ_TABS` row, and card ec1aa18e took its tree row away accordingly.)
     for (const declared of homes.paths) {
       expect(homedSet.has(declared) || unhomedSet.has(declared) || tabbedSet.has(declared)
-        || retiredSet.has(declared),
+        || projectTabbedSet.has(declared) || retiredSet.has(declared),
         `src/nav.tsx declares the Atlas home ${declared}, which the tree renders neither as a node nor`
-        + ` as a "not yet re-homed" entry, and which is neither a Workspace node tab nor retired`).toBe(true);
+        + ` as a "not yet re-homed" entry, and which is neither a node tab nor retired`).toBe(true);
     }
 
     // The tree IS navigation, not a complementary region (the P1-0 review finding this card carries).
@@ -546,11 +615,12 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // is no home at all: the address redirects, so the walk visits it to assert that rather than to
     // compare a node's content against a page's.
     const nodeTabs = nodeTabsUnderTest();
+    const projectTabs = projectNodeTabsUnderTest();
     const retirements = retirementsUnderTest();
     for (const route of routes) {
       expect(homedSet.has(route) || unhomedSet.has(route) || nodeTabs.has(route)
-        || retirements.has(route),
-        `${route} is reachable from none of the tree, its escape hatch, or the Workspace node's tabs,`
+        || projectTabs.has(route) || retirements.has(route),
+        `${route} is reachable from none of the tree, its escape hatch, or either node's tabs,`
         + ` and it is not retired either, so this walk cannot visit it`).toBe(true);
     }
     // Positive control on the third bucket: a reading of zero would let a destination that fell out
@@ -561,6 +631,10 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // The same control on the fourth, for the same reason.
     expect([...retirements.keys()].filter((r) => routes.includes(r)).length,
       "no rail destination is retired, so that branch of the walk never runs").toBeGreaterThan(0);
+    // ...and on the fifth (card ec1aa18e).
+    expect([...projectTabs.keys()].filter((r) => routes.includes(r)).length,
+      "no rail destination is a project node tab, so that branch of the walk never runs")
+      .toBeGreaterThan(0);
 
     let previous = "";
     for (const route of routes) {
@@ -592,6 +666,7 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         continue;
       }
       const tabKey = nodeTabs.get(route);
+      const projTabKey = projectTabs.get(route);
       if (tabKey) {
         // A re-homed destination is reached the way a reader reaches it from anywhere that still
         // links the old address: by the address itself, which the Atlas shell redirects into the tab.
@@ -599,6 +674,15 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         await page.goto(loomDaemon.baseURL + route);
         await expect(page.getByTestId(`atlas-tab-${tabKey}`),
           `${route} did not land on its "${tabKey}" Workspace node tab`)
+          .toHaveAttribute("aria-selected", "true");
+      } else if (projTabKey) {
+        // A PROJECT node tab (card 25c08fba) KEEPS its own address — it was never redirected — so
+        // the address is still what a reader arrives at, and card ec1aa18e took away the tree row
+        // that used to duplicate it. The tab must read selected, and the pathname claim below still
+        // applies, which is the one way this branch differs from the Workspace-tab branch above.
+        await page.goto(loomDaemon.baseURL + route);
+        await expect(page.getByTestId(`atlas-tab-${projTabKey}`),
+          `${route} did not land on its "${projTabKey}" project node tab`)
           .toHaveAttribute("aria-selected", "true");
       } else if (homedSet.has(route)) {
         await page.getByTestId(`atlas-node-${route}`).click();
@@ -663,6 +747,17 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         // And the escape hatch is not ALSO claiming it: a destination lives in one place now.
         await expect(page.getByTestId(`atlas-unhomed-${route}`),
           `${route} is a node tab and still an escape-hatch entry`).toHaveCount(0);
+      } else if (projTabKey) {
+        // The exact counterpart one tier down (card ec1aa18e): a PROJECT node tab's landed node is
+        // the project HOME row, and still exactly one. This is the claim that would have read ZERO
+        // if the card had removed the tab rows without giving the Home row `alsoActiveAt` — the tree
+        // would then be the one part of the frame with no opinion about where you are.
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${route} is a project node tab, so exactly one node — the project home — may read as landed`)
+          .toHaveCount(1);
+        await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
+        await expect(page.getByTestId(`atlas-node-${route}`),
+          `${route} is a project node tab and still an Atlas tree row`).toHaveCount(0);
       } else if (homedSet.has(route)) {
         // Exactly one node reads as active, and it is this one.
         await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
@@ -714,7 +809,12 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
 
     const nodes = page.locator(TREE_NODES);
     const total = await nodes.count();
-    expect(total, "no tree nodes to tab through").toBeGreaterThan(5);
+    // Four is what a one-project workspace with nothing running renders since card ec1aa18e took the
+    // project node's tabs out of the tree: the Workspace home, the Platform node, the project's Home
+    // row and its Overview row. The floor is "more than one", which is all this leg needs — it tabs
+    // from the first node to the last — stated against that reading rather than against the old
+    // twelve-row tier, so it does not have to move again the next time a row is re-homed.
+    expect(total, "no tree nodes to tab through").toBeGreaterThan(1);
 
     // Land on the tree's LAST node before tabbing, so the Enter assertion at the bottom has a real
     // navigation to observe: the second node is by construction not the last one. Derived rather

@@ -156,6 +156,36 @@ function nodeTabsUnderTest(): Map<string, string> {
   return new Map(rows.map((r) => [r.from, r.key]));
 }
 
+// The PROJECT node's own tabs (card 25c08fba), which card ec1aa18e made the sole home of those
+// addresses by taking their duplicate tree rows away. Parsed from the same source, with a raw-marker
+// control counting quoted `to:`s rather than `key:`s: the two HOME tabs address the node's own path
+// through a constant and a template literal, carry no quoted `to`, and are not re-homed addresses —
+// so 8 of 8 quoted targets is the real claim, where 8 of 10 `key:` markers would look like a
+// dropping pattern. `isRehomedProjectTab` in src/nav.tsx draws the same line in the app.
+function parseProjectNodeTabs(): { rows: NodeTab[]; rawMarkers: number; block: string } {
+  const src = readFileSync(NAV_SOURCE, "utf8");
+  const start = src.indexOf("export const PROJECT_NODE_TABS");
+  if (start < 0) throw new Error(`no PROJECT_NODE_TABS declaration found in ${NAV_SOURCE}`);
+  const end = src.indexOf("\n];", start);
+  if (end < 0) throw new Error(`PROJECT_NODE_TABS in ${NAV_SOURCE} has no closing "];"`);
+  const block = src.slice(start, end);
+  const rawMarkers = (block.match(/\bto:\s*"/g) ?? []).length;
+  const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*label:\s*"[^"]*",\s*to:\s*"([^"]+)"/g)]
+    .map((m) => ({ key: m[1] ?? "", from: m[2] ?? "" }));
+  return { rows, rawMarkers, block };
+}
+
+/** `from` → project tab key, with the parse's own controls run at the call site. */
+function projectNodeTabsUnderTest(): Map<string, string> {
+  const { rows, rawMarkers, block } = parseProjectNodeTabs();
+  expect(rows.length, `the PROJECT_NODE_TABS parse found no re-homed rows. Block:\n${block}`)
+    .toBeGreaterThan(0);
+  expect(rows.length,
+    `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} quoted`
+    + ` addresses — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
+  return new Map(rows.map((r) => [r.from, r.key]));
+}
+
 /**
  * The RETIRED destinations (card 5afd71bd), `from` → the node that absorbed them. Parsed from the real
  * `ATLAS_RETIREMENTS` declaration with the same raw-marker control as the tab parse above, for the
@@ -419,27 +449,49 @@ const pageSubTabs = (page: Page, selected: boolean) => page.locator(PAGE_SUB_TAB
  * `NAV_PAGES` / `ATLAS_HOMES` row. So the fallback chain is node → hatch entry → node tab, exactly as
  * this function's predecessor predicted it would need to be. WHICH of the three answered is reported
  * back, because it decides what the tree may MARK and what the frame may be HEADED (see the caller).
+ *
+ * Card ec1aa18e: a PROJECT node tab is the fourth. Card 25c08fba made those tabs while leaving each
+ * one a tree row too, so this helper used to resolve them off the row; that card's own duplication
+ * is what the owner's feedback removed, so they resolve off the project node's tab row now — the
+ * same read the Workspace branch above makes, one tier down.
  */
-type TreeAddress = { label: string; underProject: boolean; homed: boolean; tabKey?: string };
+type TreeAddress = {
+  label: string; underProject: boolean; homed: boolean; tabKey?: string; projTabKey?: string;
+};
 
-async function treeNodeAddress(page: Page, to: string, nodeTabs: Map<string, string>): Promise<TreeAddress> {
+/** A node tab's own label, read off its anchor's TEXT nodes — a count rides inside it as a
+ *  `.loom-atlas-tabcount` span, so a bare textContent read returns "Inbox1". */
+async function nodeTabLabel(page: Page, key: string, what: string): Promise<string> {
+  const tab = page.getByTestId(`atlas-tab-${key}`);
+  await expect(tab, `${what} renders no "${key}" tab`).toHaveCount(1);
+  const label = await tab.evaluate((el) => Array.from(el.childNodes)
+    .filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.textContent ?? "").join("").trim());
+  expect(label, `${what}'s ${key} tab renders no label`).not.toBe("");
+  return label;
+}
+
+async function treeNodeAddress(
+  page: Page, to: string, nodeTabs: Map<string, string>, projectTabs: Map<string, string>,
+): Promise<TreeAddress> {
   const tabKey = nodeTabs.get(to);
   if (tabKey) {
-    const tab = page.getByTestId(`atlas-tab-${tabKey}`);
-    await expect(tab, `the Workspace node renders no "${tabKey}" tab for ${to}`).toHaveCount(1);
-    // The anchor's own text nodes: a count rides inside it as a `.loom-atlas-tabcount` span, so a
-    // bare textContent read returns "Inbox1".
-    const label = await tab.evaluate((el) => Array.from(el.childNodes)
-      .filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.textContent ?? "").join("").trim());
-    expect(label, `the Workspace node's ${tabKey} tab renders no label`).not.toBe("");
+    const label = await nodeTabLabel(page, tabKey, "the Workspace node");
     return { label, underProject: false, homed: false, tabKey };
+  }
+  const projTabKey = projectTabs.get(to);
+  if (projTabKey) {
+    // Read while the page is ALREADY on that address, so the tab is the selected one and therefore
+    // in the row rather than folded into the overflow menu (card d4350286) — the caller navigates
+    // before calling, which is what makes a direct `atlas-tab-<key>` read sound here.
+    const label = await nodeTabLabel(page, projTabKey, "the project node");
+    return { label, underProject: true, homed: false, projTabKey };
   }
   const node = page.getByTestId(`atlas-node-${to}`);
   const homed = (await node.count()) > 0;
   // There is no second place left to look: card 5afd71bd deleted the escape hatch, so a target that
   // is neither a node nor a tab is one whose placement was never decided. A RETIRED target never
   // reaches this helper — its caller answers it before calling, since it has no row to read.
-  await expect(node, `the tree has no node for ${to}, and it is neither a Workspace node tab nor`
+  await expect(node, `the tree has no node for ${to}, and it is neither a node tab nor`
     + ` retired — the escape hatch that used to hold such a destination is gone`).toHaveCount(1);
   const row = node;
   const label = (await row.locator(".loom-atlas-lbl").innerText()).trim();
@@ -458,6 +510,7 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
 
     // ── The table under test, parsed from the real declaration ──
     const nodeTabs = nodeTabsUnderTest();
+    const projectTabs = projectNodeTabsUnderTest();
     // One declared redirect targets a destination card 5afd71bd RETIRED, so its Atlas landing is the
     // node that absorbed that destination rather than the declared target. Derived, so the next card
     // to retire or un-retire something moves this row's expectation by editing src/nav.tsx alone.
@@ -552,9 +605,12 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
       // absorbed the retired destination — today always the Workspace node, which is its tier's head,
       // so the trail stops at "Workspace" and the heading is that same word.
       const retiredTarget = retirements.get(pathOf(r.to));
-      const address = retiredTarget ? null : await treeNodeAddress(page, pathOf(r.to), nodeTabs);
-      const { label, underProject, homed, tabKey } = address
-        ?? { label: "", underProject: false, homed: false, tabKey: undefined as string | undefined };
+      const address = retiredTarget ? null : await treeNodeAddress(page, pathOf(r.to), nodeTabs, projectTabs);
+      const { label, underProject, homed, tabKey, projTabKey } = address
+        ?? {
+          label: "", underProject: false, homed: false,
+          tabKey: undefined as string | undefined, projTabKey: undefined as string | undefined,
+        };
       if (retiredTarget) {
         expect(retiredTarget,
           `this leg only knows how to check a retirement onto /home, not ${retiredTarget}`).toBe("/home");
@@ -582,6 +638,22 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
           .toHaveAttribute("aria-selected", "true");
         await expect(nodeHeading(page)).toHaveText("Workspace");
         expect(await crumbTrail(page), `${r.from} produced the wrong breadcrumb trail`).toEqual(["Workspace"]);
+      } else if (projTabKey) {
+        // A PROJECT node tab (card 25c08fba) keeps its own address, so unlike a Workspace tab there
+        // is no extra hop — but since card ec1aa18e it has no tree row either, so the landed mark is
+        // the project HOME row's, exactly as the Workspace home carries it for its own tabs. The
+        // heading and the deepest crumb are the TAB's label, under the project's own crumb.
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${r.from} lands on a project node tab, so exactly one node may read as landed`).toHaveCount(1);
+        await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
+        await expect(page.getByTestId(`atlas-node-${pathOf(r.to)}`),
+          `${pathOf(r.to)} is a project node tab and still an Atlas tree row`).toHaveCount(0);
+        await expect(page.getByTestId(`atlas-tab-${projTabKey}`),
+          `${r.from} reached the project node without selecting its ${projTabKey} tab`)
+          .toHaveAttribute("aria-selected", "true");
+        await expect(nodeHeading(page)).toHaveText(label);
+        expect(await crumbTrail(page), `${r.from} produced the wrong breadcrumb trail`)
+          .toEqual(["Workspace", project.name, label]);
       } else {
         if (homed) {
           await expect(page.getByTestId(`atlas-node-${pathOf(r.to)}`),
@@ -786,6 +858,7 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     test.setTimeout(120_000);
     const { rows } = parseLegacyRedirects();
     const nodeTabs = nodeTabsUnderTest();
+    const projectTabs = projectNodeTabsUnderTest();
     const tabbed = rows.find((r) => tabOf(r.to));
     expect(tabbed, "no declared redirect pins a ?tab= to exercise").toBeDefined();
     const target = tabbed!;
@@ -837,9 +910,15 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     // this destination; `treeNodeAddress` answers that off the rendered frame, so this assertion
     // follows the destination rather than assuming where it lives.
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    const landed = await treeNodeAddress(page, pathOf(target.to), nodeTabs);
+    const landed = await treeNodeAddress(page, pathOf(target.to), nodeTabs, projectTabs);
     if (landed.tabKey) {
       await expect(page.getByTestId(`atlas-tab-${landed.tabKey}`)).toHaveAttribute("aria-selected", "true");
+    } else if (landed.projTabKey) {
+      // A PROJECT node tab's own mark is on the project Home row (card ec1aa18e) — the tab itself is
+      // still what reads selected, which is the claim here.
+      await expect(page.getByTestId(`atlas-tab-${landed.projTabKey}`))
+        .toHaveAttribute("aria-selected", "true");
+      await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
     } else {
       // `treeNodeAddress` already required a node to exist for a non-tab target (the escape hatch it
       // used to fall back to went with card 5afd71bd), so this is the node's own landed mark.

@@ -221,8 +221,11 @@ test.describe("Atlas retired destinations (card 5afd71bd)", () => {
       // satisfy every zero above.
       await expect(page.getByTestId("atlas-node-/platform"),
         "positive control: the tree-node collector cannot see the Platform node either").toHaveCount(1);
-      await expect(page.getByTestId("atlas-node-/board"),
-        "positive control: the tree-node collector cannot see the project-tier Board row either").toHaveCount(1);
+      // (The Board row was this control's second specimen until card ec1aa18e removed it along with
+      // every other duplicated project node tab; Overview is the project-tier row that stayed.)
+      await expect(page.getByTestId("atlas-node-/overview"),
+        "positive control: the tree-node collector cannot see the project-tier Overview row either")
+        .toHaveCount(1);
 
       // ── CLAIM 3: no dead link points at a retired address. ──
       // The three re-pointed exits, read off their real `href`s. Each is EXERCISED or asserted against

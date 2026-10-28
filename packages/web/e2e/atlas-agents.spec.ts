@@ -27,6 +27,7 @@
 // Presence-first everywhere (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there first.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { openNodeTab } from "./helpers/nodeTabs";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
 // one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
@@ -258,14 +259,17 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/project");
 
-    // The node is IN THE TREE, under the open project, and clicking it navigates.
-    const node = page.getByTestId("atlas-home-agents");
-    await expect(node).toBeVisible();
-    expect(await node.evaluate((el) => !!el.closest("ul.loom-atlas-nodes.is-kids")),
-      "the Agents node must hang under the project node, not at the workspace root").toBe(true);
-    await node.click();
+    // The node is reached from the project node's own TAB ROW, not from a tree row: card ec1aa18e
+    // took the tree's copy of every project node tab away, Agents among them, because the owner's
+    // feedback was that the sidebar should list what is running rather than the tab row again.
+    // `openNodeTab` rather than a direct `atlas-tab-agents` click — the row folds by width.
+    await expect(page.getByTestId("atlas-home-agents"),
+      "the Agents node is a tree row again, which card ec1aa18e removed").toHaveCount(0);
+    await openNodeTab(page, "agents");
     await expect(page).toHaveURL(/\/agents$/);
-    await expect(node).toHaveClass(/is-active/);
+    // The landed mark is on the project HOME row, which is what carries it for every tab on the node.
+    await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
+    await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
 
     // The frame names the NODE, not the tier: a node that is not its tier's head is the deepest
     // crumb and the heading, exactly as a classic destination at that depth is.
@@ -307,12 +311,21 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     const startedAt = new URL(page.url()).pathname;
 
     // BEFORE: the trigger is there and nothing is open.
-    const trigger = page.getByTestId("atlas-quickspawn-open");
+    //
+    // The PROJECT ROW's own `＋` (card 318b5a21), not the Agents row's: card ec1aa18e removed that
+    // row with the rest of the project node's tabs, and this one is the trigger that survived — it
+    // is also the better specimen for this claim, since it is `projectId`-addressed and reachable
+    // from a branch you are not scoped to.
+    await expect(page.getByTestId("atlas-quickspawn-open"),
+      "the Agents row's own quick-spawn is back, which card ec1aa18e removed with that row")
+      .toHaveCount(0);
+    const stem = `atlas-project-quickspawn-${seeded.project.id}`;
+    const trigger = page.getByTestId(`${stem}-open`);
     await expect(trigger).toBeVisible();
-    await expect(page.getByTestId("atlas-quickspawn")).toHaveCount(0);
+    await expect(page.getByTestId(stem)).toHaveCount(0);
 
     await trigger.click();
-    const dialog = page.getByTestId("atlas-quickspawn");
+    const dialog = page.getByTestId(stem);
     await expect(dialog).toBeVisible();
     // It carries the SAME roster — the spawnable two, never the worker rig.
     await expect(dialog.getByTestId(`atlas-agent-row-${seeded.manager.id}`)).toBeVisible();

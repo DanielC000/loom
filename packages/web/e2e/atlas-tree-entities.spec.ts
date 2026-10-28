@@ -1,10 +1,17 @@
-// The Atlas tree's ENTITY tier — live sessions under the manager that dispatched them, open board
-// cards under the Board row (card 3b563642, Atlas restructure 8 of 11, epic 9fe8cd4e).
+// The Atlas tree's ENTITY tier — live sessions under the manager that dispatched them (card
+// 3b563642, Atlas restructure 8 of 11, epic 9fe8cd4e).
 // Design record: docs/decisions/3b563642-atlas-tree-entity-tier.md.
 //
 // The approved round-4 V2 mockup's tree is FOUR levels deep and its fourth level is not a page:
-// `Loom › Orchestrator › (Web Designer, Dev, Bugfix, QA Tester)` and `Loom › Board › <a card>`. Card
-// 0d0c6cee built the first three levels; this one builds the fourth.
+// `Loom › Orchestrator › (Web Designer, Dev, Bugfix, QA Tester)`. Card 0d0c6cee built the first
+// three levels; this one builds the fourth.
+//
+// 🔴 THE TIER'S OTHER HALF — an open board card under the Board row — IS GONE, deliberately (card
+// ec1aa18e, docs/decisions/ec1aa18e-atlas-tree-lists-running-agents.md). The owner's feedback took
+// every duplicated project-node TAB out of the tree, the Board row among them, and the card tier had
+// nothing left to hang from. The claims that measured it (closed-until-asked, the bound and its
+// "+N more" row, the Conventional-Commits prefix trim, the centred dialog) went with it rather than
+// being weakened into something that still passes. Do not restore them without restoring the row.
 //
 // What is measured, and why each measurement can fail:
 //   · NESTING IS STRUCTURAL, not visual. The worker's own <li> is compared against the manager's by
@@ -12,14 +19,9 @@
 //     list that merely renders the worker after the manager fails, which is exactly the shape this
 //     card replaced. A session with NO live manager is seeded beside them as the contrast case: if
 //     every session nested, the containment check would prove nothing.
-//   · THE CARD TIER IS CLOSED UNTIL ASKED. Its absence is paired with the twist that opens it, so
-//     "no card rows" cannot be satisfied by a tree with no Board row at all.
-//   · THE CARD TIER IS BOUNDED AND SAYS SO. Ten open cards are seeded against a cap of eight, so the
-//     count, the order (p0 first) and the "+2 more" row are all real readings rather than a list
-//     short enough that no bound could have applied.
 //   · ZERO NEW REQUESTS. A second project is expanded and its board route asserted NEVER fetched,
 //     with the selected project's own fetch as the positive control — the per-project query card
-//     0d0c6cee's record forbids. Its SESSION rows do render there, because `["allSessions"]` is one
+//     0d0c6cee's record forbids. Its SESSION rows DO render there, because `["allSessions"]` is one
 //     cross-project cache entry that is already polled; the split between the two is the claim.
 //
 // FIXTURE IDENTITY is asserted, not assumed: this daemon is shared across the specs in its worker, so
@@ -31,11 +33,6 @@ import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
 const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
-
-// components/AtlasTree.tsx's own `MAX_CARD_ROWS`. Pinned here rather than imported for the reason
-// above; a change to it fails this spec loudly instead of quietly weakening the bound check.
-const MAX_CARD_ROWS = 8;
-const SEEDED_CARDS = MAX_CARD_ROWS + 2;
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
 // navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
@@ -58,10 +55,13 @@ const shortId = (id: string) => id.slice(0, 8);
 
 /**
  * Two projects. ALPHA is the one this spec scopes to and carries everything the tier is made of: a
- * manager, a worker parented to it, a third live session with no manager at all, and ten open cards
- * one of which is p0 so the order claim has something to be right about. BRAVO carries a live manager
- * and a card of its own, and exists only to be EXPANDED — it is the contrast that separates "a
- * session row costs nothing, it is one shared cache" from "a card row would cost a query per branch".
+ * manager, a worker parented to it, and a third live session with no manager at all. BRAVO carries a
+ * live manager and exists only to be EXPANDED — it is the contrast that separates "a session row
+ * costs nothing, it is one shared cache" from "a per-project read, which no branch may cost".
+ *
+ * Each project also gets ONE board card. Not for a card tier — there isn't one (see the header) —
+ * but as the page-identity sentinel: the `/board` tab this spec lands on must be showing ALPHA's own
+ * board, on a daemon shared with every other spec in this worker.
  *
  * ⚠️ Each seeded session gets its OWN `agentName` and its OWN id prefix. Sharing `agentId` makes the
  * fixture report its default "Seeded Agent" for every row, and the default id mint makes every short
@@ -86,34 +86,24 @@ async function seedEntities(loomDaemon: LoomDaemon) {
     project: alpha, role: "plain", agentName: `AtlasEntLoose-${stamp}`, id: `e2e-entloose-${stamp}`,
   });
 
-  // p0 so it leads the tier by the board's own priority-then-position order, and so the first card
-  // row is a figure this spec chose rather than whichever card the daemon happened to return first.
+  // The page-identity sentinel — a title no other spec on this shared daemon can mint.
   const sentinel = await loomDaemon.createTask(alpha.id, {
     title: uniq("sentinel-ENTCARD"), columnKey: "inbox", priority: "p0",
   });
-  // A genuinely CONVENTIONAL title, p1 so it lands inside the cap right behind the sentinel — the
-  // specimen for the prefix-trimming claim. Its summary half shares no stem with its type or scope,
-  // so a row that trimmed nothing and a row that trimmed everything are distinguishable.
-  const conventional = await loomDaemon.createTask(alpha.id, {
-    title: `feat(daemon): ${uniq("entconv-summary")}`, columnKey: "inbox", priority: "p1",
-  });
-  for (let i = 0; i < SEEDED_CARDS - 2; i++) {
-    await loomDaemon.createTask(alpha.id, { title: uniq(`filler-ENT${i}`), columnKey: "inbox", priority: "p2" });
-  }
 
   const bravoMgr = await loomDaemon.seedLiveSession({
     project: bravo, role: "manager", agentName: `AtlasEntBravoMgr-${stamp}`, id: `e2e-entbravo-${stamp}`,
   });
   await loomDaemon.createTask(bravo.id, { title: uniq("sentinel-BRAVOCARD"), columnKey: "inbox" });
 
-  return { alpha, bravo, mgr, worker, loose, sentinel, conventional, bravoMgr };
+  return { alpha, bravo, mgr, worker, loose, sentinel, bravoMgr };
 }
 
 test.describe("Atlas tree entity tier (card 3b563642)", () => {
-  test("switch ON: workers nest under their manager, a session row is that session's node, and the Board's open cards open the dialog",
+  test("switch ON: workers nest under their manager, and a session row is that session's node",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
-      const { alpha, bravo, mgr, worker, loose, sentinel, conventional, bravoMgr } = await seedEntities(loomDaemon);
+      const { alpha, bravo, mgr, worker, loose, sentinel, bravoMgr } = await seedEntities(loomDaemon);
 
       // Every board read this page makes, collected from the first navigation — the instrument for
       // the "zero new requests" claim at the bottom. Recorded rather than intercepted, so nothing
@@ -126,8 +116,9 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
 
       await seedAtlasOn(page);
       await pinProject(page, alpha.id);
-      // Landing on /board, not /home: the card tier's own destination is here, and the dialog claim
-      // below needs the board itself on screen to be measured against.
+      // Landing on /board, the project node's Board TAB: it gives the fixture-identity read below
+      // something project-specific to be measured against, and it is the address whose own tree row
+      // card ec1aa18e removed — so the landed-mark claim at the bottom is read where it matters.
       await page.goto(loomDaemon.baseURL + "/board");
 
       const tree = page.getByTestId("atlas-tree");
@@ -135,11 +126,22 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
       const sessionRow = (id: string) => page.getByTestId(`atlas-session-${id}`);
 
       // ── FIXTURE IDENTITY, before any claim about the tier ──
-      // Scoped to <main>: once the card tier is opened below, a card title is a live exact-text match
-      // in the TREE as well, and a page-wide read would resolve two elements for one card.
       await expect(page.locator("main").getByText(sentinel.title, { exact: true }),
         "the board is not showing this spec's own seeded project").toBeVisible();
       await expect(page.getByTestId("atlas-project-node")).toContainText(alpha.name);
+
+      // ── CLAIM 0: the Board is a TAB, not a row, and the project Home row is what reads as landed ──
+      // Read here rather than left to atlas-tree.spec.ts's own walk because this spec is the one
+      // that used to hang a tier off that row: if the row ever comes back, this is where a reader
+      // of the entity tier finds out, beside the claims that went with it.
+      await expect(page.getByTestId("atlas-node-/board"),
+        "the Board is a tree row again, which card ec1aa18e removed").toHaveCount(0);
+      await expect(page.getByTestId("atlas-board-twist"),
+        "the Board row's card-tier twist is back without the row").toHaveCount(0);
+      await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
+      await expect(page.getByTestId("atlas-home-project"),
+        "on a project node tab the project Home row is the one that must read as landed")
+        .toHaveClass(/is-active/);
 
       // ── CLAIM 1: the three live sessions are rows, and the worker is INSIDE the manager ──
       await expect(sessionRow(mgr.sessionId)).toHaveCount(1);
@@ -204,97 +206,33 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
       await mgrTwist.click();
       await expect(sessionRow(worker.sessionId)).toHaveCount(1);
 
-      // ── CLAIM 2: the card tier is CLOSED until asked, then bounded and ordered ──
-      const boardTwist = page.getByTestId("atlas-board-twist");
-      // Presence before absence: the twist proves the Board row is really there, so the zero below
-      // is a reading about the tier rather than about a tree that never rendered a Board row.
-      await expect(boardTwist).toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId(`atlas-card-${sentinel.id}`),
-        "the card tier is open before anyone asked for it").toHaveCount(0);
-
-      await boardTwist.click();
-      await expect(boardTwist).toHaveAttribute("aria-expanded", "true");
-      // By the entity mark, not by a `atlas-card-` testid PREFIX: the trailing "+N more" row shares
-      // that stem and would be counted as a ninth card (measured — it read 9 against a cap of 8).
-      const cardRows = tree.locator('[data-atlas-entity="card"]');
-      await expect(cardRows, `the tier listed more than its own ${MAX_CARD_ROWS}-row bound`)
-        .toHaveCount(MAX_CARD_ROWS);
-      // The bound is REPORTED, not silently applied — and the number it reports is the one this spec
-      // seeded past the cap, so a hardcoded or off-by-one overflow would fail here.
-      await expect(page.getByTestId("atlas-card-more"))
-        .toHaveText(`+${SEEDED_CARDS - MAX_CARD_ROWS} more`);
-      // p0 leads, which is the board's own live-lane order (components/priority's
-      // byPriorityThenPosition, shared by both surfaces so the rail and the board cannot disagree).
-      await expect(cardRows.first()).toHaveAttribute("data-testid", `atlas-card-${sentinel.id}`);
-
-      // ── CLAIM 2b: a card row drops the Conventional Commits prefix, keeping the full title on hover ──
-      // At this depth the rail leaves about eighteen characters and `feat(daemon): ` is fourteen of
-      // them, so the untrimmed form ellipsised every row to its own type and scope. Both halves are
-      // asserted: what the row SHOWS, and that nothing was lost in getting there.
-      const conventionalRow = page.getByTestId(`atlas-card-${conventional.id}`);
-      await expect(conventionalRow.locator(".loom-atlas-lbl"),
-        "the card row still carries its type(scope) prefix")
-        .toHaveText(conventional.title.replace(/^feat\(daemon\): /, ""));
-      await expect(conventionalRow, "the full title did not survive on the row's hover text")
-        .toHaveAttribute("title", conventional.title);
-      // The contrast case: a NON-conventional title is left exactly as it is, so the rule above is
-      // "strip a known prefix" rather than "cut whatever is before the first colon".
-      await expect(page.getByTestId(`atlas-card-${sentinel.id}`).locator(".loom-atlas-lbl"))
-        .toHaveText(sentinel.title);
-
-      // ── CLAIM 2c: the tier's CHROME, read off geometry rather than judged by eye ──
+      // ── CLAIM 2: the tier's CHROME, read off geometry rather than judged by eye ──
       // A 2px origin drift is invisible in a PNG at any scale and was wrong in the first draft of
       // the tier one level up (card 0d0c6cee), so none of this is left to a screenshot.
+      //
+      // The destination row measured against is the project HOME row. It used to be the Agents row,
+      // which card ec1aa18e removed — and Home is the better reference anyway: it is the one
+      // destination row in this tier that cannot be re-homed away, because it IS the node.
       const origins = await tree.evaluate((root, ids) => {
         const left = (sel: string) => root.querySelector(sel)?.getBoundingClientRect().left ?? -1;
         return {
-          agents: left('[data-testid="atlas-home-agents"] .loom-atlas-lbl'),
-          board: left('[data-testid="atlas-node-/board"] .loom-atlas-lbl'),
+          home: left('[data-testid="atlas-home-project"] .loom-atlas-lbl'),
           manager: left(`[data-testid="atlas-session-${ids.mgr}"] .loom-atlas-lbl`),
           loose: left(`[data-testid="atlas-session-${ids.loose}"] .loom-atlas-lbl`),
           worker: left(`[data-testid="atlas-session-${ids.worker}"] .loom-atlas-lbl`),
-          card: left(`[data-testid="atlas-card-${ids.card}"] .loom-atlas-lbl`),
         };
-      }, { mgr: mgr.sessionId, loose: loose.sessionId, worker: worker.sessionId, card: sentinel.id });
-      expect(origins.agents, "no destination label was found to measure against").toBeGreaterThan(0);
+      }, { mgr: mgr.sessionId, loose: loose.sessionId, worker: worker.sessionId });
+      expect(origins.home, "no destination label was found to measure against").toBeGreaterThan(0);
       // A session row sits on the SAME text origin as the destination rows it shares a tier with —
       // which is the whole reason its twist is laid OVER the anchor's reserved column instead of
       // hoisted out in front of it, and the thing that would break if it were ever hoisted.
       expect(origins.manager, "a manager row and a destination row sit on different text origins")
-        .toBe(origins.agents);
+        .toBe(origins.home);
       // ...including a row with NO twist at all, which renders without the wrapper the other two use.
       expect(origins.loose, "a session row's origin depends on whether it has a twist")
         .toBe(origins.manager);
-      // And the fourth level is genuinely indented from the third, by both of its two paths into it.
+      // And the fourth level is genuinely indented from the third.
       expect(origins.worker, "a worker row is not indented from its manager").toBeGreaterThan(origins.manager);
-      expect(origins.card, "a card row is not indented from the Board row").toBeGreaterThan(origins.board);
-      expect(origins.card, "the tier's two fourth levels sit on different origins").toBe(origins.worker);
-
-      // ── CLAIM 3: a card row opens the owner's centred DIALOG, never a drawer ──
-      await expect(page.getByRole("dialog"), "a dialog was already open before the card row was clicked")
-        .toHaveCount(0);
-      await page.getByTestId(`atlas-card-${sentinel.id}`).click();
-      const dialog = page.getByRole("dialog");
-      await expect(dialog, "exactly one detail surface, not the shared dialog plus a second one")
-        .toHaveCount(1);
-      await expect(dialog).toHaveAttribute("aria-modal", "true");
-      // THIS card's detail, by its own short id — the dialog header's own text.
-      await expect(dialog.getByText(`Task · ${shortId(sentinel.id)}`)).toBeVisible();
-      // Never a drawer, in the discriminating form the owner's rule actually needs: EQUAL side
-      // margins. A right-anchored slide-over has them differing by most of the viewport, and a bare
-      // `role=dialog` check passes against one (card a6d7a102).
-      const panel = await dialog.locator("> div").boundingBox();
-      const overlay = await dialog.boundingBox();
-      expect(panel, "the dialog panel has no box to measure").toBeTruthy();
-      expect(overlay, "the dialog overlay has no box to measure").toBeTruthy();
-      const leftGap = panel!.x - overlay!.x;
-      const rightGap = (overlay!.x + overlay!.width) - (panel!.x + panel!.width);
-      expect(leftGap, "the panel is flush against the left edge").toBeGreaterThan(0);
-      expect(Math.abs(leftGap - rightGap),
-        "a card row opened an edge-anchored drawer, not the centred dialog").toBeLessThan(2);
-
-      await page.keyboard.press("Escape");
-      await expect(dialog).toHaveCount(0);
 
       // ── CLAIM 4: a session row IS that session's node, identified by its own id ──
       await sessionRow(worker.sessionId).click();
@@ -318,14 +256,11 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
       boardReads.length = 0;
       await page.getByTestId(`atlas-project-twist-${bravo.id}`).click();
       // Bravo's SESSION rows DO appear — `["allSessions"]` is one cross-project cache entry that is
-      // already being polled, so a session row in any branch is free. This is also what makes the
-      // absence below a claim about the CARD tier specifically rather than about an empty branch.
+      // already being polled, so a session row in any branch is free. That is the POSITIVE half: the
+      // branch really did expand, so the absence below is a claim about the request, not about a
+      // branch that rendered nothing.
       await expect(sessionRow(bravoMgr.sessionId),
         "a non-selected branch rendered none of its own live sessions").toHaveCount(1);
-      // Its CARD tier does not, and must not: that would be a `["board", <bravo>]` read per open
-      // branch. The selected branch keeps the only twist.
-      await expect(page.getByTestId("atlas-board-twist"),
-        "a non-selected branch grew a card tier of its own").toHaveCount(1);
       // ⚠️ The wait here is on an OBSERVED EVENT, never a fixed timer: an absence gated on a bare
       // sleep passes identically whether the request never happens or merely has not happened yet.
       // Board.tsx polls its own project's board every 4s, so two of ITS reads landing after the
@@ -370,7 +305,5 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
         "an entity row is mounted with the switch off").toHaveCount(0);
       await expect(page.getByTestId(`atlas-session-${mgr.sessionId}`)).toHaveCount(0);
       await expect(page.getByTestId(`atlas-session-${worker.sessionId}`)).toHaveCount(0);
-      await expect(page.getByTestId(`atlas-card-${sentinel.id}`)).toHaveCount(0);
-      await expect(page.getByTestId("atlas-board-twist")).toHaveCount(0);
     });
 });

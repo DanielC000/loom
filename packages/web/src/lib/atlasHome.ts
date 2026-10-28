@@ -9,9 +9,8 @@
 // the pop-over's own breakdown of that same figure are derived by ONE function, so the headline and
 // the detail behind it can never disagree.
 import { useQuery } from "@tanstack/react-query";
-import type { BoardTask, GateHistoryRow, GateRun, GatesActive, KanbanColumn, SessionListItem } from "@loom/shared";
+import type { GateHistoryRow, GateRun, GatesActive, KanbanColumn, SessionListItem } from "@loom/shared";
 import { api } from "./api";
-import { byPriorityThenPosition } from "../components/priority";
 import { isCompanionSession } from "./sessions";
 
 /** Live for fleet-counting purposes — `starting` counts, matching AtlasTree's own live marker. */
@@ -210,40 +209,3 @@ export function liveCountsByProject(sessions: readonly SessionListItem[] | undef
   return counts;
 }
 
-/** The open cards the Atlas tree hangs under its Board row, plus however many it had to leave out. */
-export interface TreeCards {
-  cards: BoardTask[];
-  /** Open cards beyond `limit` — 0 when every one of them is listed. */
-  overflow: number;
-}
-
-/**
- * The open board cards, in the order the BOARD ITSELF shows them — card 3b563642, the tree's own
- * card tier (the approved round-4 mockup hangs a card node under Board, four levels deep).
- *
- * Lane order first, then `byPriorityThenPosition` WITHIN a lane, which is exactly pages/Board.tsx's
- * own live-lane sort: a reader scanning the rail and then the board must not have to re-find the
- * card, and two different orders for one list is how that happens. Terminal lanes are excluded by
- * `role`, never by key or label — the same reason `boardRollup` above keys on it.
- *
- * BOUNDED, and the bound is reported rather than hidden: a real board carries dozens of open cards
- * and a 244px rail cannot hold them, so the caller renders `overflow` as its own row rather than
- * silently truncating a list a reader would otherwise read as complete.
- */
-export function openCardsForTree(
-  columns: readonly KanbanColumn[] | undefined,
-  tasks: readonly BoardTask[] | undefined,
-  limit: number,
-): TreeCards {
-  const byColumn = new Map<string, BoardTask[]>();
-  for (const t of tasks ?? []) {
-    const list = byColumn.get(t.columnKey);
-    if (list) list.push(t); else byColumn.set(t.columnKey, [t]);
-  }
-  const open: BoardTask[] = [];
-  for (const col of columns ?? []) {
-    if (col.role === "terminal") continue;
-    open.push(...(byColumn.get(col.key) ?? []).slice().sort(byPriorityThenPosition));
-  }
-  return { cards: open.slice(0, Math.max(0, limit)), overflow: Math.max(0, open.length - limit) };
-}

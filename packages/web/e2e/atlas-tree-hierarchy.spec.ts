@@ -48,12 +48,12 @@ const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 // the new one simply is not checked HERE, while atlas-tree.spec.ts's exhaustive node/hatch PARTITION
 // (derived from the rendered tree, so it cannot go stale) still refuses to let it fall out of both.
 // The two together are what make the claim both specific and drift-proof.
-// ⚠️ `/terminals` LEFT this list with card 25c08fba, which re-homed it as the project node's
-// "Sessions" tab: it is a project-branch tree ROW again now, at project depth, so both halves of the
-// claim below would be false for it. Only a card that re-homes a destination into a tree ROW takes an
-// entry out of this list that way; card 41eab0eb's seven STAY, because a Workspace node TAB is still
-// not a row, and so do card 5afd71bd's two RETIRED ones, which are not a row either — which is what
-// the tab/retired split below records.
+// ⚠️ `/terminals` LEFT this list with card 25c08fba, which took it DOWN to project depth as the
+// project node's "Sessions" tab. It stays out: this list's members are all resolved below as either
+// a WORKSPACE node tab or a retirement, and a PROJECT node tab (card ec1aa18e's bucket, which that
+// card's own spec — atlas-tree.spec.ts — partitions exhaustively) is neither. Card 41eab0eb's seven
+// STAY here, because a Workspace node TAB is still not a row, and so do card 5afd71bd's two RETIRED
+// ones, which are not a row either — which is what the tab/retired split below records.
 const RE_HOMED = [
   "/", "/inbox", "/gates", "/projects", "/actors", "/companion", "/automation", "/usage",
   // The Atlas-only workspace Settings node (card 595e2a47) — a `ROOT_TABS` row in the approved design,
@@ -254,11 +254,17 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
         "the seeded pending Request did not reach alpha's attention badge").toBeGreaterThanOrEqual(1);
       await expect(branch(bravo.name).locator(".loom-atlas-nodebadge"),
         "bravo carries an attention badge, though nothing was seeded against it").toHaveCount(0);
-      // The per-row metrics INSIDE the selected branch, each an exact figure this spec seeded.
-      await expect(page.getByTestId("atlas-node-/board").locator(".loom-atlas-nodemeta"),
-        "the Board row does not read this spec's own open-card count").toHaveText("3");
-      await expect(page.getByTestId("atlas-home-agents").locator(".loom-atlas-nodemeta"),
-        "the Agents row does not read this spec's own agent count").toHaveText("1");
+      // The per-row metrics that used to sit INSIDE the selected branch — the Board row's open-card
+      // count and the Agents row's agent count — went with their rows (card ec1aa18e): both rows
+      // were project node TABS the tree was duplicating, and both figures are on that node's own KPI
+      // strip. So the branch now carries NO row metric at all, which is asserted rather than left
+      // implicit — a figure reappearing here would mean a tab row had crept back in.
+      await expect(page.locator("ul.loom-atlas-nodes.is-kids .loom-atlas-nodemeta"),
+        "a row inside a project branch carries a metric again").toHaveCount(0);
+      // ...with the positive control the absence needs: the collector DOES see the metrics that are
+      // still there, one tier up on the project row itself.
+      await expect(branch(alpha.name).locator(".loom-atlas-live"),
+        "the metric collector finds nothing anywhere, so the zero above proves nothing").toHaveCount(1);
 
       // ── CLAIM 1c: the hierarchy's chrome, READ OFF COMPUTED STYLE rather than judged by eye ──
       // Both of these are invisible in a screenshot at any scale (a 2px edge, a 2px origin shift) and
@@ -283,7 +289,7 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
         return {
           branch: left("div.loom-atlas-noderow.is-branchrow .loom-atlas-lbl"),
           destination: left('[data-testid="atlas-home-workspace"] .loom-atlas-lbl'),
-          child: left('[data-testid="atlas-node-/board"] .loom-atlas-lbl'),
+          child: left('[data-testid="atlas-node-/overview"] .loom-atlas-lbl'),
         };
       });
       expect(origins.branch, "no branch label was found to measure").toBeGreaterThan(0);
@@ -297,14 +303,14 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       // Before: only the selected project's surfaces are in the tree.
       await expect(twist(alpha.id)).toHaveAttribute("aria-expanded", "true");
       await expect(twist(bravo.id)).toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId(`atlas-node-${bravo.id}/board`)).toHaveCount(0);
+      await expect(page.getByTestId(`atlas-node-${bravo.id}/overview`)).toHaveCount(0);
 
       const urlBefore = page.url();
       await twist(bravo.id).click();
 
       // After: bravo's own surfaces exist...
       await expect(twist(bravo.id)).toHaveAttribute("aria-expanded", "true");
-      await expect(page.getByTestId(`atlas-node-${bravo.id}/board`),
+      await expect(page.getByTestId(`atlas-node-${bravo.id}/overview`),
         "expanding bravo did not reveal its own surfaces").toHaveCount(1);
       // ...and NOTHING else moved: not the selection, not the stored project, not the address, and
       // not the project-scoped page that was already open.
@@ -322,10 +328,10 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       // unscope you.
       await twist(bravo.id).click();
       await expect(twist(bravo.id)).toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId(`atlas-node-${bravo.id}/board`)).toHaveCount(0);
+      await expect(page.getByTestId(`atlas-node-${bravo.id}/overview`)).toHaveCount(0);
       await twist(alpha.id).click();
       await expect(twist(alpha.id)).toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId("atlas-node-/board"),
+      await expect(page.getByTestId("atlas-node-/overview"),
         "collapsing the selected branch left its surfaces in the tree").toHaveCount(0);
       await expect(selected, "collapsing the selected branch unscoped the page").toContainText(alpha.name);
       await expect(card(alphaCard)).toBeVisible();
@@ -334,13 +340,13 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       // Without this the row would be a lie: the page it lands on reads the ACTIVE project, so it
       // would render alpha's board under a row that named bravo.
       await twist(bravo.id).click();
-      await page.getByTestId(`atlas-node-${bravo.id}/board`).click();
+      await page.getByTestId(`atlas-node-${bravo.id}/overview`).click();
       await expect(card(bravoCard), "a row inside bravo's branch did not re-scope the page to bravo").toBeVisible();
       await expect(card(alphaCard)).toHaveCount(0);
       await expect(selected).toContainText(bravo.name);
       expect(await page.evaluate((k) => localStorage.getItem(k), PROJECT_KEY)).toBe(bravo.id);
-      // And exactly one node still reads as landed, with many branches' worth of /board rows in the
-      // tree — the reason a row outside the selected branch is a plain <Link> with no isActive.
+      // And exactly one node still reads as landed, with many branches' worth of /overview rows in
+      // the tree — the reason a row outside the selected branch is a plain <Link> with no isActive.
       await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
 
       // ── CLAIM 3: the workspace tier is the entities, and the ten destinations have left the rows ──
@@ -357,11 +363,21 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
         .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
       // POSITIVE CONTROL on that collector before trusting any absence from it: it does see the rows
       // that are genuinely there. A broken selector returns [] and would "prove" every absence below.
-      expect(treeRoutes.length, "the tree-row collector found no rows at all").toBeGreaterThan(5);
+      // The floor is the two workspace-tier rows the WORKSPACE_TIER loop below then names one by
+      // one, plus the selected branch's own two (Home and Overview) — four, since card ec1aa18e took
+      // the project node's tabs out of the tree. Expressed against WORKSPACE_TIER so the first half
+      // tracks that list rather than a number typed here.
+      expect(treeRoutes.length, "the tree-row collector found no rows at all")
+        .toBeGreaterThanOrEqual(WORKSPACE_TIER.length + 2);
       for (const kept of WORKSPACE_TIER) {
         expect(treeRoutes, `the tree-row collector missed ${kept}, which deliberately stayed a row`).toContain(kept);
       }
-      expect(treeRoutes, "the tree-row collector missed the project-tier Board row").toContain("/board");
+      expect(treeRoutes, "the tree-row collector missed the project-tier Overview row").toContain("/overview");
+      // Card ec1aa18e's own claim, in the same collector: a destination the project node carries as
+      // a TAB is no longer a row either. The Board is the specimen, and the line above is its
+      // positive control — the collector plainly does see a project-tier row.
+      expect(treeRoutes, "the Board is a project-branch row again, which card ec1aa18e removed")
+        .not.toContain("/board");
 
       // Which of them is a Workspace node TAB and which is still an escape-hatch entry.
       const tabs = parseWorkspaceNodeTabs();

@@ -1398,28 +1398,8 @@ button.loom-atlas-node.is-branch.is-open {
   background: var(--loom-amber);
   box-shadow: 0 0 6px var(--loom-amber);
 }
-.loom-atlas-entdot.is-card {
-  width: 6px;
-  height: 6px;
-  background: transparent;
-  border: 1.5px solid var(--loom-text-muted);
-}
-.loom-atlas-entdot.is-card.is-p0 {
-  border-color: var(--loom-red);
-}
-.loom-atlas-entdot.is-card.is-p1 {
-  border-color: var(--loom-amber);
-}
-.loom-atlas-entdot.is-card.is-p2 {
-  border-color: var(--loom-cyan);
-}
-
-/* The bound the card tier admits to. Muted and italic so it reads as a note about the
-   list rather than as another card in it. */
-.loom-atlas-cardmore {
-  color: var(--loom-text-muted);
-  font-style: italic;
-}
+/* (The card tier's own dot and its `+N more` row went with the Board tree row — card
+   ec1aa18e; a session dot is the only entity dot left.) */
 
 /* ── Row metrics (card 0d0c6cee) ──────────────────────────────────────────────────────
    The mockup's `.node-meta` and `.node-badge`: every row answers "how much is in here"

@@ -187,7 +187,7 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     expect(offenders, "every workspace tab's strip is the Overview deck's own figures").toEqual([]);
   });
 
-  test("switch ON: every project node tab reachable from the rendered TREE carries the strip", async ({ page, loomDaemon }) => {
+  test("switch ON: every address the project node's own tab row links to carries the strip", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
@@ -196,19 +196,25 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     await page.goto(loomDaemon.baseURL + "/project");
     await expect(page.locator(".loom-atlas-nodehead h1")).toContainText(seeded.project.name);
 
-    // Both sides collected from the app: the tree's destinations, intersected with the addresses the
-    // node's own tab row links to. That intersection IS "a node tab you can reach from the tree",
-    // and it re-derives itself when a later card moves a row either way.
+    // Collected from the app, off the node's own tab row. This USED to be that set intersected with
+    // the tree's own destinations ("a node tab you can reach from the tree"), which was a real
+    // reading while card 25c08fba left every project tab a tree row as well — card ec1aa18e removed
+    // those rows, so the intersection is now two addresses and the loop would be near-vacuous.
+    // The tab row is the honest population: it IS how a reader reaches these addresses now.
     const tabHrefs = await page.locator('[data-testid="atlas-node-tabs"] [role="tab"]')
       .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
-    const fromTree = (await treeDestinations(page)).filter((p) => tabHrefs.includes(p));
+    // ...and the tree is still checked, in the one direction that is still true of it: it links NONE
+    // of them. A row creeping back would be caught here as well as in atlas-tree.spec.ts.
+    const treeLinked = (await treeDestinations(page)).filter((p) => tabHrefs.includes(p) && p !== "/project");
+    expect(treeLinked, "a project node tab is an Atlas tree row again, which card ec1aa18e removed")
+      .toEqual([]);
 
-    // The intersection is real, not empty — an empty set would make the loop below vacuous and this
-    // whole leg would pass on a tree that linked nothing.
-    expect(fromTree.length, `tree destinations that are node tabs: ${fromTree.join(", ")}`).toBeGreaterThanOrEqual(6);
+    // The population is real, not empty — an empty set would make the loop below vacuous and this
+    // whole leg would pass on a node that rendered no tabs.
+    expect(tabHrefs.length, `the project node's tab addresses: ${tabHrefs.join(", ")}`).toBeGreaterThanOrEqual(6);
 
     const offenders: string[] = [];
-    for (const path of fromTree) {
+    for (const path of tabHrefs) {
       await page.goto(loomDaemon.baseURL + path);
       await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
       const isOverviewTab = await page.getByTestId("atlas-tab-overview").getAttribute("aria-selected") === "true";
@@ -218,7 +224,8 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
       const figures = await stripFigures(page);
       if (figures.cards !== String(seeded.open)) offenders.push(`${path}: cards=${figures.cards}`);
     }
-    expect(offenders, "every tree-reachable node tab carries the node's readout").toEqual([]);
+    expect(offenders, "every address the project node's tab row links to carries the node's readout")
+      .toEqual([]);
   });
 
   test("switch OFF: no KPI strip exists at any of those addresses", async ({ page, loomDaemon }) => {
