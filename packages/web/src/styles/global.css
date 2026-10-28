@@ -2169,15 +2169,46 @@ button.loom-kpi.is-open {
 }
 
 /* ── Dashboard band ────────────────────────────────────────────────────────────────────
-   The two widest columns are the two whose rows carry inline ACTION CONTROLS, so neither
-   is the column that gives up width first: "Needs you" (its attention rows), and the
-   second column — Agents at a project, Operators at the workspace root — whose rows carry
-   a role badge, a live pill AND a split button on one 28px line. Measured at 1600 (card
-   c6160c7d): at a flat 1fr the agent NAME was left ~90px and "Orchestrator" ellipsised to
-   eight characters, which is the one word on that row a reader is actually scanning for. */
+   Five panels, one line, and the track weights are a BUDGET: the band is over-subscribed at
+   every width it is five-up at, so these numbers say which panel gives first, not what each
+   one would like.
+
+   The first two columns are the two whose rows carry inline ACTION CONTROLS, so neither is
+   the column that gives up width first: "Needs you" (its attention rows), and the second
+   column — Agents at a project, Operators at the workspace root — whose rows carry a role
+   badge, a live pill AND a split button on one 28px line. Measured at 1600 (card c6160c7d):
+   at a flat 1fr the agent NAME was left ~90px and "Orchestrator" ellipsised to eight
+   characters, which is the one word on that row a reader is actually scanning for.
+
+   The LAST column is Pulse on both nodes, and card b4442d27 measured why it cannot be a bare
+   1fr. Its `EventRow` is a FOUR-column row (time · project chip · kind · detail) whose
+   un-shrinkable timestamp alone is 72px, so it is the only panel here with a bounded, additive
+   width appetite: 255px of body before the project chip can show a single character, 328 for
+   a full-width chip, 479 for every column at natural width. Every other panel in the band
+   degrades by ellipsis against a `title` tooltip; Pulse degraded to a 12px bordered box with
+   ZERO content width and a 34px kind — not a truncated readout but an unreadable one.
+   MEASURED body widths at a flat 1fr: 142px at 1280, 170 at 1440, 254 at 1920 — so the chip
+   sat on its floor at EVERY desktop width, and 1440 was tighter than 420px phone width
+   (354px, one column) ever was.
+
+   ⚠️ So the 300px FLOOR is load-bearing, not a round number: it is the measured "chip can
+   show anything at all" threshold plus margin, and it binds only below ~1300px viewport —
+   above that the 1.9fr share is already larger and the floor is inert. Do not drop it to make
+   a neighbouring column wider, and do not flatten this track back toward 1fr: at 1fr the band
+   gives Pulse less room at 1440 than the phone layout gives it at 420.
+
+   ⚠️ The FIRST track's 1.7fr is pinned from the other end, and by a different card: below
+   ~300px of panel body the compact attention row's HEAD line wraps, taking the row from 64px
+   to 85px and reddening `atlas-band-row-shape.spec.ts`'s `<= 80` guard (card d0d430d4) at the
+   1600px width that spec pins. 1.7fr holds that track at 329px there, just past the 325px it
+   had before this budget. Lowering it to widen another column re-breaks that guard.
+
+   @decision b4442d27 — the fifth track is Pulse on BOTH nodes and its budget is additive, not
+   proportional. Never return it to a bare 1fr and never remove the 300px floor. */
 .loom-atlas-band {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1.25fr) repeat(3, minmax(0, 1fr));
+  grid-template-columns:
+    minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(300px, 1.9fr);
   gap: 10px;
   align-items: stretch;
 }

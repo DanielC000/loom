@@ -182,8 +182,10 @@ test.describe("Mission Control's activity feed at narrow widths (card a7957bde)"
       const mgr = await loomDaemon.seedLiveSession({ project: proj, role: "manager", agentName: "PulseMgr" });
       await seedActivity(loomDaemon, mgr.sessionId);
 
-      // 1440 is the TIGHTER case here, not the looser one: the band lays five panels across one row, so
-      // the Pulse column is ~170px wide against the ~354px it gets at 420 in a single column.
+      // 1440 used to be the TIGHTER case here, not the looser one: the band lays five panels across one
+      // row, and at a flat 1fr that handed the Pulse column ~170px against the ~354px it gets at 420 in
+      // a single column. Card b4442d27 then budgeted that track (~339px of column at 1440), so the two
+      // widths are now comparable — this leg keeps the row's own guarantee pinned at both regardless.
       for (const width of [1440, 420]) {
         await page.setViewportSize({ width, height: 900 });
         await page.goto(`${loomDaemon.baseURL}/home`);
