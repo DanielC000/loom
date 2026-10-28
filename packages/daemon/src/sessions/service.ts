@@ -843,6 +843,9 @@ type ConfirmMergeResult = {
    *  status couldn't be VERIFIED (`resolveOwedRange`'s refusal, round 5, OR `finishAlreadyMerged`'s own
    *  `heldAtFinish` refusal, round 6); never-cached `"landed-tip-unverifiable"`, as the sibling field. */
   heldRangeUnverifiable?: boolean;
+  /** @decision c395b4fb — set (`true`, never a fabricated `false`) only on the generic squash-refused
+   *  fallthrough, mirroring `merge.residuePossible` — the structured signal behind `detailText`'s prose. */
+  residuePossible?: boolean;
   merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked";
   warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string;
   gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[];
@@ -959,6 +962,10 @@ type ConfirmMergeResult = {
    *  no doubt this is this merge's own commit. Classified `"squash-landed-unread"`,
    *  `NEVER_CACHED_OUTCOMES`. */
   squashLandedUnread?: boolean;
+  /** @decision c395b4fb — pre-existing in-progress-merge residue (MERGE_HEAD/unmerged) in the canonical
+   *  checkout could not be cleared. No squash was ever attempted; residue IS present. Classified
+   *  `"pre-squash-residue-unclearable"`, `NEVER_CACHED_OUTCOMES`. */
+  preSquashResidueUnclearable?: boolean;
   /** @decision d69d4858 — the canonical checkout was off the expected mainline branch; mirrors
    *  `mergeBatchTracked`'s own `branchDiverted`/`unverified`, same `NEVER_CACHED_OUTCOMES` strings. */
   branchDiverted?: boolean;
@@ -21703,6 +21710,14 @@ export class SessionService {
         evt("merge_rejected", { reason: "squash_landed_unread", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, squashLandedUnread: true };
       }
+      // @decision c395b4fb — no squash was attempted; pre-existing residue could not be cleared. Checked
+      // before the generic fallthrough, which would otherwise wrongly claim a squash was attempted.
+      if (merge.preSquashResidueUnclearable) {
+        const why = merge.reason ?? "pre-existing in-progress-merge residue in the canonical checkout could not be cleared";
+        const { suppressed, sha } = await rejectNotify("pre_squash_residue_unclearable", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; worktree retained.`);
+        evt("merge_rejected", { reason: "pre_squash_residue_unclearable", sha, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, detailText: `${why}; worktree retained.`, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, preSquashResidueUnclearable: true };
+      }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
       // the REASON STRING itself, not from a second ad-hoc boolean — `merge.dirtyOverlap` only ever covers
@@ -21736,14 +21751,20 @@ export class SessionService {
       // false-positive shape upstream, at the admission-time staged-dirt preflight itself (now lock-wrapped
       // too) — not here; this in-lock re-check was never actually capable of catching that shape as a
       // "backstop," since the lock structurally prevents it from ever seeing a sibling's transient state.
+      // @decision c395b4fb — never claim "canonical repo untouched"/"Re-task a rebase" when
+      // `merge.residuePossible` is true; this branch also serves a genuinely pre-squash failure, so
+      // never say "squash was attempted" here either, only that residue may be present.
+      const residueInspectNote = " The canonical repo may still carry STAGED residue (the automatic cleanup could not run, or could not be verified clean); run `git diff --cached` / `git status` in the canonical checkout to inspect it before any further merge on this repo. Clear that residue first; a rebase of this branch alone will not clear it.";
       const detailText = merge.dirtyOverlap
-        ? `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. The canonical checkout has local content in the way of a path this branch also touches (either unstaged changes to a tracked file, or an untracked file blocking it); a HUMAN must resolve the canonical checkout by hand (commit/discard the change, or move/remove the untracked file). Project managers have no canonical-repo git write access — escalate this to the Platform Lead.`
+        ? `${why}; squash was attempted but never committed — ${merge.residuePossible ? "canonical repo NOT confirmed untouched." + residueInspectNote : "canonical repo untouched, worktree retained."} This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. The canonical checkout has local content in the way of a path this branch also touches (either unstaged changes to a tracked file, or an untracked file blocking it); a HUMAN must resolve the canonical checkout by hand (commit/discard the change, or move/remove the untracked file). Project managers have no canonical-repo git write access — escalate this to the Platform Lead.`
         : isStagedCanonicalRefusal
         ? `${why} This is NOT a stale-base problem either — the branch's own base is fine, and rebasing it changes nothing here; project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`
+        : merge.residuePossible
+        ? `${why}; canonical repo is NOT confirmed untouched.${residueInspectNote}`
         : `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
       const { suppressed, sha } = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
-      return squashRefusedResult({ merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended, gateProximity });
+      return squashRefusedResult({ merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended, gateProximity, ...(merge.residuePossible ? { residuePossible: true } : {}) });
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
     // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
@@ -25657,7 +25678,10 @@ export class SessionService {
         // @decision 08c36dae — `canonicalTrustRefusal`/`headMovedUnverified`/`squashLandedUnread` must
         // classify distinctly here too (never fall through to "rejected"), or they get cached under the
         // unchanged (branch-tip, main-tip) verdictIdentity and a cleared condition replays stale forever.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.canonicalTrustRefusal ? "canonical-trust-refusal" : outcome.value.headMovedUnverified ? "head-moved-unverified" : outcome.value.squashLandedUnread ? "squash-landed-unread" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : (outcome.value.landedTipUnverifiable || outcome.value.heldRangeUnverifiable) ? "landed-tip-unverifiable" : outcome.value.merged ? "merged" : "rejected"),
+        // @decision c395b4fb — `preSquashResidueUnclearable` classifies distinctly too, same reasoning:
+        // a human clearing the pre-existing residue by hand must see a fresh re-confirm, never a stale
+        // cached refusal from before it was cleared.
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.canonicalTrustRefusal ? "canonical-trust-refusal" : outcome.value.headMovedUnverified ? "head-moved-unverified" : outcome.value.squashLandedUnread ? "squash-landed-unread" : outcome.value.preSquashResidueUnclearable ? "pre-squash-residue-unclearable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : (outcome.value.landedTipUnverifiable || outcome.value.heldRangeUnverifiable) ? "landed-tip-unverifiable" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

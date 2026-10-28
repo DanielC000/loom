@@ -10171,7 +10171,7 @@ export async function mergeBranch(
   // what excludes `undefined` — TS1016 forbids a bare required param after these optional ones): an
   // omitting caller now gets the SAME logged legacy/grandfathered path as explicit `null`, never a silent skip.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalRepoShallow?: boolean; canonicalTrustRefusal?: boolean; headMovedUnverified?: boolean; squashLandedUnread?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; indexLockPresent?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalRepoShallow?: boolean; canonicalTrustRefusal?: boolean; preSquashResidueUnclearable?: boolean; headMovedUnverified?: boolean; squashLandedUnread?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -10372,6 +10372,9 @@ export interface CutBaseAncestryCheck {
   /** Set only when `probeFailed` is true — the real underlying git error's message, for an honest
    *  "could not verify" refusal (never the divergence remedy). */
   probeError?: string;
+  /** @decision c395b4fb — the raw error behind `probeError`, additive-only (every existing caller ignores
+   *  it) so mergeBranchLocked can classify a persistent CanonicalGitRefusal structurally. */
+  probeErrorObject?: unknown;
 }
 
 /**
@@ -10404,7 +10407,7 @@ export async function checkCutBaseAncestry(
     )).trim();
     return out === cutBaseSha ? { ok: true } : { ok: false, cutBaseSha };
   } catch (e) {
-    return { ok: false, cutBaseSha, probeFailed: true, probeError: (e as Error).message };
+    return { ok: false, cutBaseSha, probeFailed: true, probeError: (e as Error).message, probeErrorObject: e };
   }
 }
 
@@ -10443,6 +10446,25 @@ export async function verifyCommitParentAndTree(
   }
 }
 
+// @decision c395b4fb — the ONE shared classifier for mergeBranchLocked's pre/post-squash canonicalGit
+// call sites. Call FIRST in each catch, before that catch's own existing classification; null means `e`
+// is some other kind of error, so the caller falls through to its own handling unchanged.
+function trustRefusalResult(e: unknown): { ok: false; canonicalTrustRefusal: true; reason: string } | null {
+  if (!(e instanceof CanonicalGitRefusal)) return null;
+  const detail = describeGitFailure(e);
+  return { ok: false, canonicalTrustRefusal: true, reason: canonicalFailureMessage(detail, detail.text) };
+}
+
+// @decision c395b4fb — the ONE shared flag-deriver for every `resetOrSkip` result, replacing 9 hand-
+// patched spreads. Non-null but neither quarantined nor transient covers BOTH a skipped reset AND an
+// ordinary reset failure — both leave the squash's staged diff in the canonical index.
+function cleanupResidueFlags(cleanup: { message: string; quarantined?: boolean; transient?: boolean } | null): { quarantined?: boolean; transient?: boolean; residuePossible?: boolean } {
+  if (!cleanup) return {};
+  if (cleanup.quarantined) return { quarantined: true };
+  if (cleanup.transient) return { transient: true, residuePossible: true };
+  return { residuePossible: true };
+}
+
 // `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
 // merge-danger-window.ts) — a caller with no op identity handy (a test, or any future caller) just gets an
 // unattributed window entry (repo/branch only), never a functional difference in what this function does.
@@ -10452,7 +10474,7 @@ async function mergeBranchLocked(
   // @decision 0eaaa693 (round 5) — same required-`string | null` posture as {@link mergeBranch}'s own
   // param; see that signature's comment for why `= null` (not a bare `?`) is what achieves it here.
   expectAlreadyLanded?: boolean, cutBaseSha: string | null = null,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalTrustRefusal?: boolean; headMovedUnverified?: boolean; squashLandedUnread?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean; branchTipMoved?: { live: string | null }; landedTip?: string; landedBase?: string; landedVerify?: "verified" | "rejected" | "uncaptured"; trailerAdvisory?: "displaced" | "unreadable"; branchDiverted?: boolean; observedBranch?: string | null; unverified?: boolean; divertedSha?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; landedContentDiverged?: boolean; forkPointDiverged?: boolean; forkPointUnverified?: boolean; branchTipUnresolvable?: boolean; canonicalTrustRefusal?: boolean; preSquashResidueUnclearable?: boolean; headMovedUnverified?: boolean; squashLandedUnread?: boolean }> {
   // QUARANTINE CHECK moved to the TRUE convergence point, `withCanonicalIndexLock` (git/repo-lock.ts) —
   // this function only ever runs INSIDE that lock (see `mergeBranch` above), so a check re-derived here
   // would be unreachable dead code: a quarantined repo now never gets this far.
@@ -10505,6 +10527,8 @@ async function mergeBranchLocked(
     try {
       currentHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, gate-base check)")).trim();
     } catch (e) {
+      const trustRefusal = trustRefusalResult(e);
+      if (trustRefusal) return trustRefusal;
       return { ok: false, reason: `failed to verify canonical HEAD before honoring this merge's gate: ${(e as Error).message}` };
     }
     if (currentHead !== requireCanonicalHead) {
@@ -10517,8 +10541,16 @@ async function mergeBranchLocked(
   // @decision d69d4858 — pin the CHECKED-OUT BRANCH too, not just the sha above: a same-commit divert
   // passes the sha-only check trivially. Gated entirely on expectedMainlineBranch; unset ⇒ unchanged.
   if (expectedMainlineBranch !== undefined) {
-    const pre = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, mainline-branch pre-check)");
+    let preHeadRawError: unknown;
+    const pre = await readHeadShaAndBranch(
+      git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, mainline-branch pre-check)",
+      (e) => { preHeadRawError = e; },
+    );
     if (!pre) {
+      // @decision c395b4fb — a persistent commondir/pin condition surfaces here as a structural
+      // CanonicalGitRefusal; classify it as that, never as the generic "unverified" shape below.
+      const trustRefusal = trustRefusalResult(preHeadRawError);
+      if (trustRefusal) return trustRefusal;
       // Fail CLOSED: a read error/timeout is NOT proof of anything either way, so this refuses exactly
       // like a confirmed divert rather than silently proceeding on an unverified checkout.
       return {
@@ -10543,6 +10575,10 @@ async function mergeBranchLocked(
         git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, cut-base ancestry check)",
       )).trim();
     } catch (e) {
+      // @decision c395b4fb — a persistent commondir/pin condition classifies structurally, before the
+      // transient-read-failure wording below (which would otherwise wrongly invite a plain re-confirm).
+      const trustRefusal = trustRefusalResult(e);
+      if (trustRefusal) return trustRefusal;
       // @decision 0eaaa693 (round 5) — a transient read failure, never a confirmed divergence: same
       // `forkPointUnverified` outcome as a failed `checkCutBaseAncestry` probe, not the generic
       // merge-failed fallthrough's "squash was attempted... Re-task a rebase" (wrong on both counts here).
@@ -10556,6 +10592,9 @@ async function mergeBranchLocked(
       // eslint-disable-next-line no-console
       console.warn(`[merge] ${branch}: no recorded cut base (legacy worker) — landing without the fork-point ancestry check`);
     } else if (ancestry.probeFailed) {
+      // @decision c395b4fb — same structural classification as the sibling catch just above.
+      const trustRefusal = trustRefusalResult(ancestry.probeErrorObject);
+      if (trustRefusal) return trustRefusal;
       // @decision 0eaaa693 (round 3) — a TRANSIENT git failure, never the divergence remedy: fail closed
       // (nothing lands on an unverified check) but say so honestly — a plain re-confirm is the right next
       // step, not a recycle/fresh-worker dispatch.
@@ -10604,6 +10643,10 @@ async function mergeBranchLocked(
         // index/tree while withCanonicalIndexLock is held, so an orphaned child must never outlive release.
         await killableCanonicalRaw(repoPath, ["reset", "--merge", "HEAD"], timeoutMs, "git reset --merge (canonical, residue clear)", deps.gitFactory, nonInteractiveEnv(), onTreeDeathSettled);
       } catch (e) {
+        // @decision c395b4fb — classify a structural trust refusal first, before the quarantine/kill
+        // checks below (disjoint error types, so order here can't shadow either of them).
+        const trustRefusal = trustRefusalResult(e);
+        if (trustRefusal) return trustRefusal;
         // @decision bde5d1fe — re-checked AND already quarantined (never THIS call's own kill) — refuse,
         // never re-raise (no kill happened here to auto-clear later).
         // @decision 8d8fa497 — set `quarantined:true` on both branches below, never just the reason text.
@@ -10613,13 +10656,26 @@ async function mergeBranchLocked(
           raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("in-progress-merge residue clear could not be confirmed dead after a kill"), opId);
           return { ok: false, reason: `in-progress-merge residue clear's process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it; canonical repo may need manual inspection: ${(e as Error).message}`, quarantined: true };
         }
-        // Surfaced explicitly rather than falling into the outer catch below, whose "no residue to clear"
-        // reasoning does not apply here: we already know there IS residue (the signal above was affirmative)
-        // and failed to clear it, so silence here would let a genuinely dirty canonical repo look untouched.
-        return { ok: false, reason: `failed to clear in-progress-merge residue in canonical repo (MERGE_HEAD/unmerged detected, but \`git reset --merge HEAD\` did not complete): ${(e as Error).message}` };
+        // @decision c395b4fb — no squash was attempted; affirmative residue WAS detected and its clear
+        // failed, so residue is present — never "canonical repo untouched" for this refusal.
+        return {
+          ok: false,
+          preSquashResidueUnclearable: true,
+          residuePossible: true,
+          reason: `no squash was attempted; pre-existing in-progress-merge residue in the canonical checkout could not be cleared, so residue is present; a human must clear it (\`git merge --abort\` / inspect \`git status\`) before any merge on this repo; a rebase will not help: ${(e as Error).message}`,
+        };
       }
     }
-  } catch { /* ls-files failed (e.g. not a repo / no HEAD) ⇒ no residue to clear */ }
+  } catch (e) {
+    // @decision c395b4fb — narrowed from a catch-all: a structural trust refusal must refuse, never be
+    // swallowed; any OTHER unclassified failure fails closed too, never silently "no residue".
+    const trustRefusal = trustRefusalResult(e);
+    if (trustRefusal) return trustRefusal;
+    if (!isNotAGitRepositoryError(e)) {
+      return { ok: false, residuePossible: true, reason: `failed to inspect canonical repo for in-progress-merge residue before squashing: ${(e as Error).message}` };
+    }
+    /* genuinely no git repository here ⇒ no residue to clear */
+  }
 
   // @decision 2eddf573 — staged-but-not-unmerged residue is a SECOND, non-concurrent trigger for the same
   // corruption (outlives the process, invisible to the clear above) — refuse loudly on ANY staged tracked
@@ -10628,6 +10684,8 @@ async function mergeBranchLocked(
   try {
     stagedAtEntry = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, entry check)")).trim();
   } catch (e) {
+    const trustRefusal = trustRefusalResult(e);
+    if (trustRefusal) return trustRefusal;
     return { ok: false, reason: `failed to inspect canonical repo staged state before merge: ${(e as Error).message}` };
   }
   if (stagedAtEntry !== "") {
@@ -10645,6 +10703,8 @@ async function mergeBranchLocked(
   try {
     statusAtEntry = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (canonical, entry check)")).trim();
   } catch (e) {
+    const trustRefusal = trustRefusalResult(e);
+    if (trustRefusal) return trustRefusal;
     return { ok: false, reason: `failed to inspect canonical repo working-tree state before merge: ${(e as Error).message}` };
   }
   const hadUnstagedDirtAtEntry = statusAtEntry !== "";
@@ -10836,7 +10896,7 @@ async function mergeBranchLocked(
       conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, post-squash)")).trim() !== "";
     } catch (e) {
       const cleanup = await resetOrSkip("post-squash-probe-failure cleanup");
-      return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
+      return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...cleanupResidueFlags(cleanup) };
     }
     if (conflicted) {
       // The cleanup that's supposed to leave the canonical repo UNTOUCHED can ITSELF fail (busy index lock,
@@ -10844,7 +10904,7 @@ async function mergeBranchLocked(
       // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
       // rather than trusting the (now false) "untouched" guarantee.
       const cleanup = await resetOrSkip("conflict cleanup");
-      if (cleanup) return { ok: false, conflict: true, reason: cleanup.message, ...(cleanup.quarantined ? { quarantined: true } : {}), ...(cleanup.transient ? { transient: true, residuePossible: true } : {}) };
+      if (cleanup) return { ok: false, conflict: true, reason: cleanup.message, ...cleanupResidueFlags(cleanup) };
       return { ok: false, conflict: true };
     }
     // DEFENSE IN DEPTH (card e076d2a2, item 4): a `rawError` from our OWN `git merge --squash` means OUR
@@ -10882,11 +10942,10 @@ async function mergeBranchLocked(
           ok: false,
           dirtyOverlap: true,
           reason: `canonical repo has local content that would be overwritten by this merge (git refuses to clobber it): ${rawErrorMessage}${cleanup ? ` (${cleanup.message})` : ""}`,
-          ...(cleanup?.quarantined ? { quarantined: true } : {}),
-          ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
+          ...cleanupResidueFlags(cleanup),
         };
       }
-      return { ok: false, reason: cleanup ? `git merge --squash failed (${cleanup.message})` : "git merge --squash failed", ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
+      return { ok: false, reason: cleanup ? `git merge --squash failed (${cleanup.message})` : "git merge --squash failed", ...cleanupResidueFlags(cleanup) };
     }
     // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
     // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
@@ -10899,7 +10958,7 @@ async function mergeBranchLocked(
       staged = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, staged check)")).trim() !== "";
     } catch (e) {
       const cleanup = await resetOrSkip("staged-probe-failure cleanup");
-      return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
+      return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanup ? ` (${cleanup.message})` : ""}`, ...cleanupResidueFlags(cleanup) };
     }
     if (!staged) {
       // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
@@ -10926,11 +10985,7 @@ async function mergeBranchLocked(
         + `or re-cut the branch if re-landing the content is actually intended${cleanup ? ` (${cleanup.message})` : "; canonical repo restored to its pre-merge state"}`;
       return {
         ok: false, landedContentDiverged: true, reason,
-        ...(cleanup?.quarantined ? { quarantined: true } : {}),
-        ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
-        // @decision 24c22912 (round 2, item 1) — set `residuePossible` for EVERY unsuccessful cleanup,
-        //  not just `transient`: a plain skip leaves the reverted content staged too. See that record.
-        ...(cleanup && !cleanup.quarantined && !cleanup.transient ? { residuePossible: true } : {}),
+        ...cleanupResidueFlags(cleanup),
       };
     }
     // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
@@ -10957,8 +11012,7 @@ async function mergeBranchLocked(
           `unrewritable mainline commit subject (this has already happened once: commit fe2c1c6b). Retitle the ` +
           `card (tasks_update) to a clean subject, then re-confirm. Squash phase aborted before landing` +
           (cleanup ? `: ${cleanup.message}` : `; canonical repo restored to its pre-merge state.`),
-        ...(cleanup?.quarantined ? { quarantined: true } : {}),
-        ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
+        ...cleanupResidueFlags(cleanup),
       };
     }
     // The worker-commit-log body (card 8b7b81e0 DoD-3) needs the branch's OWN pre-landing commit range —
@@ -11056,8 +11110,7 @@ async function mergeBranchLocked(
         ok: false,
         reason: `failed to write the squash commit message to a temp file: ${(e as Error).message}` +
           (cleanup ? ` (${cleanup.message})` : "; canonical repo restored to its pre-merge state."),
-        ...(cleanup?.quarantined ? { quarantined: true } : {}),
-        ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}),
+        ...cleanupResidueFlags(cleanup),
       };
     }
     // Everything from here on is wrapped so the temp file is cleaned up on EVERY exit — success, a caught
@@ -11128,7 +11181,7 @@ async function mergeBranchLocked(
           }
         }
         const cleanup = await resetOrSkip("commit-failure cleanup");
-        return { ok: false, reason: cleanup ? `squash commit failed: ${(e as Error).message} (${cleanup.message})` : `squash commit failed: ${(e as Error).message}`, ...(cleanup?.quarantined ? { quarantined: true } : {}), ...(cleanup?.transient ? { transient: true, residuePossible: true } : {}) };
+        return { ok: false, reason: cleanup ? `squash commit failed: ${(e as Error).message} (${cleanup.message})` : `squash commit failed: ${(e as Error).message}`, ...cleanupResidueFlags(cleanup) };
       }
       // Re-read HEAD after a successful commit. NOT "unconditionally reached from both branches": a failure
       // now returns straight out of the catch above, having already re-verified truthfully via its own HEAD

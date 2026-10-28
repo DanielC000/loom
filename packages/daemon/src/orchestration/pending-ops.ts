@@ -71,8 +71,10 @@ export type PendingOpOutcome = string;
  *  "landed-tip-unverifiable"/"fork-point-unverified" above. Never cache or replay.
  *  @decision 08c36dae — "canonical-trust-refusal"/"head-moved-unverified"/"squash-landed-unread": each
  *  describes the CANONICAL CHECKOUT's transient state at one attempt, never a stable branch fact — never
- *  cache or replay any of the three, or a cleared condition replays stale forever. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable", "canonical-repo-shallow", "batch-head-moved", "stranded-verification-refused", "landed-tip-unverifiable", "unknown", "canonical-trust-refusal", "head-moved-unverified", "squash-landed-unread"]);
+ *  cache or replay any of the three, or a cleared condition replays stale forever.
+ *  @decision c395b4fb — "pre-squash-residue-unclearable": same reasoning — a human clearing the
+ *  pre-existing residue by hand must see a fresh re-confirm, never a stale cached refusal. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker", "worktree-dirty", "gate-tip-moved", "gate-owed", "reviewed-tip-moved", "squash-refused", "post-gate-error", "branch-diverted", "fork-point-diverged", "fork-point-unverified", "ff-unverified", "quarantined", "union-merge-transient", "solo-merge-transient", "landed-content-diverged", "ungated-landing-check-failed", "reduced-gate-only-file-failed", "canonical-index-lock-present", "worktree-gone-landing-unconfirmed", "worktree-missing-at-admission", "branch-tip-unresolvable", "canonical-repo-shallow", "batch-head-moved", "stranded-verification-refused", "landed-tip-unverifiable", "unknown", "canonical-trust-refusal", "head-moved-unverified", "squash-landed-unread", "pre-squash-residue-unclearable"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the

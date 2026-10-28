@@ -235,14 +235,22 @@ export function parseHeadShaAndBranch(output: string): { sha: string; branch: st
 }
 
 /** ONE spawn (card b801bad0 — down from two): `git rev-parse HEAD --symbolic-full-name HEAD`, parsed by
- *  {@link parseHeadShaAndBranch}. Never throws — any spawn failure or unparseable output returns `null`. */
+ *  {@link parseHeadShaAndBranch}. Never throws — any spawn failure or unparseable output returns `null`.
+ *  @decision c395b4fb — `onRawError`, additive-only (every existing caller omits it, unaffected): a hook
+ *  called with the raw thrown error before it's swallowed to `null`, so a caller can classify it (e.g. a
+ *  persistent `CanonicalGitRefusal`) without this function losing its own "never throws" contract. */
 export async function readHeadShaAndBranch(
-  git: Pick<SimpleGit, "raw">, timeoutMs: number, what: string,
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, what: string, onRawError?: (e: unknown) => void,
 ): Promise<{ sha: string; branch: string | null } | null> {
   try {
     const out = await withTimeout(git.raw(["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"]), timeoutMs, what);
     return parseHeadShaAndBranch(out);
-  } catch { return null; }
+  } catch (e) {
+    // @decision c395b4fb — the hook itself must never be able to break this function's "never throws"
+    // contract — a throwing onRawError is swallowed too, same as the git failure it was reporting.
+    try { onRawError?.(e); } catch { /* swallow — see the doc comment above */ }
+    return null;
+  }
 }
 
 /** The canonical checkout's current branch + tip. `null` when detached/unborn (nothing to watch). */
