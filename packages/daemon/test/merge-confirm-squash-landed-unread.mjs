@@ -68,14 +68,15 @@ async function setup(sfx) {
 }
 const svc = (db, extra = {}) => new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap, ...extra });
 
-// NARROWEST NATIVE SEAM: lets the REAL `git commit -F <file>` land for real, then fails ONLY the very
-// next `rev-parse HEAD` read (the post-commit confirm step mergeBranchLocked issues immediately after —
-// no other git call happens in between in production). Every other call, including the commit itself,
-// is untouched real git. One-shot (`fired`): a later re-confirm's own post-commit read (if it ever
-// reaches one) must not also be faulted.
+// NARROWEST NATIVE SEAM: lets the REAL `git commit -F <file>` land for real, then fails EVERY subsequent
+// `rev-parse HEAD` read (the post-commit confirm step mergeBranchLocked issues immediately after — no
+// other git call happens in between in production). Every other call, including the commit itself, is
+// untouched real git.
+//
+// @decision 027bad41 — PERSISTENT, not one-shot: mergeBranchLocked now retries this read ONCE, so a
+// one-shot fault would be silently recovered (see the sibling -recovered.mjs file for that shape).
 function postCommitReadFailFactory() {
   let commitSucceeded = false;
-  let fired = false;
   return (repoPath, blockTimeoutMs) => ({
     raw: async (args) => {
       const { boundedSimpleGit } = await import("../dist/git/bounded.js");
@@ -86,8 +87,7 @@ function postCommitReadFailFactory() {
         commitSucceeded = true;
         return out;
       }
-      if (commitSucceeded && !fired && Array.isArray(args) && args[0] === "rev-parse" && args[args.length - 1] === "HEAD") {
-        fired = true;
+      if (commitSucceeded && Array.isArray(args) && args[0] === "rev-parse" && args[args.length - 1] === "HEAD") {
         throw new Error("simulated post-commit HEAD read failure");
       }
       return real.raw(args);

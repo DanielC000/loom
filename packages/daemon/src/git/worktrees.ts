@@ -11198,7 +11198,27 @@ async function mergeBranchLocked(
       // fail LOUD (`ok:false`) if that read itself fails, rather than returning a value that might no longer
       // be what HEAD actually points at.
       try {
-        const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
+        // @decision 027bad41 — ONE bounded retry for an ordinary transient read failure ONLY (a
+        // CanonicalGitRefusal/WithTimeoutExpiry is rethrown below, never retried); the recovered sha
+        // still goes through the unchanged verifyLandedOnMainline/verifyLandedAsOwnCommit checks below.
+        let sha: string | undefined;
+        let readErr: unknown;
+        for (let attempt = 0; attempt < 2 && sha === undefined; attempt++) {
+          try {
+            sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
+          } catch (e) {
+            // @decision 027bad41 — a refusal is definitive (never retried anywhere in this file); a
+            // timeout leaves the hung child running, so retrying would double the lock hold. Rethrow
+            // straight to the outer catch, same as a single un-retried attempt always has.
+            if (e instanceof CanonicalGitRefusal || isWithTimeoutExpiry(e)) throw e;
+            if (attempt === 0) {
+              // eslint-disable-next-line no-console
+              console.warn(`[git] mergeBranchLocked: post-commit HEAD read failed (attempt 1/2), retrying once: ${(e as Error).message}`);
+            }
+            readErr = e;
+          }
+        }
+        if (sha === undefined) throw readErr;
         const verified = await verifyLandedOnMainline(sha);
         if (!verified.ok) return { ...verified, landedTip: resolvedBranchHead };
         // @decision 2a6a292a round 21 (card aa7677fa round 3) — a racer can move HEAD between `git commit`
@@ -11209,6 +11229,8 @@ async function mergeBranchLocked(
       } catch (e) {
         // @decision 08c36dae — the commit already succeeded here; never say "canonical repo untouched"
         // for this — a real commit DID land, only this confirmatory HEAD re-read failed.
+        // @decision 027bad41 — reached after a refusal/timeout on either attempt, or after both
+        // ordinary attempts fail (also reached by a throw from the verify calls above).
         return { ok: false, squashLandedUnread: true, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
       }
     } finally {
