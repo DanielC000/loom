@@ -308,6 +308,26 @@ try {
   check("(Q) POSITIVE CONTROL: POST /internal/merge-quarantine/clear-by-path with the CORRECT secret reaches the real handler (200, not 401)",
     cbpRightAuth.statusCode === 200);
 
+  // ===================== (S) card 9497bb7e: POST /internal/merge-quarantine/clear-broad-union =====================
+  // Same tier as (Q) above — joins isGuardedInternalWrite verbatim. Route BEHAVIOR (the guard match, the
+  // exact-match confirmPaths check, dryRun, the audit event) is covered in
+  // test/merge-quarantine-9497bb7e-broad-union-clear-route.mjs — this file's own job is only the auth
+  // mechanics, PLUS the one check that route's own in-handler classOf check (never an MCP tool, loopback
+  // only) refuses a non-loopback caller even with the correct secret.
+  const clearBroadUnionCall = (bearer, payload, remoteAddress) => appWithSecret.inject({
+    method: "POST", url: "/internal/merge-quarantine/clear-broad-union", headers: authH(bearer), payload,
+    ...(remoteAddress ? { remoteAddress } : {}),
+  });
+  const cbuNoAuth = await clearBroadUnionCall(undefined, { repoPath: TMP, dryRun: true });
+  check("(S) POST /internal/merge-quarantine/clear-broad-union with NO auth header → 401", cbuNoAuth.statusCode === 401);
+  const cbuWrongAuth = await clearBroadUnionCall("not-the-real-secret", { repoPath: TMP, dryRun: true });
+  check("(S) POST /internal/merge-quarantine/clear-broad-union with a WRONG bearer value → 401", cbuWrongAuth.statusCode === 401);
+  const cbuNonLoopback = await clearBroadUnionCall(SECRET, { repoPath: TMP, dryRun: true }, "203.0.113.7");
+  check("(S) a non-loopback caller → 403, even with the CORRECT secret (never reaches clearBroadUnion at all)", cbuNonLoopback.statusCode === 403);
+  const cbuRightAuth = await clearBroadUnionCall(SECRET, { repoPath: TMP, dryRun: true });
+  check("(S) POSITIVE CONTROL: POST /internal/merge-quarantine/clear-broad-union with the CORRECT secret reaches the real handler (200, not 401)",
+    cbuRightAuth.statusCode === 200);
+
   // ===================== (R) card c0be9bf9: GET /internal/merge-quarantine/list stays UNGATED by the bearer secret =====================
   // Deliberate (decision 214caa53: GET reads are settled policy as ungated) — same negative-scope shape as
   // (N)'s proof for /internal/hook: even with loopbackSecret wired, a GET here needs no Authorization header.
@@ -404,6 +424,9 @@ try {
     // (G) card c0be9bf9: the guard's route-matching also names /internal/merge-quarantine/clear-by-path
     // (the no-project-resolution twin, same tier) — corroborates the behavioral (Q) proof above structurally.
     check("(G) the guard matches /internal/merge-quarantine/clear-by-path by pattern", /["']\/internal\/merge-quarantine\/clear-by-path["']/.test(codeSlice));
+    // (G) card 9497bb7e: the guard's route-matching also names /internal/merge-quarantine/clear-broad-union
+    // (same tier) — corroborates the behavioral (S) proof above structurally.
+    check("(G) the guard matches /internal/merge-quarantine/clear-broad-union by pattern", /["']\/internal\/merge-quarantine\/clear-broad-union["']/.test(codeSlice));
     // And GET /internal/merge-quarantine/list must NOT be named by the guard at all — it's deliberately
     // ungated (decision 214caa53), corroborating (R)'s behavioral proof structurally.
     check("(G) the guard does NOT match /internal/merge-quarantine/list by pattern", !/["']\/internal\/merge-quarantine\/list["']/.test(codeSlice));

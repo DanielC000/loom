@@ -766,6 +766,68 @@ function ambiguousIdentitiesForLatchId(entry: MergeQuarantineEntry, latchId: str
 type EntryOwnKeyOwnership = "owned" | "not-owned" | "unknown";
 
 /**
+ * Resolves `repoPath`'s own identity to ONE target for `clear-broad-union` — BOTH the entry SELECTION and
+ * the accept/refuse VERDICT, in a single function, so {@link clearBroadUnion} and every
+ * `remediationTextFor` call site below read the SAME answer by construction and can never drift (card
+ * 9497bb7e, CR round 3 — a prior split of selection (`clearBroadUnion`'s own inline `matched.find`) from
+ * verdict (`clearBroadUnionAccepts`, applied to whatever entry the CALLER had independently resolved) let
+ * a real reviewer probe show them disagreeing: two DISTINCT active entries can share one `repoPath`
+ * identity under different keys — a real, accepted, rare shape (round 5, `~L6460`) — and the ordinary
+ * text-building path's own `resolveQuarantineFor` can resolve to a DIFFERENT one of them than this
+ * function's own identity-keyed scan would. See the decision record and its investigation findings.
+ *
+ * @decision 9497bb7e (CR round 3) — when MORE THAN ONE distinct active entry object shares this identity,
+ * this REFUSES outright rather than picking one — there is no principled "right" selection here, and
+ * guessing is exactly the drift the prior split produced. See the decision record's own ruling.
+ */
+function broadUnionTargetFor(repoPath: string):
+  | { accepts: true; entry: MergeQuarantineEntry }
+  | { accepts: false; entry: MergeQuarantineEntry | null; reason: string } {
+  const identity = directPathIdentity(repoPath);
+  const { matched } = activeMatchesAndLiftedKeysFor(identity);
+  const distinctEntries: MergeQuarantineEntry[] = [];
+  const seenEntries = new Set<MergeQuarantineEntry>();
+  for (const m of matched) {
+    const liveEntry = activeQuarantines.get(m.key);
+    if (liveEntry && !seenEntries.has(liveEntry)) { seenEntries.add(liveEntry); distinctEntries.push(liveEntry); }
+  }
+  if (distinctEntries.length > 1) {
+    return {
+      accepts: false, entry: null,
+      reason: `repoPath '${repoPath}' has ${distinctEntries.length} DIFFERENT active quarantine entries sharing this exact identity (own repoPaths: ${JSON.stringify(distinctEntries.map((e) => e.repoPath))}) — this route cannot safely pick one to act on; use POST /internal/merge-quarantine/clear or /clear-by-path instead, or see the ordinary refusal text's own manual-delete escape.`,
+    };
+  }
+  const refusingEntries = distinctEntries.filter((e) => selfClearRefusesForStaleKeyContributors(e));
+  if (refusingEntries.length === 0) {
+    return {
+      accepts: false, entry: null,
+      reason: `repoPath '${repoPath}' does not match any union whose self-clear is currently refused by the stale-key/broad-genuineContributorKeys guard — this route exists ONLY for that shape; use POST /internal/merge-quarantine/clear or /clear-by-path instead.`,
+    };
+  }
+  const entry = refusingEntries[0]!;
+  if (entry.provenanceUnknown) {
+    return {
+      accepts: false, entry,
+      reason: `repoPath '${repoPath}' carries unknown provenance — this entry may fold together more than one repo's raise from before provenance tracking existed, and Loom cannot enumerate an exact victim set for it, so this route refuses rather than guess. See the ordinary refusal text's own manual-delete escape for this shape instead.`,
+    };
+  }
+  if (isUnreadablePlaceholderEntry(entry)) {
+    return {
+      accepts: false, entry,
+      reason: `repoPath '${repoPath}' is still an unreadable boot-time placeholder — its real, on-disk content was never independently verified in memory, and clearing it can re-ingest and union in a genuine contributor this route cannot yet see. Restart the daemon first (that re-ingests the real record), then call this route with dryRun:true again.`,
+    };
+  }
+  const tiedPendingTwin = pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === identity);
+  if (tiedPendingTwin) {
+    return {
+      accepts: false, entry,
+      reason: `repoPath '${repoPath}' has a separate, PENDING (boot-unresolved) record sharing this exact identity (source file '${tiedPendingTwin.sourceFile}') — a real clear here can also reduce or remove that record's own tokens, which this route cannot safely enumerate or confirm. Resolve or clear that pending record first (see GET /internal/merge-quarantine/list), then call this route with dryRun:true again.`,
+    };
+  }
+  return { accepts: true, entry };
+}
+
+/**
  * THE one shared remediation-text builder every refusal-text site uses — so a future wording change can
  * never drift between sites. Names EXACTLY ONE route: `clear-by-path` with one of `ownRepoPaths` (the
  * entry/entries actually armed/matched here) or a listed `siblingRepoPaths` entry — verified to work in
@@ -794,7 +856,7 @@ type EntryOwnKeyOwnership = "owned" | "not-owned" | "unknown";
  * @decision 6de79dc0 (Round 4) — `"unknown"` gets a HEDGED variant of the same clause instead of silence
  * — see {@link EntryOwnKeyOwnership}'s own doc for the two shapes this closes.
  */
-function remediationTextFor(ownRepoPaths: string[], ambiguous: AmbiguousIdentities, ownPathViable: boolean, ownKeyOwnership: EntryOwnKeyOwnership): string {
+function remediationTextFor(ownRepoPaths: string[], ambiguous: AmbiguousIdentities, ownPathViable: boolean, ownKeyOwnership: EntryOwnKeyOwnership, canUseBroadUnion: boolean): string {
   const clearByPathTargets = [...(ownPathViable ? ownRepoPaths : []), ...ambiguous.siblingRepoPaths];
   const hasContributors = ambiguous.contributorRepoPaths.length > 0;
   // @decision 3be11be4 — see this function's own doc above: only reachable when `ownPathViable` is false
@@ -819,8 +881,17 @@ function remediationTextFor(ownRepoPaths: string[], ambiguous: AmbiguousIdentiti
     : ownKeyOwnership === "unknown"
       ? ` Clearing a contributor this way may ALSO release ${JSON.stringify(ownRepoPaths)}'s own, separately-outstanding unconfirmed-kill quarantine in the same step — Loom cannot tell whether it genuinely owns any of its own currently-armed keys — confirm no process is still running under ${JSON.stringify(ownRepoPaths)} too, before clearing any contributor.`
       : "";
+  // @decision 9497bb7e — the project-resolved `/clear` route named below only exists when a project is
+  // registered at the contributor's own path; never name it unconditionally. `clear-broad-union` refuses
+  // outright for a provenanceUnknown entry — never name it for that shape either. See the decision record.
+  const manualEditClause = `a manual edit, never a REST call: find ${JSON.stringify(ownRepoPaths)}'s own latch file by its latch id (GET /internal/merge-quarantine/list; it may be named '<id>.json' or 'pending-<id>.json'), confirm the file's own repoPath matches, independently confirm no process is still running under every contributor's own path too, then delete it and restart the daemon; once every contributor is cleared (whichever of these ways actually applied to it), clear-by-path with one of ${JSON.stringify(ownRepoPaths)} releases whatever still remains.${ownKeyAlsoReleasedClause}`;
+  // @decision 9497bb7e — `canUseBroadUnion` is `broadUnionTargetFor(repoPath).accepts`, computed once by
+  // the caller from the SAME shared function clearBroadUnion itself calls — never a guess. See record.
+  const noProjectEscape = !canUseBroadUnion
+    ? `if NO project is registered at a contributor's own path, no REST route can reach it that way${ambiguous.unknownProvenance ? " — this entry's own provenance is also UNKNOWN (it may fold together more than one repo's raise from before provenance tracking existed, so Loom cannot enumerate an exact victim set to confirm anything by)" : " — this exact entry also fails a pre-check no REST route here can safely work around right now (a boot-time placeholder never independently verified, a tied pending record of the same identity, or more than one active quarantine sharing this identity; GET /internal/merge-quarantine/list can show which)"} — the only remaining escape is then ${manualEditClause}`
+    : `if NO project is registered at a contributor's own path, no REST route can reach it that way — the supported escape instead is POST /internal/merge-quarantine/clear-broad-union with ${JSON.stringify({ repoPath: ownRepoPaths[0] })} and dryRun:true to read the exact, authoritative victim set, then resend WITHOUT dryRun and with confirmPaths set to EXACTLY that set once every one of those paths is independently confirmed to have no process running under it (that route destroys every contributor's own quarantine too, with no separate record to fall back on, so only an exact confirmation lets it proceed); only as a LAST RESORT, if that route is itself unavailable, fall back to ${manualEditClause}`;
   const note = noHonestClearByPathTarget
-    ? `clear-by-path cannot release this entry — including the listed path's own outstanding unconfirmed-kill quarantine — without also destroying a separately-raised contributor's own quarantine, and cannot address a contributor's own path either — clear each contributor's own quarantine directly FIRST, via the project-resolved POST /internal/merge-quarantine/clear for a project rooted at its own path (this may release everything at once, or only reduce this union's own membership without lifting anything by itself — if the listed path is still reported quarantined afterward, do the next step); once every contributor is cleared this way, clear-by-path with one of ${JSON.stringify(ownRepoPaths)} releases whatever still remains.${ownKeyAlsoReleasedClause}`
+    ? `clear-by-path cannot release this entry — including the listed path's own outstanding unconfirmed-kill quarantine — without also destroying a separately-raised contributor's own quarantine, and cannot address a contributor's own path either — clear each contributor's own quarantine directly FIRST, via the project-resolved POST /internal/merge-quarantine/clear for a project registered AT that contributor's own path, IF one is registered there (this may release everything at once, or only reduce this union's own membership without lifting anything by itself — if the listed path is still reported quarantined afterward, do the next step); ${noProjectEscape}`
     : `clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify(clearByPathTargets)} — this lifts the WHOLE entry there, including every contributor's own folded-in token and the listed path's own outstanding unconfirmed-kill quarantine, so first confirm no process is still running ${confirmClause}`;
   const contributorSuffix = ambiguous.contributorRepoPaths.length === 0 ? "" :
     `. ${ambiguous.contributorRepoPaths.length} other identit${ambiguous.contributorRepoPaths.length === 1 ? "y" : "ies"} ` +
@@ -6288,7 +6359,7 @@ function refuseSelfClearStaleKeyContributors(entry: MergeQuarantineEntry, key: s
     reason: `${ownershipClause} — and ${contributors.length} other identit${contributors.length === 1 ? "y" : "ies"} ` +
       `(${contributors.map((p) => `'${p}'`).join(", ")}) had their own, genuinely separate raise folded into this same union at runtime; clearing '${entry.repoPath}' here would destroy ` +
       `${contributors.length === 1 ? "that identity's" : "those identities'"} own quarantine too, with no way to release only '${entry.repoPath}'s own hold (tokens are not tracked per contributor). ` +
-      `Nothing was cleared. ${remediationTextFor([entry.repoPath], ambiguous, false, ownKeyOwnership)}.`,
+      `Nothing was cleared. ${remediationTextFor([entry.repoPath], ambiguous, false, ownKeyOwnership, broadUnionTargetFor(entry.repoPath).accepts)}.`,
     liftedRepoPaths: [],
     stillQuarantined: true,
     refusedBeforeClear: true,
@@ -6895,6 +6966,136 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
 }
 
 /**
+ * A SCOPED SUBSET of the candidate identities {@link clearMergeQuarantineByKey} can actually lift for an
+ * identity-wide human clear — `entry.repoPath` itself, every `contributorRepoPaths` member, and every
+ * `reducedContributorRepoPaths` member still genuinely blocked by `entry` (via {@link
+ * reducedCandidateBlockedByEntry}) — NEVER the full computation that function performs. It deliberately
+ * omits what a TIED PENDING TWIN of the same identity would additionally contribute (that function's own
+ * `candidateIdentities.add(p.entry.repoPath)` + its own contributors/reduced-contributors, ~L5755-5765) —
+ * {@link clearBroadUnion} REFUSES outright whenever one exists (card 9497bb7e, CR finding 1) rather than
+ * re-deriving that plan here, so this function is never asked to answer for a shape it would under-count.
+ * Re-derived here, pure and read-only, so {@link clearBroadUnion}'s dry-run preview and its real
+ * `confirmPaths` validation share the SAME computation and can never disagree.
+ *
+ * Deliberately NEVER includes a canonically-colliding PENDING sibling ({@link canonicalSiblingsFor}'s own
+ * shape) — that identity is a DIFFERENT `directPathIdentity`, and `clearMergeQuarantineByKey`'s own
+ * pending-tie loop only ever matches a pending entry sharing `identityRepoPath`'s own identity; a sibling
+ * with a different identity is never touched by the real clear this function previews, so requiring its
+ * confirmation would be inaccurate, not merely cautious.
+ *
+ * @decision 9497bb7e (CR finding 1) — a real probe found `clearMergeQuarantineByKey` can re-ingest a
+ * placeholder's now-readable disk record and union in a genuine contributor this function never sees;
+ * `clearBroadUnion` refuses outright on that shape instead of predicting it. See the decision record.
+ */
+export function computeBroadUnionVictimSet(entry: MergeQuarantineEntry): string[] {
+  const set = new Set<string>();
+  set.add(directPathIdentity(entry.repoPath));
+  for (const c of entry.contributorRepoPaths ?? []) set.add(directPathIdentity(c));
+  for (const c of entry.reducedContributorRepoPaths ?? []) {
+    if (reducedCandidateBlockedByEntry(c, entry)) set.add(directPathIdentity(c));
+  }
+  return [...set].sort();
+}
+
+type BroadUnionRealResult = {
+  wasQuarantined: boolean; liftedRepoPaths: string[]; stillBlockedCoOccupants: BlockedCoOccupant[];
+  provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[];
+  contentKeptRepoPaths?: string[]; unattributed?: true;
+};
+
+/**
+ * Composes {@link clearBroadUnion}'s own real-clear response: passes through every disclosure field
+ * {@link clearMergeQuarantineByKey} can return (mirroring `/clear-by-path`'s own composition — decisions
+ * `f5c42043`/`182c01cc`), PLUS the POST-CLEAR BACKSTOP — an identity in `liftedRepoPaths` but not in
+ * `confirmedSet` is never a bare `ok`. Factored out so {@link composeBroadUnionClearResultTestOnly} can
+ * exercise the backstop directly. See the decision record.
+ */
+function composeBroadUnionClearResult(result: BroadUnionRealResult, confirmedSet: ReadonlySet<string>) {
+  const liftedIdentities = [...new Set(result.liftedRepoPaths.map(directPathIdentity))];
+  const unconfirmedLifted = liftedIdentities.filter((p) => !confirmedSet.has(p));
+  return {
+    ok: true as const, dryRun: false as const,
+    wasQuarantined: result.wasQuarantined, liftedRepoPaths: result.liftedRepoPaths,
+    stillBlockedCoOccupants: result.stillBlockedCoOccupants,
+    ...(result.provenanceUnknown ? { provenanceUnknown: true as const } : {}),
+    ...(result.latchKept ? { latchKept: true as const, referencingRepoPaths: result.referencingRepoPaths } : {}),
+    ...(result.contentKeptRepoPaths?.length ? { contentKeptRepoPaths: result.contentKeptRepoPaths } : {}),
+    ...(result.unattributed ? { unattributed: true as const } : {}),
+    ...(unconfirmedLifted.length > 0 ? {
+      unconfirmedLifted,
+      unconfirmedLiftedWarning: `*** UNCONFIRMED DESTRUCTION *** this clear ALSO lifted ${JSON.stringify(unconfirmedLifted)}, which was NOT in the confirmed set — this is a backstop firing for a shape this route's own pre-checks did not predict; investigate before trusting any other result from this entry's identity.`,
+    } : {}),
+  };
+}
+
+/** Test-only seam for {@link composeBroadUnionClearResult} — lets a test drive the REAL, shared
+ *  composition (never a re-implementation) with a fabricated `liftedRepoPaths` that names something
+ *  outside `confirmedPaths`, proving the backstop fires, without needing a genuine under-counting bug to
+ *  exist. Never imported by `index.ts` or `gateway/server.ts` — the `TestOnly` suffix is load-bearing,
+ *  same precedent as {@link reconcileClearedEntryIfPlaceholderTestOnly}. */
+export function composeBroadUnionClearResultTestOnly(result: BroadUnionRealResult, confirmedPaths: string[]) {
+  return composeBroadUnionClearResult(result, new Set(confirmedPaths.map(directPathIdentity)));
+}
+
+/**
+ * The human-only, confirm-first escape for the exact stranding card 9497bb7e names: a union whose own
+ * self-clear is refused by {@link selfClearRefusesForStaleKeyContributors} (the `6de79dc0`/`3be11be4`
+ * stale-key/broad-`genuineContributorKeys` guard) with no contributor reachable through any REST route —
+ * see that guard's own doc, and `remediationTextFor`'s `noHonestClearByPathTarget` branch, for why no
+ * ordinary route can ever reach this shape. Reached ONLY via `POST /internal/merge-quarantine/clear-broad-
+ * union` (loopback + the SAME `isGuardedInternalWrite` bearer tier `/clear`/`/clear-by-path` already use;
+ * NO MCP tool anywhere exposes it — gateway/server.ts is the only caller).
+ *
+ * `dryRun:true` returns the CURRENT, authoritative victim set ({@link computeBroadUnionVictimSet}) and
+ * deletes/writes nothing — the supported way for a human to learn exactly what `confirmPaths` must list,
+ * never a static/cached answer. The real call (`dryRun:false`) REFUSES unless the given `confirmPaths`,
+ * normalized via {@link directPathIdentity}, is an EXACT match (neither a subset nor a superset) of that
+ * SAME freshly-recomputed set — an extra, unrecognized path is refused exactly like a missing one, since
+ * either shape means the human is confirming against a stale or misunderstood list, not the real one. If
+ * the union's own membership genuinely changed between a dry run and the real call, the freshly-recomputed
+ * set differs from what was confirmed and this refuses — no caching, no TOCTOU window.
+ *
+ * On an exact match, deletion reuses {@link clearMergeQuarantineByKey} UNCONDITIONALLY — the SAME
+ * unconditional per-key delete every ordinary identity-wide human clear already calls — at any ONE of the
+ * entry's own live-armed keys (lifting one lifts every key this entry is armed under; see that function's
+ * own `keysToLift` computation). This function never reimplements the delete, and never bypasses the
+ * `selfClearRefusesForStaleKeyContributors` guard anywhere else — only THIS one, narrowly-scoped,
+ * confirm-first route is permitted to call `clearMergeQuarantineByKey` on an entry the guard refuses.
+ *
+ * @decision 9497bb7e (CR round 3) — the selection (which entry) and the verdict (accept/refuse) are BOTH
+ * owned by {@link broadUnionTargetFor}, never re-stated inline here — see that function's own doc for why.
+ */
+export function clearBroadUnion(repoPath: string, confirmPaths: string[], dryRun: boolean):
+  | { ok: false; reason: string; victimPaths?: string[] }
+  | { ok: true; dryRun: true; victimPaths: string[] }
+  | ReturnType<typeof composeBroadUnionClearResult> {
+  const target = broadUnionTargetFor(repoPath);
+  if (!target.accepts) {
+    return { ok: false, reason: target.reason };
+  }
+  const entry = target.entry;
+  const victimPaths = computeBroadUnionVictimSet(entry);
+  if (dryRun) return { ok: true, dryRun: true, victimPaths };
+  const victimSet = new Set(victimPaths);
+  const confirmedSet = new Set((confirmPaths ?? []).map(directPathIdentity));
+  const missing = victimPaths.filter((p) => !confirmedSet.has(p));
+  const extra = [...confirmedSet].filter((p) => !victimSet.has(p));
+  if (missing.length > 0 || extra.length > 0) {
+    return {
+      ok: false,
+      reason: `confirmPaths does not EXACTLY match the current victim set — nothing was cleared.` +
+        (missing.length ? ` Missing: ${JSON.stringify(missing)}.` : "") +
+        (extra.length ? ` Unrecognized (not a genuine victim right now): ${JSON.stringify(extra)}.` : "") +
+        ` Call this route with dryRun:true first to read the current, authoritative set, then resend with EXACTLY that set.`,
+      victimPaths,
+    };
+  }
+  const anyLiveKey = liveArmedKeysOf(entry)[0]!;
+  const result = clearMergeQuarantineByKey(anyLiveKey, entry.repoPath, undefined, true);
+  return composeBroadUnionClearResult(result, confirmedSet);
+}
+
+/**
  * @decision abccee85 (round 6) — the pending lookup below matches by {@link directPathIdentity}, never a
  * freshly recomputed `canonicalRepoLockKey` — see the decision record for the "clear(outer) reports
  * ok:true while outer stays blocked by an unrelated pending inner, forever" bug this closes.
@@ -7297,6 +7498,11 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, queriedRepoPath: st
   // assertRepoNotQuarantined, never offer it unconditionally — a collision at this key makes it
   // ambiguous here too.
   const ambiguousIdentities = ambiguousIdentitiesForLatchId(after, latchId);
+  // @decision 9497bb7e — the plain clear-by-path suggestion below is a dead end whenever `after`'s own
+  // self-clear would itself refuse (6de79dc0's guard) — route to the SAME honest text instead. See record.
+  if (selfClearRefusesForStaleKeyContributors(after)) {
+    return `${reason} — clearing by ${JSON.stringify({ repoPath: after.repoPath })} directly would itself refuse right now (a separately-raised contributor is still folded in): ${remediationTextFor([after.repoPath], ambiguousIdentities, false, entryGenuinelyOwnsALiveArmedKeyOfItsOwn(after), broadUnionTargetFor(after.repoPath).accepts)}.`;
+  }
   const clearByIdSuggestion = totalAmbiguousCount(ambiguousIdentities) > 0 ? "" : ` or ${JSON.stringify({ id: latchId })}`;
   return `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`;
 }
@@ -7526,7 +7732,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
           // still works (it genuinely owns this key); otherwise this card's new guard now refuses it.
           // @decision 6de79dc0 (CR round 3, MAJOR) — entry-level, never per-`activeMatch.key`: a human
           // addressing this SAME entry by a genuine contributor's own latch id must still see the clause.
-          `whichever one you're actually trying to resolve. Nothing was cleared. ${remediationTextFor([activeMatch.entry.repoPath], ambiguousIdentities, !selfClearRefusesForStaleKeyContributors(activeMatch.entry), entryGenuinelyOwnsALiveArmedKeyOfItsOwn(activeMatch.entry))}.`,
+          `whichever one you're actually trying to resolve. Nothing was cleared. ${remediationTextFor([activeMatch.entry.repoPath], ambiguousIdentities, !selfClearRefusesForStaleKeyContributors(activeMatch.entry), entryGenuinelyOwnsALiveArmedKeyOfItsOwn(activeMatch.entry), broadUnionTargetFor(activeMatch.entry.repoPath).accepts)}.`,
       };
     }
     const activeIdentity = directPathIdentity(activeMatch.entry.repoPath);
@@ -7614,10 +7820,14 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
         ? "whose own provenance is incomplete — it may fold together more than one repo's raise from before provenance tracking existed"
         : "";
       const collisionClause = [namedClause, unknownClause].filter(Boolean).join(", and ");
+      // @decision 9497bb7e (CR round 4) — computed via `broadUnionTargetFor`, never hardcoded, so every
+      // text site shares the SAME selector; it genuinely evaluates to `accepts:false` here since this
+      // branch only reaches when no `activeMatch` exists (see the function's own absence-of-entry case).
+      const pendingCanUseBroadUnion = matchedRepoPaths.every((p) => broadUnionTargetFor(p).accepts);
       return {
         ok: false,
         reason: `latch id '${id}' matches a PENDING entry ${collisionClause} — a bare id cannot tell which identity you mean to clear. Nothing was cleared. ` +
-          `${remediationTextFor(matchedRepoPaths, { siblingRepoPaths: [], contributorRepoPaths: pendingContributors, unknownProvenance: pendingUnknownProvenance, unknownProvenanceKeyPaths: unknownKeyPaths }, true, "not-owned")}.`,
+          `${remediationTextFor(matchedRepoPaths, { siblingRepoPaths: [], contributorRepoPaths: pendingContributors, unknownProvenance: pendingUnknownProvenance, unknownProvenanceKeyPaths: unknownKeyPaths }, true, "not-owned", pendingCanUseBroadUnion)}.`,
       };
     }
     // @decision 3b1944b6 (Round 6, CR4 finding 2) — stamp a foreign fresh-key occupant reduced for EVERY
@@ -7876,7 +8086,7 @@ export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok:
       // @decision 6de79dc0 (CR round 3, MAJOR) — entry-level, never per-`latchId`-resolved-key: which key
       // `quarantineLatchFileIdsFor(q)[0]` happens to pick (armedKeys order) must never change this fact.
       const ownKeyOwnership = entryGenuinelyOwnsALiveArmedKeyOfItsOwn(q);
-      return `a human clears it: this latch id is ambiguous right now (${collisionClause}), so ${remediationTextFor([q.repoPath], ambiguousIdentities, ownPathViable, ownKeyOwnership)}`;
+      return `a human clears it: this latch id is ambiguous right now (${collisionClause}), so ${remediationTextFor([q.repoPath], ambiguousIdentities, ownPathViable, ownKeyOwnership, broadUnionTargetFor(q.repoPath).accepts)}`;
     })()
     : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })} or ${JSON.stringify({ id: latchId })} ` +
       `(the project-resolved POST /internal/merge-quarantine/clear works only if a registered project's repo resolves to this entry)`;

@@ -2140,7 +2140,21 @@ export type OrchestrationEventKind =
   // @decision b8196f51 — a SPAWN-mode delivery refused for a live holder (0368c784's
   // `SecondLiveManagerError`) is redirected to that holder as a message, never dropped or stalled.
   // `detail`: { source: "event-trigger" | "webhook" | "poll", agentId }.
-  | "spawn_target_redirected";
+  | "spawn_target_redirected"
+  // Card 9497bb7e: a human (loopback-only `POST /internal/merge-quarantine/clear-broad-union`, never an
+  // MCP tool) destroyed a broad-`genuineContributorKeys` union's full victim set after an exact,
+  // server-computed `confirmPaths` match — the one supported, auditable alternative to a raw manual
+  // latch-file delete. `detail` carries {repoPath, confirmPaths, liftedRepoPaths, stillBlockedCoOccupants}
+  // plus whatever OTHER disclosure fields the clear itself returned (latchKept/referencingRepoPaths/
+  // contentKeptRepoPaths/unattributed/unconfirmedLifted/unconfirmedLiftedWarning — never a fixed subset,
+  // see `gateway/server.ts`'s own `...rest` forwarding). Filed under
+  // `managerSessionId: ""` (no owning session — mirrors `mainline_moved_outside_loom`'s own sentinel for a
+  // daemon-internal, non-session event) ONLY on a real (non-`dryRun`) clear; a `dryRun:true` call writes
+  // NO event. Audit-only, same reasoning as `codex_auto_commit`/`mainline_moved_outside_loom` above —
+  // deliberately NOT added to EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/
+  // REPORT_RESOLVED_EVENT_KINDS: this is a forensic record of a destructive human action, not a
+  // worker/manager lifecycle signal any of those four track.
+  | "merge_quarantine_broad_union_cleared";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -2203,6 +2217,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   spawn_target_redirected: true,
   landing_trailer_displaced: true,
   worker_cut_base_restamped: true,
+  merge_quarantine_broad_union_cleared: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

@@ -73,7 +73,7 @@ import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/
 import {
   clearMergeQuarantineReporting, clearMergeQuarantineByRecordedPath, clearMergeQuarantineLatchFile,
   listActiveMergeQuarantines, partitionQuarantinesByRegistration, quarantineLatchFileIdsFor,
-  alsoReleasedRepoPaths, alsoReleasedWarningFor,
+  alsoReleasedRepoPaths, alsoReleasedWarningFor, clearBroadUnion,
 } from "../git/merge-quarantine.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
@@ -793,9 +793,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card c0be9bf9: /internal/merge-quarantine/clear-by-path (the no-project-resolution twin) joins
       // the SAME set and the SAME tier — it performs the identical clear, just addressed by repoPath/id
       // instead of projectId/repoKey, so it carries the identical blast radius.
+      //
+      // Card 9497bb7e: /internal/merge-quarantine/clear-broad-union joins the SAME set and tier — it
+      // destroys a whole union's own `genuineContributorKeys`-guarded victim set (its `dryRun:true` form
+      // included, since the SAME route handles both and nothing should distinguish them at this gate).
       const isGuardedInternalWrite = req.method === "POST" &&
         (routePattern === "/internal/shutdown" || routePattern === "/internal/update" ||
-          routePattern === "/internal/merge-quarantine/clear" || routePattern === "/internal/merge-quarantine/clear-by-path");
+          routePattern === "/internal/merge-quarantine/clear" || routePattern === "/internal/merge-quarantine/clear-by-path" ||
+          routePattern === "/internal/merge-quarantine/clear-broad-union");
       if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternalWrite) return;
       // This check is what scopes the hook to loopback, not a defensive no-op: a non-loopback caller
       // reaching here either already passed/failed the trust-tier wall above, or has no non-loopback bind
@@ -3360,6 +3365,45 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // `referencingRepoPaths` above — its own, separately-gated field.
       ...(result.contentKeptRepoPaths?.length ? { contentKeptRepoPaths: result.contentKeptRepoPaths } : {}),
     };
+  });
+
+  // @decision 9497bb7e — the one supported, auditable escape for a union stranded behind the
+  // `6de79dc0`/`3be11be4` guard; see the decision record. This route only resolves the request shape and
+  // files the audit event on success — `clearBroadUnion` owns every actual decision.
+  app.post("/internal/merge-quarantine/clear-broad-union", async (req, reply) => {
+    if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
+    const body = (req.body ?? {}) as { repoPath?: string; confirmPaths?: string[]; dryRun?: boolean };
+    if (typeof body.repoPath !== "string" || body.repoPath.length === 0) {
+      return reply.code(400).send({ error: "repoPath required" });
+    }
+    const dryRun = body.dryRun === true;
+    if (!dryRun) {
+      if (!Array.isArray(body.confirmPaths)) {
+        return reply.code(400).send({ error: "confirmPaths (string[]) required unless dryRun is true" });
+      }
+      // @decision 9497bb7e — validate BEFORE clearBroadUnion's own exact-match check, which otherwise
+      // reads a non-string/empty entry as a literal, never-matching path and gives a confusing refusal.
+      if (body.confirmPaths.some((p) => typeof p !== "string" || p.length === 0)) {
+        return reply.code(400).send({ error: "every confirmPaths element must be a non-empty string" });
+      }
+    }
+    const result = clearBroadUnion(body.repoPath, body.confirmPaths ?? [], dryRun);
+    if (!result.ok) {
+      return { ok: false, reason: result.reason, ...(result.victimPaths ? { victimPaths: result.victimPaths } : {}) };
+    }
+    if (result.dryRun) {
+      return { ok: true, dryRun: true, victimPaths: result.victimPaths };
+    }
+    // @decision 9497bb7e — filed AFTER the real clear succeeds, never before. `...rest` forwards EVERY
+    // disclosure field clearBroadUnion returns into BOTH the response and the event detail, so neither
+    // can silently drop a field the other carries — mirrors `/clear-by-path`'s own composition.
+    const { ok: _ok, dryRun: _dryRun, ...rest } = result;
+    deps.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "",
+      kind: "merge_quarantine_broad_union_cleared",
+      detail: { repoPath: body.repoPath, confirmPaths: body.confirmPaths ?? [], ...rest },
+    });
+    return { ok: true, dryRun: false, ...rest };
   });
 
   // --- Merge-quarantine read-only list (card c0be9bf9) — loopback-only, deliberately NOT covered by the
