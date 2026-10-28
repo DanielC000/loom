@@ -44,17 +44,27 @@ its existing `onRawError` hook, capturing `describeGitFailure(e).refusal`, retur
 (`agent-prompt-lint-surface-drift.mjs`/`agent-prompt-lint.mjs` re-run clean). The batch nudge's "Nothing
 was mutated" was corrected to "Canonical repo untouched" (the house wording).
 
+## Round 3 (Code Review of 03c8350f) — three more sites in the SAME producer, same fix
+
+`mergeMainIntoWorktree`'s owed-landing commit-tree/pre-read catch, its owed `--ff-only` catch, and the
+PLAIN path's post-merge `ls-files --unmerged` conflict check (`git/worktrees.ts`) each already computed
+`describeGitFailure(e).refusal` but never threaded it into `canonicalTrustRefusal` — the producer's own
+defect, not a caller drift this time. Fixed identically: `...(d.refusal ? { canonicalTrustRefusal: true
+} : {})` at each return; no caller change needed, since all three already flow through the SAME shared
+classifier/`classifyOutcome` path Round 2 established.
+
 ## Known residual (confirmed, NOT fixed — per explicit instruction to stop rather than widen)
 
 When EVERY candidate drops during batch ASSEMBLY, `runBatchedMerge` returns the bare
 `{ok:false, reason:"nothing landed cleanly into the batch — every candidate was dropped"}`
 (`git/batch-merge.ts`, the `landed.length === 0` branch) — no flag at all, so `classifyOutcome` ALSO falls
-to cacheable `"rejected"`. DIFFERENT from the fixed cases: each candidate's own drop already routes to a
-REAL per-candidate solo fallback (`runFallback`, started:true) — content isn't stuck; a human can always
-`worker_merge_confirm` each one directly. The residual is narrower: a `merge_batch` RE-FIRE with the SAME
-unchanged candidate set, after repair, can replay this stale "nothing landed" verdict instead of
-re-assembling — confirmed by observation (debugging this round's own (B1) fixture, before it was
-corrected to isolate the fault to the ff-phase only). Not fixed per instruction.
+to cacheable `"rejected"`. Rated HARMLESS: each candidate's own drop already routes to a REAL per-candidate solo fallback
+(`runFallback`, started:true) that already ran and is itself NEVER_CACHED where it matters — content is
+never stuck, and a human can always `worker_merge_confirm` each one directly regardless of whether this
+batch-level cache entry ever clears. The residual is narrower than it first looks: a `merge_batch`
+RE-FIRE with the SAME unchanged candidate set, after repair, can replay this stale "nothing landed"
+verdict instead of re-assembling — confirmed by observation (debugging this round's own (B1) fixture,
+before it was corrected to isolate the fault to the ff-phase only). Not fixed per instruction.
 
 ## Do not
 
@@ -81,10 +91,11 @@ corrected to isolate the fault to the ff-phase only). Not fixed per instruction.
 
 Permanent test `packages/daemon/test/merge-confirm-verdict-cache-union-merge-refusal.mjs`: (A1) solo
 identity probe (real commondir-pin-mismatch fault), (A2) solo main-tip read, (A3) solo merge call, (A4)
-solo admission-time re-union (result-shape only, see "Do not"), (B1) batch pre-ff read (real fault, the
-swallowed-refusal gap), (B2) batch `--ff-only`. RED-proofed via `negative-control --ref 5913bfdf` both
-rounds (Round 1: 10→0; Round 2: 7→0, clean tree both times). Re-ran the `-transient`/main-advance
-siblings green. The inert-reclassify route (main moving during the brief repo-guard-only wait, before
-full admission) was verified by code reading only — shares the identical `classifyUnionMergeFailureKind`
-call and an early-return shape identical to its own `quarantined` branch — not independently
-timing-repro'd; disclosed rather than assumed covered.
+solo admission-time re-union (result-shape only, see "Do not"), (A5) solo `ls-files --unmerged` (Round 3;
+op-1 flag check only — the merge that already landed in op 1 moves the branch tip, so op 2 is a genuine
+identity miss regardless of the fix, same shape as A4), (B1) batch pre-ff read (real fault, the
+swallowed-refusal gap), (B2) batch `--ff-only`. RED-proofed via `negative-control --ref <prior commit>`
+every round (Round 1: 10→0; Round 2: 7→0; Round 3: 1→0, clean tree every time). Re-ran the
+`-transient`/main-advance siblings green each round. The inert-reclassify route and the two remaining
+Round-3 sites (owed-landing commit-tree, owed `--ff-only`) were verified by code reading only — not
+independently repro'd; disclosed rather than assumed covered.

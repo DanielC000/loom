@@ -233,6 +233,58 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (A5) SOLO, POST-MERGE CONFLICT CHECK (`ls-files --unmerged`) — bare CanonicalGitRefusal
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card 57f9cdd9 round 3 (Code Review of 03c8350f) — three more bare-fallthrough catches in
+  // mergeMainIntoWorktree computed `describeGitFailure(e).refusal` but never threaded it into
+  // `canonicalTrustRefusal`: the owed-landing commit-tree/pre-read catch, the owed `--ff-only` catch, and
+  // (covered here, the easiest to inject) the PLAIN path's post-merge `ls-files --unmerged` conflict
+  // check. RED/GREEN-proofed ONLY for op 1's own `canonicalTrustRefusal:true` check (via
+  // negative-control) — this site is reached only AFTER the real `git merge --no-edit` call already
+  // landed a merge commit in the worktree, which MOVES THE BRANCH TIP during op 1 itself, so op 2's own
+  // `verdictIdentity` (recomputed fresh from the branch's now-different tip) is a genuine identity MISS
+  // regardless of whether canonicalTrustRefusal is set correctly — the exact "vacuous discrimination
+  // test" shape card 08c36dae's own decision record warns against, same reasoning as (A4)'s own disclosed
+  // limitation above. The op-2 checks below are still true statements (a real re-attempt genuinely does
+  // happen and land), just not an INDEPENDENT proof of the never-cached property for this specific site;
+  // that property is proven once, generically, by (A1)-(A3)/(B1)-(B2) above (every caller's result flows
+  // through the same `classifyOutcome`).
+  {
+    console.log("\n— (A5) SOLO post-merge conflict check (ls-files --unmerged): a bare CanonicalGitRefusal —");
+    const { db, mgrId, workerId, repo } = await setupSoloProject("a5");
+    const state = { callCount: 0, refused: true };
+    const factory = (p, ms) => ({
+      raw: async (args) => {
+        const a = Array.isArray(args) ? args : [args];
+        state.callCount++;
+        if (a[0] === "ls-files" && a.includes("--unmerged") && state.refused) {
+          throw new CanonicalGitRefusal("refused: a commondir redirect was detected for this repo (simulated)");
+        }
+        const real = canonicalGit(p, ms, nonInteractiveEnv(), undefined, undefined, repo);
+        return real.raw(args);
+      },
+    });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
+      runGate: async () => ({ passed: true, steps: [] }),
+      unionMergeGitFactory: factory,
+    });
+
+    const r1 = await confirmTracked(sessions, mgrId, workerId);
+    check("(A5, op 1) settled, not merged, never reached the gate", r1.ok === true && r1.value?.merged === false);
+    check("(A5, op 1) carries its OWN distinct flag, canonicalTrustRefusal:true", r1.value?.canonicalTrustRefusal === true);
+    check("(A5, op 1) carries NO quarantined/dirtyWorktree/unionMergeTransient flag", !r1.value?.quarantined && !r1.value?.dirtyWorktree && !r1.value?.unionMergeTransient);
+    const callsAfterOp1 = state.callCount;
+
+    state.refused = false;
+
+    const r2 = await confirmTracked(sessions, mgrId, workerId);
+    check("(A5, op 2 — re-confirm) NOT served from the until-superseded verdict cache", r2.cacheHit === undefined);
+    check("(A5, op 2 — re-confirm) a REAL new attempt happened (not zero calls, as a cache replay would be)", state.callCount > callsAfterOp1);
+    check("(A5, op 2 — re-confirm) genuinely re-attempted and LANDED", r2.ok === true && r2.value?.merged === true);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // (A4) SOLO, ADMISSION-TIME RE-UNION — bare CanonicalGitRefusal on the SECOND merge attempt
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // Mirrors merge-confirm-verdict-cache-union-merge-transient.mjs's own "ADMISSION-TIME THREADING"

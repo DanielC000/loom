@@ -9748,7 +9748,8 @@ export async function mergeMainIntoWorktree(
       // (nothing lands: no ref moves, no working-tree mutation), so the SAME "nothing lands, retry is
       // always safe" reasoning as the main-tip resolve above applies to a timeout here too.
       const transient = !d.refusal && (TIMEOUT_SHAPED_RE.test(d.text) || isTransientSpawnErrorCode(e));
-      return { ok: false, reason: canonicalFailureMessage(d, `late-range union of main into the worktree failed: ${d.text}`), ...(transient ? { transient: true } : {}) };
+      // @decision 57f9cdd9 — never the cacheable generic fallthrough for a structural refusal here either.
+      return { ok: false, reason: canonicalFailureMessage(d, `late-range union of main into the worktree failed: ${d.text}`), ...(transient ? { transient: true } : {}), ...(d.refusal ? { canonicalTrustRefusal: true } : {}) };
     }
 
     // `--ff-only` either lands instantly or fails with NO merge in progress (no MERGE_HEAD, no partial
@@ -9804,7 +9805,8 @@ export async function mergeMainIntoWorktree(
         // internal retry above) still describes momentary host/process conditions, not the branch's or
         // main's content; same for a transient spawn-error code. Never set alongside a refusal.
         const transient = isConfirmedKillTimeout || (!d.refusal && isTransientSpawnErrorCode(e));
-        return { ok: false, reason: canonicalFailureMessage(d, `late-range union of main into the worktree failed: ${d.text}`), ...(transient ? { transient: true } : {}) };
+        // @decision 57f9cdd9 — never the cacheable generic fallthrough for a structural refusal here either.
+        return { ok: false, reason: canonicalFailureMessage(d, `late-range union of main into the worktree failed: ${d.text}`), ...(transient ? { transient: true } : {}), ...(d.refusal ? { canonicalTrustRefusal: true } : {}) };
       }
     }
   }
@@ -9933,7 +9935,8 @@ export async function mergeMainIntoWorktree(
       const d = describeGitFailure(e);
       const landingAwareReason = `the merge of main may have already landed, but its post-merge state could not be inspected: ${d.text} — re-confirm to continue (the branch tip may have moved)`;
       const isSpecificRefusalKind = d.commondirRedirect || d.pinMismatch || d.boundRepoIsWorktree || d.unpinned;
-      return { ok: false, reason: isSpecificRefusalKind ? canonicalFailureMessage(d, landingAwareReason) : landingAwareReason };
+      // @decision 57f9cdd9 — never the cacheable generic fallthrough for a structural refusal here either.
+      return { ok: false, reason: isSpecificRefusalKind ? canonicalFailureMessage(d, landingAwareReason) : landingAwareReason, ...(d.refusal ? { canonicalTrustRefusal: true } : {}) };
     }
 
     if (conflicted) {
