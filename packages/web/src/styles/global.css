@@ -2,10 +2,9 @@
    Token values (the single source of truth) + base element styling.
    Spec: packages/web/design/DESIGN.md. TS access: src/theme.ts. */
 
-/* Fonts. CDN for now; switching to self-hosted @fontsource is a local-first follow-up
-   (the app is loopback-only, so offline should not depend on a CDN). Fallbacks keep the
-   layout intact when the faces are unavailable. */
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+/* Fonts. Self-hosted and bundled — no network request, so the app renders identically offline and
+   leaks nothing to a third party. Fallbacks below keep the layout intact if a face fails to load. */
+@import "./fonts.css";
 
 :root {
   /* Surfaces */
