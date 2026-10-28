@@ -932,6 +932,56 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 0d3b64c6 (SF3), "7a7e041b-mixed-cross-identity" — the INVERTED twin of the scenario just above,
+  // restoring the pre-48547eec scratch-identity shape 48547eec replaced rather than kept: mint+clear
+  // `deadTok2` under a WHOLLY UNRELATED scratch repo's own identity (never d2's), then mix it into d2's
+  // own final alongside a genuine survivor. Pre-8bc779f0-round-3, `clearedTokens` was a bare, identity-
+  // less `Set<string>`, so this tombstone (minted by an unrelated raiser) wrongly dropped `deadTok2` from
+  // d2's own copy-aside too. Post-round-3, a tombstone attributed to the SCRATCH identity is never
+  // consulted by a reconcile declaring d2's OWN identity — `deadTok2` must SURVIVE here, the opposite of
+  // the same-identity scenario above.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const r2 = makeToplevelRepo("7a7e041b-mixed-cross-identity");
+  const d2 = path.join(r2, "gone-subdir"); // never created — a phantom, unresolvable occupant identity
+  const Kr2 = canonicalRepoLockKey(r2);
+  const Kr2hash = createHash("sha256").update(Kr2).digest("hex").slice(0, 24);
+  const finalPath2 = path.join(MERGE_QUARANTINE_DIR, `${Kr2hash}.json`);
+
+  // Mint a token via a wholly UNRELATED repo and fully clear it there — this durably tombstones that
+  // exact string under the SCRATCH identity only, never d2's.
+  const scratch2 = makeToplevelRepo("7a7e041b-mixed-cross-identity-scratch");
+  const deadTok2 = enterMergeQuarantine(scratch2, "scratch-branch", "scratch raise — becomes the cross-identity tombstoned token");
+  clearMergeQuarantineByToken(scratch2, deadTok2);
+  check("(mixed-cross-identity precondition) deadTok2 is lifted in-process (tombstoned under the scratch identity)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(deadTok2));
+
+  const keepTok2 = "mixed-keep-token-7a7e041b-cross-identity";
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  fs.writeFileSync(finalPath2, JSON.stringify({
+    repoPath: d2, branch: "d2-branch", reason: "D2's own degraded entry, holding a mixed token set bled from an unrelated scratch clear",
+    enteredAt: Date.now(), tokens: [keepTok2, deadTok2],
+  }, null, 2) + "\n");
+  check("(mixed-cross-identity precondition) final holds both tokens before r2's raise", (contentIfExists(finalPath2) ?? "").includes(keepTok2) && (contentIfExists(finalPath2) ?? "").includes(deadTok2));
+
+  const rTok2 = enterMergeQuarantine(r2, "r2-branch", "r2 raises over the cross-identity mixed-token foreign occupant");
+  const tokensAfterRaise2 = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** SF3 (mixed-cross-identity) *** deadTok2 SURVIVES the copy-aside — a tombstone under an UNRELATED identity must never drop it", tokensAfterRaise2.has(deadTok2));
+  check("(mixed-cross-identity) the still-owed keepTok2 also survives the copy-aside", tokensAfterRaise2.has(keepTok2));
+  check("(mixed-cross-identity) r2's own raise is enforced too", tokensAfterRaise2.has(rTok2));
+
+  const freshMixed2 = await freshBootModule();
+  freshMixed2.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensMixed2 = new Set(freshMixed2.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** SF3 (mixed-cross-identity, reboot) *** deadTok2 is STILL held after a reboot — never silently dropped", freshTokensMixed2.has(deadTok2));
+
+  clearMergeQuarantineByToken(d2, keepTok2);
+  clearMergeQuarantineByToken(d2, deadTok2);
+  clearMergeQuarantineByToken(r2, rTok2);
+  check("(mixed-cross-identity) everything lifts in-process once genuinely released (including deadTok2, by its own real owner this time)",
+    !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(deadTok2));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // CARD 5b55149b, REVIEWER PROBE B2 ("7a7e041b-b2") — `final` physically holds the LEGACY singular
   // `token` field with an EMPTY `tokens` array: `{tokens: [], token: "legacy-live-tok"}`.
   // `readSurvivingOnDiskTokens`'s own array-type guard treated an empty array as a VALID (if empty)
@@ -2376,6 +2426,56 @@ try {
   check("(tombstoned, reboot) tombTok stays gone after a reboot", !freshTokensTomb.has(tombTok));
   }
 
+  // ---- 25f6a7dc-tombstoned-cross-identity (SF3, card 0d3b64c6) — the INVERTED twin of the scenario
+  // just above, restoring the pre-48547eec scratch-identity shape: `tombTok2` is minted+cleared under a
+  // WHOLLY UNRELATED scratch repo's own identity, never d8b's. `markedFinalFullyCoveredByClear`'s own
+  // `|| tokenTombstonedForIdentity(t, recordIdentity)` disjunct must require THIS record's own identity
+  // (d8b/z8b) specifically — a tombstone minted by an unrelated raiser must NOT count as "coverage" for
+  // d8b's own clear, so the pending-divert record for z8b must be minted (never "skipped as already
+  // tombstoned") and tombTok2 must survive it ----
+  {
+  const r8b = makeToplevelRepo("tombstoned-cross-identity-r8b");
+  const z8b = path.join(r8b, "gone-z8b");
+
+  // Mint a token via a wholly UNRELATED repo and fully clear it there — tombstones this exact string
+  // under the SCRATCH identity only, never z8b's.
+  const scratch8b = makeToplevelRepo("tombstoned-cross-identity-scratch8b");
+  const tombTok2 = enterMergeQuarantine(scratch8b, "scratch-branch", "scratch raise — becomes the cross-identity tombstoned token");
+  clearMergeQuarantineByToken(scratch8b, tombTok2);
+  check("(tombstoned-cross-identity precondition) tombTok2 is lifted in-process (tombstoned under the scratch identity)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tombTok2));
+
+  const d8b = path.join(r8b, "sub-d8b");
+  fs.mkdirSync(d8b, { recursive: true });
+  fs.writeFileSync(path.join(d8b, "placeholder.txt"), "sub\n");
+  commitAll(r8b, "add sub-d8b", GIT_ID);
+  const Kr8b = canonicalRepoLockKey(r8b);
+  reenterMergeQuarantinesAtBoot([]);
+  const tokEb = enterMergeQuarantine(d8b, "d8b-branch", "d8b raises first — takes the existing-branch identity");
+
+  const Kr8bhash = createHash("sha256").update(Kr8b).digest("hex").slice(0, 24);
+  const finalPathB = path.join(MERGE_QUARANTINE_DIR, `${Kr8bhash}.json`);
+  fs.writeFileSync(finalPathB, JSON.stringify({
+    repoPath: z8b, branch: "z8b-branch", reason: "a stale leftover naming a different identity, holding a token tombstoned under an UNRELATED identity",
+    enteredAt: Date.now(), tokens: [], token: tombTok2,
+  }, null, 2) + "\n");
+
+  const tokFb = enterMergeQuarantine(r8b, "r8b-branch", "r8b raises into d8b's existing entry");
+  const z8bPendingPath = path.join(MERGE_QUARANTINE_DIR, pendingDivertFilenameForTest(z8b));
+  check("*** SF3 (tombstoned-cross-identity) *** a pending record IS minted for z8b — the scratch tombstone never counts as coverage for z8b's own identity",
+    fs.existsSync(z8bPendingPath));
+  check("*** SF3 (tombstoned-cross-identity) *** tombTok2 SURVIVES, held by z8b's own pending record", (contentIfExists(z8bPendingPath) ?? "").includes(tombTok2));
+  check("(tombstoned-cross-identity) d8b's own union carries tokEb and tokFb", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tokEb)
+    && new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tokFb));
+
+  clearMergeQuarantineByToken(z8b, tombTok2);
+  clearMergeQuarantineByToken(d8b, tokEb);
+  clearMergeQuarantineByToken(d8b, tokFb);
+  const freshTombCross = await freshBootModule();
+  freshTombCross.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensTombCross = new Set(freshTombCross.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(tombstoned-cross-identity, reboot) tombTok2 stays gone once its own real owner (z8b) clears it", !freshTokensTombCross.has(tombTok2));
+  }
+
   // ---- 25f6a7dc-no-token — {tokens:[]} with NO legacy token at all: readSurvivingOnDiskTokens' own raw
   // array stays genuinely empty (nothing to recover either way), so protectOccupantContentBeforeDelete's
   // pre-existing random-token fallback still fires — a pin that this card's fix does not disturb it ----
@@ -2479,6 +2579,69 @@ try {
   check("*** THE FIX (probeA, reboot) *** A-d does NOT come back after a reboot", !freshTokensA.has("A-d"));
   check("*** THE FIX (probeA, reboot) *** rA's own token does NOT come back after a reboot", !freshTokensA.has(rTokenA));
   check("*** THE FIX (probeA, reboot) *** the already-tombstoned token does NOT resurrect either", !freshTokensA.has(tombTokA));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // CARD 0d3b64c6 (SF3), "25f6a7dc-probeA-cross-identity" — the INVERTED twin of probeA just above,
+  // restoring the pre-48547eec scratch-identity shape: `tombTokB` is minted+cleared under a WHOLLY
+  // UNRELATED scratch repo's own identity, never dB's. The `|| tokenTombstonedForIdentity(t,
+  // recordIdentity)` disjunct in `markedFinalFullyCoveredByClear` must require THIS record's own
+  // identity — a tombstone minted by an unrelated raiser must never complete the coverage proof for dB's
+  // own clear, so `final` must be KEPT (never unlinked) and `tombTokB` must resurrect after a reboot,
+  // the opposite of probeA's own same-identity outcome.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const rB = makeToplevelRepo("probeA-cross-identity-r");
+  const KrB = canonicalRepoLockKey(rB);
+  const KrBhash = createHash("sha256").update(KrB).digest("hex").slice(0, 24);
+  const dB = path.join(rB, "gone-subdir");
+
+  // Mint a token via a wholly UNRELATED repo and fully clear it there — tombstones this exact string
+  // under the SCRATCH identity only, never dB's.
+  const scratchB = makeToplevelRepo("probeA-cross-identity-scratch");
+  const tombTokB = enterMergeQuarantine(scratchB, "scratch-branch", "scratch raise — becomes the cross-identity tombstoned token");
+  clearMergeQuarantineByToken(scratchB, tombTokB);
+  check("(probeA-cross-identity precondition) tombTokB is lifted in-process (tombstoned under the scratch identity)", !new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(tombTokB));
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const finalPathB2 = path.join(MERGE_QUARANTINE_DIR, `${KrBhash}.json`);
+  fs.writeFileSync(finalPathB2, JSON.stringify({
+    repoPath: dB, branch: "dB-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["B-d"], resolvedKey: KrB,
+  }, null, 2) + "\n");
+  reenterMergeQuarantinesAtBoot([]);
+  check("(probeA-cross-identity precondition) dB is `existing` at rB's own key", activeMergeQuarantineFor(rB)?.repoPath === dB);
+
+  const injectB = injectPersistentReadFailure(finalPathB2);
+  let rTokenB;
+  try {
+    rTokenB = enterMergeQuarantine(rB, "rB-branch", "rB raises into dB's already-armed existing entry, final unreadable throughout");
+  } finally {
+    injectB.restore();
+  }
+  check("(probeA-cross-identity precondition) final is untouched (still ONLY B-d) right after the divert",
+    (contentIfExists(finalPathB2) ?? "").includes("B-d") && !(contentIfExists(finalPathB2) ?? "").includes(rTokenB));
+
+  // final's own physical bytes now ALSO carry the cross-identity-tombstoned token, alongside the still-
+  // owed one — a stale copy of what this exact slot held before T was released under an UNRELATED
+  // identity's own clear, never rewritten since.
+  fs.writeFileSync(finalPathB2, JSON.stringify({
+    repoPath: dB, branch: "dB-branch", reason: "D's own degraded entry, walked up to R's own real key",
+    enteredAt: Date.now(), tokens: ["B-d", tombTokB], resolvedKey: KrB,
+  }, null, 2) + "\n");
+
+  const clearResultB = clearMergeQuarantineByKey(KrB, dB, undefined, true);
+  check("(probeA-cross-identity) the clear reports success", clearResultB?.wasQuarantined === true);
+  check("*** SF3 (probeA-cross-identity) *** final is KEPT (never unlinked) — coverage is NOT proven: tombTokB's tombstone belongs to an unrelated identity",
+    contentIfExists(finalPathB2) !== null);
+  const tokensAfterClearB = new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("(probeA-cross-identity) B-d is lifted IN-PROCESS", !tokensAfterClearB.has("B-d"));
+  check("(probeA-cross-identity) rB's own (merged) token is ALSO lifted IN-PROCESS", !tokensAfterClearB.has(rTokenB));
+
+  const freshB = await freshBootModule();
+  freshB.reenterMergeQuarantinesAtBoot([]);
+  const freshTokensB = new Set(freshB.listActiveMergeQuarantines().flatMap((q) => q.tokens ?? []));
+  check("*** SF3 (probeA-cross-identity, reboot) *** tombTokB DOES resurrect after a reboot — kept content is genuinely re-read, never silently dropped", freshTokensB.has(tombTokB));
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════

@@ -167,9 +167,20 @@ migration concern (`clearedTokens` is in-memory-only, reset every reboot).
 | `orphanFileTokensAccountedForByUpdate` | returns `false` ("not accounted for") | the orphan file's own reference set is left UNNARROWED this round (fail closed, never itself a delete) |
 | **`orphanSweepSafeToDelete`** | `safe` becomes `false` | KEEP the file (fail closed) — **confirmed RED-then-GREEN by test (Scenario 7)**, named by the manager as a priority row |
 | `ownTokensByFile` builder | already identity-gated by its OWN surrounding `if` (same identity as the clearer) before this call ever runs | inert for cross-identity purposes; correct either way for this already-narrowed case |
+| `readFinalOnDiskSurvivingTokens` | feeds `survivingTokenHolderRepoPaths`'s `contentClaimants` set inside `deleteMergeQuarantineLatchByKey` — a surviving token here means another identity's own entry can be found still holding it | KEEP the file / PROTECT (same fail-closed direction as the table's general convention) — **added, NIT4 (card 0d3b64c6)** |
+| **`confirmedDurableBackingElsewhere`** | **INVERSE polarity, by design.** A surviving token at ANOTHER of the SAME entry's own live-armed keys makes this return `true`, which `survivingTokenHolderRepoPaths`'s own `excludeFinalPath` branch then uses to EXCLUDE that entry from `contentClaimants` — i.e. "survives" here means LESS protection at THIS specific location, not more | Reasoned safe, not a contradiction of the convention above: the token is independently, durably confirmed to already be backed at the entry's OWN other key, so excluding it from blocking `final` here never loses it — it is enforced at the OTHER key instead. **Added, NIT4 (card 0d3b64c6)** |
 
 No row leads to a delete or a lift when a token survives — every discriminating row keeps/protects more,
-never less, matching this module's own "absence favors enforcement" convention throughout.
+never less, matching this module's own "absence favors enforcement" convention throughout, **with the one
+documented exception (`confirmedDurableBackingElsewhere`) directly above, which trades a LOCATION for a
+CONFIRMED-ELSEWHERE guarantee rather than trading safety for anything.**
+
+**NIT4 (card 0d3b64c6) — `ownTokensByFile`'s own lean:** the identity-gating `if` ahead of this builder
+makes it inert for CROSS-identity purposes (as stated above), but on its own, UN-gated terms it would
+LEAN OPEN (same shape as the general "survives ⇒ keep" rows: an un-filtered token would be reported as
+one of the clearer's own, rather than withheld) — net-neutral only because the surrounding `if` already
+narrows every input to the SAME identity as the clearer before this builder ever runs, so there is no
+cross-identity token for the lean to act on in practice.
 
 ### N1 — stale check count (fixed above)
 

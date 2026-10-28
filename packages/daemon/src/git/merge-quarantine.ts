@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { LOOM_HOME } from "../paths.js";
-import { canonicalRepoLockKey, isRepoPathCurrentlyResolvable, findExistingAncestorRealpath } from "./repo-lock.js";
+import { canonicalRepoLockKey, isRepoPathCurrentlyResolvable, findExistingAncestorRealpath, literalRepoPathKey } from "./repo-lock.js";
 
 /**
  * The QUARANTINE mechanism, DELIBERATELY SEPARATE from merge-danger-window.ts's in-flight/crash-recovery
@@ -473,8 +473,16 @@ const unreadablePlaceholderTokens = new Set<string>();
  * @decision 8db913e2 (round 3, CR2 B1) — closes the fail-closed resurrection the round-2 chokepoint union
  * introduced: a partial clear's own cleared token could be read back from a STALE pre-clear copy of
  * `final` by a LATER reconciliation, even after this process's own durable write had already removed it.
+ *
+ * @decision 0d3b64c6 (round 2, B1) — TWO NAMESPACES, never one shared `Set`: a reader matches `direct(X)`
+ * ONLY against `.direct` and `literal(X)` ONLY against `.literal`, never cross-namespace, or a path whose
+ * direct form equals a different identity's own literal form wrongly matches. See the decision record.
+ *
+ * @decision 0d3b64c6 (round 4, SUPERSEDED round 6) — round 4 made `.literal` a
+ * `Map<literalKey, Set<directForm>>` to support a target-composition match; round 6 DELETED that outcome
+ * (see {@link classifyLiteralGate}) — `.literal` is a plain `Set<literalKey>` again, by presence alone.
  */
-const clearedTokens = new Map<string, Set<string>>();
+const clearedTokens = new Map<string, { direct: Set<string>; literal: Set<string> }>();
 
 /**
  * @decision 8db913e2 (round 4, CR3 BLOCKER 1) — THE ONE place any token is ever added to
@@ -516,20 +524,36 @@ const clearedTokens = new Map<string, Set<string>>();
  * different questions ("is the final destroyed" vs. "is the owner's own token gone").
  *
  * @decision 8bc779f0 (round 3) — `clearingIdentity` REQUIRED, no default: normalized HERE via
- * {@link directPathIdentity}, the one normalization point every caller relies on (pass a raw `repoPath`
- * or an already-normalized one — both collapse to the same key).
+ * {@link directPathIdentity}.
+ *
+ * @decision 0d3b64c6 (round 2, S1) — `clearingIdentity` MUST be the RAW `repoPath`, never a value a
+ * caller already normalized — `literalRepoPathKey(directPathIdentity(p))` collapses to the direct form
+ * itself, discarding the one raw spelling the literal namespace exists to capture. See the decision record.
+ *
+ * @decision 0d3b64c6 (SF1) — scan (a) is scoped to the CLEARING identity's own entries, never global: a
+ * tombstone under A is only ever consulted by a reader that itself declares A, so a DIFFERENT identity B
+ * still holding this token has nothing for A's tombstone to protect. See the decision record.
+ *
+ * @decision 0d3b64c6 (SF2 / round 2 B1) — attributed under BOTH {@link directPathIdentity} AND {@link
+ * literalRepoPathKey} of `clearingIdentity`, each into its OWN namespace on {@link clearedTokens} — never
+ * one shared set. See the decision record.
+ *
+ * @decision 0d3b64c6 (round 4, SUPERSEDED round 6) — round 4 stored, per literal key, the set of
+ * `identity` (direct) forms seen at clear time, to support a target-composition match. Round 6 deleted
+ * that match outcome — `.literal` is a plain presence set again; see {@link classifyLiteralGate}.
  */
 function tombstoneIfNotSurviving(tokens: string[], clearingIdentity: string, touchedFinalBasenames: string[] = []): void {
   if (tokens.length === 0) return;
   if (touchedFinalBasenames.some((b) => keptUnreadableLatchFiles.has(b))) return;
-  const surviving = new Set<string>();
-  for (const entry of activeQuarantines.values()) for (const t of entry.tokens) surviving.add(t);
-  for (const p of pendingUnresolvedQuarantines) for (const t of p.entry.tokens) surviving.add(t);
   const identity = directPathIdentity(clearingIdentity);
+  const surviving = new Set<string>();
+  for (const entry of activeQuarantines.values()) { if (directPathIdentity(entry.repoPath) !== identity) continue; for (const t of entry.tokens) surviving.add(t); }
+  for (const p of pendingUnresolvedQuarantines) { if (directPathIdentity(p.entry.repoPath) !== identity) continue; for (const t of p.entry.tokens) surviving.add(t); }
+  const literalIdentity = literalRepoPathKey(clearingIdentity);
   for (const t of tokens) {
     if (surviving.has(t)) continue;
     const owners = clearedTokens.get(t);
-    if (owners) owners.add(identity); else clearedTokens.set(t, new Set([identity]));
+    if (owners) { owners.direct.add(identity); owners.literal.add(literalIdentity); } else clearedTokens.set(t, { direct: new Set([identity]), literal: new Set([literalIdentity]) });
   }
 }
 
@@ -1353,8 +1377,222 @@ function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }
     : typeof parsed.token === "string" ? [parsed.token] : [];
   // @decision 8db913e2 (round 3) — never let a stale on-disk copy resurrect a token THIS PROCESS already
   // deliberately cleared; see clearedTokens' own doc comment for why subtracting it here is safe.
-  const identity = recordIdentity !== undefined ? directPathIdentity(recordIdentity) : undefined;
-  return { raw, surviving: raw.filter((t) => !(identity !== undefined && clearedTokens.get(t)?.has(identity))) };
+  return { raw, surviving: raw.filter((t) => !tokenTombstonedForIdentity(t, recordIdentity)) };
+}
+
+/**
+ * A result from {@link classifyLiteralGateFromFs}: `"direct-only"` means `.literal` is never consulted
+ * (either `.direct` alone is trustworthy, or the gate fails CLOSED); `"open"` means `.literal` may be
+ * consulted BY PRESENCE alone. There is deliberately no third, target-composing outcome any more — see
+ * this function's own doc for why (round 6; five straight Code Review rounds found a fail-open in a
+ * target-composition inference, and the Lead's ruling was to shrink the surface rather than patch it
+ * again).
+ */
+export type LiteralGateResult = "direct-only" | "open";
+
+/**
+ * The two fs primitives {@link classifyLiteralGateFromFs} needs, injected so the classifier is a PURE
+ * function the table-driven unit test can exercise exhaustively without touching a real filesystem. The
+ * real implementation ({@link classifyLiteralGate}) wraps the live `fs.realpathSync.native`/`fs.lstatSync`
+ * — looked up ON EACH CALL (never captured once), so a test that monkey-patches the `fs` module's own
+ * methods (as several of this card's own scenarios do) is still observed.
+ */
+export interface LiteralGateFsOps {
+  realpathNative(p: string): string;
+  lstat(p: string): { isSymbolicLink(): boolean };
+  readdir(p: string): string[];
+}
+
+/**
+ * Bound on {@link classifyLiteralGateFromFs}'s own ancestor walk — a cycle or a pathological depth fails
+ * CLOSED rather than looping/recursing unboundedly.
+ *
+ * @decision 0d3b64c6 (round 5, ruling point 3; retained round 6)
+ */
+export const LITERAL_GATE_WALK_MAX_STEPS = 64;
+
+/**
+ * How (if at all) `.literal` may be consulted for `recordIdentity` — classified LOCALLY. Round 6 DELETED
+ * the target-composing `"match-target"` outcome entirely (see {@link LiteralGateResult}'s own doc): five
+ * straight Code Review rounds each found a fail-open in some form of "does this path's CURRENT target
+ * still equal what was stored at clear time" — round 3's `isRepoPathCurrentlyResolvable` bare catch,
+ * round 4's leaf-only lstat, round 5's own nearest-link composition (itself reopened by a CHAINED
+ * redirection: a target that was a plain directory at clear time later becomes itself a link to a THIRD,
+ * now-removed location — composing against the unchanged NEAREST link's own readlink text coincidentally
+ * reproduces the old stored form even though the real repo moved twice). The Lead's ruling: stop trying
+ * to prove two paths denote "the same place" across time by composing a target; only prove the OPPOSITE
+ * ("this could not possibly be the same place") and otherwise fail closed. See the decision record's own
+ * Round 6 section for both reproductions and the accepted residual this leaves.
+ *
+ * The rule, in order:
+ * 1. `realpathNative(recordIdentity)` succeeds ⇒ `"direct-only"` — `.direct` alone is trustworthy.
+ * 2. It fails. `lstat(recordIdentity)` ITSELF succeeds — ANYTHING exists at that exact path (a directory,
+ *    a file, a live link, or a DANGLING link/junction; lstat never follows the final component) ⇒
+ *    `"direct-only"`. This is the rule that closes round 5's own MAJOR 2 (a plain, non-link leaf whose
+ *    `realpath` throws for an unrelated reason, e.g. a transient permission error, must never fall
+ *    through to `.literal`'s presence-based match) — `lstat` succeeding at all, regardless of WHAT it
+ *    finds, is enough to know `recordIdentity` names something real right now; composing or comparing
+ *    anything further is both unnecessary and (per the five rounds above) unsafe.
+ * 3. `lstat(recordIdentity)` fails `ENOENT`/`ENOTDIR` ⇒ walk UP from `recordIdentity`, one component at a
+ *    time, checking only `isSymbolicLink()`. ANY existing link found ANYWHERE on the chain ⇒
+ *    `"direct-only"` — never compose or compare its target; a chain containing a link is, by this rule,
+ *    simply never eligible for `.literal`'s presence-based match, closing round 5's own MAJOR 1 (a
+ *    chained redirection where the nearest link's own target text happens to coincide with an unrelated,
+ *    older stored form). An existing ancestor that is NOT a link says nothing about ancestors further up
+ *    — keep walking past it.
+ * 4. Any OTHER lstat errno anywhere in the walk (EACCES/EPERM/EBUSY/EMFILE/ENFILE/ELOOP, a sharing
+ *    violation), or the walk exceeding {@link LITERAL_GATE_WALK_MAX_STEPS}, ⇒ `"direct-only"` — fail
+ *    CLOSED immediately.
+ * 5. The walk reaches the filesystem root (`dirname(probe) === probe`) having found NO link anywhere on
+ *    the existing prefix ⇒ `"open"` — genuinely gone, SF2's own shape; `.literal` may be consulted by
+ *    presence alone, unchanged since round 4.
+ *
+ * Round 7 adds TWO presence checks — both only ever WIDEN `"direct-only"`, never compose or compare a
+ * target, so neither can reopen a fail-open the way `"match-target"` did (see the Round 7 "Do not"):
+ *
+ * (i) Whenever an `lstat` in this function fails `ENOENT`/`ENOTDIR` (the leaf's own rule-2 check, or an
+ *     ancestor during the walk), that alone no longer proves the component is absent: a junction whose
+ *     target is spelled as a `\\?\Volume{GUID}\…` path is INVISIBLE to libuv's own link detection once
+ *     DANGLING — `lstat` on the junction's own entry returns `ENOENT` even though the entry genuinely
+ *     exists on disk. {@link presentInParentListing} checks the PARENT's own `readdirSync` listing
+ *     (case-insensitive on win32) for the component's basename; if it's there, the component is PRESENT
+ *     despite `lstat`'s own blindness ⇒ `"direct-only"`. Any `readdir` errno other than `ENOENT`/
+ *     `ENOTDIR` ⇒ `"direct-only"` too (fail CLOSED, same posture as every other unexpected errno here).
+ * (ii) At the NEAREST EXISTING ancestor found by the walk (the first one whose `lstat` succeeds) — before
+ *      trusting "exists, not a link, say nothing about it" — compare `realpathNative(ancestor)` against
+ *      the ancestor's own LEXICAL spelling (normalized the same way, lowercased on win32). A LIVE
+ *      `\\?\Volume{GUID}\…` junction reports `isSymbolicLink() === false` (the same invisibility as (i),
+ *      just live instead of dangling) and so slips past rule 3 undetected — but its `realpath` still
+ *      resolves to somewhere textually DIFFERENT from its own name, which this check catches. A
+ *      `realpath` failure at this confirmed-existing node ⇒ `"direct-only"` too. Checked ONLY at the
+ *      nearest existing ancestor, not re-applied further up the chain — see the decision record's own
+ *      Round 7 section for the residual this scope leaves and why it's accepted.
+ *
+ * @decision 0d3b64c6 (round 6) — see the decision record's own Round 6 section for the two MAJOR repros
+ * `"match-target"`'s deletion closes, and the "never re-add a target-composition match" Do-not.
+ *
+ * @decision 0d3b64c6 (round 7) — see the decision record's own Round 7 section for the volume-GUID-
+ * junction MAJOR these two presence checks close, the accepted residual they leave, and the 8.3
+ * short-name over-block both deliberately accept.
+ */
+export function classifyLiteralGateFromFs(recordIdentity: string, ops: LiteralGateFsOps): LiteralGateResult {
+  try {
+    ops.realpathNative(recordIdentity);
+    return "direct-only"; // rule 1
+  } catch {
+    // realpath failed — fall through.
+  }
+  const leaf = path.resolve(recordIdentity);
+  try {
+    ops.lstat(leaf);
+    return "direct-only"; // rule 2: anything exists at the leaf at all (dir/file/link/dangling link)
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return "direct-only"; // rule 4
+    if (presentInParentListing(leaf, ops) !== "absent") return "direct-only"; // round 7, check (i)
+  }
+  let probe = leaf;
+  let foundNearestExistingAncestor = false;
+  for (let steps = 0; steps < LITERAL_GATE_WALK_MAX_STEPS; steps++) {
+    const parent = path.dirname(probe);
+    if (parent === probe) return "open"; // rule 5: reached the fs root; nothing on the chain is a link
+    probe = parent;
+    let isLink: boolean;
+    try {
+      isLink = ops.lstat(probe).isSymbolicLink();
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return "direct-only"; // rule 4: any other errno
+      if (presentInParentListing(probe, ops) !== "absent") return "direct-only"; // round 7, check (i)
+      continue; // genuinely absent -- keep walking up
+    }
+    if (isLink) return "direct-only"; // rule 3: ANY existing link anywhere on the chain
+    if (!foundNearestExistingAncestor) {
+      foundNearestExistingAncestor = true;
+      let real: string;
+      try {
+        real = ops.realpathNative(probe); // round 7, check (ii)
+      } catch {
+        return "direct-only";
+      }
+      if (normalizeForAncestorComparison(real) !== normalizeForAncestorComparison(probe)) return "direct-only";
+    }
+    // exists, not a link, and (if it was the nearest existing ancestor) passed check (ii) -- keep walking
+  }
+  return "direct-only"; // rule 4: walk bound exceeded
+}
+
+/**
+ * `"present"` iff `probe`'s own basename is listed in its PARENT's `readdirSync` output (case-insensitive
+ * on win32) despite `lstat(probe)` having just failed `ENOENT`/`ENOTDIR` — the shape a DANGLING
+ * `\\?\Volume{GUID}\…`-targeted junction produces (genuinely present on disk, invisible to `lstat`).
+ * `"absent"` iff the parent's listing genuinely excludes it, OR the parent itself is also missing
+ * (`ENOENT`/`ENOTDIR` on the `readdir` call — consistent with continuing the walk). `"error"` for any
+ * OTHER `readdir` errno — fails CLOSED exactly like any other unexpected errno in this module.
+ *
+ * @decision 0d3b64c6 (round 7, ruling point i)
+ */
+function presentInParentListing(probe: string, ops: LiteralGateFsOps): "present" | "absent" | "error" {
+  let names: string[];
+  try {
+    names = ops.readdir(path.dirname(probe));
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "error";
+  }
+  const base = path.basename(probe);
+  const matches = process.platform === "win32" ? (n: string) => n.toLowerCase() === base.toLowerCase() : (n: string) => n === base;
+  return names.some(matches) ? "present" : "absent";
+}
+
+/**
+ * Normalizes a path for {@link classifyLiteralGateFromFs}'s own check (ii) comparison — applied to BOTH
+ * `real` and `probe` before comparing, so a difference that is purely an ARTIFACT of a successful
+ * `realpath` call never reads as a hidden redirect.
+ *
+ * Round 7's own check (ii) compared `realpathNative(probe)` against `probe` ITSELF, lowercased on win32
+ * (the SAME rule {@link directPathIdentity} uses for a successful realpath result) but otherwise
+ * unchanged. Two artifacts of `realpath` ALONE — never a real redirect — reproduced this as a fail-CLOSED
+ * regression on `eccd24c9`:
+ * - `realpathNative` strips a local-drive extended-length prefix (`\\?\<drive>:\…` / `//?/<drive>:/…`)
+ *   entirely, but `path.dirname`/`path.resolve` (what builds `probe`) never do — every ancestor of a
+ *   `\\?\<drive>:\…`-spelled `recordIdentity` (a form `isUnsafeToCanonicalize`, `projects/vault-path.ts`,
+ *   deliberately allows through) mismatched, forever, with no redirect anywhere.
+ * - `realpathNative` DROPS a UNC share root's own trailing separator (`\\server\share\` ⇒
+ *   `\\server\share`), but `path.dirname`/`path.resolve` always ADD one for a share root (the same
+ *   convention as a drive root) — every ancestor walk reaching a share root mismatched too.
+ *
+ * This strips ONLY the local-drive prefix (never `\\?\UNC\…` or `\\?\Volume{…}…`, which are exactly the
+ * redirections check (ii) exists to detect — stripping those would silently swallow round 7's own fix),
+ * then strips a trailing separator UNLESS what remains is a bare drive root (`C:\`) — a drive root keeps
+ * its own trailing separator through `realpath`; nothing else does. Lowercases on win32 last, reusing
+ * {@link directPathIdentity}'s own rule rather than re-deriving a second one. A win32-only concern
+ * (prefixes, drive letters, UNC shares); returns `p` unchanged elsewhere.
+ *
+ * Still comparison-only — composes/compares nothing but a NORMALIZED spelling of the SAME two values
+ * check (ii) already had.
+ *
+ * @decision 0d3b64c6 (round 8) — see the decision record's own Round 8 section; the round-6 Do-not
+ * (never re-add a target-composition match) still holds.
+ */
+function normalizeForAncestorComparison(p: string): string {
+  if (process.platform !== "win32") return p;
+  let out = p;
+  const driveLocal = /^[\\/]{2}\?[\\/]([A-Za-z]:)([\\/].*)?$/.exec(out);
+  if (driveLocal) out = driveLocal[1] + (driveLocal[2] ?? "\\");
+  if (!/^[A-Za-z]:[\\/]$/.test(out)) out = out.replace(/[\\/]+$/, "") || out;
+  return out.toLowerCase();
+}
+
+/** The real-filesystem binding of {@link classifyLiteralGateFromFs} — looks up each `fs.*` method ON
+ *  EACH CALL (never captured once at module load) so a test that monkey-patches `fs`'s own methods is
+ *  still observed. See {@link classifyLiteralGateFromFs}'s own doc for the classification itself. */
+function classifyLiteralGate(recordIdentity: string): LiteralGateResult {
+  return classifyLiteralGateFromFs(recordIdentity, {
+    realpathNative: (p) => fs.realpathSync.native(p),
+    lstat: (p) => fs.lstatSync(p),
+    readdir: (p) => fs.readdirSync(p),
+  });
 }
 
 /**
@@ -1364,9 +1602,22 @@ function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }
  * alone — see each site's own doc). `undefined` fails CLOSED: never tombstoned for an unknown identity.
  *
  * @decision 8bc779f0 (round 3)
+ *
+ * @decision 0d3b64c6 (round 2, B1) — matches `direct(recordIdentity)` ONLY against `.direct` and
+ * `literal(recordIdentity)` ONLY against `.literal` — never cross-namespace. `recordIdentity` must be
+ * the RAW stored `repoPath`, same requirement as {@link tombstoneIfNotSurviving}'s own `clearingIdentity`.
+ *
+ * @decision 0d3b64c6 (round 6) — `.literal` is consulted by PRESENCE ALONE when
+ * {@link classifyLiteralGate} returns `"open"`, never by any target composition — see that function's
+ * own doc for why the composing outcome was deleted rather than patched again.
  */
 function tokenTombstonedForIdentity(token: string, recordIdentity: string | undefined): boolean {
-  return recordIdentity !== undefined && !!clearedTokens.get(token)?.has(directPathIdentity(recordIdentity));
+  if (recordIdentity === undefined) return false;
+  const owners = clearedTokens.get(token);
+  if (!owners) return false;
+  if (owners.direct.has(directPathIdentity(recordIdentity))) return true;
+  if (classifyLiteralGate(recordIdentity) !== "open") return false;
+  return owners.literal.has(literalRepoPathKey(recordIdentity));
 }
 
 /**
@@ -4226,7 +4477,10 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       }
       // @decision 8db913e2 (round 4) — tombstone `token` HERE, after the splice/delete above already
       // removed every in-memory trace of this pending entry — see `tombstoneIfNotSurviving`'s own doc.
-      tombstoneIfNotSurviving([token], identity);
+      // @decision 0d3b64c6 (round 2, S1) — `live.entry.repoPath` (RAW), never the already-normalized
+      // `identity` local — see tombstoneIfNotSurviving's own doc for why a pre-normalized value drops
+      // the literal namespace's own attribution.
+      tombstoneIfNotSurviving([token], live.entry.repoPath);
       sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile);
       // @decision 8db913e2 (Follow-up f2cc5f18) — `live.entry.tokens` captured via the `live` binding
       // resolved above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
@@ -4267,7 +4521,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     live.entry = updated;
     // @decision 8db913e2 (round 4) — tombstone `token` HERE, before the write loop below, same reason
     // as `clearActiveEntryTokenAtKey`'s own identical placement.
-    tombstoneIfNotSurviving([token], identity);
+    // @decision 0d3b64c6 (round 2, S1) — `live.entry.repoPath` (RAW), never `identity` — see the doc
+    // comment on `clearTokenFromPendingIndices`'s own first tombstone call above.
+    tombstoneIfNotSurviving([token], live.entry.repoPath);
     const writtenBasenames = new Set<string>([live.sourceFile]);
     // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens`
     // (DEFENSIVE — `64283e06`'s own posture: unreachable today, see that record).
@@ -5518,7 +5774,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
-  tombstoneIfNotSurviving(candidateTokens, identity, [...touchedFinalBasenames, ...sourceFilesToSweep.map((s) => s.sourceFile)]);
+  // @decision 0d3b64c6 (round 2, S1) — `identityRepoPath` (this function's own RAW parameter), never
+  // the already-normalized `identity` local.
+  tombstoneIfNotSurviving(candidateTokens, identityRepoPath, [...touchedFinalBasenames, ...sourceFilesToSweep.map((s) => s.sourceFile)]);
   // @decision 2dd97aaa — a content-kept claimant whose own file no longer exists BY THE TIME this clear
   // returns (e.g. swept by a later step of this same call) is a ghost, never a real claim — drop it here,
   // right before this function's own result is built, rather than report a keep nothing backs any more.
@@ -6388,7 +6646,9 @@ function tryClearMergeQuarantineByOwnIdentity(
       if (folded.unattributed) anyKeptUnattributed = true;
     }
     for (const rp of orphanContentKept.keys()) keptContentRepoPaths.add(rp);
-    tombstoneIfNotSurviving(pendingCandidateTokens, identity, pendingTouchedBasenames);
+    // @decision 0d3b64c6 (round 2, S1) — `repoPath` (this function's own RAW parameter), never the
+    // already-normalized `identity` local.
+    tombstoneIfNotSurviving(pendingCandidateTokens, repoPath, pendingTouchedBasenames);
   }
   // @decision 3b1944b6 — an EXPLICIT no-match signal, never an inferred one: `repoPath` has no
   // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
@@ -7335,15 +7595,19 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     const matchedIdentities = new Set(matchedPending.map((p) => directPathIdentity(p.entry.repoPath)));
     // @decision 8bc779f0 (round 3) — `matchedPending` can span SEVERAL distinct identities; tombstone
     // each one's OWN tokens under ITS OWN clearingIdentity, never the flat set under one arbitrary identity.
-    const byIdentityForTombstone = new Map<string, { tokens: string[]; basenames: string[] }>();
+    //
+    // @decision 0d3b64c6 (round 2, S1) — each bucket also carries every distinct RAW `repoPath` spelling
+    // feeding it (`rawRepoPaths`) — `literalRepoPathKey`, unlike `directPathIdentity`, is NOT spelling-
+    // insensitive, so a shared bucket key can still need several distinct literal attributions.
+    const byIdentityForTombstone = new Map<string, { tokens: string[]; basenames: string[]; rawRepoPaths: Set<string> }>();
     // @decision 9cabd143 (round 2, item 1) — each pending entry's own sourceFile is OWNED by the entry
     // being cleared, never gated on check (1) — see sweepOwnLatchFileUnlessOwnedElsewhere's own doc.
     for (const pending of matchedPending) {
       pendingCandidateTokens.push(...pending.entry.tokens);
       const pendingIdentity = directPathIdentity(pending.entry.repoPath);
       const bucket = byIdentityForTombstone.get(pendingIdentity);
-      if (bucket) { bucket.tokens.push(...pending.entry.tokens); bucket.basenames.push(pending.sourceFile); }
-      else byIdentityForTombstone.set(pendingIdentity, { tokens: [...pending.entry.tokens], basenames: [pending.sourceFile] });
+      if (bucket) { bucket.tokens.push(...pending.entry.tokens); bucket.basenames.push(pending.sourceFile); bucket.rawRepoPaths.add(pending.entry.repoPath); }
+      else byIdentityForTombstone.set(pendingIdentity, { tokens: [...pending.entry.tokens], basenames: [pending.sourceFile], rawRepoPaths: new Set([pending.entry.repoPath]) });
       for (const f of pending.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
       // @decision 656fdf39 (CR 66fad7ed round 2) — `pending.entry` was already re-ingested at the top of
       // this function when still placeholder-shaped, so `.tokens` here is the real, reconciled set.
@@ -7363,7 +7627,9 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       if (folded.unattributed) anyKeptUnattributed = true;
     }
     for (const rp of orphanContentKept.keys()) keptContentRepoPaths.add(rp);
-    for (const [bucketIdentity, bucket] of byIdentityForTombstone) tombstoneIfNotSurviving(bucket.tokens, bucketIdentity, bucket.basenames);
+    // @decision 0d3b64c6 (round 2, S1) — call once PER raw spelling in the bucket (never the normalized
+    // `bucketIdentity` alone), so every distinct literal form actually seen gets its own attribution.
+    for (const bucket of byIdentityForTombstone.values()) for (const raw of bucket.rawRepoPaths) tombstoneIfNotSurviving(bucket.tokens, raw, bucket.basenames);
     // Belt-and-suspenders: sweep this id's own final (if any) and any remaining tmp residue directly, in
     // case something under this exact id sits on disk but was never captured as an in-memory pending
     // entry (e.g. a sibling tmp this process never parsed).
