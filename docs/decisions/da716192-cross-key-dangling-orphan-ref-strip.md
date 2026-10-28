@@ -231,11 +231,15 @@ trace of why 2 keys can't discriminate and 3 does. RED/GREEN citations below are
      OTHER route either. The assertion is relabeled to state only what it verifies (the pending wrapper
      survives the pass intact), with the reasoning recorded inline at the construction.
 
-8. **The continuation residual (#7) — named, not fixed; follow-up card `6a098eb1`.** A degraded or pending
+8. **The continuation residual (#7) — named, not fixed; follow-up card `5669cb78`.** A degraded or pending
    bystander's own DISK file can still list a reference (like O) that is neither migrating this boot nor
-   exists on disk — logged via `warnDanglingOrphanRefsNotMigratingThisBoot` (citing `6a098eb1` in the log
-   text), never stripped. `6a098eb1` is the boot-time reconcile that would actually drop such a reference;
-   this card deliberately does not implement it. Demonstrated as "boot 3" of
+   exists on disk — logged via `warnDanglingOrphanRefsNotMigratingThisBoot` (citing `5669cb78` in the log
+   text), never stripped. Card `6a098eb1` tried a boot-time reconcile that drops such a reference on file
+   absence alone — found UNSAFE (see `docs/decisions/6a098eb1-*.md`: at least 8 existing test fixtures,
+   two naming a believed production analogue, rely on a legitimate FORWARD reference a cold `fs.stat`
+   cannot tell apart from a genuinely stale one). `5669cb78` is the follow-up that would instead tombstone
+   a PHASE-3-retired basename by PROVENANCE, never by absence; this card deliberately does not implement
+   it. Demonstrated as "boot 3" of
    `cross-key-strip-degraded-and-pending-bystanders`: X's own directory is created for real (git init)
    between boot 2 and boot 3, making it resolvable; X's own file (still at its original, now-stale `ky`
    hash) migrates to X's OWN new real key via the EXISTING 9c3b023a mechanism (which strips only X's own

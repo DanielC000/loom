@@ -9367,15 +9367,15 @@ function reenterMergeQuarantinesAtBootImpl(
   // SOURCE for one key can physically be a DIFFERENT key's own write TARGET (`writeTargetsThisPass`
   // itself is now declared earlier, above the deferred-corrupt-tmp loop — round 3, minor 4).
 
-  // @decision da716192 — a NAMED residual (CR round 3, item #7; follow-up 6a098eb1): a basename that
+  // @decision da716192 — a NAMED residual (CR round 3, item #7; follow-up 5669cb78): a basename that
   // isn't migrating this boot AND no longer exists on disk is a reference superseded by some EARLIER
-  // boot this one never saw. Logged, never stripped, here. See the decision record.
+  // boot this one never saw. Logged, never stripped — a drop on absence alone is unsafe (card 6a098eb1).
   const warnDanglingOrphanRefsNotMigratingThisBoot = (entry: MergeQuarantineEntry): void => {
     for (const f of entry.orphanLatchFiles ?? []) {
       if (allMigratingSources.has(f)) continue; // the strip below (or 9c3b023a's) already handles this one
       if (fs.existsSync(path.join(MERGE_QUARANTINE_DIR, f))) continue; // still a real, live reference
       // eslint-disable-next-line no-console
-      console.warn(`[merge-quarantine] ${entry.repoPath}'s own orphanLatchFiles references ${f}, which does not exist on disk and is not migrating anywhere this boot — a known residual (card 6a098eb1): some EARLIER boot superseded it in a way this one never observed, so nothing strips it. If this repeats across boots, investigate.`);
+      console.warn(`[merge-quarantine] ${entry.repoPath}'s own orphanLatchFiles references ${f}, which does not exist on disk and is not migrating anywhere this boot — a known residual (card 5669cb78): some EARLIER boot superseded it in a way this one never observed, so nothing strips it. If this repeats across boots, investigate.`);
     }
   };
 

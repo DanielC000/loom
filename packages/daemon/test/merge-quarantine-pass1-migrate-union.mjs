@@ -1738,12 +1738,12 @@ try {
       console.warn = realWarn;
     }
     check(
-      "(boot 3, named residual 6a098eb1) X's entry RE-ENTERS memory carrying oBasename again — a known, accepted residual, not a fix regression",
+      "(boot 3, named residual 5669cb78) X's entry RE-ENTERS memory carrying oBasename again — a known, accepted residual, not a fix regression",
       (activeXBoot3?.orphanLatchFiles ?? []).includes(oBasename),
     );
     check(
-      "(boot 3) the residual's own warning log line fired for X, naming card 6a098eb1",
-      warnLines.some((l) => l.includes(oBasename) && l.includes("6a098eb1")),
+      "(boot 3) the residual's own warning log line fired for X, naming card 5669cb78",
+      warnLines.some((l) => l.includes(oBasename) && l.includes("5669cb78")),
     );
 
     reboot2.clearMergeQuarantine(y);
