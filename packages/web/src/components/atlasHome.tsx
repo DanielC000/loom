@@ -433,6 +433,29 @@ export interface NodeHeadPill {
 }
 
 /**
+ * ONE head pill. The only element in the app allowed to wear `.loom-atlas-headpill`, so every pill
+ * ellipsises the same way — including the session node's own `gen · turns`, which is drawn from
+ * `components/SessionNode.tsx` rather than from a `NodeHeadPill` row.
+ *
+ * `children` is ONE run of text, nested in its own span: that span is what the ellipsis needs (see
+ * `.loom-atlas-headpill-text`'s own note in styles/global.css). A reading made of separated parts
+ * expresses its separator IN the text — `genReadout`'s `" · "` — rather than as sibling elements,
+ * which the pill's `gap` would space but the ellipsis could no longer treat as one truncatable run.
+ */
+export function HeadPill({ children, tone: t, title, testId }: {
+  children: ReactNode;
+  tone?: Tone;
+  title?: string;
+  testId?: string;
+}) {
+  return (
+    <span className={`loom-atlas-headpill is-${t ?? "muted"}`} data-testid={testId} title={title}>
+      <span className="loom-atlas-headpill-text">{children}</span>
+    </span>
+  );
+}
+
+/**
  * The node's own pills and action cluster, portalled into the frame's node head.
  *
  * Renders NOTHING outside the frame — the slot is `null` under the classic shell, which has no node
@@ -448,8 +471,9 @@ export function AtlasNodeHead({ pills, actions }: { pills: NodeHeadPill[]; actio
       style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
       <div className="loom-atlas-headpills" data-testid="atlas-nodehead-pills">
         {pills.map((p) => (
-          <span key={p.key} className={`loom-atlas-headpill is-${p.tone ?? "muted"}`}
-            data-testid={`atlas-nodehead-pill-${p.key}`} title={p.title}>{p.text}</span>
+          <HeadPill key={p.key} tone={p.tone} title={p.title} testId={`atlas-nodehead-pill-${p.key}`}>
+            {p.text}
+          </HeadPill>
         ))}
       </div>
       {/* Never compresses — the pills beside it are what give up width first, the same priority the

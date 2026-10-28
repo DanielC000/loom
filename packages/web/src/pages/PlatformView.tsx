@@ -297,9 +297,9 @@ function AtlasPlatformLayout({
   const headPills: NodeHeadPill[] = [
     { key: "home", text: project.name, tone: "cyan", title: "The reserved home this node resolved to" },
     // The PILL phrasing, never the classic page's full caption: MEASURED at 420px the full span is
-    // 462px of text in a 388px box, and `.loom-atlas-headpill` is `inline-flex`, so its own
-    // `text-overflow: ellipsis` never fires on a bare text child — it was chopped mid-word. The caption
-    // rides on the title instead, where the clause the pill drops stays reachable.
+    // 462px of text in a 388px box. A pill that wide now ellipsises (card 359bcdaa), but an ellipsised
+    // clause is still a clause the reader cannot read, so the short phrasing stays. The caption rides
+    // on the title instead, where what the pill drops stays reachable.
     { key: "scope", text: edition.copy.header.scopePill, title: edition.copy.header.mutedSpan },
   ];
 

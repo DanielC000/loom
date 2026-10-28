@@ -15,6 +15,9 @@
 //   5. THE GATES LAMPS ARE GONE INSIDE THE FRAME and still present outside it — the occupancy that
 //      used to be stated three times on one screen is stated twice, and the classic page is intact.
 //   6. SWITCH OFF — no node-head pill, no spawn cluster, anywhere.
+//   7. (card 359bcdaa) AN OVER-LONG READING IS ELLIPSISED, not chopped mid-word — measured off the
+//      element that actually holds the text, since every box and document-width claim in this file
+//      passes identically with the defect present. See that leg's own note.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
@@ -75,7 +78,7 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
  * The fixture's own `createProject` can't be used here: it `git init`s an EMPTY repo, which has no
  * HEAD at all, and a repo with no commit is the case the pill deliberately renders nothing for.
  */
-async function seedProjectWithRepo(baseURL: string): Promise<{ id: string; name: string; branch: string; sha8: string }> {
+async function seedProjectWithRepo(baseURL: string, opts?: { branch?: string }): Promise<{ id: string; name: string; branch: string; sha8: string }> {
   // Under `$LOOM_SCRATCH_DIR` when a Loom session provides one (this session's own out-of-tree
   // scratch root), falling back to the OS temp dir on a CI runner that has none.
   const scratch = mkdtempSync(path.join(process.env.LOOM_SCRATCH_DIR ?? tmpdir(), "loom-nodehead-e2e-"));
@@ -90,6 +93,10 @@ async function seedProjectWithRepo(baseURL: string): Promise<{ id: string; name:
   writeFileSync(path.join(repoDir, "README.md"), "# seed\n", "utf8");
   execFileSync("git", ["-C", repoDir, "add", "-A"]);
   execFileSync("git", ["-C", repoDir, "commit", "-q", "-m", "chore: seed"]);
+  // An over-long branch is how the ellipsis leg below gets an over-long PILL VALUE out of real app
+  // data — the pill reads `<branch> <sha8>` off the repo, so the fixture never injects a string into
+  // the component or patches a response to make the reading long.
+  if (opts?.branch) execFileSync("git", ["-C", repoDir, "checkout", "-q", "-b", opts.branch]);
   const sha = execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const branch = execFileSync("git", ["-C", repoDir, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
   const name = uniq("nodehead");
@@ -130,6 +137,41 @@ async function headPills(page: Page): Promise<Record<string, string>> {
       (el.getAttribute("data-testid") ?? "").replace(/^atlas-nodehead-pill-/, ""),
       (el.textContent ?? "").trim(),
     ])));
+}
+
+/**
+ * Where a pill's reading actually LIVES — the element whose own inline content is that text, found as
+ * the parent of the pill's first non-empty text node — plus everything needed to decide whether an
+ * ellipsis can render in it.
+ *
+ * ⭐ DERIVED, never selected by class, and that is the whole point of the leg below. `text-overflow`
+ * applies to a BLOCK CONTAINER's inline content; a bare text child of an `inline-flex` box is an
+ * anonymous flex item instead, unstylable, so the property resolves on the pill and has nothing to
+ * truncate. Asking "which element holds the text, and is it a block container" therefore reddens on
+ * the real defect, where selecting `.loom-atlas-headpill-text` by name would only ever report whether
+ * one class exists, and reading `getComputedStyle(pill).textOverflow` would report `ellipsis` in BOTH
+ * states — the pill carried that declaration throughout the defect.
+ *
+ * @decision 359bcdaa — never weaken this to a class selector or to a computed read on the pill.
+ */
+async function readingHost(page: Page, testId: string) {
+  return page.getByTestId(testId).evaluate((pill) => {
+    const walk = document.createTreeWalker(pill, NodeFilter.SHOW_TEXT);
+    let host: HTMLElement | null = null;
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      if ((n.textContent ?? "").trim()) { host = n.parentElement; break; }
+    }
+    if (!host) return null;
+    const cs = getComputedStyle(host);
+    return {
+      isThePillItself: host === pill,
+      text: (host.textContent ?? "").trim(),
+      display: cs.display, textOverflow: cs.textOverflow,
+      whiteSpace: cs.whiteSpace, overflowX: cs.overflowX,
+      scrollWidth: host.scrollWidth, clientWidth: host.clientWidth,
+      pillScrollWidth: pill.scrollWidth, pillClientWidth: pill.clientWidth,
+    };
+  });
 }
 
 /** How many times the whole Atlas content column states the semaphore's lane occupancy. */
@@ -408,5 +450,85 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     expect(escaped, "no node-head pill or control overflows the head").toEqual([]);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow, "the document does not scroll sideways at 420px").toBeLessThanOrEqual(0);
+  });
+
+  // ── card 359bcdaa — an over-long reading is ELLIPSISED, never chopped mid-word ──────────────────
+  //
+  // The defect card f76b89b9 measured and deferred: `.loom-atlas-headpill` carried `overflow: hidden`
+  // + `text-overflow: ellipsis` + `white-space: nowrap` and still clipped mid-word, because it is
+  // `display: inline-flex` and a bare text child of a flex container is an anonymous flex item, which
+  // `text-overflow` cannot reach. Record: docs/decisions/359bcdaa-headpill-ellipsis.md.
+  //
+  // ⚠️ THE LEG ABOVE CANNOT SEE THIS, AND NO WIDENING OF IT COULD. The overflow is consumed entirely
+  // by the pill's own `overflow: hidden`: the pill's right edge stays inside the head's box and
+  // `document.scrollWidth == clientWidth` throughout, so the box/document claims above pass in BOTH
+  // states. The only visible difference is WHICH ELEMENT holds the text and whether a block container
+  // is available for the ellipsis to render in — which is what `readingHost` asks.
+  test("switch ON at 420px: an over-long head pill is ellipsised, not chopped mid-word",
+    async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    // Long enough that it cannot fit in ANY plausible pills box, not merely in a 388px one — the
+    // measured figure is this host's, and a fixture tuned to it would stop discriminating on a
+    // different font or a wider phone.
+    const longBranch = "feature/an-exceedingly-long-branch-name-that-no-node-head-pill-can-fit-at-phone-width";
+    const proj = await seedProjectWithRepo(loomDaemon.baseURL, { branch: longBranch });
+    await seedFleet(loomDaemon, { id: proj.id, name: proj.name });
+    await seedAtlasOn(page);
+    await pinProject(page, proj.id);
+    await page.setViewportSize({ width: 420, height: 900 });
+    await page.goto(loomDaemon.baseURL + "/project");
+
+    // IDENTITY FIRST: this is this spec's own corpus and its own over-long branch. A silent fallback
+    // to a sibling worker's daemon renders a plausible, screenshot-able, entirely wrong head.
+    await expect(page.locator(".loom-atlas-nodehead h1")).toContainText(proj.name);
+    const pill = page.getByTestId("atlas-nodehead-pill-head");
+    await expect(pill).toHaveText(`${longBranch} ${proj.sha8}`);
+    expect(proj.branch, "the fixture's repo is actually on the long branch").toBe(longBranch);
+
+    const host = await readingHost(page, "atlas-nodehead-pill-head");
+    expect(host, "the pill has a reading to measure").not.toBeNull();
+    const h = host!;
+
+    // (1) NON-VACUOUS: the box is real and the reading genuinely does not fit in it. Without this,
+    //     every claim below is satisfied by a collapsed or comfortably-fitting pill.
+    expect(h.clientWidth, "the reading's box collapsed, so the comparison below is vacuous")
+      .toBeGreaterThan(0);
+    expect(h.scrollWidth, `reading is ${h.scrollWidth}px in a ${h.clientWidth}px box — it must overflow`)
+      .toBeGreaterThan(h.clientWidth);
+
+    // (2) ⭐ THE DISCRIMINATING CLAIM, and the one the defect reddens: the overflowing text sits in a
+    //     BLOCK container, not directly in the flex pill. `text-overflow` has no anonymous flex item
+    //     to apply to, so on the pre-fix markup this reads `inline-flex` and the leg fails here.
+    expect(h.display, `the reading sits directly in a ${h.display} box — text-overflow cannot reach it`)
+      .not.toMatch(/flex/);
+    expect(h.isThePillItself, "the reading must ride its own element, not the pill's anonymous item")
+      .toBe(false);
+
+    // (3) And that element carries the three properties an ellipsis needs together. Any one missing
+    //     restores the clip: no `nowrap` and it wraps instead, no `hidden` and it spills.
+    expect(h.textOverflow).toBe("ellipsis");
+    expect(h.whiteSpace).toBe("nowrap");
+    expect(h.overflowX).toBe("hidden");
+
+    // (4) The FULL value stays reachable on the title — the clause the ellipsis hides is not lost.
+    //     The branch AND the un-shortened sha, so the title is a superset of the pill, not a copy.
+    const title = await pill.getAttribute("title");
+    expect(title, `title must carry the whole reading, got: ${title}`).toContain(longBranch);
+    expect(title).toMatch(new RegExp(`${proj.sha8}[0-9a-f]{20,}`));
+
+    // (5) The ellipsis is achieved by SHRINKING the reading, never by letting the pill grow out of
+    //     its box. (Both were true during the defect too — stated so a later edit that "fixes" the
+    //     overflow by widening the pill fails here rather than quietly passing (1)-(3).)
+    expect(h.pillScrollWidth, "the pill itself no longer overflows — the reading absorbs it")
+      .toBeLessThanOrEqual(h.pillClientWidth);
+    const escaped = await page.locator(".loom-atlas-nodehead").evaluate((head) => {
+      const box = head.getBoundingClientRect();
+      return [...head.querySelectorAll(".loom-atlas-headpill")]
+        .map((el) => ({ t: (el.textContent ?? "").trim(), r: el.getBoundingClientRect() }))
+        .filter(({ r }) => r.right > box.right + 1 || r.left < box.left - 1).map(({ t }) => t);
+    });
+    expect(escaped, "no pill escapes the head, however long its reading").toEqual([]);
+    const docOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(docOverflow, "the document does not scroll sideways").toBeLessThanOrEqual(0);
   });
 });

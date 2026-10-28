@@ -7,6 +7,7 @@ import { plural } from "../lib/atlasHome";
 import { harnessOf } from "../lib/harnessFields";
 import { sessionNodeTabHref, sessionNodeTabsFor, type SessionNodeTab } from "../lib/sessionNodeTabs";
 import { useStopSession, useForkSession } from "../lib/useSessionActions";
+import { HeadPill } from "./atlasHome";
 import { TerminalCard, type TerminalTabs } from "./TerminalCard";
 import { ReviewSurface } from "./ReviewSurface";
 import { EventRow } from "./fleet";
@@ -72,9 +73,10 @@ function ctxReadout(s: SessionNodeRow) {
 function genReadout(s: SessionNodeRow) {
   const parts = [s.gen ? `gen ${s.gen}` : null, s.ctxTurns ? plural(s.ctxTurns, "turn") : null].filter(Boolean);
   if (parts.length === 0) return null;
-  return (
-    <span className="loom-atlas-headpill" data-testid="session-node-gen">{parts.join(" · ")}</span>
-  );
+  // The SHARED pill, not a hand-rolled `.loom-atlas-headpill` span: this reading grows with the
+  // session (`gen 1412 · 1318 turns`) and the node head it rides is the narrowest of the three, so
+  // it needs the same ellipsis the project node's branch pill does rather than its own copy of it.
+  return <HeadPill testId="session-node-gen">{parts.join(" · ")}</HeadPill>;
 }
 
 /**

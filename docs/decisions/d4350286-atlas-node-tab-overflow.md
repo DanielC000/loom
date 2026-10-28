@@ -72,9 +72,11 @@ and show the active tab's label"*. **This build keeps it in the row.**
   and the current tab shut inside a closed menu, leaves "which tab am I on" unreadable at a glance —
   the node head states the NODE's identity, never the tab's.
 - The alternative gives the trigger a per-tab width, which the fit computation would then have to
-  re-derive per tab, in an `inline-flex` chip that **cannot ellipsise** (card `f76b89b9` measured
-  exactly that on `.loom-atlas-headpill`: `text-overflow` does not reach a bare text child of a flex
-  container, so it clips mid-word with no `…` and no geometry assertion can see it).
+  re-derive per tab, in an `inline-flex` chip whose text **cannot ellipsise where it sits** — card
+  `f76b89b9` measured exactly that on `.loom-atlas-headpill`: `text-overflow` does not reach a bare
+  text child of a flex container, so it clips mid-word with no `…` and no geometry assertion can see
+  it. (Card `359bcdaa` fixed the head pill by nesting its text in a block-container span of its own;
+  the trap is still live for any `inline-flex` chip that has not done the same, this trigger included.)
 
 Mechanically: the leading tabs that fit are shown; if the active tab is not among them, its width is
 reserved first and the remaining room filled from the front, with the active tab appended last. Because

@@ -58,9 +58,9 @@ export interface PlatformEditionCopy {
   // `scopePill` is the SAME scope as a node-head pill (card f76b89b9) — deliberately its own field and
   // not a split of `mutedSpan`: a pill is a phrase, and a caption that grows a third clause must not
   // silently become a pill that no longer fits. MEASURED at 420px the pills box is 388px wide, so keep
-  // this under ~40 characters; `.loom-atlas-headpill` is `inline-flex`, which means its CSS
-  // `text-overflow: ellipsis` never fires on a bare text child — an over-long pill is chopped mid-word
-  // rather than ellipsised. The full `mutedSpan` rides on that pill's `title`.
+  // this under ~40 characters. An over-long value is now ellipsised rather than chopped mid-word (card
+  // 359bcdaa fixed the pill itself), but that is a graceful degradation, not a licence to overflow: a
+  // clause the reader cannot see is lost either way. The full `mutedSpan` rides on that pill's `title`.
   header: { mutedSpan: string; scopePill: string; paragraph: string };
   agentsLabel: string; // the go-live section label ("Agents" | "Assistants")
   operatorCard: AgentCardCopy;

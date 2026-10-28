@@ -1158,11 +1158,12 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await expect(nodeHeadPill(page, "home")).toHaveText(home.project.name);
     await expect(nodeHeadPill(page, "scope")).toHaveText(/your cross-project workspace agent/i);
 
-    // ── 420px: a pill whose text is wider than its box is NOT ellipsised, it is chopped mid-word —
-    //    `.loom-atlas-headpill` is `inline-flex`, and `text-overflow` does not reach a bare text child
-    //    of a flex container. MEASURED on the first build of this card: the full caption rendered 462px
-    //    of text into a 388px box and lost "…ect picker" with no "…" to show for it. So the claim is
-    //    about the TEXT's own width, not the box's: a box that fits proves nothing here.
+    // ── 420px: this node's COPY is short enough that neither pill is truncated at all — the claim is
+    //    about the TEXT's own width, not the box's, because a box that fits proves nothing here.
+    //    MEASURED on the first build of card f76b89b9: the full caption rendered 462px of text into a
+    //    388px box. ⚠️ This is NOT a check on the ellipsis. An over-long pill now truncates with a "…"
+    //    instead of mid-word (card 359bcdaa), and `atlas-node-head.spec.ts` is what holds THAT; this
+    //    leg would pass just as happily on a pill that ellipsised, which is why it stays about copy.
     await page.setViewportSize({ width: 420, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/platform`);
     for (const key of ["home", "scope"]) {
