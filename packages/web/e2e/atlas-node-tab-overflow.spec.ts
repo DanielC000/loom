@@ -142,6 +142,27 @@ async function blockGeometry(page: Page): Promise<Block> {
 }
 
 /** Every tab key the node can reach, from both halves — the row and (opening it) the menu. */
+/**
+ * A node's whole DECLARED tab set, collected from its own HOME tab — the one tab with no KPI strip
+ * (card 7874e8c2), so the row holds every tab and nothing is folded at this width.
+ *
+ * ⛔ Never hardcode this as a count. Both nodes' tab sets change whenever a card re-homes, adds or
+ * removes a surface, and a hardcoded floor goes red for a reason that has nothing to do with the
+ * overflow behaviour this spec is about: card `44f725fe` removed the project node's `Deck` tab and
+ * reddened two legs here that were otherwise entirely correct.
+ */
+async function declaredTabKeys(page: Page, loomDaemon: LoomDaemon, homePath: string): Promise<string[]> {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.goto(loomDaemon.baseURL + homePath);
+  await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
+  // Presence of the home tab's own readout, so the set below is read off a settled row; and the
+  // strip's ABSENCE is what makes "the row is the whole set" true.
+  await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+  await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
+  await expect(page.getByTestId("atlas-node-tabs-more")).toHaveCount(0);
+  return (await blockGeometry(page)).tabKeys.slice().sort();
+}
+
 async function allReachableKeys(page: Page): Promise<{ row: string[]; menu: string[] }> {
   const row = (await blockGeometry(page)).tabKeys;
   const more = page.getByTestId("atlas-node-tabs-more");
@@ -195,6 +216,14 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: 1440, height: 1000 });
 
+    // Each node's whole declared tab set, read off its own home tab before the measurements below —
+    // so "nothing is lost, only folded" is checked against the real set rather than a count.
+    const declared: Record<string, string[]> = {
+      project: await declaredTabKeys(page, loomDaemon, "/project"),
+      workspace: await declaredTabKeys(page, loomDaemon, "/home"),
+    };
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
     const offenders: string[] = [];
     // A strip-carrying tab on each node. ⛔ NOT `/project` or `/home` — Overview is the one tab with
     // no strip (card 7874e8c2), so measuring there would duck the very content that was wrapping.
@@ -212,15 +241,18 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
       if (g.blockH !== g.oneLineH) offenders.push(`${who}: block ${g.blockH}px, one line is ${g.oneLineH}px`);
       if (g.rowTops !== 1) offenders.push(`${who}: tabs on ${g.rowTops} lines (${g.tabKeys.join("/")})`);
       if (g.stripOnRowLine !== true) offenders.push(`${who}: the strip is not on the row's line`);
-      // The collapse is real, not a row that happened to fit: these nodes carry 9 and 10 tabs.
+      // The collapse is real, not a row that happened to fit: with the strip beside them, neither
+      // node's tabs fit one line at 1440 — which is what this spec's whole subject depends on.
       if (!g.hasMore) offenders.push(`${who}: no overflow trigger, ${g.tabKeys.length} tabs in the row`);
       if (g.moreOnRowLine !== true) offenders.push(`${who}: the trigger is not on the row's line`);
       if (g.docOverflow) offenders.push(`${who}: the document scrolls horizontally`);
-      // ⭐ NOTHING IS LOST, only folded: row + menu together are still the whole declared tab set.
+      // ⭐ NOTHING IS LOST, only folded: row + menu together are EXACTLY the declared tab set —
+      // an equality against the set itself, not a floor on its size, so a fold that dropped one tab
+      // and invented another could not pass.
       const reach = await allReachableKeys(page);
-      const total = reach.row.length + reach.menu.length;
-      if (total < (who === "project" ? 10 : 9)) {
-        offenders.push(`${who}: ${total} tabs reachable (row ${reach.row.join("/")} + menu ${reach.menu.join("/")})`);
+      const total = [...reach.row, ...reach.menu].sort();
+      if (JSON.stringify(total) !== JSON.stringify(declared[who])) {
+        offenders.push(`${who}: reachable ${total.join("/")} != declared ${declared[who]!.join("/")}`);
       }
       if (reach.menu.length === 0) offenders.push(`${who}: the menu is empty`);
       // The ACTIVE tab is never the one folded away (this build's rule — see the record).
@@ -420,7 +452,15 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
 
+    const declared: Record<string, string[]> = {
+      project: await declaredTabKeys(page, loomDaemon, "/project"),
+      workspace: await declaredTabKeys(page, loomDaemon, "/home"),
+    };
+
     const offenders: string[] = [];
+    // Every (width, node) pair that actually folded, so the menu half below is provably exercised
+    // somewhere rather than skipped everywhere by a row that happens to fit at both widths.
+    const folded: string[] = [];
     for (const width of [720, 420]) {
       await page.setViewportSize({ width, height: 900 });
       for (const [who, path] of [["project", "/board"], ["workspace", "/home?tab=gates"]] as const) {
@@ -436,7 +476,21 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
         // card 7874e8c2). Reserving its width here would collapse EVERY tab into the menu.
         if (g.rowTops !== 1) offenders.push(`${at}: tabs on ${g.rowTops} lines (${g.tabKeys.join("/")})`);
         if (g.rowH > 32) offenders.push(`${at}: the row is ${g.rowH}px, taller than one tab`);
-        if (!g.hasMore) { offenders.push(`${at}: no trigger, ${g.tabKeys.length} tabs in the row`); continue; }
+        // ⛔ A TRIGGER IS NOT UNCONDITIONALLY REQUIRED HERE. Below 820px the strip takes a line of
+        // its own, so the row gets the full width back and a short enough tab set legitimately fits
+        // with nothing to fold — which is a BETTER outcome than folding, not a defect. What must
+        // hold either way is that NOTHING IS UNREACHABLE, so that is what is asserted; the menu's
+        // own behaviour is then exercised only where a fold actually happened. (Hardcoding "there is
+        // always a trigger at 720" is what went red on card `44f725fe`, which removed one project
+        // tab and so let the remaining nine fit at 720.)
+        if (!g.hasMore) {
+          const rowKeys = g.tabKeys.slice().sort();
+          if (JSON.stringify(rowKeys) !== JSON.stringify(declared[who])) {
+            offenders.push(`${at}: no trigger, and the row ${rowKeys.join("/")} is not the declared set ${declared[who]!.join("/")}`);
+          }
+          continue;
+        }
+        folded.push(at);
         if (g.moreOnRowLine !== true) offenders.push(`${at}: the trigger is not on the row's line`);
 
         await page.getByTestId("atlas-node-tabs-more").click();
@@ -460,6 +514,10 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
       }
     }
     expect(offenders, "720 and 420 keep a one-line tab row and a working menu, with no horizontal overflow").toEqual([]);
+    // ⭐ And the menu half above was really exercised: at least one (width, node) pair folded. Without
+    // this the whole loop could go green on four rows that each fit, and "the menu still works at
+    // phone width" would be a claim nothing measured.
+    expect(folded.length, "no node folded at 720 or 420, so the menu assertions above never ran").toBeGreaterThan(0);
   });
 
   test("switch OFF: no overflow trigger or menu exists anywhere", async ({ page, loomDaemon }) => {

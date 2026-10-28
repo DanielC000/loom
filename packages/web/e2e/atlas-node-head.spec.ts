@@ -165,9 +165,9 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     expect(fleet.working).not.toBe(fleet.live);
 
     const keys = await renderedTabKeys(page);
-    // The node is the ten-tab one card 25c08fba built — otherwise "on every tab" could pass on a
-    // node that had lost the tabs this card is about.
-    expect(keys.length, `project node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(10);
+    // The node is the nine-tab one card 25c08fba built and card 44f725fe unified the two home tabs
+    // of — otherwise "on every tab" could pass on a node that had lost the tabs this card is about.
+    expect(keys.length, `project node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(9);
 
     // ⭐ Verdicts are COLLECTED and asserted once, never `expect`ed inside the loop: an in-loop
     // expect aborts at the first offender and hides every one after it (card a7f23a2f's lesson).

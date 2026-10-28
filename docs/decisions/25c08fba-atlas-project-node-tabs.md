@@ -2,9 +2,11 @@
 
 Card `25c08fba` (Atlas restructure 3 of 11, epic `9fe8cd4e`), on card `0d0c6cee`'s entity tree. The approved design is the round-4 V2 mockup's own declarations — `atlas.js`'s `PROJ_TABS` prepended by `homeTabs("proj")` — not the screenshots: Overview · Deck · Board · Sessions · Agents · Repository · Memory · Runs · Archive · Settings.
 
+> ⚠ **Superseded in part by card `44f725fe`** (the owner's D1 pick, request `fb8de852`): the `Deck` tab is gone and the two HOME tabs are now ONE `Overview`, so this node declares **nine** tabs, not ten. Everything below about a RE-HOMED tab's address, the mount-once rule and the hook-above-the-early-return trap is untouched and still current — only the home-tab half of the set changed. See `docs/decisions/44f725fe-atlas-unified-project-home.md`.
+
 ## A tab's address is the path it already had
 
-Only the two HOME tabs are `?tab=` on `/project` — two readings of one home, which is what the mockup's own `homeTabs().concat(PROJ_TABS)` split says they are. Every other tab keeps the path it had, and `AtlasShell` routes that path at the project node instead of at the bare page. Three reasons, each sufficient alone:
+Only the HOME tabs are `?tab=` on `/project` — at the time of this card, two readings of one home, which is what the mockup's own `homeTabs().concat(PROJ_TABS)` split says they are (card `44f725fe` has since unified them into one, which is the bare path). Every other tab keeps the path it had, and `AtlasShell` routes that path at the project node instead of at the bare page. Three reasons, each sufficient alone:
 
 - **A `?tab=` on `/project` collides with the tab body's own `?tab=`.** `pages/Repository.tsx` reads `?tab=git` off the query string itself, as Actors and Automation do. One query parameter cannot address both the node's tab and its body's sub-tab.
 - **`LEGACY_REDIRECTS` is mounted by BOTH shells from one declaration.** A row pointing `/board` at `/project?tab=board` would redirect the classic shell too, breaking this card's switch-OFF contract. A second, Atlas-only redirect table would be a second list to keep in step for no gain.
@@ -39,7 +41,7 @@ It is an unscoped god-eye page in the classic rail and the design's project-node
 - **Do not unmount an inactive tab body, and do not park one with an inline `display`** — that out-specifies the UA `[hidden]` rule. Unfinished input must survive a tab switch.
 - **Do not declare a hook below the `!projectId` early return.** See above; it blanks the app rather than failing locally.
 - **Do not derive a re-homed tab's depth or label from the page's own `scoped` flag.** `/terminals` is at project depth under Atlas and at workspace depth in the classic rail, and only the tab declaration knows that.
-- **Do not add a count a tab has no natural figure for.** Overview, Deck, Repository and Settings carry none in the approved design, and the spec asserts their absence.
+- **Do not add a count a tab has no natural figure for.** Overview, Repository and Settings carry none in the approved design (Deck did too, until card `44f725fe` removed it), and the spec asserts their absence.
 
 ## Left for the cards that own them
 

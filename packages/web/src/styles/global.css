@@ -1689,6 +1689,14 @@ button.loom-atlas-node.is-branch.is-open {
   .loom-atlas-tree.is-open {
     transition: none;
   }
+  /* The dashboard disclosure's twist and its bar's hover tint (card 44f725fe) — the only other
+     motion the Atlas home nodes add. The twist still ROTATES, it just arrives there at once: the
+     rotation is the control's open/closed state, not decoration, so nulling the transform itself
+     would leave a collapsed bar pointing down. */
+  .loom-banddisc-twist,
+  .loom-banddisc-bar {
+    transition: none;
+  }
 }
 
 /* ── Atlas home nodes (card fd99b2d7 — P2-1) ──────────────────────────────────────────
@@ -2147,6 +2155,86 @@ button.loom-kpi.is-open {
   gap: 10px;
   align-items: stretch;
 }
+/* ⛔ REQUIRED by the disclosure below (card 44f725fe), and the same trap card 25c08fba's own
+   record names from the tab-body side: the `display: grid` directly above is an AUTHOR rule, so it
+   OUT-SPECIFIES the UA's `[hidden] { display: none }` and a folded band stays fully laid out and
+   visible. Measured in the mockup before this rule existed: the board sat 1199px down the page
+   with the band "collapsed". */
+.loom-atlas-band[hidden] {
+  display: none;
+}
+
+/* ── The dashboard disclosure (card 44f725fe) ───────────────────────────────────────────
+   The band folded behind one bar. The bar is a summary ROW and not a tab row: collapsed, it
+   keeps carrying the band's own live counts, so folding costs the reader the DETAIL and
+   never the SIGNAL. */
+.loom-banddisc {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.loom-banddisc-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 12px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: var(--loom-panel-2);
+  border: 1px solid var(--loom-border);
+  border-radius: var(--loom-radius);
+  color: var(--loom-text-dim);
+  transition: border-color 80ms linear, background 80ms linear;
+}
+.loom-banddisc-bar:hover {
+  border-color: var(--loom-border-strong);
+  background: var(--loom-panel);
+}
+/* Inset, like the board card's own ring (card a6d7a102): the bar is a full-width block, so a
+   positive offset would put the ring under the panel edge above it. */
+.loom-banddisc-bar:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
+}
+.loom-banddisc-twist {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  font-size: 9px;
+  color: var(--loom-text-muted);
+  transition: transform 110ms cubic-bezier(0.2, 0, 0, 1);
+}
+.loom-banddisc-bar[aria-expanded="true"] .loom-banddisc-twist {
+  transform: rotate(90deg);
+}
+.loom-banddisc-lbl {
+  flex: none;
+  font-family: var(--loom-font-head);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--loom-text-dim);
+}
+/* Wraps rather than ellipsising: every pill here is a figure the fold has hidden, so a pill
+   pushed out of sight would be the one thing this row exists to prevent. */
+.loom-banddisc-sum {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.loom-banddisc-hint {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--loom-text-muted);
+}
 .loom-bandpanel {
   display: flex;
   flex-direction: column;
@@ -2380,6 +2468,16 @@ button.loom-kpi.is-open {
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: var(--loom-text-dim);
+}
+/* In a board HEAD the lane bar is a COMPACT trailing readout, and the base `width: 100%` below is
+   not it: after the head's own `flex: 1` spacer a full-width bar stretches the whole content column
+   and reads as a divider or a progress bar rather than a figure — measured at 1230px wide at 1600px
+   (card 44f725fe, caught by eye against the approved mockup, which sizes its own at `flex: 0 0
+   180px`). The base rule stays as it is for the OTHER use site, a project card, where the bar is a
+   full-width footer under the card's own meta line and 100% is correct. */
+.loom-atlas-primaryhead > .loom-lanebar {
+  flex: 0 0 180px;
+  width: auto;
 }
 
 /* The Replay tab: two full-width sections stacked at the node's own rhythm (card ff6123de). The

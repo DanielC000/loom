@@ -111,9 +111,10 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     await expect(page.locator(".loom-atlas-nodehead h1")).toContainText(seeded.project.name);
 
     const keys = await renderedTabKeys(page);
-    // The node is the ten-tab one card 25c08fba built, not a two-tab remnant — otherwise "every tab
-    // carries the strip" could pass on a node that had lost the tabs this card is about.
-    expect(keys.length, `project node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(10);
+    // The node is the nine-tab one card 25c08fba built and card 44f725fe unified the two home tabs
+    // of, not a one-tab remnant — otherwise "every tab carries the strip" could pass on a node that
+    // had lost the tabs this card is about.
+    expect(keys.length, `project node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(9);
     expect(keys).toContain("board");
     expect(keys).toContain("memory");
     expect(keys).toContain("runs");

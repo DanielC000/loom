@@ -11,7 +11,10 @@
 //      a summary. See ProjectHome.tsx's own note and card c6bdf358.)
 //   3. Each KPI pop-over opens AND closes, asserted on both sides of each action, so neither a
 //      pop-over that never opened nor one that never closes can pass.
-//   4. Both tabs are reachable at BOTH levels, and the tab is in the URL (it is a real address).
+//   4. The Workspace node's two home tabs are both reachable and the tab is in the URL (it is a
+//      real address); the PROJECT node has only ONE home tab since card 44f725fe unified its
+//      Overview and Deck, so its own leg asserts the Deck tab is gone and that a legacy
+//      `?tab=deck` lands on Overview with the whole board intact.
 //   5. SWITCH OFF: the classic Overview still renders, and nothing Atlas exists in the document.
 //
 // Presence-first everywhere (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
@@ -162,43 +165,70 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     }
   });
 
-  test("switch ON: both tabs are reachable at both levels, and the tab is a real address", async ({ page, loomDaemon }) => {
+  // The WORKSPACE node still carries two home tabs. The PROJECT node's pair was unified into one by
+  // card 44f725fe, which is why this is no longer a loop over both nodes: the two nodes now have
+  // genuinely different home-tab shapes, and a loop that still passed over both would mean one of
+  // the two was no longer being checked for what it actually is.
+  test("switch ON: the Workspace node's two tabs are both reachable, and the tab is a real address", async ({ page, loomDaemon }) => {
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
 
-    for (const path of ["/project", "/home"]) {
-      await page.goto(loomDaemon.baseURL + path);
+    const path = "/home";
+    await page.goto(loomDaemon.baseURL + path);
 
-      // Overview is the default landing — no `?tab=` needed, and the full deck is what shows.
-      await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
-      await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
-      await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
+    // Overview is the default landing — no `?tab=` needed, and the full deck is what shows.
+    await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
 
-      await page.getByTestId("atlas-tab-deck").click();
+    await page.getByTestId("atlas-tab-deck").click();
 
-      // The Deck tab swapped the readouts for the compact strip — presence of the strip first, and
-      // only then the deck's absence, so a mid-render page cannot satisfy this pair.
-      await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
-      await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
-      await expect(page.getByTestId("atlas-tab-deck")).toHaveAttribute("aria-selected", "true");
-      await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "false");
-      // It is an ADDRESS, not component state: the tab is in the URL, and the path did not move.
-      await expect(page).toHaveURL(new RegExp(`${path}\\?tab=deck$`));
+    // The Deck tab swapped the readouts for the compact strip — presence of the strip first, and
+    // only then the deck's absence, so a mid-render page cannot satisfy this pair.
+    await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-tab-deck")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "false");
+    // It is an ADDRESS, not component state: the tab is in the URL, and the path did not move.
+    await expect(page).toHaveURL(new RegExp(`${path}\\?tab=deck$`));
 
-      // Which means a reload lands back on it rather than snapping to the default tab.
-      await page.reload();
-      await expect(page.getByTestId("atlas-tab-deck")).toHaveAttribute("aria-selected", "true");
-      await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
+    // Which means a reload lands back on it rather than snapping to the default tab.
+    await page.reload();
+    await expect(page.getByTestId("atlas-tab-deck")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
 
-      await page.getByTestId("atlas-tab-overview").click();
-      await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
-      await expect(page).toHaveURL(new RegExp(`${path}$`));
-    }
+    await page.getByTestId("atlas-tab-overview").click();
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+  });
 
-    // The project Deck keeps the WHOLE board too — the board-first tab is the one place a trimmed
-    // board would be most tempting, so it is asserted there as well as on Overview.
+  test("switch ON: the project node has ONE home tab, and a legacy ?tab=deck lands on it", async ({ page, loomDaemon }) => {
+    const seeded = await seedProjectWithBoard(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+
+    // Overview is the node's only home tab, and the full-size deck is its readout.
+    await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    // The Deck tab is GONE — asserted AFTER a locator that must be present, so a page that merely
+    // has not rendered its tab row yet cannot satisfy it. The row holds every tab at this width
+    // (card 44f725fe took one off a row that already fit ten), so there is no More menu hiding it;
+    // pinned explicitly, because a tab folded into a closed menu is absent from the DOM too.
+    await expect(page.getByTestId("atlas-node-tabs-more"),
+      "the project tab row overflowed, so 'the Deck tab is absent' no longer means it was removed")
+      .toHaveCount(0);
+    await expect(page.getByTestId("atlas-tab-deck")).toHaveCount(0);
+
+    // A bookmarked or pasted `?tab=deck` is an unrecognised home tab now, and the node resolves it
+    // to Overview rather than rendering a blank body — the full deck is showing, the compact strip
+    // (which the Deck tab used to own) is not, and the whole board is still there.
     await page.goto(loomDaemon.baseURL + "/project?tab=deck");
+    await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
     await expect(page.getByTestId("atlas-board-embed").getByText(seeded.inboxCard, { exact: true })).toBeVisible();
     await expect(lanes(page)).toHaveCount(7);
   });

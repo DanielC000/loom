@@ -279,13 +279,13 @@ export function workspaceNodeTabOf(tab: WorkspaceNodeTab): { key: string; label:
 // ── The project node's tabs ────────────────────────────────────────────────────────────────────
 // Card 25c08fba (Atlas restructure 3 of 11). The approved round-4 V2 design puts every
 // project-scoped surface on the project NODE, as a tab under its persistent readout, rather than
-// leaving each one a full page of its own — `atlas.js`'s `PROJ_TABS`, prepended by `homeTabs("proj")`
-// (Overview + Deck), which is exactly the ten rows below in exactly that order.
+// leaving each one a full page of its own — `atlas.js`'s `PROJ_TABS`, prepended by `homeTabs("proj")`.
+// That prefix was Overview + Deck; card 44f725fe unified the two into ONE home tab, so the rows below
+// are NINE, in exactly that order.
 //
-// 🔴 A TAB'S ADDRESS IS THE PATH IT ALREADY HAD. Only the two HOME tabs are `?tab=` on the node's own
-// path, because they are two readings of the same home — which is what the mockup's own
-// `homeTabs().concat(PROJ_TABS)` split says they are. Every other tab keeps `/board`, `/memory`,
-// `/repository` and friends. Three reasons, each load-bearing:
+// 🔴 A TAB'S ADDRESS IS THE PATH IT ALREADY HAD. Only the HOME tab is `?tab=` on the node's own path
+// (and in practice it is the bare path, since it is the default) — every other tab keeps `/board`,
+// `/memory`, `/repository` and friends. Three reasons, each load-bearing:
 //
 //   • A `?tab=` on `/project` would COLLIDE with the page's own `?tab=`. Repository reads `?tab=git`
 //     off the query string itself (pages/Repository.tsx), as Actors and Automation do; one query
@@ -310,12 +310,15 @@ export type ProjectNodeTab = {
   to: string;
 };
 
-/** The project node's own path — the one address the two home tabs share. */
+/** The project node's own path — the HOME tab's own address. */
 export const PROJECT_NODE_PATH = "/project";
 
 export const PROJECT_NODE_TABS: ProjectNodeTab[] = [
   { key: "overview", label: "Overview", to: PROJECT_NODE_PATH },
-  { key: "deck", label: "Deck", to: `${PROJECT_NODE_PATH}?tab=deck` },
+  // ⛔ There is no second HOME tab here, and `deck` must not come back as one (card 44f725fe). The
+  // owner read the two as redundant and he was right at the level of the code — see ProjectHome.tsx's
+  // own header. A legacy `?tab=deck` needs no row and no LEGACY_REDIRECTS entry either: it is an
+  // unrecognised home tab, which `projectNodeTabAt` below already resolves to Overview.
   { key: "board", label: "Board", to: "/board" },
   // "Sessions", not "Terminals": the only tab here that genuinely CHANGES TIER. /terminals is a
   // god-eye page in the classic rail, and the approved design has it as a PROJECT tab ("Sessions 5"),
@@ -336,7 +339,7 @@ export function projectTabPath(tab: ProjectNodeTab): string {
   return tab.to.split("?")[0] ?? tab.to;
 }
 
-/** True for a tab that brought its OWN address with it, i.e. everything but the two home tabs. */
+/** True for a tab that brought its OWN address with it, i.e. everything but the HOME tab. */
 export function isRehomedProjectTab(tab: ProjectNodeTab): boolean {
   return projectTabPath(tab) !== PROJECT_NODE_PATH;
 }

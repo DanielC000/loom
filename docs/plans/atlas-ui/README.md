@@ -5,6 +5,8 @@ decision request `49e57872`) and asked for a plan that loses nothing from today'
 its own branch I want to be able to compare before we switch over since I'm still missing some
 functionality in the mockups that I would not want to lose. Plan carefully so nothing is lost."*
 
+> ⚠ **One approved-design change has landed since this plan was written.** Card `44f725fe` (the owner's D1 pick on request `fb8de852`) unified the PROJECT node's `Overview` and `Deck` tabs into one home tab, with the dashboard band behind a disclosure — so every row below that maps a surface onto *project › Deck* now lands on that single Overview, and the project node declares nine tabs rather than ten. The Workspace node's own Overview/Deck pair is unchanged. Rationale and the measured geometry: `docs/decisions/44f725fe-atlas-unified-project-home.md`.
+
 This folder is that plan, in four parts:
 
 1. **[Parity checklist](01-parity-checklist.md)** — every route, sub-tab, write action, non-REST write,

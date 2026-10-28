@@ -474,6 +474,25 @@ export function nodeTabShowsKpiStrip(tab: string): boolean {
   return tab !== "overview";
 }
 
+/** One compact figure+label pill. The grammar is shared by the node-tab KPI strip and the dashboard
+ *  disclosure's own collapsed summary row (card 44f725fe) — two different readouts, one shape, so a
+ *  reader meets the same figure-then-label pairing wherever a count is stated small. Deliberately
+ *  NOT a button in either place: the full-size tiles own the breakdowns. */
+export function KpiPill({ value, label, tone: t = "phosphor", title, testId }: {
+  value: ReactNode;
+  label: ReactNode;
+  tone?: Tone;
+  title?: string;
+  testId?: string;
+}) {
+  return (
+    <span className="loom-kpipill" data-testid={testId} title={title}>
+      <span className="loom-kpipill-v" style={{ color: tone[t] }}>{value}</span>
+      <span className="loom-kpipill-l">{label}</span>
+    </span>
+  );
+}
+
 /** The compact readouts carried on every node tab but Overview — the same figures, sized to sit on
  *  the tab row beside the tabs rather than to be read first. Deliberately NOT buttons: the Overview
  *  tab owns the breakdowns. */
@@ -484,17 +503,97 @@ export function KpiStrip({ items }: { items: KpiItem[] }) {
         // Keyed by the SAME `item.key` the deck's own tile testid is built from, so a reader can
         // pair a pill with its tile without going through the label — which CSS upper-cases, and
         // which `innerText` therefore returns in a different case than the source.
-        <span key={item.key} className="loom-kpipill" data-testid={`atlas-kpi-pill-${item.key}`}
-          title={`${item.label}${item.sub ? ` — ${typeof item.sub === "string" ? item.sub : ""}` : ""}`}>
-          <span className="loom-kpipill-v" style={{ color: tone[item.tone ?? "phosphor"] }}>{item.value}</span>
-          <span className="loom-kpipill-l">{item.label}</span>
-        </span>
+        <KpiPill key={item.key} value={item.value} label={item.label} tone={item.tone}
+          testId={`atlas-kpi-pill-${item.key}`}
+          title={`${item.label}${item.sub ? ` — ${typeof item.sub === "string" ? item.sub : ""}` : ""}`} />
       ))}
     </div>
   );
 }
 
 // ── Dashboard band ─────────────────────────────────────────────────────────────────────────────
+
+/** Where a viewer's folded/unfolded choice is kept. Stored as `"0"` = folded / ABSENT = unfolded,
+ *  never `"1"`/`"0"`: EXPANDED is the default (a first visit must look like the page always did and
+ *  hide nothing by surprise — Lead ruling on card 44f725fe), so an absent key is the same state as a
+ *  never-visited browser and unfolding leaves no residue to reason about later. Same encoding
+ *  discipline as `ATLAS_UI_STORAGE_KEY` (lib/atlasUi.ts). */
+export const DASHBOARD_OPEN_STORAGE_KEY = "loom.atlasDashboardOpen";
+
+/**
+ * The dashboard disclosure's persisted state — `[open, setOpen]`.
+ *
+ * A per-browser DISPLAY preference, so it goes nowhere near `resolveConfig`, the platform-config
+ * store or any `api.ts` member, and no agent can flip it. EVERY read and write is wrapped: storage
+ * can throw outright (private mode, a blocked-cookies origin, quota) and the only safe answer to
+ * "can't tell" is the default, which here is OPEN. Deliberately plain `useState` rather than
+ * lib/atlasUi.ts's module store + `useSyncExternalStore`: that machinery exists to keep two
+ * SEPARATE consumers (the Settings toggle and the shell) in step and to hold a cross-tab change
+ * back from hot-applying it; this preference has one consumer and folding a band destroys no
+ * unfinished input, so there is nothing for either mechanism to protect.
+ */
+export function useDashboardOpen(): [boolean, (open: boolean) => void] {
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(DASHBOARD_OPEN_STORAGE_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const set = useCallback((next: boolean) => {
+    setOpen(next);
+    try {
+      if (next) localStorage.removeItem(DASHBOARD_OPEN_STORAGE_KEY);
+      else localStorage.setItem(DASHBOARD_OPEN_STORAGE_KEY, "0");
+    } catch {
+      /* storage unavailable — the choice still holds for this page's lifetime, it just won't persist */
+    }
+  }, []);
+  return [open, set];
+}
+
+/**
+ * The dashboard band behind one disclosure bar (card 44f725fe, the owner's D1 pick on request
+ * fb8de852). The bar is a summary ROW, not a tab row: folding costs the reader the DETAIL and never
+ * the SIGNAL, because the collapsed bar keeps carrying the band's own live counts. That is the whole
+ * trade — the honest cost is that a folded band stops showing the Pulse feed ambiently, and the
+ * counts are the mitigation rather than a denial of it.
+ *
+ * 🔴 `.loom-atlas-band`'s own `display: grid` is an AUTHOR rule, so it OUT-SPECIFIES the UA's
+ * `[hidden] { display: none }` and a `hidden` band stays fully laid out and visible. `global.css`
+ * carries an explicit `.loom-atlas-band[hidden]` rule for exactly this, and the band element is
+ * rendered HERE rather than passed in so the `hidden` attribute and the rule that makes it bite can
+ * never drift into two different files. Measured in the mockup before that rule existed: the board
+ * sat 1199px down the page with the band "collapsed".
+ *
+ * (Card 25c08fba's own record names the same trap from the tab-body side.)
+ *
+ * @decision 44f725fe — never park this band with an inline `display`, and never drop
+ * `.loom-atlas-band[hidden]` from global.css: `hidden` alone loses to the band's `display: grid`.
+ */
+export function BandDisclosure({ open, onToggle, summary, children }: {
+  open: boolean;
+  onToggle: () => void;
+  /** The live counts the bar keeps while the detail is folded — rendered only when it is. */
+  summary: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="loom-banddisc">
+      <button type="button" className="loom-banddisc-bar" data-testid="atlas-banddisc-bar"
+        aria-expanded={open} aria-controls="atlas-dashboard-band" onClick={onToggle}
+        title={open ? "Fold the dashboard away and give the board the page" : "Unfold the five dashboard panels"}>
+        <span className="loom-banddisc-twist" aria-hidden>▸</span>
+        <span className="loom-banddisc-lbl">Dashboard</span>
+        <span className="loom-banddisc-sum" data-testid="atlas-banddisc-summary">{open ? null : summary}</span>
+        <span className="loom-banddisc-hint">{open ? "Fold away" : "Unfold"}</span>
+      </button>
+      <div className="loom-atlas-band" id="atlas-dashboard-band" hidden={!open} data-testid="atlas-dashboard-band">
+        {children}
+      </div>
+    </div>
+  );
+}
 
 /** One band panel: a head (label · count · an optional way out to the full surface) over a body that
  *  owns its own scroll, so a long list never makes one panel taller than its neighbours. */

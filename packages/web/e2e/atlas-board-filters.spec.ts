@@ -10,7 +10,8 @@
 // import", and the only one worth asserting.
 //
 //   1. the project node's Overview tab   `/project?tab=overview`  (ProjectHome.tsx)
-//   2. the project node's Deck tab       `/project?tab=deck`      (ProjectHome.tsx)
+//   2. the SAME tab with its dashboard FOLDED (card 44f725fe) — the board sits ~320px higher.
+//      This was the project node's separate Deck tab until that card unified the two.
 //   3. the Board node                    `/board`                 (nav.tsx NAV_PAGES)
 //   4. the Platform node's Board tab     `/platform?tab=board`    (PlatformView.tsx)
 //
@@ -270,8 +271,8 @@ async function assertMultiSelectFilters(
 }
 
 test.describe("the Board's multi-select filters on every Atlas board surface (card 5dcb5ae9)", () => {
-  // ── 1 + 2. The project node's two tabs ──────────────────────────────────────────────────────────
-  test("switch ON: the project node's Overview and Deck tabs both carry the real multi-select filters", async ({ page, loomDaemon }) => {
+  // ── 1 + 2. The project node's home tab, in both of its geometries ───────────────────────────────
+  test("switch ON: the project node's Overview carries the real multi-select filters, dashboard unfolded and folded", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasfilt-project"));
     const cards = await seedCards(loomDaemon, project.id);
 
@@ -285,11 +286,15 @@ test.describe("the Board's multi-select filters on every Atlas board surface (ca
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
     await assertMultiSelectFilters(embed, cards, "project node · Overview", SEED.length);
 
-    // The Deck tab is the board-FIRST read of the same node — a different layout above the same
-    // `<Board>`, and a separate mount, so its filter state starts fresh and is asserted from scratch.
-    await page.goto(`${loomDaemon.baseURL}/project?tab=deck`);
-    await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await assertMultiSelectFilters(embed, cards, "project node · Deck", SEED.length);
+    // Folding the dashboard away (card 44f725fe) is the board-FIRST read of the same node — what the
+    // Deck tab used to be, now a control rather than an address. The board is the SAME mount either
+    // way now (it used to be a second one), so what this half proves has changed with it: not that a
+    // second mount got its own filters, but that the one mount keeps its filters WORKING once the
+    // page has reflowed around it — asserted from scratch, since the sequence above left it clean.
+    await page.getByTestId("atlas-banddisc-bar").click();
+    await expect(page.getByTestId("atlas-banddisc-bar")).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeHidden();
+    await assertMultiSelectFilters(embed, cards, "project node · Overview, dashboard folded", SEED.length);
   });
 
   // ── 3. The Board node ───────────────────────────────────────────────────────────────────────────

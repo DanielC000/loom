@@ -19,8 +19,9 @@ import Archive from "./Archive";
 import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
-  AtlasNodeHead, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar,
-  MeterRow, NodeTabs, nodeTabShowsKpiStrip, type KpiItem, type NodeHeadPill,
+  AtlasNodeHead, BandDisclosure, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiPill,
+  KpiStrip, LaneBar, MeterRow, NodeTabs, nodeTabShowsKpiStrip, useDashboardOpen,
+  type KpiItem, type NodeHeadPill,
 } from "../components/atlasHome";
 import { AgentRosterRow, AgentsQuickSpawn, RosterEmpty, WorkersDispatchedNote } from "../components/atlasAgents";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
@@ -33,8 +34,18 @@ import { PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt } from "../nav
 import { color, font } from "../theme";
 
 // THE PROJECT NODE — card fd99b2d7 (Atlas P2-1), the project-scoped twin of WorkspaceHome, widened
-// to the approved design's TEN tabs by card 25c08fba. Every figure is scoped to the
-// ActiveProjectProvider's project, which the tree's own project row writes.
+// to the approved design's ten tabs by card 25c08fba and narrowed to NINE by card 44f725fe. Every
+// figure is scoped to the ActiveProjectProvider's project, which the tree's own project row writes.
+//
+// ⭐ ONE HOME TAB, NOT TWO (card 44f725fe — the owner's D1 pick on request fb8de852, from his own
+// reading of this file: "What is the need to have an overview tab, and a deck tab? Feels redundant
+// to me. Unify the pages to one."). He was right at the level of the code: Overview and Deck were
+// never two pages, just two `return` branches over ONE `kpis` array and ONE set of five band-panel
+// variables, differing only in how they spent the viewport — Overview bought the board 1316px of
+// width and spent 670px of height on the band; Deck bought the height and spent 330px of width on a
+// rail. Folding the band behind a disclosure gives the board BOTH (1316px starting at y 386), which
+// is strictly more board than either tab ever offered, and it costs no content: the Gates panel
+// survives here, where the Deck tab dropped it outright.
 //
 // The tab SET and each tab's address are declared once, in src/nav.tsx's PROJECT_NODE_TABS — read
 // there for why a re-homed tab keeps the path it already had rather than becoming a `?tab=`. This
@@ -52,8 +63,8 @@ import { color, font } from "../theme";
 // mid-edit or a composer draft. `hidden` — never an inline `display` — also keeps a parked body out
 // of the accessibility tree and the tab order.
 //
-// It is FIRST-VISIT rather than always-mounted because the cost here is not the Platform node's. Nine
-// bodies polling on every project page is not what the classic shell already paid (these were nine
+// It is FIRST-VISIT rather than always-mounted because the cost here is not the Platform node's. Eight
+// bodies polling on every project page is not what the classic shell already paid (these were eight
 // separate pages), and the Sessions body in particular opens a live pty WebSocket per live session —
 // so mounting it before anyone has asked for it would make every project address pay for terminals
 // nobody opened. First-visit-then-sticky is exactly enough for the directive: input can only exist in
@@ -76,6 +87,11 @@ export default function ProjectHome() {
   // that had no project pinned yet, which is why half the suite stayed green through it.
   const visited = useRef<Set<string>>(new Set());
   visited.current.add(tab);
+  // The dashboard disclosure's persisted state (card 44f725fe). 🔴 DECLARED HERE, above the
+  // `!projectId` early return, with every other hook — for the same measured reason the ref above
+  // is: a hook below it makes the no-project render path call one FEWER hook than the resolved one,
+  // and the first resolve of the active project then throws React error #310 and blanks the app.
+  const [dashOpen, setDashOpen] = useDashboardOpen();
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
 
@@ -260,6 +276,32 @@ export default function ProjectHome() {
     </BandPanel>
   );
 
+  // What the disclosure bar keeps saying while the five panels above are folded away (card
+  // 44f725fe). One figure per panel the fold hides, so folding costs the DETAIL and never the
+  // SIGNAL — that is the whole argument for the fold, and this row is where it is honoured or not.
+  //
+  // ⛔ These are NOT the `kpis` array: that would restate the full-size deck's own six figures ~40px
+  // under it, which is the shape card 939922ee's owner rejection names. `needs you` is the one
+  // overlap and it is deliberate — it is the panel whose whole point is that it is waiting on you.
+  // `spawnable` and `last event` appear nowhere else on the page once the band is folded.
+  const lastEvent = events[0];
+  const dashSummary = (
+    <>
+      <KpiPill value={projAttention.length} label="needs you" testId="atlas-banddisc-pill-needs"
+        tone={projAttention.length > 0 ? "amber" : "muted"} title="Attention items waiting on you in this project" />
+      <KpiPill value={roster.spawnable.length} label="spawnable" testId="atlas-banddisc-pill-spawnable"
+        tone={roster.spawnable.length > 0 ? "cyan" : "muted"} title="Agents in this project with no live session, ready to spawn" />
+      <KpiPill value={`${lanes.running}·${lanes.queued}`} label="gates" testId="atlas-banddisc-pill-gates"
+        tone={lanes.queued > 0 ? "amber" : lanes.running > 0 ? "phosphor" : "muted"}
+        title={`${lanes.running} running · ${lanes.queued} queued, daemon-wide (cap ${lanes.cap})`} />
+      {/* The event KIND, not its time: "what just happened" is the signal a folded Pulse feed
+          stops showing, and the time is one hover away rather than the figure itself. */}
+      <KpiPill value={lastEvent?.kind ?? "—"} label="last event" testId="atlas-banddisc-pill-event"
+        tone={lastEvent ? "cyan" : "muted"}
+        title={lastEvent ? `${lastEvent.kind} · ${relativeTime(lastEvent.ts)}` : "No orchestration events yet"} />
+    </>
+  );
+
   // One count per tab, keyed by the declaration's own `key`. A tab with no entry here renders no
   // count — Repository and Settings have no natural figure, and the approved design gives them none.
   // `undefined` is deliberately distinct from `0`: a count that has not loaded yet shows nothing
@@ -308,7 +350,7 @@ export default function ProjectHome() {
       : []),
   ];
 
-  // The nine re-homed tab bodies. Each is the EXISTING page component, mounted verbatim — this card
+  // The eight re-homed tab bodies. Each is the EXISTING page component, mounted verbatim — this card
   // re-homes surfaces, it does not rebuild them. Sessions is the one that takes a prop: its page is
   // god-eye by design and already supports being "reached per-project by pre-selecting the filter",
   // so the project node hands it this project's name and the body matches the tab's own count.
@@ -353,54 +395,35 @@ export default function ProjectHome() {
           ) : null
         ))}
 
-        {/* The two HOME tabs stay mutually exclusive — the one deliberate exception to the
-            mount-once rule above. They are two READINGS of the same readout rather than two
-            surfaces, they hold no input of their own, and each carries a full <Board/>; keeping both
-            alive would render two boards on every project address for a tab you can switch back to
-            in one click with nothing lost. atlas-home.spec.ts pins it from the other side: the Deck
-            tab must leave NO `atlas-kpi-deck` in the document, which a parked Overview would. */}
+        {/* THE node's one home tab. Rendered only while it is the selected tab — unlike the
+            re-homed bodies above, it is not parked with `hidden`, because it holds no input of its
+            own to protect (the disclosure's own folded/unfolded choice is persisted, so it survives
+            the remount that a parked body would exist to avoid) and it carries a full <Board/>,
+            which is not worth keeping mounted behind eight other tabs. */}
         {tab === "overview" ? (
           <>
             <KpiDeck items={kpis} />
-            <div className="loom-atlas-band">
+            <BandDisclosure open={dashOpen} onToggle={() => setDashOpen(!dashOpen)} summary={dashSummary}>
               {needsPanel}
               {agentsPanel}
               {fleetPanel}
               {gatePanel}
               {pulsePanel}
-            </div>
+            </BandDisclosure>
             <section className="loom-atlas-primary" data-testid="atlas-board-embed">
               <div className="loom-atlas-primaryhead">
                 <span className="loom-atlas-primarylbl">Board</span>
                 <span className="loom-bandcount">{board.open}</span>
                 <span style={{ flex: 1 }} />
-                <span className="loom-bandempty" style={{ margin: 0 }}>
-                  The same board, whole — every lane, every card, the same filters and the same card dialog.
-                </span>
-              </div>
-              <Board projectId={projectId} />
-            </section>
-          </>
-        ) : tab === "deck" ? (
-          <div className="loom-atlas-deck">
-            <section className="loom-atlas-deckmain" data-testid="atlas-board-embed">
-              <div className="loom-atlas-primaryhead">
-                <span className="loom-atlas-primarylbl">Board</span>
-                <span className="loom-bandcount">{board.open}</span>
-                <span style={{ flex: 1 }} />
+                {/* The LaneBar is the board head's trim at every width now. It was Deck-only, which
+                    was the one thing genuinely unique to that tab and worth keeping: a cards-per-lane
+                    reading is a real figure, where the sentence it replaces ("the same board, whole")
+                    only restated what the whole board sitting underneath it already shows. */}
                 <LaneBar lanes={board.lanes} />
               </div>
               <Board projectId={projectId} />
             </section>
-            {/* Agents rides the Deck's rail too. The Deck is a tab a reader can sit on all day, and
-                the one thing this card exists to fix is spawn controls being a navigation away. */}
-            <aside className="loom-atlas-deckrail">
-              {needsPanel}
-              {agentsPanel}
-              {fleetPanel}
-              {pulsePanel}
-            </aside>
-          </div>
+          </>
         ) : null}
         {project && <span hidden data-testid="atlas-project-name">{project.name}</span>}
       </div>

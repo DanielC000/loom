@@ -39,9 +39,10 @@ The two right-hand columns are the inert cases and are byte-identical before and
 tabs already fit grows no trigger. Below 820px the remaining height is the KPI strip's own line (and,
 at 420, its second line of pills) — the TAB ROW is one line everywhere in the "after" column.
 
-`/settings` is in the table because it is the active-tab case: Settings is the tenth of ten tabs, so
-it is folded at every width, and the row shown is `Overview · Deck · Board · Sessions · Settings` at
-1440 — the active tab swapped in for the one its width displaced.
+`/settings` is in the table because it is the active-tab case: Settings is the LAST tab, so it is
+folded at every width, and the row shown is `Overview · Deck · Board · Sessions · Settings` at 1440 —
+the active tab swapped in for the one its width displaced. (Measured when the node had ten tabs;
+card `44f725fe` has since removed `Deck`, so the row reads one tab further down the declaration.)
 
 ## Do not
 

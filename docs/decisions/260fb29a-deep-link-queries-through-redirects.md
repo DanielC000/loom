@@ -24,7 +24,7 @@ One declared row chains through a second redirect under Atlas alone: `/workspace
 
 The Atlas Platform node keeps **all five panels mounted** and hides the inactive ones with `hidden` (card `c07ff42a`; the owner's standing rule that a tab click is not consent to discard unfinished input). So its `<Board>` is live on every tab. A `?task=` arriving without `tab=board` was therefore consumed by a board inside a hidden panel: the dialog opened where nobody could see it, and the param was cleared on the way out, so no visible board ever got a chance at it.
 
-The project node does **not** have this defect, and the reason is worth recording so a future reader does not "fix" it there: every project-node address renders at least one *visible* `<Board>` (the Overview tab embeds the whole board, and the Deck tab does too), so even when the parked Board-tab body also consumes the param, a visible board consumes it as well and opens the dialog where it can be seen.
+The project node does **not** have this defect, and the reason is worth recording so a future reader does not "fix" it there: every project-node address renders at least one *visible* `<Board>` (the Overview tab embeds the whole board — as did the Deck tab, before card `44f725fe` unified the two), so even when the parked Board-tab body also consumes the param, a visible board consumes it as well and opens the dialog where it can be seen.
 
 The fix is two halves:
 

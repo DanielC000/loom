@@ -17,10 +17,12 @@
 //   1. `/board?task=`                      the Board node — the address the classic link already used.
 //   2. `/project?task=`                    the project node (ATLAS-ONLY, card fd99b2d7) — its Overview
 //                                          tab embeds the whole <Board>, so the link must land here too.
-//   3. `/project?tab=deck&task=`           the coexistence case: the node's own tab param and the
-//                                          card param on one URL. Asserts `tab=deck` SURVIVES the
-//                                          board consuming `task` — a `setSearchParams({})` that
-//                                          rebuilt the query instead of deleting one key would drop it.
+//   3. `/project?tab=deck&task=`           a LEGACY tab param plus the card param on one URL.
+//                                          `tab=deck` named a real second home tab until card
+//                                          44f725fe unified the pair; asserts the dead param neither
+//                                          breaks the deep link nor is eaten by the board consuming
+//                                          `task`, and that it resolves to the unified Overview. The
+//                                          coexistence claim for a LIVE node tab is leg 4's now.
 //   4. `/platform?tab=board&task=`         the other Atlas node with its own `?tab=`, and the one whose
 //                                          panels all stay MOUNTED (PlatformView.tsx) — so its board is
 //                                          live even on a different tab and could consume the param
@@ -156,7 +158,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 2 + 3. The project node, and the tab/task coexistence case ──────────────────────────────────
-  test("switch ON: ?task= on the project node opens that card's dialog, and ?tab=deck survives it", async ({ page, loomDaemon }) => {
+  test("switch ON: ?task= on the project node opens that card's dialog, and a legacy ?tab=deck survives it", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasdeep-project"));
     const { decoy, target } = await seedDecoyAndTarget(loomDaemon, project.id);
 
@@ -171,29 +173,36 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     await assertDialogIsCard(page, target, decoy);
     await expect(page).toHaveURL(/\/project$/);
     expect(page.url()).not.toContain("task=");
-    // The CONTROL for the tab-identity check below: the two tabs are told apart by which KPI readout
-    // renders (card fd99b2d7 — Overview keeps the 26px `.loom-kpideck`, the board-first Deck gets the
-    // compact `.loom-kpistrip`), so here the pair is asserted INVERTED. Without this, "the Deck is
-    // still showing" could be satisfied by a locator that is simply always present.
+    // The CONTROL for the readout check below: Overview is identified by the 26px `.loom-kpideck`,
+    // and `.loom-kpistrip` — the compact readout the removed Deck tab owned, and which still rides
+    // every RE-HOMED tab of this node (card 7874e8c2) — is what must be absent. Asserted here too,
+    // on an address that was never in doubt, so neither locator can be one that is simply always
+    // present or simply always missing.
     await expect(page.locator(".loom-kpideck"), "the Overview tab's own readout").toBeVisible();
     await expect(page.locator(".loom-kpistrip")).toHaveCount(0);
 
-    // ── Deck tab: the node's OWN param and the card param on one URL ──
+    // ── A LEGACY `?tab=deck` on the node, carrying a card param too ──
     // A fresh document load, not a tab click, so the two params arrive together exactly as a pasted
-    // link would deliver them.
+    // bookmark would deliver them. `tab=deck` named a real second home tab until card 44f725fe
+    // unified the pair, so this is the shape of every link anyone saved before that.
     await page.goto(`${loomDaemon.baseURL}/project?tab=deck&task=${encodeURIComponent(target.id)}`);
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
     await assertDialogIsCard(page, target, decoy);
 
-    // THE coexistence assertion: `task` is gone, `tab=deck` is NOT. Board clears its own key with
-    // `p.delete("task")`; a `setSearchParams({})` that rebuilt the query would have taken the tab with
-    // it and silently bounced the reader back to Overview.
+    // Two things at once, and BOTH matter. (1) The dead tab param does not break the deep link: the
+    // card's dialog opened anyway, asserted above. (2) `task` is gone from the URL and `tab=deck` is
+    // NOT — Board clears only its own key with `p.delete("task")`, where a `setSearchParams({})` that
+    // rebuilt the query would have taken every other param with it. That delete is still what keeps a
+    // LIVE node tab (the Platform node's, leg 4 below) alive across a card param being consumed; this
+    // leg can no longer witness that on the project node, because the node has one home tab now.
     await expect(page).toHaveURL(/\/project\?tab=deck$/);
     expect(page.url()).not.toContain("task=");
-    // …and the Deck is still the tab actually SHOWING, not merely the one still named in the URL.
-    // The KPI strip is the Deck's own readout; Overview renders the taller KPI deck instead.
-    await expect(page.locator(".loom-kpistrip"), "still on the Deck tab after the card param was consumed").toBeVisible();
-    await expect(page.locator(".loom-kpideck")).toHaveCount(0);
+    // …and the unrecognised tab resolved to Overview rather than rendering nothing. The pair is
+    // asserted in this order (present first, absent second) so a mid-render page cannot satisfy it:
+    // the 26px `.loom-kpideck` is Overview's own readout, and `.loom-kpistrip` — which the Deck tab
+    // owned — is on no home tab of this node any more.
+    await expect(page.locator(".loom-kpideck"), "a legacy ?tab=deck resolved to the unified Overview").toBeVisible();
+    await expect(page.locator(".loom-kpistrip")).toHaveCount(0);
   });
 
   // ── 4. The Platform node — the other `?tab=` owner, and the always-mounted one ───────────────────

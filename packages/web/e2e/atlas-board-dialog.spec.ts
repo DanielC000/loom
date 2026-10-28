@@ -8,7 +8,8 @@
 // share an import" and is the only one worth asserting.
 //
 //   1. the project node's Overview tab   `/project?tab=overview`  (ProjectHome.tsx)
-//   2. the project node's Deck tab       `/project?tab=deck`      (ProjectHome.tsx)
+//   2. the SAME tab with its dashboard FOLDED (card 44f725fe) — the board sits ~320px higher.
+//      This was the project node's separate Deck tab until that card unified the two.
 //   3. the Board node                    `/board`                 (nav.tsx NAV_PAGES)
 //   4. the Platform node's Board tab     `/platform?tab=board`    (PlatformView.tsx)
 //
@@ -173,8 +174,8 @@ async function seedCard(loomDaemon: LoomDaemon, projectId: string) {
 }
 
 test.describe("Atlas board cards open the centred dialog (card a6d7a102)", () => {
-  // ── 1 + 2. The project node's two tabs ──────────────────────────────────────────────────────────
-  test("switch ON: the project node's Overview and Deck tabs both open the centred dialog", async ({ page, loomDaemon }) => {
+  // ── 1 + 2. The project node's home tab, in both of its geometries ───────────────────────────────
+  test("switch ON: the project node's Overview opens the centred dialog, dashboard unfolded and folded", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasdlg-overview"));
     const task = await seedCard(loomDaemon, project.id);
 
@@ -188,12 +189,14 @@ test.describe("Atlas board cards open the centred dialog (card a6d7a102)", () =>
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
     await assertSurfaceOpensCentredDialog(page, embed, task, "project node · Overview");
 
-    // The Deck tab is the board-FIRST read of the same node: a different layout above the board, so
-    // the board's own geometry differs between the tabs — which is why each tab captures its own
-    // baseline rather than sharing one.
-    await page.goto(`${loomDaemon.baseURL}/project?tab=deck`);
-    await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await assertSurfaceOpensCentredDialog(page, embed, task, "project node · Deck");
+    // Folding the dashboard away (card 44f725fe) is the board-FIRST read of the same node — what the
+    // Deck tab used to be, now a control rather than an address. It moves the board ~320px up the
+    // page, so the board's own geometry differs between the two states exactly as it used to differ
+    // between the two tabs, which is why this captures its own baseline rather than sharing one.
+    await page.getByTestId("atlas-banddisc-bar").click();
+    await expect(page.getByTestId("atlas-banddisc-bar")).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeHidden();
+    await assertSurfaceOpensCentredDialog(page, embed, task, "project node · Overview, dashboard folded");
   });
 
   // ── 3. The Board node, plus the keyboard path ───────────────────────────────────────────────────
