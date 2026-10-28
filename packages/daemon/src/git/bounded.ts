@@ -161,6 +161,14 @@ function withSpawnFailureClassification(git: SimpleGit): SimpleGit {
 }
 
 /**
+ * @decision 122eb237 — a typed marker for {@link withTimeout}'s own expiry, classified by `instanceof`,
+ * never by matching `.message` text (forgeable — see this card's own decision record).
+ */
+export class WithTimeoutExpiry extends Error {
+  constructor(message: string) { super(message); this.name = "WithTimeoutExpiry"; }
+}
+
+/**
  * Reject `p` after `ms` if it hasn't settled, so a git step is bounded even if the underlying promise
  * NEVER settles. `boundedSimpleGit`'s own `block` timeout also bounds the child in production, but is an
  * IDLE timer, not total-elapsed (see that function's own doc) — this race is the actual backstop
@@ -173,7 +181,7 @@ function withSpawnFailureClassification(git: SimpleGit): SimpleGit {
  */
 export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms (hung git child?)`)), ms);
+    const timer = setTimeout(() => reject(new WithTimeoutExpiry(`${label} exceeded ${ms}ms (hung git child?)`)), ms);
     p.then(
       (v) => { clearTimeout(timer); resolve(v); },
       (e) => { clearTimeout(timer); reject(e); },

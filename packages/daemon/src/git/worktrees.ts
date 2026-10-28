@@ -8,7 +8,7 @@ import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, gitError, unsafeBranchNameShapeReason, writeCommitMessageFile, cleanupCommitMessageFile } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
-import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, canonicalFailureMessage, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot, type CheckCommondirTrustOpts } from "./bounded.js";
+import { withTimeout, WithTimeoutExpiry, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, treeDeathConfirmed, CANONICAL_GIT_CONFIG_ARGS, CanonicalGitRefusal, describeGitFailure, canonicalFailureMessage, isNotAGitRepositoryError, localReadGitEnv, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot, type CheckCommondirTrustOpts } from "./bounded.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitDirsSync } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
@@ -8374,10 +8374,11 @@ export class GitTransientReadFailure extends Error {
   constructor(message: string) { super(message); this.name = "GitTransientReadFailure"; }
 }
 
-/** True iff `e` is the error {@link withTimeout} itself raises on expiry — a fixed, English string WE
- *  author (`git/bounded.ts`), never git's own locale-dependent stderr. */
+/** True iff `e` is the error {@link withTimeout} itself raises on expiry.
+ *  @decision 122eb237 — typed (`instanceof WithTimeoutExpiry`), never a `.message` text match — see
+ *  `WithTimeoutExpiry`'s own doc (`git/bounded.ts`) and this card's decision record. */
 function isWithTimeoutExpiry(e: unknown): boolean {
-  return e instanceof Error && /exceeded \d+ms \(hung git child\?\)/.test(e.message);
+  return e instanceof WithTimeoutExpiry;
 }
 
 /** True iff `e` is a PROCESS-LEVEL spawn failure matching Node's own `/^Error: spawn /`-prefixed, deferred
@@ -8391,7 +8392,11 @@ function isWithTimeoutExpiry(e: unknown): boolean {
  *  assume this function covers them; see this card's own record (S4).
  *
  *  @decision 05915fc7 — round 2 ruling 2: round 1's own "any non-timeout failure ⇒ missing" was too
- *  broad; a spawn failure must classify as transient, same as a timeout. */
+ *  broad; a spawn failure must classify as transient, same as a timeout.
+ *
+ *  @decision 122eb237 — spawn classification stays text-based: simple-git discards the real spawn
+ *  error's `code`/`syscall` before this function ever sees it (verified — see this card's own decision
+ *  record); a follow-up card covers converting this one. */
 function isSpawnLevelFailure(e: unknown): boolean {
   return e instanceof Error && /^Error: spawn /.test(e.message);
 }
