@@ -62,11 +62,18 @@ const POLL_MS = 250;
 export const DEFAULT_CODEX_OWN_WORK_BUDGET_MS = 120_000;
 export const CODEX_OWN_WORK_BUDGET_MS = {
   "codex-doctrine-real-spawn": 300_000,
-  // Card 7306e109: a full create+turn+stop+archive+resume+stop cycle — two separate "boot to ready" waits
-  // (up to 20s/30s each) plus the same 90s turn-completion wait the transcript sibling already needs,
-  // comfortably clears the 120s default; sized the same as codex-doctrine-real-spawn above rather than a
-  // tighter number nobody has measured yet.
-  "codex-rollout-archive-restore-real-spawn": 300_000,
+  // Card 91cbb247: re-derived via 44634792's sizing method (docs/decisions/44634792-codex-real-spawn-
+  // own-work-budget-sizing.md) after this file's own flat waits were widened to ambientScaledBudget —
+  // the prior 300_000 (card 7306e109) predates that widening. Sum, in sequence: the fixed login-status
+  // probe (10,000) + the shared usage-limit preflight (45,000) + every ambientScaledBudget(base,3) wait
+  // at its worst case (base×AMBIENT_OVERSHOOT_CAP×3 = base×12) — boot-ready 20,000→240,000, busy-settles
+  // 60,000→720,000, the kickoff-nudge loop 10,000→120,000 ×3 attempts→360,000, engine-id 30,000→360,000,
+  // pong-reply 90,000→1,080,000, resume-ready 30,000→360,000 — plus TWO graceful-stop waits (this file
+  // stops twice: the initial conversation, then the resumed one, unlike its siblings' single stop) at
+  // CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS(8,000) each→16,000 + the best-effort settle wait (3,000):
+  // 10,000+45,000+240,000+720,000+360,000+360,000+1,080,000+360,000+16,000+3,000 = 3,194,000 →
+  // entry 3,250,000.
+  "codex-rollout-archive-restore-real-spawn": 3_250_000,
   // @decision 44634792 — do not widen a codex real-spawn member's inner wait without re-deriving its
   // entry here to cover that wait's worst case (baseMs × AMBIENT_OVERSHOOT_CAP × marginMultiplier):
   // TEST_TIMEOUT_OVERRIDES never governs a CODEX_REAL_SPAWN_SET member, so a bare inner widen just moves where the false SIGTERM kill happens.

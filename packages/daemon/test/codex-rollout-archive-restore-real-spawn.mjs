@@ -59,7 +59,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { hermeticPort, listenHermetic } from "./_hermetic-port.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 import { CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS, evaluateCodexGracefulStopExit } from "./_codex-graceful-stop.mjs";
@@ -174,21 +174,34 @@ host.spawn({
 let rawBuf = "";
 let unsubscribeRaw = host.subscribe(SESSION_ID, { onData: (chunk) => { rawBuf += chunk.toString("utf-8"); }, onControl: () => {} });
 
+// Card 91cbb247: was a flat 20000ms budget, vulnerable to general host contention (same shape 421d10fd
+// already fixed on the sibling codex-prompt-ascii-fold-real-spawn.mjs file, and card 44634792 fixed on
+// two more siblings). Scaled via the shared ambient-overshoot calibration instead of a bigger fixed
+// guess — a host/environment startup-latency TOLERANCE (codex's own real boot time), not a product
+// latency contract.
+const BOOT_READY_TIMEOUT_MS = ambientScaledBudget(20_000, 3);
+console.log(`[calib] boot-ready budget ${BOOT_READY_TIMEOUT_MS}ms`);
 try {
   await waitUntil(() => rawBuf.includes("Ask Codex to do anything"), {
     label: `${SESSION_ID} real codex TUI renders its ready placeholder at least once (initial boot)`,
-    timeoutMs: 20000,
+    timeoutMs: BOOT_READY_TIMEOUT_MS,
   });
 } catch (err) {
   console.log(`FAIL  ${err.message}`);
   console.log(`--- raw captured pty output tail (diagnostic) ---\n${rawBuf.slice(-4000)}`);
   failures++;
 }
+// Card 91cbb247: was a flat 60000ms budget — same host-contention exposure as the boot-ready wait
+// above. Waits out a real, variable-duration MCP-startup episode on this host (same documented nature
+// as the sibling codex-transcript-real-spawn.mjs's own header) — a host/environment TOLERANCE, not a
+// Loom-side latency contract. Scaled via the shared ambient-overshoot calibration.
+const BUSY_SETTLES_TIMEOUT_MS = ambientScaledBudget(60_000, 3);
+console.log(`[calib] busy-settles budget ${BUSY_SETTLES_TIMEOUT_MS}ms`);
 try {
   let stableCount = 0;
   await waitUntil(
     () => { stableCount = host.isBusy(SESSION_ID) ? 0 : stableCount + 1; return stableCount >= 3; },
-    { label: `${SESSION_ID} busy settles false and STAYS false (past any MCP-startup episode)`, timeoutMs: 60000, intervalMs: 1000 },
+    { label: `${SESSION_ID} busy settles false and STAYS false (past any MCP-startup episode)`, timeoutMs: BUSY_SETTLES_TIMEOUT_MS, intervalMs: 1000 },
   );
 } catch (err) {
   console.log(`[warn] ${err.message} — proceeding to submit anyway; the completion wait below fails loudly if this was a real problem.`);
@@ -199,6 +212,11 @@ host.enqueueStdin(SESSION_ID, KICKOFF, "system", undefined, undefined, "agent");
 // Known real-host hazard (disclosed, see codex-transcript-real-spawn.mjs's own header): extra
 // plugin/marketplace MCP servers in this host's ~/.codex/config.toml can race submitCodex's own Enter
 // keystroke and leave the kickoff typed-but-unsent. Same bounded raw-keystroke recovery nudge.
+// Card 91cbb247: was a flat 10000ms per-attempt budget. Only the PER-ATTEMPT wait is scaled — the
+// retry COUNT (3) and the recovery action (one bare "\r") are unchanged; widening how long each attempt
+// waits before deciding to nudge doesn't alter what the nudge does.
+const KICKOFF_NUDGE_TIMEOUT_MS = ambientScaledBudget(10_000, 3);
+console.log(`[calib] kickoff-nudge budget ${KICKOFF_NUDGE_TIMEOUT_MS}ms (per attempt)`);
 for (let nudge = 0; nudge < 3; nudge++) {
   let composerCleared = false;
   try {
@@ -208,7 +226,7 @@ for (let nudge = 0; nudge < 3; nudge++) {
         composerCleared = !rawBuf.slice(-2000).includes(KICKOFF);
         return composerCleared;
       },
-      { label: `${SESSION_ID} kickoff accepted (engine-id captured or composer text cleared) — attempt ${nudge + 1}/3`, timeoutMs: 10000, intervalMs: 500 },
+      { label: `${SESSION_ID} kickoff accepted (engine-id captured or composer text cleared) — attempt ${nudge + 1}/3`, timeoutMs: KICKOFF_NUDGE_TIMEOUT_MS, intervalMs: 500 },
     );
     break;
   } catch {
@@ -217,10 +235,16 @@ for (let nudge = 0; nudge < 3; nudge++) {
   }
 }
 
+// Card 91cbb247: was a flat 30000ms budget — waits on real codex rollout-file-write timing, a
+// host/environment TOLERANCE, not a product contract (same mechanism card 44634792's own triage note
+// implicated on the sibling codex-transcript-real-spawn.mjs). Scaled via the shared ambient-overshoot
+// calibration.
+const ENGINE_ID_TIMEOUT_MS = ambientScaledBudget(30_000, 3);
+console.log(`[calib] engine-id budget ${ENGINE_ID_TIMEOUT_MS}ms`);
 try {
   await waitUntil(() => engineSessionIdEvents.length > 0, {
     label: `${SESSION_ID} real codex engine-session id discovered (pty/host.ts#captureCodexEngineSessionId against a REAL rollout file)`,
-    timeoutMs: 30000,
+    timeoutMs: ENGINE_ID_TIMEOUT_MS,
   });
 } catch (err) {
   console.log(`FAIL  ${err.message}`);
@@ -231,6 +255,11 @@ const capturedEngineId = engineSessionIdEvents[0]?.engineId ?? null;
 check("exactly one onEngineSessionId event fired, with a non-empty real conversation id", engineSessionIdEvents.length === 1 && typeof capturedEngineId === "string" && capturedEngineId.length > 0);
 
 let turnsAtSettle = [];
+// Card 91cbb247: was a flat 90000ms budget — waits on a real model turn landing on disk, a
+// host/model-latency TOLERANCE, not a product contract. Scaled via the shared ambient-overshoot
+// calibration.
+const PONG_REPLY_TIMEOUT_MS = ambientScaledBudget(90_000, 3);
+console.log(`[calib] pong-reply budget ${PONG_REPLY_TIMEOUT_MS}ms`);
 if (capturedEngineId) {
   try {
     await waitUntil(
@@ -239,7 +268,7 @@ if (capturedEngineId) {
         turnsAtSettle = t;
         return t.some((turn) => turn.role === "assistant" && /pong/i.test(turn.text));
       },
-      { label: `${SESSION_ID} real codex turn produces an assistant message CONTAINING the requested reply "pong"`, timeoutMs: 90000, intervalMs: 500 },
+      { label: `${SESSION_ID} real codex turn produces an assistant message CONTAINING the requested reply "pong"`, timeoutMs: PONG_REPLY_TIMEOUT_MS, intervalMs: 500 },
     );
   } catch (err) {
     console.log(`FAIL  ${err.message}`);
@@ -328,6 +357,12 @@ try {
   let rawBuf2 = "";
   const unsubscribeRaw2 = host.subscribe(SESSION_ID, { onData: (chunk) => { rawBuf2 += chunk.toString("utf-8"); }, onControl: () => {} });
   let resumeReady = false;
+  // Card 91cbb247: was a flat 30000ms budget — same host-contention exposure as the other TUI-ready
+  // waits above (and the sibling codex-transcript-real-spawn.mjs's own boot-ready wait, card 44634792),
+  // now on a RESUMED process. A host/environment startup-latency TOLERANCE, not a product contract.
+  // Scaled via the shared ambient-overshoot calibration.
+  const RESUME_READY_TIMEOUT_MS = ambientScaledBudget(30_000, 3);
+  console.log(`[calib] resume-ready budget ${RESUME_READY_TIMEOUT_MS}ms`);
   try {
     await waitUntil(
       () => {
@@ -335,7 +370,7 @@ try {
         if (rawBuf2.includes("Ask Codex to do anything")) { resumeReady = true; return true; }
         return false;
       },
-      { label: `${SESSION_ID} real codex resume reaches the ready placeholder (or exits early)`, timeoutMs: 30000 },
+      { label: `${SESSION_ID} real codex resume reaches the ready placeholder (or exits early)`, timeoutMs: RESUME_READY_TIMEOUT_MS },
     );
   } catch (err) {
     console.log(`FAIL  ${err.message}`);
