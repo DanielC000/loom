@@ -1854,9 +1854,15 @@ function buildReingestedEntryFromDisk(
     // @decision 4e987303 (round 3/4) — filter `dropped.contributorRepoPaths` AFTER the union, compared by
     // `directPathIdentity` (never raw string equality — disk can spell the SAME identity differently).
     contributorRepoPaths: (() => {
-      const unionedContributors = entry.contributorRepoPaths || reingested.contributorRepoPaths
-        ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])].filter((c) => !dropped.contributorRepoPaths.has(directPathIdentity(c)))
+      const unioned = entry.contributorRepoPaths || reingested.contributorRepoPaths
+        ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])]
         : [];
+      // @decision 0bc6305a — behaviour-identical: an empty `dropped.contributorRepoPaths` can never
+      // remove anything, so skip the per-contributor `directPathIdentity` (a realpathSync) entirely
+      // rather than pay for it only to retain every element unchanged.
+      const unionedContributors = dropped.contributorRepoPaths.size === 0
+        ? unioned
+        : unioned.filter((c) => !dropped.contributorRepoPaths.has(directPathIdentity(c)));
       return unionedContributors.length > 0 ? unionedContributors : undefined;
     })(),
     // @decision 84c1046f — same carry-forward rule for this field's own sticky membership history
