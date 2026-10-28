@@ -9637,13 +9637,16 @@ export async function mergeMainIntoWorktree(
   try {
     mainSha = (await withTimeout(repoGit.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (main)")).trim();
   } catch (e) {
-    // @decision 8c3d6c04 — nothing lands from this bare read (no mutation), so a timeout OR a transient
-    // spawn-error code here is always safe to mark `transient:true`; never add kill-confirmation to this
-    // read as part of closing that gap — file a separate card instead (see the decision record).
-    const transient = TIMEOUT_SHAPED_RE.test((e as Error)?.message ?? "") || isTransientSpawnErrorCode(e);
     // This read can carry a CanonicalGitRefusal (e.g. a commondir redirect) — route through
     // canonicalFailureMessage so its human guidance survives, not just the bare `.message`.
     const mainTipFailure = describeGitFailure(e);
+    // @decision 8c3d6c04 — nothing lands from this bare read (no mutation), so a timeout OR a transient
+    // spawn-error code here is always safe to mark `transient:true`; never add kill-confirmation to this
+    // read as part of closing that gap — file a separate card instead (see the decision record).
+    // @decision 2968815c — gated on `!mainTipFailure.refusal`, same as this function's own siblings
+    // below (the owed-landing commit-tree/fast-forward catches) — a structural CanonicalGitRefusal is
+    // never "transient", regardless of what its message text happens to contain.
+    const transient = !mainTipFailure.refusal && (TIMEOUT_SHAPED_RE.test((e as Error)?.message ?? "") || isTransientSpawnErrorCode(e));
     return { ok: false, reason: `failed to resolve main tip: ${canonicalFailureMessage(mainTipFailure, mainTipFailure.text)}`, ...(transient ? { transient: true } : {}) };
   }
 

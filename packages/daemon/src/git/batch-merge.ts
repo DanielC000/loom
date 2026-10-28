@@ -279,7 +279,7 @@ interface LandResult {
  */
 async function landedTreeDivergesFromExpected(
   git: Pick<SimpleGit, "raw">, batchHeadBefore: string, branchTip: string, landedSha: string, timeoutMs: number,
-): Promise<{ paths: string[]; conflict?: undefined; error?: undefined } | { paths?: undefined; conflict: true; error?: undefined } | { paths?: undefined; conflict?: undefined; error: string }> {
+): Promise<{ paths: string[]; conflict?: undefined; error?: undefined } | { paths?: undefined; conflict: true; error?: undefined } | { paths?: undefined; conflict?: undefined; error: ReturnType<typeof describeGitFailure> }> {
   let mergeTreeOut: string[];
   try {
     mergeTreeOut = (await withTimeout(
@@ -287,7 +287,10 @@ async function landedTreeDivergesFromExpected(
       timeoutMs, "git merge-tree --write-tree (batch land, content-check)",
     )).trim().split(/\r?\n/).filter(Boolean);
   } catch (e) {
-    return { error: (e as Error).message };
+    // @decision 2968815c — `error` carries a classified describeGitFailure(e) result (never a bare
+    // `.message`), so the caller can render it through canonicalFailureMessage and a CanonicalGitRefusal's
+    // guidance survives this render too.
+    return { error: describeGitFailure(e) };
   }
   if (mergeTreeOut.length !== 1 || !/^[0-9a-f]{40,64}$/.test(mergeTreeOut[0]!)) return { conflict: true };
   const expectedTree = mergeTreeOut[0]!;
@@ -298,7 +301,7 @@ async function landedTreeDivergesFromExpected(
       git.raw(["rev-parse", "--verify", "--end-of-options", `${landedSha}^{tree}`]), timeoutMs, "git rev-parse tree (batch land, content-check)",
     )).trim();
   } catch (e) {
-    return { error: (e as Error).message };
+    return { error: describeGitFailure(e) };
   }
   if (landedTree === expectedTree) return { paths: [] };
   // Plain `git diff` (no `--exit-code`) always exits 0 on success regardless of whether it found
@@ -314,7 +317,7 @@ async function landedTreeDivergesFromExpected(
       timeoutMs, "git diff --name-only (batch land, content-check)",
     );
   } catch (e) {
-    return { error: (e as Error).message };
+    return { error: describeGitFailure(e) };
   }
   return { paths: [...new Set(out.split("\n").map((s) => s.trim()).filter(Boolean))] };
 }
@@ -422,12 +425,19 @@ async function landBranchCommitsIndividually(
       // eslint-disable-next-line no-console
       console.warn(`[batch-merge] ${branch}: no recorded cut base (legacy worker) — landing without the fork-point ancestry check`);
     } else if (ancestry.probeFailed) {
+      // @decision 2968815c — classify a structural trust refusal FIRST, same as mergeBranchLocked's own
+      // sibling check (worktrees.ts) — this probe's error can be a CanonicalGitRefusal (checkCutBaseAncestry
+      // always captures it as `probeErrorObject`), which is never a "transient, re-confirm" condition.
+      const probeFailure = describeGitFailure(ancestry.probeErrorObject);
+      if (probeFailure.refusal) {
+        return { ok: false, reason: `${branch}: ${canonicalFailureMessage(probeFailure, probeFailure.text)}` };
+      }
       // @decision 0eaaa693 (round 3) — a TRANSIENT git failure, never the divergence remedy: drop this
       // candidate (fail closed, nothing lands unverified) with its own honest wording — a re-confirm is
       // the right remedy here, not a recycle/fresh-worker dispatch.
       return {
         ok: false, forkPointUnverified: true,
-        reason: `${branch}: could not verify this worker's fork point against the current batch lineage (git error: ${ancestry.probeError ?? "unknown"}) — this looks like a transient git/host condition, not a confirmed divergence; re-confirm to re-check.`,
+        reason: `${branch}: could not verify this worker's fork point against the current batch lineage (git error: ${probeFailure.text}) — this looks like a transient git/host condition, not a confirmed divergence; re-confirm to re-check.`,
       };
     } else if (!ancestry.ok) {
       return {
@@ -592,8 +602,11 @@ async function landBranchCommitsIndividually(
       resetError = e;
     }
     // @decision 0d372516 — verify HEAD == batchHeadBefore UNCONDITIONALLY, whether or not reset --hard
-    // itself threw: a non-throwing reset is not itself proof the worktree is clean. Both probes are pure
-    // reads (never refused), so this stays truthful either way.
+    // itself threw: a non-throwing reset is not itself proof the worktree is clean.
+    //
+    // @decision 2968815c — these probe reads CAN be refused too (a CanonicalGitRefusal is not limited to
+    // mutating calls); the catch below routes through canonicalFailureMessage so that guidance survives,
+    // same as resetErrorMessage above.
 
     // resetError can itself be a classified canonical-git refusal (e.g. a pinMismatch surfacing mid-
     // rollback) — route through canonicalFailureMessage so its guidance survives here too, not just the
@@ -619,9 +632,12 @@ async function landBranchCommitsIndividually(
       rollbackVerificationFailed = true;
       rollbackIssue = resetErrorMessage ?? `batch worktree is not clean after rollback (HEAD=${head || "?"}, expected ${batchHeadBefore})`;
     } catch (e) {
-      // cannot prove it clean — fail closed, whether or not reset --hard itself threw.
+      // cannot prove it clean — fail closed, whether or not reset --hard itself threw. Routes through
+      // canonicalFailureMessage (not a bare `.message` render) so a CanonicalGitRefusal surfacing on one
+      // of these probe reads keeps its own human guidance.
       rollbackVerificationFailed = true;
-      rollbackIssue = resetErrorMessage ?? `failed to verify the rollback left a clean tree: ${(e as Error).message}`;
+      const verifyProbeFailure = describeGitFailure(e);
+      rollbackIssue = resetErrorMessage ?? `failed to verify the rollback left a clean tree: ${canonicalFailureMessage(verifyProbeFailure, verifyProbeFailure.text)}`;
     }
   };
   const fail = <T extends { reason?: string }>(r: T): T & { quarantined?: boolean; rollbackUnverified?: boolean } => {
@@ -709,7 +725,11 @@ async function landBranchCommitsIndividually(
       );
     } catch (e) {
       await rollback();
-      return fail({ ok: false, reason: `${branch}: failed to probe staged changes after cherry-picking ${sha.slice(0, 7)}: ${(e as Error).message}` });
+      // @decision 2968815c — this probe runs AFTER the cherry-pick already landed into the batch
+      // worktree (rollback() above either already undid it or reports why it couldn't) — route through
+      // canonicalFailureMessage so a CanonicalGitRefusal's human guidance survives here too.
+      const stagedProbeFailure = describeGitFailure(e);
+      return fail({ ok: false, reason: `${branch}: failed to probe staged changes after cherry-picking ${sha.slice(0, 7)}: ${canonicalFailureMessage(stagedProbeFailure, stagedProbeFailure.text)}` });
     }
     if (stagedPaths.trim() === "") {
       // DoD-2's deliberate choice (b): the CONSERVATIVE default. This does NOT skip just the redundant
@@ -736,7 +756,9 @@ async function landBranchCommitsIndividually(
       authorDate = (await withTimeout(git.raw(["log", "-1", "--format=%aI", "--end-of-options", sha]), timeoutMs, "git log -1 (batch land, author date)")).trim();
     } catch (e) {
       await rollback();
-      return fail({ ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${(e as Error).message}` });
+      // @decision 2968815c — same reasoning as the empty-stage probe's own catch just above.
+      const metadataReadFailure = describeGitFailure(e);
+      return fail({ ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${canonicalFailureMessage(metadataReadFailure, metadataReadFailure.text)}` });
     }
     // A reserved-key SUBJECT is a distinct hazard from a reserved line in the BODY:
     // `stripReservedLoomTrailerLines` below deliberately never touches line 0, so a one-line worker
@@ -809,7 +831,9 @@ async function landBranchCommitsIndividually(
         preCommitTree = (await withTimeout(git.raw(["write-tree"]), timeoutMs, "git write-tree (batch land, pre-commit tree capture)")).trim();
       } catch (e) {
         await rollback();
-        return fail({ ok: false, reason: `${branch}: failed to capture the staged tree before landing ${sha.slice(0, 7)}: ${(e as Error).message}` });
+        // @decision 2968815c — same reasoning as the empty-stage probe's own catch above.
+        const treeCaptureFailure = describeGitFailure(e);
+        return fail({ ok: false, reason: `${branch}: failed to capture the staged tree before landing ${sha.slice(0, 7)}: ${canonicalFailureMessage(treeCaptureFailure, treeCaptureFailure.text)}` });
       }
       try {
         // @decision 24c0bdba — kill-confirmed: an orphaned child here must never later land onto whatever
@@ -857,7 +881,10 @@ async function landBranchCommitsIndividually(
       )).trim();
     } catch (e) {
       await rollback();
-      return fail({ ok: false, reason: `${branch}: failed to verify commit landed for ${sha.slice(0, 7)}: ${(e as Error).message}` });
+      // @decision 2968815c — same reasoning as the empty-stage probe's own catch above; the manual
+      // `git commit` call already ran by this point.
+      const postCommitVerifyFailure = describeGitFailure(e);
+      return fail({ ok: false, reason: `${branch}: failed to verify commit landed for ${sha.slice(0, 7)}: ${canonicalFailureMessage(postCommitVerifyFailure, postCommitVerifyFailure.text)}` });
     }
     if (newHead === currentHead) {
       await rollback();
@@ -982,7 +1009,10 @@ async function landBranchCommitsIndividually(
   try {
     landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
   } catch (e) {
-    return { ok: false, reason: `${branch}: landed but failed to read the result: ${(e as Error).message}` };
+    // @decision 2968815c — same reasoning as the empty-stage probe's own catch above; every commit in
+    // this branch already landed by this point (no rollback() call here — see the decision record).
+    const finalReadFailure = describeGitFailure(e);
+    return { ok: false, reason: `${branch}: landed but failed to read the result: ${canonicalFailureMessage(finalReadFailure, finalReadFailure.text)}` };
   }
 
   // @decision 95940402 — this `rev-parse HEAD` is the late re-read a racer can steer; verify `landedSha`
@@ -1033,7 +1063,10 @@ async function landBranchCommitsIndividually(
     const divergence = await landedTreeDivergesFromExpected(git, batchHeadBefore, branchTip, landedSha, timeoutMs);
     if (divergence.error !== undefined) {
       await rollback();
-      return fail({ ok: false, reason: `${branch}: failed to content-check the landed result against its reviewed tip ${branchTip.slice(0, 7)}: ${divergence.error}` });
+      // @decision 2968815c — divergence.error is already a describeGitFailure(e) result; route it
+      // through canonicalFailureMessage, not a bare render, so a CanonicalGitRefusal's human guidance
+      // survives here too (mirrors every other catch in this function).
+      return fail({ ok: false, reason: `${branch}: failed to content-check the landed result against its reviewed tip ${branchTip.slice(0, 7)}: ${canonicalFailureMessage(divergence.error, divergence.error.text)}` });
     }
     if (divergence.conflict) {
       await rollback();
