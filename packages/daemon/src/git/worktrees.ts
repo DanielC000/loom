@@ -9598,7 +9598,7 @@ function isTransientSpawnErrorCode(e: unknown): boolean {
 
 export async function mergeMainIntoWorktree(
   repoPath: string, worktreePath: string, deps: BoundedGitDeps = {}, owedBase?: string, branch?: string,
-): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; dirtyWorktree?: boolean; worktreeMissing?: boolean }> {
+): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string; quarantined?: boolean; transient?: boolean; residuePossible?: boolean; dirtyWorktree?: boolean; worktreeMissing?: boolean; canonicalTrustRefusal?: boolean }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   // @decision 7e5b23e7 — only the two mutating merge calls below use this floor; every other git call in
   // this function (the cheap reads above/below, and computeOwedLanding's own merge-tree probes) keeps the
@@ -9647,7 +9647,8 @@ export async function mergeMainIntoWorktree(
     // below (the owed-landing commit-tree/fast-forward catches) — a structural CanonicalGitRefusal is
     // never "transient", regardless of what its message text happens to contain.
     const transient = !mainTipFailure.refusal && (TIMEOUT_SHAPED_RE.test((e as Error)?.message ?? "") || isTransientSpawnErrorCode(e));
-    return { ok: false, reason: `failed to resolve main tip: ${canonicalFailureMessage(mainTipFailure, mainTipFailure.text)}`, ...(transient ? { transient: true } : {}) };
+    // @decision 57f9cdd9 — a bare refusal here must never classify as the cacheable "rejected" fallback.
+    return { ok: false, reason: `failed to resolve main tip: ${canonicalFailureMessage(mainTipFailure, mainTipFailure.text)}`, ...(transient ? { transient: true } : {}), ...(mainTipFailure.refusal ? { canonicalTrustRefusal: true } : {}) };
   }
 
   // `mainSha` (card eda70da6) rides along on EVERY success return below — it's the canonical main tip
@@ -9691,7 +9692,9 @@ export async function mergeMainIntoWorktree(
     // canonicalFailureMessage's own refusal branches already open with "refused,"/"refusing," — dropping
     // "refused:" from this prefix avoids a literal doubled "refused: refused".
     const identityProbeFailure = describeGitFailure(e);
-    return { ok: false, reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}` };
+    // @decision 57f9cdd9 — same reasoning as the main-tip read above: never let a bare refusal here fall
+    // through to the cacheable "rejected" classification.
+    return { ok: false, reason: `identity-fallback probe: ${canonicalFailureMessage(identityProbeFailure, identityProbeFailure.text)}`, ...(identityProbeFailure.refusal ? { canonicalTrustRefusal: true } : {}) };
   }
 
   // @decision 7e5b23e7 — every mutating call below pins `quarantineRepoPath` to the CANONICAL `repoPath`,
@@ -9968,7 +9971,9 @@ export async function mergeMainIntoWorktree(
       if (abortQuarantined) return { ok: false, quarantined: true, reason: abortQuarantineReason };
       // mergeDescribe is always set alongside mergeRefused (same catch block, same assignment) — the `!`
       // mirrors the same guaranteed-together invariant mergeErr/mergeRefused already relied on.
-      if (mergeRefused) return { ok: false, reason: canonicalFailureMessage(mergeDescribe!, mergeErr) };
+      // @decision 57f9cdd9 — `mergeRefused` IS `describeGitFailure(e).refusal`, so `canonicalTrustRefusal`
+      // is unconditional here (never the cacheable "rejected" fallback).
+      if (mergeRefused) return { ok: false, reason: canonicalFailureMessage(mergeDescribe!, mergeErr), canonicalTrustRefusal: true };
 
       // @decision 8c3d6c04 round 3 — `!isConfirmedKillTimeout` is load-bearing: a confirmed-kill timeout on
       // an already-dirty tree must fall through to the ordinary residue/transient handling below, unchanged

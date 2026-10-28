@@ -789,6 +789,10 @@ export type MergeBatchResult = {
    *  worker-writable `.git`, so a mismatch is a fact about possible tamper, not about the candidates.
    *  @decision 043d83d2 — classified `"batch-head-moved"`, `NEVER_CACHED_OUTCOMES`. */
   batchHeadMoved?: boolean;
+  /** @decision 57f9cdd9 — the batch fast-forward was refused by a structural CanonicalGitRefusal; same
+   *  no-fallback posture as `quarantined`/`indexLockPresent`, REUSES the solo path's never-cached
+   *  `"canonical-trust-refusal"` classification (card 08c36dae) rather than a new string. */
+  canonicalTrustRefusal?: boolean;
   /** Card b801bad0 (fix round) — the fast-forward's `--ff-only` call did not throw, but the POST-ff
    *  re-read that confirms WHERE it landed could not be completed (see `FastForwardResult.unverified`) —
    *  distinct from a confirmed `branchDiverted`: the landing most likely happened, it just could not be
@@ -19799,6 +19803,15 @@ export class SessionService {
           // reuses the EXISTING `gateWorktreeDirty`/"worktree-dirty" never-cached outcome (same helper every
           // other before-gate dirt refusal uses) rather than a new classification string.
           if (union.dirtyWorktree) return refuseWorktreeDirty("before-gate", union.reason ?? "the worktree carries uncommitted changes that would be overwritten by the union-merge");
+          // @decision 57f9cdd9 — reuses the post-squash `canonicalTrustRefusal`/NEVER_CACHED classification
+          // (card 08c36dae) here too, never the generic cacheable fallback below.
+          if (union.canonicalTrustRefusal) {
+            const why = union.reason ?? "canonical-git trust refusal";
+            const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it.`;
+            const { suppressed, sha } = await rejectNotify("canonical_trust_refusal", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+            evt("merge_rejected", { reason: "canonical_trust_refusal", sha, ...(suppressed ? { suppressed: true } : {}) });
+            return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, canonicalTrustRefusal: true };
+          }
           const why = union.conflict ? (union.reason ?? "branch conflicts with current main — rebase/resolve before merge") : (union.reason ?? "union merge failed");
           const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
           // @decision 8c3d6c04 — `union.transient` is never set alongside `union.conflict`, so this note
@@ -23565,6 +23578,19 @@ export class SessionService {
             ], opId, undefined, unverifiedTail);
             return { ok: false, opId, landed: [], fallback: notStarted, unverified: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
+          if (result.canonicalTrustRefusal) {
+            // @decision 57f9cdd9 — same no-fallback posture as `quarantined`/`indexLockPresent` just
+            // above: the refusal fires BEFORE any git process runs, so a per-candidate fallback would just
+            // re-hit the identical refusal at the solo path's own union-merge check. Start nothing.
+            const notStarted = await runFallback([
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "a canonical-git trust refusal" })),
+              ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+              ...strandedFallback,
+              ...spawnConflictFallback,
+              ...lateSpawnConflictFallback,
+            ], opId, undefined, "This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it. Re-firing merge_batch after the canonical repo is repaired is safe and will genuinely re-attempt the fast-forward.");
+            return { ok: false, opId, landed: [], fallback: notStarted, canonicalTrustRefusal: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          }
           if (!result.ok) {
             const fallback = await runFallback([
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "batch failed" })),
@@ -23867,6 +23893,11 @@ export class SessionService {
           // Card b801bad0 (fix round 4) — also name the checkout check, mirroring the runFallback tail
           // above: an unverified post-ff re-read leaves canonical's OWN branch unconfirmed too.
           ? `[loom:merge-batch-unverified] merge_batch [op ${opId}]: ${outcome.value.reason ?? "the batch fast-forward's landed result could not be verified"}. The batch MAY have landed: check git log on the mainline branch; once confirmed, worker_merge_confirm finalizes each candidate via ALREADY_MERGED — and confirm canonical is checked out on the mainline branch before any worker_merge_confirm. NOTHING further was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
+          // @decision 57f9cdd9 — dedicated wording, never the generic "landed nothing" tail below: this is
+          // a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of any candidate branch
+          // will not fix it, and re-firing merge_batch after the canonical repo is repaired is safe.
+          : outcome.value.canonicalTrustRefusal
+          ? `[loom:merge-batch-trust-refusal] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "canonical-git trust refusal"}. Nothing was mutated — this is a canonical-git TRUST refusal, not an ordinary merge failure. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`;
         try {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
@@ -23939,7 +23970,9 @@ export class SessionService {
         // @decision e8e98d43 — a `finishRefused` candidate (either cause) stays plain "landed"
         // (cacheable), same as `branchAdvancedDuringGate`/`worktreeRetainedDirty`: recovery is
         // `worker_merge_confirm` on that candidate, never a `merge_batch` re-fire.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.batchHeadMoved ? "batch-head-moved" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
+        // @decision 57f9cdd9 — `canonicalTrustRefusal` classifies distinctly too (REUSES the solo path's
+        // own never-cached "canonical-trust-refusal" string, card 08c36dae), checked before "rejected".
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.postGateThrow ? "post-gate-error" : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.canonicalTrustRefusal ? "canonical-trust-refusal" : outcome.value.batchHeadMoved ? "batch-head-moved" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.unverified ? "ff-unverified" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.ok ? "landed" : "rejected"),
         // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
         //  settled, never the gate's own inner resolve.
         //

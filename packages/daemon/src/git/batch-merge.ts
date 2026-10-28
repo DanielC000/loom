@@ -1341,6 +1341,9 @@ export interface FastForwardResult {
   /** @decision 62c4953a — same posture as `quarantined`: a real `.git/index.lock` was already present,
    *  nothing ran, never a "fall back to per-branch re-gate" case. */
   indexLockPresent?: boolean;
+  /** @decision 57f9cdd9 — the `--ff-only` call threw a structural `CanonicalGitRefusal`; same no-fallback
+   *  posture as `quarantined`/`indexLockPresent`, caller classifies it never-cached. */
+  canonicalTrustRefusal?: boolean;
 }
 
 /**
@@ -1450,7 +1453,9 @@ export async function fastForwardCanonicalMain(
           // commondir check) — never fall through to it, and never report mayHaveLanded:true here.
           const ffFailure = describeGitFailure(e);
           if (ffFailure.refusal) {
-            return { ok: false, mayHaveLanded: false, reason: canonicalFailureMessage(ffFailure, ffFailure.text) };
+            // @decision 57f9cdd9 — never the cacheable generic fallthrough; same reasoning as the solo
+            // path's union-merge sites.
+            return { ok: false, mayHaveLanded: false, canonicalTrustRefusal: true, reason: canonicalFailureMessage(ffFailure, ffFailure.text) };
           }
           // A hung post-merge hook can outlive the timeout AFTER HEAD already moved — re-verify before
           // reporting a false failure (mirrors mergeBranchLocked's own post-commit-failure HEAD re-read).
@@ -1603,6 +1608,8 @@ export interface RunBatchedMergeResult {
    *  @decision 043d83d2 — never retry a per-candidate fallback on this outcome; it is a fact about the
    *  worker-writable worktree ref, not the resolved candidates. */
   batchHeadMoved?: boolean;
+  /** @decision 57f9cdd9 — mirrors {@link FastForwardResult.canonicalTrustRefusal}. */
+  canonicalTrustRefusal?: boolean;
 }
 
 /**
@@ -1735,6 +1742,7 @@ export async function runBatchedMerge(
       ok: false, landed, dropped, baseMainSha, batchHeadSha: assembledTipSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
       forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha, landingStarted: true,
       ...(ff.quarantined ? { quarantined: true } : {}), ...(ff.indexLockPresent ? { indexLockPresent: true } : {}),
+      ...(ff.canonicalTrustRefusal ? { canonicalTrustRefusal: true } : {}),
       ...(ff.branchDiverted ? { branchDiverted: true } : {}),
       ...(ff.unverified ? { unverified: true } : {}), ...(ff.observedBranch !== undefined ? { observedBranch: ff.observedBranch } : {}),
       ...(ff.mayHaveLanded ? { mayHaveLanded: true } : {}),
