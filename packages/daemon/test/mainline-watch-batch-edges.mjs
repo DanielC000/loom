@@ -113,10 +113,13 @@ try {
     // fast-forward read. That let the fast-forward observe the PRE-move tip and succeed instead of
     // forfeiting: a test-synchronization race (seen flaking twice, both under load, card 7aeaeedd), not a
     // product gap. Fixed by injecting through the SAME `batchFfGitFactory` test seam
-    // batch-merge-mainline-advanced-post-ff.mjs uses: intercept the FIRST combined `rev-parse HEAD
-    // --symbolic-full-name HEAD` read inside `fastForwardCanonicalMain` (the forfeit check's own read,
-    // git/batch-merge.ts) and perform the raw move synchronously BEFORE delegating to the real git call —
-    // the read is then GUARANTEED to observe the moved tip, with no deadline machinery involved at all.
+    // batch-merge-mainline-advanced-post-ff.mjs uses: intercept the SECOND combined `rev-parse HEAD
+    // --symbolic-full-name HEAD` read inside `fastForwardCanonicalMain` (the END-OF-GATE forfeit check's
+    // own read, git/batch-merge.ts) and perform the raw move synchronously BEFORE delegating to the real
+    // git call — the read is then GUARANTEED to observe the moved tip, with no deadline machinery involved
+    // at all. Card 627b38c7: the FIRST occurrence is now mergeBatchTracked's own NEW admission-time
+    // forfeit check, which must see the UNCHANGED state so the real gate still runs; only the SECOND
+    // occurrence (reached once the gate has genuinely passed) is the one this scenario injects the move into.
     let combinedCalls = 0;
     const batchFfGitFactory = (repoPath, blockTimeoutMs) => {
       const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
@@ -124,7 +127,7 @@ try {
         raw: async (args) => {
           if (Array.isArray(args) && args[0] === "rev-parse" && args.includes("--symbolic-full-name")) {
             combinedCalls++;
-            if (combinedCalls === 1) bypass(k); // raw move lands inside the forfeit check's own read, before it resolves
+            if (combinedCalls === 2) bypass(k); // raw move lands inside the end-of-gate forfeit check's own read, before it resolves
           }
           return real.raw(args);
         },
@@ -134,8 +137,8 @@ try {
     d1.sessions.batchFfGitFactory = batchFfGitFactory;
     const r4 = await batch(d1, [l, m]);
     d1.sessions.batchFfGitFactory = realBatchFfGitFactory;
-    check("(B4) setup control: the injected move fired exactly once, from inside the forfeit check's own read (deterministic — no race)", combinedCalls === 1);
-    // `combinedCalls === 1` only proves the HOOK fired, not that `bypass(k)`'s own raw git calls actually
+    check("(B4) setup control: the injected move fired exactly once, from inside the end-of-gate forfeit check's own read (deterministic — no race)", combinedCalls === 2);
+    // `combinedCalls === 2` only proves the HOOK fired, not that `bypass(k)`'s own raw git calls actually
     // LANDED — a hook that fired but whose bypass silently failed (e.g. a transient git error swallowed by
     // nothing, since bypass() doesn't check its own exit codes) would otherwise pass this control and then
     // fail the forfeit check below for the WRONG reason (main never having moved at all, not a detection

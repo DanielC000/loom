@@ -31,7 +31,7 @@ import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
-import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
+import { computeBatchSize, runBatchedMerge, fastForwardCanonicalMain, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo, defaultTrustedMainRoot, CanonicalGitRefusal } from "../git/bounded.js";
@@ -2560,6 +2560,25 @@ class AdmissionReunionFailedError extends Error {
   ) {
     super(`admission-time re-union failed (${failReason}): ${why}`);
     this.name = "AdmissionReunionFailedError";
+  }
+}
+
+/**
+ * Card 627b38c7: thrown from INSIDE `mergeBatchTracked`'s `runGate` closure — the FIRST statement of the
+ * `gateSemaphore.runExclusive` admission callback, before the real gate command is ever spawned — when the
+ * admission-time re-check (re-reading canonical main's HEAD now that this op holds the per-repo
+ * merge-admission guard, so no sibling squash can race the read) finds main already moved off
+ * `baseMainSha`. Mirrors `GateCancelledError`'s shape exactly: a typed error thrown from inside
+ * `runExclusive`, caught BY NAME at the call site.
+ *
+ * @decision 627b38c7 — never return this as an ordinary `{passed:false}` BatchGateResult instead of
+ *  throwing it: a normal return reaches the gate's own `onSettle`/`isMergeGateRed` red-check and gets
+ *  misclassified as a genuine red, wrongly feeding the merge-gate interval.
+ */
+class BatchAdmissionForfeitError extends Error {
+  constructor(public readonly currentMainSha: string | undefined, reason: string) {
+    super(reason);
+    this.name = "BatchAdmissionForfeitError";
   }
 }
 
@@ -23105,6 +23124,35 @@ export class SessionService {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
+                // ADMISSION-TIME FORFEIT CHECK: this callback only runs once GateSemaphore has admitted
+                // this op (cap slot + per-repo merge-admission guard), so no sibling squash can race the
+                // read below. Re-checks canonical main before the real gate ever spawns, reusing
+                // `fastForwardCanonicalMain` itself as a pure check (`targetSha === expectedBaseSha`).
+                // @decision 627b38c7 — scoped to the SHA FORFEIT only; a branch-divert or a read failure
+                //  here falls through unchanged to the real gate, same as today.
+                try {
+                  const admissionFf = await fastForwardCanonicalMain(finalRepoPath, gateBaseMainSha, gateBaseMainSha, { timeoutMs: this.gitOpMs ?? 15_000, expectedBaseBranch, gitFactory: this.batchFfGitFactory });
+                  if (!admissionFf.ok) {
+                    if (admissionFf.forfeited) {
+                      throw new BatchAdmissionForfeitError(admissionFf.currentMainSha, admissionFf.reason ?? `canonical main advanced (now ${admissionFf.currentMainSha ?? "unknown"}) since this batch was cut from ${gateBaseMainSha} — this batch's gate never validated main's current tree; falling back to a per-branch re-gate`);
+                    }
+                    // A read failure — `fastForwardCanonicalMain` catches its own internal git failure and
+                    // returns `{ok:false}` here rather than throwing, so this is a NORMAL return, never
+                    // caught below — or a branch-divert/quarantine/index-lock refusal, none of which this
+                    // admission check is scoped to act on: must NOT fabricate a forfeit, and must NOT be
+                    // silently absorbed either — fall back to today's behavior (the real gate still runs,
+                    // and the end-of-gate fastForwardCanonicalMain call still decides) and log it.
+                    // eslint-disable-next-line no-console
+                    console.warn(`[merge-batch] admission-time forfeit check returned ok:false (non-fatal — falling back to the end-of-gate check): ${admissionFf.reason ?? "no reason given"}`);
+                  }
+                } catch (err) {
+                  if (err instanceof BatchAdmissionForfeitError) throw err;
+                  // A THROWN exception from the admission check's own call (e.g. a quarantine error
+                  // `fastForwardCanonicalMain` itself doesn't convert to a structured result) — same
+                  // non-fatal fallback as the `ok:false` branch above, logged the same way.
+                  // eslint-disable-next-line no-console
+                  console.warn(`[merge-batch] admission-time forfeit check threw (non-fatal — falling back to the end-of-gate check): ${err instanceof Error ? err.message : String(err)}`);
+                }
                 const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) holdRepoGuardOnExit();
                 return gr;
@@ -23129,6 +23177,14 @@ export class SessionService {
               if (err instanceof GateCancelledError) {
                 batchGateVerdict = { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt, totalDurationMs } };
                 return { passed: false, cancelled: true, reason: `gate cancelled (${err.kind}): ${err.detail}` };
+              }
+              // A "skipped" verdict (same no-gate-ran family as batchAllDropped/batchHeadMoved), naming the
+              // REAL assembled count (landedCount, never 0 — this batch WAS fully assembled, see card 553ea58c).
+              // @decision 627b38c7 — never classify this as "pass"/"fail" via `deriveBatchGateVerdict` — the
+              //  gate command genuinely never ran.
+              if (err instanceof BatchAdmissionForfeitError) {
+                batchGateVerdict = { kind: "skipped", payload: { reason: err.message, skipReason: "forfeited-at-admission", batchBranchCount: landedCount, batchLanded: false, settledAt, totalDurationMs } };
+                return { passed: false, reason: err.message, detail: { forfeitedAtAdmission: true, currentMainSha: err.currentMainSha } };
               }
               batchGateVerdict = { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } };
               throw err;

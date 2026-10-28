@@ -146,6 +146,9 @@ try {
   {
     const repo = makeRepo("unver");
     const projId = `mlab-unver-proj-${sfx}`, agentId = `mlab-unver-agent-${sfx}`, mgrId = `mlab-unver-mgr-${sfx}`;
+    // Card 627b38c7: THREE occurrences now reach this read via mergeBatchTracked — (1) its own NEW
+    // admission-time forfeit check, (2) the pre-ff forfeit/branch-divert check, (3) verifyLanded's own
+    // post-ff re-read (the one this scenario means to fail). (1)/(2) must see the REAL state.
     let combinedCalls = 0;
     function postReadFailsGitFactory(repoPath, blockTimeoutMs) {
       const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
@@ -153,7 +156,7 @@ try {
         raw: async (args) => {
           if (Array.isArray(args) && args[0] === "rev-parse" && args.includes("--symbolic-full-name")) {
             combinedCalls++;
-            if (combinedCalls > 1) throw new Error("git rev-parse timed out after 10000ms");
+            if (combinedCalls > 2) throw new Error("git rev-parse timed out after 10000ms");
           }
           return real.raw(args);
         },
@@ -246,9 +249,11 @@ try {
         raw: async (args) => {
           if (Array.isArray(args) && args[0] === "rev-parse" && args.includes("--symbolic-full-name")) {
             combinedCalls++;
-            // Call 1 = the pre-ff forfeit-check read (must be REAL, or the forfeit check itself refuses).
-            // Call 2 = the post-ff verify read — fabricate a DIFFERENT sha on the SAME expected branch.
-            if (combinedCalls > 1) return `${"f".repeat(40)}\nrefs/heads/main\n`;
+            // Card 627b38c7: THREE occurrences now reach this read via mergeBatchTracked — call 1 = its
+            // own NEW admission-time forfeit check, call 2 = the pre-ff forfeit-check read (both must be
+            // REAL, or the forfeit check itself refuses), call 3 = the post-ff verify read — fabricate a
+            // DIFFERENT sha on the SAME expected branch.
+            if (combinedCalls > 2) return `${"f".repeat(40)}\nrefs/heads/main\n`;
           }
           return real.raw(args);
         },

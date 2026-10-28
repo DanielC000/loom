@@ -57,10 +57,12 @@ const MAINREF = `refs/heads/${MAIN}`;
 const canonBranch = () => git(P.repo, "rev-parse", "--abbrev-ref", "HEAD");
 const baseSha = git(P.repo, "rev-parse", "HEAD");
 
-// Intercepts ONLY the SECOND combined `rev-parse HEAD --symbolic-full-name HEAD` read (verifyLanded's own
-// post-ff re-read — the first is the pre-check/forfeit read inside `fastForwardCanonicalMain`): lands a
-// real, independent commit on canonical mainline (SAME branch, new sha) right before delegating to the
-// real read, so the re-read genuinely observes the externally-advanced state.
+// Intercepts ONLY the THIRD combined `rev-parse HEAD --symbolic-full-name HEAD` read (verifyLanded's own
+// post-ff re-read — the first is mergeBatchTracked's own NEW admission-time forfeit check, card 627b38c7,
+// and the second is the pre-ff forfeit/branch-divert check inside `fastForwardCanonicalMain`; both must
+// see the REAL pre-advance state so each passes and the real --ff-only genuinely runs): lands a real,
+// independent commit on canonical mainline (SAME branch, new sha) right before delegating to the real
+// read, so the re-read genuinely observes the externally-advanced state.
 let combinedCalls = 0;
 let externalAdvanceSha;
 function mainlineAdvancesPostFfGitFactory(repoPath, blockTimeoutMs) {
@@ -69,7 +71,7 @@ function mainlineAdvancesPostFfGitFactory(repoPath, blockTimeoutMs) {
     raw: async (args) => {
       if (Array.isArray(args) && args[0] === "rev-parse" && args.includes("--symbolic-full-name")) {
         combinedCalls++;
-        if (combinedCalls > 1) {
+        if (combinedCalls > 2) {
           execFileSync("git", ["commit", "--allow-empty", "-m", "external advance (simulated bypass of the canonical lock)"], { cwd: repoPath, env: { ...process.env, ...IDENT }, stdio: ["ignore", "pipe", "pipe"] });
           externalAdvanceSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoPath, encoding: "utf8" }).trim();
         }
@@ -106,7 +108,7 @@ try {
   const r = await awaitTrackedSettle(() => sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
   const value = r.ok ? r.value : { __unsettled: r };
 
-  check("precondition: the injected factory's post-ff interception actually fired", combinedCalls > 1 && typeof externalAdvanceSha === "string");
+  check("precondition: the injected factory's post-ff interception actually fired", combinedCalls > 2 && typeof externalAdvanceSha === "string");
   check("(1) the batch refuses, typed branchDiverted", value.ok === false && value.branchDiverted === true);
   check("(2) observedBranch === the expected mainline branch (the sha-mismatch shape, never a stray checkout)", value.fallback.length > 0 /* sanity: ran at all */ && canonBranch() === MAIN);
   check("(2) NO per-candidate fallback was started — every candidate reports started:false", Array.isArray(value.fallback) && value.fallback.length === 2 && value.fallback.every((f) => f.started === false));

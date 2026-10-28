@@ -112,6 +112,10 @@ try {
     const nudges = [];
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const db = new Db();
+    // Card 627b38c7: THREE occurrences now reach this read via mergeBatchTracked, not two — its own NEW
+    // admission-time forfeit check calls fastForwardCanonicalMain once before the real gate spawns, so
+    // (1) that admission-time check, (2) the pre-ff forfeit/branch-divert check, (3) verifyLanded's own
+    // post-ff re-read (the one this scenario means to fail). Both (1)/(2) must see the REAL state.
     let combinedCalls = 0;
     function postReadFailsGitFactory(repoPath, blockTimeoutMs) {
       const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
@@ -119,7 +123,7 @@ try {
         raw: async (args) => {
           if (Array.isArray(args) && args[0] === "rev-parse" && args.includes("--symbolic-full-name")) {
             combinedCalls++;
-            if (combinedCalls > 1) throw new Error("git rev-parse timed out after 10000ms");
+            if (combinedCalls > 2) throw new Error("git rev-parse timed out after 10000ms");
           }
           return real.raw(args);
         },

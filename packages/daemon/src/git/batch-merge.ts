@@ -1644,6 +1644,18 @@ export async function runBatchedMerge(
   }
   const gate = await runGate(batchWorktreePath, baseMainSha, landed.length, assemblyMs, assembledTipSha);
   if (!gate.passed) {
+    // An admission-time forfeit (see service.ts's `BatchAdmissionForfeitError`) maps to the SAME
+    // `forfeited` shape the end-of-gate fastForwardCanonicalMain refusal below produces, so every
+    // downstream consumer is reused as-is — never `gateFailed`/`isMergeGateRed`, below: the gate command
+    // genuinely never ran, so this is not a test/build failure.
+    // @decision 627b38c7 — never fall through to the generic gateFailed computation for this case.
+    if (gate.detail?.forfeitedAtAdmission === true) {
+      return {
+        ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateDetail: gate, forfeited: true,
+        currentMainSha: gate.detail.currentMainSha as string | undefined,
+        reason: gate.reason ?? "canonical main advanced before this batch's gate was admitted",
+      };
+    }
     // Card 92be634e: a reduced-gate --only-file= overflow write failure never ran any gate step at all —
     // it must never count as a merge-gate RED (recordMergeGateFailure/gateOwed), matching the solo path,
     // which never touches merge-gate state for this same failure. `isMergeGateRed` itself stays untouched

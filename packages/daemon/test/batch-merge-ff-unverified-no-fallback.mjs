@@ -72,10 +72,16 @@ const canonHead = () => git(P.repo, "rev-parse", "HEAD");
 const canonBranch = () => git(P.repo, "rev-parse", "--abbrev-ref", "HEAD");
 const baseSha = canonHead();
 
-// The injected batch git factory: proxies every real call except the SECOND combined
+// The injected batch git factory: proxies every real call except the THIRD combined
 // `rev-parse HEAD --symbolic-full-name HEAD` (the post-ff re-read inside `verifyLanded`), which throws —
 // a transient read failure, never a wrong-but-readable answer (that would classify as `branchDiverted`
 // instead; see batch-merge-canonical-branch-divert.mjs's own sibling scenarios for both shapes).
+// Card 627b38c7: THREE occurrences now reach this exact combined read, not two — mergeBatchTracked's own
+// NEW admission-time forfeit check (sessions/service.ts) calls `fastForwardCanonicalMain` once BEFORE the
+// real gate ever spawns, so the sequence is (1) that admission-time check, (2) `fastForwardCanonicalMain`'s
+// own pre-ff forfeit/branch-divert check (now reached only once the admission check itself passed), (3)
+// `verifyLanded`'s post-ff re-read — the one this file means to fail. Both (1) and (2) must see the REAL
+// state (main hasn't moved) so each passes cleanly and the real `--ff-only` genuinely runs.
 let combinedCalls = 0;
 function postReadFailsGitFactory(repoPath, blockTimeoutMs) {
   const real = boundedSimpleGit(repoPath, blockTimeoutMs, nonInteractiveEnv());
@@ -83,7 +89,7 @@ function postReadFailsGitFactory(repoPath, blockTimeoutMs) {
     raw: async (args) => {
       if (Array.isArray(args) && args[0] === "rev-parse" && args.includes("--symbolic-full-name")) {
         combinedCalls++;
-        if (combinedCalls > 1) throw new Error("git rev-parse timed out after 10000ms");
+        if (combinedCalls > 2) throw new Error("git rev-parse timed out after 10000ms");
       }
       return real.raw(args);
     },
