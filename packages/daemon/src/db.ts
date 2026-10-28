@@ -1538,6 +1538,18 @@ END;
 
 -- @decision 2a6a292a round 20 (card aa7677fa) — a Loom-owned ledger (never git-derived); see that record's
 -- round-20 section for why a forged commit can never enter it and so can never make a walk reach trust.
+-- @decision 5958c149 -- worker_landed_tip is a DIFFERENT fact from tip above: tip is the squash
+-- commit's OWN sha (mainline-reachability walking); worker_landed_tip is the WORKER BRANCH's head at
+-- squash time (the Loom-Landed-Tip trailer value). Nullable, stamped ONLY for a solo landing whose
+-- in-process verifyLandedAsOwnCommit classified "ok" or "displaced" (never "forged"/"unreadable"/
+-- uncaptured) -- see sessions/service.ts's write call for the exact gate. NULL for every batch row (batch
+-- carries no Loom-Landed-Tip at all) and for a legacy/pre-card solo row. A reader must match on
+-- (project_id, repo_key, tip=the exact squash sha asked about) via Db.getVerifiedLandedTip -- NEVER
+-- the branch column (that is the MAINLINE branch the landing went onto, not the worker's own branch --
+-- see the record's own "Correction" section for why matching it makes the lookup miss always) -- and never
+-- "latest row for a scope" -- and must treat an absent row (no match, a pruned/deleted scope, or a legacy
+-- row with this column NULL) as exactly today's strict-trailer fallback, never a stale value from a
+-- different sha. See docs/decisions/5958c149-*.md.
 CREATE TABLE IF NOT EXISTS mainline_landed_commits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id TEXT NOT NULL REFERENCES projects(id),
@@ -1545,7 +1557,8 @@ CREATE TABLE IF NOT EXISTS mainline_landed_commits (
   branch TEXT NOT NULL,
   tip TEXT NOT NULL,
   base TEXT NOT NULL,
-  landed_at TEXT NOT NULL
+  landed_at TEXT NOT NULL,
+  worker_landed_tip TEXT
 );
 -- The walk (Db.isMainlineLedgerReachable) looks up by (project_id, repo_key, branch, tip) and DOES use
 -- this index for that lookup. Round 5 (card c13666c6) measured via EXPLAIN QUERY PLAN that
@@ -2782,6 +2795,7 @@ export class Db {
     this.migrateAgents();
     this.migrateProfiles();
     this.migrateTasks();
+    this.migrateMainlineLandedCommits();
     this.migrateSchedules();
     this.migrateRuns();
     this.migrateCompanionConfig();
@@ -2855,6 +2869,21 @@ export class Db {
       if (!have.has(name)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)");
+  }
+
+  /**
+   * Idempotent additive migration: ADD COLUMN `worker_landed_tip` on `mainline_landed_commits` for an
+   * existing DB (fresh installs already have it via CREATE TABLE). No DEFAULT clause, so SQLite
+   * backfills every pre-existing row to NULL, read as "absent" by {@link Db.getVerifiedLandedTip}.
+   * @decision 5958c149 — never add an index on this column here; every lookup matches the table's
+   * existing `(project_id, repo_key, branch, tip)` index, and SCHEMA's index statements run before any
+   * migrate*(), so one referencing a migration-added column would throw on every existing install's boot.
+   */
+  private migrateMainlineLandedCommits(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(mainline_landed_commits)").all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!have.has("worker_landed_tip")) this.db.exec("ALTER TABLE mainline_landed_commits ADD COLUMN worker_landed_tip TEXT");
   }
 
   /**
@@ -4026,16 +4055,36 @@ export class Db {
    * the branch-gone ledger boundary on a scope's first-ever row.
    *
    * @decision c13666c6 round 2 — never reintroduce a row cap/prune here: the branch-gone gate must be
-   * able to vouch for an arbitrarily old landing, and a pruned table silently loses that ability forever. */
-  recordMainlineLandedCommit(projectId: string, repoKey: string, branch: string, tip: string, base: string): void {
+   * able to vouch for an arbitrarily old landing, and a pruned table silently loses that ability forever.
+   *
+   * @decision 5958c149 — `workerLandedTip` is a SEPARATE fact from `tip`/`base`, never derived from
+   * either; the caller stamps it ONLY from its own synchronous `verifyLandedAsOwnCommit` "ok"/"displaced"
+   * classification. Omitted (batch, or a solo landing short of that) writes NULL, unchanged otherwise. */
+  recordMainlineLandedCommit(projectId: string, repoKey: string, branch: string, tip: string, base: string, workerLandedTip?: string): void {
     const hadPriorRows = this.db.prepare("SELECT 1 FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? LIMIT 1")
       .get(projectId, repoKey) !== undefined;
-    this.db.prepare("INSERT INTO mainline_landed_commits (project_id, repo_key, branch, tip, base, landed_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(projectId, repoKey, branch, tip, base, new Date().toISOString());
+    this.db.prepare("INSERT INTO mainline_landed_commits (project_id, repo_key, branch, tip, base, landed_at, worker_landed_tip) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(projectId, repoKey, branch, tip, base, new Date().toISOString(), workerLandedTip ?? null);
     if (!hadPriorRows) {
       const key = goneBranchLedgerBoundaryKey(projectId, repoKey);
       if (this.getMeta(key) === undefined) this.setMeta(key, base);
     }
+  }
+  /**
+   * The synchronously-verified `Loom-Landed-Tip` value for the EXACT squash commit `tip`, or `null` on no
+   * match (no row, a NULL column, or a cleared scope — all treated as "fall back to the strict trailer
+   * read"). `null` is never a confirmed-absent landing and must never be cached as terminal.
+   * @decision 5958c149 (correction) — matched on `(project_id, repo_key, tip)` ONLY, never this table's
+   * `branch` column — that column holds the MAINLINE branch landed onto, not the worker's own branch,
+   * and every caller here only ever has the latter; matching on it would make the lookup miss always.
+   * @decision 5958c149 — no DB constraint makes `tip` unique in a scope; FAIL CLOSED on >1 row — every
+   * non-null value must agree to return it, any disagreement returns `null` (see record for why).
+   */
+  getVerifiedLandedTip(projectId: string, repoKey: string, tip: string): string | null {
+    const rows = this.db.prepare("SELECT worker_landed_tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND tip = ?")
+      .all(projectId, repoKey, tip) as { worker_landed_tip: string | null }[];
+    const distinct = new Set(rows.map((r) => r.worker_landed_tip).filter((v): v is string => v !== null));
+    return distinct.size === 1 ? [...distinct][0]! : null;
   }
   /** @decision 2a6a292a round 20 (card aa7677fa) — a PURE DB walk, never a git call: a forged commit was
    *  never landed through Loom's own merge code, so it has no row here and always breaks the chain. Past

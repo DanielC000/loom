@@ -18530,7 +18530,7 @@ export class SessionService {
     let lateRange: Awaited<ReturnType<SessionService["reviewWorkerMerge"]>>["lateRange"];
     let heldWarning: string | undefined;
     try {
-      const owed = await this.resolveOwedRange(worker.branch, repoPath, worker.repoKey ?? null);
+      const owed = await this.resolveOwedRange(worker.branch, repoPath, worker.repoKey ?? null, project.id);
       if (owed.kind === "refuse") heldWarning = `HELD BRANCH: ${owed.reason}.`;
       else if (owed.kind === "range") {
         // What will ACTUALLY land — the same computeOwedLanding worker_merge_confirm's union uses: the branch's own NON-MERGE commits in assembledTip..liveTip that main does not reach,
@@ -19065,7 +19065,7 @@ export class SessionService {
 
     // Card 13fc5227: a HELD (retained) branch is landed by the range it still owes main (`assembledTip..liveTip`), through the ONE resolver review also uses. Fail closed before
     // anything runs: an unreadable/rewritten range is refused with guidance, and the late-range union below is built only on the gated path.
-    const owed = await this.resolveOwedRange(branch, repoPath, worker.repoKey ?? null);
+    const owed = await this.resolveOwedRange(branch, repoPath, worker.repoKey ?? null, project.id);
     const owedRefusal = owed.kind === "refuse" ? owed.reason
       : owed.kind === "range" && !gate ? `${branch} is HELD and owes a late range (${owed.base.slice(0, 8)}..${owed.tip.slice(0, 8)}), but this repo has no gateCommand, and the late range is landed only through the gated union of main — inspect it and cherry-pick it onto a follow-up card's worker`
       : undefined;
@@ -19176,7 +19176,7 @@ export class SessionService {
       return { merged: false, reason: rt.text, detailText, notified: !suppressed, opId: thisOpId, gateRan: false, reviewedTipMoved: true };
     };
     {
-      const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null);
+      const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, undefined, project.id);
       if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger }))) return refuseReviewedTipMoved(rt, "confirm-start");
     }
 
@@ -21473,7 +21473,7 @@ export class SessionService {
     // no-gate-configured landing has no pin, so it is checked — and then pinned — at the tip read here, which the squash then freezes).
     const squashTip = expectedTipForLanding(landingPin) ?? (await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
     {
-      const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null);
+      const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null, project.id);
       if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger }))) return refuseReviewedTipMoved(rt, "pre-squash");
     }
     const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
@@ -21493,7 +21493,11 @@ export class SessionService {
     // of mainlineCheckedTip): a landing whose own tripwire check fail-opened still needs a walkable row.
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — gated on `merge.landedBase` too: an unverified
     // `merge.sha` (mergeBranch's own parent+tree check failed, see that function) never gets a ledger row.
-    if (merge.ok && !merge.noop && merge.sha && merge.landedBase && expectedMainlineBranch) this.recordMainlineLedgerEntryIfRepoUnchanged(project.id, worker.repoKey ?? "primary", repoPath, expectedMainlineBranch, merge.sha, merge.landedBase);
+    // @decision 5958c149 — never stamp this from anything but `verifyLandedAsOwnCommit`'s synchronous,
+    // in-process result: STRICTER than the row-write gate above ("ok"/"displaced" only, never
+    // "unreadable" — that still gets an ordinary row, just with this column NULL).
+    const verifiedLandedTip = merge.landedTip !== undefined && merge.landedBase !== undefined && (merge.trailerAdvisory === undefined || merge.trailerAdvisory === "displaced") ? merge.landedTip : undefined;
+    if (merge.ok && !merge.noop && merge.sha && merge.landedBase && expectedMainlineBranch) this.recordMainlineLedgerEntryIfRepoUnchanged(project.id, worker.repoKey ?? "primary", repoPath, expectedMainlineBranch, merge.sha, merge.landedBase, verifiedLandedTip);
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — pass `undefined`, never raw `merge.sha`,
     // whenever `merge.landedBase` is unset: a race INSIDE mergeBranch can leave `merge.sha` ALREADY
     // equal to a forged tip, so a bare `merge.sha` would sail through the `head.tip === mergeSha` check.
@@ -21784,7 +21788,7 @@ export class SessionService {
       // rides along free (mergeBranchLocked's own findLandedSquashCommit lookup, widened to return it).
       const amOwner = this.resolveLineageOwnerForWorker(managerSessionId, workerSessionId) ?? managerSessionId;
       // @decision cc9bce38 — NOT `merge.landedTip` alone: that is the tip mergeBranch froze and found EMPTY, which blesses a late revert. The squash's trailer wins (the ONE resolver); the frozen tip is only its legacy fallback.
-      const amPin = await this.pinnedTipForLandedSquash(repoPath, branch, merge.sha, merge.landedTip);
+      const amPin = await this.pinnedTipForLandedSquash(repoPath, branch, merge.sha, merge.landedTip, project.id, worker.repoKey ?? null);
       const amGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId: amOwner, workerSessionId, taskId, branch, landedTip: amPin.landedTip, branchGone: amPin.branchGone, landedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, tipUnverifiable: amPin.tipUnverifiable });
       return this.finishAlreadyMerged({ managerSessionId: amOwner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, ...(amGuard.expectedBranchTip ? { expectedBranchTip: amGuard.expectedBranchTip } : {}), onBranchRetained: amGuard.onBranchRetained, retainedNote: amGuard.warning, tipUnverifiable: amGuard.tipUnverifiable });
     }
@@ -21991,7 +21995,7 @@ export class SessionService {
    * is accepted because every destructive site stays independently content-guarded (Pass A's branchContentLandedInCommit, the `--merged`-only ref
    * sweep, finishAlreadyMerged only after an empty squash) and a batch landing is itself gated.
    */
-  private async isBranchHeld(branch: string, repoPath: string, repoKey: string | null): Promise<{ retain: OrchestrationEvent; gitUnverified: boolean; recorded: { tip: string | null; unverifiable: boolean } } | undefined> {
+  private async isBranchHeld(branch: string, repoPath: string, repoKey: string | null, projectId?: string): Promise<{ retain: OrchestrationEvent; gitUnverified: boolean; recorded: { tip: string | null; unverifiable: boolean } } | undefined> {
     // Card a5be590f (rules + Do-nots: the repo-scope section of docs/decisions/42daa283-*.md) — the hold is scoped to (branch, repo): the branch name is `loom/<sha256(taskId)>` with no repo axis, so a task retargeted to a second repo re-spawns onto the SAME
     // name there. Every retain and merge_done event carries the `repoKey` it was filed for (null = the primary repo), and ONLY events in THIS caller's repo scope count — for the retain (no
     // false hold inherited from another repo) and for the release (another repo's merge_done cannot release this one). A LEGACY row with no `repoKey` key at all matches any scope (by branch only).
@@ -22008,7 +22012,7 @@ export class SessionService {
     // @decision f2b4d684 (round 7) — `recorded` is read ONCE and returned verbatim (not a derived
     // boolean), so no caller re-reads the same trailer a second time within one evaluation — round 6's
     // own boolean left resolveOwedRange with its own second read that could disagree under a fault.
-    const recorded = await this.heldRecordedTip(retain, repoPath);
+    const recorded = await this.heldRecordedTip(retain, repoPath, projectId);
     const currentTip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
     // A MISSING branch does NOT release (42daa283: a ref probe reads a transiently locked ref as missing, and a hand-deleted branch is harmless to keep reporting): only a
     // current tip that is READABLE and equals the recorded one releases.
@@ -22024,11 +22028,19 @@ export class SessionService {
    * its own `recorded` field) — every other consumer reads THAT field, never re-calls this method (round
    * 6's own second call in `resolveOwedRange` could disagree with the first under a transient fault).
    */
-  private async heldRecordedTip(retain: OrchestrationEvent, repoPath: string): Promise<{ tip: string | null; unverifiable: boolean }> {
+  private async heldRecordedTip(retain: OrchestrationEvent, repoPath: string, projectId?: string): Promise<{ tip: string | null; unverifiable: boolean }> {
     const landedSha = typeof retain.detail?.landedSha === "string" ? retain.detail.landedSha : undefined;
     if (typeof retain.detail?.landedTip === "string") return { tip: retain.detail.landedTip, unverifiable: false };
     if (typeof retain.detail?.assembledTip === "string") return { tip: retain.detail.assembledTip, unverifiable: false };
     if (!landedSha) return { tip: null, unverifiable: false };
+    // @decision 5958c149 — consult Loom's own synchronously-verified ledger FIRST, matched on
+    // (project, repoKey, tip=landedSha) — never this table's own `branch` column (see Db.getVerifiedLandedTip's
+    // own doc for why). Absent (no `projectId`, no row, or a NULL column) falls through to the strict read.
+    if (projectId) {
+      const repoKey = typeof retain.detail?.repoKey === "string" ? retain.detail.repoKey : "primary";
+      const verified = this.db.getVerifiedLandedTip(projectId, repoKey, landedSha);
+      if (verified) return { tip: verified, unverifiable: false };
+    }
     // @decision f2b4d684 (round 5) — threads the SAME test seam `isBranchHeld`'s own `findLaterBranchSquash`
     // read already uses (`heldProbeGitFactory`'s own doc names this exact call as in scope); previously
     // unwired, so a fault injected only via `alreadyLandedGitFactory` could never reach this read at all.
@@ -22043,8 +22055,8 @@ export class SessionService {
    * `heldRecordedTip` coming back `unverifiable`) carries `transient:true`; a genuinely-absent/invalid
    * recorded tip stays an ordinary, stably-cacheable refusal — a caller must classify the two distinctly.
    */
-  private async resolveOwedRange(branch: string, repoPath: string, repoKey: string | null): Promise<{ kind: "none" } | { kind: "range"; base: string; tip: string } | { kind: "refuse"; reason: string; transient?: boolean }> {
-    const held = await this.isBranchHeld(branch, repoPath, repoKey);
+  private async resolveOwedRange(branch: string, repoPath: string, repoKey: string | null, projectId?: string): Promise<{ kind: "none" } | { kind: "range"; base: string; tip: string } | { kind: "refuse"; reason: string; transient?: boolean }> {
+    const held = await this.isBranchHeld(branch, repoPath, repoKey, projectId);
     if (!held) return { kind: "none" };
     const guidance = "inspect the branch by hand and cherry-pick what is still owed onto a follow-up card's worker";
     // @decision f2b4d684 (round 6) — `transient:true` also covers PERMANENT causes (gc'd/forged/gone)
@@ -22056,7 +22068,10 @@ export class SessionService {
     // two reads could disagree under a transient fault (CR6's `toctou-owed` repro).
     if (!held.recorded.tip) {
       if (held.recorded.unverifiable) return { kind: "refuse", reason: `${branch} is HELD but its recorded landed tip could not be verified — ${transientGuidance}`, transient: true };
-      return { kind: "refuse", reason: `${branch} is HELD but its retain event records no readable assembledTip/landedTip, so the range it still owes main cannot be determined — ${guidance}` };
+      // @decision 5958c149 — honest wording: ABSENT means "nothing is KNOWN to be owed", never "a late
+      // commit landed" — that claim requires a positively-identified tip mismatch, which this branch does
+      // not have (see finishAlreadyMerged's heldAtFinish for the specimen this card's own kickoff found).
+      return { kind: "refuse", reason: `${branch} is HELD, but the landed tip could not be verified from Loom's own record or a strict trailer, so nothing is known to be owed (its retain event records no readable assembledTip/landedTip) — ${guidance}` };
     }
     const base = held.recorded.tip;
     const tip = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
@@ -22090,7 +22105,7 @@ export class SessionService {
    *  - reviewed tip unreadable (`tip:null`), tip unreadable, or any git error in the walk ⇒ `moved` (fail CLOSED).
    * @decision bbccf470 — one resolver; state is derived from git, never stored (no agent-writable edge); never re-derive "reviewed tip" at a call site.
    */
-  private async reviewedTipVerdict(branch: string, repoPath: string, repoKey: string | null, tip?: string | null): Promise<ReviewedTipVerdict> {
+  private async reviewedTipVerdict(branch: string, repoPath: string, repoKey: string | null, tip?: string | null, projectId?: string): Promise<ReviewedTipVerdict> {
     const last = this.db.listEventsForBranch(branch, "merge_request").filter((e) => (e.detail?.repoKey ?? null) === repoKey).at(-1);
     const live = tip !== undefined ? tip : await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs });
     if (!last || !Object.prototype.hasOwnProperty.call(last.detail ?? {}, "tip")) return { state: "never-reviewed", tip: live };
@@ -22100,7 +22115,7 @@ export class SessionService {
       // Card 13fc5227 / bd9a483b (round 4): a held branch's union of main is built over its owed base (see
       // mergeMainIntoWorktree's `owedBase`), so the walk must accept that base too — derived through the
       // SAME helper the landing-check stale re-check uses, so the two cannot drift apart.
-      const owed = await this.resolveOwedRange(branch, repoPath, repoKey);
+      const owed = await this.resolveOwedRange(branch, repoPath, repoKey, projectId);
       // @decision 1e7d6956 — deliberately ignores `chain.transient`: refusing to merge on ANY chain
       // failure (transient included) is the correct, conservative behavior here (bbccf470).
       const chain = await verifyReviewedTipChain(repoPath, recorded, live, { timeoutMs: this.gitOpMs }, this.extraUnionBasesForOwedBase(owed.kind === "range" ? owed.base : undefined));
@@ -22130,7 +22145,7 @@ export class SessionService {
     // @decision 89bc3b86 — reuses the SAME `preLandedLookupGitFactory` test seam the pre-gate lookup
     //  threads through (never a second, dedicated seam): production callers never set it, so this is
     //  byte-identical outside a hermetic test that deliberately faults this specific re-lookup.
-    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger: a.goneBranchLedger }));
+    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger: a.goneBranchLedger }), a.projectId, a.repoKey);
     const alreadyLanded = looked.result;
     if (!alreadyLanded) return null;
     const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded, repoKey: a.repoKey, tipUnverifiable: looked.tipUnverifiable });
@@ -22147,12 +22162,12 @@ export class SessionService {
    * @decision cc9bce38 — run a landed-squash lookup and resolve the tip to pin finalize to through {@link pinnedTipForLandedSquash}, with the branch tip read BEFORE and AFTER `check`
    * (trusted only when the same on both reads) as its legacy fallback.
    */
-  private async tipAcrossLandedCheck<T>(repoPath: string, branch: string, check: () => Promise<T>): Promise<{ result: T; landedTip?: string; branchGone?: boolean; tipUnverifiable?: boolean }> {
+  private async tipAcrossLandedCheck<T>(repoPath: string, branch: string, check: () => Promise<T>, projectId?: string, repoKey?: string | null): Promise<{ result: T; landedTip?: string; branchGone?: boolean; tipUnverifiable?: boolean }> {
     const before = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     const result = await check();
     const after = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     const stable = before && before === after ? before : undefined; // the legacy fallback: a tip read that did not move across the lookup
-    if (typeof result === "string" && result) return { result, ...(await this.pinnedTipForLandedSquash(repoPath, branch, result, stable)) };
+    if (typeof result === "string" && result) return { result, ...(await this.pinnedTipForLandedSquash(repoPath, branch, result, stable, projectId, repoKey)) };
     if (!before && !after && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }))) return { result, branchGone: true };
     return { result, ...(stable ? { landedTip: stable } : {}) };
   }
@@ -22166,9 +22181,16 @@ export class SessionService {
    * and never the `SOLO_TIP_UNVERIFIABLE` literal itself — persisting that literal (round 2) let a LATER
    * call read it back as a live git revision argument, and made a transient fault permanent.
    */
-  private async pinnedTipForLandedSquash(repoPath: string, branch: string, squashSha: string | null | undefined, legacyTip?: string): Promise<{ landedTip?: string; branchGone?: boolean; tipUnverifiable?: boolean }> {
+  private async pinnedTipForLandedSquash(repoPath: string, branch: string, squashSha: string | null | undefined, legacyTip?: string, projectId?: string, repoKey?: string | null): Promise<{ landedTip?: string; branchGone?: boolean; tipUnverifiable?: boolean }> {
     const live = await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory });
     if (!live && !(await branchExistsInRepo(repoPath, branch, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }))) return { branchGone: true };
+    // @decision 5958c149 — consult Loom's own synchronously-verified ledger FIRST, matched on
+    // (project, repoKey, tip=squashSha) — never a tolerant trailer re-read. Absent falls through
+    // unchanged to exactly today's strict `readLandedTipTrailer` behavior.
+    if (projectId && squashSha) {
+      const verified = this.db.getVerifiedLandedTip(projectId, repoKey ?? "primary", squashSha);
+      if (verified) return { landedTip: verified };
+    }
     const trailerTip = squashSha ? await readLandedTipTrailer(repoPath, squashSha, { timeoutMs: this.gitOpMs, gitFactory: this.alreadyLandedGitFactory }) : null;
     // @decision f2b4d684 (round 4) — `tipUnverifiable:true` rides alongside the still-empty `{}` (no
     // `landedTip`) so a caller can tell THIS cause apart from a genuine late/moved commit, without
@@ -22252,7 +22274,7 @@ export class SessionService {
     // Card 42daa283: an ALREADY_MERGED-style finish must never delete a HELD branch (its late commit was never landed) — refuse up front,
     // BEFORE the worker is hard-stopped or anything is announced. The held branch is released only by a real new squash (Green path) or its
     // durable trace (a later Loom-Worker-Branch commit on main / a newer merge_done) — see `isBranchHeld`.
-    const heldAtFinish = await this.isBranchHeld(args.branch, args.repoPath, args.repoKey);
+    const heldAtFinish = await this.isBranchHeld(args.branch, args.repoPath, args.repoKey, args.projectId);
     if (heldAtFinish) {
       // @decision f2b4d684 (round 6) — never cache this refusal plainly: a transient cause
       // (gitUnverified/tipUnverifiable) must set heldRangeUnverifiable, and its wording must name that
@@ -22264,6 +22286,10 @@ export class SessionService {
         ? `branch ${args.branch} is HELD by a merge retain (merge_batch or a solo worker_merge_confirm) and its release could not be VERIFIED: reading main for a later Loom-Worker-Branch commit (which would mean it was already landed) failed. Nothing was finalized or deleted. ${transientGuidance}`
         : heldAtFinish.recorded.unverifiable
         ? `branch ${args.branch} is HELD by a merge retain (merge_batch or a solo worker_merge_confirm), but its recorded landed tip could not be VERIFIED (the \`Loom-Landed-Tip\` trailer could not be read or resolved), so whether a late commit genuinely landed on it cannot be determined. Nothing was finalized or deleted. ${transientGuidance}`
+        // @decision 5958c149 — split ABSENT (recorded.tip null) from a positively-identified mismatch;
+        // only the latter is evidence a late commit landed.
+        : !heldAtFinish.recorded.tip
+        ? `branch ${args.branch} is HELD by a merge retain (merge_batch or a solo worker_merge_confirm), but the landed tip could not be verified from Loom's own record or a strict trailer, so nothing is known to be owed (its retain event records no readable assembledTip/landedTip). Nothing was finalized or deleted. Inspect the branch by hand: if it genuinely carries no late commits, a human remedy (a real merge_done, or re-confirming once a later Loom-Worker-Branch squash lands) releases the hold; if it does, cherry-pick what is still owed onto a follow-up card's worker.`
         : `branch ${args.branch} is HELD: a merge (a merge_batch or a solo worker_merge_confirm) retained it because commit(s) landed on it after that merge fixed its tip, and main carries no later Loom-Worker-Branch commit for it, so those were never gated or landed. Nothing was finalized or deleted. Review it with worker_merge (its \`lateRange\` shows the commits added after the landing), then land it with worker_merge_confirm, which lands exactly that late range (a real landing releases the hold). You reach THIS refusal instead when the finish found the branch's work already on main without landing the late range (a card sitting in the terminal column, or a late range that nets to nothing against main): inspect the branch and cherry-pick what is still owed onto a follow-up card's worker. The branch stays held until a real merge_done, a later Loom-Worker-Branch squash on main, or the branch tip returning to the tip that landed.`;
       return { merged: false, reason, notified: false, opId: args.opId, ...((heldAtFinish.gitUnverified || heldAtFinish.recorded.unverifiable) ? { heldRangeUnverifiable: true } : {}) };
     }
@@ -22456,11 +22482,14 @@ export class SessionService {
     //  on a held candidate stays allowed.
     const retainedOutstanding = new Map<string, { branch: string; assembledTip: string | null; liveTip: string | null; phase: BranchAdvancedDuringGate["phase"]; gitUnverified: boolean; tipUnverifiable: boolean; solo?: boolean }>();
     for (const cand of resolved) {
-      const heldC = await this.isBranchHeld(cand.branch, finalRepoPath, cand.repoKey); // BRANCH-keyed (a recycle successor shares the branch)
+      const heldC = await this.isBranchHeld(cand.branch, finalRepoPath, cand.repoKey, finalProjectId); // BRANCH-keyed (a recycle successor shares the branch)
       if (!heldC) continue;
       const ev = heldC.retain;
       retainedOutstanding.set(cand.workerSessionId, {
-        branch: cand.branch, assembledTip: typeof ev.detail?.assembledTip === "string" ? ev.detail.assembledTip : typeof ev.detail?.landedTip === "string" ? ev.detail.landedTip : null,
+        // @decision 5958c149 — falls back to heldC.recorded.tip (isBranchHeld's own ledger/trailer-
+        // resolved read) when the retain event itself recorded neither field, so a ledger-resolved hold
+        // never displays "landed unknown".
+        branch: cand.branch, assembledTip: typeof ev.detail?.assembledTip === "string" ? ev.detail.assembledTip : typeof ev.detail?.landedTip === "string" ? ev.detail.landedTip : heldC.recorded.tip,
         ...(ev.detail?.source === "solo" ? { solo: true } : {}),
         liveTip: typeof ev.detail?.liveTip === "string" ? ev.detail.liveTip : null,
         phase: (ev.detail?.phase as BranchAdvancedDuringGate["phase"] | undefined) ?? "pre-stop",
@@ -22480,7 +22509,7 @@ export class SessionService {
       if (retainedOutstanding.has(cand.workerSessionId)) continue;
       const w = this.db.getSession(cand.workerSessionId);
       if (!w || !fs.existsSync(w.worktreePath ?? w.cwd)) continue;
-      const rt = await this.reviewedTipVerdict(cand.branch, finalRepoPath, cand.repoKey);
+      const rt = await this.reviewedTipVerdict(cand.branch, finalRepoPath, cand.repoKey, undefined, finalProjectId);
       if (rt.state === "moved") reviewMoved.set(cand.workerSessionId, rt.text);
       else if (rt.tip) verifiedTip.set(cand.workerSessionId, rt.tip);
     }
@@ -22564,6 +22593,11 @@ export class SessionService {
         : h.phase === "ref-kept-after-finalize"
           // FINALIZED: the worker is done and its worktree is gone, so worker_merge_confirm has nothing to act on.
           ? `held, NOT re-attempted: ${h.solo ? describeSoloRetained(h.branch, h.assembledTip ?? undefined, h.liveTip, h.phase) : describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — the branch ref still has commits that are NOT on main and were never gated; inspect it and cherry-pick its commits onto a follow-up card's worker`
+        // @decision 5958c149 — split ABSENT (no recorded/ledger-resolved tip) from a positively-identified
+        // mismatch, same as finishAlreadyMerged's heldAtFinish split; only the latter is evidence a late
+        // commit landed — an absent tip must never assert "were never gated" as a known fact.
+        : h.assembledTip === null
+          ? `held, NOT re-attempted: ${h.solo ? describeSoloRetained(h.branch, h.assembledTip ?? undefined, h.liveTip, h.phase) : describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — the landed tip could not be verified from Loom's own record or a strict trailer, so nothing is known to be owed. Inspect the branch by hand: if it genuinely carries no late commits, a human remedy (a real merge_done, or re-confirming once a later Loom-Worker-Branch squash lands) releases the hold; if it does, review with worker_merge, then land with worker_merge_confirm`
           : `held, NOT re-attempted: ${h.solo ? describeSoloRetained(h.branch, h.assembledTip ?? undefined, h.liveTip, h.phase) : describeBranchRetained(h.branch, h.assembledTip, h.liveTip, h.phase)} — its unreviewed commit(s) were never gated; review with worker_merge, then land with worker_merge_confirm (any further commit stays held too)`;
       const handed = new Set<string>(); // candidates whose unit now belongs to a started confirm (that confirm releases it)
       try {
@@ -24378,8 +24412,11 @@ export class SessionService {
    *  re-read trusted `tip` as a given, letting a racer-forged sibling commit earn a ledger row.
    *  @decision 26c12fac — never call `db.recordMainlineLandedCommit` directly from a solo or batch
    *  landing caller; both must route through this one chokepoint, or the repoPath reconfirmation below
-   *  is silently bypassed for that caller. */
-  private recordMainlineLedgerEntryIfRepoUnchanged(projectId: string, repoKey: string, repoPath: string, branch: string, tip: string, base: string): void {
+   *  is silently bypassed for that caller.
+   *  @decision 5958c149 — a skipped write (any `return` below) drops `workerLandedTip` along with the
+   *  rest of the row, never partially — a later lookup for this sha then reads ABSENT, same as 26c12fac's
+   *  own "only ever makes a future lookup more conservative" rule; never a stale value from a wrong sha. */
+  private recordMainlineLedgerEntryIfRepoUnchanged(projectId: string, repoKey: string, repoPath: string, branch: string, tip: string, base: string, workerLandedTip?: string): void {
     // @decision 26c12fac round 2 — a removed registry entry (UnknownRepoKeyError) takes this SAME skip
     // branch + log line as an ordinary repoPath mismatch, never the generic fail-open catch below.
     const skipAsMismatch = (why: string) => console.warn(`[mainline-watch] ledger record skipped: repoPath for (${projectId}, ${repoKey}) changed mid-flight (rebind race, card 26c12fac)${why}`);
@@ -24395,7 +24432,7 @@ export class SessionService {
         return;
       }
       if (literalRepoPathKey(currentPath) !== literalRepoPathKey(repoPath)) { skipAsMismatch(""); return; }
-      this.db.recordMainlineLandedCommit(projectId, repoKey, branch, tip, base);
+      this.db.recordMainlineLandedCommit(projectId, repoKey, branch, tip, base, workerLandedTip);
     } catch (err) {
       console.warn(`[mainline-watch] ledger record skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -25389,7 +25426,7 @@ export class SessionService {
               const crExpectedRef = crWatermarkResolution.ref;
               // @decision c13666c6 — same branch-gone ledger gate confirmWorkerMerge itself threads.
               const crGoneBranchLedger = this.db.getGoneBranchLedgerFacts(project.id, worker.repoKey ?? "primary");
-              const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger: crGoneBranchLedger }).catch(() => null));
+              const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger: crGoneBranchLedger }).catch(() => null), project.id, worker.repoKey ?? null);
               const landedSha = crLooked.result;
               if (landedSha) {
                 const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null, tipUnverifiable: crLooked.tipUnverifiable });
@@ -27336,7 +27373,7 @@ export class SessionService {
     // @decision f2b4d684 (round 7) — DELIBERATELY a fresh, separate check (reusing an earlier snapshot
     // would miss a genuinely new retain); its own transient-fault signal now flows into
     // `causeUnverifiable` instead of being discarded (CR6's `toctou-finalize` repro).
-    const heldAtFinalize = args.releaseHold ? undefined : await this.isBranchHeld(args.branch, args.repoPath, args.repoKey);
+    const heldAtFinalize = args.releaseHold ? undefined : await this.isBranchHeld(args.branch, args.repoPath, args.repoKey, args.projectId);
     if (heldAtFinalize) {
       // eslint-disable-next-line no-console
       console.warn(`[finalizeMerge] branch ${args.branch} is HELD by a merge retain (batch or solo) — NOT finalizing (no worktree removal, no branch delete, no task move, no merge_done)`);
@@ -28194,7 +28231,7 @@ export class SessionService {
             : viaMap.scanComplete
               ? null
               : await findLandedSquashCommit(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps, goneBranchLedger }, () => { noPathSetTrailerNoticeCount++; });
-        });
+        }, project.id, s.repoKey ?? null);
         const landedSha = paLooked.result;
         if (!landedSha) continue;
         // Card 42daa283: a HELD branch (a merge_batch retained it: commit(s) landed on it after assembly, never gated or landed) is NEVER finalized
@@ -28202,7 +28239,7 @@ export class SessionService {
         // commit would be destroyed by finalize's branch delete + worktree force-remove. Skip it whole: no finalize, no delete, no merge_done.
         // @decision 9ac3a739 — this held check runs BEFORE "already finalized" below (never after): a
         // branch-name-only finalized check could otherwise swallow this skip's own mergesHeld++ count.
-        const heldA = await this.isBranchHeld(s.branch, repoPath, s.repoKey ?? null);
+        const heldA = await this.isBranchHeld(s.branch, repoPath, s.repoKey ?? null, project?.id);
         if (heldA) {
           mergesHeld++;
           handledWorktrees.add(worktreeIdentityKey(worktreePath));

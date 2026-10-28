@@ -78,6 +78,7 @@ try {
   const b = await cut("b", "feature-b.txt");
   const c = await cut("c", "feature-a.txt"); // add/add conflict with A once A has landed ⇒ dropped, never finished
   const d = await cut("d", "feature-d.txt");  // synthetic held candidate for the (reason)/(release) cases; not in the first batch
+  const e = await cut("e", "feature-e.txt");  // synthetic held candidate with NO recorded tip, for the (absent) wording-split case; not in the first batch
 
   const script = path.join(os.tmpdir(), `loom-bmrh-gate-${sfx}.mjs`);
   registerForCleanup(script);
@@ -95,8 +96,8 @@ try {
   db.insertProject({ id: projId, name: "BMRH", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: `node "${script}"` } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
-  const wA = `bmrh-wkr-a-${sfx}`, wB = `bmrh-wkr-b-${sfx}`, wC = `bmrh-wkr-c-${sfx}`, wD = `bmrh-wkr-d-${sfx}`;
-  for (const [wId, w, label] of [[wA, a, "a"], [wB, b, "b"], [wC, c, "c"], [wD, d, "d"]]) {
+  const wA = `bmrh-wkr-a-${sfx}`, wB = `bmrh-wkr-b-${sfx}`, wC = `bmrh-wkr-c-${sfx}`, wD = `bmrh-wkr-d-${sfx}`, wE = `bmrh-wkr-e-${sfx}`;
+  for (const [wId, w, label] of [[wA, a, "a"], [wB, b, "b"], [wC, c, "c"], [wD, d, "d"], [wE, e, "e"]]) {
     db.insertTask({ id: w.taskId, projectId: projId, title: `feat(test): ${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
     db.insertSession({ id: wId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: w.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: w.taskId, worktreePath: w.worktreePath, branch: w.branch });
   }
@@ -165,6 +166,21 @@ try {
   check("(reason) its reason does NOT tell the manager to worker_merge_confirm, and says to inspect the ref", !!heldD && !/worker_merge_confirm/.test(heldD.reason) && /inspect it/.test(heldD.reason));
   check("(reason) contrast: A's live-phase reason DOES name worker_merge_confirm", /worker_merge_confirm/.test(heldEntry(againVal, wA)?.reason ?? ""));
   check("(reason) D's branch and task were left alone", refExists(repo, d.branch) && db.getTask(d.taskId)?.columnKey === "in_progress" && !fs.existsSync(path.join(repo, "feature-d.txt")));
+
+  // (absent) card 5958c149: a synthetic retain with NO recorded tip at all (no assembledTip/landedTip/
+  // landedSha) in a LIVE phase (not ref-kept-after-finalize) — the wording split must say "could not be
+  // verified ... nothing is known to be owed", never the blanket "were never gated" claim, since nothing
+  // here is evidence a late commit landed.
+  db.appendEvent({
+    id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrId, kind: "batch_merge_branch_retained", workerSessionId: wE, taskId: e.taskId,
+    detail: { opId: "synthetic", branch: e.branch, liveTip: "1".repeat(40), phase: "pre-stop" }, // deliberately NO assembledTip/landedTip/landedSha
+  });
+  const absentVal = await refire(mk(), [wE, wB]);
+  const heldE = heldEntry(absentVal, wE);
+  check("(absent) E (no recorded tip) is reported held", !!heldE);
+  check("(absent) its reason uses the HONEST absent-tip wording, not the blanket \"were never gated\" claim", !!heldE && /could not be verified from Loom's own record or a strict trailer/.test(heldE.reason) && !/were never gated/.test(heldE.reason));
+  check("(absent) contrast: A's positively-known reason DOES say \"were never gated\"", /were never gated/.test(heldEntry(againVal, wA)?.reason ?? ""));
+  check("(absent) E's branch and task were left alone", refExists(repo, e.branch) && db.getTask(e.taskId)?.columnKey === "in_progress" && !fs.existsSync(path.join(repo, "feature-e.txt")));
 
   // (members) a held candidate is not a MEMBER of the batch that ran: no batch_merge_dropped event of the re-fire names D's branch.
   const dropEvents = db.listEvents(mgrId).filter((e) => e.kind === "batch_merge_dropped");
