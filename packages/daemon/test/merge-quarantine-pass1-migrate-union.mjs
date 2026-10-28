@@ -59,6 +59,11 @@ const SCENARIOS = [
   "dual-armed-sibling-at-non-first-key-text-and-id-agree",
   "unmarked-sibling-cross-ref-orphan",
   "unmarked-sibling-cross-ref-failed-delete",
+  "cross-key-dangling-orphan-after-sibling-migrate",
+  "cross-key-strip-failed-unlink-stays-referenced-by-migrating-key",
+  "cross-key-strip-dual-armed-both-keys-written",
+  "cross-key-strip-survives-migrating-keys-own-write-failure",
+  "cross-key-strip-degraded-and-pending-bystanders",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -101,7 +106,7 @@ const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-qua
 const {
   reenterMergeQuarantinesAtBoot, activeMergeQuarantineFor, clearMergeQuarantine, clearMergeQuarantineLatchFile,
   quarantineLatchIdFor, MERGE_QUARANTINE_DIR, clearMergeQuarantineByRecordedPath, assertRepoNotQuarantined,
-  clearMergeQuarantineByKey,
+  clearMergeQuarantineByKey, reenterMergeQuarantinesAtBootTestOnly,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -1287,6 +1292,462 @@ try {
     check("(reboot-sim) the dangling reference is gone for good now", !(activeRAfter?.orphanLatchFiles ?? []).includes(yBasename));
 
     reboot1.clearMergeQuarantine(r);
+  } else if (scenarioName === "cross-key-dangling-orphan-after-sibling-migrate") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD da716192 (from 9c3b023a's own Code Review, reviewer 62eeb9f8). 9c3b023a strips only the
+    // CURRENT key's own migrate `sources` from its union's orphanLatchFiles. The cross-key variant:
+    // entry A at key K lists a file O in orphanLatchFiles, where O is a migrate SOURCE of a DIFFERENT
+    // key L — reached here via a REAL two-boot sequence, never a hand-authored impossible entry:
+    //   BOOT 1 — K is a real, standalone, already-quarantined repo. A genuinely CORRUPT/unparsable latch
+    //     O matches no repo registered THIS boot (L is not yet registered) ⇒ PASS 2 broadcasts O into
+    //     K's own REAL entry's orphanLatchFiles (merge-quarantine.ts PASS 2, ~:9577-9622) — the ordinary,
+    //     real "an orphan is referenced by every registered repo so a human clear can eventually free it"
+    //     mechanism.
+    //   BOOT 2 — L (a nested subdir of its own repo, so its LEGACY direct-path hash differs from its
+    //     CURRENT canonical-key hash — same shape `oldHashFor`'s own siblings use elsewhere in this file)
+    //     is now ALSO registered. O's filename is exactly L's own LEGACY hash, so PASS 1's deferred
+    //     corrupt-latch loop now matches O to L via `hashToRepo`'s legacy-tier entry (merge-quarantine.ts
+    //     ~:8594-8617 — the "Site A" legacy, unverified hash match the card names) and migrates O into L's
+    //     key as one of L's own `sources`. 9c3b023a's PHASE 1a strip only ever consulted `sources` for the
+    //     CURRENT key being written (L here) — K was never in `migratedSourcesByKey` at all this boot (K
+    //     has no stale source of its own), so PHASE 1a never even looked at K's entry.
+    // @decision da716192 — THE FIX: a CROSS-KEY strip, right before PHASE 1a, strips every migrating
+    // source from every OTHER live entry's orphanLatchFiles too. See the decision record.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const k = path.join(os.tmpdir(), `loom-da716192-k-${freshSfx()}`);
+    fs.mkdirSync(k, { recursive: true });
+    tmpDirs.push(k);
+    fs.writeFileSync(path.join(k, "README.md"), "# cross-key-dangling-orphan-after-sibling-migrate (K)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: k });
+    commitAll(k, "init", GIT_ID);
+    const keyK = canonicalRepoLockKey(k);
+
+    const { repo: lRoot, teamA: l } = makeRepoWithTwoSubdirs("da716192-l"); // l = teamA, no own .git — legacy hash (direct-path) != current canonical-key hash (walks up to lRoot)
+    const keyL = canonicalRepoLockKey(l);
+    check("(precondition) l's canonical key walks up to lRoot, not its own path", keyL === canonicalRepoLockKey(lRoot) && keyL !== l);
+    const legacyHashL = oldHashFor(l);
+    check("(precondition) l's LEGACY hash genuinely differs from its CURRENT canonical-key hash", legacyHashL !== hashForKey(keyL));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const fileK = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(keyK)}.json`);
+    fs.writeFileSync(fileK, JSON.stringify({
+      repoPath: k, branch: "branch-K", reason: "K's real, genuine reason — already quarantined before O ever existed", enteredAt: Date.now() - 60_000, tokens: ["token-K"],
+    }, null, 2) + "\n");
+    const fileO = path.join(MERGE_QUARANTINE_DIR, `${legacyHashL}.json`);
+    const oBasename = path.basename(fileO);
+    fs.writeFileSync(fileO, "{ this is not valid json, it never parses "); // genuinely CORRUPT — never valid JSON on either boot
+
+    // BOOT 1 — L is NOT registered yet. O matches no registered repo ⇒ a genuine orphan, broadcast into
+    // K's own REAL entry by PASS 2 (never hand-written).
+    reenterMergeQuarantinesAtBoot([k]);
+    const activeKBoot1 = activeMergeQuarantineFor(k);
+    check("(boot 1) K reads quarantined with its own real token", !!activeKBoot1 && (activeKBoot1.tokens ?? []).includes("token-K"));
+    check("(boot 1) PASS 2 broadcast O into K's own REAL entry's orphanLatchFiles — via the real mechanism, never hand-authored", (activeKBoot1?.orphanLatchFiles ?? []).includes(oBasename));
+    check("(boot 1) O's own file is untouched — PASS 2 only references orphans, never deletes them", fs.existsSync(fileO));
+    const onDiskKBoot1 = JSON.parse(fs.readFileSync(fileK, "utf8"));
+    check("(boot 1) the PERSISTED K final also carries the broadcast reference", (onDiskKBoot1.orphanLatchFiles ?? []).includes(oBasename));
+
+    // BOOT 2 — L is now ALSO registered. O's hash now legacy-matches L ⇒ migrates into L's key as one of
+    // L's own `sources`, never K's.
+    const reboot1 = await rebootSim();
+    reboot1.reenterMergeQuarantinesAtBoot([k, l]);
+    const activeLBoot2 = reboot1.activeMergeQuarantineFor(l);
+    check("(boot 2) L is now armed/quarantined under its own real, current key (the legacy match, fail-closed)", !!activeLBoot2);
+    check("(boot 2) O's file is GONE — migrated into L's key and deleted by PHASE 3", !fs.existsSync(fileO));
+
+    const activeKBoot2 = reboot1.activeMergeQuarantineFor(k);
+    check(
+      "*** THE FIX (in-memory) *** K's entry no longer lists O's now-deleted basename — the cross-key strip ran before PHASE 1a/3",
+      !(activeKBoot2?.orphanLatchFiles ?? []).includes(oBasename),
+    );
+    check("*** THE FIX *** K's own real token survives the strip untouched", (activeKBoot2?.tokens ?? []).includes("token-K"));
+    const onDiskKBoot2 = JSON.parse(fs.readFileSync(fileK, "utf8"));
+    check(
+      "*** THE FIX (persisted) *** the on-disk K final is ALSO stripped — never left stale for a future boot to re-discover",
+      !(onDiskKBoot2.orphanLatchFiles ?? []).includes(oBasename),
+    );
+
+    // THE MISATTRIBUTION 9c3b023a fixed WITHIN one key must NOT reproduce ACROSS two keys either.
+    const clearOnFreedId = reboot1.clearMergeQuarantineLatchFile(legacyHashL);
+    check("(clear-by-id on O's freed id) call succeeds", clearOnFreedId.ok === true);
+    check("(clear-by-id on O's freed id) wasQuarantined===false — nothing is ARMED at this id (it was a migrate SOURCE, not a target)", clearOnFreedId.wasQuarantined === false);
+    check(
+      "*** THE FIX *** clear-by-id on O's freed id is NOT misattributed as kept/referenced by K",
+      !clearOnFreedId.latchKept,
+    );
+
+    // K itself is still a genuine, live quarantine after all this — the fix subtracts a stale reference,
+    // never the entry's own real identity/tokens.
+    check("(sanity) K is STILL quarantined (its own real raise, unaffected by the strip)", !!reboot1.activeMergeQuarantineFor(k));
+
+    reboot1.clearMergeQuarantine(k);
+    reboot1.clearMergeQuarantine(l);
+  } else if (scenarioName === "cross-key-strip-failed-unlink-stays-referenced-by-migrating-key") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD da716192 — FAIL DIRECTION for the cross-key strip above: a source whose PHASE 3 unlink
+    // genuinely FAILS must still be referenced somewhere, by the MIGRATING key (L, via c870618c's own
+    // pre-existing fold-on-failed-unlink), never by the unrelated bystander key (K) the cross-key strip
+    // already unconditionally subtracted it from. Same shape as `unmarked-sibling-cross-ref-failed-delete`
+    // above, but across two keys instead of one.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const k = path.join(os.tmpdir(), `loom-da716192-fd-k-${freshSfx()}`);
+    fs.mkdirSync(k, { recursive: true });
+    tmpDirs.push(k);
+    fs.writeFileSync(path.join(k, "README.md"), "# cross-key-strip-failed-unlink (K)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: k });
+    commitAll(k, "init", GIT_ID);
+    const keyK = canonicalRepoLockKey(k);
+
+    const { repo: lRoot, teamA: l } = makeRepoWithTwoSubdirs("da716192-fd-l");
+    const keyL = canonicalRepoLockKey(l);
+    const legacyHashL = oldHashFor(l);
+    check("(precondition) l's LEGACY hash genuinely differs from its CURRENT canonical-key hash", legacyHashL !== hashForKey(keyL));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const fileK = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(keyK)}.json`);
+    fs.writeFileSync(fileK, JSON.stringify({
+      repoPath: k, branch: "branch-K", reason: "K's real, genuine reason — already quarantined before O ever existed", enteredAt: Date.now() - 60_000, tokens: ["token-K"],
+    }, null, 2) + "\n");
+    const fileO = path.join(MERGE_QUARANTINE_DIR, `${legacyHashL}.json`);
+    const oBasename = path.basename(fileO);
+    fs.writeFileSync(fileO, "{ this is not valid json, it never parses ");
+
+    reenterMergeQuarantinesAtBoot([k]); // BOOT 1 — O is a genuine orphan, broadcast into K's real entry.
+    check("(boot 1) K's entry carries the broadcast reference", (activeMergeQuarantineFor(k)?.orphanLatchFiles ?? []).includes(oBasename));
+
+    // BOOT 2 — L is now registered too, and O's own unlink is injected to FAIL (EBUSY).
+    const realUnlinkSync = fs.unlinkSync;
+    let hitCount = 0;
+    fs.unlinkSync = function patchedUnlinkSync(p, ...rest) {
+      if (path.resolve(String(p)) === path.resolve(fileO)) {
+        hitCount++;
+        const err = new Error("EBUSY: resource busy or locked (injected)");
+        err.code = "EBUSY";
+        throw err;
+      }
+      return realUnlinkSync.call(this, p, ...rest);
+    };
+    const reboot1 = await rebootSim();
+    try {
+      reboot1.reenterMergeQuarantinesAtBoot([k, l]);
+    } finally {
+      fs.unlinkSync = realUnlinkSync;
+    }
+    check("(precondition) the injected EBUSY was hit exactly once (O's own source only)", hitCount === 1);
+
+    check("(boot 2) O's file genuinely SURVIVES on disk (the injected unlink failed)", fs.existsSync(fileO));
+    const activeKAfter = reboot1.activeMergeQuarantineFor(k);
+    check(
+      "*** THE FIX *** K no longer references O — the cross-key strip subtracted it unconditionally, BEFORE PHASE 3 ever attempted (and failed) the delete",
+      !(activeKAfter?.orphanLatchFiles ?? []).includes(oBasename),
+    );
+    const activeLAfter = reboot1.activeMergeQuarantineFor(l);
+    check(
+      "*** FAIL DIRECTION *** L (the MIGRATING key) now references the still-undeleted O instead — c870618c's own pre-existing fold-on-failed-unlink, never a cross-key orphan",
+      (activeLAfter?.orphanLatchFiles ?? []).includes(oBasename),
+    );
+    const freshPathL = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(keyL)}.json`);
+    const onDiskL = JSON.parse(fs.readFileSync(freshPathL, "utf8"));
+    check("*** FAIL DIRECTION (persisted) *** L's own persisted final also carries the fold", (onDiskL.orphanLatchFiles ?? []).includes(oBasename));
+
+    const clearOnFreedIdWhileAlive = reboot1.clearMergeQuarantineLatchFile(legacyHashL);
+    check(
+      "(clear-by-id while O still genuinely exists) correctly reports it KEPT, referencing L — this is TRUE right now, not misattribution",
+      clearOnFreedIdWhileAlive.ok === true && clearOnFreedIdWhileAlive.latchKept === true && (clearOnFreedIdWhileAlive.referencingRepoPaths ?? []).includes(l),
+    );
+    check("(clear-by-id while O still genuinely exists) O's file survives this id-mismatched clear", fs.existsSync(fileO));
+
+    // A later, clean boot must finally delete the survivor and leave nothing misattributed anywhere.
+    const reboot2 = await rebootSim();
+    reboot2.reenterMergeQuarantinesAtBoot([k, l]);
+    check("(reboot-sim 2) O's stale survivor is finally deleted on a clean boot", !fs.existsSync(fileO));
+    check("(reboot-sim 2) K still carries no reference to it", !(reboot2.activeMergeQuarantineFor(k)?.orphanLatchFiles ?? []).includes(oBasename));
+    check("(reboot-sim 2) L no longer references it either (its own source is finally gone)", !(reboot2.activeMergeQuarantineFor(l)?.orphanLatchFiles ?? []).includes(oBasename));
+
+    reboot2.clearMergeQuarantine(k);
+    reboot2.clearMergeQuarantine(l);
+  } else if (scenarioName === "cross-key-strip-dual-armed-both-keys-written") {
+    // @decision da716192 — rebuilt in CR round 3 (round 2's 2-key version couldn't discriminate threaded
+    // from unthreaded code). THREE keys, last two genuinely MARKED via a real injected EACCES, each with
+    // a different extra token found only via reconcile. See the decision record's "Round 3" (item 1).
+    const k = path.join(os.tmpdir(), `loom-da716192-da-k-${freshSfx()}`);
+    fs.mkdirSync(k, { recursive: true });
+    tmpDirs.push(k);
+    fs.writeFileSync(path.join(k, "README.md"), "# cross-key-strip-dual-armed (K)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: k });
+    commitAll(k, "init", GIT_ID);
+    const keyK = canonicalRepoLockKey(k);
+
+    const v = path.join(os.tmpdir(), `loom-da716192-da-v-${freshSfx()}`); // only to mint a stable, distinct SECONDARY key
+    fs.mkdirSync(v, { recursive: true });
+    tmpDirs.push(v);
+    fs.writeFileSync(path.join(v, "README.md"), "# cross-key-strip-dual-armed (V)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: v });
+    commitAll(v, "init", GIT_ID);
+    const keyV = canonicalRepoLockKey(v);
+
+    const w = path.join(os.tmpdir(), `loom-da716192-da-w-${freshSfx()}`); // only to mint a THIRD, distinct SECONDARY key
+    fs.mkdirSync(w, { recursive: true });
+    tmpDirs.push(w);
+    fs.writeFileSync(path.join(w, "README.md"), "# cross-key-strip-dual-armed (W)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: w });
+    commitAll(w, "init", GIT_ID);
+    const keyW = canonicalRepoLockKey(w);
+    check("(precondition) K, V, and W have genuinely different canonical keys", new Set([keyK, keyV, keyW]).size === 3);
+
+    const { repo: lRoot, teamA: l } = makeRepoWithTwoSubdirs("da716192-da-l");
+    const keyL = canonicalRepoLockKey(l);
+    const legacyHashL = oldHashFor(l);
+    check("(precondition) l's LEGACY hash genuinely differs from its CURRENT canonical-key hash", legacyHashL !== hashForKey(keyL));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const fileK = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(keyK)}.json`);
+    const oBasename = `${legacyHashL}.json`;
+    fs.writeFileSync(fileK, JSON.stringify({
+      repoPath: k, branch: "branch-K", reason: "K's real, genuine reason — dual-armed at keyV and keyW too",
+      enteredAt: Date.now() - 60_000, tokens: ["token-K"], resolvedKeys: [keyV, keyW], orphanLatchFiles: [oBasename],
+    }, null, 2) + "\n");
+    const fileO = path.join(MERGE_QUARANTINE_DIR, oBasename);
+    fs.writeFileSync(fileO, "{ this is not valid json, it never parses ");
+    const fileV = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(keyV)}.json`);
+    fs.writeFileSync(fileV, JSON.stringify({
+      repoPath: k, branch: "branch-K", reason: "K's own content at its SECOND key, discovered only via reconcile",
+      enteredAt: Date.now() - 60_000, tokens: ["token-K", "token-V-EXTRA"],
+    }, null, 2) + "\n");
+    const fileW = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(keyW)}.json`);
+    fs.writeFileSync(fileW, JSON.stringify({
+      repoPath: k, branch: "branch-K", reason: "K's own content at its THIRD key, discovered only via reconcile",
+      enteredAt: Date.now() - 60_000, tokens: ["token-K", "token-W-EXTRA"],
+    }, null, 2) + "\n");
+
+    // A REAL, genuine read failure (EACCES) on the FIRST read of fileV/fileW's own path — routes through
+    // the REAL divertUnreadableBootLatch mechanism (never the test-only seam), so PASS1 itself never sees
+    // either file's content; every LATER read (the cross-key strip's own reconcile) succeeds normally.
+    const failedOnce = new Set();
+    const realReadFileSync = fs.readFileSync;
+    fs.readFileSync = (p, ...rest) => {
+      if (typeof p === "string" && (p === fileV || p === fileW) && !failedOnce.has(p)) {
+        failedOnce.add(p);
+        const err = new Error("EACCES: simulated"); err.code = "EACCES";
+        throw err;
+      }
+      return realReadFileSync(p, ...rest);
+    };
+    let activeKAfter;
+    try {
+      reenterMergeQuarantinesAtBoot([k, v, w, l]); // ONE boot — O migrates into L's key; keyV/keyW's own real content is discovered only at write time.
+      activeKAfter = activeMergeQuarantineFor(k);
+    } finally {
+      fs.readFileSync = realReadFileSync;
+    }
+    check("(precondition) the injected EACCES was hit for BOTH fileV and fileW, exactly once each", failedOnce.has(fileV) && failedOnce.has(fileW) && failedOnce.size === 2);
+    check("(boot) O's file is GONE — migrated into L's key and deleted by PHASE 3", !fs.existsSync(fileO));
+
+    check("(boot) K is armed at ALL THREE keys", !!activeKAfter?.armedKeys?.includes(keyK) && !!activeKAfter?.armedKeys?.includes(keyV) && !!activeKAfter?.armedKeys?.includes(keyW));
+    check("*** THE FIX (in-memory) *** K's entry no longer lists O's now-deleted basename", !(activeKAfter?.orphanLatchFiles ?? []).includes(oBasename));
+    check("*** THE FIX *** K's own real token survives the strip untouched", (activeKAfter?.tokens ?? []).includes("token-K"));
+    check("*** THE FIX (#1, threading — CR round 3's own repro) *** memory holds BOTH keyV's AND keyW's own reconciled tokens, not just whichever reconciled LAST", (activeKAfter?.tokens ?? []).includes("token-V-EXTRA") && (activeKAfter?.tokens ?? []).includes("token-W-EXTRA"));
+
+    const clearOnFreedId = clearMergeQuarantineLatchFile(legacyHashL);
+    check("*** THE FIX *** clear-by-id on O's freed id is NOT misattributed as kept/referenced by K", !clearOnFreedId.latchKept);
+    check("(sanity) K is STILL quarantined", !!activeMergeQuarantineFor(k));
+
+    clearMergeQuarantine(k);
+    clearMergeQuarantine(l);
+  } else if (scenarioName === "cross-key-strip-survives-migrating-keys-own-write-failure") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD da716192 — Code Review item #5(b): the strip must run (and survive) even when PHASE 3 never
+    // gets a chance to delete O at all, because L's own WHOLE WRITE fails (writeOutcomesByKey records
+    // `succeeded:false`) — a DIFFERENT failure shape than the existing failed-UNLINK scenario above (that
+    // one's write SUCCEEDS; only the per-file delete fails). O must stay referenced by L (PHASE 3's own
+    // `else` branch, which folds every source into L's orphanLatchFiles on a failed write), never by K.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const k = path.join(os.tmpdir(), `loom-da716192-wf-k-${freshSfx()}`);
+    fs.mkdirSync(k, { recursive: true });
+    tmpDirs.push(k);
+    fs.writeFileSync(path.join(k, "README.md"), "# cross-key-strip-survives-write-failure (K)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: k });
+    commitAll(k, "init", GIT_ID);
+    const keyK = canonicalRepoLockKey(k);
+
+    const { repo: lRoot, teamA: l } = makeRepoWithTwoSubdirs("da716192-wf-l");
+    const keyL = canonicalRepoLockKey(l);
+    const legacyHashL = oldHashFor(l);
+    const freshHashL = hashForKey(keyL);
+    check("(precondition) l's LEGACY hash genuinely differs from its CURRENT canonical-key hash", legacyHashL !== freshHashL);
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const fileK = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(keyK)}.json`);
+    fs.writeFileSync(fileK, JSON.stringify({
+      repoPath: k, branch: "branch-K", reason: "K's real, genuine reason", enteredAt: Date.now() - 60_000, tokens: ["token-K"],
+    }, null, 2) + "\n");
+    const fileO = path.join(MERGE_QUARANTINE_DIR, `${legacyHashL}.json`);
+    const oBasename = path.basename(fileO);
+    fs.writeFileSync(fileO, "{ this is not valid json, it never parses ");
+
+    reenterMergeQuarantinesAtBoot([k]); // BOOT 1 — O is a genuine orphan, broadcast into K's real entry.
+    check("(boot 1) K's entry carries the broadcast reference", (activeMergeQuarantineFor(k)?.orphanLatchFiles ?? []).includes(oBasename));
+
+    // BOOT 2 — L is now registered too; L's OWN write (the migrate-write for freshHashL's tmp) is
+    // injected to FAIL outright (not just its later unlink) — `writeOutcomesByKey.succeeded:false`.
+    const realOpenSync = fs.openSync;
+    let hitCount = 0;
+    fs.openSync = (p, ...rest) => {
+      if (typeof p === "string" && p.includes(freshHashL) && p.includes(".tmp-")) {
+        hitCount++;
+        throw Object.assign(new Error("EMFILE: too many open files (injected)"), { code: "EMFILE" });
+      }
+      return realOpenSync(p, ...rest);
+    };
+    const reboot1 = await rebootSim();
+    try {
+      reboot1.reenterMergeQuarantinesAtBoot([k, l]);
+    } finally {
+      fs.openSync = realOpenSync;
+    }
+    check("(precondition) L's own migrate-write was hit by the injected failure at least once", hitCount > 0);
+    check("(precondition) L's own fresh final was never created — the write genuinely failed", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${freshHashL}.json`)));
+    check("(boot 2) O's file genuinely SURVIVES on disk (the write for L failed, so PHASE 3 never even attempted a delete)", fs.existsSync(fileO));
+
+    const activeKAfter = reboot1.activeMergeQuarantineFor(k);
+    check(
+      "*** THE FIX *** K no longer references O — the cross-key strip subtracted it unconditionally, before PHASE 1a's write for L was even attempted",
+      !(activeKAfter?.orphanLatchFiles ?? []).includes(oBasename),
+    );
+    const activeLAfter = reboot1.activeMergeQuarantineFor(l);
+    check(
+      "*** FAIL DIRECTION *** L itself now references the still-undeleted O (PHASE 3's own `else` branch folds every source on a failed write) — never K",
+      (activeLAfter?.orphanLatchFiles ?? []).includes(oBasename),
+    );
+
+    // A later, clean boot must finally succeed and leave nothing misattributed anywhere.
+    const reboot2 = await rebootSim();
+    reboot2.reenterMergeQuarantinesAtBoot([k, l]);
+    check("(reboot-sim 2) O's stale survivor is finally deleted on a clean boot", !fs.existsSync(fileO));
+    check("(reboot-sim 2) K still carries no reference to it", !(reboot2.activeMergeQuarantineFor(k)?.orphanLatchFiles ?? []).includes(oBasename));
+    check("(reboot-sim 2) L no longer references it either", !(reboot2.activeMergeQuarantineFor(l)?.orphanLatchFiles ?? []).includes(oBasename));
+
+    reboot2.clearMergeQuarantine(k);
+    reboot2.clearMergeQuarantine(l);
+  } else if (scenarioName === "cross-key-strip-degraded-and-pending-bystanders") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD da716192 — Code Review item #2 (Lead ruling): a DEGRADED-OCCUPIED bystander (byRepoKey, but
+    // its own key is in degradedOccupiedKeys — mirrors this file's own "degraded-receiver-guard" /
+    // "union-with-degraded-in-memory" construction) and a PENDING bystander (pendingUnresolvedQuarantines,
+    // injected via reenterMergeQuarantinesAtBootTestOnly — the same real, documented test-only seam
+    // ef651188 added) can carry the identical dangling cross-reference; both must be stripped IN MEMORY,
+    // with NO disk write attempted for either (bootWriteLatch would refuse the degraded one anyway; a
+    // pending entry has no key of its own to write through).
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const y = path.join(os.tmpdir(), `loom-da716192-deg-y-${freshSfx()}`);
+    fs.mkdirSync(y, { recursive: true });
+    tmpDirs.push(y);
+    fs.writeFileSync(path.join(y, "README.md"), "# cross-key-strip-degraded-and-pending-bystanders (Y)\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: y });
+    commitAll(y, "init", GIT_ID);
+    const ky = canonicalRepoLockKey(y);
+
+    const x = path.join(os.tmpdir(), `loom-da716192-deg-x-never-exists-${freshSfx()}`); // deliberately never created
+    check("(precondition) X never exists at all", !fs.existsSync(x));
+
+    const { repo: lRoot, teamA: l } = makeRepoWithTwoSubdirs("da716192-deg-l");
+    const keyL = canonicalRepoLockKey(l);
+    const legacyHashL = oldHashFor(l);
+    check("(precondition) l's LEGACY hash genuinely differs from its CURRENT canonical-key hash", legacyHashL !== hashForKey(keyL));
+
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const xFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(ky)}.json`); // X's REAL backing-file location (a manufactured resolvedKey collision with Y, same shape as degraded-receiver-guard)
+    const yFile = path.join(MERGE_QUARANTINE_DIR, `stale-y-deg-${freshSfx()}.json`); // non-hash name -> migrates, forcing ky into degradedOccupiedKeys
+    const fileO = path.join(MERGE_QUARANTINE_DIR, `${legacyHashL}.json`);
+    const oBasename = path.basename(fileO);
+    fs.writeFileSync(xFile, JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y",
+      enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: ky, orphanLatchFiles: [oBasename],
+    }, null, 2) + "\n");
+    fs.writeFileSync(yFile, JSON.stringify({
+      repoPath: y, branch: "y-branch", reason: "Y's real, genuine unconfirmed-kill reason", enteredAt: Date.now(), tokens: ["y-token"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(fileO, "{ this is not valid json, it never parses ");
+
+    // A PENDING bystander — an unresolvable repo (never exists) whose own `sourceFile` is a SYNTHETIC
+    // name, never itself a migrating source this boot, and whose orphanLatchFiles cross-lists BOTH O (a
+    // genuinely dangling cross-key reference — must be stripped) AND that same `sourceFile` (self-ref).
+    // CR round 3, item #4: the `f === p.sourceFile` exclusion is NOT exercised by this construction —
+    // `pendingSourceFile` is never a member of `allMigratingSources`, so `!allMigratingSources.has(f)`
+    // alone already keeps it; the exclusion has nothing to prove here. A construction where `sourceFile`
+    // itself is ALSO a genuine migrate source was tried and abandoned: `clearMergeQuarantineLatchFile`
+    // resolves such an id via `pendingLatchIdFor(p.sourceFile)` directly (the matchedPending branch),
+    // never via the orphan-sweep's own `p.entry.orphanLatchFiles` cross-reference scan — so no caller in
+    // this module ever reads `orphanLatchFiles` CONTENT for a basename that also equals that SAME entry's
+    // own `sourceFile`, and the exclusion's own effect is consequently unobservable end-to-end. The check
+    // below is relabeled to state only what it verifies: the pending wrapper survives the pass intact.
+    const pendingRepoPath = path.join(os.tmpdir(), `loom-da716192-pending-never-exists-${freshSfx()}`);
+    const pendingSourceFile = `stale-pending-deg-${freshSfx()}.json`;
+    const pendingEntry = {
+      repoPath: pendingRepoPath, branch: "pending-branch", reason: "a pending bystander, unresolvable this boot",
+      enteredAt: Date.now(), tokens: ["pending-token"], orphanLatchFiles: [oBasename, pendingSourceFile], placeholder: true,
+    };
+
+    reenterMergeQuarantinesAtBootTestOnly([y, x], [{ entry: pendingEntry, sourceFile: pendingSourceFile }]); // BOOT 1 — L not yet registered; O is a genuine orphan (but never broadcast to x/the pending entry — they already cross-list it directly, mirroring an EARLIER boot's own broadcast).
+    check("(precondition) X still reads quarantined, fail-closed, with no file ever written for it this way", !!activeMergeQuarantineFor(x));
+    check("(precondition) Y still reads quarantined too", !!activeMergeQuarantineFor(y));
+
+    const xFileBytesBeforeBoot2 = fs.readFileSync(xFile); // CR round 3, item #4: snapshot BEFORE boot 2, never compare the file with itself.
+
+    const reboot1 = await rebootSim();
+    // Re-seed the identical shapes in the fresh module instance (module state resets on reimport).
+    reboot1.reenterMergeQuarantinesAtBootTestOnly([y, x, l], [{ entry: pendingEntry, sourceFile: pendingSourceFile }]); // BOOT 2 — L now registered; O migrates into L's key.
+    check("(boot 2) O's file is GONE — migrated into L's key and deleted by PHASE 3", !fs.existsSync(fileO));
+    check("(boot 2) X's own backing file is BYTE-IDENTICAL to before — degradedOccupiedKeys refuses any write there", fs.existsSync(xFile) && Buffer.compare(xFileBytesBeforeBoot2, fs.readFileSync(xFile)) === 0);
+
+    const activeXAfter = reboot1.activeMergeQuarantineFor(x);
+    check("*** THE FIX (degraded, in-memory) *** X still reads quarantined (fail-closed, unaffected by the strip)", !!activeXAfter);
+    check("*** THE FIX (degraded, in-memory) *** X's entry no longer lists O's now-deleted basename", !(activeXAfter?.orphanLatchFiles ?? []).includes(oBasename));
+
+    const clearOnFreedId = reboot1.clearMergeQuarantineLatchFile(legacyHashL);
+    check(
+      "*** THE FIX *** clear-by-id on O's freed id is NOT misattributed as kept/referenced by X (the degraded bystander) OR the pending bystander",
+      !clearOnFreedId.latchKept || !((clearOnFreedId.referencingRepoPaths ?? []).includes(x) || (clearOnFreedId.referencingRepoPaths ?? []).includes(pendingRepoPath)),
+    );
+    check(
+      "(pending wrapper survives, NOT a self-reference-exclusion exercise — see the construction note above) the pending bystander's own entry is still present after the strip",
+      reboot1.listPendingMergeQuarantinesTestOnly().some((p) => p.repoPath === pendingRepoPath && p.sourceFile === pendingSourceFile),
+    );
+
+    // BOOT 3 — CR round 3, item #7: the NAMED, accepted residual. X's own path now resolves for real (an
+    // unmounted drive remounting), so its own file at `ky` is read as an ORDINARY stale sibling and
+    // migrates to X's OWN new real key via the EXISTING 9c3b023a mechanism — which strips only X's OWN
+    // migrate source, never oBasename (an unrelated reference already embedded in the JSON). O itself
+    // isn't migrating anywhere this boot (gone since boot 2), so this cross-key strip never looks at X's
+    // entry either — the residual: oBasename RE-ENTERS memory, unstripped, exactly as the record's own
+    // "Continuation residual" section states. Captured here as documentation, never a failure.
+    fs.mkdirSync(x, { recursive: true });
+    fs.writeFileSync(path.join(x, "README.md"), "# now resolvable\n");
+    execSync(`git init -q && git config user.email mqp1mu@loom && git config user.name mqp1mu`, { cwd: x });
+    commitAll(x, "init", GIT_ID);
+
+    const realWarn = console.warn;
+    const warnLines = [];
+    console.warn = (...args) => { warnLines.push(args.join(" ")); realWarn(...args); };
+    const reboot2 = await rebootSim();
+    let activeXBoot3;
+    try {
+      reboot2.reenterMergeQuarantinesAtBoot([y, x, l]); // BOOT 3 — X now resolvable; Y/L along for the ride.
+      activeXBoot3 = reboot2.activeMergeQuarantineFor(x);
+    } finally {
+      console.warn = realWarn;
+    }
+    check(
+      "(boot 3, named residual 6a098eb1) X's entry RE-ENTERS memory carrying oBasename again — a known, accepted residual, not a fix regression",
+      (activeXBoot3?.orphanLatchFiles ?? []).includes(oBasename),
+    );
+    check(
+      "(boot 3) the residual's own warning log line fired for X, naming card 6a098eb1",
+      warnLines.some((l) => l.includes(oBasename) && l.includes("6a098eb1")),
+    );
+
+    reboot2.clearMergeQuarantine(y);
+    reboot2.clearMergeQuarantine(x);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

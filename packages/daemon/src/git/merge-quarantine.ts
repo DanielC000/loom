@@ -9068,6 +9068,21 @@ function reenterMergeQuarantinesAtBootImpl(
     const e = byRepoKey.get(key);
     if (e && isRepoPathCurrentlyResolvable(e.repoPath)) allBootWriteTargets.add(path.basename(quarantinePathForKey(key)));
   }
+  // @decision da716192 — every source migrating anywhere this boot, flattened across every key (never
+  // just one key's own `sources`) — the cross-key strip below (right before PHASE 1a) needs it. See the
+  // decision record for the dangling cross-key reference this closes.
+  const allMigratingSources = new Set<string>();
+  for (const sources of migratedSourcesByKey.values()) for (const f of sources) allMigratingSources.add(f);
+  // @decision da716192 — this set must ALSO cover every OTHER key that strip will persist to, or
+  // `bootWriteLatch`'s own "UNANTICIPATED boot write" refusal blocks it. See the decision record.
+  if (allMigratingSources.size > 0) {
+    for (const [key, e] of byRepoKey) {
+      if (migratedSourcesByKey.has(key) || degradedOccupiedKeys.has(key)) continue;
+      if (e.orphanLatchFiles?.some((f) => allMigratingSources.has(f)) && isRepoPathCurrentlyResolvable(e.repoPath)) {
+        allBootWriteTargets.add(path.basename(quarantinePathForKey(key)));
+      }
+    }
+  }
   // @decision 97cff6db (round 3, finding E) — a degraded-occupied migrate source is at-risk too; secure
   // the SOURCES' own union (never `byRepoKey.get(key)`, which can carry the occupant's unresolvable
   // `repoPath` as its winning identity) so the safety-tmp's own content stays resolvable.
@@ -9351,6 +9366,82 @@ function reenterMergeQuarantinesAtBootImpl(
   // @decision 4480b077 (round 3) — WRITE-ALL then DELETE-ALL, never interleaved per key: a stale migrate
   // SOURCE for one key can physically be a DIFFERENT key's own write TARGET (`writeTargetsThisPass`
   // itself is now declared earlier, above the deferred-corrupt-tmp loop — round 3, minor 4).
+
+  // @decision da716192 — a NAMED residual (CR round 3, item #7; follow-up 6a098eb1): a basename that
+  // isn't migrating this boot AND no longer exists on disk is a reference superseded by some EARLIER
+  // boot this one never saw. Logged, never stripped, here. See the decision record.
+  const warnDanglingOrphanRefsNotMigratingThisBoot = (entry: MergeQuarantineEntry): void => {
+    for (const f of entry.orphanLatchFiles ?? []) {
+      if (allMigratingSources.has(f)) continue; // the strip below (or 9c3b023a's) already handles this one
+      if (fs.existsSync(path.join(MERGE_QUARANTINE_DIR, f))) continue; // still a real, live reference
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] ${entry.repoPath}'s own orphanLatchFiles references ${f}, which does not exist on disk and is not migrating anywhere this boot — a known residual (card 6a098eb1): some EARLIER boot superseded it in a way this one never observed, so nothing strips it. If this repeats across boots, investigate.`);
+    }
+  };
+
+  // @decision da716192 — CROSS-KEY strip, BEFORE PHASE 1a/3 write/delete a single byte: 9c3b023a's own
+  // PHASE 1a strip (below) only ever consults the CURRENT key's own `sources`, never a key that isn't
+  // itself a migrate target this pass. See the decision record for the dangling-ref repro this closes.
+  for (const [key, entry] of byRepoKey) {
+    // The residual warning applies to EVERY entry, including an ordinary migrate target (PHASE 1a's own
+    // strip only ever subtracts THAT key's own `sources` — a DIFFERENT, already-gone orphan reference
+    // embedded in the same JSON is carried forward untouched, same residual as any other entry here).
+    warnDanglingOrphanRefsNotMigratingThisBoot(entry);
+    // An ORDINARY (non-degraded) migrate-target key is fully handled by PHASE 1a's own 9c3b023a strip
+    // below — skip it here. A DEGRADED-OCCUPIED migrate target is NOT: PHASE 1b only ever ADDS sources to
+    // the occupant's orphanLatchFiles (never strips), so it must still go through this pass too.
+    if (migratedSourcesByKey.has(key) && !degradedOccupiedKeys.has(key)) continue;
+    if (!entry.orphanLatchFiles?.some((f) => allMigratingSources.has(f))) continue;
+    const stripped: MergeQuarantineEntry = { ...entry, orphanLatchFiles: entry.orphanLatchFiles.filter((f) => !allMigratingSources.has(f)) };
+    // @decision da716192 — live occupancy, captured BEFORE replaceEntryEverywhere, never `stripped.armedKeys`
+    // alone (8db913e2/6be6c9ff/c52b290e): a re-pointed multi-key twin can carry no armedKeys of its own.
+    const liveKeys = liveArmedKeysOf(entry, byRepoKey);
+    replaceEntryEverywhere(byRepoKey, entry, stripped);
+    // @decision da716192 — thread the ADOPTED value through every key (4e987303's first "Do not"): the
+    // SAME pre-loop `stripped` for every key, discarding bootWriteLatch's return, can strand a dual-armed
+    // bystander's second key's own merged tokens out of memory.
+    let cur: MergeQuarantineEntry = stripped;
+    for (const writeKey of liveKeys) {
+      // A degraded-occupied key is unconditionally refused by bootWriteLatch itself, a migrate-target key
+      // is written by PHASE 1a/1b below, and an UNRESOLVABLE entry's own write is refused too (matches the
+      // allBootWriteTargets registration's own gate) — never attempt any of the three here; the in-memory
+      // strip above already covers all three (no disk write for any of them, same as bootWriteLatch would
+      // refuse, or would never have anticipated in the first place).
+      if (migratedSourcesByKey.has(writeKey) || degradedOccupiedKeys.has(writeKey) || !isRepoPathCurrentlyResolvable(cur.repoPath)) continue;
+      // @decision da716192 (CR round 3, item #2) — pass `allMigratingSources` as the drop set, not bare
+      // NO_DROPS: a MARKED bystander's own reconcile (`reconcileMarkedBasenameBeforeWrite`, 4e987303 M1)
+      // unions orphanLatchFiles from whatever is STILL on disk — without this, it would union O right
+      // back in from the stale bytes this very write is about to supersede.
+      const result = bootWriteLatch(writeKey, cur, { ...NO_DROPS, orphanLatchFiles: allMigratingSources });
+      if (result !== false) {
+        cur = result;
+      } else {
+        // @decision da716192 (CR round 3, item #3) — bootWriteLatch's own MARKED reconcile branch already
+        // re-points `byRepoKey` to the reconciled entry BEFORE the write itself is attempted (and thus
+        // before it can fail) — on a failed write, `cur` must re-sync from the LIVE slot, never stay
+        // pinned to the pre-call value, or a later key's own write would silently discard that reconcile.
+        cur = byRepoKey.get(writeKey) ?? cur;
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] stripped a now-superseded cross-key migrate-source reference from ${cur.repoPath}'s own orphanLatchFiles but could NOT durably re-persist ${writeKey} — it stays correct in-memory for this process (clear-by-id reads this, never disk), but a future boot may re-read the stale on-disk reference until this entry is next legitimately rewritten.`);
+      }
+    }
+    if (cur !== stripped) replaceEntryEverywhere(byRepoKey, stripped, cur);
+  }
+  // @decision da716192 (Lead ruling) — a PENDING bystander (unresolvable THIS boot — an unmounted drive,
+  // an unsynced folder) can carry the identical dangling cross-reference; strip it IN MEMORY too, never a
+  // disk write (a pending entry has no key of its own to write through). Never strip a pending entry's own
+  // self-reference (`p.sourceFile`), even if it happens to also be a migrating source elsewhere.
+  for (const p of pendingUnresolvedQuarantines) {
+    warnDanglingOrphanRefsNotMigratingThisBoot(p.entry);
+    if (!p.entry.orphanLatchFiles?.some((f) => f !== p.sourceFile && allMigratingSources.has(f))) continue;
+    // @decision da716192 (CR round 3, item #6) — route through replaceEntryEverywhere, never a bare
+    // `p.entry = {...}` assignment: it already scans `pendingUnresolvedQuarantines` by VALUE (never just
+    // the one wrapper `p`), so a DIFFERENT pending wrapper sharing this exact entry object (the same
+    // shared-identity shape `fd189d91`/`97cff6db` round 5 already established for a degraded divert) is
+    // kept in sync too, instead of only the one this loop happened to iterate onto.
+    const strippedPending: MergeQuarantineEntry = { ...p.entry, orphanLatchFiles: p.entry.orphanLatchFiles.filter((f) => f === p.sourceFile || !allMigratingSources.has(f)) };
+    replaceEntryEverywhere(byRepoKey, p.entry, strippedPending);
+  }
 
   // PHASE 1a — migrate-pass WRITES. Every at-risk key's safety-tmp was ALREADY written (and fsync'd,
   // and the directory fsync'd) by the dedicated phase above, BEFORE this loop (or any other write in
