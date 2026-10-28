@@ -24,10 +24,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      canonical repo (~:9650ish), before the merge-base shortcut / identity probe ever run.
 // (A3) SOLO, MERGE CALL — a bare CanonicalGitRefusal at the real `git merge --no-edit` call itself
 //      (~:9980ish), with everything before it (main-tip read, identity probe) proxied through cleanly.
-// (B1) BATCH, PRE-FF READ — a real commondir-trust-pin-mismatch fault at `fastForwardCanonicalMain`'s own
-//      pre-`--ff-only` `readHeadShaAndBranch` call (batch-merge.ts ~:1366) — the swallowed-refusal gap:
-//      `readHeadShaAndBranch` returns `null` on ANY raw error, so without the `onRawError` hook this
-//      refusal was indistinguishable from an ordinary read failure and never reached the fix at all.
+// (B1) BATCH, END-OF-GATE PRE-FF READ — a real commondir-trust-pin-mismatch fault at
+//      `fastForwardCanonicalMain`'s own pre-`--ff-only` `readHeadShaAndBranch` call (batch-merge.ts
+//      ~:1366) — the swallowed-refusal gap: `readHeadShaAndBranch` returns `null` on ANY raw error, so
+//      without the `onRawError` hook this refusal was indistinguishable from an ordinary read failure
+//      and never reached the fix at all. Card 89c4c950 made `mergeBatchTracked`'s own ADMISSION-time
+//      check call this SAME `fastForwardCanonicalMain` (and so this SAME read shape) FIRST, before the
+//      real gate ever spawns — so this scenario arms the fault only from the SECOND matching read against
+//      the canonical repo, letting the admission-time read pass cleanly and the real gate actually run,
+//      to keep isolating the fault to the END-of-gate site specifically (never the admission
+//      short-circuit, which `batch-merge-admission-trust-refusal.mjs` covers on its own). A gate-call
+//      counter is the discriminator: exactly 1 real gate run proves the gate genuinely executed before
+//      this end-of-gate refusal fired.
 // (B2) BATCH, --FF-ONLY CALL — a bare CanonicalGitRefusal at the `--ff-only` call itself.
 //
 // Every scenario asserts: (1) the refusal carries NO quarantined/dirtyWorktree/transient/branchDiverted/
@@ -429,17 +437,25 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
-  // (B1) BATCH, PRE-FF READ — real commondir-trust-pin mismatch (the swallowed-refusal gap)
+  // (B1) BATCH, END-OF-GATE PRE-FF READ — real commondir-trust-pin mismatch (the swallowed-refusal gap)
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
-    console.log("\n— (B1) BATCH pre-ff read: a real commondir-trust-pin mismatch at readHeadShaAndBranch —");
+    console.log("\n— (B1) BATCH end-of-gate pre-ff read: a real commondir-trust-pin mismatch at readHeadShaAndBranch —");
     const { db, mgrId, workerId1, workerId2, repo } = await setupBatchProject("b1");
     const state = { preFfReadAttempts: 0, refused: true };
     // `registerCommondirTrustPinLookup` is GLOBAL (not scoped by which call is asking) — arming it for
     // the WHOLE scenario would ALSO refuse `assembleBatchBranches`'s own calls against the batch
     // worktree, dropping every candidate at assembly and never reaching the ff phase at all. `lookupArmed`
     // is instead flipped true ONLY around a call that targets `repo` (the canonical repo) directly —
-    // never a batch-worktree-targeting assembly call — isolating the fault to exactly the ff phase.
+    // never a batch-worktree-targeting assembly call.
+    //
+    // Card 89c4c950: `mergeBatchTracked`'s own ADMISSION-time check now ALSO calls
+    // `fastForwardCanonicalMain` (and so issues this SAME read shape) FIRST, before the real gate ever
+    // spawns — so refusing on the FIRST matching read would now catch the admission-time short-circuit
+    // instead of this scenario's intended end-of-gate site (`batch-merge-admission-trust-refusal.mjs`
+    // covers the admission site on its own). Refusing ONLY from the SECOND matching read lets the
+    // admission-time read pass cleanly, so the real gate actually runs, isolating this fault to exactly
+    // the end-of-gate ff phase again.
     let lookupArmed = false;
     registerCommondirTrustPinLookup((_p) => (lookupArmed
       ? { toplevel: "C:\\fake\\pinned", pinnedAt: "2026-01-01T00:00:00.000Z", source: "bind", projectId: "p", repoKey: "r" }
@@ -448,8 +464,9 @@ try {
       async raw(args) {
         const a = Array.isArray(args) ? args : [args];
         const isCanonicalRepoCall = p === repo;
-        if (isCanonicalRepoCall && a[0] === "rev-parse" && a.includes("--symbolic-full-name")) state.preFfReadAttempts++;
-        lookupArmed = isCanonicalRepoCall && state.refused;
+        const isTargetReadShape = isCanonicalRepoCall && a[0] === "rev-parse" && a.includes("--symbolic-full-name");
+        if (isTargetReadShape) state.preFfReadAttempts++;
+        lookupArmed = isTargetReadShape && state.refused && state.preFfReadAttempts >= 2;
         try {
           const real = canonicalGit(p, ms, undefined, undefined, undefined, repo);
           return await real.raw(args);
@@ -458,9 +475,10 @@ try {
         }
       },
     });
+    let gateCalls = 0;
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
       syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
-      runGate: async () => ({ passed: true, steps: [] }),
+      runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
       batchFfGitFactory: factory,
     });
 
@@ -470,7 +488,9 @@ try {
     check("(B1, op 1) carries its OWN distinct flag, canonicalTrustRefusal:true", v1.canonicalTrustRefusal === true);
     check("(B1, op 1) carries NO quarantined/indexLockPresent/branchDiverted/unverified/batchHeadMoved flag", !v1.quarantined && !v1.indexLockPresent && !v1.branchDiverted && !v1.unverified && !v1.batchHeadMoved);
     check("(B1, op 1) NO per-candidate fallback was started (same no-fallback posture as quarantined)", (v1.fallback ?? []).every((f) => f.started === false));
+    check("(B1, op 1) THE DISCRIMINATING CHECK: the real gate ran EXACTLY ONCE — proves the admission-time read passed cleanly and this refusal genuinely fired at the END-of-gate site, not the admission short-circuit", gateCalls === 1);
     const attemptsAfterOp1 = state.preFfReadAttempts;
+    const gateCallsAfterOp1 = gateCalls;
 
     registerCommondirTrustPinLookup(undefined);
     state.refused = false;
@@ -478,6 +498,7 @@ try {
     const r2 = await awaitTrackedSettle(() => sessions.mergeBatchTracked(mgrId, [workerId1, workerId2]), { label: "mergeBatchTracked", timeoutMs: 240_000, pendingOps: sessions.pendingOps });
     check("(B1, op 2 — re-fire) NOT served from the until-superseded verdict cache", r2.ok === true && r2.cacheHit === undefined);
     check("(B1, op 2 — re-fire) a REAL new pre-ff read happened (count rose), not a replay", state.preFfReadAttempts > attemptsAfterOp1);
+    check("(B1, op 2 — re-fire) the real gate ran again (count rose)", gateCalls > gateCallsAfterOp1);
     const v2 = r2.ok ? r2.value : { __unsettled: r2 };
     check("(B1, op 2 — re-fire) genuinely re-attempted and LANDED", v2.ok === true && (v2.landed ?? []).length === 2);
   }

@@ -2605,6 +2605,21 @@ class BatchAdmissionForfeitError extends Error {
 }
 
 /**
+ * The same admission-time short-circuit as `BatchAdmissionForfeitError` above, for a canonical-git TRUST
+ * REFUSAL (`FastForwardResult.canonicalTrustRefusal`) detected at that same read instead of an ordinary
+ * sha-forfeit. Thrown, never returned — same reason as that class's own doc comment. No `currentMainSha`
+ * field: a trust refusal fires at the HEAD read itself, before any sha is ever determined.
+ *
+ * @decision 89c4c950 — never widen this to cover a branch-divert or a bare read failure at admission.
+ */
+class BatchAdmissionTrustRefusalError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "BatchAdmissionTrustRefusalError";
+  }
+}
+
+/**
  * The WORKER/ASSISTANT `startupModeCycles` pin (audit finding 760cd01d / card 5603f40f): pins a spawned
  * worker's or assistant's boot-cycle target to `auto` INDEPENDENT of the shared
  * `config.permission.startupModeCycles` knob, since neither has a live human at its TUI to answer an
@@ -23190,13 +23205,19 @@ export class SessionService {
                 // this op (cap slot + per-repo merge-admission guard), so no sibling squash can race the
                 // read below. Re-checks canonical main before the real gate ever spawns, reusing
                 // `fastForwardCanonicalMain` itself as a pure check (`targetSha === expectedBaseSha`).
-                // @decision 627b38c7 — scoped to the SHA FORFEIT only; a branch-divert or a read failure
-                //  here falls through unchanged to the real gate, same as today.
+                // @decision 627b38c7 — scoped to the SHA FORFEIT only; a branch-divert or a bare read
+                //  failure here falls through unchanged to the real gate, same as today.
+                // @decision 89c4c950 — a canonical-git TRUST REFUSAL at this same read is ALSO
+                //  short-circuited here now (see `BatchAdmissionTrustRefusalError`'s own doc) — never
+                //  burn a full gate run on a batch the end-of-gate check would refuse anyway.
                 try {
                   const admissionFf = await fastForwardCanonicalMain(finalRepoPath, gateBaseMainSha, gateBaseMainSha, { timeoutMs: this.gitOpMs ?? 15_000, expectedBaseBranch, gitFactory: this.batchFfGitFactory });
                   if (!admissionFf.ok) {
                     if (admissionFf.forfeited) {
                       throw new BatchAdmissionForfeitError(admissionFf.currentMainSha, admissionFf.reason ?? `canonical main advanced (now ${admissionFf.currentMainSha ?? "unknown"}) since this batch was cut from ${gateBaseMainSha} — this batch's gate never validated main's current tree; falling back to a per-branch re-gate`);
+                    }
+                    if (admissionFf.canonicalTrustRefusal) {
+                      throw new BatchAdmissionTrustRefusalError(admissionFf.reason ?? "a canonical-git trust refusal at gate admission");
                     }
                     // A read failure — `fastForwardCanonicalMain` catches its own internal git failure and
                     // returns `{ok:false}` here rather than throwing, so this is a NORMAL return, never
@@ -23208,7 +23229,7 @@ export class SessionService {
                     console.warn(`[merge-batch] admission-time forfeit check returned ok:false (non-fatal — falling back to the end-of-gate check): ${admissionFf.reason ?? "no reason given"}`);
                   }
                 } catch (err) {
-                  if (err instanceof BatchAdmissionForfeitError) throw err;
+                  if (err instanceof BatchAdmissionForfeitError || err instanceof BatchAdmissionTrustRefusalError) throw err;
                   // A THROWN exception from the admission check's own call (e.g. a quarantine error
                   // `fastForwardCanonicalMain` itself doesn't convert to a structured result) — same
                   // non-fatal fallback as the `ok:false` branch above, logged the same way.
@@ -23247,6 +23268,14 @@ export class SessionService {
               if (err instanceof BatchAdmissionForfeitError) {
                 batchGateVerdict = { kind: "skipped", payload: { reason: err.message, skipReason: "forfeited-at-admission", batchBranchCount: landedCount, batchLanded: false, settledAt, totalDurationMs } };
                 return { passed: false, reason: err.message, detail: { forfeitedAtAdmission: true, currentMainSha: err.currentMainSha } };
+              }
+              // Same "skipped", never "pass"/"fail" posture as the forfeit arm just above, but its own
+              //  distinct `skipReason`/`detail` flag.
+              // @decision 89c4c950 — `runBatchedMerge` routes THIS flag to the no-fallback
+              //  `canonicalTrustRefusal` shape, never the forfeit's per-branch re-gate fallback.
+              if (err instanceof BatchAdmissionTrustRefusalError) {
+                batchGateVerdict = { kind: "skipped", payload: { reason: err.message, skipReason: "canonical-trust-refusal-at-admission", batchBranchCount: landedCount, batchLanded: false, settledAt, totalDurationMs } };
+                return { passed: false, reason: err.message, detail: { canonicalTrustRefusalAtAdmission: true } };
               }
               batchGateVerdict = { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } };
               throw err;
@@ -23637,7 +23666,7 @@ export class SessionService {
               ...strandedFallback,
               ...spawnConflictFallback,
               ...lateSpawnConflictFallback,
-            ], opId, undefined, "This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it. Re-firing merge_batch after the canonical repo is repaired is safe and will genuinely re-attempt the fast-forward.");
+            ], opId, undefined, "This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it. Re-firing merge_batch after the canonical repo is repaired is safe and will genuinely re-attempt the batch.");
             return { ok: false, opId, landed: [], fallback: notStarted, canonicalTrustRefusal: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
           if (!result.ok) {

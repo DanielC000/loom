@@ -1721,6 +1721,19 @@ export async function runBatchedMerge(
         reason: gate.reason ?? "canonical main advanced before this batch's gate was admitted",
       };
     }
+    // Card 89c4c950: an admission-time canonical-git TRUST REFUSAL (see service.ts's
+    // `BatchAdmissionTrustRefusalError`) maps to the SAME no-fallback `canonicalTrustRefusal` shape the
+    // end-of-gate `fastForwardCanonicalMain` refusal below produces — every downstream consumer (the
+    // no-fallback `runFallback` posture, the never-cached `classifyOutcome` string, the
+    // `[loom:merge-batch-trust-refusal]` nudge) is reused as-is, never the forfeit's own per-branch
+    // re-gate fallback above: a trust refusal is about the canonical checkout's TRUSTWORTHINESS, not about
+    // whether main moved, so re-attempting each candidate solo would just re-hit the identical refusal.
+    if (gate.detail?.canonicalTrustRefusalAtAdmission === true) {
+      return {
+        ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateDetail: gate, canonicalTrustRefusal: true,
+        reason: gate.reason ?? "a canonical-git trust refusal at gate admission",
+      };
+    }
     // Card 92be634e: a reduced-gate --only-file= overflow write failure never ran any gate step at all —
     // it must never count as a merge-gate RED (recordMergeGateFailure/gateOwed), matching the solo path,
     // which never touches merge-gate state for this same failure. `isMergeGateRed` itself stays untouched
