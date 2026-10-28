@@ -1599,15 +1599,48 @@ button.loom-atlas-node.is-branch.is-open {
 
 /* The drawer toggle and the short leave label are OUT of the media query in their off state, so the
    wide shell renders exactly what it rendered before card 49e883a9: neither is reachable, and
-   neither takes a gap in the crumb row. */
+   neither takes a gap in the crumb row. The crumb disclosure and the leave icon (card 9477a5ed) join
+   them on the same terms — the wide crumb row gains no control and no gap. */
 .loom-atlas-drawerbtn {
   display: none;
 }
 .loom-atlas-leave-short {
   display: none;
 }
+.loom-atlas-leave-icon {
+  display: none;
+}
+.loom-atlas-crumbmore {
+  display: none;
+}
 .loom-atlas-scrim {
   display: none;
+}
+.loom-atlas-leave {
+  /* On the CLASS, never inline: a `style` padding would beat the square icon-sized padding the
+     narrow rule below needs. The value is what the button carried inline before card 9477a5ed. */
+  padding: 5px 12px;
+}
+/* The trail and its disclosure share a line. The gaps live here rather than inline so the narrow
+   rule can tighten them: at 420px three separators' worth of gap is ~35px of a 233px nav. */
+.loom-atlas-crumbnav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.loom-atlas-crumblist {
+  gap: 8px;
+}
+/* A segment's own layout belongs HERE, not on its inline `style`: inline beats class, so an inline
+   `display: flex` shadows the narrow-width collapse rule below and every segment keeps rendering
+   (measured — the collapse was inert with the disclosure sitting beside a full four-crumb trail).
+   Only `flex-shrink` and `color`, which vary per segment, stay inline. */
+.loom-atlas-crumblist > li {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
 }
 
 /* ≤720px: the strip above becomes an OVERLAY drawer. At 420px that stacked strip was 33dvh of nav
@@ -1704,12 +1737,94 @@ button.loom-atlas-node.is-branch.is-open {
     padding-left: 56px;
   }
   /* The crumb trail's own half of backlog card 9477a5ed: the full "Switch to the classic UI" wording
-     took ~110px off a 420px row, which is most of what a two-segment trail needs. */
-  .loom-atlas-leave-full {
+     took ~110px off a 420px row, which is most of what a two-segment trail needs. Card 9477a5ed
+     takes the remaining 83px too — a four-segment session address needs it — and the button becomes
+     an icon the same 34px square as the drawer toggle at the other end of the row. The accessible
+     name is unchanged at every width (it is the `aria-label`, not either label span), so nothing a
+     screen reader or a by-name locator sees moves with the breakpoint; only the tooltip carries the
+     wording for a sighted reader now. */
+  .loom-atlas-leave-full,
+  .loom-atlas-leave-short {
     display: none;
   }
-  .loom-atlas-leave-short {
-    display: inline;
+  .loom-atlas-leave-icon {
+    display: block;
+  }
+  .loom-atlas-leave {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+  }
+
+  /* ── A four-segment trail at phone width (card 9477a5ed) ──────────────────────────────────────
+     1d3192dc's lopsided shrink hands the deficit to the ancestors, which is right and stays — but
+     it can only SHARE OUT a deficit, and at 420px a session address's deficit exceeds the row:
+     MEASURED, the trail got 184px for four labels and three separators, and the project crumb
+     painted its "/" and zero characters. The count is what has to come down, so the leading
+     ancestors collapse behind `.loom-atlas-crumbmore` and the deepest TWO segments render — the
+     node and the tab within it, which is the pair the heading below does not already state.
+
+     Count-based, in CSS, not measured: `:nth-last-child(n+3)` is every item with two or more
+     siblings after it. `.is-collapsible` (set only for a trail longer than three) is what keeps a
+     three-segment trail whole — without it this selector would hide a 3-crumb trail's first
+     segment too — and 1-to-2-segment trails match nothing here at any width.
+
+     @decision 9477a5ed — never derive this collapse by measuring rendered boxes, and never express
+     it as a width cap on a segment. */
+  .loom-atlas-crumbnav,
+  .loom-atlas-crumblist,
+  .loom-atlas-crumblist > li {
+    gap: 5px;
+  }
+  .loom-atlas-crumblist.is-collapsible:not(.is-open) > li:nth-last-child(n+3) {
+    display: none;
+  }
+  /* Expanded, the full trail WRAPS rather than squeezing: the row is already 52px tall for the
+     drawer toggle and the single-line trail uses ~17px of it, so two lines cost no extra chrome at
+     all. A pathological set of names takes a third line and grows the row — `min-height`, not
+     `height` — which is the honest outcome for a reveal the reader asked for. */
+  .loom-atlas-crumblist.is-collapsible.is-open {
+    flex-wrap: wrap;
+  }
+  /* No count condition on the control itself: it is RENDERED only for a collapsible trail
+     (AtlasShell's `collapsibleTrail`), so this rule only ever has one to show. */
+  .loom-atlas-crumbmore {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    min-width: 22px;
+    height: 20px;
+    padding: 0 3px;
+    border: 1px solid var(--loom-border-strong);
+    border-radius: var(--loom-radius-sm);
+    background: transparent;
+    color: var(--loom-text-dim);
+    font-family: var(--loom-font-mono);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      background 80ms linear,
+      border-color 80ms linear,
+      color 80ms linear;
+  }
+  .loom-atlas-crumbmore:hover {
+    background: var(--loom-panel);
+    border-color: var(--loom-text-dim);
+    color: var(--loom-text);
+  }
+  .loom-atlas-crumbmore[aria-expanded="true"] {
+    color: var(--loom-text);
+    border-color: var(--loom-text-dim);
+    /* The nav centres its items, which against a wrapped two-or-three-line trail would leave the
+       control floating beside the MIDDLE of the path it just opened. On the first line it reads as
+       what it is: the thing the trail starts at. */
+    align-self: flex-start;
   }
 }
 

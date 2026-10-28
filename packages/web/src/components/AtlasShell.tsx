@@ -89,6 +89,9 @@ function currentParamPage(pathname: string): { page: ParamPage; id: string } | u
 /** Where the frame says you are: the trail THROUGH the tree, and the node it ends at. */
 type NodeAddress = { crumbs: string[]; heading: string };
 
+/** The crumb trail's own id, so its narrow-width disclosure can `aria-controls` it. */
+const ATLAS_CRUMB_LIST_ID = "loom-atlas-crumblist";
+
 /**
  * A re-homed cross-project address, redirected into its Workspace node tab — card 41eab0eb.
  *
@@ -309,6 +312,30 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
       : page?.label)
     ?? "Workspace";
 
+  // ── A four-segment trail at phone width (card 9477a5ed) ────────────────────────────────────────
+  // Below the narrow breakpoint the LEADING ancestors collapse behind this disclosure and the trail
+  // renders its deepest two segments; the control reveals the rest in place. Decision 1d3192dc's
+  // lopsided shrink still governs whatever remains rendered — it decides how a DEFICIT is shared out,
+  // and cannot help once the deficit exceeds the row, which is the state a four-segment trail reaches
+  // at 420px (measured: the project crumb painted its separator and no characters at all). So the
+  // fix reduces the segment COUNT and leaves that ratio untouched rather than changing it.
+  //
+  // Which widths this happens at is CSS's call alone (`.loom-atlas-crumblist.is-collapsible` in
+  // styles/global.css) — no media query and no box measurement here, exactly like the drawer above.
+  // The frame's other overflow control, the node tab row's More menu, has to measure because a tab's
+  // width is not knowable without rendering it; a trail's segment count is known at render time, so
+  // paying that cost here would buy nothing and inherit the remeasure hazard (card 485d67b4, where a
+  // re-measure tore the open menu's DOM down and stranded the reader's focus on <body>).
+  //
+  // @decision 9477a5ed — never derive this collapse by measuring rendered boxes, and never express it
+  // as a width cap on a segment.
+  const collapsibleTrail = crumbs.length > 3;
+  const [trailOpen, setTrailOpen] = useState(false);
+  // Re-collapses on every address change: "what is above me" is a question about THIS node, so an
+  // expanded trail carried into the next one would be answering it where it was not asked again.
+  const trailKey = crumbs.join("\u0000");
+  useEffect(() => { setTrailOpen(false); }, [trailKey]);
+
   return (
     <div className="loom-atlas" data-testid="atlas-shell">
       {overlays}
@@ -344,9 +371,28 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                   : <path d="M2.5 4h11M2.5 8h11M2.5 12h11" />}
               </svg>
             </button>
-            <nav aria-label="Breadcrumb" data-testid="atlas-breadcrumb" style={{ minWidth: 0 }}>
-              <ol style={{ display: "flex", alignItems: "center", gap: 8, listStyle: "none", margin: 0, padding: 0,
-                overflow: "hidden", fontFamily: font.mono, fontSize: 11.5, color: color.textMuted }}>
+            <nav aria-label="Breadcrumb" data-testid="atlas-breadcrumb" className="loom-atlas-crumbnav">
+              {/* The disclosure sits OUTSIDE the <ol> deliberately: five specs read the trail as
+                  `[...nav.querySelectorAll("li")]`, so an <li> holding a control rather than a segment
+                  would enter every one of those trails as an empty string — at EVERY width, including
+                  the wide one this card does not touch. Its accessible name is generic and stable
+                  (the path itself is the `title`, and activating it renders the real segments): a name
+                  carrying the project or session name would be one more live page-wide text match for
+                  an unrelated spec's by-name locator to collide with, the trap card c6160c7d hit. */}
+              {collapsibleTrail && (
+                <button type="button" className="loom-atlas-crumbmore" data-testid="atlas-crumb-more"
+                  aria-expanded={trailOpen} aria-controls={ATLAS_CRUMB_LIST_ID}
+                  aria-label={trailOpen ? "Hide the full path" : "Show the full path"}
+                  title={trailOpen ? "Hide the full path" : `Show the full path: ${crumbs.join(" / ")}`}
+                  onClick={() => setTrailOpen((open) => !open)}>
+                  <span aria-hidden>…</span>
+                </button>
+              )}
+              <ol id={ATLAS_CRUMB_LIST_ID}
+                className={`loom-atlas-crumblist${collapsibleTrail ? " is-collapsible" : ""}`
+                  + `${trailOpen ? " is-open" : ""}`}
+                style={{ display: "flex", alignItems: "center", listStyle: "none", margin: 0, padding: 0,
+                  overflow: "hidden", fontFamily: font.mono, fontSize: 11.5, color: color.textMuted }}>
                 {crumbs.map((crumb, i) => {
                   const last = i === crumbs.length - 1;
                   return (
@@ -358,9 +404,12 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                     // @decision 1d3192dc — never express this as a width CAP on the deepest crumb (a
                     // `ch` count or a percentage). Both clip a long detail label on a row that had the
                     // room for it; the lopsided shrink ratio is what makes the ancestors give way first.
+                    // Only what VARIES per segment stays inline. `display`/`align-items`/`min-width`
+                    // moved to `.loom-atlas-crumblist > li` because inline beats class: an inline
+                    // `display: flex` silently shadowed the narrow-width collapse rule, which showed
+                    // up as every segment still rendering at 420px with the disclosure beside them.
                     <li key={`${i}-${crumb}`} aria-current={last ? "page" : undefined}
-                      style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0,
-                        flexShrink: last ? 1 : 999,
+                      style={{ flexShrink: last ? 1 : 999,
                         color: last ? color.text : color.textMuted }}>
                       {i > 0 && <span aria-hidden style={{ color: color.border }}>/</span>}
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{crumb}</span>
@@ -377,18 +426,32 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {/* The way back. Settings is a tree node now, so this is no longer the ONLY exit — but it
                 stays: it is one click from anywhere, and a preview whose exit is buried in a settings
                 page is a preview people stop trying. */}
-            {/* Two labels, one accessible name. At 420px the full wording was eating the crumb row —
-                the half of backlog card 9477a5ed this card supersedes, where the trail squeezed down
-                to "W… / live-a305eb…". The `aria-label` is stated so the name does NOT change with the
-                breakpoint: a control whose accessible name depends on viewport width is a different
-                control to a screen reader at every size, and every by-name locator would have to know
-                which width it is at. */}
+            {/* THREE renderings, ONE accessible name. At 420px the full wording was eating the crumb
+                row. Card 49e883a9 took the first cut at that, shortening the wording to "Classic"
+                and freeing ~110px. That was not enough for a four-segment trail (measured:
+                the nav reached 184px of a 420px row, and 83px of what remained was still this
+                button), so below the breakpoint it now drops its word entirely and renders as an
+                icon the same size as the drawer toggle opposite it — ~49px more for the trail, and
+                the one control in this row whose meaning a reader can recover from its tooltip.
+                The `aria-label` is stated so the name does NOT change with the breakpoint: a control
+                whose accessible name depends on viewport width is a different control to a screen
+                reader at every size, and every by-name locator would have to know which width it is
+                at.
+
+                Its padding is `.loom-atlas-leave`'s, NOT inline: inline beats class, so a `style`
+                here would shadow the square icon-sized padding the narrow rule needs. */}
             <Button data-testid="atlas-leave" onClick={() => setAtlasUi(false)}
               aria-label="Switch to the classic UI"
               title="Turn the Atlas preview off and return to the classic UI"
-              style={{ padding: "5px 12px" }}>
+              className="loom-atlas-leave">
               <span className="loom-atlas-leave-full">Switch to the classic UI</span>
               <span className="loom-atlas-leave-short" aria-hidden>Classic</span>
+              <svg className="loom-atlas-leave-icon" width="16" height="16" viewBox="0 0 16 16"
+                fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+                strokeLinejoin="round" aria-hidden focusable="false">
+                <path d="M6.5 2.5H3.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3" />
+                <path d="M10 5.5 13 8l-3 2.5M13 8H6" />
+              </svg>
             </Button>
           </div>
 

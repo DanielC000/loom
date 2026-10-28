@@ -582,15 +582,25 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     );
 
     // ── Narrow: the ancestors give way, the tab crumb does not. ──
-    await page.setViewportSize({ width: 420, height: 880 });
+    //
+    // 760px, NOT the 420px this leg used to measure at. Card 9477a5ed collapses a four-segment trail
+    // below 720px, so at 420px the ancestors this leg reads are no longer RENDERED — their boxes go
+    // 0×0, `scrollWidth > clientWidth` reads false, and the positive control below would report "the
+    // row was never under pressure" while measuring nothing at all. 760px is the nearest width where
+    // the full trail still draws AND the row still runs out of room, which is the state 1d3192dc's
+    // shrink ratio is the answer to. The narrow-width behaviour is e2e/atlas-crumb-collapse.spec.ts.
+    await page.setViewportSize({ width: 760, height: 880 });
     await page.goto(`${loomDaemon.baseURL}/review/${worker.sessionId}`);
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
     const narrow = await clippedCrumbs();
     expect(narrow.length, "no crumbs to measure").toBe(4);
+    // The collapse really is inert at this width, or the two assertions below read a trail that is
+    // only partly rendered — which is the exact failure mode moving this leg was meant to avoid.
+    await expect(page.getByTestId("atlas-crumb-more")).toBeHidden();
     // POSITIVE CONTROL: the row must genuinely be under width pressure here, or "the last crumb is
     // not clipped" would pass on a row with room to spare and prove nothing about the priority.
     expect(narrow.slice(0, -1).some(Boolean),
-      "positive control: no ancestor crumb was clipped at 420px, so the row was never under pressure")
+      "positive control: no ancestor crumb was clipped at 760px, so the row was never under pressure")
       .toBe(true);
     expect(narrow.at(-1), "the deepest crumb was clipped before its ancestors were").toBe(false);
     // And it is really the tab, in full — scrollWidth parity alone would also hold for an empty span.

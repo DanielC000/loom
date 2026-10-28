@@ -231,15 +231,24 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     expect(squeezed, "every segment of the project node's own 2-crumb trail fits at 420px").toEqual([]);
 
     // WHY the room exists — the crumb half of superseded card 9477a5ed. The full wording is ~110px of
-    // this row; at 420px the button renders its short label instead, with the SAME accessible name.
+    // this row; this card took it down to "Classic", and card 9477a5ed then took the remaining ~83px
+    // by dropping the word entirely below the breakpoint — a four-segment session address needs it
+    // (see e2e/atlas-crumb-collapse.spec.ts). The accessible name is the SAME at every width either
+    // way, which is the half of the claim that matters and the half neither card moved.
     const leave = page.getByTestId("atlas-leave");
     await expect(leave).toBeVisible();
     await expect(leave).toHaveAccessibleName("Switch to the classic UI");
     const labels = await leave.evaluate((el) => ({
       full: getComputedStyle(el.querySelector(".loom-atlas-leave-full")!).display,
       short: getComputedStyle(el.querySelector(".loom-atlas-leave-short")!).display,
+      icon: getComputedStyle(el.querySelector(".loom-atlas-leave-icon")!).display,
     }));
-    expect(labels, "at 420px the leave button renders its short label").toEqual({ full: "none", short: "inline" });
+    expect(labels, "at 420px the leave button renders neither wording, only its icon")
+      .toEqual({ full: "none", short: "none", icon: "block" });
+    // And the room is real, not just the absence of a label: a 34px square, the same as the drawer
+    // toggle at the other end of the row, against the ~155px the full wording takes.
+    expect(Math.round((await leave.boundingBox())!.width),
+      "the narrow leave button is the drawer toggle's own 34px square").toBe(34);
   });
 
   test("switch ON at 420px: a tree row navigates and closes the drawer, and a typed draft survives", async ({ page, loomDaemon }) => {
