@@ -54,6 +54,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      tamper): with `forkFrom: baseMainSha`, this must FORFEIT at fast-forward time, never
 //      misreport as batchHeadMoved.
 //
+// CARD 37fd19c5, Code Review follow-up (sibling card to 95940402's own identity-check fix): a
+// CanonicalGitRefusal swallowed inside `verifyCommitParentAndTree`'s own plain-check read — driven through
+// the REAL `mergeBatchTracked` → `runFallback` path, not just the direct `assembleBatchBranches` unit call
+// `canonical-refusal-guidance-on-every-surface.mjs`'s own (L)/(M) scenarios already cover.
+// (T)  the per-candidate fallback reason must carry the refusal's OWN canonical guidance (never the
+//      unconditional "may have been tampered with; ... is safe" wording `runFallback`'s own tail used to
+//      always append regardless of cause), and that tail itself must now be CAUSE-NEUTRAL — deferring to
+//      "the reason above" rather than asserting a tamper/safety verdict unconditionally.
+//
 // CARD 95940402 (named OPEN RESIDUAL in 043d83d2's own third Code Review — see its decision record's
 // "OPEN RESIDUAL" paragraph): every check above only ever compares the batch worktree's REF to another
 // ref/stamp — none of them verify a landed COMMIT's own identity. A racer who substitutes a commit with
@@ -100,7 +109,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, computeEmitCompareGate } = await import("../dist/git/worktrees.js");
 const { runBatchedMerge, assembleBatchBranches } = await import("../dist/git/batch-merge.js");
-const { boundedSimpleGit } = await import("../dist/git/bounded.js");
+const { boundedSimpleGit, CanonicalGitCommondirRefusal } = await import("../dist/git/bounded.js");
 const { nonInteractiveEnv } = await import("../dist/git/writer.js");
 
 let failures = 0;
@@ -614,6 +623,46 @@ try {
     check("(J) canonical main is still at the advanced sha (a forfeit refuses the ff; it never reverts anything)", git(repo, "rev-parse", "HEAD") === advancedSha);
   }
 
+  // ── (T) card 37fd19c5 (Code Review) — a canonical refusal swallowed inside verifyCommitParentAndTree's
+  //     own plain-check read, driven through the REAL mergeBatchTracked → runFallback path ─────────────
+  {
+    function catFileRefusalFactory(repoPath, timeoutMs) {
+      const real = boundedSimpleGit(repoPath, timeoutMs, nonInteractiveEnv());
+      return {
+        raw: async (args) => {
+          const a = Array.isArray(args) ? args : [args];
+          if (a[0] === "cat-file" && a[1] === "-p") {
+            throw new CanonicalGitCommondirRefusal(
+              `canonicalGit: refusing — "${repoPath}" has a FILE-shaped .git (a linked worktree or --separate-git-dir pointer) and this call supplied no trustedMainRoot to verify it against — refusing rather than trusting an unverified pointer by default (docs/decisions/3a5c5d4a).`,
+            );
+          }
+          return real.raw(args);
+        },
+      };
+    }
+    const d5 = boot(undefined, catFileRefusalFactory);
+    const w1t = await addWorker(d5.db, "t1"), w2t = await addWorker(d5.db, "t2");
+
+    const headBefore = canonHead();
+    const r5 = await awaitTrackedSettle(() => d5.sessions.mergeBatchTracked(P.mgrId, [w1t.workerId, w2t.workerId]), { label: "mergeBatchTracked (T)", timeoutMs: 240_000, pendingOps: d5.sessions.pendingOps });
+    const value5 = r5.ok ? r5.value : { __unsettled: r5 };
+
+    check("(T) the batch refuses, typed batchHeadMoved (swallowed refusal inside verifyCommitParentAndTree)", value5.ok === false && value5.batchHeadMoved === true);
+    const topReason = value5.reason ?? "";
+    check("(T) the top-level reason carries the refusal's own canonical guidance", /do not retry/i.test(topReason) && /HUMAN escalation/i.test(topReason) && /Platform Lead/i.test(topReason));
+    check('(T) the top-level reason does NOT say "may have been tampered with"', !/may have been tampered with/i.test(topReason));
+    check("(T) canonical mainline untouched", canonHead() === headBefore);
+    check("(T) NO per-candidate fallback was STARTED (both report started:false — a refusal is the same no-fallback severity as a genuine tamper)", Array.isArray(value5.fallback) && value5.fallback.length === 2 && value5.fallback.every((f) => f.started === false));
+    for (const f of value5.fallback) {
+      check(`(T) fallback entry for ${f.workerSessionId} carries the refusal's own canonical guidance`, /do not retry/i.test(f.reason) && /HUMAN escalation/i.test(f.reason) && /Platform Lead/i.test(f.reason));
+      check(`(T) fallback entry for ${f.workerSessionId} does NOT say "may have been tampered with"`, !/may have been tampered with/i.test(f.reason));
+      check(`(T) fallback entry for ${f.workerSessionId}'s tail is CAUSE-NEUTRAL — the "safe to re-fire" clause is now CONDITIONED on the reason above, never asserted outright`, /unless that reason says/i.test(f.reason));
+    }
+    const movedEventsT = d5.db.listEventsSince(0, 100000).filter((e) => e.kind === "batch_merge_head_moved" && e.detail?.projectId === P.projId);
+    check("(T) a durable batch_merge_head_moved event still fired (the event itself is unaffected by this card — only the rendered text changed)", movedEventsT.length >= 1);
+    d5.db.close();
+  }
+
   // (C) — the source-text regression guard for the pre-gate reduced-gate steer leg (service.ts's batch
   // runGate closure must pass the pinned assembledTipSha, never resolve "HEAD") lives in its own small
   // file, batch-merge-head-moved-emitcompare-arg-guard.mjs — registered in
@@ -626,6 +675,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a batch-worktree HEAD swap (pre-gate, mid-gate, or between two candidates) and a dirty-tree tamper (pre-gate or mid-gate) all refuse as batchHeadMoved with no per-candidate fallback and canonical main untouched; computeEmitCompareGate's own resolved-sha contract is immune to what HEAD points to (card 043d83d2). The landed-COMMIT-identity checks (card 95940402: forged parent/tree/trailer substitutes, noop misclassification, trailer stripping) now live in the sibling file batch-merge-head-moved-commit-identity.mjs (split by card 3aad1cb3)."
+  ? "\n✅ ALL PASS — a batch-worktree HEAD swap (pre-gate, mid-gate, or between two candidates) and a dirty-tree tamper (pre-gate or mid-gate) all refuse as batchHeadMoved with no per-candidate fallback and canonical main untouched; computeEmitCompareGate's own resolved-sha contract is immune to what HEAD points to (card 043d83d2). The landed-COMMIT-identity checks (card 95940402: forged parent/tree/trailer substitutes, noop misclassification, trailer stripping) now live in the sibling file batch-merge-head-moved-commit-identity.mjs (split by card 3aad1cb3). A swallowed canonical refusal inside verifyCommitParentAndTree, driven end-to-end through mergeBatchTracked's own runFallback, now surfaces the refusal's real guidance at both the top-level reason AND every per-candidate fallback entry, with the fallback tail itself cause-neutral rather than asserting \"tampered with\"/\"safe\" unconditionally (card 37fd19c5)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

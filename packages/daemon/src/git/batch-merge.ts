@@ -895,9 +895,18 @@ async function landBranchCommitsIndividually(
     // and never rollback() on a mismatch — this outcome discards the whole worktree regardless.
     const verifiedPlain = await verifyCommitParentAndTree(git, timeoutMs, newHead, expectedParentForThisCommit, preCommitTree);
     if (!verifiedPlain.ok) {
+      // A caught git-read failure (`errorDetail` set) renders through canonicalFailureMessage so a real
+      // CanonicalGitRefusal's guidance survives; a genuine mismatch (no `errorDetail`) keeps the sentence
+      // below. An ORDINARY (non-refusal) read failure gets the tamper hint appended too — typed on
+      // `errorDetail.refusal`, never by matching text — since nothing proved that HEAD is safe either.
+      //
+      // @decision 37fd19c5 — never drop the tamper hint for a non-refusal `errorDetail` without replacing
+      // it with an equally strong caution; an ordinary read failure proves nothing safe about this HEAD.
       return {
         ok: false, headMoved: true,
-        reason: `${branch}: the batch worktree's HEAD after landing ${sha.slice(0, 7)} (${newHead.slice(0, 8)}) does not verify as the commit this call just made (expected parent ${expectedParentForThisCommit.slice(0, 8)}, tree ${preCommitTree.slice(0, 8)}) — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+        reason: verifiedPlain.errorDetail
+          ? `${branch}: could not verify the batch worktree's HEAD after landing ${sha.slice(0, 7)} (${newHead.slice(0, 8)}) as the commit this call just made — ${canonicalFailureMessage(verifiedPlain.errorDetail, verifiedPlain.errorDetail.text)}${verifiedPlain.errorDetail.refusal ? "" : " — this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with"}`
+          : `${branch}: the batch worktree's HEAD after landing ${sha.slice(0, 7)} (${newHead.slice(0, 8)}) does not verify as the commit this call just made (expected parent ${expectedParentForThisCommit.slice(0, 8)}, tree ${preCommitTree.slice(0, 8)}) — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
       };
     }
     // Parent+tree never proves the MESSAGE wasn't forged; `verifyLoomTrailersExactAndReadable` audits the
@@ -1037,9 +1046,13 @@ async function landBranchCommitsIndividually(
   // message AFTER the Base/PathSet amend, unlike the earlier "plain" check).
   let trailerAdvisory: "displaced" | "unreadable" | undefined;
   if (!finalVerify.ok) {
+    // @decision 37fd19c5 — same errorDetail-vs-genuine-mismatch branch as the "plain" check above,
+    // including the non-refusal tamper-hint append (see that site's own comment for why).
     return {
       ok: false, headMoved: true,
-      reason: `${branch}: the batch worktree's final HEAD (${landedSha.slice(0, 8)}) does not verify as this landing's own commit${lastExpectedParent !== undefined && lastExpectedTree !== undefined ? ` (expected parent ${lastExpectedParent.slice(0, 8)}, tree ${lastExpectedTree.slice(0, 8)})` : ""} — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
+      reason: finalVerify.errorDetail
+        ? `${branch}: could not verify the batch worktree's final HEAD (${landedSha.slice(0, 8)}) as this landing's own commit — ${canonicalFailureMessage(finalVerify.errorDetail, finalVerify.errorDetail.text)}${finalVerify.errorDetail.refusal ? "" : " — this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with"}`
+        : `${branch}: the batch worktree's final HEAD (${landedSha.slice(0, 8)}) does not verify as this landing's own commit${lastExpectedParent !== undefined && lastExpectedTree !== undefined ? ` (expected parent ${lastExpectedParent.slice(0, 8)}, tree ${lastExpectedTree.slice(0, 8)})` : ""} — refusing; this worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with`,
     };
   }
   if (!finalTrailerVerify.ok) {

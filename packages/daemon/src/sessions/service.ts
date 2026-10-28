@@ -23484,9 +23484,15 @@ export class SessionService {
             // problem, so start nothing and surface it loudly, mirroring `branchDiverted`/`quarantined`.
             //
             // @decision 043d83d2 — never run a per-candidate fallback on this outcome.
-            // @decision 45036494 — the "tampered with" tail below is safe unconditionally ONLY because a
-            // legitimate commit-msg hook ("displaced"/"unreadable") no longer reaches `headMoved` at all
-            // (batch-merge.ts's tip-trailer checks fall through kept VERIFIED for those two kinds now).
+            //
+            // The tail below used to assert "tampered with"/"safe" unconditionally. `result.reason` can
+            // now itself be a canonical refusal's own guidance (e.g. "do not retry"), which that wording
+            // would contradict — so the tail defers to `result.reason`, printed just above it, rather than
+            // asserting a cause or a remedy itself.
+            //
+            // @decision 37fd19c5 — never reassert "tampered with"/"safe" as an UNCONDITIONAL verdict in
+            // this tail, even for a seemingly-unrelated future edit — it must keep deferring to
+            // `result.reason`, since that reason is now the only place a real refusal's own guidance lives.
             evtBatch("batch_merge_head_moved", { repoPath: finalRepoPath, baseMainSha, reason: result.reason, fastForwardMs: result.fastForwardMs });
             const notStarted = await runFallback([
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "the batch worktree's HEAD moved unexpectedly" })),
@@ -23494,7 +23500,7 @@ export class SessionService {
               ...strandedFallback,
               ...spawnConflictFallback,
               ...lateSpawnConflictFallback,
-            ], opId, undefined, "this batch worktree's HEAD lives in the shared, worker-writable .git and may have been tampered with; re-firing merge_batch is safe and will re-cut a fresh worktree and re-assemble from the same candidates — the worktree this refusal found is NOT retained for inspection (it is removed like any other refusal, unlike a quarantine), so its own reflog is gone too; this op's own durable batch_merge_head_moved event (already recorded) is what survives");
+            ], opId, undefined, "this batch worktree's HEAD lives in the shared, worker-writable .git and could not be verified as this batch's own commit (see the reason above) — unless that reason says to escalate or not to retry, re-firing merge_batch is safe and will re-cut a fresh worktree and re-assemble from the same candidates; the worktree this refusal found is NOT retained for inspection (it is removed like any other refusal, unlike a quarantine), so its own reflog is gone too; this op's own durable batch_merge_head_moved event (already recorded) is what survives");
             return { ok: false, opId, landed: [], fallback: notStarted, batchHeadMoved: true, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
           }
           if (result.branchDiverted) {

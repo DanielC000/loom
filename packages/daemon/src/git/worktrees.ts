@@ -10434,10 +10434,19 @@ export async function checkCutBaseAncestry(
  * 95940402 round 2) is the raw commit MESSAGE — present whenever the `cat-file -p` read itself succeeded,
  * even if `ok` is `false` on a parent/tree mismatch — so a caller that also needs to inspect trailers
  * (e.g. a `Loom-Worker-Branch:` block) doesn't need a second read of the same object.
+ *
+ * A caught git-read failure also returns `errorDetail: describeGitFailure(e)` alongside `ok:false`,
+ * unconditionally — never gated on `instanceof CanonicalGitRefusal`, since an ordinary transient read
+ * failure classifies just as cleanly. The three genuine parent/tree MISMATCH returns above (no exception
+ * at all) carry no `errorDetail` — a caller branches on its presence to tell "we couldn't check" from "we
+ * checked and it didn't match".
+ *
+ * @decision 37fd19c5 — still never throws: {@link mergeBranchLocked}'s own `verifyLandedAsOwnCommit`
+ * closure relies on that contract explicitly.
  */
 export async function verifyCommitParentAndTree(
   git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, expectedParent: string, expectedTree: string,
-): Promise<{ ok: boolean; body?: string }> {
+): Promise<{ ok: boolean; body?: string; errorDetail?: ReturnType<typeof describeGitFailure> }> {
   try {
     const raw = await withTimeout(git.raw(["cat-file", "-p", sha]), timeoutMs, "git cat-file -p <sha> (canonical, own-commit parent-count verify — immune to grafts/replace-refs)");
     const headerEnd = raw.indexOf("\n\n");
@@ -10449,8 +10458,8 @@ export async function verifyCommitParentAndTree(
     // @decision 868e0135 — `--end-of-options` added: round-2 CR retracted the compound-suffix exemption this relied on.
     const tree = (await withTimeout(git.raw(["rev-parse", "--verify", "--end-of-options", `${sha}^{tree}`]), timeoutMs, "git rev-parse <sha>^{tree} (canonical, own-commit tree verify)")).trim();
     return { ok: tree === expectedTree, body };
-  } catch {
-    return { ok: false };
+  } catch (e) {
+    return { ok: false, errorDetail: describeGitFailure(e) };
   }
 }
 

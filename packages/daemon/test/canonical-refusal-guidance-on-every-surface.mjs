@@ -44,10 +44,31 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     `(e as Error).message` for the caller to render raw; now the caller routes the returned error
 //     object through describeGitFailure/canonicalFailureMessage.
 //
+// Card 37fd19c5 (Code Review follow-up to 2968815c): `verifyCommitParentAndTree` (worktrees.ts) itself —
+// shared by the batch cherry-pick path and the solo squash path — had its OWN catch-all swallowing a
+// CanonicalGitRefusal from its `cat-file -p`/`rev-parse ...^{tree}` reads, never reached by 2968815c's own
+// fix (which covered the catches immediately AROUND this call, never this function's internal one).
+// (L) batch-merge.ts's landBranchCommitsIndividually — the "plain" per-commit tip verify's own call into
+//     verifyCommitParentAndTree (its `cat-file -p` read, 1st occurrence in this call tree).
+// (M) batch-merge.ts's landBranchCommitsIndividually — the "final" post-loop tip verify's own call into
+//     verifyCommitParentAndTree (its `cat-file -p` read, 2nd occurrence).
+// (N) Regression pair, both sites: a GENUINE parent/tree mismatch (no exception at all — the real
+//     `cat-file -p` read is redirected to a different, real, unrelated commit) must keep the exact
+//     pre-existing "...may have been tampered with" wording, proving the fix branches on `errorDetail`'s
+//     presence rather than blanket-replacing the tamper wording for every `!ok`.
+//
+// Card 37fd19c5, Code Review follow-up round (closing the two gaps that review found):
+// (O) an ORDINARY (non-refusal) read failure on the plain check must get the tamper hint back, typed on
+//     `errorDetail.refusal`, never dropped silently.
+// (P) a real refusal on verifyCommitParentAndTree's SECOND internal read (`rev-parse --verify ...^{tree}`,
+//     reached only once the first read already succeeded) — proves the catch covers the whole try.
+//
 // NOT every merge-path CanonicalGitRefusal render site anywhere in the codebase is covered by this file —
-// only the sites listed (A)-(K) above. See card 26084115's own "Do not" list for sites deliberately out
+// only the sites listed (A)-(P) above. See card 26084115's own "Do not" list for sites deliberately out
 // of scope (the batch post-mutation cherry-pick loop and mergeBranchLocked's PRE-probe entry reads were
-// each already closed by a separate card/commit before this file grew to cover them here).
+// each already closed by a separate card/commit before this file grew to cover them here). The SOLO path's
+// own `verifyLandedAsOwnCommit` closure (worktrees.ts) is a named, deliberate residual of card 37fd19c5 —
+// not covered here either; see docs/decisions/37fd19c5-*.md.
 //
 // Run: 1) pnpm build, 2) node packages/daemon/test/canonical-refusal-guidance-on-every-surface.mjs
 import fs from "node:fs";
@@ -682,8 +703,237 @@ for (const site of batchGSites) {
   }
 }
 
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
+// (L)/(M)/(N) batch-merge.ts — landBranchCommitsIndividually's two calls into verifyCommitParentAndTree
+// (worktrees.ts) — the "plain" per-commit tip verify and the "final" post-loop tip verify (card 37fd19c5).
+// `["cat-file","-p",sha]` is the UNIQUE shape reached by this call tree for these two checks (confirmed by
+// grep: `cat-file` does not appear anywhere in batch-merge.ts itself, and worktrees.ts's other `cat-file`
+// callers all pass `-e`/`-t`, never `-p` — so matching `args[0]==="cat-file" && args[1]==="-p"` cannot
+// collide with any other site this call tree reaches). A `counts` object (same table-driven technique as
+// (G) above) pins WHICH occurrence (1st = plain, 2nd = final) is faulted, so a test can't pass via the
+// other site's own catch by accident.
+//
+// @decision 37fd19c5 — uses the SHORT `redirectRawReason`/`CanonicalGitCommondirRefusal` shape for (L)/(M)
+// (like (C)/(G)/(J)/(K)), never the long pinMismatch `rawReason`, whose guidance survives a bare render either way.
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
+function makeOneCommitLMCandidate(label) {
+  const repo = makeRepo(`lm-${label}`);
+  const decoySha = git(repo, ["rev-parse", "HEAD"]); // the repo's own 0-parent "init" commit — a REAL, resolvable, unrelated object.
+  const branch = `loom/crgs-lm-${label}-${sfx}`;
+  const wt = path.join(os.tmpdir(), `loom-crgs-lm-${label}-wt-${sfx}`);
+  tmpDirs.push(wt);
+  execFileSync("git", ["worktree", "add", "-q", "-b", branch, wt, "HEAD"], { cwd: repo });
+  fs.writeFileSync(path.join(wt, `feature-lm-${label}.txt`), `content-${sfx}\n`);
+  execFileSync("git", ["add", "."], { cwd: wt });
+  execFileSync("git", ["-c", "user.email=worker@loom", "-c", "user.name=worker", "commit", "-q", "-m", "worker work"], { cwd: wt });
+
+  const batchWt = path.join(os.tmpdir(), `loom-crgs-lm-${label}-batchwt-${sfx}`);
+  tmpDirs.push(batchWt);
+  execFileSync("git", ["worktree", "add", "-q", "-b", `loom/crgs-lm-${label}-batchwt-${sfx}`, batchWt, "HEAD"], { cwd: repo });
+
+  const candidate = { workerSessionId: `crgs-wkr-lm-${label}`, taskId: `crgs-task-lm-${label}`, branch, taskTitle: `feat(test): crgs-lm-${label}` };
+  return { repo, batchWt, candidate, decoySha };
+}
+
+// (L) the "plain" check (1st cat-file -p occurrence) throws a real CanonicalGitRefusal.
+{
+  const { repo, batchWt, candidate } = makeOneCommitLMCandidate("l");
+  const trustedMainRoot = defaultTrustedMainRoot(repo);
+  const counts = {};
+  const gitFactory = (p, ms) => {
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return {
+      raw: async (...callArgs) => {
+        const args = Array.isArray(callArgs[0]) ? callArgs[0] : callArgs;
+        if (args[0] === "cat-file" && args[1] === "-p" && (counts.catFile = (counts.catFile ?? 0) + 1) === 1) {
+          throw new CanonicalGitCommondirRefusal(redirectRawReason);
+        }
+        return real.raw(...callArgs);
+      },
+    };
+  };
+
+  const result = await assembleBatchBranches(repo, batchWt, [candidate], { gitFactory });
+
+  // @decision 043d83d2 — a "plain"/"final" verify failure sets `headMoved:true`, which short-circuits
+  // the WHOLE batch BEFORE anything is ever pushed to `dropped[]` (unlike (A)-(K)'s own catches above,
+  // none of which set this flag) — the reason lives on `headMovedReason`, never `dropped[0].reason`.
+  check("(L) sanity: assembly reports headMoved (plain-check verifyCommitParentAndTree refusal), nothing landed", result.landed.length === 0 && result.headMoved === true);
+  const reason = result.headMovedReason ?? "";
+  check("(L) sanity: the headMoved reason is the plain-check site this card's fix touches", reason.includes("could not verify the batch worktree's HEAD after landing"));
+  check('(L) the headMoved reason does NOT say "may have been tampered with"', !reason.includes("may have been tampered with"));
+  check('(L) the headMoved reason does NOT carry the doubled "refused: refused"', !reason.includes("refused: refused"));
+  for (const s of redirectGuidance) {
+    check(`(L) the headMoved reason carries the guidance clause "${s}"`, reason.toLowerCase().includes(s.toLowerCase()));
+  }
+}
+
+// (M) the "final" check (2nd cat-file -p occurrence) throws a real CanonicalGitRefusal; the 1st (plain)
+// occurrence is left real so this isolates the SECOND call specifically.
+{
+  const { repo, batchWt, candidate } = makeOneCommitLMCandidate("m");
+  const trustedMainRoot = defaultTrustedMainRoot(repo);
+  const counts = {};
+  const gitFactory = (p, ms) => {
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return {
+      raw: async (...callArgs) => {
+        const args = Array.isArray(callArgs[0]) ? callArgs[0] : callArgs;
+        if (args[0] === "cat-file" && args[1] === "-p" && (counts.catFile = (counts.catFile ?? 0) + 1) === 2) {
+          throw new CanonicalGitCommondirRefusal(redirectRawReason);
+        }
+        return real.raw(...callArgs);
+      },
+    };
+  };
+
+  const result = await assembleBatchBranches(repo, batchWt, [candidate], { gitFactory });
+
+  check("(M) sanity: assembly reports headMoved (final-check verifyCommitParentAndTree refusal), nothing landed", result.landed.length === 0 && result.headMoved === true);
+  const reason = result.headMovedReason ?? "";
+  check("(M) sanity: the headMoved reason is the final-check site this card's fix touches", reason.includes("could not verify the batch worktree's final HEAD"));
+  check('(M) the headMoved reason does NOT say "may have been tampered with"', !reason.includes("may have been tampered with"));
+  check('(M) the headMoved reason does NOT carry the doubled "refused: refused"', !reason.includes("refused: refused"));
+  for (const s of redirectGuidance) {
+    check(`(M) the headMoved reason carries the guidance clause "${s}"`, reason.toLowerCase().includes(s.toLowerCase()));
+  }
+}
+
+// (N) regression pair: a GENUINE parent/tree mismatch (no exception — the real cat-file -p read is
+// redirected to the repo's own unrelated 0-parent "init" commit, which genuinely fails the "exactly one
+// parent" check) must keep the EXACT pre-existing "may have been tampered with" wording at BOTH sites —
+// proving the fix branches on `errorDetail`'s presence, never a blanket replacement for every `!ok`.
+{
+  const { repo, batchWt, candidate, decoySha } = makeOneCommitLMCandidate("n1");
+  const trustedMainRoot = defaultTrustedMainRoot(repo);
+  const counts = {};
+  const gitFactory = (p, ms) => {
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return {
+      raw: async (...callArgs) => {
+        const args = Array.isArray(callArgs[0]) ? callArgs[0] : callArgs;
+        if (args[0] === "cat-file" && args[1] === "-p" && (counts.catFile = (counts.catFile ?? 0) + 1) === 1) {
+          return real.raw(["cat-file", "-p", decoySha]);
+        }
+        return real.raw(...callArgs);
+      },
+    };
+  };
+
+  const result = await assembleBatchBranches(repo, batchWt, [candidate], { gitFactory });
+
+  check("(N1, plain) sanity: assembly reports headMoved (genuine plain-check mismatch), nothing landed", result.landed.length === 0 && result.headMoved === true);
+  const reason = result.headMovedReason ?? "";
+  check('(N1, plain) the headMoved reason KEEPS "may have been tampered with" for a genuine mismatch', reason.includes("may have been tampered with"));
+  check("(N1, plain) the headMoved reason is the plain-check site, un-refusal-rendered", reason.includes("does not verify as the commit this call just made"));
+  for (const s of redirectGuidance) {
+    check(`(N1, plain) the headMoved reason does NOT carry the refusal guidance clause "${s}" (no refusal occurred)`, !reason.toLowerCase().includes(s.toLowerCase()));
+  }
+}
+{
+  const { repo, batchWt, candidate, decoySha } = makeOneCommitLMCandidate("n2");
+  const trustedMainRoot = defaultTrustedMainRoot(repo);
+  const counts = {};
+  const gitFactory = (p, ms) => {
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return {
+      raw: async (...callArgs) => {
+        const args = Array.isArray(callArgs[0]) ? callArgs[0] : callArgs;
+        if (args[0] === "cat-file" && args[1] === "-p" && (counts.catFile = (counts.catFile ?? 0) + 1) === 2) {
+          return real.raw(["cat-file", "-p", decoySha]);
+        }
+        return real.raw(...callArgs);
+      },
+    };
+  };
+
+  const result = await assembleBatchBranches(repo, batchWt, [candidate], { gitFactory });
+
+  check("(N2, final) sanity: assembly reports headMoved (genuine final-check mismatch), nothing landed", result.landed.length === 0 && result.headMoved === true);
+  const reason = result.headMovedReason ?? "";
+  check('(N2, final) the headMoved reason KEEPS "may have been tampered with" for a genuine mismatch', reason.includes("may have been tampered with"));
+  check("(N2, final) the headMoved reason is the final-check site, un-refusal-rendered", reason.includes("does not verify as this landing's own commit"));
+  for (const s of redirectGuidance) {
+    check(`(N2, final) the headMoved reason does NOT carry the refusal guidance clause "${s}" (no refusal occurred)`, !reason.toLowerCase().includes(s.toLowerCase()));
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
+// (O)/(P) Code Review follow-up (card 37fd19c5): the batch call sites' errorDetail branch must append the
+// tamper hint back for an ORDINARY (non-refusal) read failure — typed on `errorDetail.refusal`, never by
+// matching text — since losing it there would silently drop the caution rather than move it. And the
+// catch inside verifyCommitParentAndTree must cover BOTH its own reads in the SAME try, not just the
+// first (`cat-file -p`) — (P) targets the SECOND read (`rev-parse --verify ...^{tree}`) directly.
+// ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+// (O) a plain, non-refusal Error on the 1st cat-file -p occurrence (plain check) — the rendered reason
+// must say "could not verify" (the errorDetail branch fired) AND keep the tamper hint (typed append,
+// since this is NOT a refusal), but carry none of the refusal-only guidance clauses.
+{
+  const { repo, batchWt, candidate } = makeOneCommitLMCandidate("o");
+  const trustedMainRoot = defaultTrustedMainRoot(repo);
+  const counts = {};
+  const ordinaryFailureText = "injected: ordinary cat-file read failure (not a refusal)";
+  const gitFactory = (p, ms) => {
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return {
+      raw: async (...callArgs) => {
+        const args = Array.isArray(callArgs[0]) ? callArgs[0] : callArgs;
+        if (args[0] === "cat-file" && args[1] === "-p" && (counts.catFile = (counts.catFile ?? 0) + 1) === 1) {
+          throw new Error(ordinaryFailureText);
+        }
+        return real.raw(...callArgs);
+      },
+    };
+  };
+
+  const result = await assembleBatchBranches(repo, batchWt, [candidate], { gitFactory });
+
+  check("(O) sanity: assembly reports headMoved (ordinary read failure, plain check), nothing landed", result.landed.length === 0 && result.headMoved === true);
+  const reason = result.headMovedReason ?? "";
+  check("(O) sanity: the headMoved reason is the plain-check site this card's fix touches", reason.includes("could not verify the batch worktree's HEAD after landing"));
+  check("(O) the headMoved reason carries the injected ordinary failure text", reason.includes(ordinaryFailureText));
+  check('(O) the headMoved reason KEEPS "may have been tampered with" for an ORDINARY (non-refusal) read failure — typed append, never dropped', reason.includes("may have been tampered with"));
+  for (const s of redirectGuidance) {
+    check(`(O) the headMoved reason does NOT carry the refusal-only guidance clause "${s}" (no refusal occurred)`, !reason.toLowerCase().includes(s.toLowerCase()));
+  }
+}
+
+// (P) a real CanonicalGitRefusal on the SECOND internal read inside verifyCommitParentAndTree's "plain"
+// invocation — `rev-parse --verify ...^{tree}` (worktrees.ts ~:10459) — reached only once `cat-file -p`
+// has ALREADY succeeded for real (so the parent-count/parent-value checks passed). Proves the catch wraps
+// the WHOLE try, not just the first read.
+{
+  const { repo, batchWt, candidate } = makeOneCommitLMCandidate("p");
+  const trustedMainRoot = defaultTrustedMainRoot(repo);
+  const gitFactory = (p, ms) => {
+    const real = canonicalGit(p, ms, undefined, undefined, undefined, trustedMainRoot);
+    return {
+      raw: async (...callArgs) => {
+        const args = Array.isArray(callArgs[0]) ? callArgs[0] : callArgs;
+        // `^{tree}` is unique to this read in the whole call tree — the branch-tip resolve's own
+        // `rev-parse --verify` ends in `^{commit}`, never `^{tree}` (confirmed by reading both call sites).
+        if (args[0] === "rev-parse" && args[1] === "--verify" && String(args[args.length - 1]).endsWith("^{tree}")) {
+          throw new CanonicalGitCommondirRefusal(redirectRawReason);
+        }
+        return real.raw(...callArgs);
+      },
+    };
+  };
+
+  const result = await assembleBatchBranches(repo, batchWt, [candidate], { gitFactory });
+
+  check("(P) sanity: assembly reports headMoved (refusal on the tree-verify read), nothing landed", result.landed.length === 0 && result.headMoved === true);
+  const reason = result.headMovedReason ?? "";
+  check("(P) sanity: the headMoved reason is the plain-check site (the tree-verify read belongs to that same invocation)", reason.includes("could not verify the batch worktree's HEAD after landing"));
+  check('(P) the headMoved reason does NOT say "may have been tampered with" (a real refusal, never the ordinary-failure append)', !reason.includes("may have been tampered with"));
+  for (const s of redirectGuidance) {
+    check(`(P) the headMoved reason carries the guidance clause "${s}"`, reason.toLowerCase().includes(s.toLowerCase()));
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every CanonicalGitRefusal render site covered by THIS file's own scenarios (A)-(K) — identity-probe catches on all three surfaces, the FIRST pre-mutation setup read, the rollback render, all five POST-mutation cherry-pick-loop catches, the cut-base-ancestry probe, the main-tip read's transient-flag gate, the landed-tree content-check, and the rollback's own post-reset verify probe — keeps its human guidance, with no doubled \"refused: refused\" wording, no misclassified \"transient\"/\"re-confirm\" wording on a structural refusal, and an ORDINARY (non-refusal) failure keeps its own honest \"failed:\"/\"transient\" wording unchanged. This is NOT a claim that every merge-path render site anywhere in the codebase is covered — see this file's own header comment for the explicit list, and card 26084115's \"Do not\" list for sites deliberately out of scope."
+  ? "\n✅ ALL PASS — every CanonicalGitRefusal render site covered by THIS file's own scenarios (A)-(P) — identity-probe catches on all three surfaces, the FIRST pre-mutation setup read, the rollback render, all five POST-mutation cherry-pick-loop catches, the cut-base-ancestry probe, the main-tip read's transient-flag gate, the landed-tree content-check, the rollback's own post-reset verify probe, and both of verifyCommitParentAndTree's own internal reads at both its plain/final checks (with a genuine-mismatch regression pair proving the fix doesn't blanket-replace the tamper wording, and an ordinary-failure pair proving the tamper hint is typed-appended back rather than silently dropped) — keeps its human guidance, with no doubled \"refused: refused\" wording, no misclassified \"transient\"/\"re-confirm\" wording on a structural refusal, and an ORDINARY (non-refusal) failure (or a genuine, un-excepted mismatch) keeps its own honest wording unchanged. This is NOT a claim that every merge-path render site anywhere in the codebase is covered — see this file's own header comment for the explicit list, and card 26084115's \"Do not\" list for sites deliberately out of scope."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const d of tmpDirs) {
