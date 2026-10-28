@@ -412,6 +412,10 @@ export interface LoomDaemon {
    * `merge_request`, which the project Overview's Attention section renders as a rich Review-queue card).
    * Inserted straight through the daemon's appendEvent writer; it NEVER runs a real review or merge.
    * Returns the inserted event id.
+   *
+   * A `session_recovery_abandoned` row is ALSO recorded for
+   * {@link LoomDaemon.supersedeSeededCrashAbandonments} to clear after the test — see that method's doc for
+   * why that one kind cannot self-clean the way `merge_request` does.
    */
   seedOrchestrationEvent: (evt: {
     managerSessionId: string; kind: string;
@@ -543,6 +547,17 @@ export interface LoomDaemon {
    * no-pty session, so no real claude is ever spawned.
    */
   resolveSeededQuestions: () => Promise<void>;
+  /**
+   * File a superseding `session_recovered` row for every session {@link LoomDaemon.seedOrchestrationEvent}
+   * seeded a `session_recovery_abandoned` for, so the global CRASH-LOOPED attention item that row derives
+   * clears. The `autoIsolation` auto fixture calls this after EVERY test — a FIFTH forward leak, and the
+   * one that does NOT look like one at the call site.
+   *
+   * @decision 2bbeed83 — never move this into the seeding spec's afterEach (the seeder is INCIDENTAL),
+   * never widen it past the ids recorded at seed time, never downgrade the read-back from a throw.
+   * Unlike `merge_request`, archival REVEALS this item rather than clearing it.
+   */
+  supersedeSeededCrashAbandonments: () => Promise<void>;
 }
 
 export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomDaemon: LoomDaemon }>({
@@ -584,16 +599,21 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
   // seeded companion_config row is a FOURTH leak, structurally fixed by card e8282e02: it outlives session
   // archival, and the shared daemon's `checkTokenCollision` guard refuses ANY later config save that arms a
   // token an un-cleaned sibling's row still holds — see {@link LoomDaemon.deleteSeededCompanionConfigs}'s
-  // own doc. Archiving seeded sessions, hard-killing spawned host shells, deleting seeded companion configs,
-  // AND answering seeded questions after each test closes all four forward leaks centrally. Idempotent: an
-  // already-archived / already-killed / already-deleted / already-answered id is a no-op, so a spec that
-  // also cleans up explicitly is harmless.
+  // own doc. A seeded `session_recovery_abandoned` row is a FIFTH leak, and the only one archival makes
+  // WORSE rather than better: its CRASH-LOOPED attention item has no liveness filter and no expiry, so
+  // archiving the subject session REVEALS it daemon-wide instead of clearing it (card 2bbeed83) — see
+  // {@link LoomDaemon.supersedeSeededCrashAbandonments}'s own doc. Archiving seeded sessions, hard-killing
+  // spawned host shells, deleting seeded companion configs, answering seeded questions, AND superseding
+  // seeded crash-loop abandonments after each test closes all five forward leaks centrally. Idempotent: an
+  // already-archived / already-killed / already-deleted / already-answered / already-superseded id is a
+  // no-op, so a spec that also cleans up explicitly is harmless.
   autoIsolation: [async ({ loomDaemon }, use) => {
     await use();
     await loomDaemon.killSpawnedShells();
     await loomDaemon.deleteSeededCompanionConfigs();
     await loomDaemon.archiveSeededSessions();
     await loomDaemon.resolveSeededQuestions();
+    await loomDaemon.supersedeSeededCrashAbandonments();
   }, { auto: true }],
 
   // eslint-disable-next-line no-empty-pattern
@@ -695,6 +715,10 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     // Card e8282e02: track every seeded companion's sessionId so afterEach can delete its companion_config
     // row — a row that outlives archival and keeps its (now unique-by-default) bot token enabled.
     const seededCompanionConfigSessionIds: string[] = [];
+    // Card 2bbeed83: track the SUBJECT session of every seeded `session_recovery_abandoned` row so afterEach
+    // can supersede it — its CRASH-LOOPED attention item has no liveness filter and no expiry, so archiving
+    // the session reveals it daemon-wide rather than clearing it.
+    const seededCrashAbandonmentSessionIds: string[] = [];
 
     const seedProjectMemory: LoomDaemon["seedProjectMemory"] = async (projectId, entries) => {
       const res = await apiPost<{ projectMemoryIds: string[] }>(baseURL, "/internal/test/seed", {
@@ -839,6 +863,11 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       const res = await apiPost<{ orchestrationEventIds: string[] }>(baseURL, "/internal/test/seed", {
         orchestrationEvents: [evt],
       });
+      // Same per-session keying `activeCrashLoopAbandonments` itself uses (`workerSessionId ?? managerSessionId`),
+      // so the supersede below lands on the row the attention derivation actually read.
+      if (evt.kind === "session_recovery_abandoned") {
+        seededCrashAbandonmentSessionIds.push(evt.workerSessionId ?? evt.managerSessionId);
+      }
       return firstOrThrow(res.orchestrationEventIds, "orchestrationEventId");
     };
 
@@ -926,6 +955,40 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
+    const supersedeSeededCrashAbandonments: LoomDaemon["supersedeSeededCrashAbandonments"] = async () => {
+      if (seededCrashAbandonmentSessionIds.length === 0) return;
+      // Deduped: a spec may seed several abandonments for ONE session, and one superseding row clears them
+      // all (latest-by-ts per session).
+      const ids = [...new Set(seededCrashAbandonmentSessionIds.splice(0))];
+      for (const sessionId of ids) {
+        let newest: { kind: string } | undefined;
+        try {
+          // The SAME shape CrashRecoveryWatcher.tick's own stable-resume branch writes (managerSessionId:
+          // parentSessionId ?? sessionId, workerSessionId: sessionId) — the real "it recovered" path, not a
+          // fixture-only shortcut. Filed AFTER the abandoned row, so latest-by-ts clears the item.
+          await seedOrchestrationEvent({
+            managerSessionId: sessionId, workerSessionId: sessionId, kind: "session_recovered",
+            detail: { afterAttempts: 1, e2eCleanup: true },
+          });
+          const r = await fetch(`${baseURL}/api/orchestration/events?kinds=session_recovery_abandoned,session_recovered`);
+          if (!r.ok) continue; // the daemon is going away at teardown — nothing to verify against
+          const rows = (await r.json()) as { kind: string; managerSessionId: string; workerSessionId: string | null }[];
+          // The route orders ts DESC, rowid DESC, so the FIRST row keyed to this session is the newest.
+          newest = rows.find((row) => (row.workerSessionId ?? row.managerSessionId) === sessionId);
+        } catch {
+          continue; // transport/teardown failure only — never a verified mismatch (that throws below)
+        }
+        // A VERIFIED mismatch throws: this cleanup's whole point is that a quiet no-op reds a LATER spec
+        // for something it never did, and the blamed spec is never the one that caused it.
+        if (newest?.kind !== "session_recovered") {
+          throw new Error(
+            `e2e fixture cleanup: expected session_recovered to supersede session_recovery_abandoned for ` +
+            `${sessionId}, got ${JSON.stringify(newest)}`,
+          );
+        }
+      }
+    };
+
     // Track every real shell spawned via POST /api/terminals so killSpawnedShells can tear them down.
     const spawnedShellIds: string[] = [];
 
@@ -948,7 +1011,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedMainlineWatermark, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, deleteSeededCompanionConfigs, resolveSeededQuestions });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedMainlineWatermark, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, deleteSeededCompanionConfigs, resolveSeededQuestions, supersedeSeededCrashAbandonments });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
