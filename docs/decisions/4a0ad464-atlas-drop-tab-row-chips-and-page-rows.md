@@ -106,3 +106,8 @@ appended section, not restated here.
 - **Do not make `.loom-atlas-idle` a control.** It is the branch's empty state, not a destination.
 - **Do not retire `/overview` as a tidy-up.** See part B above: it is a real IA decision that
   contradicts a standing `@decision`, and it needs its own card and the owner's eyes.
+- **Do not delete the tab-overflow spec or the fold machinery it covers because no desktop width
+  folds any more.** Part A's 35px/one-line measurement is at 1280/1440/1920 only — see `d4350286`'s
+  record for the widths (900 and below with the rail present; 600 and below once it is a drawer) where
+  the menu still fires. Phone width still folds; every leg that needs a fold asserts it rather than
+  assuming it.

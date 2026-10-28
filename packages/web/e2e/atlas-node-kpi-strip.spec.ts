@@ -21,6 +21,9 @@
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
+//
+// @decision 4a0ad464 — never re-add a compact figure strip to a node's tab row. Don't weaken these
+// legs to a testid check either: a strip rendered without one is the same regression.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { nodeTabKeys, openNodeTab } from "./helpers/nodeTabs";
 

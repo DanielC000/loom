@@ -33,6 +33,10 @@
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
+//
+// @decision 4a0ad464 — don't delete this spec, or the machinery it covers, because no desktop width
+// folds any more. Phone width still does, and every leg that needs a fold asserts it rather than
+// assuming it, so a width that stopped folding fails loudly instead of going vacuous.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
