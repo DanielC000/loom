@@ -281,6 +281,20 @@ card's own diff to also thread an unrelated field risks obscuring the actual fix
 tracked by the manager as their own follow-up cards — neither is fixed in this card. **The latter is now
 fixed by card `c7dc99bf`** (`docs/decisions/c7dc99bf-*.md`); `findLaterBranchSquash` remains open.
 
+### Round 7 (card `472c8e62`) — investigated; `findLaterBranchSquash` STAYS strict
+
+Card `472c8e62` picked up this record's own "Deliberately left STRICT"/"Found but out of scope" note on
+`findLaterBranchSquash` (above) and investigated whether it has a real, reachable gap and, if so, whether
+it can be closed the same way this card widened every other trailer-reading call site. Found: the gap is
+real (a batch-retained branch's later, hook-displaced landing can stay HELD forever — `isBranchHeld`'s
+last fallback can't see a displaced trailer), but it cannot be closed with verifier-backed tolerant
+discovery the way `findLandedSquashCommit`/`scanMergedCommitMap`/`findAllLandedTrailerCommits` were: the
+commits inside a `mainline_landed_commits` ledger row's own range are the WORKER's own commits, landed
+verbatim, with worker-authored (not Loom-authored) message text — so the ledger's range-membership proof
+does not establish which branch a candidate's trailer text actually names. Documented as accepted,
+no code change. Full investigation, the decisive finding, the rejected options, and the one sound fix
+route for a future card: `docs/decisions/472c8e62-strict-later-squash-release-for-held-branches.md`.
+
 ## Do not
 
 - Do not change `parseLoomTrailerBlock`'s own semantics to be tolerant — every other existing caller
