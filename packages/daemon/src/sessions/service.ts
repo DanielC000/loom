@@ -27602,13 +27602,47 @@ export class SessionService {
       console.info(`[reconcile] worker ${s.id} stale-generation own-landing — ATTRIBUTED to ${attribution.sha.slice(0, 8)} via ${attribution.via} (never touching the shared branch/worktree)`);
       return "attributed";
     }
-    // @decision e5458ccd — do not one-shot escalate an unreadable/unresolvable watermark: it is a
-    // transient read failure, not evidence X's landing can never be found. No-op instead, so this row is
-    // retried next boot rather than claiming a scan that never actually ran.
+    // @decision e5458ccd — an unresolvable watermark is a BLOCKED PRECONDITION for this lookup, never
+    // evidence X's landing can never be found, so it is never a candidate for immediate escalation.
+    // @decision 1fae1b98 — `cause:"corrupt"` is the one exception (a deterministic, already-persisted
+    // fact — see this card's own decision record); every other cause bounds like `"transient"` below.
     if (attribution.kind === "watermark-unresolved") {
+      if (attribution.cause === "corrupt") {
+        const reason = "the stored mainline watermark for this repo is corrupt (fails validation) — a human mainline-watermark reset clears it";
+        const entry = this.db.recordStaleGenerationWatermarkUnresolved(s.id, { branch, taskId, projectId: project.id }, reason);
+        // eslint-disable-next-line no-console
+        console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — ${reason} (attempt ${entry.watermark.attempts}); ${entry.watermark.escalated ? "already escalated" : "escalating now (deterministic, no grace)"}`);
+        if (!entry.watermark.escalated) {
+          const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
+          const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and Loom cannot even attempt to check its landing: the stored mainline watermark for repo "${s.repoKey ?? "primary"}" is corrupt. This will never clear on its own — reset it via POST /api/projects/${project.id}/mainline-watermark/reset (after checking out the right branch), then this worker's own landing can be checked again on a later boot.`
+            + this.buildStampSuffix(this.resolveDeployStaleness());
+          try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
+          this.db.markStaleGenerationWatermarkEscalated(s.id);
+          // eslint-disable-next-line no-console
+          console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — escalated [loom:merge-orphaned] to ${target.slice(0, 8)} for a corrupt mainline watermark (one-shot)`);
+        }
+        return "escalated";
+      }
+      const reason = "a git ref read failure (unreadable git metadata, or the stored branch no longer resolves — Loom cannot further distinguish a transient host condition from the branch having since been removed)";
+      const entry = this.db.recordStaleGenerationWatermarkUnresolved(s.id, { branch, taskId, projectId: project.id }, reason);
+      const wm = entry.watermark;
+      const ageMs = Date.now() - new Date(wm.firstDetectedAt).getTime();
+      const crossedThreshold = wm.attempts >= this.staleGenerationTransientEscalateAttempts || ageMs >= this.staleGenerationTransientEscalateMs;
       // eslint-disable-next-line no-console
-      console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — mainline watermark unreadable/unresolvable this boot; retrying next boot, no escalation`);
-      return "no-op";
+      console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — ${reason} this boot (attempt ${wm.attempts}); ${crossedThreshold ? "past the give-up threshold, escalating" : "retrying next boot, no escalation yet"}`);
+      if (!wm.escalated && crossedThreshold) {
+        const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
+        const ageDays = Math.max(0, Math.round(ageMs / 86_400_000));
+        // @decision 1fae1b98 — this nudge must name a remedy too (worded conditionally — this cause may
+        // self-heal, unlike the corrupt-cause nudge's certain reset).
+        const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and ${wm.attempts} consecutive boot(s) over ~${ageDays} day(s) have each hit ${reason} — never a definitive content mismatch, so Loom cannot rule out this eventually self-healing, but it has gone on long enough to need a human look. If the stored branch was renamed or deleted, reset the project's mainline baseline via POST /api/projects/${project.id}/mainline-watermark/reset (after checking out the right branch); if it's a host/filesystem condition instead, no action may be needed. Loom will keep retrying every boot regardless; this alert will not repeat.`
+          + this.buildStampSuffix(this.resolveDeployStaleness());
+        try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
+        this.db.markStaleGenerationWatermarkEscalated(s.id);
+        // eslint-disable-next-line no-console
+        console.warn(`[reconcile] worker ${s.id} stale-generation own-landing — escalated [loom:merge-orphaned] to ${target.slice(0, 8)} past the watermark transient give-up threshold (one-shot)`);
+      }
+      return (wm.escalated || crossedThreshold) ? "escalated" : "transient";
     }
     // @decision 05915fc7 — round 2 S1: bounded now, not silent-forever — past
     // staleGenerationTransientEscalateAttempts boots OR staleGenerationTransientEscalateMs elapsed
@@ -27719,7 +27753,9 @@ export class SessionService {
   ): Promise<
     | { kind: "attributed"; sha: string; via: "union-chain" | "content-match" }
     | { kind: "zero-delta" }
-    | { kind: "watermark-unresolved" }
+    // @decision 1fae1b98 — `cause:"corrupt"` (a deterministic, already-persisted fact) escalates on first
+    // sight; every other watermark-unresolved cause bounds like the content-check's own `"transient"`.
+    | { kind: "watermark-unresolved"; cause: "transient" | "corrupt" }
     | { kind: "transient"; candidateShas: string[] }
     | { kind: "no-match"; checked: boolean }
   > {
@@ -27734,7 +27770,9 @@ export class SessionService {
       mainlineRefResolution = this.resolveMainlineWatermarkRef(project.id, s.repoKey);
       mainlineRefCache.set(cacheKey, mainlineRefResolution);
     }
-    if (mainlineRefResolution.state === "unreadable") return { kind: "watermark-unresolved" };
+    if (mainlineRefResolution.state === "unreadable") {
+      return { kind: "watermark-unresolved", cause: mainlineRefResolution.cause === "corrupt" ? "corrupt" : "transient" };
+    }
     const expectedMainlineRef = mainlineRefResolution.ref;
     if (expectedMainlineRef) {
       let refResolves = mainlineRefResolvesCache.get(cacheKey);
@@ -27742,7 +27780,7 @@ export class SessionService {
         refResolves = (await readBaseSha(repoPath, expectedMainlineRef)) !== null;
         mainlineRefResolvesCache.set(cacheKey, refResolves);
       }
-      if (!refResolves) return { kind: "watermark-unresolved" };
+      if (!refResolves) return { kind: "watermark-unresolved", cause: "transient" };
     }
     const base = expectedMainlineRef ?? "HEAD"; // the candidate SCAN's own base — unrelated to the content-check pathspec below
 

@@ -1899,18 +1899,36 @@ export interface MergeReconcileWedgeEntry {
  * interface's old doc) now holds ONLY for `kind:"definitive"`. `kind:"transient"` has its own bounded
  * give-up (see `resolveStaleGenerationOwnLanding`'s own decision record for the full kind-flip semantics).
  */
+/**
+ * @decision 1fae1b98 — nested on the SAME `StaleGenerationUnresolvedEntry` row, never reusing its six
+ * content-check fields directly — see this card's own decision record for why that would conflate two
+ * unrelated causes' attempt counts into one misleading number.
+ */
+export interface StaleGenerationWatermarkSubEntry {
+  reason: string;
+  firstDetectedAt: string;
+  lastAttemptAt: string;
+  attempts: number;
+  escalated: boolean;
+}
+
 export interface StaleGenerationUnresolvedEntry {
   sessionId: string;
   branch: string | null;
   taskId: string | null;
   projectId: string;
-  reason: string;
+  // @decision 1fae1b98 — these six content-check fields are always set or unset TOGETHER: a row created
+  // purely from a `watermark` sighting (no content-check attempt has ever run for this session) has none
+  // of them — see `recordStaleGenerationUnresolved`'s own `hadPriorContentAttempt` check.
+  reason?: string;
   /** @decision 05915fc7 — the CURRENT boot's own classification; see this interface's own doc above. */
-  kind: "definitive" | "transient";
-  firstDetectedAt: string;
-  lastAttemptAt: string;
-  attempts: number;
-  escalated: boolean;
+  kind?: "definitive" | "transient";
+  firstDetectedAt?: string;
+  lastAttemptAt?: string;
+  attempts?: number;
+  escalated?: boolean;
+  /** @decision 1fae1b98 — see {@link StaleGenerationWatermarkSubEntry}'s own doc. */
+  watermark?: StaleGenerationWatermarkSubEntry;
 }
 
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
@@ -5220,14 +5238,29 @@ export class Db {
       const v: unknown = JSON.parse(raw);
       if (Array.isArray(v)) {
         return v
-          .filter(
-            (e): e is Omit<StaleGenerationUnresolvedEntry, "kind"> & { kind?: "definitive" | "transient" } =>
-              !!e && typeof e.sessionId === "string" && typeof e.projectId === "string" &&
+          .filter((e): e is StaleGenerationUnresolvedEntry => {
+            if (!e || typeof e.sessionId !== "string" || typeof e.projectId !== "string") return false;
+            // @decision 1fae1b98 — the six content-check fields are always set or unset TOGETHER: a row
+            // created purely from a `watermark` sighting has none of them; one with only SOME present is
+            // dropped as malformed, never silently half-trusted.
+            const anyContent = e.reason !== undefined || e.kind !== undefined || e.firstDetectedAt !== undefined
+              || e.lastAttemptAt !== undefined || e.attempts !== undefined || e.escalated !== undefined;
+            const contentValid = !anyContent || (
               typeof e.firstDetectedAt === "string" && typeof e.lastAttemptAt === "string" &&
               typeof e.attempts === "number" && typeof e.reason === "string" && typeof e.escalated === "boolean" &&
-              (e.kind === undefined || e.kind === "definitive" || e.kind === "transient"),
-          )
-          .map((e): StaleGenerationUnresolvedEntry => ({ ...e, kind: e.kind ?? "definitive" }));
+              (e.kind === undefined || e.kind === "definitive" || e.kind === "transient")
+            );
+            if (!contentValid) return false;
+            const wm = e.watermark;
+            return wm === undefined || (
+              !!wm && typeof wm.firstDetectedAt === "string" && typeof wm.lastAttemptAt === "string" &&
+              typeof wm.attempts === "number" && typeof wm.reason === "string" && typeof wm.escalated === "boolean"
+            );
+          })
+          // @decision 05915fc7 — round 3 (B1): an absent `kind` on a row that carries content fields is a
+          // pre-card legacy row, defaulted to "definitive". A watermark-only row has no content fields to
+          // default at all — see the separate watermark-tracking anchor above.
+          .map((e): StaleGenerationUnresolvedEntry => (e.firstDetectedAt !== undefined && e.kind === undefined ? { ...e, kind: "definitive" } : e));
       }
     } catch { /* corrupt blob ⇒ empty (like listMergeReconcileWedges) */ }
     return [];
@@ -5239,7 +5272,8 @@ export class Db {
    * decides escalation; the caller's own policy differs by `kind` (see {@link StaleGenerationUnresolvedEntry}'s
    * own doc) — `"definitive"` escalates on `!entry.escalated` alone, `"transient"` has its own bounded
    * give-up on top. `kind` is stamped fresh on EVERY call (the caller's current boot classification),
-   * never merged with a prior value.
+   * never merged with a prior value. Never touches a prior `watermark` sub-entry (see
+   * {@link recordStaleGenerationWatermarkUnresolved}) — carried through untouched either way.
    * Round 2 (card 21b53e6a): there is no more git-based attribution attempt to fail here — a stale
    * generation with its own `merge_request` always escalates, so `reason` now explains WHY no DB-only
    * resolution is attempted at all, never a specific lookup failure.
@@ -5247,23 +5281,66 @@ export class Db {
   recordStaleGenerationUnresolved(
     sessionId: string, ctx: { branch: string | null; taskId: string | null; projectId: string }, reason: string,
     kind: "definitive" | "transient",
-  ): StaleGenerationUnresolvedEntry {
+  ): StaleGenerationUnresolvedEntry & { reason: string; kind: "definitive" | "transient"; firstDetectedAt: string; lastAttemptAt: string; attempts: number; escalated: boolean } {
     const now = new Date().toISOString();
     const list = this.listStaleGenerationUnresolved();
     const existing = list.find((e) => e.sessionId === sessionId);
-    const updated: StaleGenerationUnresolvedEntry = existing
-      ? { ...existing, ...ctx, lastAttemptAt: now, attempts: existing.attempts + 1, reason, kind }
-      : { sessionId, ...ctx, firstDetectedAt: now, lastAttemptAt: now, attempts: 1, reason, kind, escalated: false };
+    // @decision 1fae1b98 — "had a prior CONTENT-CHECK sighting" is keyed on `firstDetectedAt`, never on
+    // mere row presence: a row created purely by a watermark sighting has no content fields at all, and
+    // must be treated as this session's FIRST content-check sighting, not a repeat of a placeholder.
+    const hadPriorContentAttempt = existing?.firstDetectedAt !== undefined;
+    const updated = {
+      ...existing, sessionId, ...ctx,
+      firstDetectedAt: hadPriorContentAttempt ? existing!.firstDetectedAt! : now,
+      lastAttemptAt: now,
+      attempts: hadPriorContentAttempt ? existing!.attempts! + 1 : 1,
+      reason, kind,
+      escalated: hadPriorContentAttempt ? existing!.escalated! : false,
+    };
     this.setMeta(STALE_GENERATION_UNRESOLVED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), updated]));
     return updated;
   }
-  /** Flip `sessionId` to `escalated:true` (a nudge was fired) — a no-op if it isn't currently tracked
-   *  or is already escalated (keeps the nudge one-shot). */
+  /** Flip `sessionId`'s own CONTENT-CHECK `escalated` to `true` (a nudge was fired) — a no-op if it isn't
+   *  currently tracked, is already escalated (keeps the nudge one-shot), or — Code Review of `1fae1b98`
+   *  — has never had a CONTENT-CHECK sighting at all (`firstDetectedAt === undefined`, a watermark-only
+   *  row): writing `escalated:true` alone there would make `anyContent` true while the other five
+   *  content fields stay undefined, so `listStaleGenerationUnresolved`'s all-or-none guard drops the
+   *  WHOLE row — including an already-escalated `watermark` sub-entry — causing its own one-shot nudge
+   *  to re-fire. Never touches a `watermark` sub-entry either way — see
+   *  {@link markStaleGenerationWatermarkEscalated} for that independent flag. */
   markStaleGenerationEscalated(sessionId: string): void {
     const list = this.listStaleGenerationUnresolved();
     const entry = list.find((e) => e.sessionId === sessionId);
-    if (!entry || entry.escalated) return;
+    if (!entry || entry.escalated || entry.firstDetectedAt === undefined) return;
     this.setMeta(STALE_GENERATION_UNRESOLVED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), { ...entry, escalated: true }]));
+  }
+  /**
+   * @decision 1fae1b98 — the WATERMARK sub-entry's own upsert; touches ONLY `watermark`, carrying any
+   * top-level content-check fields through untouched — see this card's own decision record for why.
+   */
+  recordStaleGenerationWatermarkUnresolved(
+    sessionId: string, ctx: { branch: string | null; taskId: string | null; projectId: string }, reason: string,
+  ): StaleGenerationUnresolvedEntry & { watermark: StaleGenerationWatermarkSubEntry } {
+    const now = new Date().toISOString();
+    const list = this.listStaleGenerationUnresolved();
+    const existing = list.find((e) => e.sessionId === sessionId);
+    const prior = existing?.watermark;
+    const watermark: StaleGenerationWatermarkSubEntry = prior
+      ? { firstDetectedAt: prior.firstDetectedAt, lastAttemptAt: now, attempts: prior.attempts + 1, reason, escalated: prior.escalated }
+      : { firstDetectedAt: now, lastAttemptAt: now, attempts: 1, reason, escalated: false };
+    const updated = { ...existing, sessionId, ...ctx, watermark };
+    this.setMeta(STALE_GENERATION_UNRESOLVED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), updated]));
+    return updated;
+  }
+  /** Flip `sessionId`'s own `watermark` sub-entry to `escalated:true` — a no-op if it isn't currently
+   *  tracked or is already escalated (keeps the nudge one-shot). Never touches the top-level
+   *  content-check `escalated` field — see {@link markStaleGenerationEscalated} for that independent flag. */
+  markStaleGenerationWatermarkEscalated(sessionId: string): void {
+    const list = this.listStaleGenerationUnresolved();
+    const entry = list.find((e) => e.sessionId === sessionId);
+    if (!entry?.watermark || entry.watermark.escalated) return;
+    const updated = { ...entry, watermark: { ...entry.watermark, escalated: true } };
+    this.setMeta(STALE_GENERATION_UNRESOLVED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), updated]));
   }
 
   // --- companion RUN config (Companion epic Phase 3): the "how to RUN this companion" layer, keyed by
