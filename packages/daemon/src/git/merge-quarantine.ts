@@ -2599,6 +2599,17 @@ function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physica
   return buildReingestedEntryFromDisk(physicalPath, entry, parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string }, NO_DROPS, activeQuarantines, "reconcileClearedEntryIfPlaceholder");
 }
 
+/** Test-only pass-through to {@link reconcileClearedEntryIfPlaceholder} — this module's own functions are
+ *  not exported, so a unit test pinning its exact return SHAPE (card 0bc6305a: an empty
+ *  orphanLatchFiles/contributorRepoPaths union collapses to `undefined`, never a defined `[]`) needs a
+ *  seam that doesn't require driving the whole clear-decision machinery (which may or may not lift the
+ *  entry depending on unrelated refusal reasons, making the reconciled intermediate unobservable through
+ *  any real entry point). Never imported by `index.ts` — the `TestOnly` suffix is load-bearing, same
+ *  precedent as {@link markedFinalFullyCoveredByClearTestOnly}. */
+export function reconcileClearedEntryIfPlaceholderTestOnly(entry: MergeQuarantineEntry, physicalPath: string): MergeQuarantineEntry {
+  return reconcileClearedEntryIfPlaceholder(entry, physicalPath);
+}
+
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
  *  residue for KEY — a failed write DELIBERATELY leaves its tmp behind (round 2: it's the only durable
  *  record of an active quarantine until resolved) — HERE, at clear time, is where it gets swept.
