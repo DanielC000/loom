@@ -8396,7 +8396,10 @@ function isWithTimeoutExpiry(e: unknown): boolean {
  *
  *  @decision 122eb237 — spawn classification stays text-based: simple-git discards the real spawn
  *  error's `code`/`syscall` before this function ever sees it (verified — see this card's own decision
- *  record); a follow-up card covers converting this one. */
+ *  record); a follow-up card covers converting this one.
+ *
+ *  @decision 40f572f7 — the follow-up: investigated a guard-verified marker fix, accepted the text
+ *  heuristic as-is instead (bounded worst case, no sound-but-cheap fix) — see this card's own record. */
 function isSpawnLevelFailure(e: unknown): boolean {
   return e instanceof Error && /^Error: spawn /.test(e.message);
 }
