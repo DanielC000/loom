@@ -2005,6 +2005,16 @@ export type OrchestrationEventKind =
   // deploy that ships it and can never be back-filled — do not difference it against a pre-this-change
   // figure (a different instrument, a retention-bounded floor, not a measurement).
   | "engine_session_rotated"
+  // Card cc788ae4: a manager-initiated `worker_restamp_cut_base` deliberately re-stamped a worker
+  // session's recorded `cutBaseSha` fork point to the canonical repo's current target tip, after
+  // verifying the worker branch contains that tip and carries no merge commit beyond it (the "departed
+  // lineage" check — see docs/decisions/cc788ae4-*.md). `detail` carries {sessionId, taskId, projectId,
+  // repoKey, branch, oldCutBaseSha, newCutBaseSha, branchExtraCount} — the acting manager is NOT a detail
+  // field; it is the event row's own `managerSessionId` (a real, attributable actor — unlike the
+  // daemon-global sentinels above). Audit-only, deliberately excluded from `EVENT_TRIGGER_EVENT_KINDS`/`GATE_HISTORY_KINDS`/
+  // `ORCH_ACTIVITY_KINDS`/`REPORT_RESOLVED_EVENT_KINDS` — same posture as `commondir_trust_pinned`/
+  // `landing_trailer_displaced`: a forensic record of a deliberate manager act, not a merge/gate outcome.
+  | "worker_cut_base_restamped"
   // A vault's governing repo (VaultVersioner.commit()/flushSync(), or the proactive
   // VaultPushStatusWatcher tick) found a stale `.git/index.lock` — `detail` carries { repoPath, lockPath,
   // ageMs, command, caveat, corroboratedByMessage? }. Filed `managerSessionId: ""` (daemon-global). Audit-
@@ -2192,6 +2202,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   wake_target_redirected: true,
   spawn_target_redirected: true,
   landing_trailer_displaced: true,
+  worker_cut_base_restamped: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

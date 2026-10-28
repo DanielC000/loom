@@ -4703,6 +4703,58 @@ export class OrchestrationMcpRouter {
       async ({ branch, repoKey, create }) => ok(await sessions.checkoutProjectBranch(managerSessionId, { branch, repoKey, create })),
     );
 
+    // @decision cc788ae4 — manager-only, OWN project only (server-derived from managerSessionId, never a
+    // workerSessionId's own project trusted blindly); never registered on the worker/platform/setup/
+    // auditor surfaces, and never callable from any automatic union-merge/gate path.
+    server.registerTool(
+      "worker_restamp_cut_base",
+      {
+        description:
+          "Deliberately re-stamp a worker session's recorded cut-base (fork-point) sha to the canonical " +
+          "repo's CURRENT mainline target tip — one of three remedies for a merge-time forkPointDiverged " +
+          "refusal (the other two: switch the canonical checkout back, or re-dispatch on a fresh worker " +
+          "cut from current mainline) for a worker whose branch was cut before the canonical checkout " +
+          "moved to a different lineage. Recycling or rebasing the worker alone can NEVER clear that " +
+          "refusal (its recorded cut base is carried forward unchanged either way); this tool clears it " +
+          "deliberately, but ONLY after verifying TWO things against the branch's CURRENT state: (A) the " +
+          "current mainline target tip is an ancestor of the worker branch's tip (the branch genuinely " +
+          "contains it), and (B) every commit the branch carries beyond that tip has exactly one parent — " +
+          "ANY merge commit in that range refuses outright, including a legitimate union-forward merge of " +
+          "the mainline, because a merge commit is the only way the OLD, departed lineage could ever have " +
+          "entered the branch in the first place. The remedy when refused on (B) is to rebase/cherry-pick " +
+          "the branch linearly onto the current target (no merges) and retry — never to inspect what the " +
+          "merge brought in. Neither check inspects CONTENT: a worker could hand-author fresh " +
+          "single-parent commits that happen to redo a departed diff by hand, which this tool cannot tell " +
+          "apart from a genuine rebase's own replayed commits — the ordinary merge gate and review of the " +
+          "branch's real diff are what cover that, not this tool. Check B is also POINT-IN-TIME: it is " +
+          "never re-run at merge time, so a merge commit added to the branch AFTER a successful restamp " +
+          "lands through the ordinary squash uncaught, same as it always would have. " +
+          "`workerSessionId` must name a session in YOUR OWN project with a branch and a task not already " +
+          "proven merged, AND must be the NEWEST session row at that worktree path/branch — a merge only " +
+          "ever reads the newest row's own recorded cut base, so restamping a superseded row from an " +
+          "older recycle/respawn is refused (naming the newer session's id), not silently accepted as a " +
+          "no-op success. Pass `dryRun:true` to run every check and report the same shape with no write " +
+          "and no audit event — use it to probe before committing. " +
+          "HARD REFUSALS (no override): any live/queued gate op of ANY kind on this project's repo(s) — " +
+          "hygiene, avoiding a race against an in-flight worker_merge_confirm's own pre-lock read, not a " +
+          "correctness requirement — wait for gate_queue to show it clear and retry (returns `liveGateOps`); " +
+          "check (A) failing (returns `notAncestor:true`); check (B) failing on a merge commit (returns " +
+          "`mergeCommitSha`); or the branch carrying more commits beyond the target than a fixed, " +
+          "non-configurable scan bound (returns `tooManyCommits:true` + `branchExtraCount`) — refused " +
+          "rather than scanned unboundedly, since real worker branches are small. " +
+          "A same-state call (the recorded cut base already equals the current target tip, re-verified) " +
+          "is a TRUE no-op — {ok:true, noop:true, ...}, no write, no audit event, same as calling this " +
+          "with nothing to change. " +
+          "On success, re-stamps the session's cut base and files a durable audit event naming the old " +
+          "and new sha, the branch, and you as the acting manager — never silent. Returns {ok:true, noop, " +
+          "dryRun?, branch, oldCutBaseSha, newCutBaseSha, branchExtraCount, repoKey} on success, or " +
+          "{error, refused?, liveGateOps?, notAncestor?, mergeCommitSha?, tooManyCommits?, " +
+          "branchExtraCount?} on refusal.",
+        inputSchema: strictShape({ workerSessionId: z.string(), dryRun: z.boolean().optional() }),
+      },
+      async ({ workerSessionId, dryRun }) => ok(await sessions.restampWorkerCutBase(managerSessionId, { workerSessionId, dryRun })),
+    );
+
     // @decision 753d9911 — never add a `projectId` argument to `gate_history`; the project is resolved
     // server-side from the caller's own session, so no argument shape can name a different project.
     //

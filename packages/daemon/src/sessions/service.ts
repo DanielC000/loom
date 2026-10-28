@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry,recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, fastForwardCanonicalMain, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -410,6 +410,21 @@ export interface LiveGateOpNotice {
 export type CheckoutProjectBranchResult =
   | { ok: true; noop: boolean; branch: string; sha: string; repoKey: string; previousBranch: string | null; created?: boolean }
   | { ok: false; error: string; refused?: true; liveGateOps?: LiveGateOpNotice[]; unmergedWorkers?: { workerSessionId: string; taskId: string | null; branch: string }[] };
+
+/** {@link SessionService.restampWorkerCutBase}'s result (card cc788ae4). `noop:true` = the session's
+ *  current `cutBaseSha` already equals the (freshly re-verified) current target tip — the checks still
+ *  ran and passed, but nothing was written and no audit event was filed. `dryRun:true` on a `dryRun`
+ *  call mirrors the input flag back, alongside the SAME checks/fields a real call would report, so a
+ *  caller can tell a dry-run report apart from a real one without re-reading its own request. On
+ *  refusal, `liveGateOps` is set only for the live/queued-gate precondition; `notAncestor`/
+ *  `mergeCommitSha`/`tooManyCommits`/`branchExtraCount` surface {@link CutBaseRestampEligibility}'s own
+ *  fields directly, for a caller that wants the structured reason rather than just the message. */
+export type RestampCutBaseResult =
+  | { ok: true; noop: boolean; dryRun?: true; branch: string; oldCutBaseSha: string | null; newCutBaseSha: string; branchExtraCount: number; repoKey: string }
+  | {
+      ok: false; error: string; refused?: true; liveGateOps?: LiveGateOpNotice[];
+      notAncestor?: boolean; mergeCommitSha?: string; tooManyCommits?: boolean; branchExtraCount?: number;
+    };
 
 /** {@link SessionService.gateQueueForManager}'s result: the resolved cap plus every live gate run, split
  *  into running/queued so a manager reads queue depth and admission order without counting entries itself.
@@ -2937,6 +2952,11 @@ export class SessionService {
    *  other call through to the real `canonicalGit` and intercepting only the one it targets. `undefined`
    *  in every existing test constructor ⇒ `mergeBranch`'s own default, byte-identical to before this seam. */
   private readonly soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
+  /** TEST SEAM (card cc788ae4), SAME shape as {@link soloMergeGitFactory}: git factory for
+   *  {@link restampWorkerCutBase}'s own target-tip read and `checkCutBaseRestampEligibility` call, so a
+   *  hermetic test can fault-inject a probe failure without a real corrupted git repo. `undefined` in
+   *  every existing test constructor ⇒ the real `canonicalGit`, byte-identical to before this seam. */
+  private readonly cutBaseRestampGitFactory?: BoundedGitDeps["gitFactory"];
   /** TEST SEAM (card 8c3d6c04), SAME shape as {@link soloMergeGitFactory}: git factory for the solo PRE-
    *  SQUASH union-merge (`mergeMainIntoWorktree`, both the ordinary pre-gate call and the admission-time
    *  reunion), so a hermetic test can drive a REAL `confirmWorkerMergeTracked` through a FAKE union-merge
@@ -3450,6 +3470,8 @@ export class SessionService {
       batchFfGitFactory?: BatchGitDeps["gitFactory"];
       /** TEST SEAM (card d69d4858): git factory for the SOLO `mergeBranch` call's whole git surface — see the field's own doc. */
       soloMergeGitFactory?: BoundedGitDeps["gitFactory"];
+      /** TEST SEAM (card cc788ae4): git factory for `restampWorkerCutBase` — see the field's own doc. */
+      cutBaseRestampGitFactory?: BoundedGitDeps["gitFactory"];
       /** TEST SEAM (card 8c3d6c04): git factory for the solo pre-squash union-merge — see the field's own doc. */
       unionMergeGitFactory?: BoundedGitDeps["gitFactory"];
       /** TEST SEAM (card 31f8467c): git factory for the already-landed detection calls only
@@ -3498,6 +3520,7 @@ export class SessionService {
     this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
     this.batchFfGitFactory = opts?.batchFfGitFactory;
     this.soloMergeGitFactory = opts?.soloMergeGitFactory;
+    this.cutBaseRestampGitFactory = opts?.cutBaseRestampGitFactory;
     this.unionMergeGitFactory = opts?.unionMergeGitFactory;
     this.alreadyLandedGitFactory = opts?.alreadyLandedGitFactory;
     this.preLandedLookupGitFactory = opts?.preLandedLookupGitFactory;
@@ -7162,6 +7185,128 @@ export class SessionService {
       // repo — never let that surface as an uncaught rejection past the MCP tool boundary.
       return { ok: false, error: `project_checkout_branch failed unexpectedly: ${e instanceof Error ? e.message : String(e)}` };
     }
+  }
+
+  /**
+   * `worker_restamp_cut_base`'s backing implementation (card cc788ae4). A manager-initiated, deliberate
+   * re-stamp of a worker session's recorded `cutBaseSha` fork point to the canonical repo's CURRENT
+   * target tip — but only after verifying the worker's branch was genuinely rebased/cherry-picked onto
+   * that tip (never merged). See `docs/decisions/cc788ae4-*.md` for the full design, trust analysis, and
+   * named residual.
+   *
+   * Scoped to the caller's OWN project (server-derived from `managerSessionId`, never a projectId
+   * argument). Resolves the repo via the SESSION's own stamped `repoKey` — never a fresh task read (the
+   * multi-repo invariant: every post-cut op resolves the session's stamped repoKey).
+   */
+  async restampWorkerCutBase(managerSessionId: string, args: { workerSessionId: string; dryRun?: boolean }): Promise<RestampCutBaseResult> {
+    const managerProjectId = this.db.getSession(managerSessionId)?.projectId;
+    if (!managerProjectId) return { ok: false, error: "no project for this session" };
+    const worker = this.db.getSession(args.workerSessionId);
+    if (!worker || worker.projectId !== managerProjectId) {
+      return { ok: false, error: "worker session not found in this project" };
+    }
+    if (!worker.branch) return { ok: false, error: "that session has no branch — nothing to restamp" };
+    // @decision cc788ae4 — never restamp a session row that has a newer sibling at the same worktree
+    // path/branch: a merge only ever reads the newest row's cutBaseSha (`priorCutBaseShaForWorktree`,
+    // this file, ~9691), so restamping an older, superseded row changes nothing a real landing consults.
+    const newerSibling = this.db.listAllSessions()
+      .filter((s) => s.id !== worker.id && ((worker.worktreePath && s.worktreePath === worker.worktreePath) || s.branch === worker.branch) && s.createdAt > worker.createdAt)
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+    if (newerSibling) {
+      return {
+        ok: false,
+        error: `refusing: session ${newerSibling.id} is a NEWER row at this same worktree path/branch (created ${newerSibling.createdAt}, after this session's own ${worker.createdAt}) — a merge only ever reads the NEWEST row's recorded cutBaseSha, so restamping this older, superseded row would report success while changing nothing a real landing consults; restamp ${newerSibling.id} instead`,
+      };
+    }
+    const project = this.db.getProject(managerProjectId);
+    if (!project) return { ok: false, error: "project not found" };
+    let resolvedRepo: ResolvedRepo;
+    try {
+      // @decision cc788ae4 — resolve via the SESSION's own stamped repoKey, never task.repoKey (the
+      // multi-repo invariant); the worktree this branch lives in was physically cut from THIS repo.
+      resolvedRepo = resolveRepoByKey(project, worker.repoKey ?? null);
+    } catch (e) {
+      if (e instanceof UnknownRepoKeyError) return { ok: false, error: e.message };
+      throw e;
+    }
+    const { path: repoPath, key: repoKey } = resolvedRepo;
+    if (worker.taskId) {
+      let merged: Awaited<ReturnType<typeof getTaskMergedInfo>> = null;
+      try {
+        merged = await getTaskMergedInfo(repoPath, worker.taskId, { timeoutMs: this.gitOpMs, goneBranchLedger: this.db.getGoneBranchLedgerFacts(managerProjectId, repoKey) });
+      } catch { merged = null; }
+      if (merged) return { ok: false, error: `task ${worker.taskId} is already proven merged — nothing to restamp` };
+    }
+    // Hygiene, not safety (owner ruling, card cc788ae4): avoids a confusing race against an in-flight
+    // worker_merge_confirm's own pre-lock `session.cutBaseSha` read — never the authority on correctness.
+    const liveGates = this.liveGateOpsForRepoPath(repoPath);
+    if (liveGates.length > 0) {
+      return {
+        ok: false, refused: true, liveGateOps: liveGates,
+        error: `refusing: ${liveGates.length} live/queued gate op(s) on this project's repo(s) — a restamp mid-gate can race an in-flight worker_merge_confirm's own pre-lock read; wait for gate_queue to show them clear and retry`,
+      };
+    }
+    try {
+      const ms = this.gitOpMs ?? 15_000;
+      // @decision 0eaaa693 — a canonicalGit-backed instance, NEVER boundedGit/boundedSimpleGit; round 5's
+      // empirical proof (a worker-plantable `git replace` object) is why.
+      const git = (this.cutBaseRestampGitFactory ?? canonicalGit)(repoPath, ms);
+      const targetTip = (await withTimeout(git.raw(["rev-parse", "HEAD"]), ms, "git rev-parse HEAD (cut-base restamp target tip)")).trim();
+      // @decision 56c10535 — resolveBranchTip (exact for-each-ref match), never a bare `rev-parse
+      // refs/heads/<branch>` (DWIM-ambiguous against a same-named tag/decoy).
+      const branchTip = await resolveBranchTip(repoPath, worker.branch, { trustedMainRoot: defaultTrustedMainRoot(repoPath), gitFactory: this.cutBaseRestampGitFactory ?? canonicalGit });
+      if (branchTip === null) {
+        return { ok: false, error: `branch "${worker.branch}" no longer exists in the canonical repo — nothing to restamp` };
+      }
+      const oldCutBaseSha = worker.cutBaseSha ?? null;
+      if (oldCutBaseSha === targetTip) {
+        // Still re-verify (cheap) before reporting a no-op — a stale match must not short-circuit past a
+        // real check (round-2-style laundering the project_checkout_branch precedent already guards
+        // against for its own same-branch no-op).
+        const eligibility = await checkCutBaseRestampEligibility(git, ms, branchTip, targetTip);
+        if (!eligibility.ok) return this.restampCutBaseRefusal(eligibility, worker.branch, targetTip);
+        return { ok: true, noop: true, ...(args.dryRun ? { dryRun: true as const } : {}), branch: worker.branch, oldCutBaseSha, newCutBaseSha: targetTip, branchExtraCount: eligibility.branchExtraCount ?? 0, repoKey };
+      }
+      const eligibility = await checkCutBaseRestampEligibility(git, ms, branchTip, targetTip);
+      if (!eligibility.ok) return this.restampCutBaseRefusal(eligibility, worker.branch, targetTip);
+      if (args.dryRun) {
+        return { ok: true, noop: false, dryRun: true, branch: worker.branch, oldCutBaseSha, newCutBaseSha: targetTip, branchExtraCount: eligibility.branchExtraCount ?? 0, repoKey };
+      }
+      this.db.setSessionCutBaseSha(worker.id, targetTip, managerSessionId, {
+        taskId: worker.taskId ?? null, projectId: managerProjectId, repoKey, branch: worker.branch,
+        oldCutBaseSha, branchExtraCount: eligibility.branchExtraCount ?? 0,
+      });
+      return { ok: true, noop: false, branch: worker.branch, oldCutBaseSha, newCutBaseSha: targetTip, branchExtraCount: eligibility.branchExtraCount ?? 0, repoKey };
+    } catch (e) {
+      // Defensive, fail-closed catch-all — never let a git read's throw surface as an uncaught rejection
+      // past the MCP tool boundary; any read failure here must refuse, never stamp.
+      return { ok: false, error: `worker_restamp_cut_base failed unexpectedly: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /** Shared refusal-shaping for {@link restampWorkerCutBase}'s `checkCutBaseRestampEligibility` failure
+   *  cases — one place to word each, so the tool's three structural refusal shapes stay consistent. */
+  private restampCutBaseRefusal(eligibility: CutBaseRestampEligibility, branch: string, targetTip: string): RestampCutBaseResult & { ok: false } {
+    if (eligibility.probeFailed) {
+      return { ok: false, error: `could not verify "${branch}" against the current mainline target (git error: ${eligibility.probeError ?? "unknown"}) — nothing was restamped; this looks like a transient git/host condition — retry` };
+    }
+    if (eligibility.notAncestor) {
+      return {
+        ok: false, notAncestor: true,
+        error: `refusing: "${branch}" does not yet contain the current mainline target tip ${targetTip.slice(0, 8)} — rebase or cherry-pick this branch onto it first, then retry`,
+      };
+    }
+    if (eligibility.tooManyCommits) {
+      return {
+        ok: false, tooManyCommits: true, branchExtraCount: eligibility.branchExtraCount,
+        error: `refusing: "${branch}" carries ${eligibility.branchExtraCount} commit(s) beyond the current mainline target — over the ${CUT_BASE_RESTAMP_MAX_SCAN}-commit scan bound, refused rather than scanned unboundedly`,
+      };
+    }
+    // mergeCommitSha
+    return {
+      ok: false, mergeCommitSha: eligibility.mergeCommitSha, branchExtraCount: eligibility.branchExtraCount,
+      error: `refusing: "${branch}" carries a merge commit (${eligibility.mergeCommitSha!.slice(0, 8)}); rebase linearly onto ${targetTip.slice(0, 8)} (no merges) and retry`,
+    };
   }
 
   /** Shapes one {@link GateIntentRow} into its wire form ({@link GateIntentEntry}) — shared by
@@ -19220,7 +19365,8 @@ export class SessionService {
         // confirmed divergence: fall through silently, same as any other advisory read failure, rather
         // than refusing a transient git hiccup as an unreachable "re-dispatch, recycling can't clear it".
         if (!advisoryAncestry.unknown && !advisoryAncestry.probeFailed && !advisoryAncestry.ok) {
-          const why = `this worker's branch was cut from ${advisoryAncestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${advisoryTip.slice(0, 8)}) — the canonical checkout moved to a different lineage while this worker was unmerged. Canonical repo and worktree are untouched; nothing was squashed; no gate was run. This cannot be cleared by recycling or rebasing this worker. Remedy: either switch the canonical checkout back to the branch this worker was cut from, or re-dispatch the work on a fresh worker cut from the current mainline (e.g. cherry-pick these commits there).`;
+          // @decision cc788ae4 — THIRD remedy named, mirroring mergeBranchLocked's own in-lock refusal.
+          const why = `this worker's branch was cut from ${advisoryAncestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${advisoryTip.slice(0, 8)}) — the canonical checkout moved to a different lineage while this worker was unmerged. Canonical repo and worktree are untouched; nothing was squashed; no gate was run. This cannot be cleared by recycling or rebasing this worker. Remedy: either switch the canonical checkout back to the branch this worker was cut from, re-dispatch the work on a fresh worker cut from the current mainline (e.g. cherry-pick these commits there), or rebase/cherry-pick this worker's branch linearly onto the current mainline target (no merge commits) and have a manager call worker_restamp_cut_base to re-stamp the recorded cut base.`;
           const { suppressed, sha } = await rejectNotify("fork_point_diverged", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}`);
           evt("merge_rejected", { reason: "fork_point_diverged", sha, phase: "advisory-pre-gate", ...(suppressed ? { suppressed: true } : {}) });
           return { merged: false, reason: why, detailText: why, notified: !suppressed, opId: thisOpId, gateRan: false, forkPointDiverged: true };
@@ -22662,7 +22808,8 @@ export class SessionService {
         // @decision 0eaaa693 (round 3) — same probeFailed-vs-confirmed split as the solo advisory: a
         // transient git hiccup must fall through, never be pulled to fallback as an unreachable divergence.
         if (!ancestry.unknown && !ancestry.probeFailed && !ancestry.ok) {
-          strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `this worker's branch was cut from ${ancestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${advisoryBatchTip.slice(0, 8)}) — this cannot be cleared by recycling or rebasing this worker; switch the canonical checkout back to the branch this worker was cut from, or re-dispatch the work on a fresh worker cut from current mainline` });
+          // @decision cc788ae4 — THIRD remedy named, mirroring mergeBranchLocked's own in-lock refusal.
+          strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `this worker's branch was cut from ${ancestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${advisoryBatchTip.slice(0, 8)}) — this cannot be cleared by recycling or rebasing this worker; switch the canonical checkout back to the branch this worker was cut from, re-dispatch the work on a fresh worker cut from current mainline, or rebase/cherry-pick this worker's branch linearly onto the current mainline target (no merge commits) and have a manager call worker_restamp_cut_base to re-stamp the recorded cut base` });
           continue;
         }
       }

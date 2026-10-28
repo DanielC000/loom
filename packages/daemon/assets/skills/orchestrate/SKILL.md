@@ -802,6 +802,20 @@ what you checked. Found none? Treat it as live.
      normally on the next re-call) is `forceRemoveWorktree:true` on the re-call — a deliberate, named
      escalation, never an implicit side effect of just calling again. Don't fall back to `git log`
      guesswork while waiting.
+   - **A worker refused because its branch was cut before the canonical checkout moved to a different
+     lineage cannot be cleared by recycling or rebasing it alone.** A platform that records each worker's
+     own fork point at cut time, and refuses a landing whose fork point is no longer on the current
+     mainline, will say so explicitly — and that refusal's recorded fork point is carried forward
+     unchanged by a plain recycle or respawn, so retrying either does nothing. Three remedies actually
+     work: (1) switch the canonical checkout back to the branch the worker was cut from; (2) re-dispatch
+     the work on a fresh worker cut from the current mainline (cherry-pick the commits there); or (3), if
+     your platform exposes a tool for it (e.g. `worker_restamp_cut_base`), have the worker rebase or
+     cherry-pick its branch LINEARLY onto the current mainline target — no merge commits — then call that
+     tool to deliberately re-stamp the recorded fork point once it verifies the rebase. Such a tool
+     deliberately refuses ANY merge commit the branch still carries beyond the target, including an
+     ordinary forward-merge of the mainline — a merge commit is how a departed lineage would have entered
+     the branch in the first place, so the fix is to rebase/cherry-pick linearly and retry, never to ask
+     the tool to inspect what the merge brought in.
    - **A gate that never resolves is a defect to diagnose, never a license to merge around it.** Silence
      alone is not evidence the gate is "wedged" or "flaky, not your code" — check its live state (or a
      `gate_status`/`gate_queue` read tool, if your platform exposes one) before concluding that, and never

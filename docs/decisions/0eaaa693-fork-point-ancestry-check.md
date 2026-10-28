@@ -65,9 +65,10 @@ doesn't mistake either for a transient condition or a true legacy worker:
   the "re-confirm to re-check" wording misleadingly implying the next attempt might succeed. There is no
   remedy that re-derives the lost sha (see "Do not attempt a best-effort backfill" below — the same
   reasoning applies to a GONE sha as to a never-recorded one). The real remedy is one of: (a) a manager
-  re-stamps this worker's cut base deliberately once such a tool exists (`cc788ae4`, filed as a backlog
-  discovery from this same investigation — not yet built), or (b) re-dispatch the work on a fresh worker
-  cut from the current mainline, same as the confirmed-divergence remedy.
+  calls `worker_restamp_cut_base` (card `cc788ae4`) to deliberately re-stamp this worker's cut base to the
+  current mainline tip, once it verifies the branch was genuinely rebased/cherry-picked onto it (see
+  `docs/decisions/cc788ae4-*.md`), or (b) re-dispatch the work on a fresh worker cut from the current
+  mainline, same as the confirmed-divergence remedy.
 - **`priorCutBaseShaForWorktree` (`sessions/service.ts`) returning `null` because every prior session row
   at that worktree path has since been deleted** (not because the lineage never had one) stamps the SAME
   `cutBaseUnknown: true` grandfathering outcome as a true legacy worker, even though this worktree's
@@ -260,8 +261,10 @@ Besides the "untestable" refutation and the two null-case/wording fixes above:
   UNREACHABLE remedy in round 1 (Code Review, 2026-10-20): `recycleWorker` copies `old.cutBaseSha`
   forward (`sessions/service.ts`), a `>0`-ahead respawn carries it back via `priorCutBaseShaForWorktree`,
   and a rebase never re-derives it either — so recycling/rebasing THIS worker can never clear this
-  refusal. State that explicitly and name only the two remedies that actually work (switch the canonical
-  checkout back, or re-dispatch on a fresh worker cut from current mainline).
+  refusal on its own. State that explicitly and name the three remedies that actually work (switch the
+  canonical checkout back, re-dispatch on a fresh worker cut from current mainline, or rebase/cherry-pick
+  this worker's branch linearly onto the current mainline target and have a manager call
+  `worker_restamp_cut_base` — card `cc788ae4` — to re-stamp the recorded cut base).
 - Do not treat `checkCutBaseAncestry`'s `{ok: false}` as a confirmed divergence without checking
   `probeFailed` first (round 3, Code Review 2026-10-21) — a `git merge-base` call that THREW (timeout,
   transient error) is not a fact about the branch's lineage; refusing it with the divergence remedy told

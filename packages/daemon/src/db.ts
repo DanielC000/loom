@@ -7092,6 +7092,22 @@ export class Db {
     this.db.prepare("UPDATE sessions SET harness = ?, engine_session_id = NULL WHERE id = ?").run(harness ?? null, id);
     this.notifySessionChanged(id);
   }
+  /**
+   * @decision cc788ae4 — the ONE writer of `cut_base_sha` other than `createWorktree`'s own
+   * `cutBaseAdvanced` logic — never add a second write site for this column without also appending a
+   * durable audit event, the way this one does.
+   *
+   * Mirrors {@link repointMainlineWatermark}'s shape (write + durable audit event in one call) rather than
+   * `setEngineSessionId`'s bare column update.
+   */
+  setSessionCutBaseSha(id: string, newSha: string, actorSessionId: string, detail: { taskId: string | null; projectId: string; repoKey: string; branch: string; oldCutBaseSha: string | null; branchExtraCount: number }): void {
+    this.db.prepare("UPDATE sessions SET cut_base_sha = ? WHERE id = ?").run(newSha, id);
+    this.notifySessionChanged(id);
+    this.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: actorSessionId, kind: "worker_cut_base_restamped",
+      detail: { sessionId: id, newCutBaseSha: newSha, ...detail },
+    });
+  }
   /** @decision 5a56bb0a — atomic: archiveSession + setResumability("dead") + the retirement marker event,
    *  in ONE transaction, so a hard kill between them can never leave a dead+archived row with no marker
    *  (unrefusable by resume()'s chokepoint, and un-retried — nothing re-derives "dead" for this reason). */

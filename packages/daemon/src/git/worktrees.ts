@@ -10430,6 +10430,120 @@ export async function checkCutBaseAncestry(
   }
 }
 
+/** Bound on how many commits {@link checkCutBaseRestampEligibility} will enumerate/inspect before
+ *  refusing outright rather than scanning further — a deliberate, named constant (never configurable;
+ *  owner ruling, card cc788ae4). Real worker branches are small; a branch this far ahead of the current
+ *  mainline target is refused as unverifiable rather than scanned without bound. */
+export const CUT_BASE_RESTAMP_MAX_SCAN = 2000;
+
+/** {@link checkCutBaseRestampEligibility}'s outcome. */
+export interface CutBaseRestampEligibility {
+  ok: boolean;
+  /** Set when `ok` is false because `targetTip` is not an ancestor of `branchTip` (Check A) — the branch
+   *  has not yet been rebased/cherry-picked onto the current mainline target. */
+  notAncestor?: boolean;
+  /** Set when `ok` is false because the branch carries a MERGE commit beyond `targetTip` (Check B) — the
+   *  sha of the first such commit found, for the refusal message. */
+  mergeCommitSha?: string;
+  /** Set when `ok` is false because the branch carries more than {@link CUT_BASE_RESTAMP_MAX_SCAN}
+   *  commits beyond `targetTip` — refused rather than scanned unboundedly. */
+  tooManyCommits?: boolean;
+  /** The number of commits `branchTip` carries beyond `targetTip` — set whenever that count was actually
+   *  determined (including the `tooManyCommits` refusal, where it names the real, over-cap count). */
+  branchExtraCount?: number;
+  /** True iff a git call itself threw (a timeout, a transient error) — never a confirmed structural
+   *  rejection. Mirrors {@link CutBaseAncestryCheck.probeFailed}. */
+  probeFailed?: boolean;
+  /** Set only when `probeFailed` is true — the real underlying git error's message. */
+  probeError?: string;
+}
+
+/**
+ * @decision cc788ae4 — the eligibility check behind a manager's deliberate `worker_restamp_cut_base`:
+ * verifies a worker branch has been genuinely rebased/cherry-picked onto the current mainline target tip
+ * (never merged) before its recorded `cutBaseSha` may be re-stamped to that tip. Two checks:
+ *
+ * (A) `targetTip` must be an ancestor of `branchTip` — compares `git merge-base` OUTPUT to `targetTip`
+ * directly, never `merge-base --is-ancestor`'s exit status (same `0eaaa693` "Do not": simple-git's
+ * `raw()` resolves that subcommand's non-zero "not an ancestor" exit as a SUCCESS with empty output).
+ *
+ * (B) every commit `branchTip` carries beyond `targetTip` (`git rev-list branchTip --not targetTip` —
+ * this walk already covers anything reachable only via a merge commit's own second parent, so no
+ * separate recursive check is needed) must have EXACTLY ONE parent. A MERGE commit anywhere in that set
+ * is refused outright — including a legitimate union-forward merge of the current mainline (e.g. from an
+ * earlier `mergeMainIntoWorktree` union step): the ONLY mechanism by which the old, departed mainline
+ * lineage can ever have entered a worker branch is exactly such a merge commit (`mergeMainIntoWorktree`
+ * always produces one), so "zero merge commits beyond the target" is both necessary and sufficient to
+ * structurally prove no foreign lineage survives — refusing ANY merge commit, rather than trying to
+ * inspect what it merged, is the correct fail-closed direction (owner ruling, card cc788ae4). Each
+ * commit's parent count is read via `git cat-file -p <sha>` and the header's `parent ` line count — NEVER
+ * `git rev-list --parents` (mirrors `verifyCommitParentAndTree`'s own choice), mostly for consistency
+ * with that established convention: `cat-file -p` is naturally immune to a worker-planted `info/grafts`
+ * entry (a rev-walk-level reinterpretation a raw single-object read never consults — `docs/decisions/
+ * 95940402-*.md`'s round-22/23 finding), but `canonicalGit`'s own env-level `GIT_GRAFT_FILE` sentinel
+ * (`git/bounded.ts`'s `prepareCanonicalEnv`) ALSO neutralizes grafts for every subcommand it is used for
+ * unconditionally, so that specific protection would hold for `rev-list --parents` too, run through
+ * `canonicalGit`. `cat-file -p` has NO inherent immunity to a planted `git replace` object, though — a
+ * plain, replace-honoring reader (no `canonicalGit`) IS fooled into reporting a real 2-parent merge
+ * commit as single-parent (reproduced below, scenario 5b). The actual, load-bearing protection against
+ * that forgery — for `cat-file -p` exactly as much as for the `merge-base` call in Check A — is
+ * `canonicalGit`'s `core.useReplaceRefs=false` config, never a property of the subcommand chosen.
+ *
+ * Fail-closed throughout: any git-read failure/throw is `probeFailed: true`, never a confirmed pass.
+ * `git` must be a `canonicalGit`-backed instance (never `boundedGit`/`boundedSimpleGit`) — see
+ * `docs/decisions/0eaaa693-*.md` round 5's empirical proof (for Check A's own `merge-base` call) and
+ * scenario 5b below (for this function's `cat-file -p` call) that a worker-plantable `git replace`
+ * object defeats a replace-honoring read either way.
+ *
+ * Named residual (not closed, same posture as `0eaaa693`'s own "inherent residual" callouts): this proves
+ * STRUCTURE (no foreign lineage merged in wholesale), never CONTENT — a worker could hand-author fresh
+ * single-parent commits that happen to reproduce the departed lineage's own diffs, which is
+ * indistinguishable from legitimately redoing equivalent work after a real rebase. See
+ * `docs/decisions/cc788ae4-*.md`.
+ */
+export async function checkCutBaseRestampEligibility(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, branchTip: string, targetTip: string,
+): Promise<CutBaseRestampEligibility> {
+  let mergeBaseOut: string;
+  try {
+    mergeBaseOut = (await withTimeout(
+      git.raw(["merge-base", "--end-of-options", targetTip, branchTip]), timeoutMs, "git merge-base (cut-base restamp ancestry check)",
+    )).trim();
+  } catch (e) {
+    return { ok: false, probeFailed: true, probeError: (e as Error).message };
+  }
+  if (mergeBaseOut !== targetTip) return { ok: false, notAncestor: true };
+  if (branchTip === targetTip) return { ok: true, branchExtraCount: 0 }; // trivial: nothing beyond target to scan
+  let branchExtra: string[];
+  try {
+    const raw = await withTimeout(
+      git.raw(["rev-list", branchTip, "--not", "--end-of-options", targetTip]),
+      timeoutMs, "git rev-list (cut-base restamp departed-lineage scan)",
+    );
+    branchExtra = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch (e) {
+    return { ok: false, probeFailed: true, probeError: (e as Error).message };
+  }
+  if (branchExtra.length > CUT_BASE_RESTAMP_MAX_SCAN) {
+    return { ok: false, tooManyCommits: true, branchExtraCount: branchExtra.length };
+  }
+  for (const sha of branchExtra) {
+    let raw: string;
+    try {
+      raw = await withTimeout(
+        git.raw(["cat-file", "-p", sha]), timeoutMs, "git cat-file -p <sha> (cut-base restamp merge-commit scan — relies on canonicalGit's core.useReplaceRefs=false; naturally immune to grafts, not to replace refs on its own)",
+      );
+    } catch (e) {
+      return { ok: false, probeFailed: true, probeError: (e as Error).message };
+    }
+    const headerEnd = raw.indexOf("\n\n");
+    const header = (headerEnd === -1 ? raw : raw.slice(0, headerEnd)).split(/\r?\n/);
+    const parentCount = header.filter((l) => l.startsWith("parent ")).length;
+    if (parentCount > 1) return { ok: false, mergeCommitSha: sha, branchExtraCount: branchExtra.length };
+  }
+  return { ok: true, branchExtraCount: branchExtra.length };
+}
+
 /**
  * Shared parent+tree(+single-parent) identity check for "is `sha` the exact commit a just-completed `git
  * commit`/`git commit --amend` call produced" — reused by the solo squash path ({@link mergeBranchLocked}'s
@@ -10636,7 +10750,10 @@ async function mergeBranchLocked(
         // @decision 0eaaa693 — a recycle/rebase of THIS worker can NEVER clear this refusal: recycleWorker
         // carries the SAME recorded cutBaseSha forward (Session.cutBaseSha's own doc), and a rebase never
         // re-derives it. Say so explicitly, and name only the remedies that actually work.
-        reason: `this worker's branch was cut from ${ancestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${cutBaseTargetTip.slice(0, 8)}) — the canonical checkout moved to a different lineage while this worker was unmerged. Canonical repo and worktree are untouched; nothing was squashed. This cannot be cleared by recycling or rebasing this worker. Remedy: either switch the canonical checkout back to the branch this worker was cut from, or re-dispatch the work on a fresh worker cut from the current mainline (e.g. cherry-pick these commits there). This refusal is never cached.`,
+        // @decision cc788ae4 — a THIRD remedy: rebase/cherry-pick this worker's branch linearly onto the
+        // current mainline target (no merges), then a manager's `worker_restamp_cut_base` deliberately
+        // re-stamps the recorded cut base once it verifies that — never recycling/rebasing alone.
+        reason: `this worker's branch was cut from ${ancestry.cutBaseSha!.slice(0, 8)}, which is not an ancestor of the current mainline target (${cutBaseTargetTip.slice(0, 8)}) — the canonical checkout moved to a different lineage while this worker was unmerged. Canonical repo and worktree are untouched; nothing was squashed. This cannot be cleared by recycling or rebasing this worker. Remedy: either switch the canonical checkout back to the branch this worker was cut from, re-dispatch the work on a fresh worker cut from the current mainline (e.g. cherry-pick these commits there), or rebase/cherry-pick this worker's branch linearly onto the current mainline target (no merge commits) and have a manager call worker_restamp_cut_base to re-stamp the recorded cut base. This refusal is never cached.`,
       };
     }
   }
