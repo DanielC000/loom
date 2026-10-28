@@ -120,7 +120,7 @@ const {
   setActiveQuarantineTestOnly, pushPendingQuarantineTestOnly, assertRepoNotQuarantined,
   clearMergeQuarantineLatchFile, clearMergeQuarantineByRecordedPath, clearMergeQuarantineReporting,
   enterMergeQuarantine, stillBlockedEntryFor, MERGE_QUARANTINE_DIR, quarantineLatchIdFor,
-  quarantineLatchFileIdsFor,
+  quarantineLatchFileIdsFor, activeMergeQuarantineFor, directPathIdentity,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -553,15 +553,16 @@ if (scenarioName === "clear-by-id-y-is-both-no-false-success") {
   check("*** THE FIX (J, minor 2) *** reason names X as the host contributor-wise", namesHostContributorClause(result.reason, X));
   check("*** THE FIX (J, minor 2) *** latchKept/contentKeptRepoPaths are CARRIED ALONGSIDE stillQuarantined, never dropped", result.latchKept === true && Array.isArray(result.contentKeptRepoPaths) && result.contentKeptRepoPaths.includes(Z));
 } else if (scenarioName === "clear-by-id-resolvable-contributor-own-record-wording") {
-  // ROUND 4, item 1 (Code Review ff7ea5aa, reviewer-supplied repro, PINS round 3's own resolvability
-  // gate — reverting round 3 left every OTHER wording check in this file green). Real X with an active
-  // entry carrying contributorRepoPaths:[Y]; Y is a REAL, RESOLVABLE subdirectory of X (no own `.git`,
-  // so it canonically collapses onto X's own key) with its OWN, SEPARATE active record. Clearing Y's OWN
-  // id must say Y is blocked by "ANOTHER repo's own, separate quarantine" (the ordinary key-collapse
-  // tier) — NEVER the contributor clause, since Y is RESOLVABLE and `isHostOfContributor` must gate on
-  // that (round 3's fix). Pre-round-3 (and round 2), this said "a recorded CONTRIBUTOR … the HOST must
-  // be cleared" instead — wrong, since nothing about Y's resolvable block runs through the contributor
-  // relation.
+  // ROUND 4, item 1 (Code Review ff7ea5aa). Real X with an active entry carrying contributorRepoPaths:[Y];
+  // Y is a REAL, RESOLVABLE subdirectory of X (no own `.git`) with its OWN, SEPARATE active record.
+  // Clearing Y's OWN id lifts that separate record — and, as a side effect of card 3b1944b6's own
+  // shared `preClearForeignKeyStamp` chokepoint (every route clearing an identity's own record while its
+  // fresh key is foreign durably marks the foreign entry's `reducedContributorRepoPaths`), durably marks
+  // Y's identity onto X too.
+  //
+  // @decision 8d775613 (round 2) — a `reducedContributorRepoPaths` match's text is the NEUTRAL "recorded
+  // as reduced" wording, unconditionally — never "ANOTHER repo's own" (this scenario's own ORIGINAL pin,
+  // now stale) and never the CONTRIBUTOR/token-set clause (Y's token was never inside X's set).
   const X = ghost("L-X");
   fs.mkdirSync(X, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: X });
@@ -587,7 +588,8 @@ if (scenarioName === "clear-by-id-y-is-both-no-false-success") {
   check("(L) clear-by-id on Y's own record succeeds (ok:true)", result.ok === true);
   check("(L) stillQuarantined is EXACTLY true (X still blocks Y via the ordinary key-collapse tier)", result.stillQuarantined === true);
   check("*** THE FIX (L, round 4 item 1) *** reason does NOT use the contributor clause", !namesHostContributorClause(result.reason, X));
-  check("*** THE FIX (L, round 4 item 1) *** reason uses the 'ANOTHER repo's own, separate quarantine' wording", typeof result.reason === "string" && result.reason.includes("ANOTHER repo's own, separate quarantine"));
+  check("(L precondition) X is durably marked with Y's identity in reducedContributorRepoPaths (the shared preClearForeignKeyStamp chokepoint)", (activeMergeQuarantineFor(X)?.reducedContributorRepoPaths ?? []).includes(directPathIdentity(Y)));
+  check("*** THE FIX (L, round 2 of 8d775613) *** reason is the NEUTRAL 'recorded as reduced' wording, never 'ANOTHER repo's own, separate quarantine'", typeof result.reason === "string" && result.reason.includes("recorded as reduced under") && !result.reason.includes("ANOTHER repo's own, separate quarantine"));
   check("(L negative control) assertRepoNotQuarantined(Y) still refuses after Y's own record is cleared", !assertRepoNotQuarantined(Y).ok);
   check("(L negative control) the refusal names X", !assertRepoNotQuarantined(Y).ok && assertRepoNotQuarantined(Y).reason.includes(`'${X}'`));
 } else if (scenarioName === "offered-clear-by-id-is-real-before-graduation") {

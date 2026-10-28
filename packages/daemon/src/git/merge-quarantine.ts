@@ -7480,20 +7480,23 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, queriedRepoPath: st
   // the queried repoPath's own entry. Compare `after` against the QUERIED identity directly instead.
   const queriedIdentity = directPathIdentity(queriedRepoPath);
   const isOwnEntry = directPathIdentity(after.repoPath) === queriedIdentity;
-  // @decision 2a169469 (round 3) — gate the contributor wording on `queriedRepoPath` being UNRESOLVABLE,
-  // the same split `stillBlockedEntryFor` uses for `ownIdentityEntryFor`: a RESOLVABLE contributor (e.g. a
-  // real subdir folded into its real toplevel) is blocked via the key-collapse/ancestor tier, not this one.
-  // @decision 3b1944b6 (Round 4) — ALSO true for a membership already `reduceForeignUnionContributor`'d
-  // out of `contributorRepoPaths` (its own durable `reducedContributorRepoPaths` marker survives that
-  // drop) — the token stays outstanding either way, so this wording stays accurate for both.
-  const isHostOfContributor = !isOwnEntry && !isRepoPathCurrentlyResolvable(queriedRepoPath) &&
-    ((after.contributorRepoPaths?.some((c) => directPathIdentity(c) === queriedIdentity) ?? false)
-      || (after.reducedContributorRepoPaths?.includes(queriedIdentity) ?? false));
+  // @decision 2a169469 (round 3) — gate the PLAIN `contributorRepoPaths` wording on `queriedRepoPath`
+  // being UNRESOLVABLE: a RESOLVABLE plain contributor is blocked via the key-collapse/ancestor tier, not
+  // this one.
+  // @decision 8d775613 (round 2) — a `reducedContributorRepoPaths` match is NOT resolvability-gated and
+  // carries NO exclusion: the marker is written by two mechanisms the data cannot tell apart (see the
+  // record), so its own text must stay neutral — never claim token membership or "never lifts".
+  const isReducedContributorOfAfter = after.reducedContributorRepoPaths?.includes(queriedIdentity) ?? false;
+  const isUnresolvedPlainContributorOfAfter = !isRepoPathCurrentlyResolvable(queriedRepoPath) &&
+    (after.contributorRepoPaths?.some((c) => directPathIdentity(c) === queriedIdentity) ?? false);
+  const isHostOfContributor = !isOwnEntry && (isReducedContributorOfAfter || isUnresolvedPlainContributorOfAfter);
   const reason = isOwnEntry
     ? `repoPath is still quarantined by its own recorded entry (repoPath '${after.repoPath}', latch id '${latchId}') — this clear did not lift it`
-    : isHostOfContributor
-      ? `repoPath is quarantined because it is a recorded CONTRIBUTOR folded into another, still-quarantined entry's own token set (host repoPath '${after.repoPath}', latch id '${latchId}') — clearing repoPath directly never lifts a contributor; the HOST must be cleared`
-      : `repoPath is quarantined by ANOTHER repo's own, separate quarantine (repoPath '${after.repoPath}', latch id '${latchId}') that this clear never addressed`;
+    : isReducedContributorOfAfter
+      ? `repoPath's identity is recorded as reduced under another, still-quarantined entry (host repoPath '${after.repoPath}', latch id '${latchId}') — repoPath's own clear cannot resolve this further; clearing '${after.repoPath}'s own quarantine (see below) is what lifts it`
+      : isUnresolvedPlainContributorOfAfter
+        ? `repoPath is quarantined because it is a recorded CONTRIBUTOR folded into another, still-quarantined entry's own token set (host repoPath '${after.repoPath}', latch id '${latchId}') — clearing repoPath directly never lifts a contributor; the HOST must be cleared`
+        : `repoPath is quarantined by ANOTHER repo's own, separate quarantine (repoPath '${after.repoPath}', latch id '${latchId}') that this clear never addressed`;
   // @decision 9a55fb90 — route the bare-id suggestion through the SAME collision check as
   // assertRepoNotQuarantined, never offer it unconditionally — a collision at this key makes it
   // ambiguous here too.

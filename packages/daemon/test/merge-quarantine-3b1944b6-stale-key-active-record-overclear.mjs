@@ -328,7 +328,10 @@ function rebootThenCollapseAndClearInChildProcess(R, sub, tag) {
   // @decision 3b1944b6 (Round 2) — `clearMergeQuarantineReporting`'s own return type has NO literal
   // `stillQuarantined` field (that's `clearMergeQuarantine`'s own internal type, never surfaced here) —
   // the wrapper's `if (after)` branch instead folds the still-blocked disclosure straight into `reason`.
-  check("*** THE FIX (a) *** result says stillQuarantined, naming R", result.wasQuarantined === true && result.reason?.includes("quarantined by ANOTHER repo's own") && result.reason?.includes(R));
+  // @decision 8d775613 (round 2) — a reducedContributorRepoPaths match's text is the NEUTRAL "recorded as
+  // reduced" wording, never "ANOTHER repo's own" and never the CONTRIBUTOR/token-set wording (the latter
+  // overclaims for the OTHER mechanism sharing this same marker).
+  check("*** THE FIX (a) *** result says stillQuarantined, naming R as the reduced-marker's host", result.wasQuarantined === true && result.reason?.includes("recorded as reduced under") && result.reason?.includes(R));
   const postReduce = readLatchFileIfExists(R);
   check("*** THE FIX (a) *** R's own latch file is byte-identical except contributorRepoPaths", sameExceptContributors(preReduce, postReduce));
   check("*** THE FIX (a) *** sub is removed from R's own contributorRepoPaths", !contributorsOf(postReduce).some((c) => c === sub));
@@ -360,7 +363,8 @@ function rebootThenCollapseAndClearInChildProcess(R, sub, tag) {
   check("*** THE FIX (b) *** R's real quarantine is STILL ACTIVE after the post-reboot clear(sub)", out.rStillActive);
   check("*** THE FIX (b) *** assertRepoNotQuarantined(R).ok is FALSE — R stays genuinely blocked", out.rOk === false);
   check("*** THE FIX (b) *** result never names R in liftedRepoPaths", !out.result.liftedRepoPaths.includes(R));
-  check("*** THE FIX (b) *** result says stillQuarantined, naming R", out.result.wasQuarantined === true && out.result.reason?.includes("quarantined by ANOTHER repo's own") && out.result.reason?.includes(R));
+  // @decision 8d775613 (round 2) — same reducedContributorRepoPaths shape as (a) above; the NEUTRAL wording.
+  check("*** THE FIX (b) *** result says stillQuarantined, naming R as the reduced-marker's host", out.result.wasQuarantined === true && out.result.reason?.includes("recorded as reduced under") && out.result.reason?.includes(R));
   check("*** THE FIX (b) *** R's own latch file is byte-identical except contributorRepoPaths", sameExceptContributors(out.preReduce, out.postReduce));
   check("*** THE FIX (b) *** sub is removed from R's own contributorRepoPaths", !contributorsOf(out.postReduce).some((c) => c === sub));
   check("*** THE FIX (b), Round 4 *** sub is durably recorded in R's own reducedContributorRepoPaths", reducedContributorsOf(out.postReduce).includes(directPathIdentity(sub)));
@@ -404,7 +408,8 @@ function rebootThenCollapseAndClearInChildProcess(R, sub, tag) {
   check("*** THE FIX (twin) *** R's real quarantine is STILL ACTIVE after clearing sub", !!activeMergeQuarantineFor(R));
   check("*** THE FIX (twin) *** assertRepoNotQuarantined(R).ok is FALSE — R stays genuinely blocked", assertRepoNotQuarantined(R).ok === false);
   check("*** THE FIX (twin) *** result never names R in liftedRepoPaths", !result.liftedRepoPaths.includes(R));
-  check("*** THE FIX (twin) *** result says stillQuarantined, naming R", result.wasQuarantined === true && result.reason?.includes("quarantined by ANOTHER repo's own") && result.reason?.includes(R));
+  // @decision 8d775613 (round 2) — same reducedContributorRepoPaths shape as (a) above; the NEUTRAL wording.
+  check("*** THE FIX (twin) *** result says stillQuarantined, naming R as the reduced-marker's host", result.wasQuarantined === true && result.reason?.includes("recorded as reduced under") && result.reason?.includes(R));
   const postReduce = readLatchFileIfExists(R);
   check("*** THE FIX (twin) *** R's own latch file is byte-identical except contributorRepoPaths", sameExceptContributors(preReduce, postReduce));
   check("*** THE FIX (twin) *** sub is removed from R's own contributorRepoPaths", !contributorsOf(postReduce).some((c) => c === sub));
@@ -442,7 +447,8 @@ function rebootThenCollapseAndClearInChildProcess(R, sub, tag) {
 
   const result = clearMergeQuarantineReporting(sub);
   check("*** THE FIX (file-safety) *** R's own final latch file SURVIVES the clear of an unrelated colliding sourceFile", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, rFinalBasename)));
-  check("*** THE FIX (file-safety) *** result says stillQuarantined, naming R", result.wasQuarantined === true && result.reason?.includes("quarantined by ANOTHER repo's own") && result.reason?.includes(R));
+  // @decision 8d775613 (round 2) — same reducedContributorRepoPaths shape as (a) above; the NEUTRAL wording.
+  check("*** THE FIX (file-safety) *** result says stillQuarantined, naming R as the reduced-marker's host", result.wasQuarantined === true && result.reason?.includes("recorded as reduced under") && result.reason?.includes(R));
   const postReduce = readLatchFileIfExists(R);
   check("*** THE FIX (file-safety) *** R's own latch file is byte-identical except contributorRepoPaths", sameExceptContributors(preReduce, postReduce));
   check("*** THE FIX (file-safety) *** sub is removed from R's own contributorRepoPaths", !contributorsOf(postReduce).some((c) => c === sub));
@@ -722,6 +728,12 @@ function rebootThenCollapseAndDoubleClearInChildProcess(R, sub, tag) {
   check("*** THE FIX (round5-shapeA-cc) *** R's real quarantine is STILL ACTIVE after a SECOND clear(sub)", !!activeMergeQuarantineFor(R));
   check("*** THE FIX (round5-shapeA-cc) *** assertRepoNotQuarantined(R).ok is FALSE after a SECOND clear(sub)", assertRepoNotQuarantined(R).ok === false);
   check("*** THE FIX (round5-shapeA-cc) *** second clear never names R in liftedRepoPaths", !second.liftedRepoPaths.includes(R));
+  // @decision 8d775613 (round 2, Code Review of 3ef87ee0) — shape A's own text must stay NEUTRAL on both
+  // clears: it must NOT claim "never lifts a contributor" (false — the FIRST clear here genuinely lifted
+  // sub's own record) and must NOT claim token-set membership (sub's token was never inside R's set).
+  check("*** THE FIX (round5-shapeA-cc) *** second clear's reason is the NEUTRAL 'recorded as reduced' wording", (second.reason ?? "").includes("recorded as reduced under") && (second.reason ?? "").includes(R));
+  check("*** THE FIX (round5-shapeA-cc) *** second clear's reason never claims 'never lifts a contributor' (false: the first clear DID)", !(second.reason ?? "").includes("never lifts a contributor"));
+  check("*** THE FIX (round5-shapeA-cc) *** second clear's reason never claims token-set membership", !(second.reason ?? "").includes("token set"));
 }
 
 // ===================== (round5-shapeA-crc) shape A, clear -> reboot -> clear =====================
@@ -760,6 +772,11 @@ function rebootThenCollapseAndDoubleClearInChildProcess(R, sub, tag) {
   check("*** THE FIX (round5-shapeA-crc) *** R's real quarantine is STILL ACTIVE after reboot + a SECOND clear(sub)", out.rStillActive);
   check("*** THE FIX (round5-shapeA-crc) *** assertRepoNotQuarantined(R).ok is FALSE after reboot + a SECOND clear(sub)", out.rOk === false);
   check("*** THE FIX (round5-shapeA-crc) *** second clear never names R in liftedRepoPaths", !out.second.liftedRepoPaths.includes(R));
+  // @decision 8d775613 (round 2) — same neutral-wording requirement as (round5-shapeA-cc), surviving a
+  // real reboot's own re-parse of the durable `reducedContributorRepoPaths` marker.
+  check("*** THE FIX (round5-shapeA-crc) *** second clear's reason is the NEUTRAL 'recorded as reduced' wording", (out.second.reason ?? "").includes("recorded as reduced under") && (out.second.reason ?? "").includes(R));
+  check("*** THE FIX (round5-shapeA-crc) *** second clear's reason never claims 'never lifts a contributor'", !(out.second.reason ?? "").includes("never lifts a contributor"));
+  check("*** THE FIX (round5-shapeA-crc) *** second clear's reason never claims token-set membership", !(out.second.reason ?? "").includes("token set"));
 }
 
 // ===================== (round5-liftedpair) CR3 item 3 — clearing R fully must report BOTH R and sub in liftedRepoPaths =====================
