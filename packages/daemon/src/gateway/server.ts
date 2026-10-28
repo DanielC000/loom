@@ -339,9 +339,9 @@ export function sanitizeCompanionName(raw: string): string {
  * vacuously. If the logger is EVER turned on, pass this as `logger: { serializers: GATEWAY_LOG_SERIALIZERS
  * }` so the `Authorization` header, the echoed `Sec-WebSocket-Protocol` subprotocol (which carries the
  * gateway token as its `loom.bearer.<token>` entry on a WS upgrade — see trust-tier.ts's `WS_BEARER_PREFIX`),
- * and a `?token=`/`?gwtoken=` query value (the DEPRECATED loopback fallback and the gateway token's own
- * page-load capture param — see the loopback write-guard's own doc comment below and gatewayCredential.ts's
- * `captureGatewayTokenFromUrl`) can never land in a log line in cleartext. The url is redacted
+ * and a `?token=`/`?gwtoken=` query value (the REMOTE Tier-1 `?token=` fallback — decision `89bde4c9`
+ * removed the loopback guard's own fallback — plus the gateway token's page-load capture param, see
+ * gatewayCredential.ts's `captureGatewayTokenFromUrl`) can never land in a log line in cleartext. The url is redacted
  * unconditionally, whether or not a request actually used the fallback — a logger can't tell "sent but
  * unused" apart from "absent" without parsing it anyway, so there is no cheaper correct check. Pure +
  * exported so a hermetic test can assert the redaction directly without booting a real pino logger.
@@ -761,13 +761,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and the two `/internal/*`
   //     routes (constant-time compared); for the WS upgrades, the same secret via the remote tier's own
   //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` mechanism — reused verbatim, not
-  //     reinvented; the web client sends only this now (gatewayCredential.ts's `socketAuth`). A `?token=`
-  //     query-param fallback is still accepted below but DEPRECATED (it rode the secret in the URL — would
-  //     be logged verbatim by GATEWAY_LOG_SERIALIZERS if the request logger were ever enabled; the real
-  //     exposure is devtools/browser history and any proxy/tunnel access log the request passed through)
-  //     — kept for one release so a browser tab still running
-  //     removal is tracked by a follow-up card. Optional dep — ABSENT ⇒ no-op (partial-stub tests stay
-  //     byte-identical); `index.ts` (the only real boot path) always supplies it.
+  //     reinvented; the web client sends only this now (gatewayCredential.ts's `socketAuth`). Optional
+  //     dep — ABSENT ⇒ no-op (partial-stub tests stay byte-identical); `index.ts` (the only real boot
+  //     path) always supplies it.
+  //
+  // @decision 89bde4c9 — the loopback `?token=` ws fallback is REMOVED here; never re-add it to this
+  // guard. The REMOTE Tier-1 `?token=` fallback is a SEPARATE, untouched mechanism in the trust-tier
+  // wall hook above (this file, `if (remoteTrust.tierWall)`, ~:701) — trust-tier.ts itself only supplies the `resolveWsSubprotocolToken` helper that hook calls.
+  //
   //   - TEST NOTE: the socket peer address (via `requestClass`) is what this hook (and the trust-tier wall above) key
   //     loopback-vs-remote off — Fastify's `injectWS` helper does NOT default it the way `.inject()`
   //     does; card 214caa53 GAP 1 (same record above) covers the mechanics this forces on tests.
@@ -825,10 +826,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // outright, never fall back to `?token=`, mirroring the remote tier's own reasoning exactly.
           return reply.code(401).send({ error: "unauthorized — see `loom open` for how to obtain the local access credential" });
         }
-        // DEPRECATED fallback (see the hook's own doc comment above): the web client no longer sends
-        // `?token=` for a well-formed offer either, but a stale pre-upgrade browser bundle still might.
-        const q = req.query as { token?: unknown };
-        presented = resolved.outcome === "token" ? resolved.token : (typeof q?.token === "string" ? q.token : undefined);
+        // @decision 89bde4c9 — no `?token=` fallback here: a loopback ws secret never rides a URL.
+        presented = resolved.outcome === "token" ? resolved.token : undefined;
       } else {
         const auth = req.headers.authorization;
         presented = typeof auth === "string" ? /^Bearer\s+(.+)$/i.exec(auth)?.[1] : undefined;

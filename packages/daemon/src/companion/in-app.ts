@@ -4,7 +4,7 @@
  * Unlike Telegram (an external-network long-poll behind a bot token), the in-app channel's transport is the
  * Loom WEB CLIENT talking to the daemon over a dedicated session WebSocket (/ws/companion/:sessionId, see
  * gateway/server.ts). No bot token or pairing: the upgrade is gated by the loopback human-only-write guard
- * (bearer secret via WS subprotocol or `?token=`, same mechanism as /ws/term).
+ * (bearer secret via WS subprotocol only, same mechanism as /ws/term).
  * @decision 351e89af — "loopback = authenticated local user" is not this route's trust model; the guard is.
  * This adapter only CARRIES traffic for a companion that ALREADY has an in-app binding (provisioned elsewhere
  * — the human-triggered provision endpoint, card cbc9fa68); it NEVER creates a companion or a binding itself.

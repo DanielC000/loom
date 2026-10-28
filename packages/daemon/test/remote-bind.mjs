@@ -438,9 +438,10 @@ try {
   const reqNoAuth = GATEWAY_LOG_SERIALIZERS.req({ method: "GET", url: "/api/version", headers: { host: "example.com" } });
   check("(9) GATEWAY_LOG_SERIALIZERS.req is a no-op when no sensitive header is present", reqNoAuth.headers.authorization === undefined && reqNoAuth.headers["sec-websocket-protocol"] === undefined);
 
-  // card e4459829 (M8): the DEPRECATED loopback `?token=` ws fallback (gateway/server.ts's loopback
-  // write-guard) still rides the request url verbatim — redact it in the url too, not just the headers
-  // above, regardless of whether this particular request actually used the fallback.
+  // card e4459829 (M8): a `?token=` ws fallback still rides the request url verbatim — redact it in the
+  // url too, not just the headers above, regardless of whether this particular request actually used the
+  // fallback. (Card 89bde4c9 later removed the LOOPBACK guard's own `?token=` fallback; this redaction
+  // stays live for the separate REMOTE Tier-1 `?token=` fallback, trust-tier.ts, which is unaffected.)
   const reqWithQueryToken = GATEWAY_LOG_SERIALIZERS.req({
     method: "GET", url: "/ws/term/sess1?token=super-secret-value", headers: { host: "example.com" },
   });

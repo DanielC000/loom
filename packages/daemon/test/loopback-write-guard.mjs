@@ -25,8 +25,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       actual failure.
 //   (F2) the anti-fabrication route itself: POST /api/sessions/:id/input (ownerText) — same proof.
 //   (H) /ws/term: a loopback upgrade with NO credential is REJECTED before the 101 response; a valid
-//       [generic, bearer] subprotocol offer OR a valid `?token=` query fallback is ACCEPTED (reusing the
-//       SAME mechanism trust-tier.mjs already proves for the remote case) — with `loopbackSecret` wired.
+//       [generic, bearer] subprotocol offer is ACCEPTED (reusing the SAME mechanism trust-tier.mjs
+//       already proves for the remote case) — with `loopbackSecret` wired. (H2, card 89bde4c9: the
+//       `?token=` query fallback this guard used to ALSO accept is now REJECTED — see below.)
 //   (G) structural: the guard's route-matching no longer references routeTier at all (v2 gates
 //       unconditionally) — confirmed by reading the compiled hook body.
 //
@@ -36,9 +37,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // agent with Bash could inject straight into the owner-role Companion slot with NO manager involved at
 // all. v3 gates `/ws/companion/:sessionId` by the EXACT same mechanism as /ws/term (no second scheme):
 //   (I) a loopback upgrade to /ws/companion with NO credential is REJECTED before the 101 response; a
-//       WRONG bearer subprotocol is also rejected; a VALID [generic, bearer] offer OR a valid `?token=`
-//       fallback is ACCEPTED — mirroring (H) exactly, proving the SAME mechanism was reused, not a
-//       parallel one. (loopbackSecret omitted ⇒ inert, proven alongside (A).)
+//       WRONG bearer subprotocol is also rejected; a VALID [generic, bearer] offer is ACCEPTED —
+//       mirroring (H) exactly, proving the SAME mechanism was reused, not a parallel one. (loopbackSecret
+//       omitted ⇒ inert, proven alongside (A).) (I2, card 89bde4c9: the `?token=` fallback is REJECTED.)
 //
 // v4 (card 93249b52, SECURITY follow-up — renumbered (L)/(M)/(N) to avoid colliding with v3's own (I)
 // above, both landed on main around the same time): the guard also covers POST /internal/shutdown and
@@ -61,6 +62,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       TEST NOTE above) on /ws/term now REJECTS with no credential (was silently ACCEPTED pre-fix) and
 //       REJECTS even with a valid bearer credential (fail-closed is unconditional on the address, not
 //       credential-gated); with `loopbackSecret` UNSET the same call still succeeds (inertness preserved).
+//
+// v6 (card 89bde4c9, SECURITY follow-up): the `?token=` ws query-param fallback (H)/(I) above used to
+// prove ACCEPTED is now REMOVED from this guard — a browser bundle predating card e4459829 (squash
+// fce9f3578, shipped in v0.31.0) is no longer owed a grace window, so a loopback ws secret can never ride
+// a URL on this guard again. (H2)/(I2) flip the old positive-control proof into a negative one: the SAME
+// `?token=` value that used to be ACCEPTED (with no subprotocol offer at all) is now REJECTED. The remote
+// Tier-1 `?token=` fallback (trust-tier.mjs) is a separate mechanism, untouched here.
 import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
@@ -220,9 +228,14 @@ try {
   check("(H) POSITIVE CONTROL: /ws/term upgrade with a VALID [generic, bearer] subprotocol offer → ACCEPTED", !!wsOkProto);
   wsOkProto.close();
 
-  const wsOkQuery = await appWithSecret.injectWS(`/ws/term/sess3?token=${SECRET}`, { headers: H, socket: LOOPBACK_SOCKET });
-  check("(H) POSITIVE CONTROL: /ws/term upgrade with a VALID ?token= query fallback → ACCEPTED", !!wsOkQuery);
-  wsOkQuery.close();
+  // (H2) card 89bde4c9: the `?token=` query fallback is REMOVED from this guard — a well-formed
+  // credential riding the URL (no subprotocol offer at all) must now be REFUSED, not accepted.
+  const wsQueryOnlyRejected = await (async () => {
+    try { const ws = await appWithSecret.injectWS(`/ws/term/sess3?token=${SECRET}`, { headers: H, socket: LOOPBACK_SOCKET }); ws.close(); return false; }
+    catch { return true; }
+  })();
+  check("(H2) THE FALLBACK IS REMOVED: /ws/term upgrade with a VALID ?token= query value but NO subprotocol offer → REJECTED (was ACCEPTED pre-fix)",
+    wsQueryOnlyRejected);
 
   // ===================== (I) /ws/companion: the SAME gap, closed by card 351e89af =====================
   const wsCompanionNoAuth = await (async () => {
@@ -241,9 +254,13 @@ try {
   check("(I) POSITIVE CONTROL: /ws/companion upgrade with a VALID [generic, bearer] subprotocol offer → ACCEPTED (proves the mechanism, not just the rejection)", !!wsCompanionOkProto);
   wsCompanionOkProto.close();
 
-  const wsCompanionOkQuery = await appWithSecret.injectWS(`/ws/companion/csess3?token=${SECRET}`, { headers: H, socket: LOOPBACK_SOCKET });
-  check("(I) POSITIVE CONTROL: /ws/companion upgrade with a VALID ?token= query fallback → ACCEPTED", !!wsCompanionOkQuery);
-  wsCompanionOkQuery.close();
+  // (I2) card 89bde4c9: same removal, mirrored for /ws/companion.
+  const wsCompanionQueryOnlyRejected = await (async () => {
+    try { const ws = await appWithSecret.injectWS(`/ws/companion/csess3?token=${SECRET}`, { headers: H, socket: LOOPBACK_SOCKET }); ws.close(); return false; }
+    catch { return true; }
+  })();
+  check("(I2) THE FALLBACK IS REMOVED: /ws/companion upgrade with a VALID ?token= query value but NO subprotocol offer → REJECTED (was ACCEPTED pre-fix)",
+    wsCompanionQueryOnlyRejected);
 
   // ===================== (L) POST /internal/shutdown =====================
   // Card 93249b52: this loomctl lifecycle writer joins the same guard — proven the same way as every
@@ -447,6 +464,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the loopback human-only-write guard (v5) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write, the /ws/term stdin socket, the /ws/companion inbound chat socket (card 351e89af), AND POST /internal/shutdown + POST /internal/update (card 93249b52 — the loomctl lifecycle writers, one of which fetches+installs code) — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, proves POST /internal/hook stays deliberately ungated, fails CLOSED on an undeterminable peer address unconditionally (card 214caa53, GAP 1), and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
+  ? "\n✅ ALL PASS — the loopback human-only-write guard (v6) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write, the /ws/term stdin socket, the /ws/companion inbound chat socket (card 351e89af), AND POST /internal/shutdown + POST /internal/update (card 93249b52 — the loomctl lifecycle writers, one of which fetches+installs code) — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, proves POST /internal/hook stays deliberately ungated, fails CLOSED on an undeterminable peer address unconditionally (card 214caa53, GAP 1), REFUSES the now-removed `?token=` ws query fallback (card 89bde4c9), and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

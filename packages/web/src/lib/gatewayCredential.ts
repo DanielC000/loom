@@ -197,9 +197,9 @@ function asSubprotocolSafe(token: string | null): string | null {
  *  write-guard read (`[loom.v1, loom.bearer.<token>]`) — never in the URL, closing the loopback secret's
  *  old `?token=` exposure (it used to ride the query string — would be logged verbatim by
  *  GATEWAY_LOG_SERIALIZERS if the gateway's request logger were ever enabled; the real exposure today is
- *  devtools/browser history and any proxy/tunnel access log the request passed through). The daemon still
- *  ALSO accepts a loopback `?token=` fallback (deprecated, kept for stale-bundle back-compat — see
- *  gateway/server.ts), but this client never sends one anymore. Remote presents the gateway token for
+ *  devtools/browser history and any proxy/tunnel access log the request passed through). The loopback
+ *  human-only-write guard is now subprotocol-only — it no longer accepts a `?token=` fallback at all
+ *  (decision 89bde4c9). Remote presents the gateway token for
  *  EVERY kind including `fleet` (the remote tier gates reads too, unlike loopback); loopback presents
  *  nothing for `fleet` (that feed is ungated there — matches before). */
 export function socketAuth(kind: "term" | "companion" | "fleet", loopbackToken: string | null, remote: boolean = isRemoteOrigin(), gatewayToken: string | null = getGatewayToken()): { query: string; protocols?: string[] } {
