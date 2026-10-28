@@ -1399,16 +1399,21 @@ try {
   check("(V) worker X is tracked as escalated (correctly could not verify the chain)", db.listStaleGenerationUnresolved().some((e) => e.sessionId === V.workerXId && e.escalated === true));
   check("(V) worker Y is still independently finalized on main, unaffected", db.listEventsForWorker(V.workerYId).some((ev) => ev.kind === "merge_done"));
 
-  // (W) Round 3 item 4: an unreadable watermark is a transient no-op, never a one-shot escalation — even
-  // though X's own landing would have attributed trivially had the watermark been readable.
+  // (W) Round 3 item 4, superseded by card 1fae1b98: an UNPARSEABLE watermark row fails validation, which
+  // 1fae1b98 classifies as cause:"corrupt" — a deterministic, already-persisted fact that escalates on
+  // FIRST sight (no grace), unlike the transient bucket below. X's own landing would have attributed
+  // trivially had the watermark been readable.
   check("(W) worker X gets NO merge_done (watermark unreadable — attribution never attempted)", db.listEventsForWorker(W.workerXId).every((ev) => ev.kind !== "merge_done"));
-  check("(W) worker X is NEVER tracked in the one-shot escalation store (a transient read failure retries, it does not escalate)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== W.workerXId));
-  check("(W) NO undelivered nudge was enqueued for X's unreadable-watermark case", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === W.mgrId).length === 0);
+  check("(W) worker X IS tracked and escalated on first sight (card 1fae1b98: a corrupt/unparseable watermark is a deterministic fact, never a transient retry)", db.listStaleGenerationUnresolved().some((e) => e.sessionId === W.workerXId && e.watermark?.escalated === true && e.watermark?.attempts === 1));
+  check("(W) an undelivered nudge WAS enqueued for X's corrupt-watermark case (card 1fae1b98: one-shot, fires on the same boot)", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === W.mgrId).length === 1);
 
-  // (X) Round 3 item 4/5: a well-formed watermark naming an unresolvable ref is the SAME transient no-op,
-  // via the other early-return branch.
+  // (X) Round 3 item 4/5, still true under card 1fae1b98: a WELL-FORMED watermark naming an unresolvable
+  // ref is cause:"transient" (collapsed with a db-read failure) — tracked (attempts counted) for the
+  // bounded give-up, but NOT escalated until staleGenerationTransientEscalateAttempts/_Ms is crossed; a
+  // single first-boot attempt stays well under that threshold. See the round-2 (idem x3) block below for
+  // the boot where it actually crosses.
   check("(X) worker X gets NO merge_done (watermark names an unresolvable ref — attribution never attempted)", db.listEventsForWorker(X.workerXId).every((ev) => ev.kind !== "merge_done"));
-  check("(X) worker X is NEVER tracked in the one-shot escalation store", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== X.workerXId));
+  check("(X) worker X IS tracked (attempt counted) but NOT escalated (card 1fae1b98: an unresolvable ref is a bounded transient retry, below the give-up threshold on its first attempt)", db.listStaleGenerationUnresolved().some((e) => e.sessionId === X.workerXId && e.watermark?.escalated === false && e.watermark?.attempts === 1));
   check("(X) NO undelivered nudge was enqueued for X's unresolvable-ref case", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === X.mgrId).length === 0);
 
   // (P) card 21b53e6a ROUND 3 item 1 — X's OWN merge_request was already DECIDED (a real merge_cancelled
@@ -1455,7 +1460,7 @@ try {
   check("(counts) exactly 2 branches reclaimed via Pass C's sweep (B + S — F's branch was CAS-deleted directly by Pass A, never Pass C)", r.branchesReclaimed === 2);
   check("(counts) A's protected worktree was NOT counted as a suspected-still-live left-on-disk failure either", r.worktreesLeftOnDiskSuspectedLive === 0);
   check("(counts) exactly 2 stale merges resolved (G's worker Y + I's worker Y — S's own A2-eligible row is skipped outright by the staleGeneration guard)", r.staleMergesResolved === 2);
-  check("(counts) exactly 4 stale-generation own-landings escalated this boot (N + S's own X + T's own X + V's own X — M/Q/R/U attribute, W/X are transient no-ops, never escalated)", r.staleGenerationUnresolvedEscalated === 4);
+  check("(counts) exactly 5 stale-generation own-landings escalated this boot (N + S's own X + T's own X + V's own X + W's own X — M/Q/R/U attribute, X is a bounded transient no-op not yet escalated; card 1fae1b98: W's corrupt watermark escalates immediately)", r.staleGenerationUnresolvedEscalated === 5);
 
   // --- idempotent second run: A's and C's protected worktrees still need to survive a SECOND pass with
   // the SAME protectedSessionIds (mirrors a boot that runs reconcile more than once, or a retry) ---
@@ -1503,8 +1508,25 @@ try {
   check("(idem) T's worker X still has no merge_done, forever (the stray commit never becomes visible)", db.listEventsForWorker(T.workerXId).every((ev) => ev.kind !== "merge_done"));
   check("(idem) U's worker X still has exactly ONE merge_done after a second pass", db.listEventsForWorker(U.workerXId).filter((ev) => ev.kind === "merge_done").length === 1);
   check("(idem) V's worker X still has no merge_done, forever (the foreign-branch union never becomes valid)", db.listEventsForWorker(V.workerXId).every((ev) => ev.kind !== "merge_done"));
-  check("(idem) W's worker X still has no merge_done after a second pass (still watermark-unreadable, never escalated)", db.listEventsForWorker(W.workerXId).every((ev) => ev.kind !== "merge_done") && db.listStaleGenerationUnresolved().every((e) => e.sessionId !== W.workerXId));
-  check("(idem) X's worker X still has no merge_done after a second pass (still watermark-unresolvable, never escalated)", db.listEventsForWorker(X.workerXId).every((ev) => ev.kind !== "merge_done") && db.listStaleGenerationUnresolved().every((e) => e.sessionId !== X.workerXId));
+  check("(idem) W's worker X still has no merge_done after a second pass, escalation stays one-shot (card 1fae1b98: escalated:true, attempts bumped — no second nudge)", db.listEventsForWorker(W.workerXId).every((ev) => ev.kind !== "merge_done") && db.listStaleGenerationUnresolved().some((e) => e.sessionId === W.workerXId && e.watermark?.escalated === true && e.watermark?.attempts === 2) && db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === W.mgrId).length === 1);
+  check("(idem) X's worker X still has no merge_done after a second pass (card 1fae1b98: still watermark-unresolvable, attempts bumped, still below the give-up threshold, never escalated)", db.listEventsForWorker(X.workerXId).every((ev) => ev.kind !== "merge_done") && db.listStaleGenerationUnresolved().some((e) => e.sessionId === X.workerXId && e.watermark?.escalated === false && e.watermark?.attempts === 2) && db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === X.mgrId).length === 0);
+
+  // --- round 2 (manager-requested, 2026-10-28): pin X's own give-up BOUNDARY, not just "still below it"
+  // above. Read the LIVE, resolved threshold off the real SessionService instance (never a hard-coded
+  // guess) — card 1fae1b98 reuses staleGenerationTransientEscalateAttempts/_Ms from the content-check's
+  // own transient bucket, so a THIRD pass brings X's attempts to 3, which is >= a default threshold of 3.
+  await sessions.reconcileOrchestrationOnBoot(new Set([A.succId, C.succId]));
+  const xThresholdAttempts = sessions.staleGenerationTransientEscalateAttempts;
+  const xEntry3 = db.listStaleGenerationUnresolved().find((e) => e.sessionId === X.workerXId);
+  check(`(round2) X's own attempts counter reaches exactly 3 on the third pass (its live give-up threshold is ${xThresholdAttempts} attempts, card 1fae1b98)`, xEntry3?.watermark?.attempts === 3);
+  if (xThresholdAttempts <= 3) {
+    check("(round2) X's third pass CROSSES its own live attempts threshold and escalates for real (card 1fae1b98: bounded, not silent-forever)", xEntry3?.watermark?.escalated === true);
+    check("(round2) X's crossing boot enqueues exactly ONE undelivered nudge (first-ever escalation for X, one-shot)", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === X.mgrId).length === 1);
+    check("(round2) X still has NO merge_done even once escalated — escalation is a human nudge, never attribution", db.listEventsForWorker(X.workerXId).every((ev) => ev.kind !== "merge_done"));
+  } else {
+    check("(round2) X's third pass still stays below its own (higher) live attempts threshold, not yet escalated", xEntry3?.watermark?.escalated === false);
+    check("(round2) X still has NO undelivered nudge (threshold not yet crossed)", db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === X.mgrId).length === 0);
+  }
   check("(idem) O's worker P stays finalized (no re-finalize), F still untouched", db.listEventsForWorker(O.pId).filter((ev) => ev.kind === "merge_done").length === 1 && db.listEventsForWorker(O.fId).length === 1);
   check("(idem) P's worker X still never escalated, forever (a decided outcome never escalates on retry either)", db.listStaleGenerationUnresolved().every((e) => e.sessionId !== P.workerXId) && db.listUndeliveredQueuedMessages().filter((e) => e.workerSessionId === P.mgrId).length === 0);
 } finally {
