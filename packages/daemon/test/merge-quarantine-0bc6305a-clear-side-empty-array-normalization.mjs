@@ -1,17 +1,6 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Card 0bc6305a Code Review: before the shared `buildReingestedEntryFromDisk` helper,
-// `reconcileClearedEntryIfPlaceholder`'s own inline body returned a DEFINED EMPTY ARRAY for
-// orphanLatchFiles/contributorRepoPaths whenever either side was itself a truthy (possibly empty — `[]`
-// is truthy in JS) array (`entry.X || reingested.X ? [...union] : undefined`). The shared helper instead
-// always collapses an empty UNION to `undefined` (`unioned.length > 0 ? unioned : undefined`), mirroring
-// `reconcileMarkedBasenameBeforeWrite`'s own pre-existing reingest-arm shape. The reviewer found no
-// consumer that distinguishes `[]` from `undefined` for either field — every read in this file uses
-// `?.includes`/`?? []`/`.length`/`||`-union (see docs/decisions/0bc6305a-*.md's own consumer census) — so
-// this is an intentional, inert normalization, not a behavior change worth reverting. This test pins the
-// NEW (post-0bc6305a) shape going forward, since boot genuinely produces a defined-empty array for
-// orphanLatchFiles via a plain `.filter()` that can empty it out (merge-quarantine.ts ~:8442/~:8890) —
-// exactly the shape neither twin's own pre-existing test suite, nor card 0bc6305a's own before/after
-// field-set harness, exercised for the CLEAR-side twin specifically.
+// @decision 0bc6305a — pins the clear-side empty-array-to-undefined normalization; never revert it to
+// the old per-field `[]`-on-empty shape without re-reading the consumer census in the decision record.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-0bc6305a-clear-side-empty-array-normalization.mjs
 import fs from "node:fs";
