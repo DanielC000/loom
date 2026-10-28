@@ -29,7 +29,8 @@
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that is
 // merely still loading, so every pair asserts what must BE there before what must not. Geometry is
-// sampled until two consecutive reads agree before it is compared (card 757c80dd gotcha 2).
+// read only once the page is READY for it (card 4756e252) and then sampled until two consecutive reads
+// agree before it is compared (card 757c80dd gotcha 2).
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import type { Locator } from "@playwright/test";
 
@@ -84,21 +85,54 @@ async function boardGeometry(scope: Locator): Promise<Geometry> {
 }
 
 /**
- * The board grid's geometry, sampled until two consecutive reads agree. A box read straight after a
- * navigation is a coin flip while the board's own 4s query and the band above it are still resolving
- * — the P1-0 shell fingerprint hit exactly this and two identical runs disagreed. Comparing an
- * unsettled "before" against a settled "after" would report a reflow that never happened.
+ * Everything that must be true before the board's box is worth reading at all. Awaited before EVERY
+ * sample in `settledBoardGeometry`, not once up front: a face that only starts loading later re-arms
+ * `document.fonts.ready`, so a one-shot gate would be blind to exactly the state it is here to catch.
  *
- * BOTH SIDES of every reflow compare go through here — the asymmetry (a settled "before" against a
- * bare "after") is the single mid-measure sample that card 885e7a49 found reachable by the harness and
- * by nothing a human can see, and a 6px y shift with width/height/x identical was sighted once at the
- * open-leg compare below. Settling is on SELF-CONSISTENCY (two consecutive agreeing reads), never on
- * agreement with `before`, so a real reflow still settles on its new box and still goes red.
+ * @decision 4756e252 — two agreeing reads 120ms apart do NOT establish that the board has settled.
+ * Don't drop any check below back to a one-shot gate, and never substitute `document.fonts.status` or
+ * `.check()` for `.ready`: both are measured unusable, not merely weaker.
+ */
+async function boardReadyForGeometry(scope: Locator): Promise<void> {
+  const page = scope.page();
+  // PRESENCE first (card 625d791c): the board query really has resolved…
+  await expect(lanesIn(scope), "the board query has resolved").not.toHaveCount(0);
+  // …and only THEN that this is the real grid rather than the first-load placeholder. BoardSkeleton
+  // (pages/Board.tsx) reuses `.loom-board-grid`, so `boardGeometry`'s own locator matches it: measured
+  // y=30 against the real grid's y=152, held for 98-251ms. Deliberately NOT `toHaveCount(DEFAULT_LANES)`
+  // — the callers assert that, and this asserts the weaker, different thing.
+  await expect(scope.locator(".loom-board-grid.loom-skeleton"), "the first-load skeleton is gone").toHaveCount(0);
+  // The node's tab row is not mid-measure. PRECAUTIONARY: carried from card 885e7a49, which proved that
+  // state harness-reachable; this card's own 16ms census never once observed it set, so it is not
+  // evidence from here. Count 0 in the classic shell too, which has no `.loom-atlas-tabs` at all, so
+  // this is a no-op on that leg rather than a second code path.
+  await expect(page.locator(".loom-atlas-tabs[data-nt-measuring]"), "the tab row is not mid-measure").toHaveCount(0);
+  // Every webfont currently in flight has settled. `styles/global.css` imports Google Fonts with
+  // `display=swap`, so the chrome ABOVE the board re-lays-out when the faces land and the whole board
+  // shifts down with it. `.ready` is the only sound primitive here — see the decision record.
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+}
+
+/**
+ * The board grid's geometry, read only once `boardReadyForGeometry` holds and then sampled until two
+ * consecutive reads agree. A box read straight after a navigation is a coin flip while the board's own
+ * 4s query and the band above it are still resolving — the P1-0 shell fingerprint hit exactly this and
+ * two identical runs disagreed. Comparing an unsettled "before" against a settled "after" would report
+ * a reflow that never happened.
+ *
+ * BOTH SIDES of every reflow compare go through this ONE helper — the asymmetry (a settled "before"
+ * against a bare "after") is the single mid-measure sample that card 885e7a49 found reachable by the
+ * harness and by nothing a human can see. Self-consistency alone is not enough, though: it settles on
+ * any state that merely outlives one 120ms window, and the webfont swap is such a state. Settling is
+ * still on SELF-CONSISTENCY, never on agreement with `before`, so a real reflow settles on its new box
+ * and still goes red — the readiness gate above only decides WHEN the first sample may be taken.
  */
 async function settledBoardGeometry(scope: Locator): Promise<Geometry> {
+  await boardReadyForGeometry(scope);
   let prev = await boardGeometry(scope);
   for (let i = 0; i < 25; i++) {
     await scope.page().waitForTimeout(120);
+    await boardReadyForGeometry(scope);
     const next = await boardGeometry(scope);
     if (next.x === prev.x && next.y === prev.y && next.width === prev.width && next.height === prev.height) return next;
     prev = next;
