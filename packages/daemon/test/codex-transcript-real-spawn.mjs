@@ -39,7 +39,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { hermeticPort, listenHermetic } from "./_hermetic-port.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 import { CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS, reportCodexGracefulStopExit } from "./_codex-graceful-stop.mjs";
@@ -153,10 +153,15 @@ host.spawn({
 let rawBuf = "";
 const unsubscribeRaw = host.subscribe(SESSION_ID, { onData: (chunk) => { rawBuf += chunk.toString("utf-8"); }, onControl: () => {} });
 
+// Card 44634792: was a flat 20000ms budget — same host-contention exposure 421d10fd already fixed on
+// the sibling codex-prompt-ascii-fold-real-spawn.mjs file. Scaled via the shared ambient-overshoot
+// calibration — a startup-latency TOLERANCE, not a product contract.
+const READY_PLACEHOLDER_TIMEOUT_MS = ambientScaledBudget(20_000, 3);
+console.log(`[calib] ready-placeholder budget ${READY_PLACEHOLDER_TIMEOUT_MS}ms`);
 try {
   await waitUntil(() => rawBuf.includes("Ask Codex to do anything"), {
     label: `${SESSION_ID} real codex TUI renders its ready placeholder at least once`,
-    timeoutMs: 20000,
+    timeoutMs: READY_PLACEHOLDER_TIMEOUT_MS,
   });
 } catch (err) {
   console.log(`FAIL  ${err.message}`);
@@ -165,6 +170,13 @@ try {
 }
 // Settle past any MCP-startup busy episode: require `!isBusy` to hold across 3 consecutive checks (not
 // just one instantaneous read) before trusting it, generous overall budget for a slow/extra plugin server.
+// Card 44634792: was a flat 60000ms budget. This directly waits out a REAL, variable-duration MCP-
+// startup episode (this file's own header: this host's personal ~/.codex/config.toml has extra
+// plugin/marketplace servers, observed live "Starting MCP servers (3/4): codex_apps") — a host/
+// environment TOLERANCE by its own documented nature, not a Loom-side latency contract. Scaled via
+// the shared ambient-overshoot calibration.
+const BUSY_SETTLES_TIMEOUT_MS = ambientScaledBudget(60_000, 3);
+console.log(`[calib] busy-settles budget ${BUSY_SETTLES_TIMEOUT_MS}ms`);
 try {
   let stableCount = 0;
   await waitUntil(
@@ -172,7 +184,7 @@ try {
       stableCount = host.isBusy(SESSION_ID) ? 0 : stableCount + 1;
       return stableCount >= 3;
     },
-    { label: `${SESSION_ID} busy settles false and STAYS false (past any MCP-startup episode)`, timeoutMs: 60000, intervalMs: 1000 },
+    { label: `${SESSION_ID} busy settles false and STAYS false (past any MCP-startup episode)`, timeoutMs: BUSY_SETTLES_TIMEOUT_MS, intervalMs: 1000 },
   );
 } catch (err) {
   console.log(`[warn] ${err.message} — proceeding to submit anyway; the transcript-completion wait below will fail loudly if this was a real problem, not silently pass.`);
@@ -190,6 +202,11 @@ host.enqueueStdin(SESSION_ID, KICKOFF, "system", undefined, undefined, "agent");
 // neither happens within a window, sends ONE bare "\r" via the SAME `writeStdin` raw-keystroke passthrough
 // a human retrying a stuck Enter would use — never a production-code change, and bounded to 3 attempts so
 // a genuinely different failure still surfaces as a real timeout below rather than retrying forever.
+// Card 44634792: was a flat 10000ms per-attempt budget. Only the PER-ATTEMPT wait is scaled — the
+// retry COUNT (3) and the recovery action (one bare "\r") are unchanged; widening how long each
+// attempt waits before deciding to nudge doesn't alter what the nudge does.
+const KICKOFF_NUDGE_TIMEOUT_MS = ambientScaledBudget(10_000, 3);
+console.log(`[calib] kickoff-nudge budget ${KICKOFF_NUDGE_TIMEOUT_MS}ms (per attempt)`);
 for (let nudge = 0; nudge < 3; nudge++) {
   let composerCleared = false;
   try {
@@ -199,7 +216,7 @@ for (let nudge = 0; nudge < 3; nudge++) {
         composerCleared = !rawBuf.slice(-2000).includes(KICKOFF);
         return composerCleared;
       },
-      { label: `${SESSION_ID} kickoff accepted (engine-id captured or composer text cleared) — attempt ${nudge + 1}/3`, timeoutMs: 10000, intervalMs: 500 },
+      { label: `${SESSION_ID} kickoff accepted (engine-id captured or composer text cleared) — attempt ${nudge + 1}/3`, timeoutMs: KICKOFF_NUDGE_TIMEOUT_MS, intervalMs: 500 },
     );
     break; // real progress observed — stop nudging
   } catch {
@@ -211,10 +228,17 @@ for (let nudge = 0; nudge < 3; nudge++) {
 // --- DoD-1 against a REAL process: the engine-session identity must be DISCOVERED (not fed to us), same
 // mechanism already proven against a fake pty in codex-engine-session-id-capture.mjs — this is the one
 // thing that fake couldn't prove: that it works against codex's REAL rollout-file-write timing. ----------
+// Card 44634792: was a flat 30000ms budget — this is the wait both this card and the card's own
+// 2026-10-21 triage note implicate ("arrived late at 1.2×"; a downstream readTranscript assertion
+// fed by this capture went red under load). Waits on real codex rollout-file-write timing, a
+// host/environment TOLERANCE, not a product contract. Scaled via the shared ambient-overshoot
+// calibration.
+const ENGINE_ID_TIMEOUT_MS = ambientScaledBudget(30_000, 3);
+console.log(`[calib] engine-id budget ${ENGINE_ID_TIMEOUT_MS}ms`);
 try {
   await waitUntil(() => engineSessionIdEvents.length > 0, {
     label: `${SESSION_ID} real codex engine-session id discovered (pty/host.ts#captureCodexEngineSessionId against a REAL rollout file)`,
-    timeoutMs: 30000,
+    timeoutMs: ENGINE_ID_TIMEOUT_MS,
   });
 } catch (err) {
   console.log(`FAIL  ${err.message}`);
@@ -229,6 +253,11 @@ check("previousEngineId is null (first capture, not a rotation)", engineSessionI
 // back through the SAME harness-aware seam worker_transcript calls. Polls the ACTUAL file, never a fixed
 // sleep — a genuinely stuck/slow turn fails loud via waitUntil's own timeout, not a false pass. -----------
 let turnsAtSettle = [];
+// Card 44634792: was a flat 90000ms budget — waits on a real model turn landing on disk, a
+// host/model-latency TOLERANCE, not a product contract. Scaled via the shared ambient-overshoot
+// calibration.
+const PONG_REPLY_TIMEOUT_MS = ambientScaledBudget(90_000, 3);
+console.log(`[calib] pong-reply budget ${PONG_REPLY_TIMEOUT_MS}ms`);
 if (capturedEngineId) {
   try {
     await waitUntil(
@@ -242,7 +271,7 @@ if (capturedEngineId) {
         turnsAtSettle = t;
         return t.some((turn) => turn.role === "assistant" && /pong/i.test(turn.text));
       },
-      { label: `${SESSION_ID} real codex turn produces an assistant message CONTAINING the requested reply "pong" (not merely any non-empty assistant message)`, timeoutMs: 90000, intervalMs: 500 },
+      { label: `${SESSION_ID} real codex turn produces an assistant message CONTAINING the requested reply "pong" (not merely any non-empty assistant message)`, timeoutMs: PONG_REPLY_TIMEOUT_MS, intervalMs: 500 },
     );
   } catch (err) {
     console.log(`FAIL  ${err.message}`);

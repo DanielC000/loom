@@ -15,7 +15,12 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- resolveGateCapFromEnv: env-string -> cap number, with the bare/absent fallback -----------------
-check("sanity: BASE_WAIT_TIMEOUT_MS is today's unchanged 180s figure", BASE_WAIT_TIMEOUT_MS === 180_000);
+// Card 44634792: BASE_WAIT_TIMEOUT_MS is now DERIVED from CODEX_OWN_WORK_BUDGET_MS (see
+// _codex-real-spawn-lock.mjs's own doc), not a fixed 180_000 — a hardcoded-180s expectation here would
+// go stale the moment a CODEX_OWN_WORK_BUDGET_MS entry changes. The derivation itself (and the
+// "covers every own-work entry" invariant) is pinned in codex-real-spawn-lock-ceiling.mjs instead; this
+// file only needs BASE_WAIT_TIMEOUT_MS to be a positive, finite number to build the rest of its checks on.
+check("sanity: BASE_WAIT_TIMEOUT_MS is a positive finite number (its derivation is pinned in codex-real-spawn-lock-ceiling.mjs, not here)", Number.isFinite(BASE_WAIT_TIMEOUT_MS) && BASE_WAIT_TIMEOUT_MS > 0);
 
 check("[fallback] undefined env (bare/manual run, no gate-child env) resolves to cap=2", resolveGateCapFromEnv(undefined) === 2);
 check("[fallback] an empty-string env resolves to cap=2", resolveGateCapFromEnv("") === 2);
@@ -36,11 +41,14 @@ check("[CLAMP] a cap ABOVE the validator's max (\"51\") clamps to 50, does not f
 check("[CLAMP] an absurdly large cap (\"999999\") clamps to 50", resolveGateCapFromEnv("999999") === 50);
 check("[CLAMP] \"Infinity\" is REJECTED (falls back to 2), never clamped to 50 — distinguishes reject-as-invalid from clamp-as-oversized", resolveGateCapFromEnv("Infinity") === 2 && resolveGateCapFromEnv("Infinity") !== 50);
 
-// --- computeCodexLockWaitTimeoutMs: unchanged at cap<=2, scales linearly above it --------------------
-check("[unchanged] cap=1 yields today's flat 180s (never smaller than before this card)", computeCodexLockWaitTimeoutMs(1) === 180_000);
-check("[unchanged] cap=2 yields today's flat 180s — the owner-set cap today (gate-cap-is-2 memory)", computeCodexLockWaitTimeoutMs(2) === 180_000);
-check("cap=3 scales to 360s (2 other-holder-worths)", computeCodexLockWaitTimeoutMs(3) === 360_000);
-check("cap=4 scales to 540s (3 other-holder-worths)", computeCodexLockWaitTimeoutMs(4) === 540_000);
+// --- computeCodexLockWaitTimeoutMs: floors at BASE_WAIT_TIMEOUT_MS for cap<=2, scales linearly above it.
+// Card 44634792: expressed RELATIVE to the live (derived) BASE_WAIT_TIMEOUT_MS, never a hardcoded
+// absolute figure — the exact value changes whenever CODEX_OWN_WORK_BUDGET_MS does, but the ratios here
+// (the floor, then 2x, then 3x) are the invariant this test actually owns.
+check("[floor] cap=1 yields exactly BASE_WAIT_TIMEOUT_MS (never smaller than one holder-worth)", computeCodexLockWaitTimeoutMs(1) === BASE_WAIT_TIMEOUT_MS);
+check("[floor] cap=2 yields exactly BASE_WAIT_TIMEOUT_MS — the owner-set cap today (gate-cap-is-2 memory)", computeCodexLockWaitTimeoutMs(2) === BASE_WAIT_TIMEOUT_MS);
+check("cap=3 scales to 2x BASE_WAIT_TIMEOUT_MS (2 other-holder-worths)", computeCodexLockWaitTimeoutMs(3) === BASE_WAIT_TIMEOUT_MS * 2);
+check("cap=4 scales to 3x BASE_WAIT_TIMEOUT_MS (3 other-holder-worths)", computeCodexLockWaitTimeoutMs(4) === BASE_WAIT_TIMEOUT_MS * 3);
 
 // --- RED PROOF: a flat-180s-regardless-of-cap regression (the bug this card fixes) would be caught ----
 // If `computeCodexLockWaitTimeoutMs` were ever "simplified" back to always returning BASE_WAIT_TIMEOUT_MS

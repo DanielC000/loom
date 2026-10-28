@@ -45,7 +45,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 import { pinUnreachableLoomPort } from "./_unreachable-port.mjs";
 import { CODEX_GRACEFUL_STOP_WAIT_BUDGET_MS, reportCodexGracefulStopExit } from "./_codex-graceful-stop.mjs";
@@ -137,10 +137,16 @@ const unsubscribe = host.subscribe(SESSION_ID, {
 // correctly queues rather than delivering (a message can never race into an already-busy composer). This
 // file's own assertion needs a genuinely IDLE, ready session (its own label says "session was idle
 // post-boot") — "ready" does not imply "idle", so both conditions are waited for explicitly.
+// Card 44634792: was a flat 20000ms budget, vulnerable to general host contention (same shape
+// 421d10fd already fixed on the sibling codex-prompt-ascii-fold-real-spawn.mjs file) — scale via the
+// shared ambient-overshoot calibration instead of a bigger fixed guess. This is a host/environment
+// startup-latency TOLERANCE (codex's own real boot time), not a product latency contract.
+const BOOT_READY_TIMEOUT_MS = ambientScaledBudget(20_000, 3);
+console.log(`[calib] boot-ready budget ${BOOT_READY_TIMEOUT_MS}ms`);
 try {
   await waitUntil(() => host.isCodexBootReady(SESSION_ID) && !host.isBusy(SESSION_ID), {
     label: `${SESSION_ID} real codex reaches full boot readiness AND settles idle (ready marker + model-loaded + trust-dialog-resolved + not busy)`,
-    timeoutMs: 20000,
+    timeoutMs: BOOT_READY_TIMEOUT_MS,
   });
 } catch (err) {
   console.log(`FAIL  real codex never reached an idle, boot-ready state within budget: ${err.message}`);
@@ -158,6 +164,14 @@ check("enqueueStdin delivered the one real turn immediately (session was idle po
 // Whichever it is, it must be a GENUINE terminal state, not "still deciding" — poll for EITHER outcome
 // rather than assuming the common (confirmed) one, since which one actually occurs is real, observed host
 // state this test cannot control (see this file's own header).
+// Card 44634792: was a flat 30000ms budget — same host-contention exposure as the boot-ready wait
+// above. This waits on whichever side of the real MCP-startup race actually occurs (this file's own
+// header), never on the production ladder's own internal timing — armCodexBusyStaleTimer's own
+// worst-case latency before FAIL LOUD is (CODEX_SUBMIT_MAX_RETRIES+1)*CODEX_BUSY_STALE_MS ≈ 9s
+// (pty/host.ts), well under even the unscaled budget — so this is a test-side TOLERANCE for real
+// external process/host variability, not an assertion about that product timing.
+const SUBMIT_LADDER_TIMEOUT_MS = ambientScaledBudget(30_000, 3);
+console.log(`[calib] submit-ladder budget ${SUBMIT_LADDER_TIMEOUT_MS}ms`);
 let outcome = null;
 try {
   await waitUntil(
@@ -166,7 +180,7 @@ try {
       if (unconfirmedEvents.some((e) => e.sessionId === SESSION_ID)) { outcome = "exhausted"; return true; }
       return false;
     },
-    { label: `${SESSION_ID} the real submit ladder reaches a terminal state (confirmed-idle or exhausted-and-reported)`, timeoutMs: 30000 },
+    { label: `${SESSION_ID} the real submit ladder reaches a terminal state (confirmed-idle or exhausted-and-reported)`, timeoutMs: SUBMIT_LADDER_TIMEOUT_MS },
   );
 } catch (err) {
   console.log(`FAIL  the real submit ladder never reached ANY terminal state within budget (neither confirmed nor exhausted-and-reported) — the exact silent-wedge shape this card's fix exists to prevent: ${err.message}`);
