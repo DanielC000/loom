@@ -20,7 +20,7 @@ import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
   AtlasNodeHead, BandDisclosure, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiPill,
-  KpiStrip, LaneBar, MeterRow, NodeTabs, nodeTabShowsKpiStrip, useDashboardOpen,
+  LaneBar, MeterRow, NodeTabs, useDashboardOpen,
   type KpiItem, type NodeHeadPill,
 } from "../components/atlasHome";
 import { AgentRosterRow, AgentsQuickSpawn, RosterEmpty, WorkersDispatchedNote } from "../components/atlasAgents";
@@ -325,8 +325,8 @@ export default function ProjectHome() {
 
   // ── The node head (card 5968d7e0) ────────────────────────────────────────────────────────────
   // Two readings, neither of them a figure from `kpis` above. That is the rule, not a coincidence:
-  // the strip carries all six KPIs on every tab but Overview and the deck carries them ON Overview,
-  // so a pill restating one would be the same number twice on one screen.
+  // the deck carries all six on the home tab, so a pill restating one would be the same number twice
+  // on one screen.
   //
   //  · `N working` is a BUSY count — how many of this project's agents are mid-turn. The `mgr ·
   //    workers` tile beside it is a LIVE count split by role (`1/4`); a live agent waiting on its
@@ -380,9 +380,9 @@ export default function ProjectHome() {
           <AgentsQuickSpawn projectId={projectId} projectName={project?.name}
             testId="atlas-nodehead-spawn" trigger="button" />
         } />
-        <NodeTabs tabs={tabs} active={tab} hrefFor={hrefFor}>
-          {nodeTabShowsKpiStrip(tab) && <KpiStrip items={kpis} />}
-        </NodeTabs>
+        {/* No readout rides this row — card 4a0ad464 removed the tab-row KPI strip on the owner's
+            own instruction. The node's figures are the full-size deck on the home tab below. */}
+        <NodeTabs tabs={tabs} active={tab} hrefFor={hrefFor} />
 
         {/* Every re-homed body that has been visited, the inactive ones parked with `hidden`. Rendered
             BEFORE the home tabs' own content so a body's position in the DOM is stable across tab

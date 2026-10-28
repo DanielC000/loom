@@ -102,3 +102,38 @@ Folding a tab out of the row means `page.getByTestId("atlas-tab-<key>")` is **no
 reach a node tab** at any width where the row overflows — which, with a KPI strip on the row, includes
 1440 and the e2e default 1280 viewport. A spec that enumerates or activates node tabs now has to read
 both halves. `e2e/helpers/nodeTabs.ts` is that contract in one place; see its own header.
+
+---
+
+## What card `4a0ad464` (2026-10-28) took away, and what is left
+
+This menu existed because the KPI strip card `7874e8c2` put on every tab could not fit beside the row
+and wrapped under it, taking the tab block from 35px to 74px at 1440. The owner then asked for the
+strip itself to go — naming this menu as the cost it imposed:
+
+> "… need too much space causing the need for a "More.." tab. remove them."
+
+With the strip gone the row is alone on its line and **every declared tab fits at every desktop
+width**. MEASURED on both home nodes after that card, with the tree rail present: a trigger first
+appears at **900px** and below; because the rail becomes a DRAWER below 820px and hands the content
+column its width back, there is then NO trigger at 820 or 720 for the project node, and one again at
+600 and below. The block is 35px, one line, at every width in that sweep.
+
+**The machinery stays.** It is still what keeps a nine-tab row reachable at phone width, where it was
+never the strip that made the tabs overflow. What changed in the code:
+
+- `computeFit`'s side-width reservation (`sideW`/`sideCount`) and `NodeTabs`' trailing-content slot
+  are deleted along with their only consumer. The anchor on `computeFit` now reads `@decision
+  4a0ad464`, and this record's own prohibition on budgeting against the full width is **void** — the
+  full container width is the budget now, because nothing else is ever on the line.
+- `atlas-node-tab-overflow.spec.ts`'s legs that need a real fold run at a `FOLD_WIDTH` constant
+  (900) rather than 1440, and each asserts the fold it depends on rather than assuming it. Its first
+  leg is now card `4a0ad464`'s own claim: at 1280/1440/1920 both home blocks are one line with no
+  strip and no trigger.
+
+### Do not
+
+- **Do not delete the overflow machinery** because no desktop width folds any more. Phone width
+  still does, and the alternative there is the silent off-screen clipping card `25c08fba` fixed.
+- **Do not re-add a side-width reservation to `computeFit`** without a caller that actually puts
+  something on the row's line.

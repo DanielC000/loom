@@ -25,12 +25,12 @@
 // Home row carries the landed mark for all of them, as the Workspace home does for its own tabs. The
 // project tier is ordered running-first, alphabetical within each group (lib/projectOrder).
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link, NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CONTEXT_WARN_RATIO, contextWindowForModel, type Project, type SessionListItem } from "@loom/shared";
 import {
-  ATLAS_HOMES, PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt, projectTabPath,
-  useVisibleNavPages, type AtlasHome, type NavPage,
+  ATLAS_HOMES, PROJECT_NODE_PATH, PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt,
+  projectTabPath, useVisibleNavPages, type AtlasHome, type NavPage,
 } from "../nav";
 import { AgentsQuickSpawn } from "./atlasAgents";
 import { NavIcon } from "./navIcons";
@@ -58,22 +58,27 @@ import { color, font } from "../theme";
 // at project depth even though its own flag says workspace. Depth is therefore `scoped` OR named as a
 // re-homed project tab — read off the same PROJECT_NODE_TABS declaration the node and the frame read.
 //
-// 🔴 A DESTINATION AT PROJECT DEPTH IS NOT AUTOMATICALLY A TREE ROW (card ec1aa18e). The depth test
-// above still decides which TIER a destination belongs to — that is what keeps `/terminals` out of
-// the workspace tier — but a destination that the project node already carries as a TAB gets no row
-// of its own, because the sidebar would then be a second copy of the tab row one click away. So the
-// `project` bucket returned here is the project-depth destinations that are NOT tabs: today exactly
-// `/overview`, whose surfaces (the owner's board embed among them) the node's own tabs do not carry.
-// The bucket is kept plural, and in source order, rather than collapsed to that one address — a
-// hand-named row is the thing cards 0d0c6cee and 5afd71bd both went out of their way to delete.
-function splitByDepth(pages: NavPage[]): { workspace: NavPage[]; project: NavPage[] } {
+// 🔴 NO DESTINATION AT PROJECT DEPTH IS A TREE ROW ANY MORE (card 4a0ad464). Card ec1aa18e took the
+// rows for the destinations the project node carries as TABS — the sidebar would otherwise be a
+// second copy of the tab row one click away — and left two page rows standing: `Home` (the node's own
+// address) and `Overview`. The owner read BOTH as the same redundancy, verbatim: "projects tree on
+// the sidebar show the pages instead of the running agent. We have the pages as tabs now. I doubt we
+// need to have the tabs for each project in the sidebar too." So a project branch now holds ONLY what
+// is RUNNING in it, and this function keeps the one job it still has: which destinations belong to
+// the WORKSPACE tier. The depth test is unchanged — it is still what keeps `/terminals` (an unscoped
+// page the project node carries as its Sessions tab) out of that tier.
+//
+// ⚠️ `/overview` is left with no Atlas NAVIGATION at all — neither a tab nor a row nor retired,
+// still routed and still rendered at its own address under both shells. Why it was not retired onto
+// the project node instead, and what that would cost, is in card 4a0ad464's record.
+//
+// @decision 4a0ad464 — a project branch holds entities, never pages. Don't re-add a row for a
+// project-depth destination; put the surface on the node's tab row instead.
+function workspaceTierPages(pages: NavPage[]): NavPage[] {
   const isProjectTab = (to: string) =>
     PROJECT_NODE_TABS.some((t) => isRehomedProjectTab(t) && projectTabPath(t) === to);
   const atProjectDepth = (p: NavPage) => !!p.scoped || isProjectTab(p.to);
-  return {
-    workspace: pages.filter((p) => !atProjectDepth(p)),
-    project: pages.filter((p) => atProjectDepth(p) && !isProjectTab(p.to)),
-  };
+  return pages.filter((p) => !atProjectDepth(p));
 }
 
 // The ONE god-eye destination that stays a WORKSPACE-TIER NODE rather than becoming a tab: the
@@ -301,25 +306,19 @@ function sessionMetric(s: SessionListItem): ReactNode {
   );
 }
 
-// An Atlas-only node — a tier's own HOME: the Workspace root and the project node (card fd99b2d7).
-//
-// A tier's home is a LEAF row rather than the tier's heading made clickable. The heading above
-// ("Workspace" / "Projects") names a GROUP, and a project row is a SELECTOR whose whole contract is
-// that it re-scopes without navigating (card e47df20a) — folding a destination into either would give
-// one control two jobs and make "where am I" ambiguous for the row that already says "what am I
-// scoped to". One extra row buys both tiers the same, honest shape.
+// An Atlas-only node — a tier's own HOME. The WORKSPACE root is the only one left: it is a LEAF row
+// rather than the "Workspace" heading made clickable, because that heading names a GROUP (card
+// fd99b2d7). The PROJECT tier no longer has one — card 4a0ad464 removed its `Home` row as a page row
+// the node's own tab row already carries, and gave the project row itself the node's address, which
+// is exactly the "one control, two jobs" card e47df20a avoided. The owner asked for the row to go
+// anyway, so the two jobs are now deliberate and `selectAndOpenProject` is where they are reconciled.
 //
 // `trailing` rides OUTSIDE the link, as a sibling in the same row: a button nested inside an anchor is
 // invalid HTML and unreachable by the keyboard, which is exactly what the quick-spawn `＋` must not be.
-//
-// `alsoActiveAt` is the project Home row's case (card ec1aa18e), the counterpart of the mark the
-// Workspace home already carries on its own tabs: a project tab's address (`/board`, `/memory`, …)
-// is a pathname NavLink's `isActive` cannot resolve to this node, so the caller says so instead.
-function HomeNode({ home, testId, active = true, alsoActiveAt = false, trailing, metric, onNavigate }: {
+function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }: {
   home: AtlasHome;
   testId: string;
   active?: boolean;
-  alsoActiveAt?: boolean;
   trailing?: ReactNode;
   metric?: ReactNode;
   onNavigate?: () => void;
@@ -338,7 +337,7 @@ function HomeNode({ home, testId, active = true, alsoActiveAt = false, trailing,
       {active
         ? (
           <NavLink to={home.to} end={false} onClick={onNavigate}
-            className={({ isActive }) => `loom-atlas-node${isActive || alsoActiveAt ? " is-active" : ""}`}
+            className={({ isActive }) => `loom-atlas-node${isActive ? " is-active" : ""}`}
             data-testid={testId}>
             {body}
           </NavLink>
@@ -350,16 +349,20 @@ function HomeNode({ home, testId, active = true, alsoActiveAt = false, trailing,
 }
 
 const WORKSPACE_HOME = ATLAS_HOMES.find((h) => h.key === "workspace")!;
-const PROJECT_HOME = ATLAS_HOMES.find((h) => h.key === "project")!;
 
 // One project row — cards e47df20a (P1-4) and 0d0c6cee. A real control: clicking it writes the active
 // project to the SAME ActiveProjectProvider the rail chip writes and every `scoped` page reads, so a
 // tree selection and a chip selection are indistinguishable downstream. There is deliberately no
 // second Atlas-only notion of "which project" to keep in step.
 //
-// A <button>, not a link: selecting a project does not change the address. It re-scopes the page you
-// are already on — which is the whole point of "tree selection IS scoping" — so a link would promise
-// navigation it never performs. (The project node's own page is the `Home` row directly beneath it.)
+// Still a <button>, not a link, though card 4a0ad464 made it navigate as well as scope. Two reasons
+// it stays a button: it does NOT always navigate (on one of the node's own tabs it only re-scopes —
+// see `selectAndOpenProject`), so an href would promise a destination it sometimes declines to go to;
+// and SCOPING, not navigation, is still the job it is named for — `aria-current` and `is-open` are
+// what "the branch you are inside" has meant since P1-4 and both still mean it.
+//
+// @decision 4a0ad464 — this row is the project node's ONLY address in the tree now. Don't take the
+// navigation back out without putting a `Home` row back, and don't make it unconditional.
 //
 // 🔴 THE TWIST IS ITS OWN BUTTON, and expansion is NOT selection (card 0d0c6cee). Every project is
 // expandable whether or not it is active, so a reader can look INTO a project — its agents, its board,
@@ -437,8 +440,16 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
   onNavigate?: () => void;
 } = {}) {
   const pages = useVisibleNavPages();
-  const { workspace, project } = splitByDepth(pages);
+  const workspace = workspaceTierPages(pages);
   const { projectId, setProjectId, projects } = useActiveProject();
+  const navigate = useNavigate();
+
+  // Which project tab the current address selects, if any. ONE resolver (src/nav.tsx's
+  // `projectNodeTabAt`), shared with the node and the frame, so the tree cannot disagree with the
+  // crumbs about which node an address is on. Read HERE, above the row handlers, because
+  // `selectAndOpenProject` below decides whether to navigate from it.
+  const { pathname, search } = useLocation();
+  const onProjectNodeTab = !!projectNodeTabAt(pathname, search);
 
   // Which branches are OPEN. Selection auto-opens its own branch (that is what a reader asked for by
   // scoping to it), so the map holds only the rows a reader has since overridden by hand — an absent
@@ -451,6 +462,27 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
   const selectProject = (id: string) => {
     setProjectId(id);
     setOpenBranches((prev) => ({ ...prev, [id]: true }));
+  };
+  /**
+   * Clicking a project ROW: scope to it, and — since card 4a0ad464 removed the branch's `Home` row —
+   * take the reader to its node, which this row is now the tree's only address for.
+   *
+   * The rule, stated positively: the row takes you to the project node, EXCEPT where clicking it has
+   * real work of its own to do (re-scoping one of the node's own tabs, which is project-agnostic and
+   * reads the ACTIVE project). Both halves are asserted in atlas-tree-hierarchy.spec.ts.
+   *
+   * @decision 4a0ad464 — don't take the navigation out without putting a `Home` row back, and don't
+   * make it unconditional: clicking your own row from one of its tabs would then do nothing at all.
+   */
+  const selectAndOpenProject = (id: string) => {
+    const rescopesATabInPlace = onProjectNodeTab && id !== projectId;
+    selectProject(id);
+    if (rescopesATabInPlace) return;
+    navigate(PROJECT_NODE_PATH);
+    // A navigation inside the drawer closes it, exactly as an anchor click does. The <nav>'s own
+    // delegated handler is gated on `closest("a")` so a BUTTON never closes it — which is correct
+    // for the twist and the quick-spawn `＋`, and wrong for a row that now navigates.
+    onNavigate?.();
   };
 
   // The ENTITY tier's own expansion, deliberately a SECOND map (card 3b563642). "Expansion is not
@@ -530,33 +562,18 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
     [projects, liveByProject],
   );
 
-  // Which project tab the current address selects, if any — the input to the project Home row's own
-  // landed mark now that the tabs are no longer rows of their own. ONE resolver (src/nav.tsx's
-  // `projectNodeTabAt`), shared with the node and the frame, so the tree cannot disagree with the
-  // crumbs about which node an address is on.
-  const { pathname, search } = useLocation();
-  const onProjectNodeTab = !!projectNodeTabAt(pathname, search);
-
   const platformNodes = workspace.filter((p) => WORKSPACE_TIER_NODES.includes(p.to));
 
   /**
-   * What hangs under ONE project node: its Home row, then what is RUNNING in it, then the
-   * project-depth destinations the node's own tab row does NOT already carry (card ec1aa18e — today
-   * just Overview). Built per project, so a reader can open a branch they are not scoped to and see
-   * the real shape of it, which is the whole point of a branch that lists live work.
+   * What hangs under ONE project node: ONLY what is RUNNING in it. Built per project, so a reader can
+   * open a branch they are not scoped to and see the real shape of it, which is the whole point of a
+   * branch that lists live work. No row carries a count: the two that did (Agents, Board) read
+   * `projectId`-keyed caches only the SELECTED project's pages fill, and both are tabs now.
    *
-   * No row carries a count any more. The two that did (Agents, Board) were reading `projectId`-keyed
-   * caches that only the SELECTED project's pages fill, so their figures were absent on every other
-   * branch anyway — and both rows are now tabs on the node, under its own KPI strip, where the same
-   * figures are shown for whichever project you are actually scoped to.
+   * @decision 4a0ad464 — a project branch holds entities, never pages. The owner read the `Home` and
+   * `Overview` rows as duplicating the node's own tab row; don't re-add either, or any other.
    */
   const scopedNodes = (p: Project, selected: boolean): ReactNode[] => {
-    // The SELECTED branch keeps the original, unqualified test ids — every spec in the suite addresses
-    // the landed node by them, and "the node you are on" is still exactly one element. A row in
-    // another branch is a different element for the same destination, so it gets its own stem, with
-    // the project id spliced in where a reader of the id would look for it.
-    const nodeId = (to: string) => (selected ? `atlas-node-${to}` : `atlas-node-${p.id}${to}`);
-    const homeId = (key: string) => (selected ? `atlas-home-${key}` : `atlas-home-${p.id}-${key}`);
     // Clicking into a branch you are not scoped to re-scopes to it first: the page it lands on reads
     // the ACTIVE project, so navigating without this would render another project's data under a row
     // that named this one. Nothing to do when the row is already the selected branch's.
@@ -597,22 +614,24 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
         : undefined)];
     });
 
-    return [
-      // The Home row carries the landed mark for every one of the node's TABS as well as for the
-      // node's own address — `alsoActiveAt`, above — but only on the SELECTED branch: a tab address
-      // renders the ACTIVE project's data, so marking another branch's Home row would be the tree
-      // naming a project the page below it is not showing.
-      <HomeNode key={PROJECT_HOME.to} home={PROJECT_HOME} active={selected} onNavigate={scopeFirst}
-        alsoActiveAt={selected && onProjectNodeTab} testId={homeId(PROJECT_HOME.key)} />,
-      // The sessions lead the project's surfaces, as they do in the approved design: what is
-      // RUNNING is what a reader opens the rail to check, and a list of pages is what they scroll
-      // past to reach it. Card ec1aa18e removed that list.
-      ...sessionRows,
-      ...project.map((page) => (
-        <TreeNode key={page.to} page={page} activeTo={activeTo} active={selected} onNavigate={scopeFirst}
-          testId={nodeId(page.to)} />
-      )),
-    ];
+    // A branch with nothing running is now EMPTY, where before this card it still held two page
+    // rows — so expanding an idle project would open onto nothing at all and read as a broken twist
+    // rather than as an answer. One muted, non-interactive line says the answer instead. Not a link:
+    // the row above it is already the way into the project, and a second one here would be the page
+    // row this card just removed wearing a different label.
+    if (sessionRows.length === 0) {
+      return [
+        <li key="idle" className="loom-atlas-idle" data-testid={`atlas-branch-idle-${p.id}`}>
+          {/* The same two leading spacers every row in this rail carries, so the line's text starts
+              exactly where a sibling session row's LABEL does rather than at a second origin derived
+              by hand from the paddings. */}
+          <span className="loom-atlas-twist" aria-hidden />
+          <span className="loom-atlas-ico" aria-hidden />
+          <span>Nothing running</span>
+        </li>,
+      ];
+    }
+    return sessionRows;
   };
 
   return (
@@ -652,8 +671,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
         {projects.length === 0 ? (
           <>
             {/* Nothing to select, so nothing here pretends to be selectable — the row stays the plain
-                label it was before selection existed. The surfaces stay reachable beneath it: every one
-                renders with no project resolved today (each has its own empty state). */}
+                label it was before selection existed. */}
             <div className="loom-atlas-node is-branch is-open" data-testid="atlas-project-node">
               <span className="loom-atlas-twist" aria-hidden>▸</span>
               <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
@@ -662,9 +680,11 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
             <ul className="loom-atlas-nodes is-kids">
               {scopedNodes({ id: "", name: "No project" } as Project, true)}
             </ul>
-            {/* Deliberately a HINT, not a gate — see above. */}
+            {/* Deliberately a HINT, not a gate — see above. The branch below it holds only what is
+                RUNNING since card 4a0ad464, and with no project there is nothing to run, so the hint
+                is what the empty branch means rather than a caveat on a list of surfaces. */}
             <p style={{ margin: "6px 10px 0", color: color.textMuted, fontFamily: font.mono, fontSize: 11.5, lineHeight: 1.6 }}>
-              No project is active yet — these scope to one once a project exists.
+              No project yet. Create one on the Platform node and its agents appear here.
             </p>
           </>
         ) : (
@@ -685,7 +705,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
               const needs = needsByProject.get(p.id) ?? 0;
               return (
                 <ProjectNode key={p.id} project={p} selected={selected} expanded={isExpanded(p.id)}
-                  onSelect={selectProject} onToggle={toggleBranch}
+                  onSelect={selectAndOpenProject} onToggle={toggleBranch}
                   metrics={
                     <>
                       {needs > 0 && (

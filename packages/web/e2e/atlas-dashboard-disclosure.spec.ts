@@ -1,6 +1,12 @@
-// The project node's dashboard disclosure — card 44f725fe, the owner's D1 pick on request fb8de852
-// ("What is the need to have an overview tab, and a deck tab? Feels redundant to me. Unify the pages
-// to one."). Design set: vault `Mockups/2026-10-28 Atlas unified project page/`.
+// The dashboard disclosure — card 44f725fe, the owner's D1 pick on request fb8de852 ("What is the
+// need to have an overview tab, and a deck tab? Feels redundant to me. Unify the pages to one.").
+// Design set: vault `Mockups/2026-10-28 Atlas unified project page/`.
+//
+// Card 4a0ad464 then applied the SAME pattern to the WORKSPACE node, whose Overview/Deck pair the
+// owner's words covered just as much — so this file now carries a leg for each node. They are
+// deliberately NOT one loop: the two nodes fold DIFFERENT panels onto DIFFERENT primary surfaces
+// (the project's board, the workspace's project grid), and a shared loop would stop checking either
+// for what it actually is.
 //
 // The five band panels now sit behind ONE collapsible `Dashboard` bar on the node's single home tab,
 // where they used to be split across an Overview tab (band + a 1316px board starting ~670px down) and
@@ -43,6 +49,18 @@ const BAND_PANELS = ["needs", "agents", "fleet", "gates", "pulse"];
 // One summary pill per hidden panel — `gates` and `pulse` are read as `gates` and `last event`, and
 // `fleet` as `spawnable` (the figure its rows are there to act on).
 const SUMMARY_PILLS = ["needs", "spawnable", "gates", "event"];
+
+// The WORKSPACE node's own five (pages/WorkspaceHome.tsx), and its own summary row.
+const WS_BAND_PANELS = ["needs", "operators", "gates", "plan", "pulse"];
+// ⚠️ THREE pills for FIVE panels, deliberately — NOT the project node's one-per-panel shape. The
+// full-size KPI deck stays on screen when the band folds, and it already states `gate run·queued` and
+// `plan 5h` verbatim, so a pill for either would be the same number twice within ~40px — the shape
+// card 939922ee's owner rejection names. The bar carries what the fold actually TAKES OFF the page,
+// plus `needs you`, which card 44f725fe kept across the same overlap for its own reason (it is the
+// panel whose whole point is that it is waiting on you).
+const WS_SUMMARY_PILLS = ["needs", "operators", "event"];
+// ...and the two the deck already carries, which must NOT be restated on the bar.
+const WS_PILLS_THE_DECK_CARRIES = ["gates", "plan"];
 
 async function seedAtlasOn(page: Page) {
   await page.addInitScript((key) => {
@@ -89,6 +107,25 @@ const bar = (page: Page) => page.getByTestId("atlas-banddisc-bar");
  */
 async function boardBox(page: Page): Promise<{ top: number; width: number }> {
   const read = async () => await page.locator(".loom-board-grid").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { top: Math.round(r.top + window.scrollY), width: Math.round(el.clientWidth) };
+  });
+  let prev = await read();
+  for (let i = 0; i < 20; i++) {
+    const next = await read();
+    if (next.top === prev.top && next.width === prev.width) return next;
+    prev = next;
+  }
+  return prev;
+}
+
+/**
+ * The same settled read for the WORKSPACE node's primary surface — its project grid, which is what
+ * the fold lifts there (the project node's is its board). One helper shape, two selectors, rather
+ * than one helper that guesses which node it is on.
+ */
+async function gridBox(page: Page): Promise<{ top: number; width: number }> {
+  const read = async () => await page.locator(".loom-projgrid").evaluate((el) => {
     const r = el.getBoundingClientRect();
     return { top: Math.round(r.top + window.scrollY), width: Math.round(el.clientWidth) };
   });
@@ -274,5 +311,149 @@ test.describe("the project node's dashboard disclosure (card 44f725fe)", () => {
     await expect(bar(page)).toHaveCount(0);
     await expect(page.getByTestId("atlas-dashboard-band")).toHaveCount(0);
     await expect(page.getByTestId("atlas-banddisc-summary")).toHaveCount(0);
+  });
+});
+
+test.describe("the Workspace node's dashboard disclosure (card 4a0ad464)", () => {
+  // ⭐ CARD 4a0ad464's part C. RED on the pre-card build at every assertion: there was no disclosure
+  // bar on `/home` at all — the band sat open and unfoldable on an Overview tab, and the board-first
+  // reading lived on a separate `Deck` tab.
+  test("switch ON: folding the dashboard lifts the project grid without narrowing it, and the choice persists", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const seeded = await seedProjectWithBoard(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize(WIDE);
+    await page.goto(loomDaemon.baseURL + "/home");
+
+    // FIXTURE IDENTITY. The workspace tier aggregates every project on a daemon this worker's other
+    // specs also seed into, so the sentinel is THIS spec's own project card rather than any total.
+    await expect(page.getByTestId(`atlas-project-card-${seeded.project.id}`)).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+
+    // ── DEFAULT = EXPANDED, and the bar states no counts while the detail is on screen. ──
+    await expect(bar(page)).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeVisible();
+    const offenders: string[] = [];
+    for (const key of WS_BAND_PANELS) {
+      if (await page.getByTestId(`atlas-band-${key}`).isVisible() !== true) offenders.push(`${key}: not visible unfolded`);
+    }
+    expect(offenders, "every band panel is on screen while the dashboard is unfolded").toEqual([]);
+    await expect(page.getByTestId("atlas-banddisc-summary")).toBeEmpty();
+
+    const expanded = await gridBox(page);
+
+    // ── THE FOLD ACTUALLY MOVES THE PRIMARY SURFACE. ──
+    await bar(page).click();
+    await expect(bar(page)).toHaveAttribute("aria-expanded", "false");
+    // Hidden, not merely attributed: the assertion that fails if `.loom-atlas-band[hidden]` is ever
+    // dropped and `hidden` is left to lose to the band's own `display: grid` (card 44f725fe's own
+    // measured trap, which applies here identically because it is the same band element).
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeHidden();
+    const stillShowing: string[] = [];
+    for (const key of WS_BAND_PANELS) {
+      if (await page.getByTestId(`atlas-band-${key}`).isVisible()) stillShowing.push(key);
+    }
+    expect(stillShowing, "a band panel is still on screen with the dashboard folded").toEqual([]);
+
+    const collapsed = await gridBox(page);
+    expect(collapsed.top, `grid top: ${expanded.top} unfolded → ${collapsed.top} folded`)
+      .toBeLessThan(expanded.top - 200);
+    // ── THE WIDTH IS NOT THE PRICE — the retired Deck tab spent 330px of it on a standing rail. ──
+    expect(collapsed.width, `grid width: ${expanded.width} unfolded vs ${collapsed.width} folded`)
+      .toBe(expanded.width);
+    expect(collapsed.width, "the folded grid keeps the full content width").toBeGreaterThan(1250);
+
+    // ── THE SIGNAL SURVIVES, and does NOT restate the deck. ──
+    const summary = page.getByTestId("atlas-banddisc-summary");
+    await expect(summary).toBeVisible();
+    const missing: string[] = [];
+    for (const key of WS_SUMMARY_PILLS) {
+      if (await summary.getByTestId(`atlas-banddisc-pill-${key}`).count() !== 1) missing.push(key);
+    }
+    expect(missing, "the folded bar carries a live count for the signal the fold took off the page").toEqual([]);
+    // The other polarity, which is the claim the three-pill shape actually makes: the two figures the
+    // deck is still showing are NOT restated on the bar. Without this the list above would be
+    // satisfied by a bar that simply carried everything.
+    const restated: string[] = [];
+    for (const key of WS_PILLS_THE_DECK_CARRIES) {
+      if (await summary.getByTestId(`atlas-banddisc-pill-${key}`).count() !== 0) restated.push(key);
+    }
+    expect(restated, "the folded bar restates a figure the full-size deck is still showing").toEqual([]);
+    // ...and the deck IS still showing them, so the absence above is a decision rather than a page
+    // that lost its readout entirely.
+    await expect(page.getByTestId("atlas-kpi-gates")).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-plan")).toBeVisible();
+
+    // ── NOTHING WAS DROPPED. The grid, its foot line (the retired Deck tab's own figure) and the
+    //    fleet-controls bar are all still here with the band folded. ──
+    await expect(page.getByTestId(`atlas-project-card-${seeded.project.id}`)).toBeVisible();
+    await expect(page.getByTestId("atlas-grid-foot")).toContainText("open card");
+    await expect(page.getByTestId("atlas-fleet-controls-bar")).toBeVisible();
+
+    // ── IT PERSISTS, BOTH WAYS. ──
+    await page.reload();
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(bar(page), "the fold did not survive a reload").toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeHidden();
+    await bar(page).click();
+    await expect(bar(page)).toHaveAttribute("aria-expanded", "true");
+    await page.reload();
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(bar(page), "the unfold did not survive a reload").toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeVisible();
+  });
+
+  // ⭐ ONE PREFERENCE, BOTH NODES — the two bands read the SAME storage key on purpose: the band is
+  // the same furniture on both, and two keys would make "fold the dashboard away" mean two different
+  // things depending on which node you happened to be standing on when you asked for it. Asserted
+  // rather than left implicit, because it is a choice a reader would otherwise have to infer.
+  test("switch ON: the fold is one preference shared by both home nodes", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const seeded = await seedProjectWithBoard(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize(WIDE);
+
+    await page.goto(loomDaemon.baseURL + "/home");
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(bar(page)).toHaveAttribute("aria-expanded", "true");
+    await bar(page).click();
+    await expect(bar(page)).toHaveAttribute("aria-expanded", "false");
+
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+    await expect(bar(page), "folding the workspace band left the project band unfolded")
+      .toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeHidden();
+
+    // ...and back the other way, so this is a shared preference rather than a one-way write.
+    await bar(page).click();
+    await expect(bar(page)).toHaveAttribute("aria-expanded", "true");
+    await page.goto(loomDaemon.baseURL + "/home");
+    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(bar(page), "unfolding the project band left the workspace band folded")
+      .toHaveAttribute("aria-expanded", "true");
+  });
+
+  test("switch OFF: no dashboard disclosure exists on the classic Mission-Control-era pages", async ({ page, loomDaemon }) => {
+    const seeded = await seedProjectWithBoard(loomDaemon);
+    // Deliberately NOT seedAtlasOn — off is the default.
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize(WIDE);
+    await page.goto(loomDaemon.baseURL + "/");
+
+    // Presence FIRST: the classic shell really is here, so the absences below are absences and not a
+    // page that never loaded.
+    await expect(page.locator(".loom-rail")).toBeVisible();
+    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
+    await expect(bar(page)).toHaveCount(0);
+    await expect(page.getByTestId("atlas-dashboard-band")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-banddisc-summary")).toHaveCount(0);
+    // ...and the Atlas-only workspace node is not mounted in the classic shell either.
+    await page.goto(loomDaemon.baseURL + "/home");
+    await expect(page.locator(".loom-rail")).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
+    await expect(bar(page)).toHaveCount(0);
   });
 });

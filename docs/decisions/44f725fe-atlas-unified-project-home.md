@@ -46,3 +46,46 @@ MEASURED control (rule removed, rebuilt): 2 of the spec's 3 legs go red at `toBe
 - **Do not shrink, summarize or gate the embedded `<Board/>`,** in either state. Standing owner directive (card `c6bdf358`): it is the primary board surface. Mount it ONCE — the fold changes the board's position, never its content.
 - **Do not change the first-visit default to COLLAPSED without the owner.** Expanded is a deliberate ruling: it keeps a first visit identical to what shipped before, so nobody loses a panel they never chose to fold.
 - **Do not make `nodeTabShowsKpiStrip` return true for `overview`,** and do not strip the re-homed tabs of their own readout. See `7874e8c2`.
+
+---
+
+## Extended to the WORKSPACE node by card `4a0ad464` (2026-10-28)
+
+The owner's words on request `fb8de852` — *"What is the need to have an overview tab, and a deck tab?
+Feels redundant to me. Unify the pages to one."* — covered both home nodes; this card unified only the
+project one. Card `4a0ad464` applies the same D1 disclosure to `pages/WorkspaceHome.tsx`:
+`HOME_TABS` is one row, the five band panels go behind the same `BandDisclosure`, and a legacy
+`?tab=deck` falls back to Overview with **no** `LEGACY_REDIRECTS` row — for the same both-shells reason
+stated above.
+
+Three things are deliberately NOT copied verbatim from the project node:
+
+1. **The summary row is THREE pills, not one per folded panel.** The full-size deck stays on screen
+   when the band folds, and it already states `gate run·queued` and `plan 5h` verbatim — so a pill for
+   either would be the same number twice within ~40px, the shape card `939922ee`'s owner rejection
+   names. The bar carries what the fold actually takes OFF the page (`operators`, `last event`) plus
+   `needs you`, kept across the same overlap for the reason this record already gives it.
+2. **The two bands share ONE storage key** (`DASHBOARD_OPEN_STORAGE_KEY`). The band is the same
+   furniture on both nodes; two keys would make "fold the dashboard away" mean two different things
+   depending on which node you were standing on when you asked.
+3. **The retired Deck tab's own line is kept**, under the project grid: its open-card total across
+   every project is the one figure that tab stated and no tile on this node carries.
+
+MEASURED at 1440 on the workspace node: the project grid's top moves **702 → 378** when the band folds
+(a 324px lift, the same delta this record measured for the project node's board), at an unchanged
+content width.
+
+### Also superseded here
+
+This record's last prohibition — *"do not strip the re-homed tabs of their own readout"* — is void.
+Card `4a0ad464` removed the tab-row KPI strip from every node and every tab on the owner's explicit
+instruction; see the superseding section appended to `7874e8c2`'s record.
+
+### Do not (in addition to this record's own list above)
+
+- **Do not re-add a second HOME tab to `WorkspaceHome.tsx`'s `HOME_TABS`,** `deck` least of all — the
+  same prohibition this record already carries for `PROJECT_NODE_TABS`.
+- **Do not give the workspace bar one pill per folded panel.** Two of the five are on the deck above
+  it; a pill for either is the duplication the fold is supposed to avoid, not a completeness win.
+- **Do not split the two nodes' fold state onto separate storage keys** without a reason the owner
+  has actually asked for.

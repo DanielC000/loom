@@ -12,10 +12,11 @@
 //      equivalent of, and since card 0d0c6cee the ten cross-project destinations are no longer tree
 //      rows at all. Card 41eab0eb then made seven of those WORKSPACE NODE TABS, leaving two in the
 //      escape hatch at the foot of the tree (card 25c08fba took `/terminals` the other way, down to
-//      project depth as a tree ROW again). So the claim is a THREE-WAY PARTITION: every rail
-//      destination is a node, a hatch entry, or a declared node tab — in exactly one of the three,
-//      never two and never none — and every extra node is a declared Atlas home. See `parseAtlasHomes`
-//      and `parseWorkspaceNodeTabs` below for why that is no weaker than an equality.
+//      project depth as a tree ROW again). So the claim is a PARTITION: every rail destination is in
+//      EXACTLY ONE Atlas placement, never two and never none — and every extra node is a declared
+//      Atlas home. See `parseAtlasHomes` and `parseWorkspaceNodeTabs` below for why that is no
+//      weaker than an equality. Card 4a0ad464 added the SIXTH and last placement, PAGE-ONLY — see
+//      `PAGE_ONLY_DESTINATIONS` below for what it is and why it is not a fallback bucket.
 //   2. CONTENT IDENTITY. For every one of those destinations, the page's rendered structure is
 //      fingerprinted at the OLD route (switch off) and again after reaching it under Atlas (switch
 //      on), and required to match. "The same content the old route rendered" is asserted against the
@@ -190,6 +191,22 @@ const TREE_NODES = "a.loom-atlas-node";
 // it is what pins the hatch as gone, and keeps a re-added one from quietly becoming a destination's
 // "home" again. Deliberately NOT `.loom-atlas-node`, which is what it never was.
 const UNHOMED_LINKS = "a.loom-atlas-unhomed-link";
+
+// ── The SIXTH placement: a destination Atlas keeps as a PAGE but gives no navigation to ─────────
+// Card 4a0ad464. The owner read the per-project page rows as redundant with the node's own tab row
+// — verbatim: "projects tree on the sidebar show the pages instead of the running agent. We have
+// the pages as tabs now. I doubt we need to have the tabs for each project in the sidebar too." —
+// so `/overview`'s tree row went with the branch's `Home` row.
+//
+// It is NOT retired: its address still routes, under BOTH shells, and `SetupWizard` still lands a
+// freshly-created project on it. It is NOT a node tab: the project node's own Overview tab is a
+// different component. It is simply reachable by URL and not by the tree.
+//
+// ⛔ THIS IS A NAMED LIST, NOT A FALLBACK. One entry, spelled out, so a destination that falls out
+// of the tree by ACCIDENT still fails the partition below — which is exactly what card 5afd71bd's
+// own record demands ("never re-add a fallback row"; the same reasoning applies to a fallback
+// BUCKET). A second entry here is a design decision someone has to make on purpose.
+const PAGE_ONLY_DESTINATIONS = ["/overview"];
 
 // ── Destinations PHASE 2 has deliberately rebuilt ──────────────────────────────────────────────
 // Claim 2 above ("the same content the old route rendered") is a PHASE-1 contract: phase 1 mounts
@@ -422,6 +439,10 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // redirect itself below, so a declared retirement whose address still renders a page fails here.
     // Card ec1aa18e added the FIFTH: a destination may be a PROJECT node tab, which since that card
     // is also no longer a tree row. Derived and verified exactly as the Workspace tabs are.
+    // Card 4a0ad464 added the SIXTH: PAGE-ONLY — a destination Atlas still routes and still renders
+    // as its own page, but gives no navigation to. Named one by one in PAGE_ONLY_DESTINATIONS above
+    // (never derived from "whatever fell out of the tree"), and VERIFIED below: the address must
+    // still render a page rather than redirect, or it is a retirement wearing the wrong label.
     const nodeTabs = nodeTabsUnderTest();
     const projectTabs = projectNodeTabsUnderTest();
     const retirements = retirementsUnderTest();
@@ -458,18 +479,26 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     const homedSet = new Set(treeRoutes);
     const unhomedSet = new Set(unhomedRoutes);
     const retiredSet = new Set(retirements.keys());
+    const pageOnlySet = new Set(PAGE_ONLY_DESTINATIONS);
     const placesFor = (route: string) =>
       [homedSet.has(route), unhomedSet.has(route), tabbedSet.has(route), projectTabbedSet.has(route),
-        retiredSet.has(route)].filter(Boolean).length;
+        retiredSet.has(route), pageOnlySet.has(route)].filter(Boolean).length;
     for (const route of railRoutes) {
       expect(placesFor(route),
-        `the classic destination ${route} is in ${placesFor(route)} of the five Atlas placements — it`
+        `the classic destination ${route} is in ${placesFor(route)} of the six Atlas placements — it`
         + ` must be in EXACTLY one (a tree node, a "not yet re-homed" entry, a Workspace node tab, a`
-        + ` PROJECT node tab, or retired). nodes: ${JSON.stringify(treeRoutes)};`
+        + ` PROJECT node tab, retired, or page-only). nodes: ${JSON.stringify(treeRoutes)};`
         + ` escape hatch: ${JSON.stringify(unhomedRoutes)}; workspace tabs: ${JSON.stringify([...tabbedSet])};`
-        + ` project tabs: ${JSON.stringify([...projectTabbedSet])}; retired: ${JSON.stringify([...retiredSet])}`)
+        + ` project tabs: ${JSON.stringify([...projectTabbedSet])}; retired: ${JSON.stringify([...retiredSet])};`
+        + ` page-only: ${JSON.stringify([...pageOnlySet])}`)
         .toBe(1);
     }
+    // POSITIVE CONTROL on the PAGE-ONLY bucket, the same shape the retired and project-tab buckets
+    // carry: a reading of zero would make its disjunct dead and let a destination that simply fell
+    // out of the tree pass as "page-only" without anyone having decided that.
+    expect([...pageOnlySet].filter((r) => railRoutes.includes(r)).length,
+      "no page-only address is a rail destination, so that branch of the partition never runs")
+      .toBe(pageOnlySet.size);
     // POSITIVE CONTROL on the new bucket, the same shape the retired bucket carries below: a reading
     // of zero would make its disjunct dead and let a destination that simply fell out of the tree
     // pass as "a project tab" without being one.
@@ -510,11 +539,25 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     // TAB is not a tree row either — the rail lists what is running, not the tab row again.
     expect(treeRoutes, "the Board destination is still an Atlas tree row, which card ec1aa18e removed")
       .not.toContain("/board");
+    // Card 4a0ad464's own claim, same shape again: the project tier's last two PAGE rows are gone,
+    // so a project branch holds entities and nothing else.
+    expect(treeRoutes, "the project-tier Overview destination is still an Atlas tree row, which card 4a0ad464 removed")
+      .not.toContain("/overview");
+    await expect(page.getByTestId("atlas-home-project"),
+      "the project branch still carries a Home row, which card 4a0ad464 removed").toHaveCount(0);
     // ...with a positive control, since an absence reads the same from a broken collector: the node
-    // collector DOES still see the two destinations that deliberately stayed.
+    // collector DOES still see the destinations that deliberately stayed, in BOTH tiers.
     expect(treeRoutes, "the tree node collector missed the Platform node").toContain("/platform");
-    expect(treeRoutes, "the tree node collector missed the project-tier Overview node")
-      .toContain("/overview");
+    expect(treeRoutes, "the tree node collector missed the Workspace home node").toContain("/home");
+    // ⭐ ...AND THE PAGE-ONLY ADDRESS IS STILL A PAGE, not a retirement by another name: it renders
+    // its own content at its own address rather than redirecting. Without this, "no tree row" could
+    // be satisfied by a destination that had quietly stopped existing.
+    await page.goto(loomDaemon.baseURL + "/overview");
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+    await expect(page, "the page-only address /overview redirected instead of rendering")
+      .toHaveURL(loomDaemon.baseURL + "/overview");
+    await page.goto(loomDaemon.baseURL + "/home");
+    await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
 
     // (b) Every EXTRA node must be an address src/nav.tsx declares as an Atlas home — a node
     //     pointing at a page that does not exist, or a typo'd `to`, is in neither set and fails.
@@ -532,9 +575,16 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     //     entry, or a node tab — never missing from all of them. (The workspace Settings home is a
     //     `ROOT_TABS` row in the approved design, so card 41eab0eb made it the Settings tab; the
     //     Agents home is a `PROJ_TABS` row, and card ec1aa18e took its tree row away accordingly.)
+    // ⚠️ `/project` is the exception the rule has to name: card 4a0ad464 took its tree ROW away and
+    // gave its address to the project ROW itself, which is a <button> and therefore invisible to
+    // every link collector in this file. So a declared home may also be reached that way — verified
+    // against the rendered control, not excused, so a project row that stopped navigating fails here.
+    const projectRowNavigates = await page.getByTestId("atlas-project-node").count() > 0;
+    expect(projectRowNavigates, "no project row is rendered, so the exception below is vacuous").toBe(true);
     for (const declared of homes.paths) {
       expect(homedSet.has(declared) || unhomedSet.has(declared) || tabbedSet.has(declared)
-        || projectTabbedSet.has(declared) || retiredSet.has(declared),
+        || projectTabbedSet.has(declared) || retiredSet.has(declared)
+        || (declared === "/project" && projectRowNavigates),
         `src/nav.tsx declares the Atlas home ${declared}, which the tree renders neither as a node nor`
         + ` as a "not yet re-homed" entry, and which is neither a node tab nor retired`).toBe(true);
     }
@@ -543,14 +593,22 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     const tree = page.getByTestId("atlas-tree");
     expect(await tree.evaluate((el) => el.tagName.toLowerCase())).toBe("nav");
 
-    // Depth: `scoped` destinations hang under the project node, god-eye ones under the workspace root.
-    // Asserted structurally (the scoped nodes are inside the project node's child list), not by naming
-    // which pages are scoped — that is nav.tsx's call, and restating it here is the drift this avoids.
+    // Depth: a project branch holds ONLY what is running in it since card 4a0ad464 — no page row of
+    // any kind. Asserted structurally, over the branch's own child list, rather than by naming which
+    // pages are scoped: that is nav.tsx's call, and restating it here is the drift this avoids.
     const projectNode = page.getByTestId("atlas-project-node");
     await expect(projectNode).toBeVisible();
     const scopedCount = await page.locator("ul.loom-atlas-nodes.is-kids a.loom-atlas-node").count();
-    expect(scopedCount, "no destination landed under the project node").toBeGreaterThan(0);
-    expect(scopedCount, "every destination landed under the project node").toBeLessThan(treeRoutes.length);
+    expect(scopedCount, "a destination row is back under the project node, which card 4a0ad464 removed")
+      .toBe(0);
+    // ...with the positive control that absence needs: this fixture's project has nothing running,
+    // so the branch renders that card's idle line instead, and the collector above is reading a
+    // branch that really is there rather than one that failed to render.
+    await expect(page.locator(".loom-atlas-idle").first(),
+      "the project branch rendered neither a row nor its empty-branch line").toBeVisible();
+    // And the WORKSPACE tier's own rows are unaffected — the depth split still exists, it is just
+    // that one side of it now holds entities.
+    expect(treeRoutes.length, "the workspace tier lost its rows too").toBeGreaterThan(0);
 
     // The escape hatch stays reachable from the frame itself, not only via the Settings node.
     await expect(page.getByTestId("atlas-leave")).toBeVisible();
@@ -617,11 +675,12 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     const nodeTabs = nodeTabsUnderTest();
     const projectTabs = projectNodeTabsUnderTest();
     const retirements = retirementsUnderTest();
+    const pageOnly = new Set(PAGE_ONLY_DESTINATIONS);
     for (const route of routes) {
       expect(homedSet.has(route) || unhomedSet.has(route) || nodeTabs.has(route)
-        || projectTabs.has(route) || retirements.has(route),
+        || projectTabs.has(route) || retirements.has(route) || pageOnly.has(route),
         `${route} is reachable from none of the tree, its escape hatch, or either node's tabs,`
-        + ` and it is not retired either, so this walk cannot visit it`).toBe(true);
+        + ` and it is neither retired nor page-only, so this walk cannot visit it`).toBe(true);
     }
     // Positive control on the third bucket: a reading of zero would let a destination that fell out
     // of both tree halves pass the disjunct above without being anywhere.
@@ -635,6 +694,9 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     expect([...projectTabs.keys()].filter((r) => routes.includes(r)).length,
       "no rail destination is a project node tab, so that branch of the walk never runs")
       .toBeGreaterThan(0);
+    // ...and on the sixth (card 4a0ad464).
+    expect([...pageOnly].filter((r) => routes.includes(r)).length,
+      "no rail destination is page-only, so that branch of the walk never runs").toBeGreaterThan(0);
 
     let previous = "";
     for (const route of routes) {
@@ -662,6 +724,30 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         await expect(page.locator(".loom-atlas-nodehead h1")).not.toBeEmpty();
         await expect(page.getByTestId(`atlas-node-${route}`),
           `the retired ${route} is still an Atlas tree row`).toHaveCount(0);
+        previous = landed;
+        continue;
+      }
+      if (pageOnly.has(route)) {
+        // A PAGE-ONLY destination (card 4a0ad464) has no tree row and no tab, but it is NOT retired:
+        // it still renders its own page at its own address. So the identity claim holds for it in
+        // the ORDINARY direction — the Atlas shell frames the same component the classic route did
+        // — and what is asserted on top is that the tree makes no claim about where you are, since
+        // it has no row for this address.
+        await page.goto(loomDaemon.baseURL + route);
+        await expect(page.getByTestId("atlas-shell")).toBeVisible();
+        await expect(page.getByTestId("atlas-empty"),
+          `the page-only ${route} fell through to the Atlas catch-all instead of rendering`).toHaveCount(0);
+        await expect(page, `the page-only ${route} redirected, so it is a retirement, not page-only`)
+          .toHaveURL(loomDaemon.baseURL + route);
+        const landed = await settledPageSkeleton(page);
+        expect(before.get(route), `the ${route} route rendered nothing under the classic shell`).toBeTruthy();
+        expect(landed, `the page-only ${route} node rendered different content than the ${route} route did.\n`
+          + `--- classic shell ---\n${before.get(route)}\n--- atlas shell ---\n${landed}\n`)
+          .toBe(before.get(route));
+        await expect(page.locator("a.loom-atlas-node.is-active"),
+          `${route} has no tree row, but the tree marked one as landed anyway`).toHaveCount(0);
+        await expect(page.getByTestId(`atlas-node-${route}`),
+          `the page-only ${route} is an Atlas tree row again`).toHaveCount(0);
         previous = landed;
         continue;
       }
@@ -748,14 +834,15 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
         await expect(page.getByTestId(`atlas-unhomed-${route}`),
           `${route} is a node tab and still an escape-hatch entry`).toHaveCount(0);
       } else if (projTabKey) {
-        // The exact counterpart one tier down (card ec1aa18e): a PROJECT node tab's landed node is
-        // the project HOME row, and still exactly one. This is the claim that would have read ZERO
-        // if the card had removed the tab rows without giving the Home row `alsoActiveAt` — the tree
-        // would then be the one part of the frame with no opinion about where you are.
-        await expect(page.locator("a.loom-atlas-node.is-active"),
-          `${route} is a project node tab, so exactly one node — the project home — may read as landed`)
-          .toHaveCount(1);
-        await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
+        // The counterpart one tier down. Card ec1aa18e put this mark on the project HOME row; card
+        // 4a0ad464 removed that row, so the PROJECT ROW carries it instead — it is the node's only
+        // address in the tree now. It is a <button>, so `a.loom-atlas-node.is-active` (an ANCHOR
+        // selector) legitimately reads ZERO here, and the mark is `aria-current` on the row.
+        await expect(page.getByTestId("atlas-project-node"),
+          `${route} is a project node tab, so the project row must read as the landed branch`)
+          .toHaveAttribute("aria-current", "true");
+        await expect(page.getByTestId("atlas-home-project"),
+          "the project branch grew a Home row back, which card 4a0ad464 removed").toHaveCount(0);
         await expect(page.getByTestId(`atlas-node-${route}`),
           `${route} is a project node tab and still an Atlas tree row`).toHaveCount(0);
       } else if (homedSet.has(route)) {
@@ -809,11 +896,12 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
 
     const nodes = page.locator(TREE_NODES);
     const total = await nodes.count();
-    // Four is what a one-project workspace with nothing running renders since card ec1aa18e took the
-    // project node's tabs out of the tree: the Workspace home, the Platform node, the project's Home
-    // row and its Overview row. The floor is "more than one", which is all this leg needs — it tabs
-    // from the first node to the last — stated against that reading rather than against the old
-    // twelve-row tier, so it does not have to move again the next time a row is re-homed.
+    // TWO is what a one-project workspace with nothing running renders since card 4a0ad464 removed
+    // the project branch's last two page rows (`Home` and `Overview`): the Workspace home and the
+    // Platform node, and nothing else is an ANCHOR — a project row is a <button> and a session row
+    // only exists while something is running. The floor is "more than one", which is all this leg
+    // needs, stated against that reading rather than against a row count that moves every time a
+    // surface is re-homed.
     expect(total, "no tree nodes to tab through").toBeGreaterThan(1);
 
     // Land on the tree's LAST node before tabbing, so the Enter assertion at the bottom has a real
@@ -854,9 +942,20 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     await page.keyboard.press("Tab");
     expect(await nodes.nth(1).evaluate((el) => el === document.activeElement),
       "Tab did not advance to the second tree node").toBe(true);
+    // ...and Shift+Tab comes back, which is also how focus returns to the node Enter is pressed on.
+    await page.keyboard.press("Shift+Tab");
+    expect(await first.evaluate((el) => el === document.activeElement),
+      "Shift+Tab did not return to the first tree node").toBe(true);
 
     // Enter activates it — an observable navigation, not just a styled control.
-    const target = await nodes.nth(1).evaluate((el) => new URL((el as HTMLAnchorElement).href).pathname);
+    //
+    // ⚠️ The FIRST node, not the second. The page was landed on `nodes.last()` above so that this
+    // has a real navigation to observe, and "the second node is by construction not the last" stopped
+    // being true when card 4a0ad464 took the project branch's two page rows out and left the tier
+    // exactly two anchors deep. The FIRST node is not the last whenever there is more than one,
+    // which is the floor this leg already asserts — so this control cannot go vacuous again the next
+    // time the row count moves.
+    const target = await first.evaluate((el) => new URL((el as HTMLAnchorElement).href).pathname);
     const startedAt = new URL(page.url()).pathname;
     await page.keyboard.press("Enter");
     await expect.poll(() => new URL(page.url()).pathname,

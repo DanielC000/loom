@@ -102,10 +102,11 @@ async function deckRows(page: Page) {
 /** The tree really is expanded — so the measured column width is the tree-present one. */
 async function expectTreeExpanded(page: Page) {
   await expect(page.locator(".loom-atlas-tree")).toBeVisible();
-  // The open project's own scoped destinations, which only render under the open branch (P1-4).
-  // Overview, not Repository: card ec1aa18e took every project node TAB out of the tree, and
-  // Overview is the one project-depth destination the node's tab row does not carry.
-  await expect(page.locator(".loom-atlas-node").filter({ hasText: "Overview" }).first()).toBeVisible();
+  // A row that only the full-width rail renders. The reference used to be the open branch's own
+  // `Overview` destination (card ec1aa18e), then card 4a0ad464 removed every page row from a
+  // project branch — so it is the Workspace tier's Platform node now, which is project-independent
+  // and therefore does not depend on which branch happens to be open.
+  await expect(page.getByTestId("atlas-node-/platform")).toBeVisible();
   const treeWidth = await page.locator(".loom-atlas-tree").evaluate((el) => Math.round(el.getBoundingClientRect().width));
   expect(treeWidth, "the tree rail is at its full declared width, not collapsed").toBe(244);
 }

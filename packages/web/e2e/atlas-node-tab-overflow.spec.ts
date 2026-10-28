@@ -1,31 +1,35 @@
 // The node tab row's overflow menu — card d4350286 (Atlas, epic 9fe8cd4e), owner decision 5b91bcc0
 // ("Build the overflow More menu"). Design record: docs/decisions/d4350286-atlas-node-tab-overflow.md.
 //
-// 🔴 THE CARD'S OWN HEADLINE CLAUSE — "at 1440 the tab ROW is one line" — WAS ALREADY TRUE BEFORE
-// THIS CARD, and a leg asserting it would pass on the pre-fix build. MEASURED on the unmodified
-// build at 1440: `.loom-atlas-tabrow` was 28px tall with every tab on one `offsetTop`, on all three
-// nodes. What was two lines is the tab BLOCK — `.loom-atlas-tabs`, 35px → 74px — because the KPI
-// strip card 7874e8c2 put on every tab could not fit BESIDE the row and wrapped under it. That 39px
-// is the "~39px" the card asks for, so the discriminating claim this spec pins is the BLOCK's
-// height, derived from the row's own line box rather than hardcoded, plus the strip sharing that
-// line. Same shape as the wrong DoD clauses cards 7874e8c2 and 49e883a9 each found in their own
-// briefs: a DoD sentence can name an assertion that cannot fail — measure before trusting one.
+// 🔴 CARD 4a0ad464 TOOK THIS CARD'S SUBJECT AWAY AT DESKTOP WIDTHS, deliberately. The overflow
+// existed because the KPI strip card 7874e8c2 put on every tab could not fit BESIDE the row and
+// wrapped under it, taking the tab BLOCK from 35px to 74px at 1440. The owner then asked for the
+// strip itself to go — verbatim: "Chips like … on the tabs row are not necessary and need too much
+// space causing the need for a 'More..' tab. remove them." — so the row is alone on its line and
+// every declared tab FITS at every desktop width. The machinery stays: it is still what keeps a
+// nine-tab row reachable at phone width, where it was never the strip that made the tabs overflow.
+//
+// MEASURED on this build (card 4a0ad464's own sweep, both home nodes, no strip anywhere): a trigger
+// appears at 900 and below with the tree rail present, and — because the rail becomes a DRAWER below
+// 820px and hands the column its width back — NOT at 820 or 720 for the project node, then again at
+// 600 and below. The block is 35px, one line, at every width in that sweep. So the legs that need a
+// real fold now run at `FOLD_WIDTH` rather than 1440.
 //
 // What each leg measures:
-//   1. SWITCH ON at 1440 — the project and Workspace nodes' whole tab block is ONE line, strip and
-//      all, and the strip still reads its real figures. The PLATFORM node is the INERT control: it
-//      has 5 tabs and no strip, they already fit, so it must come out with NO trigger and every tab
-//      still in the row. (Stated plainly: that leg is a non-regression control, not a discriminator
-//      — it was green before this card too.)
-//   2. An overflowed tab selected THROUGH the menu navigates, the panel actually changes (the
-//      rendered panel's own text is fingerprinted on both sides, not just a testid flip), and the
-//      tab lands back IN THE ROW — this build's active-tab rule, asserted rather than described.
-//   3. Keyboard: Enter opens, Space opens, arrows move, Escape closes and returns focus, and a
+//   1. SWITCH ON at 1280/1440/1920 — card 4a0ad464's own claim: both home nodes' whole tab block is
+//      ONE line with NO trigger at all, the row holds the entire declared set, and no KPI strip
+//      exists on it. This leg is RED on the pre-card build at every one of those widths.
+//   2. The PLATFORM node is the INERT control: 5 tabs, never a strip, never a fold. (Stated plainly:
+//      that leg was green before card d4350286 too — a non-regression control, not a discriminator.)
+//   3. At FOLD_WIDTH, an overflowed tab selected THROUGH the menu navigates, the panel actually
+//      changes (the rendered panel's own text is fingerprinted on both sides, not just a testid
+//      flip), and the tab lands back IN THE ROW — this build's active-tab rule.
+//   4. Keyboard: Enter opens, Space opens, arrows move, Escape closes and returns focus, and a
 //      selected item navigates exactly like the tab.
-//   4. A typed draft in a panel survives a trip out through the menu and back.
-//   5. 720 and 420, where the tree is a drawer (card 49e883a9): no horizontal overflow, the tab row
-//      is one line, and the menu still opens and selects.
-//   6. SWITCH OFF — no trigger and no menu exist anywhere.
+//   5. A typed draft in a panel survives a trip out through the menu and back.
+//   6. 720 and 420, where the tree is a drawer (card 49e883a9): no horizontal overflow, the tab row
+//      is one line, and the menu still opens and selects wherever it folds.
+//   7. SWITCH OFF — no trigger and no menu exist anywhere.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
@@ -54,6 +58,20 @@ async function pinProject(page: Page, projectId: string) {
 }
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+
+/**
+ * A width at which BOTH home nodes' rows genuinely overflow, so the menu legs below have a menu.
+ *
+ * ⚠️ Not a round desktop number any more: card 4a0ad464 removed the KPI strip, and with the row
+ * alone on its line every declared tab fits at 1000 and above. 900 is the widest width in that
+ * card's own sweep where both nodes still fold — and it is deliberately ABOVE the 820px drawer
+ * breakpoint, so these legs keep exercising the ordinary desktop layout (tree rail present) rather
+ * than quietly becoming a second copy of the narrow-width leg at the foot of this file.
+ *
+ * Each leg that uses it still ASSERTS the fold it depends on rather than assuming it, so a future
+ * label change that makes the row fit here fails loudly instead of going vacuous.
+ */
+const FOLD_WIDTH = 900;
 
 /**
  * A project whose board carries a KNOWN open-card count — the same seed shape atlas-home.spec.ts and
@@ -87,9 +105,8 @@ interface Block {
   hasMore: boolean;
   /** The trigger's vertical centre matches the row's — i.e. it is ON the row's line, not under it. */
   moreOnRowLine: boolean | null;
+  /** A tab-row KPI strip, which card 4a0ad464 removed — kept as a REGRESSION detector, asserted false. */
   stripPresent: boolean;
-  /** Same test for the KPI strip. `null` when the node renders none (Platform, Overview tabs). */
-  stripOnRowLine: boolean | null;
   docOverflow: boolean;
 }
 
@@ -98,7 +115,7 @@ interface Block {
  * is out of its MEASURING state.
  *
  * @decision 885e7a49 — Never read this geometry on a bare `toBeVisible()`: a measuring pass draws
- * every tab, so the strip wraps and the block reads 74px against a 35px line. Wait on
+ * every tab plus the trigger, so a row that settles folded reads unfolded mid-pass. Wait on
  * `data-nt-measuring`, the component's own pass flag — never on the geometry under test, which
  * would make these legs unfalsifiable.
  */
@@ -134,8 +151,8 @@ async function blockGeometry(page: Page): Promise<Block> {
       rowTops: new Set(links.map((el) => el.offsetTop)).size,
       hasMore: !!wrap.querySelector('[data-testid="atlas-node-tabs-more"]'),
       moreOnRowLine: onRowLine(wrap.querySelector('[data-testid="atlas-node-tabs-more"]')),
-      stripPresent: !!wrap.querySelector(".loom-kpistrip"),
-      stripOnRowLine: onRowLine(wrap.querySelector(".loom-kpistrip")),
+      // By CLASS, not test id: a strip re-rendered without its test id is the same regression.
+      stripPresent: !!wrap.querySelector(".loom-kpistrip, .loom-kpipill"),
       docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
   });
@@ -143,8 +160,12 @@ async function blockGeometry(page: Page): Promise<Block> {
 
 /** Every tab key the node can reach, from both halves — the row and (opening it) the menu. */
 /**
- * A node's whole DECLARED tab set, collected from its own HOME tab — the one tab with no KPI strip
- * (card 7874e8c2), so the row holds every tab and nothing is folded at this width.
+ * A node's whole DECLARED tab set, collected from its own HOME tab at a width where nothing folds.
+ *
+ * The home tab, specifically, because it is the one tab whose body carries the node's full-size KPI
+ * deck — so waiting on that deck is a settle signal that belongs to the page rather than to the
+ * geometry under test. The no-fold guarantee is now the WIDTH's (1600, far above the ≤1000 where a
+ * trigger first appears on this build), and it is asserted here rather than assumed.
  *
  * ⛔ Never hardcode this as a count. Both nodes' tab sets change whenever a card re-homes, adds or
  * removes a surface, and a hardcoded floor goes red for a reason that has nothing to do with the
@@ -155,10 +176,7 @@ async function declaredTabKeys(page: Page, loomDaemon: LoomDaemon, homePath: str
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto(loomDaemon.baseURL + homePath);
   await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
-  // Presence of the home tab's own readout, so the set below is read off a settled row; and the
-  // strip's ABSENCE is what makes "the row is the whole set" true.
   await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
-  await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
   await expect(page.getByTestId("atlas-node-tabs-more")).toHaveCount(0);
   return (await blockGeometry(page)).tabKeys.slice().sort();
 }
@@ -209,58 +227,57 @@ async function panelFingerprint(page: Page): Promise<string> {
 }
 
 test.describe("Atlas node tab overflow menu (card d4350286)", () => {
-  test("switch ON at 1440: the project and Workspace blocks are ONE line, strip and all", async ({ page, loomDaemon }) => {
-    test.setTimeout(180_000);
+  // ⭐ CARD 4a0ad464's OWN CLAIM, and the DoD clause that asked for 1280/1440/1920 by name. RED on
+  // the pre-card build at all three: with the KPI strip beside them neither home node's tabs fitted
+  // one line at any of these widths, so both `hasMore` and `stripPresent` came out the other way.
+  test("switch ON at 1280/1440/1920: both home blocks are ONE line, with NO strip and NO More menu", async ({ page, loomDaemon }) => {
+    test.setTimeout(240_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.setViewportSize({ width: 1440, height: 1000 });
 
     // Each node's whole declared tab set, read off its own home tab before the measurements below —
-    // so "nothing is lost, only folded" is checked against the real set rather than a count.
+    // so "every tab is in the row" is checked against the real set rather than a count.
     const declared: Record<string, string[]> = {
       project: await declaredTabKeys(page, loomDaemon, "/project"),
       workspace: await declaredTabKeys(page, loomDaemon, "/home"),
     };
-    await page.setViewportSize({ width: 1440, height: 1000 });
 
     const offenders: string[] = [];
-    // A strip-carrying tab on each node. ⛔ NOT `/project` or `/home` — Overview is the one tab with
-    // no strip (card 7874e8c2), so measuring there would duck the very content that was wrapping.
-    for (const [who, path] of [["project", "/board"], ["workspace", "/home?tab=gates"]] as const) {
-      await page.goto(loomDaemon.baseURL + path);
-      const g = await blockGeometry(page);
-      // Identity: this is THIS spec's corpus, not a sibling worker's daemon.
-      if (who === "project") {
-        await expect(page.locator(".loom-atlas-nodehead h1")).toBeVisible();
-        await expect(page.getByTestId("atlas-kpi-pill-cards").locator(".loom-kpipill-v"))
-          .toHaveText(String(seeded.open));
+    for (const width of [1280, 1440, 1920]) {
+      await page.setViewportSize({ width, height: 1000 });
+      // A NON-home tab on each node — the tabs that used to carry the strip (card 7874e8c2 put it on
+      // every tab but Overview), so this measures exactly where the chips used to be.
+      for (const [who, path] of [["project", "/board"], ["workspace", "/home?tab=gates"]] as const) {
+        const at = `${width} ${who}`;
+        await page.goto(loomDaemon.baseURL + path);
+        const g = await blockGeometry(page);
+        // Identity: this is THIS spec's corpus, not a sibling worker's daemon. PRESENCE first, so
+        // nothing below is satisfied by a page that has not rendered its node chrome yet.
+        // ⚠️ NOT the node head's `h1` — on a project node TAB that heading is the TAB's own label
+        // ("Board"), and the project's name is the crumb above it. ProjectHome's own hidden marker
+        // is the one locator that names the project on every tab of the node.
+        if (who === "project") {
+          await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+        }
+        if (g.tabKeys.length === 0) { offenders.push(`${at}: no tabs rendered at all`); continue; }
+
+        if (g.stripPresent) offenders.push(`${at}: a tab-row KPI strip is back`);
+        if (g.hasMore) offenders.push(`${at}: a More trigger, with ${g.tabKeys.length} tabs in the row`);
+        if (g.blockH !== g.oneLineH) offenders.push(`${at}: block ${g.blockH}px, one line is ${g.oneLineH}px`);
+        if (g.rowTops !== 1) offenders.push(`${at}: tabs on ${g.rowTops} lines (${g.tabKeys.join("/")})`);
+        if (g.docOverflow) offenders.push(`${at}: the document scrolls horizontally`);
+        // ⭐ EVERY declared tab is IN THE ROW — an equality against the set itself, not a floor on
+        // its size, so a row that dropped one tab and invented another could not pass.
+        const row = g.tabKeys.slice().sort();
+        if (JSON.stringify(row) !== JSON.stringify(declared[who])) {
+          offenders.push(`${at}: row ${row.join("/")} != declared ${declared[who]!.join("/")}`);
+        }
+        await expect(page.getByTestId("atlas-node-tabs-menu"),
+          `${at}: a menu exists with nothing folded`).toHaveCount(0);
       }
-      // Presence first, so nothing below is satisfied by a page that merely has no strip yet.
-      if (!g.stripPresent) { offenders.push(`${who}: no KPI strip at ${path}`); continue; }
-      if (g.blockH !== g.oneLineH) offenders.push(`${who}: block ${g.blockH}px, one line is ${g.oneLineH}px`);
-      if (g.rowTops !== 1) offenders.push(`${who}: tabs on ${g.rowTops} lines (${g.tabKeys.join("/")})`);
-      if (g.stripOnRowLine !== true) offenders.push(`${who}: the strip is not on the row's line`);
-      // The collapse is real, not a row that happened to fit: with the strip beside them, neither
-      // node's tabs fit one line at 1440 — which is what this spec's whole subject depends on.
-      if (!g.hasMore) offenders.push(`${who}: no overflow trigger, ${g.tabKeys.length} tabs in the row`);
-      if (g.moreOnRowLine !== true) offenders.push(`${who}: the trigger is not on the row's line`);
-      if (g.docOverflow) offenders.push(`${who}: the document scrolls horizontally`);
-      // ⭐ NOTHING IS LOST, only folded: row + menu together are EXACTLY the declared tab set —
-      // an equality against the set itself, not a floor on its size, so a fold that dropped one tab
-      // and invented another could not pass.
-      const reach = await allReachableKeys(page);
-      const total = [...reach.row, ...reach.menu].sort();
-      if (JSON.stringify(total) !== JSON.stringify(declared[who])) {
-        offenders.push(`${who}: reachable ${total.join("/")} != declared ${declared[who]!.join("/")}`);
-      }
-      if (reach.menu.length === 0) offenders.push(`${who}: the menu is empty`);
-      // The ACTIVE tab is never the one folded away (this build's rule — see the record).
-      const activeKey = who === "project" ? "board" : "gates";
-      if (!reach.row.includes(activeKey)) offenders.push(`${who}: the active tab ${activeKey} is not in the row`);
-      if (reach.menu.includes(activeKey)) offenders.push(`${who}: the active tab ${activeKey} is in the menu`);
     }
-    expect(offenders, "the project and Workspace tab blocks fit one line at 1440 with every tab still reachable").toEqual([]);
+    expect(offenders, "both home nodes' tab blocks are one unfolded line at every desktop width").toEqual([]);
   });
 
   test("switch ON at 1440: the Platform node, whose tabs already fit, is untouched", async ({ page, loomDaemon }) => {
@@ -269,9 +286,9 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/platform");
 
-    // ⚠️ STATED PLAINLY: this leg was green before this card too — the Platform node has five tabs,
-    // no KPI strip, and was never wrapping. It is a NON-REGRESSION control (the collapse must not
-    // reach a row that fits), not a discriminator for the overflow itself.
+    // ⚠️ STATED PLAINLY: this leg was green before card d4350286 too, and before card 4a0ad464 — the
+    // Platform node has five tabs, never carried a KPI strip, and was never wrapping. It is a
+    // NON-REGRESSION control (the collapse must not reach a row that fits), not a discriminator.
     const g = await blockGeometry(page);
     expect(g.tabKeys.length, `platform tabs: ${g.tabKeys.join("/")}`).toBe(5);
     expect(g.rowTops, "every platform tab on one line").toBe(1);
@@ -285,9 +302,14 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
     await expect(page.getByTestId("atlas-tab-board")).toHaveAttribute("aria-selected", "true");
+    // The fold this leg is about is ASSERTED, not assumed: card 4a0ad464 made the row fit at every
+    // desktop width, so a `FOLD_WIDTH` that stopped folding would leave every assertion below
+    // satisfied by a click that never happened rather than failing for the real reason.
+    await expect(page.getByTestId("atlas-node-tabs-more"),
+      `the row does not fold at ${FOLD_WIDTH}px, so this leg has no menu to test`).toHaveCount(1);
 
     const before = { fp: await panelFingerprint(page), url: new URL(page.url()).pathname };
     await page.getByTestId("atlas-node-tabs-more").click();
@@ -335,7 +357,7 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
 
     const more = page.getByTestId("atlas-node-tabs-more");
@@ -384,7 +406,7 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
 
     const more = page.getByTestId("atlas-node-tabs-more");
@@ -419,7 +441,7 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
 
     // The Board tab's own new-card composer — real unfinished input, of exactly the kind the owner's
@@ -471,18 +493,19 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
         await expect(page.getByTestId("atlas-tree-toggle")).toBeVisible();
         const g = await blockGeometry(page);
         if (g.docOverflow) offenders.push(`${at}: the document scrolls horizontally`);
-        // ⭐ THE TAB ROW is one line here — not the whole block: below 820px the KPI strip stops
-        // right-aligning and takes a line of its own by design (`.loom-kpistrip { margin-left: 0 }`,
-        // card 7874e8c2). Reserving its width here would collapse EVERY tab into the menu.
+        // ⭐ THE TAB ROW is one line here. It is also the whole block now — card 4a0ad464 removed the
+        // KPI strip that used to take a line of its own below 820px (`.loom-kpistrip
+        // { margin-left: 0 }`), so there is nothing left to share the wrapper with at any width.
         if (g.rowTops !== 1) offenders.push(`${at}: tabs on ${g.rowTops} lines (${g.tabKeys.join("/")})`);
         if (g.rowH > 32) offenders.push(`${at}: the row is ${g.rowH}px, taller than one tab`);
-        // ⛔ A TRIGGER IS NOT UNCONDITIONALLY REQUIRED HERE. Below 820px the strip takes a line of
-        // its own, so the row gets the full width back and a short enough tab set legitimately fits
-        // with nothing to fold — which is a BETTER outcome than folding, not a defect. What must
-        // hold either way is that NOTHING IS UNREACHABLE, so that is what is asserted; the menu's
-        // own behaviour is then exercised only where a fold actually happened. (Hardcoding "there is
-        // always a trigger at 720" is what went red on card `44f725fe`, which removed one project
-        // tab and so let the remaining nine fit at 720.)
+        // ⛔ A TRIGGER IS NOT UNCONDITIONALLY REQUIRED HERE. Below 820px the tree is a drawer, so the
+        // content column gets the rail's 244px back and a short enough tab set legitimately fits with
+        // nothing to fold — a BETTER outcome than folding, not a defect. MEASURED on this build: at
+        // 720 the project node's nine tabs fit and the Workspace node's do not. What must hold either
+        // way is that NOTHING IS UNREACHABLE, so that is what is asserted; the menu's own behaviour
+        // is then exercised only where a fold actually happened. (Hardcoding "there is always a
+        // trigger at 720" is what went red on card `44f725fe`, which removed one project tab and so
+        // let the remaining nine fit at 720.)
         if (!g.hasMore) {
           const rowKeys = g.tabKeys.slice().sort();
           if (JSON.stringify(rowKeys) !== JSON.stringify(declared[who])) {

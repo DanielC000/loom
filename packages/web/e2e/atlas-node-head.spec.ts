@@ -377,10 +377,13 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/home?tab=gates");
 
-    // PRESENCE FIRST — the tab's own body is up, and the node's strip above it already carries the
-    // running·queued pair. Only then does the absence of the page's lamps mean anything.
+    // PRESENCE FIRST — the tab's own body is up. (Until card 4a0ad464 the node's tab-row strip above
+    // it carried the running·queued pair as well, and its pill was this leg's presence anchor; the
+    // strip is gone, so the body's own Semaphore line is what has to be up before an absence below
+    // means anything.) Only then does the absence of the page's lamps mean anything.
     await expect(page.getByTestId("atlas-tab-gates")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("atlas-kpi-pill-gates")).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-strip"),
+      "the tab-row KPI strip is back, which card 4a0ad464 removed").toHaveCount(0);
     await expect(page.getByText(/maxConcurrentGates/).first()).toBeVisible();
 
     // ONE statement of lane occupancy in the whole column: the body's own Semaphore line, which is a

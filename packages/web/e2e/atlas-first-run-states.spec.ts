@@ -573,7 +573,8 @@ test("the collapsed request pill stands down on the Atlas project node, which re
 
   // Now the project node, same browser, same pending request — reached through the tree, the way a
   // user gets there.
-  await page.getByTestId("atlas-home-project").click();
+  // The project ROW is the node's address in the tree since card 4a0ad464 removed the Home row.
+  await page.getByTestId("atlas-project-node").click();
   await expect(page).toHaveURL(/\/project$/);
 
   // The page IS the surface here: its own "Needs you" band lists THIS project's request. Asserted

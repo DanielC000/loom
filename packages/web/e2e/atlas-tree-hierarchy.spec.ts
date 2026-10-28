@@ -11,9 +11,10 @@
 // frame re-rendered":
 //   1. SIBLING BRANCHES. Two seeded projects are rows in the SAME list (asserted structurally, by
 //      comparing the two <li>s' parent element), each carrying its own metrics.
-//   2. EXPANSION IS NOT SELECTION. Opening the branch of the project you are NOT scoped to reveals its
-//      surfaces and leaves the active project, the address and the open page's own data alone. Then
-//      clicking INTO that branch re-scopes, which is the only way those rows can be honest.
+//   2. EXPANSION IS NOT SELECTION. Opening the branch of the project you are NOT scoped to reveals
+//      what is running in it and leaves the active project, the address and the open page's own data
+//      alone. Then clicking the ROW re-scopes — and, since card 4a0ad464 removed the branch's `Home`
+//      row, also navigates to that project's node, which is the only address its branch has left.
 //   3. THE CROSS-PROJECT DESTINATIONS ARE NOT TREE ROWS. The workspace tier is exactly two rows, and
 //      the ten re-homed destinations are absent from the rows while still reachable from the escape
 //      hatch at the foot of the tree (cards 41eab0eb / 25c08fba turn them into node tabs).
@@ -188,7 +189,7 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
   test("switch ON: projects are sibling branches, expansion is not selection, and the cross-project destinations have left the rows",
     async ({ page, loomDaemon }) => {
       test.setTimeout(120_000);
-      const { alpha, bravo, alphaCard, bravoCard } = await seedHierarchy(loomDaemon);
+      const { alpha, bravo, alphaCard, bravoCard, live } = await seedHierarchy(loomDaemon);
 
       await seedAtlasOn(page);
       await pinProject(page, alpha.id);
@@ -284,14 +285,17 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
         .toBe("rgba(0, 0, 0, 0)");
       // One text origin for the whole tier: a branch label and a workspace-tier destination label
       // start at the same x, so rows do not step in and out as branches open and close.
-      const origins = await tree.evaluate((root) => {
+      // Card 4a0ad464 removed every page row from a project branch, so the CHILD measured here is
+      // alpha's own live session row — what a branch holds now. (Its label sits on the same origin a
+      // page row's did: that is this spec's own claim one tier down, in atlas-tree-entities.)
+      const origins = await tree.evaluate((root, sessionId) => {
         const left = (sel: string) => root.querySelector(sel)?.getBoundingClientRect().left ?? -1;
         return {
           branch: left("div.loom-atlas-noderow.is-branchrow .loom-atlas-lbl"),
           destination: left('[data-testid="atlas-home-workspace"] .loom-atlas-lbl'),
-          child: left('[data-testid="atlas-node-/overview"] .loom-atlas-lbl'),
+          child: left(`[data-testid="atlas-session-${sessionId}"] .loom-atlas-lbl`),
         };
-      });
+      }, live.sessionId);
       expect(origins.branch, "no branch label was found to measure").toBeGreaterThan(0);
       expect(origins.branch, "a branch label and a workspace-tier destination label sit on different origins")
         .toBe(origins.destination);
@@ -300,18 +304,20 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       expect(origins.child, "a child row is not indented from its branch").toBeGreaterThan(origins.branch);
 
       // ── CLAIM 2: expanding the branch you are NOT scoped to changes nothing but the branch ──
-      // Before: only the selected project's surfaces are in the tree.
+      // Before: bravo's branch contributes nothing to the tree. Its own content since card 4a0ad464
+      // is what is RUNNING in it — nothing, here — so what a reader sees on expanding it is that
+      // card's idle line, which is also the one row in this branch a locator can hold.
       await expect(twist(alpha.id)).toHaveAttribute("aria-expanded", "true");
       await expect(twist(bravo.id)).toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId(`atlas-node-${bravo.id}/overview`)).toHaveCount(0);
+      await expect(page.getByTestId(`atlas-branch-idle-${bravo.id}`)).toHaveCount(0);
 
       const urlBefore = page.url();
       await twist(bravo.id).click();
 
-      // After: bravo's own surfaces exist...
+      // After: bravo's own branch content exists...
       await expect(twist(bravo.id)).toHaveAttribute("aria-expanded", "true");
-      await expect(page.getByTestId(`atlas-node-${bravo.id}/overview`),
-        "expanding bravo did not reveal its own surfaces").toHaveCount(1);
+      await expect(page.getByTestId(`atlas-branch-idle-${bravo.id}`),
+        "expanding bravo revealed nothing at all, not even its empty-branch line").toHaveCount(1);
       // ...and NOTHING else moved: not the selection, not the stored project, not the address, and
       // not the project-scoped page that was already open.
       await expect(selected, "expanding a branch moved the active-project selection").toContainText(alpha.name);
@@ -328,26 +334,61 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       // unscope you.
       await twist(bravo.id).click();
       await expect(twist(bravo.id)).toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId(`atlas-node-${bravo.id}/overview`)).toHaveCount(0);
+      await expect(page.getByTestId(`atlas-branch-idle-${bravo.id}`)).toHaveCount(0);
       await twist(alpha.id).click();
       await expect(twist(alpha.id)).toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId("atlas-node-/overview"),
-        "collapsing the selected branch left its surfaces in the tree").toHaveCount(0);
+      await expect(page.getByTestId(`atlas-session-${live.sessionId}`),
+        "collapsing the selected branch left its session rows in the tree").toHaveCount(0);
       await expect(selected, "collapsing the selected branch unscoped the page").toContainText(alpha.name);
       await expect(card(alphaCard)).toBeVisible();
 
-      // ── CLAIM 2b: clicking INTO an unselected branch re-scopes to it first ──
-      // Without this the row would be a lie: the page it lands on reads the ACTIVE project, so it
-      // would render alpha's board under a row that named bravo.
-      await twist(bravo.id).click();
-      await page.getByTestId(`atlas-node-${bravo.id}/overview`).click();
-      await expect(card(bravoCard), "a row inside bravo's branch did not re-scope the page to bravo").toBeVisible();
+      // ── CLAIM 2b: the project ROW is the node's address, and re-scoping still comes first ──
+      // ⭐ CARD 4a0ad464. The branch's `Home` row was the project node's only address in the tree, and
+      // this card removed it as a page row the node's own tab row already carries — so the row has to
+      // supply that destination or the node is unreachable from the tree it heads. RED before that
+      // card: the row re-scoped in place and the address never moved, whatever you were looking at.
+      //
+      // The rule has TWO halves and both are asserted here, because each is what keeps the other
+      // honest: the row takes you to the node, EXCEPT where clicking it has real work of its own to
+      // do — re-scoping one of the node's own tabs, which is project-agnostic and reads the active
+      // project. Yanking a reader off the Board for picking a different project would lose the
+      // surface they deliberately chose; never navigating at all would have made the node
+      // unreachable, and would make a click on your OWN row from a tab do nothing whatsoever.
+
+      // (i) FROM A TAB, A DIFFERENT PROJECT: re-scope in place, address unmoved. The older contract
+      //     (card e47df20a), still load-bearing — the page reads the ACTIVE project, so without the
+      //     re-scope the board would render alpha's cards under a row that named bravo.
+      await page.getByTestId("atlas-tab-board").click();
+      await expect(page).toHaveURL(/\/board$/);
+      await branch(bravo.name).click();
+      await expect(page, "clicking another project's row left the tab the reader was on")
+        .toHaveURL(/\/board$/);
+      await expect(card(bravoCard), "the row did not re-scope the board it left you on").toBeVisible();
       await expect(card(alphaCard)).toHaveCount(0);
       await expect(selected).toContainText(bravo.name);
       expect(await page.evaluate((k) => localStorage.getItem(k), PROJECT_KEY)).toBe(bravo.id);
-      // And exactly one node still reads as landed, with many branches' worth of /overview rows in
-      // the tree — the reason a row outside the selected branch is a plain <Link> with no isActive.
-      await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
+
+      // (ii) FROM A TAB, THE PROJECT YOU ARE ALREADY IN: nothing to re-scope, so the row navigates
+      //      to the node rather than doing nothing at all.
+      await branch(bravo.name).click();
+      await expect(page, "clicking the row you are already scoped to from one of its tabs did nothing")
+        .toHaveURL(/\/project$/);
+      await expect(page.getByTestId("atlas-project-name")).toHaveText(bravo.name);
+
+      // (iii) FROM ANYWHERE THAT IS NOT ONE OF THE NODE'S TABS: always the node.
+      await page.getByTestId("atlas-home-workspace").click();
+      await expect(page).toHaveURL(/\/home$/);
+      await branch(alpha.name).click();
+      await expect(page, "clicking a project row from off the node did not open that node")
+        .toHaveURL(/\/project$/);
+      await expect(page.getByTestId("atlas-project-name"),
+        "the project node did not re-scope to the row that was clicked").toHaveText(alpha.name);
+
+      // The landed mark is the project ROW's `aria-current` now — a <button>, so the anchor-scoped
+      // `is-active` class this claim used to read cannot carry it — and exactly one row has it.
+      await expect(page.getByTestId("atlas-project-node")).toHaveAttribute("aria-current", "true");
+      await expect(page.locator('button.loom-atlas-node[aria-current="true"]'),
+        "more than one project row reads as the branch you are inside").toHaveCount(1);
 
       // ── CLAIM 3: the workspace tier is the entities, and the ten destinations have left the rows ──
       // The tier's own list, in order, read off the tree: the Workspace home and the Platform node,
@@ -363,19 +404,22 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
         .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
       // POSITIVE CONTROL on that collector before trusting any absence from it: it does see the rows
       // that are genuinely there. A broken selector returns [] and would "prove" every absence below.
-      // The floor is the two workspace-tier rows the WORKSPACE_TIER loop below then names one by
-      // one, plus the selected branch's own two (Home and Overview) — four, since card ec1aa18e took
-      // the project node's tabs out of the tree. Expressed against WORKSPACE_TIER so the first half
-      // tracks that list rather than a number typed here.
+      // The floor is exactly the workspace tier now — card ec1aa18e took the project node's tabs out
+      // of the tree and card 4a0ad464 took its last two page rows (`Home`, `Overview`), so a project
+      // branch contributes NO destination anchor at all. Expressed against WORKSPACE_TIER rather
+      // than as a number typed here.
       expect(treeRoutes.length, "the tree-row collector found no rows at all")
-        .toBeGreaterThanOrEqual(WORKSPACE_TIER.length + 2);
+        .toBeGreaterThanOrEqual(WORKSPACE_TIER.length);
       for (const kept of WORKSPACE_TIER) {
         expect(treeRoutes, `the tree-row collector missed ${kept}, which deliberately stayed a row`).toContain(kept);
       }
-      expect(treeRoutes, "the tree-row collector missed the project-tier Overview row").toContain("/overview");
-      // Card ec1aa18e's own claim, in the same collector: a destination the project node carries as
-      // a TAB is no longer a row either. The Board is the specimen, and the line above is its
-      // positive control — the collector plainly does see a project-tier row.
+      // Card 4a0ad464's own claim, in the same collector: the project tier's last page row is gone.
+      // The WORKSPACE_TIER loop immediately above is its positive control — the collector plainly
+      // does see the rows that stayed.
+      expect(treeRoutes, "the project-tier Overview row is back, which card 4a0ad464 removed")
+        .not.toContain("/overview");
+      // Card ec1aa18e's own claim, same collector: a destination the project node carries as a TAB
+      // is no longer a row either. The Board is that card's specimen.
       expect(treeRoutes, "the Board is a project-branch row again, which card ec1aa18e removed")
         .not.toContain("/board");
 

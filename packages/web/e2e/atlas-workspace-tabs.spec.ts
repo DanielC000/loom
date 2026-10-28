@@ -43,10 +43,12 @@ const PROJECT_KEY = "loom.projectId";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 
-/** The node's own two tabs, which precede the re-homed ones — pages/WorkspaceHome.tsx's `HOME_TABS`. */
-const HOME_TAB_KEYS = ["overview", "deck"];
+/** The node's own LEADING tab, which precedes the re-homed ones — pages/WorkspaceHome.tsx's
+ *  `HOME_TABS`. One entry since card 4a0ad464 unified Overview and Deck into a single home tab, the
+ *  same way card 44f725fe did for the project node. */
+const HOME_TAB_KEYS = ["overview"];
 /** The node's own TRAILING tab, which follows them — that file's `REPLAY_TAB` (card ff6123de). Kept a
- *  separate list because the position is the claim: the node's two readings lead, the re-homed seven
+ *  separate list because the position is the claim: the node's own reading leads, the re-homed seven
  *  hold the middle in the mockup's `ROOT_TABS` order, and the forensic tab trails them all. */
 const TRAILING_TAB_KEYS = ["replay"];
 

@@ -1,20 +1,23 @@
-// The node KPI strip on every node tab — card 7874e8c2 (Atlas restructure 5 of 11), closing item 5
-// of the Atlas gap audit. Design record: docs/decisions/7874e8c2-node-kpi-strip-on-every-tab.md.
+// THERE IS NO NODE KPI STRIP — card 4a0ad464, inverting card 7874e8c2. Records:
+// docs/decisions/4a0ad464-atlas-drop-tab-row-chips-and-page-rows.md, and the superseding section
+// appended to docs/decisions/7874e8c2-node-kpi-strip-on-every-tab.md.
 //
-// What the card claims, and how each half is measured rather than asserted by shape:
-//   1. SWITCH ON — every tab of a home node carries the node's readout, and that readout is REAL:
-//      the project strip's open-cards pill reads a count this spec seeded into named lanes, on
-//      every project tab, not just on the one the strip used to live on.
-//   2. Overview is the one tab with no STRIP, because its body already carries the same six figures
-//      as the full-size deck — so its leg asserts the DECK reads the same seeded count instead of
-//      excusing the tab. The card's own DoD asks for the strip there too; the record above says why
-//      that one clause is not satisfied literally.
-//   3. SWITCH OFF — no KPI strip exists anywhere, at every one of those same addresses.
+// The owner's own words (2026-10-28): "Chips like '21 needs you 1/1 mgr · workers 40% worst context
+// 0·0 gate run·queued 83 open cards 4 merged today' on the tabs row are not necessary and need too
+// much space causing the need for a 'More..' tab. remove them."
 //
-// ⛔ THE TAB SET IS COLLECTED FROM THE APP, NEVER TYPED. Two independent collections, both read off
-// the rendered page: the node's own tab row, and the project-scoped rows of the rendered TREE. A
-// hardcoded list would quietly stop covering a tab the moment a later card adds one — which is the
-// exact shape of the defect this card exists to fix, nineteen tabs carrying a readout on two.
+// This file used to prove the strip rode EVERY tab of both home nodes. It now proves the inverse,
+// in the same shape, at the same addresses, over the same app-collected tab sets:
+//   1. SWITCH ON — NO tab of either home node carries a strip, or any pill from one. Measured over
+//      the node's whole DECLARED tab set, folded tabs included, not whatever the row happens to fit.
+//   2. The node's readout is still REAL and still reachable: the home tab's full-size DECK reads the
+//      count this spec seeded into named lanes. That is the positive control the absence needs — a
+//      page that rendered no readout AT ALL would otherwise satisfy every assertion here.
+//   3. SWITCH OFF — unchanged, and still passing: the classic shell never had a strip either.
+//
+// ⛔ THE TAB SET IS COLLECTED FROM THE APP, NEVER TYPED. A hardcoded list would quietly stop covering
+// a tab the moment a later card adds one — the exact shape of the defect card 7874e8c2 existed to
+// fix, and just as able to hide a strip that crept back onto a tab nobody listed.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
@@ -77,16 +80,27 @@ async function treeDestinations(page: Page): Promise<string[]> {
     [...new Set(els.map((el) => new URL((el as HTMLAnchorElement).href).pathname))]);
 }
 
-/** The strip's figures, keyed by the SAME `item.key` the deck's tiles are keyed by. */
-async function stripFigures(page: Page): Promise<Record<string, string>> {
-  return page.locator('[data-testid="atlas-kpi-strip"] .loom-kpipill').evaluateAll((els) =>
-    Object.fromEntries(els.map((el) => [
-      (el.getAttribute("data-testid") ?? "").replace(/^atlas-kpi-pill-/, ""),
-      // `textContent`, not `innerText`: `.loom-kpipill-l` is upper-cased by CSS, and innerText
-      // applies `text-transform` while the source value does not.
-      (el.querySelector(".loom-kpipill-v")?.textContent ?? "").trim(),
-    ])));
+/**
+ * Every trace of a tab-row readout the page still carries, by THREE independent handles: the strip's
+ * own test id, its class, and the per-pill test id stem. Three because they fail independently — a
+ * strip re-rendered without its test id, or a bare `KpiPill` loop put back on the row with no
+ * wrapper at all, is the same regression this card forbids and only the class/stem would see it.
+ *
+ * ⛔ Scoped to `.loom-atlas-tabs` for the CLASS handle, never the whole page: `.loom-kpipill` is also
+ * what the dashboard disclosure's collapsed summary bar states its counts in (card 44f725fe), which
+ * is a DIFFERENT readout this card deliberately keeps. A page-wide class count would redden on that
+ * one and read as a strip that never came back.
+ */
+async function tabRowReadout(page: Page): Promise<Record<string, number>> {
+  return {
+    byTestId: await page.getByTestId("atlas-kpi-strip").count(),
+    byClass: await page.locator('[data-testid="atlas-node-tabs"] .loom-kpistrip, [data-testid="atlas-node-tabs"] .loom-kpipill').count(),
+    byPillStem: await page.locator('[data-testid^="atlas-kpi-pill-"]').count(),
+  };
 }
+
+/** True when the page carries no tab-row readout at all, by any of the three handles above. */
+const noReadout = (r: Record<string, number>) => Object.values(r).every((n) => n === 0);
 
 /** The deck's figures, same keying — so the two readouts can be compared rather than described. */
 async function deckFigures(page: Page): Promise<Record<string, string>> {
@@ -97,8 +111,8 @@ async function deckFigures(page: Page): Promise<Record<string, string>> {
     ])));
 }
 
-test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
-  test("switch ON: the project node's strip reads the seeded board on EVERY tab but Overview", async ({ page, loomDaemon }) => {
+test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
+  test("switch ON: NO project node tab carries a strip, and the deck still reads the seeded board", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
@@ -107,13 +121,13 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     await page.goto(loomDaemon.baseURL + "/project");
 
     // Identity: this is THIS spec's corpus. Without it a silent fallback to a sibling worker's
-    // daemon would still render a plausible, screenshot-able, entirely wrong strip.
+    // daemon would still render a plausible, screenshot-able, entirely wrong node.
     await expect(page.locator(".loom-atlas-nodehead h1")).toContainText(seeded.project.name);
 
     const keys = await renderedTabKeys(page);
     // The node is the nine-tab one card 25c08fba built and card 44f725fe unified the two home tabs
-    // of, not a one-tab remnant — otherwise "every tab carries the strip" could pass on a node that
-    // had lost the tabs this card is about.
+    // of, not a one-tab remnant — otherwise "no tab carries a strip" could pass on a node that had
+    // lost the tabs this claim is about.
     expect(keys.length, `project node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(9);
     expect(keys).toContain("board");
     expect(keys).toContain("memory");
@@ -125,36 +139,29 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     for (const key of keys) {
       // Through whichever half holds it (card d4350286); it asserts the tab reads selected after.
       await openNodeTab(page, key);
+      // PRESENCE FIRST, on every tab: the tab row itself is up. Without it an absence below is
+      // satisfied by a page that merely has not rendered its node chrome yet.
+      await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
 
       if (key === "overview") {
-        // Overview's readout is the DECK, not the strip — asserted, not excused. `toHaveText`
-        // retries, so this doubles as the settle for the board query behind the figure.
+        // The node's readout lives HERE and nowhere else now. `toHaveText` retries, so this doubles
+        // as the settle for the board query behind the figure — and it is the positive control for
+        // every absence in this loop: the figures are real, they are just not on the tab row.
         await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
         await expect(page.getByTestId("atlas-kpi-cards").locator(".loom-kpi-value"))
           .toHaveText(String(seeded.open));
         const deck = await deckFigures(page);
         if (deck.cards !== String(seeded.open)) offenders.push(`${key}: deck cards=${deck.cards}`);
-        if (await page.getByTestId("atlas-kpi-strip").count() !== 0) {
-          offenders.push(`${key}: carries a strip as well as the deck`);
-        }
-        continue;
       }
 
-      await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
-      await expect(page.getByTestId("atlas-kpi-pill-cards").locator(".loom-kpipill-v"))
-        .toHaveText(String(seeded.open));
-      const figures = await stripFigures(page);
-      if (figures.cards !== String(seeded.open)) offenders.push(`${key}: strip cards=${figures.cards}`);
-      // The strip is the WHOLE readout, not a surviving pill or two: the same six keys the deck
-      // declares. A strip that quietly lost four of them would otherwise still pass on `cards`.
-      if (Object.keys(figures).length !== 6) {
-        offenders.push(`${key}: ${Object.keys(figures).length} pills (${Object.keys(figures).join("/")})`);
-      }
+      const readout = await tabRowReadout(page);
+      if (!noReadout(readout)) offenders.push(`${key}: ${JSON.stringify(readout)}`);
     }
-    expect(offenders, "every project node tab carries the node's readout, reading the seeded board").toEqual([]);
+    expect(offenders, "no project node tab carries a tab-row KPI readout, by test id, class or pill stem")
+      .toEqual([]);
   });
 
-  test("switch ON: the Workspace node's strip rides every tab, and is the deck's own figures", async ({ page, loomDaemon }) => {
+  test("switch ON: NO Workspace node tab carries a strip, and the deck still declares its six tiles", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     await seedAtlasOn(page);
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -164,10 +171,10 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     expect(keys.length, `workspace node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(9);
     expect(keys[0]).toBe("overview");
 
-    // The sentinel here is not an absolute count — the Workspace tier aggregates every project on a
-    // daemon a sibling spec also seeds into (card 5dcb5ae9's lesson), so a fixed number would be
-    // measuring the fixture. What IS pinned: the strip is the deck's figures, key for key. A strip
-    // fed a different array, or a stale one, breaks this however the fixture's totals move.
+    // The positive control, and deliberately NOT an absolute figure — the Workspace tier aggregates
+    // every project on a daemon a sibling spec also seeds into (card 5dcb5ae9's lesson), so a fixed
+    // number would be measuring the fixture. What IS pinned: the node's readout still EXISTS, at
+    // full size, with all six tiles. Every absence below is read against that.
     await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
     const deck = await deckFigures(page);
     expect(Object.keys(deck).sort(), "the workspace deck's six declared tiles").toHaveLength(6);
@@ -175,20 +182,14 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
     const offenders: string[] = [];
     for (const key of keys) {
       await openNodeTab(page, key);
-      if (key === "overview") {
-        if (await page.getByTestId("atlas-kpi-strip").count() !== 0) offenders.push(`${key}: strip present`);
-        continue;
-      }
-      await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
-      const figures = await stripFigures(page);
-      if (JSON.stringify(figures) !== JSON.stringify(deck)) {
-        offenders.push(`${key}: ${JSON.stringify(figures)} != deck ${JSON.stringify(deck)}`);
-      }
+      await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
+      const readout = await tabRowReadout(page);
+      if (!noReadout(readout)) offenders.push(`${key}: ${JSON.stringify(readout)}`);
     }
-    expect(offenders, "every workspace tab's strip is the Overview deck's own figures").toEqual([]);
+    expect(offenders, "no workspace node tab carries a tab-row KPI readout").toEqual([]);
   });
 
-  test("switch ON: every address the project node's own tab row links to carries the strip", async ({ page, loomDaemon }) => {
+  test("switch ON: no address the project node's own tab row links to carries a strip", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
@@ -219,16 +220,21 @@ test.describe("Atlas node KPI strip (card 7874e8c2)", () => {
       await page.goto(loomDaemon.baseURL + path);
       await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
       const isOverviewTab = await page.getByTestId("atlas-tab-overview").getAttribute("aria-selected") === "true";
-      if (isOverviewTab) continue; // the node's own path, whose readout is the deck
-      if (await page.getByTestId("atlas-kpi-strip").count() === 0) { offenders.push(`${path}: no strip`); continue; }
-      await expect(page.getByTestId("atlas-kpi-pill-cards").locator(".loom-kpipill-v")).toHaveText(String(seeded.open));
-      const figures = await stripFigures(page);
-      if (figures.cards !== String(seeded.open)) offenders.push(`${path}: cards=${figures.cards}`);
+      if (isOverviewTab) {
+        // The ONE address whose body still states the node's figures, and the positive control for
+        // every absence collected here — the readout exists, it has simply left the tab row.
+        await expect(page.getByTestId("atlas-kpi-cards").locator(".loom-kpi-value")).toHaveText(String(seeded.open));
+      }
+      const readout = await tabRowReadout(page);
+      if (!noReadout(readout)) offenders.push(`${path}: ${JSON.stringify(readout)}`);
     }
-    expect(offenders, "every address the project node's tab row links to carries the node's readout")
+    expect(offenders, "no address the project node's tab row links to carries a tab-row KPI readout")
       .toEqual([]);
   });
 
+  // UNCHANGED by card 4a0ad464, and kept deliberately: the classic shell never had a strip, so this
+  // leg passed before and after. It is the control that says the ON legs above are measuring the
+  // Atlas shell's own chrome rather than an absence that was always true everywhere.
   test("switch OFF: no KPI strip exists at any of those addresses", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);

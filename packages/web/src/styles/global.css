@@ -1169,6 +1169,23 @@ body {
 .loom-atlas-nodes.is-kids {
   padding-left: 14px;
 }
+/* A project branch with nothing running (card 4a0ad464, which left the branch holding only live
+   sessions). Deliberately NOT a `.loom-atlas-node`: it is not a control, takes no pointer or keyboard
+   state, and must not look like one more row a reader could click. It borrows the node row's left
+   padding and line box so the branch keeps its rhythm, and sits at the muted dim the rest of the
+   rail's secondary text uses. */
+.loom-atlas-idle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  padding: 0 10px;
+  border-left: 2px solid transparent;
+  color: var(--loom-text-muted);
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  font-style: italic;
+}
 .loom-atlas-node {
   display: flex;
   align-items: center;
@@ -1725,8 +1742,9 @@ button.loom-atlas-node.is-branch.is-open {
   min-width: 0;
 }
 
-/* Node tabs. The row keeps the tabs left and lets the Deck tab's compact KPI strip ride the
-   same baseline on the right, so the readouts never cost the page a second band. */
+/* Node tabs. The row is alone on its line: card 4a0ad464 removed the compact KPI strip that used to
+   ride the same baseline on the right, on the owner's own instruction that the chips cost the tabs
+   more width than they were worth. */
 .loom-atlas-tabs {
   display: flex;
   align-items: center;
@@ -2125,17 +2143,11 @@ button.loom-kpi.is-open {
   overflow-y: auto;
 }
 
-/* The Deck tab's compact readouts — deliberately small. ⛔ These are NOT a replacement for the
-   full tiles: round 3 shrank the Overview's readouts to this size and the page stopped reading
-   as an overview at all (card 939922ee). The Deck tab is board-first on purpose; the Overview
-   tab is not, and must keep .loom-kpideck. */
-.loom-kpistrip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-left: auto;
-}
+/* One compact figure+label pill — what the dashboard disclosure's collapsed bar states its counts
+   in (card 44f725fe). ⛔ This size is NOT a replacement for the full tiles: round 3 shrank the
+   Overview's readouts to it and the page stopped reading as an overview at all (card 939922ee), and
+   card 4a0ad464 then deleted the tab-row strip that was the last place they appeared at this size.
+   A node's readout is .loom-kpideck. */
 .loom-kpipill {
   display: inline-flex;
   align-items: baseline;
@@ -2462,8 +2474,7 @@ button.loom-kpi.is-open {
 }
 
 /* ── The primary surface (the project grid / the board) ─────────────────────────────────── */
-.loom-atlas-primary,
-.loom-atlas-deckmain {
+.loom-atlas-primary {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2500,21 +2511,6 @@ button.loom-kpi.is-open {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  min-width: 0;
-}
-
-/* The Deck tab: the primary surface takes the page, with a standing rail of the panels you
-   act from. The rail is fixed-width so the board's own lanes get every pixel that is left. */
-.loom-atlas-deck {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
-  gap: 12px;
-  align-items: start;
-}
-.loom-atlas-deckrail {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
   min-width: 0;
 }
 
@@ -2593,9 +2589,6 @@ button.loom-kpi.is-open {
   .loom-atlas-band {
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   }
-  .loom-atlas-deck {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 @media (max-width: 820px) {
   .loom-bandpanel {
@@ -2633,9 +2626,6 @@ button.loom-kpi.is-open {
     left: 16px;
     right: 16px;
     width: auto;
-  }
-  .loom-kpistrip {
-    margin-left: 0;
   }
 }
 

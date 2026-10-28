@@ -96,14 +96,19 @@ async function seedEntities(loomDaemon: LoomDaemon) {
   });
   await loomDaemon.createTask(bravo.id, { title: uniq("sentinel-BRAVOCARD"), columnKey: "inbox" });
 
-  return { alpha, bravo, mgr, worker, loose, sentinel, bravoMgr };
+  // A project with NOTHING running — the branch that renders card 4a0ad464's idle line. It is the
+  // only non-session row left in this tier (that card removed the two page rows that used to be
+  // here), so it is what the text-origin measurement below holds the session rows to.
+  const idle = await loomDaemon.createProject(uniq("atlasent-idle"));
+
+  return { alpha, bravo, mgr, worker, loose, sentinel, bravoMgr, idle };
 }
 
 test.describe("Atlas tree entity tier (card 3b563642)", () => {
   test("switch ON: workers nest under their manager, and a session row is that session's node",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
-      const { alpha, bravo, mgr, worker, loose, sentinel, bravoMgr } = await seedEntities(loomDaemon);
+      const { alpha, bravo, mgr, worker, loose, sentinel, bravoMgr, idle } = await seedEntities(loomDaemon);
 
       // Every board read this page makes, collected from the first navigation — the instrument for
       // the "zero new requests" claim at the bottom. Recorded rather than intercepted, so nothing
@@ -130,18 +135,24 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
         "the board is not showing this spec's own seeded project").toBeVisible();
       await expect(page.getByTestId("atlas-project-node")).toContainText(alpha.name);
 
-      // ── CLAIM 0: the Board is a TAB, not a row, and the project Home row is what reads as landed ──
-      // Read here rather than left to atlas-tree.spec.ts's own walk because this spec is the one
-      // that used to hang a tier off that row: if the row ever comes back, this is where a reader
+      // ── CLAIM 0: a project branch holds ENTITIES and nothing else, and the project ROW is what
+      // reads as landed ──
+      // Read here rather than left to atlas-tree.spec.ts's own walk because this spec is the one that
+      // used to hang a tier off the Board row: if a page row ever comes back, this is where a reader
       // of the entity tier finds out, beside the claims that went with it.
       await expect(page.getByTestId("atlas-node-/board"),
         "the Board is a tree row again, which card ec1aa18e removed").toHaveCount(0);
       await expect(page.getByTestId("atlas-board-twist"),
         "the Board row's card-tier twist is back without the row").toHaveCount(0);
-      await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
+      // Card 4a0ad464 removed the branch's last two page rows, so the landed mark moved down onto
+      // the project row itself — a <button>, hence `aria-current` rather than an anchor class.
       await expect(page.getByTestId("atlas-home-project"),
-        "on a project node tab the project Home row is the one that must read as landed")
-        .toHaveClass(/is-active/);
+        "the project Home row is back, which card 4a0ad464 removed").toHaveCount(0);
+      await expect(page.getByTestId("atlas-node-/overview"),
+        "the project Overview row is back, which card 4a0ad464 removed").toHaveCount(0);
+      await expect(page.getByTestId("atlas-project-node"),
+        "on a project node tab the project row is the one that must read as landed")
+        .toHaveAttribute("aria-current", "true");
 
       // ── CLAIM 1: the three live sessions are rows, and the worker is INSIDE the manager ──
       await expect(sessionRow(mgr.sessionId)).toHaveCount(1);
@@ -210,23 +221,30 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
       // A 2px origin drift is invisible in a PNG at any scale and was wrong in the first draft of
       // the tier one level up (card 0d0c6cee), so none of this is left to a screenshot.
       //
-      // The destination row measured against is the project HOME row. It used to be the Agents row,
-      // which card ec1aa18e removed — and Home is the better reference anyway: it is the one
-      // destination row in this tier that cannot be re-homed away, because it IS the node.
+      // The row measured against was the Agents row (card ec1aa18e removed it), then the project
+      // HOME row (card 4a0ad464 removed that too, along with every other page row in this tier).
+      // What is left to hold the session rows to is the IDLE line that card put in an empty branch —
+      // which carries the same two leading spacers every row in this rail does, precisely so a
+      // non-session row and a session row still share one text origin. Its branch has to be opened
+      // by hand: only the SELECTED project's branch auto-expands.
+      await page.getByTestId(`atlas-project-twist-${idle.id}`).click();
+      const idleLine = page.getByTestId(`atlas-branch-idle-${idle.id}`);
+      await expect(idleLine, "the idle branch rendered no placeholder line to measure against")
+        .toBeVisible();
       const origins = await tree.evaluate((root, ids) => {
         const left = (sel: string) => root.querySelector(sel)?.getBoundingClientRect().left ?? -1;
         return {
-          home: left('[data-testid="atlas-home-project"] .loom-atlas-lbl'),
+          home: left(`[data-testid="atlas-branch-idle-${ids.idle}"] span:last-child`),
           manager: left(`[data-testid="atlas-session-${ids.mgr}"] .loom-atlas-lbl`),
           loose: left(`[data-testid="atlas-session-${ids.loose}"] .loom-atlas-lbl`),
           worker: left(`[data-testid="atlas-session-${ids.worker}"] .loom-atlas-lbl`),
         };
-      }, { mgr: mgr.sessionId, loose: loose.sessionId, worker: worker.sessionId });
-      expect(origins.home, "no destination label was found to measure against").toBeGreaterThan(0);
-      // A session row sits on the SAME text origin as the destination rows it shares a tier with —
+      }, { mgr: mgr.sessionId, loose: loose.sessionId, worker: worker.sessionId, idle: idle.id });
+      expect(origins.home, "no non-session row was found to measure against").toBeGreaterThan(0);
+      // A session row sits on the SAME text origin as the non-session rows it shares a tier with —
       // which is the whole reason its twist is laid OVER the anchor's reserved column instead of
       // hoisted out in front of it, and the thing that would break if it were ever hoisted.
-      expect(origins.manager, "a manager row and a destination row sit on different text origins")
+      expect(origins.manager, "a manager row and the idle line sit on different text origins")
         .toBe(origins.home);
       // ...including a row with NO twist at all, which renders without the wrapper the other two use.
       expect(origins.loose, "a session row's origin depends on whether it has a twist")

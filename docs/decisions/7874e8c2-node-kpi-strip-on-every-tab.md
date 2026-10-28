@@ -33,3 +33,38 @@ The mockup does not solve this — it overflows instead, and its tab row is visi
 - **Do not make `nodeTabShowsKpiStrip` return true for `overview`.** The strip and the deck are fed the same `kpis` array, so the node's six figures would be stated twice within 50px of each other, and `atlas-home.spec.ts` plus `atlas-deep-links.spec.ts` both assert the absence directly.
 - **Do not re-express the rule as a list of tab keys.** It is a predicate so that a tab a later card re-homes onto a node inherits the strip without this file being edited; a list silently omits the new tab and nothing fails.
 - **Do not "fix" the second line by removing `flex-wrap` from `.loom-atlas-tabs` or `.loom-atlas-tabrow`.** The row does not fit beside a six-pill strip at any supported width, so unwrapping it clips tabs off the row rather than tightening the layout — measured at 1440, not only at phone width.
+
+---
+
+## SUPERSEDED by card `4a0ad464` (2026-10-28): there is no tab-row KPI strip at all
+
+The owner, verbatim, on the built result:
+
+> "Chips like "21 needs you 1/1 mgr · workers 40% worst context 0·0 gate run·queued 83 open cards 4 merged today" on the tabs row are not necessary and need too much space causing the need for a "More.." tab. remove them."
+
+So `KpiStrip`, `nodeTabShowsKpiStrip`, the `.loom-kpistrip` rules and the trailing-content slot on
+`NodeTabs` are all deleted. A node's readout is the full-size `KpiDeck` on its home tab, and a
+non-home tab carries no readout at all.
+
+**Everything above this section is history, not current behaviour.** What survives of it:
+
+- The *reason* Overview never carried a strip — the same figures twice on one screen — is now the
+  reason no tab does. `KpiDeck`'s own "SIZE IS THE FEATURE" note (card `939922ee`) is still the live
+  rule, and is the one this card leans on rather than overturns.
+- The "39px of wrapped strip is the better half of the trade" section is void: the strip was the
+  thing taking that second line, and the trade it was weighed against (card `d4350286`'s overflow
+  menu) existed only because of it. Measured after this card, at 1280 / 1440 / 1920 on both home
+  nodes: the tab block is **35px, one line, with every declared tab in the row and no More trigger**.
+  The overflow machinery stays — it is still what keeps a nine-tab row reachable at phone width —
+  but it no longer fires at any desktop width.
+- `atlas-node-kpi-strip.spec.ts` kept its name and its shape and now proves the INVERSE, over the
+  same app-collected tab sets, with the home tab's deck as the positive control that the figures
+  still exist somewhere.
+
+### Do not (replacing this record's own prohibitions above)
+
+- **Do not re-add a compact figure strip to a node's tab row,** under any name or predicate. The
+  owner read the chips as space the tabs needed; a re-shrunk readout there is the same rejection in
+  a new costume.
+- The prohibition on `nodeTabShowsKpiStrip` returning true for `overview` is moot — the predicate no
+  longer exists. Do not reintroduce it to bring the strip back under a narrower rule.

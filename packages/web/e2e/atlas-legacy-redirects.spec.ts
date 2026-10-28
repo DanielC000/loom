@@ -640,12 +640,12 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
         expect(await crumbTrail(page), `${r.from} produced the wrong breadcrumb trail`).toEqual(["Workspace"]);
       } else if (projTabKey) {
         // A PROJECT node tab (card 25c08fba) keeps its own address, so unlike a Workspace tab there
-        // is no extra hop — but since card ec1aa18e it has no tree row either, so the landed mark is
-        // the project HOME row's, exactly as the Workspace home carries it for its own tabs. The
+        // is no extra hop — but since card ec1aa18e it has no tree row either, and since card
+        // 4a0ad464 neither does the node itself, so the landed mark is the project ROW's. The
         // heading and the deepest crumb are the TAB's label, under the project's own crumb.
-        await expect(page.locator("a.loom-atlas-node.is-active"),
-          `${r.from} lands on a project node tab, so exactly one node may read as landed`).toHaveCount(1);
-        await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
+        await expect(page.getByTestId("atlas-project-node"),
+          `${r.from} lands on a project node tab, so the project row must read as the landed branch`)
+          .toHaveAttribute("aria-current", "true");
         await expect(page.getByTestId(`atlas-node-${pathOf(r.to)}`),
           `${pathOf(r.to)} is a project node tab and still an Atlas tree row`).toHaveCount(0);
         await expect(page.getByTestId(`atlas-tab-${projTabKey}`),
@@ -914,11 +914,12 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     if (landed.tabKey) {
       await expect(page.getByTestId(`atlas-tab-${landed.tabKey}`)).toHaveAttribute("aria-selected", "true");
     } else if (landed.projTabKey) {
-      // A PROJECT node tab's own mark is on the project Home row (card ec1aa18e) — the tab itself is
-      // still what reads selected, which is the claim here.
+      // A PROJECT node tab's own mark is on the project ROW (card 4a0ad464, which removed the Home
+      // row card ec1aa18e had put it on) — the tab itself is still what reads selected, which is the
+      // claim here.
       await expect(page.getByTestId(`atlas-tab-${landed.projTabKey}`))
         .toHaveAttribute("aria-selected", "true");
-      await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
+      await expect(page.getByTestId("atlas-project-node")).toHaveAttribute("aria-current", "true");
     } else {
       // `treeNodeAddress` already required a node to exist for a non-tab target (the escape hatch it
       // used to fall back to went with card 5afd71bd), so this is the node's own landed mark.

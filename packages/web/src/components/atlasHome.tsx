@@ -32,26 +32,23 @@ export interface NodeTab {
 const MORE_LABEL = "More";
 
 /**
- * How many leading tabs the row has room for, given what else is on its line.
+ * How many leading tabs the row has room for.
  *
- * @decision d4350286 — Do not budget the tabs against the container's full width when the row has
- * trailing content: the strip's line is what this collapse exists to reclaim.
+ * @decision 4a0ad464 — the row has no trailing content to budget against any more. Don't re-add a
+ * side-width reservation here without a caller that actually puts something on this line.
  */
 function computeFit(a: {
-  widths: number[]; moreW: number; availW: number; sideW: number; sideCount: number;
+  widths: number[]; moreW: number; availW: number;
   rowGap: number; wrapGap: number; activeIdx: number;
 }): number {
   const n = a.widths.length;
   const total = a.widths.reduce((s, w) => s + w, 0) + a.rowGap * Math.max(0, n - 1);
   const activeW = (a.activeIdx >= 0 ? a.widths[a.activeIdx] : 0) ?? 0;
-  // The trailing content (the home nodes' KPI strip) gets its place on the line reserved only while
-  // that still leaves the row the active tab AND the trigger. Below that it cannot: at phone width
-  // the strip is as wide as the whole column, so reserving it would collapse every single tab into
-  // the menu. There the strip keeps the line of its own it already takes (`.loom-kpistrip
-  // { margin-left: 0 }`, the <=820px rule) and the row budgets against the full width instead.
-  const beside = a.availW - a.sideW - a.wrapGap * a.sideCount;
-  const need = activeW + (activeW > 0 ? a.rowGap : 0) + a.moreW;
-  const budget = a.sideCount > 0 && beside >= need ? beside : a.availW;
+  // The whole container width is the budget. Card d4350286 also reserved room for whatever ELSE
+  // shared the line — the KPI strip the home nodes used to pass as children — and card 4a0ad464
+  // removed that strip on the owner's own instruction, leaving the row alone on its line at every
+  // width. The reservation is gone with its only consumer rather than left behind unreachable.
+  const budget = a.availW;
   if (total <= budget) return n;
   const room = budget - a.moreW - a.wrapGap;
   // Greedy from the front, stopping at `stopAt` so a pinned active tab's own slot is never also
@@ -70,12 +67,10 @@ function computeFit(a: {
   return greedy(room - activeW - a.rowGap, a.activeIdx);
 }
 
-export function NodeTabs({ tabs, active, hrefFor, children }: {
+export function NodeTabs({ tabs, active, hrefFor }: {
   tabs: NodeTab[];
   active: string;
   hrefFor: (key: string) => string;
-  /** Trailing content on the same row — the Deck tab's compact KPI strip sits here. */
-  children?: ReactNode;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
@@ -148,14 +143,6 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
     }
     const rowStyle = getComputedStyle(row);
     const wrapStyle = getComputedStyle(wrap);
-    // Everything else sharing the wrap's line — today the KPI strip the home nodes pass as children.
-    // Measured rather than assumed, so a node that passes none reserves nothing.
-    let sideW = 0, sideCount = 0;
-    for (const el of [...wrap.children] as HTMLElement[]) {
-      if (el === row || el.dataset.ntSlot === "more") continue;
-      sideW += el.getBoundingClientRect().width;
-      sideCount++;
-    }
     const next = computeFit({
       widths: metrics.current.widths,
       moreW: metrics.current.more,
@@ -163,7 +150,6 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
       // over-estimate only wraps instead of clipping — but wrapping still costs the line this
       // whole collapse exists to reclaim.
       availW: wrap.clientWidth - 1,
-      sideW, sideCount,
       rowGap: parseFloat(rowStyle.columnGap) || 0,
       wrapGap: parseFloat(wrapStyle.columnGap) || 0,
       activeIdx,
@@ -171,8 +157,8 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
     setLayout((cur) => (cur.fit === next && !cur.measure ? cur : { fit: next, measure: false }));
   }, [tabs.length, activeIdx]);
 
-  // Deps-free on purpose: a parent re-render is also how a count ticks or the strip's own width
-  // moves, and neither shows up in a dependency list. `setLayout` returns the identical object when
+  // Deps-free on purpose: a parent re-render is also how a tab's count ticks, and that does not show
+  // up in a dependency list. `setLayout` returns the identical object when
   // nothing changed, so React bails out rather than looping.
   const recomputeRef = useRef(recompute);
   recomputeRef.current = recompute;
@@ -306,7 +292,6 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
           )}
         </div>
       )}
-      {children}
     </div>
   );
 }
@@ -317,8 +302,9 @@ export function NodeTabs({ tabs, active, hrefFor, children }: {
 // 🔴 SIZE IS THE FEATURE, not decoration. Round 3 shrank these readouts to pills on the tab row and
 // the owner read the resulting page as "the board" rather than "an overview" — the dashboard
 // furniture had not been removed, it had become too small to register as furniture (card 939922ee,
-// round 3's own diagnosis). The Overview tab gets the full tiles; the Deck tab, which IS board-first
-// on purpose, gets the compact strip below instead. Don't collapse the two.
+// round 3's own diagnosis). Card 4a0ad464 then removed the shrunk copy from the tab row outright, on
+// the owner's own instruction, so these tiles are now a node's ONLY KPI readout. Don't shrink them,
+// and don't mint a compact twin anywhere else on the node.
 
 export interface KpiItem {
   key: string;
@@ -413,19 +399,19 @@ function KpiTile({ item, open, align, onToggle, onClose }: {
 // What a node portals into the frame's node-head slot (lib/atlasNodeHead.ts) — card 5968d7e0.
 //
 // A head pill is a STATE READING, never a KPI. The distinction is load-bearing and is what keeps
-// this row off the ground the KPI strip one line below already holds: a pill answers "what is this
-// node doing right now" in one phrase (`4 working`, `main 57143a90`, `gen 412 · 318 turns`), while a
-// strip pill is a labelled FIGURE from the node's six-item `kpis` array. They are also drawn
-// differently on purpose — round corners and a tinted ground here, square and upper-cased there — so
-// the two rows never read as one repeated readout.
+// this row off the ground the deck below already holds: a pill answers "what is this node doing
+// right now" in one phrase (`4 working`, `main 57143a90`, `gen 412 · 318 turns`), while a deck tile
+// is a labelled FIGURE from the node's six-item `kpis` array. They are also drawn differently on
+// purpose — round corners and a tinted ground here, a full-size figure over a label there — so the
+// two never read as one repeated readout.
 //
 // @decision 5968d7e0 — never feed this a figure the node's own `kpis` array already carries. The
-// strip is on every tab but Overview and the deck is on Overview, so a KPI restated here is the
-// same number twice within ~50px, which is the shape card 939922ee's owner rejection names.
+// deck carries all six on the node's home tab, so a KPI restated here is the same number twice
+// within ~50px, which is the shape card 939922ee's owner rejection names.
 
 export interface NodeHeadPill {
   key: string;
-  /** The whole reading, as one phrase. Not a label+value pair — that shape belongs to `KpiStrip`. */
+  /** The whole reading, as one phrase. Not a label+value pair — that shape belongs to `KpiPill`. */
   text: ReactNode;
   tone?: Tone;
   /** The hover that expands a compressed reading (a short sha, an abbreviated branch). */
@@ -486,22 +472,18 @@ export function AtlasNodeHead({ pills, actions }: { pills: NodeHeadPill[]; actio
   );
 }
 
-/**
- * Which of a home node's tabs carry the compact strip on their tab row. The rule is not a list of
- * tab keys but a predicate — *every tab whose own body does not already carry the node's readout* —
- * so a tab a later card re-homes onto a node inherits the strip without this being touched.
- *
- * @decision 7874e8c2 — never make this return true for `overview`: the strip and the deck are fed
- * the same `kpis`, so a strip there renders the node's six figures twice on one screen.
- */
-export function nodeTabShowsKpiStrip(tab: string): boolean {
-  return tab !== "overview";
-}
+// ⛔ THERE IS NO TAB-ROW KPI STRIP, on any node or any tab — card 4a0ad464, the owner's own words:
+// "Chips like … on the tabs row are not necessary and need too much space causing the need for a
+// 'More..' tab. remove them." Card 7874e8c2's `nodeTabShowsKpiStrip` predicate and its `KpiStrip`
+// are gone with it, and so is the trailing-content slot on `NodeTabs` they rode in. The node's
+// readout is the full-size `KpiDeck` on its home tab, where SIZE IS THE FEATURE (see the deck's own
+// note above) — a non-home tab simply carries no readout now.
+//
+// @decision 4a0ad464 — never put a compact figure strip back on a node's tab row. The owner read the
+// chips as space the tabs needed; a re-shrunk readout there is the same rejection in a new costume.
 
-/** One compact figure+label pill. The grammar is shared by the node-tab KPI strip and the dashboard
- *  disclosure's own collapsed summary row (card 44f725fe) — two different readouts, one shape, so a
- *  reader meets the same figure-then-label pairing wherever a count is stated small. Deliberately
- *  NOT a button in either place: the full-size tiles own the breakdowns. */
+/** One compact figure+label pill — the shape the dashboard disclosure's collapsed summary row states
+ *  its counts in (card 44f725fe). Deliberately NOT a button: the full-size tiles own the breakdowns. */
 export function KpiPill({ value, label, tone: t = "phosphor", title, testId }: {
   value: ReactNode;
   label: ReactNode;
@@ -514,24 +496,6 @@ export function KpiPill({ value, label, tone: t = "phosphor", title, testId }: {
       <span className="loom-kpipill-v" style={{ color: tone[t] }}>{value}</span>
       <span className="loom-kpipill-l">{label}</span>
     </span>
-  );
-}
-
-/** The compact readouts carried on every node tab but Overview — the same figures, sized to sit on
- *  the tab row beside the tabs rather than to be read first. Deliberately NOT buttons: the Overview
- *  tab owns the breakdowns. */
-export function KpiStrip({ items }: { items: KpiItem[] }) {
-  return (
-    <div className="loom-kpistrip" data-testid="atlas-kpi-strip">
-      {items.map((item) => (
-        // Keyed by the SAME `item.key` the deck's own tile testid is built from, so a reader can
-        // pair a pill with its tile without going through the label — which CSS upper-cases, and
-        // which `innerText` therefore returns in a different case than the source.
-        <KpiPill key={item.key} value={item.value} label={item.label} tone={item.tone}
-          testId={`atlas-kpi-pill-${item.key}`}
-          title={`${item.label}${item.sub ? ` — ${typeof item.sub === "string" ? item.sub : ""}` : ""}`} />
-      ))}
-    </div>
   );
 }
 

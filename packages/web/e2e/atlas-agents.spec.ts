@@ -267,9 +267,13 @@ test.describe("Atlas agents (card c6160c7d)", () => {
       "the Agents node is a tree row again, which card ec1aa18e removed").toHaveCount(0);
     await openNodeTab(page, "agents");
     await expect(page).toHaveURL(/\/agents$/);
-    // The landed mark is on the project HOME row, which is what carries it for every tab on the node.
-    await expect(page.locator("a.loom-atlas-node.is-active")).toHaveCount(1);
-    await expect(page.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
+    // The landed mark is on the project ROW, which is what carries it for every tab on the node
+    // since card 4a0ad464 removed the Home row the mark used to sit on. The row is a <button>, so
+    // the anchor-scoped `is-active` selector legitimately reads zero here — asserted, because a
+    // silently-zero reading is what a broken collector looks like too.
+    await expect(page.getByTestId("atlas-project-node")).toHaveAttribute("aria-current", "true");
+    await expect(page.getByTestId("atlas-home-project"),
+      "the project branch grew a Home row back, which card 4a0ad464 removed").toHaveCount(0);
 
     // The frame names the NODE, not the tier: a node that is not its tier's head is the deepest
     // crumb and the heading, exactly as a classic destination at that depth is.

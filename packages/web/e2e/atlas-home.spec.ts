@@ -11,10 +11,10 @@
 //      a summary. See ProjectHome.tsx's own note and card c6bdf358.)
 //   3. Each KPI pop-over opens AND closes, asserted on both sides of each action, so neither a
 //      pop-over that never opened nor one that never closes can pass.
-//   4. The Workspace node's two home tabs are both reachable and the tab is in the URL (it is a
-//      real address); the PROJECT node has only ONE home tab since card 44f725fe unified its
-//      Overview and Deck, so its own leg asserts the Deck tab is gone and that a legacy
-//      `?tab=deck` lands on Overview with the whole board intact.
+//   4. BOTH nodes have exactly ONE home tab — card 44f725fe unified the project node's Overview and
+//      Deck, card 4a0ad464 the Workspace node's. Each gets its own leg (same shape, different
+//      content): the Deck tab is gone, no tab-row KPI strip exists, and a legacy `?tab=deck` lands
+//      on Overview in place, with nothing dropped.
 //   5. SWITCH OFF: the classic Overview still renders, and nothing Atlas exists in the document.
 //
 // Presence-first everywhere (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
@@ -165,42 +165,51 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     }
   });
 
-  // The WORKSPACE node still carries two home tabs. The PROJECT node's pair was unified into one by
-  // card 44f725fe, which is why this is no longer a loop over both nodes: the two nodes now have
-  // genuinely different home-tab shapes, and a loop that still passed over both would mean one of
-  // the two was no longer being checked for what it actually is.
-  test("switch ON: the Workspace node's two tabs are both reachable, and the tab is a real address", async ({ page, loomDaemon }) => {
+  // ⭐ CARD 4a0ad464's part C, the WORKSPACE half of the unification card 44f725fe did for the project
+  // node. RED on the pre-card build: a `Deck` tab was rendered, it was selectable, and `?tab=deck`
+  // resolved to it rather than falling back. Deliberately NOT folded back into a loop over both
+  // nodes — the shapes are the same now, but the two nodes' CONTENT is not, and a shared loop would
+  // stop checking either one for what it actually is (the same reason card 44f725fe split it).
+  test("switch ON: the Workspace node has ONE home tab, and a legacy ?tab=deck lands on it", async ({ page, loomDaemon }) => {
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
+    await page.setViewportSize({ width: 1440, height: 1000 });
 
     const path = "/home";
     await page.goto(loomDaemon.baseURL + path);
 
-    // Overview is the default landing — no `?tab=` needed, and the full deck is what shows.
+    // Overview is the node's only home tab, and the full-size deck is its readout.
     await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
     await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    // The Deck tab is GONE — asserted AFTER a locator that must be present, so a page that merely
+    // has not rendered its tab row yet cannot satisfy it. The row holds every tab at this width
+    // (card 4a0ad464 removed the KPI strip that used to push some into the menu), so there is no
+    // More menu hiding it; pinned explicitly, because a tab folded into a closed menu is absent
+    // from the DOM too.
+    await expect(page.getByTestId("atlas-node-tabs-more"),
+      "the workspace tab row overflowed, so 'the Deck tab is absent' no longer means it was removed")
+      .toHaveCount(0);
+    await expect(page.getByTestId("atlas-tab-deck")).toHaveCount(0);
+    // ...and the tab-row chips went with it (part A of the same card).
     await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
 
-    await page.getByTestId("atlas-tab-deck").click();
-
-    // The Deck tab swapped the readouts for the compact strip — presence of the strip first, and
-    // only then the deck's absence, so a mid-render page cannot satisfy this pair.
-    await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
-    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-tab-deck")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "false");
-    // It is an ADDRESS, not component state: the tab is in the URL, and the path did not move.
-    await expect(page).toHaveURL(new RegExp(`${path}\\?tab=deck$`));
-
-    // Which means a reload lands back on it rather than snapping to the default tab.
-    await page.reload();
-    await expect(page.getByTestId("atlas-tab-deck")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("atlas-kpi-strip")).toBeVisible();
-
-    await page.getByTestId("atlas-tab-overview").click();
+    // A bookmarked or pasted `?tab=deck` is an unrecognised home tab now, and the node resolves it
+    // to Overview rather than rendering a blank body. NO LEGACY_REDIRECTS row does this — the
+    // address does not move, which is exactly how it stays invisible to the classic shell.
+    await page.goto(loomDaemon.baseURL + path + "?tab=deck");
+    await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
     await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
-    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(page, "the node redirected instead of resolving the unknown tab in place")
+      .toHaveURL(new RegExp(`${path}\\?tab=deck$`));
+
+    // ⭐ NOTHING WAS DROPPED (the D1 rule). The retired Deck tab's one unique line — its open-card
+    // total across every project — is on the unified tab, under the grid.
+    await expect(page.getByTestId("atlas-grid-foot")).toContainText("open card");
+    await expect(page.getByTestId(`atlas-project-card-${seeded.project.id}`)).toBeVisible();
+    // ...as is the band, and the fleet-controls bar the Deck tab never had.
+    await expect(page.getByTestId("atlas-dashboard-band")).toBeVisible();
+    await expect(page.getByTestId("atlas-fleet-controls-bar")).toBeVisible();
   });
 
   test("switch ON: the project node has ONE home tab, and a legacy ?tab=deck lands on it", async ({ page, loomDaemon }) => {
@@ -241,10 +250,12 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
 
     const tree = page.getByTestId("atlas-tree");
     await expect(tree.getByTestId("atlas-home-workspace")).toBeVisible();
-    await expect(tree.getByTestId("atlas-home-project")).toBeVisible();
-    // The workspace home is the landed node, and only it.
+    // ⛔ THE PROJECT TIER HAS NO `Home` ROW (card 4a0ad464) — its node is reached by the project row
+    // itself, which is asserted below. The absence is checked AFTER a row that must be present, so a
+    // tree that merely has not rendered cannot satisfy it.
+    await expect(tree.getByTestId("atlas-home-project")).toHaveCount(0);
+    // The workspace home is the landed node.
     await expect(tree.getByTestId("atlas-home-workspace")).toHaveClass(/is-active/);
-    await expect(tree.getByTestId("atlas-home-project")).not.toHaveClass(/is-active/);
     // The trail stops at the tier — "Workspace", not "Workspace / Home".
     await expect(page.locator(".loom-atlas-nodehead h1")).toHaveText("Workspace");
 
@@ -269,8 +280,10 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(page).toHaveURL(/\/project$/);
     await expect(page.locator(".loom-atlas-nodehead h1")).toHaveText(new RegExp(escapeRe(seeded.project.name)));
 
-    // And the project home node in the tree is now the landed one.
-    await expect(tree.getByTestId("atlas-home-project")).toHaveClass(/is-active/);
+    // ⭐ And the project ROW is what carries the landed mark now (card 4a0ad464): it is the node's
+    // only address in the tree, so it is also the only row that can say "you are here".
+    await expect(tree.getByTestId("atlas-project-node")).toHaveAttribute("aria-current", "true");
+    await expect(tree.getByTestId("atlas-home-project")).toHaveCount(0);
   });
 
   test("switch OFF: the classic Overview is untouched and nothing Atlas is mounted", async ({ page, loomDaemon }) => {

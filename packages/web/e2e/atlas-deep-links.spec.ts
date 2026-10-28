@@ -18,6 +18,8 @@
 //   2. `/project?task=`                    the project node (ATLAS-ONLY, card fd99b2d7) — its Overview
 //                                          tab embeds the whole <Board>, so the link must land here too.
 //   3. `/project?tab=deck&task=`           a LEGACY tab param plus the card param on one URL.
+//                                          (The Workspace node's own `?tab=deck` went the same way
+//                                          one card later — see atlas-home.spec.ts, card 4a0ad464.)
 //                                          `tab=deck` named a real second home tab until card
 //                                          44f725fe unified the pair; asserts the dead param neither
 //                                          breaks the deep link nor is eaten by the board consuming
@@ -174,10 +176,10 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     await expect(page).toHaveURL(/\/project$/);
     expect(page.url()).not.toContain("task=");
     // The CONTROL for the readout check below: Overview is identified by the 26px `.loom-kpideck`,
-    // and `.loom-kpistrip` — the compact readout the removed Deck tab owned, and which still rides
-    // every RE-HOMED tab of this node (card 7874e8c2) — is what must be absent. Asserted here too,
-    // on an address that was never in doubt, so neither locator can be one that is simply always
-    // present or simply always missing.
+    // and `.loom-kpistrip` — the compact readout the removed Deck tab owned, and which card 4a0ad464
+    // then deleted outright, from every tab of every node — is what must be absent. Asserted here
+    // too, on an address that was never in doubt, so neither locator can be one that is simply
+    // always present or simply always missing.
     await expect(page.locator(".loom-kpideck"), "the Overview tab's own readout").toBeVisible();
     await expect(page.locator(".loom-kpistrip")).toHaveCount(0);
 
@@ -200,7 +202,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     // …and the unrecognised tab resolved to Overview rather than rendering nothing. The pair is
     // asserted in this order (present first, absent second) so a mid-render page cannot satisfy it:
     // the 26px `.loom-kpideck` is Overview's own readout, and `.loom-kpistrip` — which the Deck tab
-    // owned — is on no home tab of this node any more.
+    // owned — is on no tab of any node any more (card 4a0ad464).
     await expect(page.locator(".loom-kpideck"), "a legacy ?tab=deck resolved to the unified Overview").toBeVisible();
     await expect(page.locator(".loom-kpistrip")).toHaveCount(0);
   });

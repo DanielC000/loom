@@ -11,8 +11,8 @@ import { useOpenRequest } from "../components/requests";
 import { AttentionRow, EventRow } from "../components/fleet";
 import { Badge, Button, Dot, Panel, StatusPill } from "../components/ui";
 import {
-  AtlasNodeHead, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiStrip, LaneBar,
-  MeterRow, NodeTabs, nodeTabShowsKpiStrip, PlanUsageDetail, relativeResets, type KpiItem,
+  AtlasNodeHead, BandDisclosure, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiPill,
+  LaneBar, MeterRow, NodeTabs, PlanUsageDetail, relativeResets, useDashboardOpen, type KpiItem,
 } from "../components/atlasHome";
 import { FleetControlsBar } from "../components/fleetControls";
 import { CompactMergeAction } from "../components/reviewQueue";
@@ -30,10 +30,11 @@ import { useNavigate } from "react-router-dom";
 
 // THE WORKSPACE ROOT NODE — cards fd99b2d7 (Atlas P2-1) and 41eab0eb (the cross-project surfaces as
 // this node's tabs), both on the owner-approved round-4 V2 design: Mockups/2026-10-19 UI Overhaul
-// Round 4. NINE tabs, in the mockup's own `ROOT_TABS` order: Overview is the default landing
-// (full-size KPI tiles over a dashboard band over the project grid); Deck is the same node read
-// board-first, with the readouts shrunk onto the tab row and a standing rail beside the grid; and the
-// seven cross-project surfaces that used to be tree rows follow them as tab bodies.
+// Round 4. ONE home tab, in the mockup's own `ROOT_TABS` order: Overview is the default landing
+// (full-size KPI tiles over a foldable dashboard band over the project grid), and the seven
+// cross-project surfaces that used to be tree rows follow it as tab bodies.
+// There was a second home tab, `Deck`, until card 4a0ad464 unified the pair behind one
+// `BandDisclosure` — see that card's record, and card 44f725fe's, which did the same for the project node.
 //
 // "Scope is depth": this node is the shallowest thing containing every project, so every figure here
 // is cross-project. Nothing on this page reads the active project.
@@ -45,7 +46,13 @@ import { useNavigate } from "react-router-dom";
 // The node's OWN LEADING tabs. The seven re-homed cross-project surfaces follow them, in the mockup's
 // `ROOT_TABS` order, from the one declaration in src/nav.tsx (card 41eab0eb) — so this file never
 // names which surfaces they are, only how their counts are derived.
-const HOME_TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label: "Deck" }];
+// ⛔ ONE home tab, and `deck` must not come back as a second one (card 4a0ad464 — the owner's words
+// on card 93d50f2d item 3: "What is the need to have an overview tab, and a deck tab? Feels redundant
+// to me. Unify the pages to one."). A legacy `?tab=deck` needs no row and no LEGACY_REDIRECTS entry
+// either: `isTabKey` below simply does not recognise it, and an unrecognised tab falls back to
+// Overview. A redirect row would reach the CLASSIC shell too (both shells mount that table from one
+// declaration), and `/home` is Atlas-only anyway.
+const HOME_TABS = [{ key: "overview", label: "Overview" }];
 
 // The node's own TRAILING tab — the retrospective reading of the same node (card ff6123de): the wave
 // scrubber/diff plus the finished-wave tier, both of them Mission Control surfaces with nowhere else to
@@ -55,8 +62,8 @@ const HOME_TABS = [{ key: "overview", label: "Overview" }, { key: "deck", label:
 // the rarest thing on this node, and the More ⋯ overflow folds from the END of the row — so last is
 // exactly the slot that should yield first when the row runs out of width (card d4350286). And it is
 // declared separately rather than appended to HOME_TABS because HOME_TABS' own position is load-bearing:
-// the mockup's `homeTabs().concat(ROOT_TABS)` split puts the node's two readings FIRST, and inserting a
-// third there would push Inbox and Gates right for a surface nobody reaches daily.
+// the mockup's `homeTabs().concat(ROOT_TABS)` split puts the node's own reading FIRST, and inserting a
+// second there would push Inbox and Gates right for a surface nobody reaches daily.
 const REPLAY_TAB = { key: "replay", label: "Replay" };
 
 /**
@@ -81,6 +88,11 @@ export default function WorkspaceHome() {
   const tab = isTabKey(raw) ? raw : "overview";
   const { projects, setProjectId } = useActiveProject();
   const navigate = useNavigate();
+  // The SAME per-browser preference the project node's own band reads (card 44f725fe's
+  // `DASHBOARD_OPEN_STORAGE_KEY`), not a second key: the band is the same furniture on both nodes,
+  // and two keys would make "fold the dashboard away" mean two different things depending on which
+  // node you happened to be standing on when you asked for it.
+  const [dashOpen, setDashOpen] = useDashboardOpen();
 
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const usageQ = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: api.usageLimits, refetchInterval: 30_000 });
@@ -292,13 +304,41 @@ export default function WorkspaceHome() {
       sessions={fleet} onOpen={(id) => { setProjectId(id); navigate("/project"); }} />
   );
 
+  // What the disclosure bar keeps saying while the five panels above are folded away — card
+  // 4a0ad464, the same contract card 44f725fe gave the project node's own bar: folding costs the
+  // reader the DETAIL and never the SIGNAL.
+  //
+  // ⛔ NOT one pill per panel, and deliberately NOT the `kpis` array. THREE of the five panels state
+  // a figure the full-size deck is already showing 40px above a folded bar — Gate lanes is the
+  // `gate run·queued` tile verbatim, Plan usage is the `plan 5h` tile, and the deck does not move
+  // when the band folds. A pill for either would be the same number twice on one screen, which is
+  // the shape card 939922ee's owner rejection names. So the bar carries exactly what the fold
+  // actually TAKES OFF the page: the Operators roster's size and what just happened in the Pulse
+  // feed. `needs you` joins them despite overlapping its own tile, for the one reason card 44f725fe
+  // gave the same pill on the project node — it is the panel whose whole point is that it is
+  // waiting on you.
+  const lastEvent = events[0];
+  const dashSummary = (
+    <>
+      <KpiPill value={attention.length} label="needs you" testId="atlas-banddisc-pill-needs"
+        tone={attention.length > 0 ? "amber" : "muted"} title="Attention items waiting on you across every project" />
+      <KpiPill value={operators.length} label="operators" testId="atlas-banddisc-pill-operators"
+        tone={operators.length > 0 ? "cyan" : "muted"} title="Standing cross-project operator sessions" />
+      {/* The event KIND, not its time: "what just happened" is the signal a folded Pulse feed stops
+          showing, and the time is one hover away rather than the figure itself. */}
+      <KpiPill value={lastEvent?.kind ?? "—"} label="last event" testId="atlas-banddisc-pill-event"
+        tone={lastEvent ? "cyan" : "muted"}
+        title={lastEvent ? `${lastEvent.kind} · ${relativeTime(lastEvent.ts)}` : "No orchestration events yet"} />
+    </>
+  );
+
   return (
     <div className="loom-atlas-home">
       {/* The node's own pill, portalled into the frame's node head (card 5968d7e0).
           ONE pill, not the mockup's `7 live` + `5 projects` pair: this node's `kpis` array already
-          declares `live sessions` and `projects` as TILES, and the strip carries all six on every tab
-          but Overview — so both of the mockup's pills would be a figure restated within ~50px of
-          itself. `N working` is the busy count instead, which no tile on this node carries.
+          declares `live sessions` and `projects` as TILES — so both of the mockup's pills would be a
+          figure restated within ~50px of itself. `N working` is the busy count instead, which no tile
+          on this node carries.
           No action cluster either: the workspace tier's spawnables are the standing OPERATORS, and
           card c6160c7d's decision record keeps this node a readout of those rather than a second
           place to start or stop one — their lifecycle lives on the Platform and Companion nodes
@@ -313,26 +353,32 @@ export default function WorkspaceHome() {
           gives its first tab. A tab link is built FRESH rather than merged over the live query: `sub`
           belongs to whichever re-homed page is showing, and carrying it onto a sibling tab would hand
           one guest's sub-tab value to another. */}
-      <NodeTabs tabs={tabs} active={tab} hrefFor={(k) => (k === "overview" ? "/home" : `/home?tab=${k}`)}>
-        {nodeTabShowsKpiStrip(tab) && <KpiStrip items={kpis} />}
-      </NodeTabs>
+      {/* No readout rides this row: card 4a0ad464 removed the tab-row KPI strip on the owner's own
+          instruction. The node's figures are the full-size deck on the home tab below. */}
+      <NodeTabs tabs={tabs} active={tab} hrefFor={(k) => (k === "overview" ? "/home" : `/home?tab=${k}`)} />
 
       <RehomedTabPanels active={tab} />
       <ReplayTabPanel active={tab} />
 
-      {/* The node's own two tabs stay CONDITIONAL, unlike the re-homed bodies above: neither holds
-          unfinished user input (a KPI pop-over is ephemeral, and the fleet controls confirm in place),
-          and the Deck's whole trade is vertical room — so mounting the other one hidden would cost
-          every one of these panels' polls on a tab that is not showing them. */}
+      {/* THE node's one home tab. Rendered only while it is the selected tab — unlike the re-homed
+          bodies above, it holds no unfinished input of its own to protect (a KPI pop-over is
+          ephemeral, the fleet controls confirm in place, and the disclosure's own folded/unfolded
+          choice is persisted, so it survives the remount a parked body would exist to avoid), and
+          mounting it hidden would cost every one of these panels' polls on a tab not showing them. */}
       {tab === "overview" && (
         <>
           <KpiDeck items={kpis} />
           {/* The four daemon-global fleet controls (clear usage hold / pause / resume / kill all) take
-              this full-width bar under the deck in the approved design — card 7b893d54. The Deck tab
-              deliberately does NOT carry it: that tab's whole trade is vertical room for the board, and
-              the crumb-bar chip already reaches these controls from every node including this one. */}
+              this full-width bar under the deck in the approved design — card 7b893d54. It stays above
+              the disclosure rather than inside it: folding the dashboard is a request for the project
+              grid, not for fewer ways to stop the fleet, and the crumb-bar chip reaches the same four
+              controls from every node including this one. */}
           <FleetControlsBar />
-          <div className="loom-atlas-band">
+          {/* The band behind ONE bar — card 4a0ad464, the same D1 disclosure card 44f725fe gave the
+              project node. Unfolded is the default and the page looks exactly as it did; folded, the
+              project grid rises to meet the deck, which is the reading the retired Deck tab existed
+              to give. */}
+          <BandDisclosure open={dashOpen} onToggle={() => setDashOpen(!dashOpen)} summary={dashSummary}>
             {needsPanel}
             {operatorsPanel}
             {gatePanel}
@@ -340,7 +386,7 @@ export default function WorkspaceHome() {
               <PlanUsageDetail usage={usage} />
             </BandPanel>
             {pulsePanel}
-          </div>
+          </BandDisclosure>
           <section className="loom-atlas-primary">
             <div className="loom-atlas-primaryhead">
               <span className="loom-atlas-primarylbl">Projects</span>
@@ -356,32 +402,15 @@ export default function WorkspaceHome() {
                 title="Create a project with guided setup on the Platform node">New project <span aria-hidden>↗</span></Link>
             </div>
             {grid}
-          </section>
-        </>
-      )}
-      {tab === "deck" && (
-        <div className="loom-atlas-deck">
-          <section className="loom-atlas-deckmain">
-            <div className="loom-atlas-primaryhead">
-              <span className="loom-atlas-primarylbl">Projects</span>
-              <span className="loom-bandcount">{projects.length}</span>
-              <span style={{ flex: 1 }} />
-              {/* Same control, same target, same reasoning as the Overview tab's above. */}
-              <Link to="/platform" className="loom-btn loom-btn-default loom-bandlink"
-                title="Create a project with guided setup on the Platform node">New project <span aria-hidden>↗</span></Link>
-            </div>
-            {grid}
-            <p className="loom-bandempty" style={{ marginTop: 10 }}>
+            {/* The retired Deck tab's one line of its own, kept rather than dropped (card 4a0ad464's
+                D1 rule, inherited from card 44f725fe): `open cards` is the only figure that tab
+                stated and no tile on this node carries, and the Platform sentence is the one place
+                the grid's own omission is explained. */}
+            <p className="loom-bandempty" style={{ marginTop: 10 }} data-testid="atlas-grid-foot">
               {plural(openCards, "open card")} across {plural(projects.length, "project")}. The reserved Platform home is pinned in the tree, not listed here.
             </p>
           </section>
-          <aside className="loom-atlas-deckrail">
-            {needsPanel}
-            {operatorsPanel}
-            {gatePanel}
-            {pulsePanel}
-          </aside>
-        </div>
+        </>
       )}
     </div>
   );
