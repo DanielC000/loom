@@ -183,7 +183,7 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 - **Caveat (supervisor code is NOT `daemon_restart`-deployable):** `daemon_restart` only rebuilds +
   relaunches the daemon *process*; the **supervisor** (`scripts/daemon-supervisor.mjs`) and anything it loads are NOT re-read across exit `75` (the same running supervisor execs the new `dist/`). A merge that edits the supervisor needs a **human Ctrl-C + re-run of `pnpm daemon:stable`** to go live — a manager must flag that human action in its done-report (mirrors the unsupervised `restarting:false` refusal). If `daemon_restart`'s result (or the post-restart resume nudge) instead carries `supervisorCheckFailed` — the check itself failed, not a confirmed unchanged — flag that supervisor-liveness is **unknown**, not confirmed-fine; the check couldn't tell you either way, so don't assume the human step is unnecessary.
 
-**Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these five footguns:
+**Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these six footguns:
 - A bash `run_in_background` PID is the **shell's** PID, not the daemon's — `taskkill //PID <that-pid>`
   fails. Find the real node listener with `netstat -ano | grep :<port>`, then `taskkill //F //T //PID <that-pid>`, and confirm the port actually freed. (This identifies which PID holds the port, not how many listeners are on it — a matching row count is not a listener count.)
 - A helper `.mjs` must **LIVE under `packages/daemon`** for its deps (e.g. `ws`, `better-sqlite3`) to
@@ -204,6 +204,13 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   config path not found.` — turbo resolves its global config directory from the real OS profile dirs, and
   a fake/empty `HOME`/`USERPROFILE` has none. Set `TURBO_CONFIG_DIR_PATH=<a dir under that same fake
   home>` (create the dir first) alongside the fake `HOME`/`USERPROFILE` and it resolves normally.
+- Set `LOOM_PORT` and `LOOM_HOME` **before** importing any daemon module (including transitively, e.g.
+  `dist/index.js`) — `paths.ts`'s `PORT`/`LOOM_HOME` are module-scope constants read from `process.env`
+  once at import, so a late set is silently ignored: the spawned `claude`'s SessionStart hook
+  (`claude-settings.ts`'s hook `command`) and its `--mcp-config` URLs (`buildMcpServers({port: PORT, …})`
+  in `pty/host.ts`) still point at whatever was live at import time, aiming them at the REAL daemon on
+  4317 instead of your throwaway one. Symptom: SessionStart never fires and the MCP client sits at
+  "connecting…" with no error.
 
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.
