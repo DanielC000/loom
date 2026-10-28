@@ -57,6 +57,8 @@ const SCENARIOS = [
   "clear-by-id-ordinary-unchanged",
   "collision-refusal-text-names-clear-by-path",
   "dual-armed-sibling-at-non-first-key-text-and-id-agree",
+  "unmarked-sibling-cross-ref-orphan",
+  "unmarked-sibling-cross-ref-failed-delete",
 ];
 
 const scenarioArg = process.argv.find((a) => a.startsWith("--scenario="));
@@ -1133,6 +1135,158 @@ try {
       !!offeredId && clearMergeQuarantineLatchFile(offeredId).ok === false,
     );
     check("sub is untouched by the refused clear-by-id attempt", !!activeMergeQuarantineFor(sub));
+  } else if (scenarioName === "unmarked-sibling-cross-ref-orphan") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 9c3b023a — PASS1-migrate's read loop (a6fa60e2) only ever strips a migrating source's OWN
+    // self-reference from ITS OWN entry; it never strips a SIBLING migrating source's filename that a
+    // DIFFERENT source's entry cross-lists in `orphanLatchFiles`. Two subdirs of one repo (teamA/teamB,
+    // same canonical key) each carry a stale-keyed latch; teamA's own entry cross-lists teamB's own
+    // 24-hex basename. Both migrate onto the SAME fresh-hash target, which has NO pre-existing final —
+    // necessarily UNMARKED (keptUnreadableLatchFiles can only ever name a basename this process already
+    // failed to read). Before this card's fix, the persisted final (and the in-memory union) still
+    // listed teamB's now-deleted basename — a dangling reference — and a real `clearMergeQuarantineLatchFile`
+    // on the freed id falsely reported it "kept"/referenced by teamA.
+    // Also covers the record's own "never widen this strip beyond `sources`" rule: fileX's own
+    // orphanLatchFiles ALSO cross-lists Z's basename — a genuinely UNRELATED, still-pending latch that
+    // is NOT one of this key's own migrate `sources` — and Z's reference must SURVIVE the strip in both
+    // the persisted final and the in-memory entry.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, teamA: r, teamB: t } = makeRepoWithTwoSubdirs("9c3b023a-orphan");
+    const k = canonicalRepoLockKey(r); // same for t too — one physical repo
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const sfx = freshSfx();
+    const fileX = path.join(MERGE_QUARANTINE_DIR, `!stale-x-${sfx}.json`);
+    const yId = "cafecafecafecafecafecafe"; // a real 24-hex id, distinct from hashForKey(k)
+    check("(precondition) the chosen 24-hex id does not coincide with the real fresh-hash target", yId !== hashForKey(k));
+    const fileY = path.join(MERGE_QUARANTINE_DIR, `${yId}.json`);
+    const yBasename = path.basename(fileY);
+    // Z: a genuinely UNRELATED latch, never a migrate source for key k — its own repoPath never exists on
+    // disk and carries no resolvedKey, so PASS 1 diverts it straight to pendingUnresolvedQuarantines with
+    // a `continue`, never touching migratedSourcesByKey/byRepoKey for k at all.
+    const zId = "facefacefacefacefaceface";
+    check("(precondition) Z's own id does not coincide with the real fresh-hash target or Y's id", zId !== hashForKey(k) && zId !== yId);
+    const zPath = path.join(MERGE_QUARANTINE_DIR, `${zId}.json`);
+    const zBasename = path.basename(zPath);
+    const zRepoPath = path.join(os.tmpdir(), `loom-9c3b023a-z-never-exists-${freshSfx()}`);
+
+    fs.writeFileSync(fileX, JSON.stringify({
+      repoPath: r, branch: "branch-R", reason: "R's real reason", enteredAt: Date.now() - 60_000,
+      tokens: ["token-R"], orphanLatchFiles: [yBasename, zBasename], // THE CROSS-LIST: sibling T's filename, PLUS Z's — only T's is a migrate source
+    }, null, 2) + "\n");
+    fs.writeFileSync(fileY, JSON.stringify({
+      repoPath: t, branch: "branch-T", reason: "T's real reason", enteredAt: Date.now(), tokens: ["token-T"],
+    }, null, 2) + "\n");
+    fs.writeFileSync(zPath, JSON.stringify({
+      repoPath: zRepoPath, branch: "branch-Z", reason: "Z — genuinely unrelated, never a migrate source for key k", enteredAt: Date.now(), tokens: ["token-Z"],
+    }, null, 2) + "\n");
+
+    reenterMergeQuarantinesAtBoot([r, t]);
+
+    const activeR = activeMergeQuarantineFor(r);
+    const activeT = activeMergeQuarantineFor(t);
+    check("(boot) both siblings resolve to the SAME in-memory union entry", !!activeR && activeR === activeT);
+    check("(boot) both tokens survive the union", (activeR?.tokens ?? []).includes("token-R") && (activeR?.tokens ?? []).includes("token-T"));
+    check("(boot) fileX is gone (migrated + deleted by PHASE 3)", !fs.existsSync(fileX));
+    check("(boot) fileY is gone (migrated + deleted by PHASE 3)", !fs.existsSync(fileY));
+    check("(boot) Z's own file is UNTOUCHED — never a migrate source for key k", fs.existsSync(zPath));
+
+    const freshPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k)}.json`);
+    check("(boot) exactly the fresh-hash final exists", fs.existsSync(freshPath));
+    const onDisk = JSON.parse(fs.readFileSync(freshPath, "utf8"));
+    check(
+      "*** THE FIX *** the PERSISTED final's own orphanLatchFiles no longer lists T's (now-deleted) basename",
+      !(onDisk.orphanLatchFiles ?? []).includes(yBasename),
+    );
+    check(
+      "*** THE FIX (in-memory twin) *** the in-memory union entry's own orphanLatchFiles no longer lists it either",
+      !(activeR?.orphanLatchFiles ?? []).includes(yBasename),
+    );
+    check(
+      "*** THE STRIP IS SCOPED *** the PERSISTED final's own orphanLatchFiles STILL lists Z's basename — never a migrate source, never stripped",
+      (onDisk.orphanLatchFiles ?? []).includes(zBasename),
+    );
+    check(
+      "*** THE STRIP IS SCOPED (in-memory twin) *** the in-memory union entry's own orphanLatchFiles still lists Z's basename too",
+      (activeR?.orphanLatchFiles ?? []).includes(zBasename),
+    );
+
+    const clearResult = clearMergeQuarantineLatchFile(yId);
+    check("(clear-by-id on the freed id) call succeeds", clearResult.ok === true);
+    check("(clear-by-id on the freed id) wasQuarantined===false — nothing legitimately matches it anymore", clearResult.wasQuarantined === false);
+    check("*** THE FIX *** clear-by-id on the freed id is NOT misattributed as kept/referenced by R", !clearResult.latchKept);
+
+    clearMergeQuarantine(r);
+  } else if (scenarioName === "unmarked-sibling-cross-ref-failed-delete") {
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CARD 9c3b023a — ordering safety analysis: PHASE 1a's own strip (this card's fix) removes the
+    // cross-listed sibling from `orphanLatchFiles` BEFORE PHASE 3 ever attempts to delete it. If that
+    // delete genuinely FAILS (EBUSY, same injection technique as `ebusy-fold-and-sweep`), PHASE 3's own
+    // pre-existing `c870618c` fold-on-failed-unlink must re-add the sibling — it is reading the LIVE,
+    // already-stripped union (4e987303 round-3 m3), not a stale PHASE-1a snapshot — so a file that
+    // genuinely survives on disk never ends up unreferenced, and a later boot cleanly re-migrates it with
+    // no duplicate or misattributed entry.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    const { repo, teamA: r, teamB: t } = makeRepoWithTwoSubdirs("9c3b023a-faildel");
+    const k = canonicalRepoLockKey(r);
+    fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+    const sfx = freshSfx();
+    const fileX = path.join(MERGE_QUARANTINE_DIR, `!stale-x-${sfx}.json`);
+    const yId = "deadbeefdeadbeefdeadbeef"; // a real 24-hex id, distinct from hashForKey(k)
+    check("(precondition) the chosen 24-hex id does not coincide with the real fresh-hash target", yId !== hashForKey(k));
+    const fileY = path.join(MERGE_QUARANTINE_DIR, `${yId}.json`);
+    const yBasename = path.basename(fileY);
+
+    fs.writeFileSync(fileX, JSON.stringify({
+      repoPath: r, branch: "branch-R", reason: "R's real reason", enteredAt: Date.now() - 60_000,
+      tokens: ["token-R"], orphanLatchFiles: [yBasename],
+    }, null, 2) + "\n");
+    fs.writeFileSync(fileY, JSON.stringify({
+      repoPath: t, branch: "branch-T", reason: "T's real reason — its own unlink is injected to FAIL (EBUSY)", enteredAt: Date.now(), tokens: ["token-T"],
+    }, null, 2) + "\n");
+
+    const realUnlinkSync = fs.unlinkSync;
+    let hitCount = 0;
+    fs.unlinkSync = function patchedUnlinkSync(p, ...rest) {
+      if (path.resolve(String(p)) === path.resolve(fileY)) {
+        hitCount++;
+        const err = new Error("EBUSY: resource busy or locked (injected)");
+        err.code = "EBUSY";
+        throw err;
+      }
+      return realUnlinkSync.call(this, p, ...rest);
+    };
+    try {
+      reenterMergeQuarantinesAtBoot([r, t]);
+    } finally {
+      fs.unlinkSync = realUnlinkSync;
+    }
+    check("(precondition) the injected EBUSY was hit exactly once (T's own source only)", hitCount === 1);
+
+    const freshPath = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k)}.json`);
+    check("(boot) the fresh write succeeded", fs.existsSync(freshPath));
+    check("(boot) T's stale source (unlink FAILED) is still on disk", fs.existsSync(fileY));
+    const onDisk = JSON.parse(fs.readFileSync(freshPath, "utf8"));
+    check(
+      "*** THE FIX (ordering safety) *** PHASE 3's own c870618c fold re-adds the still-undeleted sibling — never left unreferenced",
+      (onDisk.orphanLatchFiles ?? []).includes(yBasename),
+    );
+
+    const clearOnFreedId = clearMergeQuarantineLatchFile(yId);
+    check("(clear-by-id while T's file still genuinely exists) correctly reports it KEPT — this is TRUE right now, not misattribution", clearOnFreedId.ok === true && clearOnFreedId.latchKept === true);
+    check("(clear-by-id while T's file still genuinely exists) T's file survives this id-mismatched clear", fs.existsSync(fileY));
+
+    // A later boot (no injection this time) must cleanly re-migrate/delete the still-stale survivor, with
+    // no duplicate entry and nothing left misattributed.
+    const reboot1 = await rebootSim();
+    reboot1.reenterMergeQuarantinesAtBoot([r, t]);
+    check("(reboot-sim) T's stale survivor is finally deleted on a clean boot", !fs.existsSync(fileY));
+    const activeRAfter = reboot1.activeMergeQuarantineFor(r);
+    const activeTAfter = reboot1.activeMergeQuarantineFor(t);
+    check("(reboot-sim) both siblings still resolve to the SAME single union entry — no duplicate", !!activeRAfter && activeRAfter === activeTAfter);
+    check("(reboot-sim) both tokens still present", (activeRAfter?.tokens ?? []).includes("token-R") && (activeRAfter?.tokens ?? []).includes("token-T"));
+    check("(reboot-sim) the dangling reference is gone for good now", !(activeRAfter?.orphanLatchFiles ?? []).includes(yBasename));
+
+    reboot1.clearMergeQuarantine(r);
   } else {
     throw new Error(`unknown scenario: ${scenarioName}`);
   }

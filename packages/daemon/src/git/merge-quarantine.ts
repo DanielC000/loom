@@ -9359,8 +9359,16 @@ function reenterMergeQuarantinesAtBootImpl(
   for (const [key, sources] of migratedSourcesByKey) {
     if (degradedOccupiedKeys.has(key)) continue; // handled in phase 1b below
     if (writeOutcomesByKey.has(key)) continue; // already marked failed above (its own safety-tmp write failed)
-    const unionEntry = byRepoKey.get(key);
+    let unionEntry = byRepoKey.get(key);
     if (!unionEntry) continue; // defensive — every key here was armed into byRepoKey above
+    // @decision 9c3b023a — strip every `sources` member from the LIVE union's own `orphanLatchFiles`
+    // here, caller-side, never relying on `bootWriteLatch`'s own `dropped` param alone — that param is a
+    // no-op on an UNMARKED key. See the decision record for the dangling-ref repro this closes.
+    if (unionEntry.orphanLatchFiles?.some((f) => sources.includes(f))) {
+      const stripped = { ...unionEntry, orphanLatchFiles: unionEntry.orphanLatchFiles.filter((f) => !sources.includes(f)) };
+      replaceEntryEverywhere(byRepoKey, unionEntry, stripped);
+      unionEntry = stripped;
+    }
     // @decision 4e987303 (round 3, M1) — the PASS1-migrate read loop already stripped EVERY one of
     // `sources` from this entry's own `orphanLatchFiles` (a6fa60e2) — drop them here too, or a marked
     // key's own disk union resurrects a dangling self-reference to a file this pass is about to delete.
