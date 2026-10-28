@@ -35,6 +35,15 @@ import { cleanupPathSync } from "./_tmp-fixture.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// Hoisted ahead of PART 1 (which doesn't itself need LOOM_HOME — it passes an explicit per-call dbFile
+// throughout) because PART 1's own dynamic dist import right below would otherwise freeze paths.ts's
+// consts BEFORE PART 2 re-points LOOM_HOME later in the file.
+// @decision 0ee30648 — every dist import in this file must see a non-default LOOM_HOME from the start.
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rlevents-gw-${Date.now()}-${process.pid}`);
+fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+const { requireHermeticEnv } = await import("./_guard.mjs");
+requireHermeticEnv();
+
 // ============================ PART 1 — RateLimitWatcher (hermetic) ============================
 {
   const { Db } = await import("../dist/db.js");
@@ -129,11 +138,6 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // ============================ PART 2 — per-session manual clear route ============================
 {
-  process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rlevents-gw-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
-  const { requireHermeticEnv } = await import("./_guard.mjs");
-  requireHermeticEnv();
-
   const { Db } = await import("../dist/db.js");
   const { buildServer } = await import("../dist/gateway/server.js");
   const { recordClaudeRateLimit, readClaudeUsageState } = await import("../dist/orchestration/usage-awareness.js");

@@ -137,6 +137,54 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Windows paths are case-insensitive, so a differently-cased path must not defeat a comparison against
+// it — path.resolve() does NOT normalize case. Shared with `_guard.mjs` (which imports this rather than
+// keeping its own copy) so the two files' path comparisons can never silently diverge.
+export function normalizeForCompare(p) {
+  return process.platform === "win32" ? p.toLowerCase() : p;
+}
+
+const REAL_LOOM_HOME_DEFAULT = path.resolve(path.join(os.homedir(), ".loom"));
+const REAL_PORT_DEFAULT = 4317;
+
+/**
+ * The runtime half of the paths.ts import-ordering assert: `dist/paths.js` stashes a snapshot of its
+ * own frozen LOOM_HOME/PORT consts on `globalThis` the moment it is first imported (see paths.ts's own
+ * comment). FAILS only when that snapshot shows the REAL, unoverridden default (`~/.loom`) while the
+ * live env has SINCE been re-pointed elsewhere — i.e. dist was imported before this process ever set
+ * LOOM_HOME, so every paths.ts-derived constant in this process is silently still aimed at the real home
+ * no matter what the env says now. A harness-preset env (snapshot already a temp dir) and a
+ * `useOwnLoomHome({fresh:true})` nested subdir (same — snapshot already non-default) both PASS by
+ * construction.
+ *
+ * @decision 0ee30648 — keyed on "frozen IS the real default," never strict/ancestor equality against
+ * the current value; see the decision record for why those alternatives false-positive.
+ * @returns {{frozen: string, current: string} | null} the mismatch, or null when safe/not applicable.
+ */
+export function loomHomeImportOrderingViolation() {
+  const snapshot = globalThis.__LOOM_PATHS_IMPORT_SNAPSHOT__;
+  if (!snapshot) return null; // dist/paths.js was never imported in this process
+  const frozen = path.resolve(snapshot.loomHome);
+  if (normalizeForCompare(frozen) !== normalizeForCompare(REAL_LOOM_HOME_DEFAULT)) return null; // already isolated at import time
+  const current = process.env.LOOM_HOME;
+  if (!current) return null; // still unset — not a re-point (stays on the real default either way)
+  const resolvedCurrent = path.resolve(current);
+  if (normalizeForCompare(resolvedCurrent) === normalizeForCompare(REAL_LOOM_HOME_DEFAULT)) return null; // genuinely still the real home
+  return { frozen, current: resolvedCurrent };
+}
+
+/** The PORT twin of {@link loomHomeImportOrderingViolation} — see its doc for the shared rule. */
+export function portImportOrderingViolation() {
+  const snapshot = globalThis.__LOOM_PATHS_IMPORT_SNAPSHOT__;
+  if (!snapshot) return null;
+  if (snapshot.port !== REAL_PORT_DEFAULT) return null;
+  const current = process.env.LOOM_PORT;
+  if (!current) return null;
+  const resolvedCurrent = Number(current);
+  if (resolvedCurrent === REAL_PORT_DEFAULT) return null;
+  return { frozen: snapshot.port, current: resolvedCurrent };
+}
+
 const registry = new Set();
 let hooksInstalled = false;
 const MAX_ATTEMPTS = 5;
@@ -289,6 +337,19 @@ export function useOwnLoomHome(prefix, opts = {}) {
     process.env.LOOM_HOME = mkdtempManaged(prefix);
   } else if (opts.fresh) {
     process.env.LOOM_HOME = mkdtempManagedIn(process.env.LOOM_HOME, prefix);
+  }
+  // @decision 0ee30648 — if dist/paths.js was already imported with the REAL default LOOM_HOME before
+  // this call ran, the re-point above is too late: every paths.ts-derived const in this process is
+  // already frozen at the real home. See loomHomeImportOrderingViolation's own doc for the exact rule.
+  const violation = loomHomeImportOrderingViolation();
+  if (violation) {
+    throw new Error(
+      `🛑 useOwnLoomHome(): dist/paths.js was imported while LOOM_HOME was still the real default ` +
+        `(${violation.frozen}), BEFORE this call re-pointed it to ${violation.current} — every ` +
+        `paths.ts-derived const (DB_PATH, WORKTREES_DIR, PORT, ...) in this process is frozen at the ` +
+        `real value regardless. Fix: set process.env.LOOM_HOME (or call useOwnLoomHome()) BEFORE the ` +
+        `first import of anything under ../dist.`,
+    );
   }
   return process.env.LOOM_HOME;
 }

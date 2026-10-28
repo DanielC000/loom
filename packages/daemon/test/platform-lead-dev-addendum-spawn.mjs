@@ -47,6 +47,21 @@ function countOccurrences(haystack, needle) {
   return count;
 }
 
+// Hoisted out of section (d)'s own block (which used to set this LATER): section (a)-(c)'s own
+// pure-compose import right below doesn't touch LOOM_HOME itself, but still freezes paths.ts's frozen
+// consts the moment it imports dist/sessions/platform-lead-prompt.js.
+// @decision 0ee30648 — every dist import in this file must see a non-default LOOM_HOME from the start.
+const tmpHome = path.join(os.tmpdir(), `loom-lead-addendum-spawn-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
+process.env.LOOM_HOME = tmpHome;
+const sandboxHome = path.join(tmpHome, "home");
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome;
+process.env.HOME = sandboxHome;
+
+const { requireHermeticEnv } = await import("./_guard.mjs");
+requireHermeticEnv();
+
 // ===================== (a)-(c): the PURE compose function, called directly =====================
 {
   const { composePlatformLeadStartupPrompt, PLATFORM_LEAD_PROMPT_DEV_ADDENDUM } =
@@ -111,17 +126,7 @@ function countOccurrences(haystack, needle) {
 // Proves the ACTUAL spawned startup text (not just the pure compose function) carries the addendum
 // exactly once under LOOM_DEV=1, and never under LOOM_DEV unset — for both a FRESH spawn and a RECYCLE.
 {
-  const tmpHome = path.join(os.tmpdir(), `loom-lead-addendum-spawn-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}`);
-  fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
-  process.env.LOOM_HOME = tmpHome;
-  const sandboxHome = path.join(tmpHome, "home");
-  fs.mkdirSync(sandboxHome, { recursive: true });
-  process.env.USERPROFILE = sandboxHome;
-  process.env.HOME = sandboxHome;
   delete process.env.LOOM_DEV; // phase 1 below needs the default-unset state; each phase sets it explicitly
-
-  const { requireHermeticEnv } = await import("./_guard.mjs");
-  requireHermeticEnv();
   const { commitAll } = await import("./_git-commit.mjs");
 
   const { Db } = await import("../dist/db.js");

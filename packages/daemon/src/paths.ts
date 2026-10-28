@@ -478,6 +478,16 @@ export function readCodescapePromptBlockAsset(assetPath: string): { text: string
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
 /**
+ * A snapshot of the two frozen consts above, AS RESOLVED AT THIS MODULE'S FIRST IMPORT — the test-only
+ * runtime assert (test/_guard.mjs, test/_tmp-fixture.mjs) reads this to catch a test that imported
+ * `dist/` before setting LOOM_HOME/LOOM_PORT. Zero-cost and inert in production.
+ *
+ * @decision 0ee30648 — test-only infrastructure; never read this global from production code.
+ */
+(globalThis as { __LOOM_PATHS_IMPORT_SNAPSHOT__?: { loomHome: string; port: number } }).__LOOM_PATHS_IMPORT_SNAPSHOT__ =
+  { loomHome: LOOM_HOME, port: PORT };
+
+/**
  * The Loom SOURCE repo root — the checkout whose code the DEV Platform Auditor reads for code-awareness
  * (its least-privilege, read-only repo tools confine EVERY read to this tree — see mcp/repo-read.ts).
  * Resolved from the built daemon's own location: `dist/paths.js` lives at `<repo>/packages/daemon/dist`,

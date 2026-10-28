@@ -16,10 +16,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import Database from "better-sqlite3";
-import { Db } from "../dist/db.js";
-import { Scheduler } from "../dist/orchestration/scheduler.js";
-import { OrchestrationControl } from "../dist/orchestration/control.js";
-import { nextFireAt } from "../dist/orchestration/cron.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
@@ -32,6 +28,12 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-scheduler-${Date.now()}-${p
 process.env.LOOM_PORT = String(PORT);
 const LOOM = process.env.LOOM_HOME;
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
+// @decision 0ee30648 — dynamic, AFTER requireHermeticEnv() above (never a static top-level import,
+// which would be hoisted ahead of the env setup on this same line's own frozen-const ordering).
+const { Db } = await import("../dist/db.js");
+const { Scheduler } = await import("../dist/orchestration/scheduler.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { nextFireAt } = await import("../dist/orchestration/cron.js");
 const DB_FILE = path.join(LOOM, "loom.db");
 // gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — set once PART
 // 2 boots its own daemon (below); post()'s callers all run after that point.

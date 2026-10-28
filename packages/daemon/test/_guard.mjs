@@ -30,7 +30,12 @@
 import os from "node:os";
 import path from "node:path";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import {
+  cleanupPathSync,
+  normalizeForCompare,
+  loomHomeImportOrderingViolation,
+  portImportOrderingViolation,
+} from "./_tmp-fixture.mjs";
 import { ambientScaledBudget } from "./_wait.mjs";
 
 // @decision 8c8ee0ee — STRUCTURAL test-spawn registry for pty/host.ts's real-reaper test tripwire
@@ -435,14 +440,6 @@ function wrapSpawnLikeForTestRegistry(moduleExports, name, captureCreationTime =
 const REAL_LOOM_HOME = path.resolve(path.join(os.homedir(), ".loom"));
 const OS_TMPDIR = path.resolve(os.tmpdir());
 
-// Windows paths are case-insensitive, so a differently-cased LOOM_HOME (`c:\users\danie\.loom` vs the
-// canonical `C:\Users\danie\.loom`) must not defeat a comparison against it — path.resolve() does NOT
-// normalize case. Both comparisons below (the real-home exclusion and the tmpdir-scoped proof) go
-// through this (card 49c50b80 DoD-2).
-function normalizeForCompare(p) {
-  return process.platform === "win32" ? p.toLowerCase() : p;
-}
-
 // Card 49c50b80: a LOOM_HOME this hook may safely clean up (i.e. whose `-worktrees` sibling it deletes)
 // MUST be a genuine, strict subdirectory of the OS temp dir — that is the structural proof it's a
 // throwaway home a TEST created (`fs.mkdtempSync(path.join(os.tmpdir(), ...))`, the shape every test in
@@ -616,6 +613,20 @@ export function requireHermeticEnv({ port = false } = {}) {
   else if (path.resolve(home) === REAL_LOOM_HOME)
     problems.push(`LOOM_HOME resolves to the real ~/.loom (${path.resolve(home)})`);
 
+  // @decision 0ee30648 — dist/paths.js may have already been imported (and its LOOM_HOME/PORT consts
+  // frozen) BEFORE this test ever set the env above; a current value that merely LOOKS isolated doesn't
+  // prove the already-loaded module saw it. See loomHomeImportOrderingViolation's own doc for the rule.
+  const homeOrderingViolation = loomHomeImportOrderingViolation();
+  if (homeOrderingViolation) {
+    problems.push(
+      `dist/paths.js was imported while LOOM_HOME was still the real default ` +
+        `(${homeOrderingViolation.frozen}), BEFORE this process re-pointed it to ` +
+        `${homeOrderingViolation.current} — every paths.ts-derived const in this process is frozen at ` +
+        `the real value regardless. Fix: set LOOM_HOME (or call useOwnLoomHome()) BEFORE the first ` +
+        `import of anything under ../dist.`,
+    );
+  }
+
   // Card 5eace211 (Code Review, CRITICAL) — `LOOM_PROJECT_WORK_ROOT` is a human-set override pointing at
   // the REAL shared root every project's caches/build output live under (Decision 2). Unset is always
   // fine (paths.ts derives a sibling of the temp LOOM_HOME instead).
@@ -654,6 +665,17 @@ export function requireHermeticEnv({ port = false } = {}) {
     const p = process.env.LOOM_PORT;
     if (!p) problems.push("LOOM_PORT is unset (would default to the prod daemon on 4317)");
     else if (Number(p) === PROD_PORT) problems.push("LOOM_PORT == 4317 (the prod daemon)");
+
+    // @decision 0ee30648 — the PORT twin of the LOOM_HOME ordering check above.
+    const portOrderingViolation = portImportOrderingViolation();
+    if (portOrderingViolation) {
+      problems.push(
+        `dist/paths.js was imported while LOOM_PORT was still the real default ` +
+          `(${portOrderingViolation.frozen}), BEFORE this process re-pointed it to ` +
+          `${portOrderingViolation.current} — PORT in this process is frozen at the real value ` +
+          `regardless. Fix: set LOOM_PORT BEFORE the first import of anything under ../dist.`,
+      );
+    }
   }
 
   if (problems.length) {
