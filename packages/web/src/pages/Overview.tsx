@@ -1,7 +1,7 @@
 import { useState, useMemo, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
+import type { Agent, SessionListItem, OrchestrationEvent, SessionRole } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -18,7 +18,8 @@ import { useSessionQueuesBulk, useSessionWakesBulk, useInvalidateSessionQueueWak
 import { SessionActions } from "../components/SessionActions";
 import { SpawnControls } from "../components/SpawnControls";
 import { DiffView } from "../components/Diff";
-import { Panel, Button, SectionLabel, StatusPill, Badge, Chip, Meter } from "../components/ui";
+import { Panel, Button, SectionLabel, StatusPill, Badge, Meter } from "../components/ui";
+import { ProjectSchedules } from "../components/projectSchedules";
 import {
   Stat, FleetCard, FleetRow, AttentionRow, EventRow, fleetRollup, worstContext,
 } from "../components/fleet";
@@ -619,49 +620,6 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
           queueData={queues.data?.[s.id] ?? []} wakesData={wakes.data?.[s.id] ?? []}
           onQueueMutated={invalidateQueues} onWakeCancelled={invalidateWakes} />
       ))}
-    </div>
-  );
-}
-
-// The project's cron schedules — every Schedule whose agent belongs to this project (agent→project),
-// read-only here (create/enable/delete live on the Automation page, Time tab). Reuses GET /api/schedules.
-// Owns its OWN section chrome: with schedules, the full SectionLabel + Panel; with NONE, a single muted
-// pointer line (no heading, no Panel box) so an empty project doesn't spend a whole section on "add one".
-function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string>; agentName: (id: string) => string }) {
-  const navigate = useNavigate();
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
-  const mine = (schedules.data ?? []).filter((s) => agentIds.has(s.agentId));
-  if (mine.length === 0) {
-    return (
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
-        <span style={{ textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Schedules</span>
-        <span>· none —</span>
-        <button onClick={() => navigate("/automation")} title="Create a schedule on the Automation page"
-          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.cyan, fontFamily: font.mono, fontSize: 11 }}>
-          add one on the Automation page →
-        </button>
-      </div>
-    );
-  }
-  return (
-    <section>
-      <SectionLabel>Schedules</SectionLabel>
-      <Panel style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {mine.map((s) => <ScheduleRow key={s.id} s={s} agentName={agentName(s.agentId)} />)}
-      </Panel>
-    </section>
-  );
-}
-
-function ScheduleRow({ s, agentName }: { s: Schedule; agentName: string }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim,
-      border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 8px" }}>
-      <span style={{ color: color.cyan }}>{s.cron}</span>
-      <Chip label="agent" value={agentName} />
-      <span style={{ fontSize: 10, color: s.kind === "auditor" ? color.phosphor : color.amber }}>kind:{s.kind}</span>
-      <span style={{ flex: 1 }}>next · {s.nextFireAt ? new Date(s.nextFireAt).toLocaleString() : "—"}</span>
-      <span style={{ fontSize: 9, color: s.enabled ? color.phosphor : color.textMuted }}>{s.enabled ? "ON" : "OFF"}</span>
     </div>
   );
 }

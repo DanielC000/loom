@@ -6,7 +6,8 @@ import { useAtlasNodeHeadSlot } from "../lib/atlasNodeHead";
 import { plural } from "../lib/atlasHome";
 import { harnessOf } from "../lib/harnessFields";
 import { sessionNodeTabHref, sessionNodeTabsFor, type SessionNodeTab } from "../lib/sessionNodeTabs";
-import { useStopSession, useForkSession } from "../lib/useSessionActions";
+import { useStopSession, useForkSession, useEndSession } from "../lib/useSessionActions";
+import { EndSessionButton, canEndSession } from "./SessionActions";
 import { HeadPill } from "./atlasHome";
 import { TerminalCard, type TerminalTabs } from "./TerminalCard";
 import { ReviewSurface } from "./ReviewSurface";
@@ -145,6 +146,7 @@ export function SessionNode({ session, tab = "terminal" }: {
   const headerSlot = useAtlasNodeHeadSlot();
   const stop = useStopSession();
   const fork = useForkSession();
+  const end = useEndSession();
 
   // ONE declaration of the role→tab-set rule, shared with the frame's crumb trail
   // (lib/sessionNodeTabs.ts). Asking the list which tabs this role gets — rather than re-spelling the
@@ -172,6 +174,21 @@ export function SessionNode({ session, tab = "terminal" }: {
   // result banner and the request-changes note are all still meaningful once the worker is gone.
   const liveish = isLiveish(session);
 
+  // END SESSION (card 102bc915) — the one action that had no Atlas home before this card. Its only
+  // mount was the classic Overview's fleet accordion, so retiring /overview took it out of the product
+  // entirely; Fork, Stop, Resume and Clear-rate-limit each already had a tab. It rides the base's
+  // EXISTING `actionsExtra` slot (Terminals.tsx's kill cluster is its other user), so TerminalCard is
+  // untouched, and it renders the SHARED button under the SHARED predicate — never a second copy of
+  // "live and not a worker" (canEndSession carries that anchor). `undefined` rather than a hidden
+  // button, so a worker's node and an ended session's node render byte-identically to before.
+  //
+  // `canEndSession`, not `liveish`: the two differ on purpose. `liveish` admits `starting`, which is
+  // right for Stop and the composer and wrong here — a session still booting has no turn to wrap up.
+  const endAction = canEndSession(session)
+    ? <EndSessionButton s={session} onEnd={() => end.mutate(session.id)} ending={end.isPending}
+        style={{ padding: "0 8px" }} />
+    : undefined;
+
   return (
     <TerminalCard
       session={session}
@@ -182,6 +199,7 @@ export function SessionNode({ session, tab = "terminal" }: {
       lifecycle={liveish ? "stop" : "none"}
       onStop={() => stop.mutate(session.id)}
       stopPending={stop.isPending}
+      actionsExtra={endAction}
       readOnly={!liveish}
       maximizable
       showProject={false}

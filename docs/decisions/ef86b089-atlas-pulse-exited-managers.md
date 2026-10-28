@@ -67,3 +67,20 @@ Three things that table says, which the prose above only claims:
 - **Do not key the cap on anything but recency.** It is `lastActivity` DESC, so the rows it keeps are the ones a reader is plausibly looking for. A cap that kept an arbitrary 8 would bound the cost just as well and be useless.
 - **Do not give the band an `action` or an expand control as part of widening it.** `5afd71bd`'s own prohibition still holds (this band is the deepest cross-project view of that stream), and the band's visuals are under a pending owner mockup review.
 - **Do not change `pages/MissionControl.tsx`.** It is the CLASSIC shell's page, where this gap never existed, and its behaviour under the switch OFF is the condition the retirement's owner sign-off was given under.
+
+---
+
+## Extended to the PROJECT node by card `102bc915` (2026-10-28)
+
+This card closed the gap on the WORKSPACE node and left it open one tier down. `pages/ProjectHome.tsx`'s Pulse band fed off `liveManagers` alone, so **an exited-but-unarchived manager's events were reachable nowhere on the project tier** — the same defect, the same shape, in the file next door. It survived because this card's own scope was the cross-project band: nothing here was wrong, it just was not applied twice.
+
+It mattered more than it looks. Classic `/overview` reads every NON-archived manager, so it showed those rows all along — meaning the gap was invisible until `/overview` retires (card `3449fb54`), at which point the project tier would have lost a whole CLASS of manager silently. That is strictly worse than the older-events loss a cap causes, and it is why card `102bc915` built this half whether or not it raised the project Pulse's own cap.
+
+The fix is this card's own mechanism, reused verbatim — `pulseExitedManagers` / `PULSE_EXITED_REFETCH_MS` / `PULSE_EXITED_MANAGER_CAP`, same two tiers, same `["orchEvents", id]` keys, so a manager crossing between tiers keeps its cache entry. The only difference is the INPUT: `ProjectHome` feeds the helper its already project-filtered session list, so the recency cap applies WITHIN one project rather than across the fleet. Nothing in the policy above was loosened, and the prohibitions in this record's own `Do not` list bind that mount exactly as they bind this one.
+
+Witness: `packages/web/e2e/atlas-project-parity.spec.ts`'s Pulse legs — an exited-but-unarchived manager's event rendering in the project node's band, with classic `/overview` as the positive control, and both measured RED against the pre-card build. This record's own spec (`atlas-pulse-exited-managers.spec.ts`) is unchanged and still green: the two nodes are asserted separately, deliberately, because they feed the SAME helper from DIFFERENT session sets and a shared loop would stop checking either for what it actually is.
+
+### Do not (in addition to this record's own list above)
+
+- **Do not fold the two nodes' pulse derivations into one shared hook** to remove the duplication. They differ in the input set (cross-project versus project-filtered), which is the part that decides what the cap means on each; a shared wrapper would hide exactly that.
+- **Do not re-scope `pulseExitedManagers` itself to a project.** It takes the session list it is handed. Filtering is the caller's job, and is what lets one helper serve both tiers.

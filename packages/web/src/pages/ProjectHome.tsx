@@ -5,7 +5,9 @@ import { contextWindowForModel, resolveConfig, type OrchestrationEvent, type Ses
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
-import { attentionItemInProject } from "../lib/fleet";
+import {
+  GLOBAL_ACTIVITY_CAP, PULSE_EXITED_REFETCH_MS, attentionItemInProject, pulseExitedManagers,
+} from "../lib/fleet";
 import { bySessionActivity, byCreatedStable } from "../lib/sessions";
 import { EventRow, FleetRow, worstContext } from "../components/fleet";
 import { HarnessMixProvider } from "../components/HarnessPicker";
@@ -163,8 +165,26 @@ export default function ProjectHome() {
   // the KPI sub-line and the rows in the panel can never disagree about who is spawnable.
   const roster = splitRoster(agentsQ.data, profilesQ.data, sessionsQ.data);
 
+  // The project's pulse, TWO TIERS — card 102bc915 extending card ef86b089 from the workspace node to
+  // this one. This fed off `liveManagers` alone, so an exited-but-unarchived manager's stream was
+  // reachable NOWHERE on the project tier: the classic Overview reads every non-archived manager, so
+  // retiring it would have dropped a whole class of manager rather than merely older events. That is
+  // the SAME gap ef86b089 found and closed one tier up, and this is the same fix, not a second one.
+  //
+  // `all` is already project-filtered, so the helper's own recency cap applies WITHIN this project.
+  // The cap and the 60s interval are both load-bearing and are ef86b089's to set — read
+  // `pulseExitedManagers` (lib/fleet.ts) for the policy; never fold this tier onto the live tier's 3s
+  // interval and never drop its cap. Same `["orchEvents", id]` keys as the live tier, so a manager
+  // crossing between them keeps its cache entry and only changes how often it is refetched.
+  const exitedManagers = useMemo(() => pulseExitedManagers(all), [all]);
   const eventQs = useQueries({
-    queries: liveManagers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
+    queries: [
+      ...liveManagers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
+      ...exitedManagers.map((m) => ({
+        queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id),
+        refetchInterval: PULSE_EXITED_REFETCH_MS,
+      })),
+    ],
   });
   const events = eventQs
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
@@ -259,8 +279,12 @@ export default function ProjectHome() {
     </BandPanel>
   );
   const gatePanel = (
-    // "Gates", not "Gates & throughput": a band column is ~250px, and the longer label wraps inside
-    // its own head. The sparkline below carries its own caption, so nothing is lost by the shorter name.
+    // "Gates", not "Gates & throughput": this column is NARROW and the longer label wraps inside its
+    // own head. The sparkline below carries its own caption, so the shorter name loses nothing.
+    // MEASURED at 1440 (card 102bc915): the band's five tracks are 283.9 / 244.7 / 195.8 / 195.8 /
+    // 195.8 px, so Gates is 195.8 — not the "~250px" this comment used to claim, which was taken at
+    // 1600. Re-measure at the width you care about before sizing anything to it; the tracks are a
+    // fixed fr template, so every one of them is a function of the content column.
     <BandPanel label="Gates" count={`cap ${lanes.cap}`} action={{ to: "/gates", label: "All" }} testId="atlas-band-gates">
       <GateLaneList lanes={lanes} />
       <div style={{ marginTop: 10 }}>
@@ -272,7 +296,13 @@ export default function ProjectHome() {
   const pulsePanel = (
     <BandPanel label="Pulse" count="last 24h" action={{ to: "/runs", label: "Runs" }} testId="atlas-band-pulse">
       {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}
-      {events.slice(0, 40).map((e) => <EventRow key={e.id} e={e} />)}
+      {/* `GLOBAL_ACTIVITY_CAP` (lib/fleet.ts) — the SAME constant the classic Overview's Activity
+          section, Mission Control's Activity column and the workspace node's own Pulse all read, so
+          the four cannot disagree about how deep "recent activity" goes. It was a local 40 here.
+          MEASURED at 1440 before raising it: this panel is a fixed 320px box with its own scrolling
+          body, so going 6 → 100 rows moved the band height, the board's top, the board's width and
+          the document height by exactly 0px. The cap buys depth, never page space. */}
+      {events.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} />)}
     </BandPanel>
   );
 

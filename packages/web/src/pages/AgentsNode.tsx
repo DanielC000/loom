@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useActiveProject } from "../lib/activeProject";
 import { useAgentRoster } from "../lib/atlasAgents";
 import { AgentEditDialog, AgentRosterCard, RosterEmpty, SpawnTermRow, WorkersDispatchedNote } from "../components/atlasAgents";
+import { ProjectSchedules } from "../components/projectSchedules";
 import { Badge, Button, Panel, SectionLabel, StatusPill } from "../components/ui";
 import { RoleBadge } from "../lib/roleDisplay";
 import { plural } from "../lib/atlasHome";
@@ -32,6 +33,10 @@ export default function AgentsNode() {
   // `null` = closed; `{ agentId: null }` = the create form; `{ agentId: "…" }` = that agent's editor.
   // A wrapper object rather than a bare `string | null`, because `null` has to mean two things.
   const [editing, setEditing] = useState<{ agentId: string | null } | null>(null);
+  // Every agent in this project, spawnable rigs and worker rigs alike — what the Schedules panel
+  // below filters the god-eye schedule list down to. Declared ABOVE the `!projectId` early return
+  // with the other hooks' results, so both render paths read the same roster.
+  const scheduleAgents = [...roster.spawnable, ...roster.workers].map((entry) => entry.agent);
 
   if (!projectId) {
     return (
@@ -92,6 +97,22 @@ export default function AgentsNode() {
         <WorkerRigs roster={roster} onEdit={(id) => setEditing({ agentId: id })} />
         <WhatASpawnDoes />
       </div>
+
+      {/* This project's cron schedules (card 102bc915) — the one surface classic /overview carried
+          that no Atlas project-node tab did. It lands HERE rather than in a band panel or a tab of
+          its own for two reasons. A Schedule is keyed to an AGENT (`s.agentId`), so this node is
+          already the surface that owns the things it is about; and the band is a FIXED five-column
+          grid whose tracks measure 283.9 / 244.7 / 195.8 / 195.8 / 195.8 px at 1440 — a sixth panel
+          is not additive, it shrinks all five (to 239.3 / 206.3 / 165.1 ×3, measured). So the home
+          tab is untouched and nothing the owner sees there moves.
+
+          The id set is the roster union, NOT a second api.agents read: `useAgentRoster` partitions
+          every one of this project's agents into exactly these two lists, so the union IS the set
+          Overview builds from `agents.data` — same membership, no extra request, and it cannot drift
+          from the roster rendered directly above it. */}
+      <ProjectSchedules
+        agentIds={new Set(scheduleAgents.map((a) => a.id))}
+        agentName={(id) => scheduleAgents.find((a) => a.id === id)?.name ?? id.slice(0, 8)} />
 
       {editing && (
         <AgentEditDialog projectId={projectId} agentId={editing.agentId} onClose={() => setEditing(null)} />

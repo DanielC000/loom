@@ -597,9 +597,12 @@ export function BandPanel({ label, count, action, children, style, testId }: {
   return (
     <Panel data-testid={testId} className="loom-bandpanel" style={style}>
       <div className="loom-bandhead">
-        {/* nowrap on both: a band column is ~250px wide, and a label allowed to wrap inside the head
-            pushes the row to two lines for a reason the reader cannot see. Keep the LABEL short
-            instead — the head wrapping is the safety net, not the plan. */}
+        {/* nowrap on both: a band column is NARROW — MEASURED at 1440, the five tracks are 283.9 /
+            244.7 / 195.8 / 195.8 / 195.8 px (card 102bc915), so three of the five are under 200px.
+            This comment used to say "~250px", a figure taken at 1600; don't size anything to a
+            remembered number, re-measure at the width you care about. A label allowed to wrap inside
+            the head pushes the row to two lines for a reason the reader cannot see. Keep the LABEL
+            short instead — the head wrapping is the safety net, not the plan. */}
         <SectionLabel style={{ margin: 0, whiteSpace: "nowrap" }}>{label}</SectionLabel>
         {count !== undefined && <span className="loom-bandcount">{count}</span>}
         <span style={{ flex: 1 }} />

@@ -157,22 +157,37 @@ check("replayRoots puts LIVE managers first, then archived ones, de-duped with t
   assert.deepEqual(live.map((m) => m.id), ["exited-recent", "live-old", "live-new"], "the live input is not sorted in place");
 });
 
-check("GLOBAL_ACTIVITY_CAP is ONE number, and both cross-project feeds read it instead of a literal", () => {
-  assert.equal(GLOBAL_ACTIVITY_CAP, 100, "the cross-project activity feed renders 100 rows");
-  // The anti-drift half, and the whole point of the constant: the two surfaces that render this feed must
-  // REFERENCE it. A literal in either file is the 40-vs-100 split this card closed, reopening itself.
-  for (const rel of ["../src/pages/MissionControl.tsx", "../src/pages/WorkspaceHome.tsx"]) {
+check("GLOBAL_ACTIVITY_CAP is ONE number, and every activity feed reads it instead of a literal", () => {
+  assert.equal(GLOBAL_ACTIVITY_CAP, 100, "the activity feed renders 100 rows");
+  // The anti-drift half, and the whole point of the constant: every surface that renders this feed must
+  // REFERENCE it. A literal in any of them is the 40-vs-100 split this card closed, reopening itself.
+  //
+  // ProjectHome joined this list in card 102bc915. Its pulse used to keep its own literal 40 — which is
+  // exactly the split, living on at the project tier — and classic /overview's own 100 was the parity
+  // the Atlas node was missing. Both now read the constant, so there are no two numbers left to drift.
+  const CAPPED_FEEDS = [
+    "../src/pages/MissionControl.tsx",
+    "../src/pages/WorkspaceHome.tsx",
+    "../src/pages/ProjectHome.tsx",
+  ];
+  const HARDCODED_CAP = /slice\(0,\s*(?:40|100)\)/;
+  for (const rel of CAPPED_FEEDS) {
     const src = readFileSync(new URL(rel, import.meta.url), "utf8");
     assert.ok(src.includes("slice(0, GLOBAL_ACTIVITY_CAP)"),
-      `${rel} must slice its cross-project activity feed with GLOBAL_ACTIVITY_CAP, not a literal`);
-    assert.ok(!/slice\(0,\s*(?:40|100)\)/.test(src),
+      `${rel} must slice its activity feed with GLOBAL_ACTIVITY_CAP, not a literal`);
+    assert.ok(!HARDCODED_CAP.test(src),
       `${rel} still caps a feed with a hardcoded 40/100 — that is the drift this constant exists to stop`);
   }
-  // POSITIVE CONTROL on that second, ABSENCE-shaped assertion: the pattern must be shown capable of
-  // matching, or two zero-hits prove nothing. The project-scoped pulse keeps its own literal by design.
-  const projectHome = readFileSync(new URL("../src/pages/ProjectHome.tsx", import.meta.url), "utf8");
-  assert.ok(/slice\(0,\s*40\)/.test(projectHome),
-    "positive control: the hardcoded-cap pattern matches nothing anywhere, so the absences above are vacuous");
+  // POSITIVE CONTROL on those ABSENCE-shaped assertions: the pattern must be shown capable of matching,
+  // or N zero-hits prove nothing. Asserted against a SYNTHETIC sample rather than some real file that
+  // happens to still carry a literal — which is what it used to be (ProjectHome's own 40), and it went
+  // vacuous the moment card 102bc915 fixed that file. A control that lives on a real file's defect dies
+  // when the defect is fixed, i.e. exactly when the suite still needs it.
+  for (const sample of ["events.slice(0, 40)", "events.slice(0,100)", "x.slice(0,  40)"]) {
+    assert.ok(HARDCODED_CAP.test(sample), `positive control: the pattern must match ${sample}`);
+  }
+  assert.ok(!HARDCODED_CAP.test("events.slice(0, GLOBAL_ACTIVITY_CAP)"),
+    "negative control: the pattern must NOT match the constant-referencing form it exists to allow");
 });
 
 // ── The Pulse band's EXITED manager tier (card ef86b089) ──────────────────────────────────────────────
