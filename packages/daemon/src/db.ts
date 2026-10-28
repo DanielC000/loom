@@ -1852,6 +1852,46 @@ const MERGE_RECONCILE_WEDGED_KEY = "merge_reconcile_wedged";
 const STALE_GENERATION_UNRESOLVED_KEY = "stale_generation_merge_unresolved";
 
 /**
+ * app_meta key, ONE marker per (project, repoKey) — same colon-joined-prefix convention as
+ * {@link mainlineWatermarkKey}/`MAINLINE_BOOT_ALERT_PREFIX` (git/mainline-watch.ts). Tracks boot-reconcile
+ * Pass A's own finalize-withholding condition (its stored mainline watermark is unreadable, or names a
+ * branch ref that no longer resolves — see `SessionService.reconcileOrchestrationOnBoot`).
+ * `recordWatermarkFinalizeSkip`/`clearWatermarkFinalizeSkip` are this key's only writers; `nudgedAt` is
+ * claimed via the same compare-and-set shape `SessionService.deliverPendingBootAlerts` uses for its own
+ * sibling marker.
+ *
+ * @decision 1d9674c9 — never reuse `MAINLINE_BOOT_ALERT_PREFIX`'s marker/text for this cause; never
+ * forget to purge this key alongside W wherever a mainline-watermark purge path runs (card c013e8a5's
+ * rule for every per-(project,repoKey) mainline-watch key).
+ */
+const WATERMARK_FINALIZE_SKIP_PREFIX = "watermark-finalize-skip:";
+const watermarkFinalizeSkipKey = (projectId: string, repoKey: string): string => `${WATERMARK_FINALIZE_SKIP_PREFIX}${projectId}:${repoKey}`;
+
+/** `cause` names which of Pass A's two fail-closed checks is withholding finalize for this (project,
+ *  repoKey); `branch` is present only for `"ref-unresolvable"` (the row parses fine but names a branch ref
+ *  that no longer resolves) — `"unreadable"` has no branch to name. */
+export interface WatermarkFinalizeSkipMarker {
+  cause: "unreadable" | "ref-unresolvable";
+  branch?: string;
+  detectedAt: string;
+  nudgedAt: string | null;
+}
+function parseWatermarkFinalizeSkipMarker(raw: string | undefined): WatermarkFinalizeSkipMarker | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<WatermarkFinalizeSkipMarker>;
+    if (v.cause !== "unreadable" && v.cause !== "ref-unresolvable") return null;
+    if (typeof v.detectedAt !== "string") return null;
+    return {
+      cause: v.cause,
+      ...(typeof v.branch === "string" ? { branch: v.branch } : {}),
+      detectedAt: v.detectedAt,
+      nudgedAt: typeof v.nudgedAt === "string" ? v.nudgedAt : null,
+    };
+  } catch { return null; }
+}
+
+/**
  * Project-memory eviction candidate order (card cf8d773f) — shared VERBATIM between
  * {@link Db.evictProjectMemoryOverCap} (which deletes from the front of this order) and
  * {@link Db.projectMemoryEvictionRank} (which reports a note's position in it) via this one constant, so
@@ -3959,6 +3999,11 @@ export class Db {
       // too (ancestry in the OLD repo), cleared UNCONDITIONALLY here, never gated on W/marker existing.
       this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?").run(id, repoKey);
       this.deleteMeta(goneBranchLedgerBoundaryKey(id, repoKey));
+      // Card 1d9674c9 — same UNCONDITIONAL posture as the two deletes just above, never gated behind the
+      // W/boot-alert-marker early-continue below: a rebind invalidates any pending finalize-withheld
+      // marker for the OLD (project, repoKey) too (the new path, if any, starts unmarked), and this marker
+      // can exist on its own with neither W nor a boot-alert marker present (e.g. a "read-failed" cause).
+      this.clearWatermarkFinalizeSkip(id, repoKey);
       const wKey = `mainline-watermark:${id}:${repoKey}`;
       const aKey = `mainline-boot-alerted:${id}:${repoKey}`;
       const rawMarker = this.getMeta(aKey);
@@ -4008,6 +4053,7 @@ export class Db {
     this.deleteMeta(aKey);
     this.deleteMeta(`${MAINLINE_DIVERT_EPISODE_PREFIX}${projectId}:${repoKey}`);
     this.deleteMeta(`${MAINLINE_DEFER_STREAK_PREFIX}${projectId}:${repoKey}`);
+    this.clearWatermarkFinalizeSkip(projectId, repoKey); // card 1d9674c9 — same purge-discipline rule
     return { hadAnything, previousWatermark, previousWatermarkRaw, unread };
   }
 
@@ -4478,6 +4524,7 @@ export class Db {
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`mainline-boot-alerted:${id}:%`); // card 05e7f246
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_DIVERT_EPISODE_PREFIX}${id}:%`); // card c013e8a5
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_DEFER_STREAK_PREFIX}${id}:%`); // card c013e8a5
+      this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${WATERMARK_FINALIZE_SKIP_PREFIX}${id}:%`); // card 1d9674c9
       // @decision 2a6a292a round 21 (card aa7677fa round 3) — mainline_landed_commits.project_id is a
       // REFERENCES projects(id) FK, enforced (better-sqlite3 defaults foreign_keys=ON): delete the rows
       // first or the final `DELETE FROM projects` below throws for any project that has ever landed.
@@ -5221,6 +5268,52 @@ export class Db {
     const after = before.filter((e) => e.sessionId !== sessionId);
     if (after.length === before.length) return; // wasn't tracked ⇒ nothing to clear
     this.setMeta(MERGE_RECONCILE_WEDGED_KEY, JSON.stringify(after));
+  }
+
+  // --- boot-reconcile Pass-A finalize-withheld-by-watermark tracking (card 1d9674c9; ONE app_meta row
+  // per (project, repoKey), not a JSON-array-of-entries like the two blocks above — see
+  // WATERMARK_FINALIZE_SKIP_PREFIX's own doc) ---
+  /**
+   * Record (or update) this (project, repoKey)'s finalize-withheld marker. Never resets an EXISTING
+   * marker's `detectedAt`/`nudgedAt` — only `cause`/`branch`, which may legitimately flip between boots
+   * (e.g. `"unreadable"` one boot, `"ref-unresolvable"` the next) without re-arming the one-shot nudge.
+   * `isNew` is true only the first time a marker is created since the last clear, so the caller can
+   * append its durable event exactly once per episode rather than once per boot.
+   */
+  recordWatermarkFinalizeSkip(
+    projectId: string, repoKey: string, cause: "unreadable" | "ref-unresolvable", branch?: string,
+  ): { marker: WatermarkFinalizeSkipMarker; isNew: boolean } {
+    const key = watermarkFinalizeSkipKey(projectId, repoKey);
+    const existing = parseWatermarkFinalizeSkipMarker(this.getMeta(key));
+    if (existing) {
+      if (existing.cause !== cause || existing.branch !== branch) {
+        const updated: WatermarkFinalizeSkipMarker = { ...existing, cause, ...(branch !== undefined ? { branch } : { branch: undefined }) };
+        this.setMeta(key, JSON.stringify(updated));
+        return { marker: updated, isNew: false };
+      }
+      return { marker: existing, isNew: false };
+    }
+    const fresh: WatermarkFinalizeSkipMarker = { cause, ...(branch !== undefined ? { branch } : {}), detectedAt: new Date().toISOString(), nudgedAt: null };
+    this.setMeta(key, JSON.stringify(fresh));
+    return { marker: fresh, isNew: true };
+  }
+  /** Clear this (project, repoKey)'s finalize-withheld marker — the re-arm. Called both when Pass A
+   *  resolves the pair OK again, and from every mainline-watermark purge path (card c013e8a5's rule).
+   *  A no-op when absent. */
+  clearWatermarkFinalizeSkip(projectId: string, repoKey: string): void {
+    this.deleteMeta(watermarkFinalizeSkipKey(projectId, repoKey));
+  }
+  /** Every pending (never-yet-nudged) finalize-withheld marker for a project — read by
+   *  {@link SessionService.deliverPendingWatermarkFinalizeSkipNotices}. */
+  listPendingWatermarkFinalizeSkips(projectId: string): Array<{ repoKey: string; key: string; raw: string; marker: WatermarkFinalizeSkipMarker }> {
+    const prefix = `${WATERMARK_FINALIZE_SKIP_PREFIX}${projectId}:`;
+    const out: Array<{ repoKey: string; key: string; raw: string; marker: WatermarkFinalizeSkipMarker }> = [];
+    for (const row of this.listMetaByPrefix(prefix)) {
+      const marker = parseWatermarkFinalizeSkipMarker(row.value);
+      if (!marker || marker.nudgedAt) continue;
+      out.push({ repoKey: row.key.slice(prefix.length), key: row.key, raw: row.value, marker });
+    }
+    return out;
   }
 
   // --- stale-generation own-landing-unresolved tracking (card 21b53e6a; app_meta JSON array, mirrors

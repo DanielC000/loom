@@ -24288,11 +24288,90 @@ export class SessionService {
   }
 
   /**
+   * Card 1d9674c9 — THE nudge text for a boot-reconcile finalize-withheld notice. Deliberately a SEPARATE
+   * function from `mainlineMovedNudgeText` (never reused for this cause, per this card's own manager
+   * ruling): this describes a finalize-withholding PRECONDITION Loom could not check, never a confirmed
+   * mainline-move tripwire — must not claim more than was observed.
+   */
+  // @decision 1d9674c9 — round 2: delivery can land on a LATER boot than detection — quote the marker's
+  // own `detectedAt` and say the observation may be stale; never add a re-check at delivery time.
+  private watermarkFinalizeWithheldNudgeText(a: { projectName: string; projectId: string; repoKey: string; cause: "unreadable" | "ref-unresolvable"; branch?: string; detectedAt: string }): string {
+    const causeText = a.cause === "unreadable"
+      ? "its stored mainline watermark record is unreadable (corrupt, or a database read failure)"
+      : `its stored mainline watermark names a branch ("${a.branch ?? "?"}") that no longer resolves (renamed or deleted)`;
+    return `[loom:watermark-finalize-withheld] project "${a.projectName}" repo "${a.repoKey}" — boot-reconcile could not verify at least one worker's landed merge, as of ${a.detectedAt}, because ${causeText}. That observation may be stale by the time you read this (delivery can happen on a later boot than detection). Loom deliberately never falls back to scanning a live HEAD for this, so the affected worker(s) stay unreconciled (worktree/branch/task left as-is) until it clears. This is a precondition Loom could not check, not a confirmed problem with any specific merge. ACTION for you (the manager): check out the correct mainline branch in the canonical repo FIRST, then ask the owner to reset this project's mainline baseline for repo "${a.repoKey}" via POST /api/projects/${a.projectId}/mainline-watermark/reset (loopback, human-only) — the reset adopts whatever is currently checked out, so the order matters. Loom retries this check every boot regardless; this notice fires once and will not repeat until the condition clears and recurs.`;
+  }
+
+  /**
+   * Record (or update) this (project, repoKey)'s finalize-withheld marker and, on first sight since the
+   * last clear, append the durable `watermark_finalize_withheld` event — then attempt delivery
+   * immediately in case a manager is already live (mirrors the boot-alert tripwire's own filing shape,
+   * card 05e7f246). Never throws into Pass A's hot loop.
+   */
+  private fileWatermarkFinalizeSkip(project: Project, repoKey: string, cause: "unreadable" | "ref-unresolvable", branch?: string): void {
+    try {
+      const { isNew } = this.db.recordWatermarkFinalizeSkip(project.id, repoKey, cause, branch);
+      if (isNew) {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "watermark_finalize_withheld",
+          detail: { projectId: project.id, repoKey, cause, ...(branch !== undefined ? { branch } : {}) },
+        });
+      }
+      this.deliverPendingWatermarkFinalizeSkipNotices(project.id);
+    } catch (err) {
+      console.warn(`[reconcile] watermark-finalize-skip bookkeeping failed (fail-open): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * THE reader of a boot-reconcile finalize-withheld notice (card 1d9674c9) — the project's live
+   * MANAGER(S), told once. Mirrors {@link deliverPendingBootAlerts}'s own shape (two callers: filing,
+   * right above, and {@link onOrchestrationMcpFirstSeen}) but a deliberately separate marker/text — never
+   * `MAINLINE_BOOT_ALERT_PREFIX`/`mainlineMovedNudgeText`, an unrelated cause. Delivery is claimed by an
+   * atomic compare-and-set on the marker (`nudgedAt` null -> now); only the caller that wins delivers, to
+   * every live manager. A project with no live manager is left un-nudged (marker keeps `nudgedAt:null`),
+   * so the next manager that resumes/spawns is the reader — a project that never has one stays event-only.
+   */
+  deliverPendingWatermarkFinalizeSkipNotices(projectId: string): number {
+    let delivered = 0;
+    try {
+      const managers = this.db.listLiveManagersInProject(projectId);
+      if (managers.length === 0) return 0;
+      const project = this.db.getProject(projectId);
+      if (!project) return 0;
+      for (const { repoKey, key, raw, marker } of this.db.listPendingWatermarkFinalizeSkips(projectId)) {
+        const claimed = JSON.stringify({ ...marker, nudgedAt: new Date().toISOString() });
+        if (!this.db.compareAndSetMeta(key, raw, claimed)) continue; // another path claimed it
+        const text = this.watermarkFinalizeWithheldNudgeText({ projectName: project.name, projectId, repoKey, cause: marker.cause, branch: marker.branch, detectedAt: marker.detectedAt });
+        try {
+          for (const m of managers) this.enqueueDurableMessage(m.id, text, { sender: "system", kind: "warning", taskId: null });
+        } catch (err) {
+          // A throw must not leave a claimed marker with no record: hand the claim back (compare-and-set,
+          // so a concurrent writer is never clobbered). At-least-once: a manager enqueued before the
+          // throw may be told again.
+          this.db.compareAndSetMeta(key, claimed, raw);
+          throw err;
+        }
+        delivered++;
+      }
+    } catch (err) {
+      console.warn(`[reconcile] watermark-finalize-skip notice delivery skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return delivered;
+  }
+
+  /**
    * The chokepoint (card 05e7f246): the gateway calls this the FIRST time a session's `/mcp-orch/` route is hit (PtyHost.markMcpSeen newly true). Every manager spawn path (fresh, resume, fork, profile-derived startNew,
    * recycle successor) mounts that surface, so none needs its own call; a non-manager is ignored. Never throws.
    */
   onOrchestrationMcpFirstSeen(sessionId: string): void {
-    try { const s = this.db.getSession(sessionId); if (s?.role === "manager") this.deliverPendingBootAlerts(s.projectId); } catch { /* fail-open: never into the MCP request path */ }
+    try {
+      const s = this.db.getSession(sessionId);
+      if (s?.role === "manager") {
+        this.deliverPendingBootAlerts(s.projectId);
+        this.deliverPendingWatermarkFinalizeSkipNotices(s.projectId); // card 1d9674c9
+      }
+    } catch { /* fail-open: never into the MCP request path */ }
   }
 
   /** Rejects once `deadlineAt + graceMs` has passed. The losing promise is left to its own per-call git timeout. */
@@ -28006,7 +28085,7 @@ export class SessionService {
   // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
   // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
   // prove Pass A's early-out never spawns git for an already-finalized worker.
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesReviewForkReclaimed: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number; staleGenerationUnresolvedEscalated: number; staleGenerationTransient: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesHeld: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesReviewForkReclaimed: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesPathRefused: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number; staleGenerationUnresolvedEscalated: number; staleGenerationTransient: number; watermarkSkipAffectedPairs: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     // @decision dd494a9b — precompute both maps for Pass A (per-session calls were 96% of a ~7-min boot
@@ -28154,6 +28233,10 @@ export class SessionService {
     let unreadableWatermarkSkipCount = 0; // card eb58b8bd: sessions skipped THIS pass (landed-lookup/finalize only) because their project+repoKey's stored mainline watermark is unreadable — aggregated once per pass, same convention as noPathSetTrailerNoticeCount above.
     let unresolvableWatermarkRefSkipCount = 0; // card eb58b8bd round 2: sessions skipped THIS pass (landed-lookup/finalize only) because their project+repoKey's stored mainline watermark names a branch that no longer resolves (renamed/deleted) — aggregated once per pass, same convention as unreadableWatermarkSkipCount above, but see the once-per-pass log below for why this one ALSO names each affected project/repoKey.
     const unresolvableWatermarkRefLabels = new Set<string>(); // dedup'd `${project.name} (${projectId}) repoKey=<repoKey> branch=<branch>` labels for the once-per-pass log — a renamed/deleted branch is a structurally permanent condition (not a transient corrupt read), so naming it is what lets an operator actually act on it.
+    // Card 1d9674c9: distinct (project, repoKey) PAIRS withheld this pass — never the same thing as
+    // unreadableWatermarkSkipCount/unresolvableWatermarkRefSkipCount above, which count SESSIONS skipped;
+    // a manager-facing boot summary cares about "how many projects are stuck", not "how many workers".
+    const watermarkSkipAffectedPairs = new Set<string>();
     // Card c33f94b2 DoD-1: every failed-to-finish reconciliation this boot, named (worker/branch/task/
     // project) — not just a bare count. `wedged:true` entries are the structurally-permanent repoKey
     // class (see below); `wedged:false` are ordinary/transient failures ("retry next boot" is honest for
@@ -28279,13 +28362,25 @@ export class SessionService {
         // @decision 77b8319b — an unreadable row must never fall back to scanning bare "HEAD": skip only
         // this session's landed-lookup/finalize (worktree/branch/task left as-is, retried next pass).
         const mainlineRefCacheKey = `${project.id}:${s.repoKey ?? "primary"}`;
+        const watermarkRepoKey = s.repoKey ?? "primary";
         let mainlineRefResolution = mainlineRefCache.get(mainlineRefCacheKey);
         if (!mainlineRefResolution) {
           mainlineRefResolution = this.resolveMainlineWatermarkRef(project.id, s.repoKey);
           mainlineRefCache.set(mainlineRefCacheKey, mainlineRefResolution);
+          // Card 1d9674c9: resolved ONCE per (project, repoKey) per pass (this branch), so the one-shot
+          // finalize-withheld signal is recorded/cleared here too, never per-session.
+          //
+          // @decision 1d9674c9 — round 2: only clear here when `!mainlineRefResolution.ref` (nothing
+          // left to check); a named branch still has to clear the ref-resolvability check below first.
+          if (mainlineRefResolution.state === "unreadable") {
+            this.fileWatermarkFinalizeSkip(project, watermarkRepoKey, "unreadable");
+          } else if (!mainlineRefResolution.ref) {
+            this.db.clearWatermarkFinalizeSkip(project.id, watermarkRepoKey);
+          }
         }
         if (mainlineRefResolution.state === "unreadable") {
           unreadableWatermarkSkipCount++;
+          watermarkSkipAffectedPairs.add(mainlineRefCacheKey);
           continue;
         }
         const expectedMainlineRef = mainlineRefResolution.ref;
@@ -28314,9 +28409,17 @@ export class SessionService {
           if (refResolves === undefined) {
             refResolves = (await readBaseSha(repoPath, expectedMainlineRef)) !== null;
             mainlineRefResolvesCache.set(mainlineRefCacheKey, refResolves);
+            // Card 1d9674c9: resolved ONCE per (project, repoKey) per pass (this branch) — same one-shot
+            // record/clear as the unreadable-row branch above.
+            if (!refResolves) {
+              this.fileWatermarkFinalizeSkip(project, watermarkRepoKey, "ref-unresolvable", mainlineRefResolution.branch);
+            } else {
+              this.db.clearWatermarkFinalizeSkip(project.id, watermarkRepoKey);
+            }
           }
           if (!refResolves) {
             unresolvableWatermarkRefSkipCount++;
+            watermarkSkipAffectedPairs.add(mainlineRefCacheKey);
             unresolvableWatermarkRefLabels.add(
               `${project.name} (${project.id}) repoKey=${s.repoKey ?? "primary"} branch=${mainlineRefResolution.branch}`,
             );
@@ -28912,7 +29015,7 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${staleAsideLeftovers.length} renamed-aside stale worktree dir(s) found under WORKTREES_DIR — never auto-deleted; see GET /api/worktrees/stale-leftovers to review and reclaim.`);
     }
-    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesReviewForkReclaimed, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero, staleGenerationUnresolvedEscalated, staleGenerationTransient };
+    return { mergesFinished, mergesHeld, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesReviewForkReclaimed, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesPathRefused, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero, staleGenerationUnresolvedEscalated, staleGenerationTransient, watermarkSkipAffectedPairs: watermarkSkipAffectedPairs.size };
   }
 
   /**

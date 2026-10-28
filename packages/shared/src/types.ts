@@ -1959,6 +1959,19 @@ export type OrchestrationEventKind =
   | "merge_branch_retained"
   // @decision 4fa36502 — the canonical mainline moved without a Loom landing (tripwire, never a refusal): `detail` {projectId, repoKey, branch, from, to, evidence, suspectShas, severity:"high"}; or severity:"low" + unverifiable:true when the check exceeded its cap. Filed under the confirming manager.
   | "mainline_moved_outside_loom"
+  // Card 1d9674c9: boot-reconcile Pass A withheld landed-lookup/finalize for EVERY eligible worker in a
+  // (project, repoKey) this boot because its stored mainline watermark is unreadable or names a branch
+  // ref that no longer resolves — a condition `SessionService.reconcileOrchestrationOnBoot` previously
+  // only logged via an aggregated `console.warn`, with no durable record and no nudge. `detail` carries
+  // {projectId, repoKey, cause: "unreadable" | "ref-unresolvable", branch?}. Filed under
+  // `managerSessionId: ""` (no single owning session — a project-wide condition, same sentinel as
+  // `mainline_moved_outside_loom`), ONCE per (project, repoKey) episode (never re-filed while the SAME
+  // marker stays un-re-armed). Deliberately a PARALLEL mechanism to `mainline_moved_outside_loom` — never
+  // reuses its marker/text, since this is a finalize-withholding condition, not a mainline-move tripwire;
+  // see docs/decisions/1d9674c9-*.md. Deliberately NOT added to EVENT_TRIGGER_EVENT_KINDS/
+  // GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS — same audit/notice posture as
+  // `mainline_moved_outside_loom`'s own siblings above.
+  | "watermark_finalize_withheld"
   // A daemon-boot backfill established one or more durable commondir-trust pins for a (project, repoKey)
   // binding that predates this feature — trust-on-first-use, not a pre-attack-verified baseline. `detail`
   // carries {count, pins: Array<{projectId, repoKey}>}. Filed under `managerSessionId: ""` (no owning
@@ -2160,7 +2173,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
-  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, commondir_trust_pinned: true, engine_session_rotated: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, watermark_finalize_withheld: true, commondir_trust_pinned: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,

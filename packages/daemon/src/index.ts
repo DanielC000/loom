@@ -1250,6 +1250,14 @@ async function main(): Promise<void> {
     if (reconciled.worktreesReviewForkReclaimed > 0) {
       console.log(`[boot] orchestration reconcile: reclaimed ${reconciled.worktreesReviewForkReclaimed} review-fork worktree(s) whose only "work" was inherited from the reviewed branch, not authored by the reviewer (card 37fe091c)`);
     }
+    // Card 1d9674c9: a SEPARATE, non-zero-gated line, same convention as worktreesReviewForkReclaimed
+    // above — distinct (project, repoKey) PAIRS whose finalize was withheld this pass by an unreadable/
+    // unresolvable mainline watermark (never the per-SESSION unreadableWatermarkSkipCount/
+    // unresolvableWatermarkRefSkipCount, which stay console.warn-only — see the dedicated [reconcile]
+    // warns this pass already emits for those, naming each affected project/repoKey).
+    if (reconciled.watermarkSkipAffectedPairs > 0) {
+      console.log(`[boot] orchestration reconcile: ${reconciled.watermarkSkipAffectedPairs} project/repo pair(s) had finalize withheld this pass by an unreadable or unresolvable mainline watermark — a durable notice was filed for each first-seen occurrence (card 1d9674c9; see the dedicated [reconcile] warns above for which)`);
+    }
   }).catch((err) => {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   });
