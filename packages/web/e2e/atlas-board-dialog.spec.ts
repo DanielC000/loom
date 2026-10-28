@@ -88,6 +88,12 @@ async function boardGeometry(scope: Locator): Promise<Geometry> {
  * navigation is a coin flip while the board's own 4s query and the band above it are still resolving
  * — the P1-0 shell fingerprint hit exactly this and two identical runs disagreed. Comparing an
  * unsettled "before" against a settled "after" would report a reflow that never happened.
+ *
+ * BOTH SIDES of every reflow compare go through here — the asymmetry (a settled "before" against a
+ * bare "after") is the single mid-measure sample that card 885e7a49 found reachable by the harness and
+ * by nothing a human can see, and a 6px y shift with width/height/x identical was sighted once at the
+ * open-leg compare below. Settling is on SELF-CONSISTENCY (two consecutive agreeing reads), never on
+ * agreement with `before`, so a real reflow still settles on its new box and still goes red.
  */
 async function settledBoardGeometry(scope: Locator): Promise<Geometry> {
   let prev = await boardGeometry(scope);
@@ -158,12 +164,12 @@ async function assertSurfaceOpensCentredDialog(
 
   // The board behind the modal is untouched: same lanes, same box.
   await expect(lanesIn(scope), `${label}: lanes while the dialog is open`).toHaveCount(DEFAULT_LANES);
-  expect(await boardGeometry(scope), `${label}: the board reflowed when the dialog opened`).toEqual(before);
+  expect(await settledBoardGeometry(scope), `${label}: the board reflowed when the dialog opened`).toEqual(before);
 
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(lanesIn(scope), `${label}: lanes after the dialog closed`).toHaveCount(DEFAULT_LANES);
-  expect(await boardGeometry(scope), `${label}: the board reflowed when the dialog closed`).toEqual(before);
+  expect(await settledBoardGeometry(scope), `${label}: the board reflowed when the dialog closed`).toEqual(before);
 }
 
 /** A project with one card in a known non-terminal lane — the card every surface below opens. */
