@@ -1376,8 +1376,20 @@ export async function fastForwardCanonicalMain(
         // @decision b801bad0 — ONE spawn for BOTH the forfeit sha-check and (when pinned) the branch divert
         // pre-check: `readHeadShaAndBranch` (git/mainline-watch.ts), not two separate rev-parse/symbolic-ref
         // calls — see that function's own doc for the exact invocation and why flag order matters here.
-        const entry = await readHeadShaAndBranch(git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, batch fast-forward check)");
-        if (!entry) return { ok: false, reason: "failed to read canonical HEAD (and checked-out branch)" };
+        // @decision 57f9cdd9 — `readHeadShaAndBranch` swallows ANY raw error to `null` (its own "never
+        // throws" contract); without `onRawError` a structural CanonicalGitRefusal here was indistinguishable
+        // from an ordinary read failure, so the --ff-only arm below was never reached for it.
+        let preFfRefusal: ReturnType<typeof describeGitFailure> | undefined;
+        const entry = await readHeadShaAndBranch(
+          git, timeoutMs, "git rev-parse HEAD + symbolic-full-name HEAD (canonical, batch fast-forward check)",
+          (e) => { preFfRefusal = describeGitFailure(e); },
+        );
+        if (!entry) {
+          if (preFfRefusal?.refusal) {
+            return { ok: false, mayHaveLanded: false, canonicalTrustRefusal: true, reason: canonicalFailureMessage(preFfRefusal, preFfRefusal.text) };
+          }
+          return { ok: false, reason: "failed to read canonical HEAD (and checked-out branch)" };
+        }
         const currentMainSha = entry.sha;
         if (currentMainSha !== expectedBaseSha) {
           return {

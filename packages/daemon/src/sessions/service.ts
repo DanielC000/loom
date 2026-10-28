@@ -2545,7 +2545,7 @@ class GateWorktreeDirtyError extends Error {
 
 class AdmissionReunionFailedError extends Error {
   constructor(
-    public readonly failReason: "union_conflict_at_admission" | "union_merge_failed_at_admission" | "union_merge_quarantined_at_admission" | "worktree_missing_at_admission",
+    public readonly failReason: "union_conflict_at_admission" | "union_merge_failed_at_admission" | "union_merge_quarantined_at_admission" | "worktree_missing_at_admission" | "canonical_trust_refusal_at_admission",
     public readonly why: string,
     // Card 7e5b23e7: set only for the quarantined case — the canonical repo now refuses EVERY merge until
     // a human clears it, not just this one. Carried separately from `why` (this op's own operation-specific
@@ -2561,10 +2561,28 @@ class AdmissionReunionFailedError extends Error {
     /** @decision 8c3d6c04 round 2 — mirrors `mergeMainIntoWorktree`'s own `dirtyWorktree`: the worktree was
      *  already dirty before the admission-time re-union was attempted. */
     public readonly dirtyWorktree?: boolean,
+    /** @decision 57f9cdd9 — mirrors `quarantined`: a structural CanonicalGitRefusal, carried separately
+     *  from `why` so the handler can reuse the post-squash canonicalTrustRefusal wording verbatim. */
+    public readonly canonicalTrustRefusal?: boolean,
   ) {
     super(`admission-time re-union failed (${failReason}): ${why}`);
     this.name = "AdmissionReunionFailedError";
   }
+}
+
+/**
+ * @decision 57f9cdd9 — the ONE shared precedence decision over {@link mergeMainIntoWorktree}'s failure
+ * shape, so a future flag is added HERE, once, instead of hand-copied (and silently dropped) per caller.
+ */
+function classifyUnionMergeFailureKind(
+  union: { conflict?: boolean; quarantined?: boolean; dirtyWorktree?: boolean; worktreeMissing?: boolean; canonicalTrustRefusal?: boolean },
+): "worktreeMissing" | "quarantined" | "dirtyWorktree" | "canonicalTrustRefusal" | "conflict" | "generic" {
+  if (union.worktreeMissing) return "worktreeMissing";
+  if (union.quarantined) return "quarantined";
+  if (union.dirtyWorktree) return "dirtyWorktree";
+  if (union.canonicalTrustRefusal) return "canonicalTrustRefusal";
+  if (union.conflict) return "conflict";
+  return "generic";
 }
 
 /**
@@ -19787,12 +19805,15 @@ export class SessionService {
         if (!union.ok) {
           // @decision 89bc3b86 — mirrors the inert-reclassify re-union and the admission-time re-union:
           //  refuse HERE, immediately, never fall through into quarantine/conflict/generic-failure below.
-          if (union.worktreeMissing) return refuseWorktreeMissingAtAdmission("during the pre-gate union-merge");
+          // @decision 57f9cdd9 — the precedence among these flags is decided ONCE, shared with the other
+          //  two mergeMainIntoWorktree callers, via classifyUnionMergeFailureKind.
+          const unionFailureKind = classifyUnionMergeFailureKind(union);
+          if (unionFailureKind === "worktreeMissing") return refuseWorktreeMissingAtAdmission("during the pre-gate union-merge");
           // Card 7e5b23e7: a quarantine raised (or already in force) by the union-merge's own kill-confirm
           // is NOT an ordinary union failure — the canonical repo now refuses EVERY merge until a human
           // clears it. Reuse `assertRepoNotQuarantined`'s own text for that repo-wide remedy (never
           // hand-write it here) rather than reporting only this op's own operation-specific reason.
-          if (union.quarantined) {
+          if (unionFailureKind === "quarantined") {
             const quarantineCheck = assertRepoNotQuarantined(repoPath);
             const detailText = `${union.reason ?? "union-merge raised a canonical-repo quarantine"}${quarantineCheck.ok ? "" : ` ${quarantineCheck.reason}`}; squash phase never reached, canonical repo untouched, worktree retained.`;
             const { suppressed, sha } = await rejectNotify("union_merge_quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
@@ -19802,10 +19823,10 @@ export class SessionService {
           // @decision 8c3d6c04 round 2 — a worktree ALREADY dirty before the union-merge was attempted
           // reuses the EXISTING `gateWorktreeDirty`/"worktree-dirty" never-cached outcome (same helper every
           // other before-gate dirt refusal uses) rather than a new classification string.
-          if (union.dirtyWorktree) return refuseWorktreeDirty("before-gate", union.reason ?? "the worktree carries uncommitted changes that would be overwritten by the union-merge");
+          if (unionFailureKind === "dirtyWorktree") return refuseWorktreeDirty("before-gate", union.reason ?? "the worktree carries uncommitted changes that would be overwritten by the union-merge");
           // @decision 57f9cdd9 — reuses the post-squash `canonicalTrustRefusal`/NEVER_CACHED classification
           // (card 08c36dae) here too, never the generic cacheable fallback below.
-          if (union.canonicalTrustRefusal) {
+          if (unionFailureKind === "canonicalTrustRefusal") {
             const why = union.reason ?? "canonical-git trust refusal";
             const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it.`;
             const { suppressed, sha } = await rejectNotify("canonical_trust_refusal", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
@@ -20284,26 +20305,40 @@ export class SessionService {
                 // union a second time.
                 reclassifyBase = reunion.mainSha;
                 gateBaseMainHead = reunion.mainSha;
-              } else if (reunion.worktreeMissing) {
-                // @decision 89bc3b86 — mirrors the quarantine early-return below: refuse HERE, never fall
-                //  through into `reunionFailed`. Shares `refuseWorktreeMissingAtAdmission` with the
-                //  full-admission re-union site below and `captureGatedTip`'s own detection further down.
-                return refuseWorktreeMissingAtAdmission("while this merge was re-checking main/the branch during the repo-guard wait");
-              } else if (reunion.quarantined) {
-                // @decision 7e5b23e7 — do NOT fall through to the real gate on a quarantine here: that
-                // burns a full gate lane before the squash's own entry check refuses anyway. Return the
-                // same quarantined rejection shape the pre-gate union-merge uses, immediately.
-                const quarantineCheck = assertRepoNotQuarantined(repoPath);
-                const detailText = `${reunion.reason ?? "re-union raised a canonical-repo quarantine"}${quarantineCheck.ok ? "" : ` ${quarantineCheck.reason}`}; squash phase never reached, canonical repo untouched, worktree retained.`;
-                const { suppressed, sha } = await rejectNotify("union_merge_quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-                evt("merge_rejected", { reason: "union_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
-                return { merged: false, reason: reunion.reason, detailText, notified: !suppressed, opId: thisOpId, quarantined: true };
               } else {
-                // Conflict or a real git failure — do NOT try to resolve it here. Fall through to "not
-                // provably inert" below and let the ordinary real-gate path's own `reunionAtAdmission`
-                // (and its already-hardened `AdmissionReunionFailedError` handling) retry and report it
-                // properly, exactly as it would for any other admission-time reunion failure.
-                reunionFailed = true;
+                // @decision 57f9cdd9 — shared precedence decision (classifyUnionMergeFailureKind), same as
+                //  the pre-gate union-merge and the admission-time re-union below.
+                const reunionFailureKind = classifyUnionMergeFailureKind(reunion);
+                if (reunionFailureKind === "worktreeMissing") {
+                  // @decision 89bc3b86 — mirrors the quarantine early-return below: refuse HERE, never fall
+                  //  through into `reunionFailed`. Shares `refuseWorktreeMissingAtAdmission` with the
+                  //  full-admission re-union site below and `captureGatedTip`'s own detection further down.
+                  return refuseWorktreeMissingAtAdmission("while this merge was re-checking main/the branch during the repo-guard wait");
+                } else if (reunionFailureKind === "quarantined") {
+                  // @decision 7e5b23e7 — do NOT fall through to the real gate on a quarantine here: that
+                  // burns a full gate lane before the squash's own entry check refuses anyway. Return the
+                  // same quarantined rejection shape the pre-gate union-merge uses, immediately.
+                  const quarantineCheck = assertRepoNotQuarantined(repoPath);
+                  const detailText = `${reunion.reason ?? "re-union raised a canonical-repo quarantine"}${quarantineCheck.ok ? "" : ` ${quarantineCheck.reason}`}; squash phase never reached, canonical repo untouched, worktree retained.`;
+                  const { suppressed, sha } = await rejectNotify("union_merge_quarantined", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+                  evt("merge_rejected", { reason: "union_merge_quarantined", sha, ...(suppressed ? { suppressed: true } : {}) });
+                  return { merged: false, reason: reunion.reason, detailText, notified: !suppressed, opId: thisOpId, quarantined: true };
+                } else if (reunionFailureKind === "canonicalTrustRefusal") {
+                  // @decision 57f9cdd9 — same no-fall-through posture as quarantined above: a structural
+                  // refusal here will re-occur identically on any later retry, so burn no further gate work.
+                  const why = reunion.reason ?? "canonical-git trust refusal";
+                  const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained. This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it.`;
+                  const { suppressed, sha } = await rejectNotify("canonical_trust_refusal", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+                  evt("merge_rejected", { reason: "canonical_trust_refusal", sha, ...(suppressed ? { suppressed: true } : {}) });
+                  return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, canonicalTrustRefusal: true };
+                } else {
+                  // Conflict, a dirty worktree, or a real git failure — do NOT try to resolve it here. Fall
+                  // through to "not provably inert" below and let the ordinary real-gate path's own
+                  // `reunionAtAdmission` (and its already-hardened `AdmissionReunionFailedError` handling)
+                  // retry and report it properly, exactly as it would for any other admission-time reunion
+                  // failure.
+                  reunionFailed = true;
+                }
               }
             }
             // FAIL CLOSED: a failed HEAD re-read (`postWaitHead` undefined — git error/timeout), a failed
@@ -20708,11 +20743,17 @@ export class SessionService {
             if (!reunion.ok) {
               // @decision c30952c1 — the worktree vanished during the (possibly minutes-long) gate-queue
               //  wait: a distinct cause from a conflict/quarantine/content failure, checked first.
-              if (reunion.worktreeMissing) throw new AdmissionReunionFailedError("worktree_missing_at_admission", reunion.reason ?? "the worktree no longer exists");
+              // @decision 57f9cdd9 — shared precedence decision (classifyUnionMergeFailureKind), same as
+              //  the pre-gate union-merge and the inert-reclassify re-union above.
+              const reunionFailureKind = classifyUnionMergeFailureKind(reunion);
+              if (reunionFailureKind === "worktreeMissing") throw new AdmissionReunionFailedError("worktree_missing_at_admission", reunion.reason ?? "the worktree no longer exists");
               const why = reunion.conflict
                 ? (reunion.reason ?? "branch conflicts with current main — rebase/resolve before merge")
                 : (reunion.reason ?? "union merge failed");
-              if (reunion.quarantined) throw new AdmissionReunionFailedError("union_merge_quarantined_at_admission", why, true);
+              if (reunionFailureKind === "quarantined") throw new AdmissionReunionFailedError("union_merge_quarantined_at_admission", why, true);
+              if (reunionFailureKind === "canonicalTrustRefusal") {
+                throw new AdmissionReunionFailedError("canonical_trust_refusal_at_admission", reunion.reason ?? "canonical-git trust refusal", undefined, undefined, undefined, undefined, true);
+              }
               throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why, undefined, reunion.transient, reunion.residuePossible, reunion.dirtyWorktree);
             }
             gateBaseMainHead = reunion.mainSha;
@@ -20855,6 +20896,14 @@ export class SessionService {
         // @decision 8c3d6c04 round 2 — a worktree ALREADY dirty before the admission-time re-union was
         // attempted reuses the SAME never-cached `gateWorktreeDirty` outcome as the pre-gate site.
         if (err.dirtyWorktree) return refuseWorktreeDirty("before-gate", err.why);
+        // @decision 57f9cdd9 — same no-fallthrough posture as `quarantined` above: never the generic
+        // branch's "may be transient" wording, false for a structural refusal.
+        if (err.canonicalTrustRefusal) {
+          const detailText = `${err.why}; squash phase never reached, canonical repo untouched, worktree retained. This is a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of this branch will not fix it.`;
+          const { suppressed, sha } = await rejectNotify(err.failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+          evt("merge_rejected", { reason: err.failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
+          return { merged: false, reason: err.why, detailText, notified: !suppressed, opId: thisOpId, canonicalTrustRefusal: true };
+        }
         // @decision 8c3d6c04 — `err.transient` is only ever set for `union_merge_failed_at_admission`; the
         // old blanket hedge below stays for the remaining, genuinely-unknown non-conflict case only.
         // @decision 8c3d6c04 round 2 — never claim "nothing was changed" when `err.residuePossible` is true.
@@ -23897,7 +23946,7 @@ export class SessionService {
           // a canonical-git TRUST refusal, not an ordinary merge failure — a rebase of any candidate branch
           // will not fix it, and re-firing merge_batch after the canonical repo is repaired is safe.
           : outcome.value.canonicalTrustRefusal
-          ? `[loom:merge-batch-trust-refusal] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "canonical-git trust refusal"}. Nothing was mutated — this is a canonical-git TRUST refusal, not an ordinary merge failure. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
+          ? `[loom:merge-batch-trust-refusal] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "canonical-git trust refusal"}. Canonical repo untouched — this is a canonical-git TRUST refusal, not an ordinary merge failure. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`;
         try {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
