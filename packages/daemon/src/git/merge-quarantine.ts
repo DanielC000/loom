@@ -4881,6 +4881,9 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   const nonTwinPendingIndices = collectPendingIndices((p) => p.entry.tokens.includes(token) && !activeMatches.has(p.entry));
   clearTokenFromPendingIndices(nonTwinPendingIndices, token);
   const seen = new Set<MergeQuarantineEntry>();
+  // @decision 1dd00dca — relies on Map visiting entries inserted mid-iteration (the orphan arm inside
+  // clearActiveEntryTokenAtKey); never iterate a snapshot, or a resolvable foreign T strands on the dead
+  // token.
   for (const [k, entry] of activeQuarantines) {
     if (seen.has(entry) || !entry.tokens.includes(token)) continue;
     // @decision 1922be3a (round 3) — mark `seen` only on an actual match, never on every key visited: an
@@ -4998,9 +5001,26 @@ function unlinkLatchFileConfirmed(filename: string): boolean {
  *
  * @decision 8db913e2 (Follow-up f2cc5f18) — see the decision record.
  */
+/**
+ * The minimal, already-parsed shape {@link orphanSweepSafeToDelete} hands forward so a caller that KEEPS
+ * the file (the only case that ever consumes this) can arm it in memory straight from THIS read — never a
+ * second read/parse of the same file. Deliberately narrower than a full {@link MergeQuarantineEntry}: no
+ * `resolvedKey`/`contributorRepoPaths`/etc. carried forward.
+ *
+ * @decision 1dd00dca — never widen this to a full `MergeQuarantineEntry`-shaped carry-forward; the
+ * in-memory arm this feeds is deliberately narrow (never a resolvedKey/contributor union).
+ */
+interface ArmableOrphanRecord {
+  repoPath: string;
+  branch: string;
+  reason: string;
+  enteredAt: number;
+  tokens: string[];
+}
+
 // @decision 21ec39e5 (round 2) — `readFailed` is the ONLY reliable read-failure signal; never infer it
 // from `!parsedRepoPath` alone (a readable record lacking a string `repoPath` also hits that case).
-function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]): { safe: boolean; parsedRepoPath?: string; readFailed?: true } {
+function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]): { safe: boolean; parsedRepoPath?: string; readFailed?: true; armable?: ArmableOrphanRecord } {
   let raw: string;
   try {
     raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, orphanFile), "utf8");
@@ -5018,12 +5038,88 @@ function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]):
   // @decision d5d705f5 (M2 follow-up) — never let this memo cell outlive this one synchronous frame;
   // share it between this read and the `.every()` below, never recompute separately for each.
   const identityMemo: IdentityGateMemo = {};
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, parsedRepoPath, identityMemo);
+  const { raw: onDiskTokens, surviving } = readSurvivingOnDiskTokens(parsed, parsedRepoPath, identityMemo);
   const armableByPass1 = parsedRepoPath !== undefined && typeof parsed.branch === "string" && typeof parsed.reason === "string";
-  if (armableByPass1 && onDiskTokens.length === 0) return { safe: false, parsedRepoPath }; // genuine, legacy-shaped, PASS 1 would re-arm it — never delete
+  // Carried whenever the record is genuinely armable, regardless of `safe` — so the one consumer that
+  // reads this on a `!safe` keep never needs a second read/parse of this same file. `tokens` is the
+  // SURVIVING set; a tokenless-but-armable record mints a fresh token (mirrors `latchEntryFromParsedRecord`).
+  //
+  // Deliberately the RAW `surviving` set, never subtracted by the caller's own `candidateTokens`. Round 2
+  // tried that subtraction and it durably SPLIT T's in-process state from what a reboot would re-derive:
+  // tombstones are IDENTITY-scoped, so a token subtracted here still sits, un-accounted-for, in O's own
+  // on-disk bytes (never touched), and the next boot's fresh process (no tombstones carried over) re-arms
+  // T with EVERY on-disk token — resurrecting exactly what the in-process clear just lifted.
+  // @decision 1dd00dca (Round 3) — this arm must mirror what the next boot's own PASS 1 would arm from
+  // the SAME bytes; never subtract a token here that boot would still see on disk.
+  const armable: ArmableOrphanRecord | undefined = armableByPass1
+    ? {
+        repoPath: parsedRepoPath!, branch: parsed.branch as string, reason: parsed.reason as string,
+        enteredAt: typeof parsed.enteredAt === "number" ? parsed.enteredAt : Date.now(),
+        tokens: surviving.length > 0 ? surviving : [randomUUID()],
+      }
+    : undefined;
+  if (armableByPass1 && onDiskTokens.length === 0) return { safe: false, parsedRepoPath, armable }; // genuine, legacy-shaped, PASS 1 would re-arm it — never delete
   const accountedFor = new Set(candidateTokens);
   const safe = onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, parsedRepoPath, identityMemo));
-  return { safe, parsedRepoPath };
+  return { safe, parsedRepoPath, armable };
+}
+
+/**
+ * Arm `basename`'s already-proven-foreign, already-proven-uncovered content in memory, for THIS PROCESS
+ * ONLY, when (and only when) `repoPath`'s own identity is not already enforced anywhere this process can
+ * see right now. "Already enforced" is answered by {@link stillBlockedEntryFor} — a PURE mirror of the
+ * SAME lookup order {@link assertRepoNotQuarantined}'s own {@link resolveQuarantineFor} uses — so this
+ * never arms a second, competing representation for an identity (or for a canonical key) enforcement
+ * already treats as blocked; it only closes the ONE gap card 1dd00dca names: an identity
+ * `resolveQuarantineFor` would otherwise answer `undefined` for, purely because nothing durable happened
+ * to persist it this boot.
+ *
+ * NEVER touches disk — `basename` is left exactly as the caller already decided to keep it; the next
+ * boot's own PASS 1 reads the identical bytes and arms `repoPath` exactly as it does today, so there is
+ * nothing here for PASS 1 to double-arm or double-count. Deliberately narrow: no degraded-collision
+ * union/eviction dance (that machinery, in `reenterMergeQuarantinesAtBootImpl`'s own closures, is
+ * boot-scoped and six-plus Code Review rounds deep — replicating it here is out of scope). When
+ * `stillBlockedEntryFor` finds ANYTHING — `repoPath`'s own representation, or a different identity
+ * already occupying its canonical key — this is a no-op: today's keep-and-wait-for-the-next-boot
+ * behavior, unchanged.
+ *
+ * The gate is {@link stillBlockedEntryFor} (a PURE peek), never the mutating {@link resolveQuarantineFor}/
+ * {@link activeMergeQuarantineFor} — both can mutate state (lazy pending graduation, cross-tier sibling
+ * absorption) as a side effect of being merely queried; calling one FROM INSIDE a clear's own sweep,
+ * mid-decision, is exactly the mutation hazard decisions `4b6c8d24` and `2a169469` both warn against.
+ * @decision 1dd00dca (Round 2, Code Review) — never swap this gate back to a mutating lookup.
+ *
+ * Call this SYNCHRONOUSLY, inline, from within the SAME keep-decision that just proved `basename` safe to
+ * keep (never deferred to a later pass/loop) — Node's single-threaded, run-to-completion model is what
+ * makes this race-free: nothing can observe or mutate `activeQuarantines`/`pendingUnresolvedQuarantines`
+ * between this function's own `stillBlockedEntryFor` check and its own arm, because no `await`/timer/I/O
+ * callback ever runs in between.
+ *
+ * @decision 1dd00dca — never replicate the boot-only degraded-collision union/eviction dance here; a
+ * key-occupied or already-enforced collision fails safe to a no-op, never a union.
+ */
+function armForeignOrphanContentInMemoryIfUnenforced(record: ArmableOrphanRecord, basename: string): "armed-active" | "armed-pending" | "already-enforced" {
+  if (stillBlockedEntryFor(record.repoPath) !== undefined) return "already-enforced";
+  const entry: MergeQuarantineEntry = {
+    repoPath: record.repoPath, branch: record.branch, reason: record.reason,
+    enteredAt: record.enteredAt, tokens: record.tokens, orphanLatchFiles: [basename],
+  };
+  if (isRepoPathCurrentlyResolvable(record.repoPath)) {
+    // `stillBlockedEntryFor` returning `undefined` above already proves `canonicalRepoLockKey(record.repoPath)`
+    // is UNOCCUPIED in `activeQuarantines` right now — see `activeMergeQuarantineForPeek`'s own lookup
+    // order (the same tier chain `activeMergeQuarantineFor` itself uses): an occupied key, by ANY
+    // identity, always returns something truthy, never `undefined`. So this `.set` can never clobber an
+    // existing occupant.
+    const key = canonicalRepoLockKey(record.repoPath);
+    activeQuarantines.set(key, { ...entry, resolvedKey: key, armedKeys: [key] });
+    // eslint-disable-next-line no-console
+    console.warn(`[merge-quarantine] arming ${record.repoPath} in memory, THIS PROCESS ONLY, straight from a kept orphan latch (${basename}) whose own content this sweep just proved foreign and uncovered — enforced immediately rather than waiting for the next boot's PASS 1; ${basename} itself is left untouched on disk.`);
+    return "armed-active";
+  }
+  pendingUnresolvedQuarantines.push({ entry, sourceFile: basename });
+  // eslint-disable-next-line no-console
+  console.warn(`[merge-quarantine] arming ${record.repoPath} as a PENDING quarantine, THIS PROCESS ONLY (its path does not currently resolve), straight from a kept orphan latch (${basename}) whose own content this sweep just proved foreign and uncovered; ${basename} itself is left untouched on disk.`);
+  return "armed-pending";
 }
 
 /**
@@ -5056,7 +5152,7 @@ function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]):
  * candidate referencer sharing an identity with the clear CURRENTLY IN PROGRESS — a same-identity record
  * is never a "co-occupant"; see the decision record's own section for the self-reference bug this closes.
  */
-function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: string[], excludeIdentities?: ReadonlySet<string>): { kept: boolean; referencingRepoPaths: string[]; contentKeptRepoPath?: string } {
+function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: string[], excludeIdentities?: ReadonlySet<string>): { kept: boolean; referencingRepoPaths: string[]; contentKeptRepoPath?: string; contentKeptNotArmedReason?: "already-enforced" } {
   // @decision 63e49ee2 (round 3) — a read-failure-kept file has no identity to attribute; keep it with
   // no referencing repoPath, never gated on `orphanLatchFiles`/`physicalOwnerRepoPaths` alone.
   if (keptUnreadableLatchFiles.has(filename)) return { kept: true, referencingRepoPaths: [] };
@@ -5080,15 +5176,21 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: s
     // OWN stale content, never a true foreign claimant — never report it as a content-kept claimant here,
     // not just exclude it from the referencer scan above.
     const ownContent = !!safety.parsedRepoPath && !!excludeIdentities?.has(directPathIdentity(safety.parsedRepoPath));
+    // @decision 1dd00dca — arm it in memory, THIS PROCESS ONLY, synchronously right here (never deferred
+    // to a later pass) when it's genuinely foreign and armable; never for the clearer's own stale content.
+    const armResult = !ownContent && safety.armable ? armForeignOrphanContentInMemoryIfUnenforced(safety.armable, filename) : undefined;
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] keeping orphan latch ${filename} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for${!ownContent && safety.parsedRepoPath ? ` (its own parsed content names repoPath '${safety.parsedRepoPath}')` : ""}; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.`);
+    console.error(`[merge-quarantine] keeping orphan latch ${filename} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for${!ownContent && safety.parsedRepoPath ? ` (its own parsed content names repoPath '${safety.parsedRepoPath}')` : ""}; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.${armResult === "already-enforced" ? " (that identity, or its own canonical key, is already enforced elsewhere in this process — not re-armed here.)" : ""}`);
     // @decision 8db913e2 (Follow-up f2cc5f18, Code Review 745c3736) — a caller must be able to SEE this
     // keep, never a silent `{kept:true, referencingRepoPaths:[]}` indistinguishable from "nothing to
     // report" — name the parsed foreign repoPath when the content gave us one.
     //
     // @decision 8db913e2 (Follow-up 0a783fb2) — a CONTENT-parsed repoPath never shares
     // `referencingRepoPaths` with a true in-memory referencer again — see `foldOrphanSweepResult`.
-    return { kept: true, referencingRepoPaths: [], contentKeptRepoPath: ownContent ? undefined : safety.parsedRepoPath };
+    return {
+      kept: true, referencingRepoPaths: [], contentKeptRepoPath: ownContent ? undefined : safety.parsedRepoPath,
+      ...(armResult === "already-enforced" ? { contentKeptNotArmedReason: "already-enforced" as const } : {}),
+    };
   }
   unlinkLatchFile(filename);
   return { kept: false, referencingRepoPaths: [] };
@@ -6080,6 +6182,15 @@ function resolveQuarantineFor(repoPath: string): MergeQuarantineEntry | undefine
     if (own) return own;
   }
   return activeMergeQuarantineFor(repoPath);
+}
+
+/** Test-only pass-through to {@link resolveQuarantineFor} — the real, MUTATING lookup
+ *  {@link assertRepoNotQuarantined} itself calls. Lets a test cross-check it against the PURE
+ *  {@link stillBlockedEntryFor} peek for enforcement-equivalence (card 1dd00dca) without being able to
+ *  call the unexported function directly. Never imported by `index.ts` — the `TestOnly` suffix is
+ *  load-bearing, same precedent as this module's other `TestOnly` exports. */
+export function resolveQuarantineForTestOnly(repoPath: string): boolean {
+  return resolveQuarantineFor(repoPath) !== undefined;
 }
 
 /**
