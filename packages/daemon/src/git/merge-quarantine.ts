@@ -1370,14 +1370,30 @@ function wouldOverwriteDifferentUnresolvableOccupant(final: string, entry: Merge
  * normalized HERE (same one point as {@link tombstoneIfNotSurviving}). A token is only subtracted when
  * tombstoned UNDER THIS SAME identity, never globally. `undefined` (repoPath not yet validated) fails
  * CLOSED: nothing subtracted, every on-disk token survives.
+ *
+ * @decision d5d705f5 — `recordIdentity` is the SAME value for every token in `raw`, so every
+ * identity-dependent classification {@link tokenTombstonedForIdentity} may need is memoized once per call
+ * here, never once per token. See the decision record.
+ *
+ * @decision d5d705f5 (M2 follow-up) — `callerMemo`, when passed, lets a caller that re-loops the SAME
+ * `recordIdentity` right after this call share this call's own memo rather than paying twice. See the
+ * decision record's own follow-up section.
  */
-function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }, recordIdentity: string | undefined): { raw: string[]; surviving: string[] } {
+function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }, recordIdentity: string | undefined, callerMemo?: IdentityGateMemo): { raw: string[]; surviving: string[] } {
   const raw = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
     ? parsed.tokens
     : typeof parsed.token === "string" ? [parsed.token] : [];
   // @decision 8db913e2 (round 3) — never let a stale on-disk copy resurrect a token THIS PROCESS already
   // deliberately cleared; see clearedTokens' own doc comment for why subtracting it here is safe.
-  return { raw, surviving: raw.filter((t) => !tokenTombstonedForIdentity(t, recordIdentity)) };
+  const identityMemo: IdentityGateMemo = callerMemo ?? {};
+  return { raw, surviving: raw.filter((t) => !tokenTombstonedForIdentity(t, recordIdentity, identityMemo)) };
+}
+
+/** Test-only pass-through to {@link readSurvivingOnDiskTokens} — this module's own functions are not
+ *  exported, so a unit test exercising the {@link tokenTombstonedForIdentity} walk-memoization (card
+ *  d5d705f5) needs a seam that doesn't require driving the whole raise/clear state machine. */
+export function readSurvivingOnDiskTokensTestOnly(parsed: { tokens?: unknown; token?: unknown }, recordIdentity: string | undefined): { raw: string[]; surviving: string[] } {
+  return readSurvivingOnDiskTokens(parsed, recordIdentity);
 }
 
 /**
@@ -1389,6 +1405,21 @@ function readSurvivingOnDiskTokens(parsed: { tokens?: unknown; token?: unknown }
  * again).
  */
 export type LiteralGateResult = "direct-only" | "open";
+
+/**
+ * Per-call memo threaded through {@link tokenTombstonedForIdentity} by {@link readSurvivingOnDiskTokens}
+ * and the three residual `.every()` sites that re-loop the same `recordIdentity` outside it — both fields
+ * are IDENTITY-dependent, never token-dependent, so a caller looping over one identity's own tokens in ONE
+ * synchronous frame computes each at most once and shares it across every token in that loop. Lazily
+ * populated (a field stays `undefined` until the first token that actually needs it reaches that check) —
+ * a loop where no token reaches a given check still performs zero work for it, same as with no memo at all.
+ *
+ * @decision d5d705f5 (M1 follow-up) — see the decision record's own follow-up section.
+ */
+interface IdentityGateMemo {
+  directIdentity?: string;
+  literalGate?: LiteralGateResult;
+}
 
 /**
  * The two fs primitives {@link classifyLiteralGateFromFs} needs, injected so the classifier is a PURE
@@ -1610,13 +1641,26 @@ function classifyLiteralGate(recordIdentity: string): LiteralGateResult {
  * @decision 0d3b64c6 (round 6) — `.literal` is consulted by PRESENCE ALONE when
  * {@link classifyLiteralGate} returns `"open"`, never by any target composition — see that function's
  * own doc for why the composing outcome was deleted rather than patched again.
+ *
+ * @decision d5d705f5 — `memo`, when passed, is scoped to one synchronous caller frame over an identity's
+ * tokens; never widen its lifetime past that frame. See the decision record.
+ *
+ * @decision d5d705f5 (M1 follow-up) — `memo` now ALSO caches {@link directPathIdentity}'s own result,
+ * equally token-independent for the same `recordIdentity`, previously recomputed once per token even
+ * after the gate itself was memoized. See the decision record's own follow-up section.
  */
-function tokenTombstonedForIdentity(token: string, recordIdentity: string | undefined): boolean {
+function tokenTombstonedForIdentity(token: string, recordIdentity: string | undefined, memo?: IdentityGateMemo): boolean {
   if (recordIdentity === undefined) return false;
   const owners = clearedTokens.get(token);
   if (!owners) return false;
-  if (owners.direct.has(directPathIdentity(recordIdentity))) return true;
-  if (classifyLiteralGate(recordIdentity) !== "open") return false;
+  const directIdentity = memo
+    ? (memo.directIdentity === undefined ? (memo.directIdentity = directPathIdentity(recordIdentity)) : memo.directIdentity)
+    : directPathIdentity(recordIdentity);
+  if (owners.direct.has(directIdentity)) return true;
+  const gate = memo
+    ? (memo.literalGate === undefined ? (memo.literalGate = classifyLiteralGate(recordIdentity)) : memo.literalGate)
+    : classifyLiteralGate(recordIdentity);
+  if (gate !== "open") return false;
   return owners.literal.has(literalRepoPathKey(recordIdentity));
 }
 
@@ -2474,8 +2518,20 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
   // validated string) scopes the clearedTokens half — a token cleared under a DIFFERENT identity must
   // never count as coverage for THIS record. `undefined` fails CLOSED (never covered by clearedTokens).
   const recordIdentity = typeof parsed.repoPath === "string" ? parsed.repoPath : undefined;
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, recordIdentity);
-  return onDiskTokens.every((t) => candidateTokens.includes(t) || tokenTombstonedForIdentity(t, recordIdentity));
+  // @decision d5d705f5 (M2 follow-up) — never let this memo cell outlive this one synchronous frame;
+  // share it between this read and the `.every()` below, never recompute separately for each.
+  const identityMemo: IdentityGateMemo = {};
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, recordIdentity, identityMemo);
+  return onDiskTokens.every((t) => candidateTokens.includes(t) || tokenTombstonedForIdentity(t, recordIdentity, identityMemo));
+}
+
+/** Test-only pass-through to {@link markedFinalFullyCoveredByClear} — this module's own functions are not
+ *  exported, so a unit test exercising its own memo-sharing fix (card d5d705f5, M2 follow-up) needs a
+ *  seam that doesn't require driving the whole clear state machine. Never imported by `index.ts` — the
+ *  `TestOnly` suffix is load-bearing: `no-src-testonly-import-guard.mjs` matches `/TestOnly$/`
+ *  specifically to catch a future import of this exact kind of seam into production code. */
+export function markedFinalFullyCoveredByClearTestOnly(final: string, candidateTokens: string[]): boolean {
+  return markedFinalFullyCoveredByClear(final, candidateTokens);
 }
 
 /**
@@ -4286,12 +4342,15 @@ function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: Merge
   // `updated` (that's the whole point of an orphan reference) — scope the clearedTokens half to ITS own
   // repoPath, never `updated`'s. `undefined` (not a validated string) fails CLOSED (never accounted-for).
   const recordIdentity = typeof parsed.repoPath === "string" ? parsed.repoPath : undefined;
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, recordIdentity);
+  // @decision d5d705f5 (M2 follow-up) — never let this memo cell outlive this one synchronous frame;
+  // share it between this read and the `.every()` below, never recompute separately for each.
+  const identityMemo: IdentityGateMemo = {};
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, recordIdentity, identityMemo);
   // @decision eedf16f5 — `droppedTokens` (never named `clearedTokens`, the SEPARATE module-level global
   // tombstone set below) is the FULL overlap set THIS call drops — shadowing that global here would
   // silently disable its own fallback on the next line. See the decision record.
   const accountedFor = new Set([...updated.tokens, ...droppedTokens]);
-  return onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, recordIdentity));
+  return onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, recordIdentity, identityMemo));
 }
 
 /**
@@ -4885,11 +4944,14 @@ function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]):
   const parsedRepoPath = typeof parsed.repoPath === "string" ? parsed.repoPath : undefined;
   // @decision 8bc779f0 (round 3) — scope the clearedTokens half to `parsedRepoPath` (this orphan's OWN
   // identity, can genuinely differ from the clearer's own) — `undefined` fails CLOSED (never accounted-for).
-  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, parsedRepoPath);
+  // @decision d5d705f5 (M2 follow-up) — never let this memo cell outlive this one synchronous frame;
+  // share it between this read and the `.every()` below, never recompute separately for each.
+  const identityMemo: IdentityGateMemo = {};
+  const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, parsedRepoPath, identityMemo);
   const armableByPass1 = parsedRepoPath !== undefined && typeof parsed.branch === "string" && typeof parsed.reason === "string";
   if (armableByPass1 && onDiskTokens.length === 0) return { safe: false, parsedRepoPath }; // genuine, legacy-shaped, PASS 1 would re-arm it — never delete
   const accountedFor = new Set(candidateTokens);
-  const safe = onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, parsedRepoPath));
+  const safe = onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, parsedRepoPath, identityMemo));
   return { safe, parsedRepoPath };
 }
 
