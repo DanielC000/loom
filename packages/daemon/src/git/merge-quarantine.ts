@@ -1778,6 +1778,104 @@ interface DroppedSets {
 const NO_DROPS: DroppedSets = { tokens: new Set(), orphanLatchFiles: new Set(), contributorRepoPaths: new Set() };
 
 /**
+ * Shared builder for BOTH placeholder-reingest twins — {@link reconcileMarkedBasenameBeforeWrite}'s own
+ * reingest arm and {@link reconcileClearedEntryIfPlaceholder} — once a caller has already confirmed
+ * `entry` is itself a bare {@link isUnreadablePlaceholderEntry} AND `parsed` is genuine (non-placeholder)
+ * content at the SAME identity. Extracted per card 0bc6305a (from `84c1046f`'s own Code Review, session
+ * `690b1e0d`): the two call sites had drifted apart field-by-field before (84c1046f's own bug was
+ * exactly that drift). The gating BEFORE this point genuinely differs between the two callers (one
+ * distinguishes a corrupt-but-unreadable-right-now file via its own `"unreadable"` sentinel, the other
+ * treats every read/parse failure the same, with no such sentinel) and stays separate in each; only this
+ * BUILD step — identical in both twins once gating has already passed — is shared here.
+ *
+ * `final` is the on-disk latch path `parsed` was read from (only its basename-derived hash is used, to
+ * exclude `parsed`'s own key from the on-disk key fold). `dropped`/`ownershipMap` are forwarded straight
+ * into the SAME union/filter rules this function's own field-by-field comments below explain — pass
+ * {@link NO_DROPS} for a caller with nothing of its own to subtract (today, that's
+ * {@link reconcileClearedEntryIfPlaceholder}). `callerLabel` is forwarded only into
+ * {@link unionResolvedKeysRetaining}'s own diagnostic cap-eviction log line — cosmetic, never read back
+ * or branched on.
+ *
+ * @decision 0bc6305a — never reimplement this build inline at a THIRD call site; route through this
+ * helper, passing {@link NO_DROPS} when there is nothing of your own to subtract.
+ */
+function buildReingestedEntryFromDisk(
+  final: string,
+  entry: MergeQuarantineEntry,
+  parsed: Record<string, unknown> & { repoPath: string; branch: string; reason: string },
+  dropped: DroppedSets,
+  ownershipMap: ReadonlyMap<string, MergeQuarantineEntry>,
+  callerLabel: string,
+): MergeQuarantineEntry {
+  const reingested = latchEntryFromParsedRecord(parsed);
+  // @decision 8bc779f0 — apply the SAME clearedTokens tombstone filter both reingest twins already
+  // applied independently; `reingested.tokens` alone is unfiltered raw disk content.
+  //
+  // Widened to the bare index-signature type below (TS2559: the narrowed intersection has no declared
+  // properties in common with `readSurvivingOnDiskTokens`'s own weak `{tokens?; token?}` param type).
+  const parsedForTokenRead: Record<string, unknown> = parsed;
+  const { surviving: reingestedSurvivingTokens } = readSurvivingOnDiskTokens(parsedForTokenRead, parsed.repoPath);
+  const finalOwnHash = path.basename(final, ".json");
+  // @decision db0a9db0 (round 4) — run the SAME detector every other re-parse site uses, on the
+  // REINGESTED record's own disk-sourced keys, before anything below overrides them — never force
+  // `provenanceTracked: true` here.
+  const reingestedUnknownProvenance = detectUnknownProvenance(reingested, finalOwnHash);
+  // @decision f575cebf — drop a candidate ONLY when positivelyForeignKey proves it belongs to another
+  // repo right now; an empty slot or a same-identity occupant both survive the filter unchanged.
+  const onDiskKeys = informativeKeysFor(reingested).filter((k) => quarantineHashForKey(k) !== finalOwnHash && !positivelyForeignKey(k, entry, ownershipMap));
+  return {
+    ...reingested,
+    // @decision 2dd97aaa (Follow-up 58957b1e) — filter `dropped.tokens` AFTER the union, same posture as
+    // writePendingDivertFile's own re-read-and-union branch.
+    // @decision 8bc779f0 — `reingestedSurvivingTokens` (never bare `reingested.tokens`): already
+    // excludes every `clearedTokens` member.
+    // @decision 702b4241 (round 4/5) — union `entry`'s own tokens forward too, never drop them wholesale:
+    // `entry` can ALREADY carry a REAL raiser's own token, not just a placeholder's bare synthetic one —
+    // but filter OUT every {@link unreadablePlaceholderTokens} member, which was never returned to a real
+    // caller and must never ride into the union.
+    tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingestedSurvivingTokens])].filter((t) => !dropped.tokens.has(t)),
+    resolvedKey: entry.resolvedKey,
+    resolvedKeys: onDiskKeys.length > 0
+      ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeys, `${callerLabel}(${entry.repoPath})`)
+      : entry.resolvedKeys,
+    armedKeys: entry.armedKeys,
+    // @decision 84c1046f — carry orphanLatchFiles forward from BOTH sides, never disk-only; never drop
+    // an in-memory accumulation this entry already owns.
+    // @decision 4e987303 (round 3) — filter `dropped.orphanLatchFiles` AFTER the union: a caller that
+    // just consumed/deleted a sourceFile must never see disk resurrect it as a dangling self-reference.
+    orphanLatchFiles: (() => {
+      const unionedOrphans = entry.orphanLatchFiles || reingested.orphanLatchFiles
+        ? [...new Set([...(entry.orphanLatchFiles ?? []), ...(reingested.orphanLatchFiles ?? [])])].filter((f) => !dropped.orphanLatchFiles.has(f))
+        : [];
+      return unionedOrphans.length > 0 ? unionedOrphans : undefined;
+    })(),
+    // @decision 84c1046f — carry contributorRepoPaths forward from BOTH sides, never disk-only; a
+    // disk-only read silently drops a contributor folded in at runtime.
+    // @decision 4e987303 (round 3/4) — filter `dropped.contributorRepoPaths` AFTER the union, compared by
+    // `directPathIdentity` (never raw string equality — disk can spell the SAME identity differently).
+    contributorRepoPaths: (() => {
+      const unionedContributors = entry.contributorRepoPaths || reingested.contributorRepoPaths
+        ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])].filter((c) => !dropped.contributorRepoPaths.has(directPathIdentity(c)))
+        : [];
+      return unionedContributors.length > 0 ? unionedContributors : undefined;
+    })(),
+    // @decision 84c1046f — same carry-forward rule for this field's own sticky membership history
+    // (3b1944b6) — dropping it reopens 3b1944b6's second-clear-lifts-the-whole-union bug.
+    reducedContributorRepoPaths: entry.reducedContributorRepoPaths || reingested.reducedContributorRepoPaths
+      ? [...new Set([...(entry.reducedContributorRepoPaths ?? []), ...(reingested.reducedContributorRepoPaths ?? [])])]
+      : undefined,
+    // @decision 4913e721 / 84c1046f — OR in `entry`'s own (caller's live) mark too, never disk-only; never
+    // originate a fresh `true` here, only propagate one already true on either side.
+    provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
+    provenanceTracked: entry.provenanceTracked || reingested.provenanceTracked ? true : undefined,
+    // @decision 6de79dc0 (CR round 3, MINOR) — the absorbing union, never a wholesale `...reingested`
+    // adopt: `entry` is always a placeholder here, so this always resolves `undefined` — a permanent,
+    // fail-closed demotion, never re-promoted later.
+    genuineContributorKeys: unionGenuineContributorKeysAbsorbing([entry, reingested]),
+  };
+}
+
+/**
  * THE chokepoint for a MARKED basename ({@link keptUnreadableLatchFiles}) about to be renamed over by
  * ANY call to {@link writeMergeQuarantineLatch} — a raise, a lazy-graduation, a sibling-consume, or a
  * partial-clear rewrite all funnel through this one check, so none of them can independently reintroduce
@@ -1838,81 +1936,13 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
   // @decision 702b4241 (round 2) — when `entry` is itself card 702b4241's own UNREADABLE placeholder,
   // the generic token-only union below is the WRONG direction: RE-INGEST the on-disk record WHOLESALE
   // instead, or the placeholder's own synthetic branch/reason durably wins over genuine recovered data.
+  //
+  // @decision 0bc6305a — the build is now the ONE shared {@link buildReingestedEntryFromDisk}, also
+  // used by {@link reconcileClearedEntryIfPlaceholder}; only the gating (incl. this function's own
+  // `"unreadable"` sentinel elsewhere) stays separate per caller. See that helper's own doc.
   if (isUnreadablePlaceholderEntry(entry) && !isPlaceholderEntryShape(parsed)
     && typeof parsed.branch === "string" && typeof parsed.reason === "string") {
-    const reingested = latchEntryFromParsedRecord(parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string });
-    // @decision 8bc779f0 — apply the SAME clearedTokens tombstone filter the generic branch below
-    // already applies via readSurvivingOnDiskTokens; `reingested.tokens` alone is unfiltered raw disk
-    // content. See the decision record.
-    const { surviving: reingestedSurvivingTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
-    const finalOwnHashForReingest = path.basename(final, ".json");
-    // @decision db0a9db0 (round 4) — run the SAME detector every other re-parse site uses, on the
-    // REINGESTED record (its own disk-sourced keys), before anything below overrides them — never force
-    // `provenanceTracked: true` here; see db0a9db0's own "only writeMergeQuarantineLatch stamps it" rule.
-    const reingestedUnknownProvenance = detectUnknownProvenance(reingested, finalOwnHashForReingest);
-    // @decision f575cebf — drop a candidate ONLY when positivelyForeignKey proves it belongs to another
-    // repo right now; an empty slot or a same-identity occupant both survive the filter unchanged.
-    const onDiskKeysForReingest = informativeKeysFor(reingested).filter((k) => quarantineHashForKey(k) !== finalOwnHashForReingest && !positivelyForeignKey(k, entry, ownershipMap));
-    // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too, never drop them wholesale:
-    // `entry` can ALREADY carry a REAL raiser's own token (unioned in via `divertRaiseEntry` before this
-    // basename ever became readable), not just the placeholder's bare synthetic one — see "Round 5" below.
-    // @decision 702b4241 (round 4) — but filter OUT every {@link unreadablePlaceholderTokens} member: that
-    // specific synthetic token was never returned to a real caller and must never ride into the union,
-    // even on the plain query-after-boot path where `entry.tokens` holds nothing else at all.
-    return {
-      ...reingested,
-      // @decision 2dd97aaa (Follow-up 58957b1e) — filter `dropped.tokens` AFTER the union, same posture
-      // as writePendingDivertFile's own re-read-and-union branch.
-      // @decision 8bc779f0 — `reingestedSurvivingTokens` (never bare `reingested.tokens`): already
-      // excludes every `clearedTokens` member, same as the generic branch's own `resurrectable` below.
-      tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingestedSurvivingTokens])].filter((t) => !dropped.tokens.has(t)),
-      resolvedKey: entry.resolvedKey,
-      resolvedKeys: onDiskKeysForReingest.length > 0
-        ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeysForReingest, `reconcileMarkedBasenameBeforeWrite-reingest(${entry.repoPath})`)
-        : entry.resolvedKeys,
-      armedKeys: entry.armedKeys,
-      // @decision 84c1046f — carry orphanLatchFiles forward from BOTH sides, never disk-only; never drop
-      // an in-memory accumulation this entry already owns.
-      // @decision 4e987303 (round 3) — filter `dropped.orphanLatchFiles` AFTER the union: a caller that
-      // just consumed/deleted a sourceFile must never see disk resurrect it as a dangling self-reference.
-      orphanLatchFiles: (() => {
-        const unionedOrphans = entry.orphanLatchFiles || reingested.orphanLatchFiles
-          ? [...new Set([...(entry.orphanLatchFiles ?? []), ...(reingested.orphanLatchFiles ?? [])])].filter((f) => !dropped.orphanLatchFiles.has(f))
-          : [];
-        return unionedOrphans.length > 0 ? unionedOrphans : undefined;
-      })(),
-      // @decision 84c1046f — carry contributorRepoPaths forward from BOTH sides, never disk-only; a
-      // disk-only read silently drops a contributor folded in at runtime (clear-by-id then wrongly lifts
-      // that contributor's own quarantine). See the decision record.
-      // @decision 4e987303 (round 3) — filter `dropped.contributorRepoPaths` AFTER the union: THIS
-      // write's own explicit reduction (never the whole sticky reducedContributorRepoPaths set — see the
-      // decision record for why that would be a different, previously-rejected, unconditional rule).
-      // @decision 4e987303 (round 4) — compare by `directPathIdentity`, never raw string equality: disk
-      // can spell the SAME identity differently (case, `/` vs `\`) than the caller's own removal — a raw
-      // comparison misses that spelling and resurrects it. See the decision record.
-      contributorRepoPaths: (() => {
-        const unionedContributors = entry.contributorRepoPaths || reingested.contributorRepoPaths
-          ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])].filter((c) => !dropped.contributorRepoPaths.has(directPathIdentity(c)))
-          : [];
-        return unionedContributors.length > 0 ? unionedContributors : undefined;
-      })(),
-      // @decision 84c1046f — same carry-forward rule for this field's own sticky membership history
-      // (3b1944b6) — dropping it reopens 3b1944b6's second-clear-lifts-the-whole-union bug.
-      reducedContributorRepoPaths: entry.reducedContributorRepoPaths || reingested.reducedContributorRepoPaths
-        ? [...new Set([...(entry.reducedContributorRepoPaths ?? []), ...(reingested.reducedContributorRepoPaths ?? [])])]
-        : undefined,
-      // @decision 4913e721 — OR in `entry`'s own (caller's live) mark too, never disk-only: the old code
-      // discarded it outright, the same drop class db0a9db0's "carry forward at EVERY copy site" forbids.
-      provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
-      // @decision 84c1046f — same OR-carry as provenanceUnknown just above: db0a9db0's own "carry forward
-      // at every copy/rebuild site" rule names this field too; never originates a fresh true here, only
-      // propagates one already true on either side.
-      provenanceTracked: entry.provenanceTracked || reingested.provenanceTracked ? true : undefined,
-      // @decision 6de79dc0 (CR round 3, MINOR) — same absorbing helper `reconcileClearedEntryIfPlaceholder`
-      // uses, not the wholesale `...reingested` adopt: `entry` is always a placeholder here, so this
-      // always resolves `undefined` — a permanent, fail-closed demotion, never re-promoted later.
-      genuineContributorKeys: unionGenuineContributorKeysAbsorbing([entry, reingested]),
-    };
+    return buildReingestedEntryFromDisk(final, entry, parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string }, dropped, ownershipMap, "reconcileMarkedBasenameBeforeWrite-reingest");
   }
   const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
   // @decision 8db913e2 (Follow-up 150aed7b) — exclude the key `final`'s OWN basename hash names, never
@@ -2557,57 +2587,10 @@ function reconcileClearedEntryIfPlaceholder(entry: MergeQuarantineEntry, physica
   if (!isReadableLatchRecord(parsed)) return entry; // e.g. the bare literal `null`
   if (typeof parsed.repoPath !== "string" || directPathIdentity(parsed.repoPath) !== directPathIdentity(entry.repoPath)) return entry; // a different identity — never ours to adopt
   if (isPlaceholderEntryShape(parsed) || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return entry; // still not genuine content
-  const reingested = latchEntryFromParsedRecord(parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string });
-  // @decision 8bc779f0 — the SAME tombstone gap reconcileMarkedBasenameBeforeWrite's own reingest
-  // branch had: `reingested.tokens` alone is unfiltered raw disk content. See the decision record.
-  const { surviving: reingestedSurvivingTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
-  const finalOwnHash = path.basename(physicalPath, ".json");
-  // @decision db0a9db0 (round 4) — run the SAME detector every other re-parse site uses, on the
-  // REINGESTED record's own disk-sourced keys, mirroring reconcileMarkedBasenameBeforeWrite's own
-  // identical call — never force `provenanceTracked: true` here either.
-  const reingestedUnknownProvenance = detectUnknownProvenance(reingested, finalOwnHash);
-  // @decision 656fdf39 (CR d1e02886 round 3) — same `positivelyForeignKey` filter as the sibling fold
-  // branch in `reconcileMarkedBasenameBeforeWrite`: drop a key ONLY when a live, different-identity
-  // occupant owns it right now — never merely unprovable. Live `activeQuarantines` is correct here.
-  const onDiskKeys = informativeKeysFor(reingested).filter((k) => quarantineHashForKey(k) !== finalOwnHash && !positivelyForeignKey(k, entry, activeQuarantines));
-  const orphanLatchFiles = entry.orphanLatchFiles || reingested.orphanLatchFiles
-    ? [...new Set([...(entry.orphanLatchFiles ?? []), ...(reingested.orphanLatchFiles ?? [])])]
-    : undefined;
-  const contributorRepoPaths = entry.contributorRepoPaths || reingested.contributorRepoPaths
-    ? [...new Set([...(entry.contributorRepoPaths ?? []), ...(reingested.contributorRepoPaths ?? [])])]
-    : undefined;
-  // @decision 3b1944b6 (Round 4) — same union-forward as `contributorRepoPaths` just above, for its own
-  // sticky history field — see that field's own doc comment.
-  const reducedContributorRepoPaths = entry.reducedContributorRepoPaths || reingested.reducedContributorRepoPaths
-    ? [...new Set([...(entry.reducedContributorRepoPaths ?? []), ...(reingested.reducedContributorRepoPaths ?? [])])]
-    : undefined;
-  // @decision 6de79dc0 — named explicitly per 656fdf39's own "Do not" list, via the ABSENCE-ABSORBING
-  // union (CR round 2, CRITICAL-2) — see {@link unionGenuineContributorKeysAbsorbing}'s own doc.
-  const genuineContributorKeys = unionGenuineContributorKeysAbsorbing([entry, reingested]);
-  return {
-    ...reingested,
-    // @decision 702b4241 (round 5) — union `entry`'s own tokens forward too, filtering OUT every
-    // {@link unreadablePlaceholderTokens} member, the SAME rule reconcileMarkedBasenameBeforeWrite's own
-    // placeholder branch applies.
-    //
-    // @decision 8bc779f0 — `reingestedSurvivingTokens` (never bare `reingested.tokens`): already
-    // excludes every `clearedTokens` member.
-    tokens: [...new Set([...entry.tokens.filter((t) => !unreadablePlaceholderTokens.has(t)), ...reingestedSurvivingTokens])],
-    resolvedKey: entry.resolvedKey,
-    resolvedKeys: onDiskKeys.length > 0
-      ? unionResolvedKeysRetaining(entry.resolvedKeys, onDiskKeys, `reconcileClearedEntryIfPlaceholder(${entry.repoPath})`)
-      : entry.resolvedKeys,
-    armedKeys: entry.armedKeys,
-    orphanLatchFiles,
-    contributorRepoPaths,
-    reducedContributorRepoPaths,
-    genuineContributorKeys,
-    // @decision 4913e721 — OR in `entry`'s own (caller's live) mark too, never disk-only.
-    provenanceUnknown: reingestedUnknownProvenance || entry.provenanceUnknown || reingested.provenanceUnknown ? true : undefined,
-    // @decision 84c1046f — same OR-carry rule as the sibling reingest arm in
-    // reconcileMarkedBasenameBeforeWrite; see that site's own comment.
-    provenanceTracked: entry.provenanceTracked || reingested.provenanceTracked ? true : undefined,
-  };
+  // @decision 0bc6305a — the build is now the ONE shared {@link buildReingestedEntryFromDisk}, also used
+  // by {@link reconcileMarkedBasenameBeforeWrite}'s own reingest arm; this caller has nothing of its own
+  // to drop ({@link NO_DROPS}) and reads live `activeQuarantines` as its ownership map.
+  return buildReingestedEntryFromDisk(physicalPath, entry, parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string }, NO_DROPS, activeQuarantines, "reconcileClearedEntryIfPlaceholder");
 }
 
 /** Best-effort; a missing file is not an error. Never throws. Also sweeps any leftover `.json.tmp-<pid>`
