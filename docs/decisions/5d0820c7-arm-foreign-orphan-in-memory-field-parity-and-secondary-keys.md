@@ -7,10 +7,12 @@ armed a foreign orphan/tmp-residue's identity T from the narrow `ArmableOrphanRe
 reason/enteredAt/tokens only). The next boot's own PASS 1 instead reads the SAME bytes with 16
 fields/derivations (repoPath, branch, reason, opId, enteredAt, tokens, orphanLatchFiles, resolvedKey,
 resolvedKeys, identityAtRaise, genuineContributorKeys, placeholder, contributorRepoPaths,
-reducedContributorRepoPaths, provenanceUnknown, provenanceTracked — the inline parse at
-`merge-quarantine.ts` ~`:8945-8997`) and additionally attempts an ACTIVE arm at every
-`secondaryKeysToAttempt(entry, currentKey)` candidate (~`:9075-9105` unresolvable branch, ~`:9117-9128`
-resolvable branch) — the in-process arm never attempted any key but T's own. So, in-process, a repo B
+reducedContributorRepoPaths, provenanceUnknown, provenanceTracked — the inline per-file entry-
+construction block in PASS 1's own read loop, inside `reenterMergeQuarantinesAtBootImpl`) and
+additionally attempts an ACTIVE arm at every `secondaryKeysToAttempt(entry, currentKey)` candidate (the
+degraded-entry secondary-key loop feeding `degradedDivertsToFlush`, for the unresolvable branch; the
+loop right after `armCurrentKeyUnlessDegradedCollision`'s own primary arm, for the resolvable branch) —
+the in-process arm never attempted any key but T's own. So, in-process, a repo B
 named by O's own `resolvedKey` (or a contributor C named by O's own `contributorRepoPaths`) was NOT
 blocked until the next reboot — a fail-open window. This card landed as TWO separate commits (Step A,
 then Step B) for bisection.
@@ -264,21 +266,27 @@ occupant, fresh OR stale, never conditioned on whether that occupant's own fresh
 pass right now. The occupant's own entry is always left completely untouched; T stays correctly,
 separately armed at its own primary key regardless of the occupant's own current resolvability.
 
-**The residual this widening accepts, stated honestly rather than fixed:** clearing the STALE occupant
-(U) FIRST leaves U correctly UNBLOCKED in-process (T's own secondary claim at `keyU` was declined, never
-armed there) — but a reboot taken at that SAME point still reads `keyU` BLOCKED. T's own on-disk orphan
-content still carries `resolvedKey = keyU` (the in-process arm never writes anything to T's own physical
-file — see `armForeignOrphanContentInMemoryIfUnenforced`'s own "left untouched on disk" invariant), and
-`keyU` is now free for PASS 1 to re-arm T there on the next boot. A fail-open for `keyU` relative to a
-reboot, for a STALE SECONDARY CLAIM ONLY — T's own primary-key block is unaffected either way, and the
+**The residual this widening accepts, stated honestly rather than fixed — and scoped to `keyU` alone, not
+to a stale occupant specifically:** this is not new to round 3's own widening; it dates from round 2's
+own decline, which already declined unconditionally for a FRESH occupant. It applies to ANY declined
+different-identity occupant at a secondary key, fresh OR stale, cleared FIRST: clearing the occupant (U)
+FIRST leaves U correctly UNBLOCKED in-process (T's own secondary claim at `keyU` was declined, never
+armed there, so in-process `keyU` reads nothing — none) — but a reboot taken at that SAME point still
+reads `keyU` BLOCKED, re-armed as T. T's own on-disk orphan content still carries `resolvedKey = keyU`
+(the in-process decline never writes anything to T's own physical file — see
+`armForeignOrphanContentInMemoryIfUnenforced`'s own "left untouched on disk" invariant), and `keyU` is
+now free for PASS 1 to re-arm T there on the next boot. A fail-open for `keyU` relative to a reboot, for
+ANY declined secondary claim cleared first — T's own primary-key block is unaffected either way, and the
 in-process state is never LESS correct than before this round's fix, only less STRICT than what a reboot
-taken at that same instant would show. Clearing T FIRST instead shows no such gap: T's own orphan file is
-swept the instant T itself is fully lifted, so there is nothing left on disk for a later reboot to re-arm
-from — confirmed empirically for both clear orders, not merely argued (see the STALE-OCCUPANT-RESOLVABLE-T
-test below). Not fixed here — the same boot-scoped-`registeredRepoPaths`-equivalent gap SHOULD-1 and the
-"Do not" list already name for the stale-occupant-eviction and `provenanceUnknown` cases applies equally
-here: there is no runtime way to tell "this stale occupant's own claim was never going to resolve again
-anyway" apart from "it just hasn't resolved YET" without replicating PASS 1's own boot-scoped machinery.
+taken at that same instant would show. Clearing T FIRST instead shows no such gap, fresh or stale alike:
+T's own orphan file is swept the instant T itself is fully lifted, so there is nothing left on disk for a
+later reboot to re-arm from — confirmed empirically for both clear orders of the STALE case (see the
+STALE-OCCUPANT-RESOLVABLE-T test below) and, by the identical mechanism, for the FRESH case too (see
+OCCUPIED-KEY-RESOLVABLE-T's own optional mid-reboot check). Not fixed here — the same boot-scoped-
+`registeredRepoPaths`-equivalent gap SHOULD-1 and the "Do not" list already name for the stale-occupant-
+eviction and `provenanceUnknown` cases applies equally here: there is no runtime way to tell "this
+occupant's own claim was never going to resolve again anyway" apart from "it just hasn't resolved YET"
+without replicating PASS 1's own boot-scoped machinery.
 
 **SHOULD-1 (record correction) — the `provenanceUnknown` residual's scope was stated too narrowly.** The
 "Step B" section above originally scoped the named `provenanceUnknown` residual to a RESOLVABLE secondary
@@ -342,8 +350,8 @@ rather than restated here: PASS 1's CASE 2 (`armKeyUnlessDegradedCollision`) is 
   list Step B's own provenanceUnknown scoping already cannot access at runtime; see Round 3's own section
   for why declining uniformly (fresh or stale) is the accepted substitute, and its own named residual.
 - Do not read this card as closing `97a5b64f`'s own scope — that card is about LATER writes of an
-  already-armed entry (`mergeTokenIntoPendingEntries` ~`:3800`, `rewriteOrphanLatchFilesAfterPartialClear`
-  ~`:4953`→~`:4600`) dropping fields independent of how complete the arm originally was. Completing the
+  already-armed entry (`mergeTokenIntoPendingEntries`, `rewriteOrphanLatchFilesAfterPartialClear`)
+  dropping fields independent of how complete the arm originally was. Completing the
   arm here (Step A) may shrink `97a5b64f`'s remaining scope — a later write might be able to safely carry
   the now-complete in-memory entry forward rather than needing to rebase onto disk to recover a field
   memory never had — but that is for `97a5b64f`'s own investigation to confirm, not assumed here.

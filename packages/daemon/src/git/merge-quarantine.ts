@@ -5259,8 +5259,8 @@ function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntr
     console.warn(`[merge-quarantine] arming ${record.repoPath} as a PENDING quarantine, THIS PROCESS ONLY (its path does not currently resolve), straight from a kept ${label} (${basenameText}) whose own content this sweep just proved foreign and uncovered; ${basenameText} itself is left untouched on disk.`);
   }
   // @decision 5d0820c7 — STEP B: arm every OTHER informative key `record` carries too. Threads
-  // `armedKeys` through each call so every key the final merged object ends up at points at the SAME
-  // object — mirrors PASS 1's own ~:9108-9111 note.
+  // `armedKeys` through each call so every key ends up at the SAME object — mirrors PASS 1's own
+  // "Thread the return value through both arms" note in its secondary-key loop.
   //
   // @decision 5d0820c7 (round 3) — decline for ANY different-identity occupant, fresh OR stale, never
   // gated on the occupant's own freshness (round 2 gated this on `isKeyVerifiedFor` and still corrupted
@@ -5277,8 +5277,8 @@ function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntr
     armedEntry = armQuarantineKey(activeQuarantines, key, armedEntry);
   }
   // @decision 5d0820c7 — the PENDING push is deferred until AFTER the secondary-key loop, using the
-  // FINAL (possibly-unioned) object — mirrors PASS 1's own `degradedDivertsToFlush.push({ entry:
-  // armedAtResolvedKey ?? entry, ... })` at ~:9104, which also defers until after its own loop.
+  // FINAL (possibly-unioned) object — mirrors PASS 1's own degraded-entry secondary-key loop, which
+  // also defers its `degradedDivertsToFlush.push` until after that same loop.
   if (!resolvableNow) pendingUnresolvedQuarantines.push({ entry: armedEntry, sourceFile: basenames[0]! });
   return result;
 }

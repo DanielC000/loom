@@ -300,6 +300,13 @@ try {
       booted.clearMergeQuarantineByToken(U, tU);
     } else {
       booted.clearMergeQuarantineByToken(U, tU);
+      // Optional (card 62c79512): the FRESH-occupant counterpart to the STALE-OCCUPANT-RESOLVABLE-T
+      // scenario's own mid-reboot residual check, below — the SAME gap, not stale-specific, proven here
+      // for a fresh U too (T's own orphan content still carries resolvedKey=keyU, now free on disk).
+      const midReboot = await freshBootModule();
+      midReboot.reenterMergeQuarantinesAtBoot([T]);
+      check(`(OCCUPIED-KEY-RESOLVABLE-T, U-then-T) NAMED RESIDUAL (not stale-specific): a reboot taken right after clearing FRESH occupant U still reads keyU blocked (T's on-disk resolvedKey=keyU re-arms it once free) — in-process does not, by design (T's secondary claim was declined there)`, midReboot.stillBlockedEntryFor(U) !== undefined);
+      check(`(OCCUPIED-KEY-RESOLVABLE-T, U-then-T) the SAME mid-reboot never touches T's own primary key — T stays blocked there too`, midReboot.stillBlockedEntryFor(T) !== undefined);
       booted.clearMergeQuarantineByToken(T, tF);
     }
     check(`(OCCUPIED-KEY-RESOLVABLE-T, ${order}) T is fully lifted in-process after both its own and U's tokens clear`, !booted.stillBlockedEntryFor(T));
@@ -331,8 +338,10 @@ try {
   // repo, resolvedKey=key(U). Both clear orders, each with a reboot taken right after its own first
   // clear.
   //
-  // @decision 5d0820c7 (round 3) — see the decision record's own Round 3 section for the full mechanism
-  // and the named, honestly-stated residual this scenario proves empirically.
+  // @decision 5d0820c7 (round 3) — the reboot-vs-in-process gap at keyU here is scoped to ANY declined
+  // occupant cleared first (fresh or stale, dating from round 2), never to T's own primary key.
+  //
+  // OCCUPIED-KEY-RESOLVABLE-T's own optional mid-reboot check, below, proves the FRESH-occupant case.
   // ═══════════════════════════════════════════════════════════════════════════════════════════════════
   for (const order of ["T-then-U", "U-then-T"]) {
     const A = makeRepo(`stal-a-${order}`);
@@ -376,11 +385,15 @@ try {
       check(`(STALE-OCCUPANT-RESOLVABLE-T, U-then-T) U is lifted in-process right after its OWN clear (T's secondary claim was declined, never armed at keyU)`, !booted.stillBlockedEntryFor(uDir));
       check(`(STALE-OCCUPANT-RESOLVABLE-T, U-then-T) T is STILL blocked in-process right after U's clear (T's own token untouched)`, booted.stillBlockedEntryFor(T) !== undefined);
 
-      // ⚠️ NAMED, ACCEPTED RESIDUAL (round 3, NOT fixed here — see the decision record's own Round 3
-      // section): a reboot taken at this exact point still reads keyU BLOCKED, where in-process does not.
+      // ⚠️ NAMED, ACCEPTED RESIDUAL (dates from round 2's own unconditional decline, widened — not fixed
+      // — by round 3 to also cover a STALE occupant; see the decision record's own Round 3 section):
+      // clearing ANY declined different-identity occupant FIRST, fresh or stale, leaves keyU free
+      // in-process but still re-armable, from T's own on-disk resolvedKey=keyU, on a reboot taken at
+      // this exact point — scoped to keyU alone, never T's own primary key (asserted just below).
       const midReboot = await freshBootModule();
       midReboot.reenterMergeQuarantinesAtBoot([T]);
       check(`(STALE-OCCUPANT-RESOLVABLE-T, U-then-T) NAMED RESIDUAL: a reboot taken right after U's own clear still reads keyU blocked (T's on-disk resolvedKey=keyU re-arms it once free) — in-process does not, by design (T's secondary claim was declined there)`, midReboot.stillBlockedEntryFor(uDir) !== undefined);
+      check(`(STALE-OCCUPANT-RESOLVABLE-T, U-then-T) the SAME mid-reboot never touches T's own primary key — T stays blocked there too (the residual is scoped to keyU alone, never T's own primary)`, midReboot.stillBlockedEntryFor(T) !== undefined);
 
       booted.clearMergeQuarantineByToken(T, tF);
       check(`(STALE-OCCUPANT-RESOLVABLE-T, U-then-T) T's own orphan file is swept once T is fully lifted too`, !fs.existsSync(orphanPath));
