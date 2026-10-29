@@ -114,14 +114,21 @@ All three were found and fixed by running the full `merge-quarantine*.mjs` corpu
 this card's own new scenarios alone — consistent with this module's own repeated "Do not trust a fix
 verified only against its own new scenario" rule (see `d2582692`'s and `4b6c8d24`'s own records).
 
-## The residual: FAIL-OPEN AT RUNTIME until the next reboot (not merely "bounded")
+## The residual: FAIL-OPEN AT RUNTIME until the next reboot (not merely "bounded") — PARTIALLY CLOSED, see the Update below
 
 The conservative, fail-closed default for `candidateTokens` when `clearedEntry` is `undefined` (nothing
 active at this particular key) is an empty array — meaning a legitimately-foreign, currently-resolvable
-tmp with no `clearedEntry` context is now KEPT, correctly, but sits on disk UNENFORCED at runtime: nothing
-in `activeQuarantines`/`pendingUnresolvedQuarantines` currently blocks on it, and it stays that way for as
-long as the daemon keeps running. **State this plainly as FAIL-OPEN AT RUNTIME, never merely "bounded" or
-"self-healing" without that qualifier** — round 1 of this record undersold the residual by leading with
+tmp with no `clearedEntry` context is now KEPT, correctly. **Update (card `25d0d45b`): for a kept tmp
+whose content is genuinely ARMABLE (parses with a string `repoPath`/`branch`/`reason`) and not the
+clearer's own excluded identity, it is no longer merely sitting on disk unenforced — it is now armed
+in-process IMMEDIATELY, closing this exact window.** The paragraphs below describe the PRE-`25d0d45b`
+state and remain accurate for the shapes `25d0d45b` does NOT cover: a read-failure keep, a keep with no
+parseable `repoPath` (neither shape ever produces an armable record), a kept file attributed to the
+clearer's OWN identity (never armed, by design — see `25d0d45b`'s own record), or a keep whose identity
+(or canonical key) is already represented elsewhere in this process (the same conservative
+already-enforced/key-occupied skip `1dd00dca` established for the `.json` orphan case). For those
+remaining shapes, **state the residual plainly as FAIL-OPEN AT RUNTIME, never merely "bounded" or
+"self-healing" without that qualifier"** — round 1 of this record undersold the residual by leading with
 the recovery property instead of the open window it follows.
 
 **Confirmed, empirically, that a RESTART closes the window.** Simulated the post-fix state directly (the
@@ -310,7 +317,9 @@ rather than either being left silently dropped, or the two being conflated, as b
   each change, never by this card's own new file alone.
 - Do not describe the runtime residual as merely "bounded" or "self-healing" without the FAIL-OPEN-AT-
   RUNTIME qualifier (round 2) — the content is genuinely unenforced between a clear and the next restart;
-  name that plainly before naming the escape.
+  name that plainly before naming the escape. **(Card `25d0d45b`)** — this now applies ONLY to the
+  shapes `25d0d45b` left open (read-failure, no-`repoPath`, own-identity, key-already-occupied); for an
+  armable, foreign, unoccupied-key keep, the window is closed in-process immediately — say so instead.
 - Do not claim a same-identity re-raise recovers a kept tmp "as the union," and do not relay a measurement
   (your own or another party's) into this record without independently re-verifying it first — a same-
   identity re-raise only RE-BLOCKS the identity under a FRESH token; the old, kept tmp's own old token is

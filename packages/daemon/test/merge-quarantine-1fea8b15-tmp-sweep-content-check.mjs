@@ -49,7 +49,7 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor, MERGE_QUARANTINE_DIR,
-  reenterMergeQuarantinesAtBoot,
+  reenterMergeQuarantinesAtBoot, assertRepoNotQuarantined, clearMergeQuarantineLatchFile,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -109,12 +109,23 @@ try {
 
     const clearResult = clearMergeQuarantine(r);
     check("*** THE FIX (resolvable) *** D's foreign tmp residue SURVIVES R's clear", fs.existsSync(strandedDTmp));
-    // @decision 1fea8b15 (round 2, Code Review BLOCKING 2) — the EXACT channel, no `||`: a content-kept
-    // entry has NO live entry backing it, so it must appear in `contentKeptRepoPaths` ONLY, never in
-    // `stillBlockedCoOccupants` (which implies a working `{id}` clear-by-id route that doesn't exist here).
-    check("(resolvable) clearResult names D's content via contentKeptRepoPaths", !!clearResult.contentKeptRepoPaths?.includes(d));
-    check("(resolvable) D is NOT in stillBlockedCoOccupants (no non-working {id} route offered for it)",
-      !clearResult.stillBlockedCoOccupants?.some((c) => c.repoPath === d));
+    // @decision 25d0d45b — the residual this closed for this exact shape: D is now armed/enforced
+    // IN-PROCESS immediately, not merely kept-and-deferred-to-the-next-boot. See the decision record.
+    check("*** 25d0d45b CLOSES THE RUNTIME RESIDUAL (resolvable) *** D is now armed in-process immediately", assertRepoNotQuarantined(d).ok === false);
+    // @decision 25d0d45b (Code Review, MAJOR 1) — SUPERSEDES the original 1fea8b15 round-2 framing: once
+    // armed, D is a genuine live entry with a working `{id}` route — report it via
+    // `stillBlockedCoOccupants`, never `contentKeptRepoPaths`. See the decision record.
+    check("(resolvable) D is NOT in contentKeptRepoPaths (it is now a genuine live entry, not content-only)",
+      !clearResult.contentKeptRepoPaths?.includes(d));
+    const dCoOccupant = clearResult.stillBlockedCoOccupants?.find((c) => c.repoPath === d);
+    check("*** THE FIX IS CORRECTLY REPORTED (resolvable) *** D IS in stillBlockedCoOccupants, with a route id", !!dCoOccupant?.route?.id);
+    check("(resolvable) result-says-blocked === assertRepoNotQuarantined-refuses", !!dCoOccupant === (assertRepoNotQuarantined(d).ok === false));
+    // Prove the route is GENUINELY working, not merely structurally present: actually clear D by that id.
+    // @decision 25d0d45b (Round 3, NIT 7) — guarded: a RED run (route.id missing) must report a FAIL
+    // here, never throw a TypeError that aborts the process and hides every scenario after this one.
+    const dClearById = dCoOccupant?.route?.id ? clearMergeQuarantineLatchFile(dCoOccupant.route.id) : { ok: false, liftedRepoPaths: [] };
+    check("(resolvable) D's own {id} route is a REAL, WORKING clear route", dClearById.ok === true && dClearById.liftedRepoPaths.includes(d));
+    check("(resolvable) ...and D now reads unblocked after clearing it by that id", assertRepoNotQuarantined(d).ok === true);
 
     try { fs.unlinkSync(strandedDTmp); } catch { /* best-effort cleanup */ }
   }
@@ -190,9 +201,13 @@ try {
       fs.existsSync(dTmp));
     check("(ownleak) R's own stray tmp IS swept (own-identity residue — the intended WFR-2 behavior, unaffected)",
       !fs.existsSync(rStrayTmp));
-    check("(ownleak) clearResult names D's content via contentKeptRepoPaths (no silent loss)",
-      !!clearResult.contentKeptRepoPaths?.includes(d));
-    check("(ownleak) D is NOT in stillBlockedCoOccupants", !clearResult.stillBlockedCoOccupants?.some((c) => c.repoPath === d));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — D is armed here too (resolvable, foreign, uncovered),
+    // so it is now a live referencer, never a content-only keep. See the decision record.
+    check("(ownleak) D is NOT in contentKeptRepoPaths (it is now a genuine live entry)",
+      !clearResult.contentKeptRepoPaths?.includes(d));
+    const dCoOccupant = clearResult.stillBlockedCoOccupants?.find((c) => c.repoPath === d);
+    check("*** THE FIX IS CORRECTLY REPORTED (ownleak) *** D IS in stillBlockedCoOccupants, with a route id", !!dCoOccupant?.route?.id);
+    check("(ownleak) result-says-blocked === assertRepoNotQuarantined-refuses", !!dCoOccupant === (assertRepoNotQuarantined(d).ok === false));
 
     try { fs.unlinkSync(dTmp); } catch { /* best-effort cleanup */ }
   }
@@ -242,41 +257,89 @@ try {
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // SCENARIO clear-undefined-clearedentry-keeps-foreign-tmp-then-boot-recovers — when `clearedEntry` is
   // undefined at this key (nothing active armed there), `candidateTokens` falls back to `[]` — the
-  // conservative, fail-closed default. A foreign tmp at that key survives (never wrongly deleted), and a
-  // FRESH boot reconcile still recovers it properly — the bounded, self-healing residual this fix accepts
-  // rather than claims permanently closed.
+  // conservative, fail-closed default. A foreign tmp at that key survives (never wrongly deleted).
+  //
+  // R is deliberately NEVER raised here: raising R first, then clearing it, now ARMS D immediately (this
+  // card's own main fix) — occupying K — so a SECOND `clearMergeQuarantine(r)` call (the original
+  // two-clear shape this scenario used) no longer sees `clearedEntry===undefined`; it finds D's own
+  // just-armed entry instead, and (via the pre-existing, unrelated `1872935d` mechanism) ALSO DURABLY
+  // RELEASES D, deleting D's own tmp and naming D in `liftedRepoPaths` — see the DEDICATED scenario right
+  // after this one, which restores and pins exactly that two-clear shape as current, disclosed behavior.
+  // THIS scenario tests the single-clear, genuinely-undefined-`clearedEntry` shape in isolation, with no
+  // such second-clear interaction to route around. Never raising R at all reaches
+  // `deleteMergeQuarantineLatchByKey` with a genuinely undefined `clearedEntry` on the FIRST (and only)
+  // clear call.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
-    const r = makeRepo("undefined-entry-r");
+    const r = makeRepo("undefined-entry-r"); // never raised
     const d = path.join(r, "ghost-subdir");
     const key = canonicalRepoLockKey(r);
-    enterMergeQuarantine(r, "r-branch", "r's own real raise");
     const dToken = "D-DISJOINT-TOKEN-undefined-clearedentry";
     const strandedDTmp = plantStrandedTmp(key, d, dToken, "88885-cafed005");
     fs.mkdirSync(d, { recursive: true }); // D remounts, still no own .git
 
-    // Fully clear R first (removes R's own final + entry), leaving NOTHING armed at K in-memory.
-    // @decision 1fea8b15 (round 2, nit) — relabeled: this is NOT a bare precondition — on pre-fix code,
-    // this SAME first clear's own unconditional sweep would have destroyed D's tmp blind (D's foreign,
-    // resolvable-now content, same shape as the main resolvable scenario above). It is a RED assertion.
-    clearMergeQuarantine(r);
-    check("*** THE FIX (undefined-clearedentry, first clear) *** R's final is gone, D's tmp SURVIVES, nothing armed at K",
-      !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${createHash("sha256").update(key).digest("hex").slice(0, 24)}.json`)) &&
-      fs.existsSync(strandedDTmp) && !activeMergeQuarantineFor(r));
-
-    // Clear R again — this time `clearMergeQuarantineByKey`'s own `entry` lookup at K is undefined
-    // (nothing active there), so `deleteMergeQuarantineLatchByKey`'s `clearedEntry` is undefined too.
-    clearMergeQuarantine(r);
+    // `clearMergeQuarantineByKey`'s own `entry = activeQuarantines.get(key)` lookup is undefined here —
+    // R was never raised, so nothing has EVER occupied K — making `deleteMergeQuarantineLatchByKey`'s
+    // `clearedEntry` undefined on this ONE call, no second clear needed.
+    const clearResult = clearMergeQuarantine(r);
     check("*** THE FIX (undefined-clearedentry) *** D's foreign tmp residue SURVIVES a clear with no active entry at K", fs.existsSync(strandedDTmp));
+    // @decision 25d0d45b — the residual this closed for this exact shape: D is now armed/enforced
+    // IN-PROCESS immediately (ACTIVE, since D is resolvable and K was genuinely unoccupied), never
+    // merely kept-and-deferred-to-the-next-boot. See the decision record.
+    check("*** 25d0d45b CLOSES THE RUNTIME RESIDUAL (undefined-clearedentry) *** D is armed in-process immediately", assertRepoNotQuarantined(d).ok === false);
+    // @decision 25d0d45b (Code Review, MAJOR 1) — armed means a genuine live referencer, never content-only.
+    check("(undefined-clearedentry) D is NOT in contentKeptRepoPaths (it is now a genuine live entry)",
+      !clearResult.contentKeptRepoPaths?.includes(d));
+    const dCoOccupant = clearResult.stillBlockedCoOccupants?.find((c) => c.repoPath === d);
+    check("*** THE FIX IS CORRECTLY REPORTED (undefined-clearedentry) *** D IS in stillBlockedCoOccupants, with a route id", !!dCoOccupant?.route?.id);
+    check("(undefined-clearedentry) result-says-blocked === assertRepoNotQuarantined-refuses", !!dCoOccupant === (assertRepoNotQuarantined(d).ok === false));
+    const dEntryInProcess = activeMergeQuarantineFor(d);
+    check("(undefined-clearedentry) ...carrying D's own real token", !!dEntryInProcess && dEntryInProcess.tokens.includes(dToken));
 
-    // Now simulate a fresh boot reconcile and confirm the residual is bounded, not permanent.
+    // The boot leg is KEPT (unchanged intent): a fresh boot reconcile still independently recovers the
+    // same tmp residue, consistent with the in-process state above — no split, never a permanent-only-
+    // via-boot residual for this shape any more.
     const fresh = await freshBootModule();
     fresh.reenterMergeQuarantinesAtBoot([r]);
     const dActive = fresh.activeMergeQuarantineFor(d);
-    check("*** THE RESIDUAL IS BOUNDED *** a fresh boot reconcile recovers D's kept-but-orphaned tmp, with its own token intact",
+    check("(undefined-clearedentry) a fresh boot reconcile ALSO recovers D's kept tmp, with its own token intact",
       !!dActive && dActive.tokens.includes(dToken));
     check("(undefined-clearedentry) the tmp residue itself is gone after boot recovery (promoted to a real final, not left stranded)",
       !fs.existsSync(strandedDTmp));
+    check("(undefined-clearedentry) in-process verdict === post-reboot verdict (no split)",
+      assertRepoNotQuarantined(d).ok === fresh.assertRepoNotQuarantined(d).ok);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO clear-undefined-clearedentry-TWO-CLEAR-second-clear-durably-releases-D.
+  //
+  // @decision 25d0d45b (Code Review, MAJOR 2) — never assume a second clear of the host is harmless
+  // once the first clear has armed a co-located occupant: it durably releases that occupant too.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const r = makeRepo("undefined-entry-twoclear-r");
+    const d = path.join(r, "ghost-subdir");
+    const key = canonicalRepoLockKey(r);
+    enterMergeQuarantine(r, "r-branch", "r's own real raise");
+    const dToken = "D-DISJOINT-TOKEN-twoclear";
+    const strandedDTmp = plantStrandedTmp(key, d, dToken, "88889-cafed009");
+    fs.mkdirSync(d, { recursive: true }); // D remounts, still no own .git
+
+    const clearResult1 = clearMergeQuarantine(r);
+    check("(twoclear, first clear) R's final is gone, D's tmp SURVIVES", fs.existsSync(strandedDTmp) && clearResult1.liftedRepoPaths.includes(r));
+    check("(twoclear, first clear) D is armed and reports as a genuine blocked co-occupant",
+      clearResult1.stillBlockedCoOccupants?.some((c) => c.repoPath === d) && assertRepoNotQuarantined(d).ok === false);
+
+    const clearResult2 = clearMergeQuarantine(r);
+    check("*** PINNED, DISCLOSED BEHAVIOR (twoclear, second clear) *** the second clear ALSO durably releases D — named in liftedRepoPaths",
+      clearResult2.liftedRepoPaths.includes(r) && clearResult2.liftedRepoPaths.includes(d));
+    check("(twoclear, second clear) D's own tmp residue is deleted (durably released, not merely in-process)", !fs.existsSync(strandedDTmp));
+    check("(twoclear, second clear) D now reads UNBLOCKED in-process", assertRepoNotQuarantined(d).ok === true);
+
+    const fresh = await freshBootModule();
+    fresh.reenterMergeQuarantinesAtBoot([r]);
+    check("(twoclear) a later boot ALSO finds D unblocked (the release is durable, not a transient in-process artifact)",
+      fresh.assertRepoNotQuarantined(d).ok === true);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════

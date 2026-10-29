@@ -38,7 +38,7 @@ const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-qua
 const {
   enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor, listActiveMergeQuarantines,
   reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR, clearMergeQuarantineByToken,
-  clearMergeQuarantineLatchFile, quarantineLatchFileIdsFor,
+  clearMergeQuarantineLatchFile, quarantineLatchFileIdsFor, assertRepoNotQuarantined,
 } = await import(mergeQuarantineModuleHref);
 const { canonicalRepoLockKey } = await import(pathToFileURL(path.join(distGitDir, "repo-lock.js")).href);
 
@@ -235,7 +235,15 @@ try {
     const result = clearMergeQuarantineLatchFile(id);
     check("(clear-by-id-pending) the clear-by-id call succeeded and lifted D", result.ok === true && result.wasQuarantined === true);
     check("*** THE FIX (clear-by-id-pending) *** E's foreign tmp residue SURVIVES this clear-by-id", fs.existsSync(strandedETmp));
-    check("*** THE FIX (clear-by-id-pending) *** contentKeptRepoPaths names E", !!result.contentKeptRepoPaths && result.contentKeptRepoPaths.includes(eRepoPath));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — E is unresolvable, now ARMED PENDING; report via
+    // referencingRepoPaths, never contentKeptRepoPaths.
+    check("(clear-by-id-pending, 25d0d45b) E is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !result.contentKeptRepoPaths?.includes(eRepoPath));
+    check("*** THE FIX IS CORRECTLY REPORTED (clear-by-id-pending, 25d0d45b) *** E IS in referencingRepoPaths", !!result.referencingRepoPaths?.includes(eRepoPath));
+    check("(clear-by-id-pending, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses",
+      !!result.stillBlockedCoOccupants?.some((c) => c.repoPath === eRepoPath) === (assertRepoNotQuarantined(eRepoPath).ok === false));
+    // @decision 25d0d45b (Round 3, NIT 7) — route-id presence, not just referencingRepoPaths membership.
+    const eCoOccupant = result.stillBlockedCoOccupants?.find((c) => c.repoPath === eRepoPath);
+    check("(clear-by-id-pending, 25d0d45b) E's own stillBlockedCoOccupants entry carries a working route id", !!eCoOccupant?.route?.id);
 
     try { fs.unlinkSync(strandedETmp); } catch { /* best-effort cleanup — an orphan with no real repo behind it */ }
   }
@@ -263,7 +271,15 @@ try {
     const result = clearMergeQuarantineLatchFile(id);
     check("(clear-by-id-raw) the clear-by-id call reports nothing was quarantined by this bare id", result.ok === true && result.wasQuarantined === false);
     check("*** THE FIX (clear-by-id-raw) *** F's foreign tmp residue SURVIVES this clear-by-id", fs.existsSync(strandedFTmp));
-    check("*** THE FIX (clear-by-id-raw) *** contentKeptRepoPaths names F", !!result.contentKeptRepoPaths && result.contentKeptRepoPaths.includes(fRepoPath));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — F is unresolvable, now ARMED PENDING; report via
+    // referencingRepoPaths, never contentKeptRepoPaths.
+    check("(clear-by-id-raw, 25d0d45b) F is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !result.contentKeptRepoPaths?.includes(fRepoPath));
+    check("*** THE FIX IS CORRECTLY REPORTED (clear-by-id-raw, 25d0d45b) *** F IS in referencingRepoPaths", !!result.referencingRepoPaths?.includes(fRepoPath));
+    check("(clear-by-id-raw, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses",
+      !!result.stillBlockedCoOccupants?.some((c) => c.repoPath === fRepoPath) === (assertRepoNotQuarantined(fRepoPath).ok === false));
+    // @decision 25d0d45b (Round 3, NIT 7) — route-id presence, not just referencingRepoPaths membership.
+    const fCoOccupant = result.stillBlockedCoOccupants?.find((c) => c.repoPath === fRepoPath);
+    check("(clear-by-id-raw, 25d0d45b) F's own stillBlockedCoOccupants entry carries a working route id", !!fCoOccupant?.route?.id);
 
     try { fs.unlinkSync(strandedFTmp); } catch { /* best-effort cleanup — an orphan with no real repo behind it */ }
   }

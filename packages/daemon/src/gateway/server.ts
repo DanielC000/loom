@@ -3268,7 +3268,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
+    const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, latchKept, referencingRepoPaths, contentKeptRepoPaths, contentKeptBlockedBy, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
     // @decision 1872935d — name every OTHER identity this clear swept up beyond repo.path itself (the
     // sibling-key-contributor shape 6de79dc0 accepted releasing, but never disclosed on this success
     // path) — post-hoc, since the clear already ran by the time this is computed.
@@ -3290,6 +3290,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
       // `referencingRepoPaths` above — its own, separately-gated field.
       ...(contentKeptRepoPaths?.length ? { contentKeptRepoPaths } : {}),
+      // @decision 25d0d45b (Round 5) — the `blockedBy` disclosure rides alongside `contentKeptRepoPaths`
+      // unconditionally; a producer field nobody forwards has no effect for a human reading this response.
+      ...(contentKeptBlockedBy?.length ? { contentKeptBlockedBy } : {}),
     };
   });
 
@@ -3321,7 +3324,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
       // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
       // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
-      const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, stillQuarantined, latchKept, referencingRepoPaths, contentKeptRepoPaths, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, stillQuarantined, latchKept, referencingRepoPaths, contentKeptRepoPaths, contentKeptBlockedBy, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
       // @decision 1872935d — same disclosure as `/clear` above, addressed against the given repoPath.
       const alsoReleased = alsoReleasedRepoPaths(liftedRepoPaths, [body.repoPath as string]);
       const alsoReleasedWarning = alsoReleasedWarningFor(alsoReleased);
@@ -3340,6 +3343,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
         // @decision 8db913e2 (Follow-up 0a783fb2) — same split as `/clear` above.
         ...(contentKeptRepoPaths?.length ? { contentKeptRepoPaths } : {}),
+        // @decision 25d0d45b (Round 5) — same disclosure as `/clear` above.
+        ...(contentKeptBlockedBy?.length ? { contentKeptBlockedBy } : {}),
       };
     }
     const result = clearMergeQuarantineLatchFile(body.id as string);
@@ -3363,6 +3368,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
       // `referencingRepoPaths` above — its own, separately-gated field.
       ...(result.contentKeptRepoPaths?.length ? { contentKeptRepoPaths: result.contentKeptRepoPaths } : {}),
+      // @decision 25d0d45b (Round 5) — same disclosure as the two routes above.
+      ...(result.contentKeptBlockedBy?.length ? { contentKeptBlockedBy: result.contentKeptBlockedBy } : {}),
     };
   });
 

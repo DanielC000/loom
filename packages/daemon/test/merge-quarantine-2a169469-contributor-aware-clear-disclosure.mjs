@@ -551,7 +551,18 @@ if (scenarioName === "clear-by-id-y-is-both-no-false-success") {
   check("*** THE FIX (J) *** liftedRepoPaths is EXACTLY empty", Array.isArray(result.liftedRepoPaths) && result.liftedRepoPaths.length === 0);
   check("*** THE FIX (J, minor 2) *** stillQuarantined is EXACTLY true", result.stillQuarantined === true);
   check("*** THE FIX (J, minor 2) *** reason names X as the host contributor-wise", namesHostContributorClause(result.reason, X));
-  check("*** THE FIX (J, minor 2) *** latchKept/contentKeptRepoPaths are CARRIED ALONGSIDE stillQuarantined, never dropped", result.latchKept === true && Array.isArray(result.contentKeptRepoPaths) && result.contentKeptRepoPaths.includes(Z));
+  // @decision 25d0d45b (Code Review, MAJOR 1) — Z is now ARMED (pending) and reports via
+  // `stillBlockedCoOccupants`, never `contentKeptRepoPaths`. See the decision record.
+  check("*** THE FIX (J, minor 2) *** latchKept is CARRIED ALONGSIDE stillQuarantined, never dropped", result.latchKept === true);
+  check("(J, 25d0d45b) Z is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !result.contentKeptRepoPaths?.includes(Z));
+  const zCoOccupant = result.stillBlockedCoOccupants?.find((c) => c.repoPath === Z);
+  check("*** THE FIX IS CORRECTLY REPORTED (J, 25d0d45b) *** Z IS in stillBlockedCoOccupants, with a route id", !!zCoOccupant?.route?.id);
+  check("(J, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses", !!zCoOccupant === (assertRepoNotQuarantined(Z).ok === false));
+  // @decision 25d0d45b (Round 3, NIT 7) — guarded: a RED run (route.id missing) reports a FAIL here,
+  // never a TypeError that aborts the process and hides every scenario after this one.
+  const zClearById = zCoOccupant?.route?.id ? clearMergeQuarantineLatchFile(zCoOccupant.route.id) : { ok: false, liftedRepoPaths: [] };
+  check("(J, 25d0d45b) Z's own {id} route is a REAL, WORKING clear route", zClearById.ok === true && zClearById.liftedRepoPaths.includes(Z));
+  check("(J, 25d0d45b) ...and Z now reads unblocked after clearing it by that id", assertRepoNotQuarantined(Z).ok === true);
 } else if (scenarioName === "clear-by-id-resolvable-contributor-own-record-wording") {
   // ROUND 4, item 1 (Code Review ff7ea5aa). Real X with an active entry carrying contributorRepoPaths:[Y];
   // Y is a REAL, RESOLVABLE subdirectory of X (no own `.git`) with its OWN, SEPARATE active record.

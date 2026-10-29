@@ -314,8 +314,13 @@ try {
     const clearResultF = mod.clearMergeQuarantineLatchFile(idF);
     check("(F) THE FIX: a by-id clear of a foreign-token orphan via the RAW-FALLBACK reports ok:true", clearResultF.ok === true);
     check("(F) THE FIX: ...and reports it KEPT via latchKept, never silently", clearResultF.latchKept === true);
-    check("*** CARD 0a783fb2 *** (F) ...naming the parsed foreign repoPath via contentKeptRepoPaths", (clearResultF.contentKeptRepoPaths ?? []).includes(foreignRepoF));
-    check("*** CARD 0a783fb2 *** (F) ...and NEVER folding it into referencingRepoPaths too", !(clearResultF.referencingRepoPaths ?? []).includes(foreignRepoF));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — foreignRepoF is resolvable with nothing else at its
+    // own key, so card 25d0d45b's own fix now ARMS it; report via referencingRepoPaths, never
+    // contentKeptRepoPaths.
+    check("(F, 25d0d45b) foreignRepoF is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !(clearResultF.contentKeptRepoPaths ?? []).includes(foreignRepoF));
+    check("*** THE FIX IS CORRECTLY REPORTED (F, 25d0d45b) *** foreignRepoF IS in referencingRepoPaths", (clearResultF.referencingRepoPaths ?? []).includes(foreignRepoF));
+    check("(F, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses",
+      !!clearResultF.stillBlockedCoOccupants?.some((c) => c.repoPath === foreignRepoF) === (mod.assertRepoNotQuarantined(foreignRepoF).ok === false));
     check("(F) the orphan genuinely survives on disk", fs.existsSync(orphanPathF));
   }
 
@@ -380,8 +385,12 @@ try {
     check("(H precondition) the orphan exists before H's full clear", fs.existsSync(orphanPathH));
 
     const clearResultH = bootedH.clearMergeQuarantine(H);
-    check("*** CARD 0a783fb2 *** (H) clearMergeQuarantineByKey reports the content-parsed keep via contentKeptRepoPaths", (clearResultH?.contentKeptRepoPaths ?? []).includes(foreignRepoH));
-    check("*** CARD 0a783fb2 *** (H) ...and never folds it into referencingRepoPaths", !(clearResultH?.referencingRepoPaths ?? []).includes(foreignRepoH));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — foreignRepoH is resolvable, now ARMED; report via
+    // referencingRepoPaths, never contentKeptRepoPaths.
+    check("(H, 25d0d45b) foreignRepoH is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !(clearResultH?.contentKeptRepoPaths ?? []).includes(foreignRepoH));
+    check("*** THE FIX IS CORRECTLY REPORTED (H, 25d0d45b) *** foreignRepoH IS in referencingRepoPaths", (clearResultH?.referencingRepoPaths ?? []).includes(foreignRepoH));
+    check("(H, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses",
+      !!clearResultH?.stillBlockedCoOccupants?.some((c) => c.repoPath === foreignRepoH) === (bootedH.assertRepoNotQuarantined(foreignRepoH).ok === false));
     check("(H) THE FIX: O (holding the foreign token) SURVIVES H's full clear", fs.existsSync(orphanPathH));
   }
 
@@ -456,8 +465,12 @@ try {
     check("(I precondition) the orphan exists before P's full clear", fs.existsSync(orphanPathI));
 
     const clearResultI = bootedI.clearMergeQuarantineByRecordedPath(pI);
-    check("*** CARD 0a783fb2 *** (I) clearMergeQuarantineByRecordedPath reports the content-parsed keep via contentKeptRepoPaths", (clearResultI?.contentKeptRepoPaths ?? []).includes(foreignRepoI));
-    check("*** CARD 0a783fb2 *** (I) ...and never folds it into referencingRepoPaths", !(clearResultI?.referencingRepoPaths ?? []).includes(foreignRepoI));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — foreignRepoI is resolvable, now ARMED; report via
+    // referencingRepoPaths, never contentKeptRepoPaths.
+    check("(I, 25d0d45b) foreignRepoI is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !(clearResultI?.contentKeptRepoPaths ?? []).includes(foreignRepoI));
+    check("*** THE FIX IS CORRECTLY REPORTED (I, 25d0d45b) *** foreignRepoI IS in referencingRepoPaths", (clearResultI?.referencingRepoPaths ?? []).includes(foreignRepoI));
+    check("(I, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses",
+      !!clearResultI?.stillBlockedCoOccupants?.some((c) => c.repoPath === foreignRepoI) === (bootedI.assertRepoNotQuarantined(foreignRepoI).ok === false));
     check("(I) THE FIX: O (holding the foreign token) SURVIVES P's full clear", fs.existsSync(orphanPathI));
   }
 
@@ -496,8 +509,12 @@ try {
 
     const clearResultJ = bootedJ.clearMergeQuarantineLatchFile(idJ);
     check("(J) clear-by-id reports ok:true", clearResultJ.ok === true);
-    check("*** CARD 0a783fb2 *** (J) the pending-match branch's own orphan-sweep reports the content-parsed keep via contentKeptRepoPaths", (clearResultJ.contentKeptRepoPaths ?? []).includes(foreignRepoJ));
-    check("*** CARD 0a783fb2 *** (J) ...and never folds it into referencingRepoPaths", !(clearResultJ.referencingRepoPaths ?? []).includes(foreignRepoJ));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — foreignRepoJ is resolvable, now ARMED; report via
+    // referencingRepoPaths, never contentKeptRepoPaths.
+    check("(J, 25d0d45b) foreignRepoJ is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !(clearResultJ.contentKeptRepoPaths ?? []).includes(foreignRepoJ));
+    check("*** THE FIX IS CORRECTLY REPORTED (J, 25d0d45b) *** foreignRepoJ IS in referencingRepoPaths", (clearResultJ.referencingRepoPaths ?? []).includes(foreignRepoJ));
+    check("(J, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses",
+      !!clearResultJ.stillBlockedCoOccupants?.some((c) => c.repoPath === foreignRepoJ) === (bootedJ.assertRepoNotQuarantined(foreignRepoJ).ok === false));
     check("(J) THE FIX: O (holding the foreign token) SURVIVES P's clear-by-id", fs.existsSync(orphanPathJ));
   }
 
@@ -717,9 +734,11 @@ console.log(failures === 0
     "unreferenced orphan once every real on-disk token is covered by this clear's own candidateTokens " +
     "(B) or already globally tombstoned (C); a non-ENOENT read failure fails closed (D); a readable, " +
     "genuine, TOKENLESS occupant is kept rather than vacuously covered (E); a by-id clear via the " +
-    "RAW-FALLBACK branch reports a content-based keep via contentKeptRepoPaths, naming the parsed repoPath " +
-    "when one parses (F) or via anyKeptUnattributed when none does (G), never silently, and never folded " +
-    "into referencingRepoPaths (card 0a783fb2). That same card's shared fold-in helper closes the four " +
+    "RAW-FALLBACK branch reports a content-based keep, naming the parsed repoPath when one parses (F) " +
+    "or via anyKeptUnattributed when none does (G), never silently — and, since card 25d0d45b, an " +
+    "armable foreign identity with nothing already at its own key is now ARMED and reported via " +
+    "referencingRepoPaths/stillBlockedCoOccupants instead of the (card 0a783fb2) contentKeptRepoPaths " +
+    "channel that case used to take. That same card's shared fold-in helper closes the four " +
     "other discard sites: clearMergeQuarantineByKey (H), clearMergeQuarantineByRecordedPath (I), and " +
     "clearMergeQuarantineLatchFile's own pending-match branch, both for its orphan-sweep (J) and its " +
     "previously-untracked ownSweep/finalSweep/tmpSweep unattributed case (K). Genuinely corrupt " +

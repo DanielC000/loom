@@ -27,11 +27,17 @@ Because `activeMergeQuarantineFor`'s own lookup order always returns something t
 identity already occupies T's canonical key (even an unrelated one), this ONE check correctly answers
 BOTH of the manager-ruled exclusions in one read: T's own identity is already enforced somewhere, OR T's
 canonical key is already occupied by a different identity. Either way, the helper is a no-op — today's
-keep-and-wait-for-the-next-boot behavior, unchanged — and the caller discloses it via a new, additive
-`contentKeptNotArmedReason: "already-enforced"` field on `sweepOrphanLatchFileIfUnreferenced`'s own return
-(never threaded further up into the outer, REST-facing `contentKeptRepoPaths` arrays — that would have
-touched every one of the five call sites this function feeds, well beyond this card's one-call-site
-scope; a manager-filed follow-up may widen it later).
+keep-and-wait-for-the-next-boot behavior, unchanged.
+
+**Superseded (card `25d0d45b`, Round 4):** this originally disclosed the no-op via an additive
+`contentKeptNotArmedReason: "already-enforced"` field, deliberately never threaded past this one call
+site. That field was REMOVED once `25d0d45b`'s own Round 3/4 work made it genuinely dead (the disposition
+decision now always re-derives this same "already enforced" fact via `classifyKeptRepoPath`/
+`stillBlockedEntryFor`, which can never disagree with the arm attempt that just ran synchronously before
+it) — and the disclosure IS now threaded all the way up, as a structured `blockedBy: {repoPath, id?}`
+naming WHICH different identity's own entry is doing the refusing, carried on `contentKeptBlockedBy`
+through every clear-result-returning function this module exports. See card `25d0d45b`'s own decision
+record for the full design.
 
 When `resolveQuarantineFor(T)` answers `undefined`, the helper arms T:
 - Resolvable → directly into `activeQuarantines` at `canonicalRepoLockKey(T)`. Safe to `.set()`
@@ -184,10 +190,9 @@ the load-bearing pin at the test's own "T1's in-memory set is ALREADY reduced" c
   decision that proved the file safe to keep — Node's single-threaded, run-to-completion model is what
   makes this race-free; deferring the call to a later pass/loop reopens a window nothing here was ever
   built to guard against.
-- Do not thread `contentKeptNotArmedReason` further up through `foldOrphanSweepResult` or any of the
-  outer, REST-facing `contentKeptRepoPaths` return shapes without re-deriving whether that's actually
-  wanted — it was added additively, scoped to `sweepOrphanLatchFileIfUnreferenced`'s own immediate return,
-  deliberately, to keep this card's surface to its one call site.
+- **Superseded (card `25d0d45b`).** This used to say not to thread `contentKeptNotArmedReason` past this
+  function's own immediate return. That field is gone; its successor, `blockedBy`, is now threaded
+  all the way up deliberately — see this record's own updated paragraph above.
 - Do not read `orphanSweepSafeToDelete`'s new `armable` field as populated whenever `safe` is `false` —
   it is populated whenever the record is genuinely armable (repoPath/branch/reason all strings),
   independent of `safe`; a caller must still check both.

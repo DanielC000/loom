@@ -2446,8 +2446,13 @@ function hashKey(key) {
     const clearAL1 = await appAL.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HAL, payload: { repoPath: subAL1 } });
     check("(AL1) POST /clear-by-path {repoPath} → 200", clearAL1.statusCode === 200);
     const bodyAL1 = clearAL1.json();
-    check("*** CARD 0a783fb2 *** (AL1, route) /clear-by-path {repoPath} forwards the content-parsed keep via contentKeptRepoPaths", (bodyAL1.contentKeptRepoPaths ?? []).includes(foreignAL1));
-    check("*** CARD 0a783fb2 *** (AL1, route) ...and never folds it into referencingRepoPaths", !(bodyAL1.referencingRepoPaths ?? []).includes(foreignAL1));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — an armed outcome is never content-only: report it via
+    // `referencingRepoPaths`/`stillBlockedCoOccupants`, never `contentKeptRepoPaths`.
+    check("(AL1, 25d0d45b) foreignAL1 is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !(bodyAL1.contentKeptRepoPaths ?? []).includes(foreignAL1));
+    check("*** THE FIX IS CORRECTLY REPORTED (AL1, 25d0d45b) *** foreignAL1 IS in referencingRepoPaths", (bodyAL1.referencingRepoPaths ?? []).includes(foreignAL1));
+    const foreignAL1CoOccupant = bodyAL1.stillBlockedCoOccupants?.find((c) => c.repoPath === foreignAL1);
+    check("(AL1, 25d0d45b) ...and in stillBlockedCoOccupants, with a route id", !!foreignAL1CoOccupant?.route?.id);
+    check("(AL1, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses", !!foreignAL1CoOccupant === (assertRepoNotQuarantined(foreignAL1).ok === false));
 
     // --- (AL2) /clear-by-path {id} → clearMergeQuarantineLatchFile's own pending-match branch ---
     const pAL2 = path.join(os.tmpdir(), `loom-mqcbp-pAL2-never-exists-${sfx}`);
@@ -2473,8 +2478,13 @@ function hashKey(key) {
     const clearAL2 = await appAL.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HAL, payload: { id: idAL2 } });
     check("(AL2) POST /clear-by-path {id} → 200", clearAL2.statusCode === 200);
     const bodyAL2 = clearAL2.json();
-    check("*** CARD 0a783fb2 *** (AL2, route) /clear-by-path {id} forwards the content-parsed keep via contentKeptRepoPaths", (bodyAL2.contentKeptRepoPaths ?? []).includes(foreignAL2));
-    check("*** CARD 0a783fb2 *** (AL2, route) ...and never folds it into referencingRepoPaths", !(bodyAL2.referencingRepoPaths ?? []).includes(foreignAL2));
+    // @decision 25d0d45b (Code Review, MAJOR 1) — an armed outcome is never content-only: report it via
+    // `referencingRepoPaths`/`stillBlockedCoOccupants`, never `contentKeptRepoPaths`.
+    check("(AL2, 25d0d45b) foreignAL2 is NOT in contentKeptRepoPaths (it is now a genuine live entry)", !(bodyAL2.contentKeptRepoPaths ?? []).includes(foreignAL2));
+    check("*** THE FIX IS CORRECTLY REPORTED (AL2, 25d0d45b) *** foreignAL2 IS in referencingRepoPaths", (bodyAL2.referencingRepoPaths ?? []).includes(foreignAL2));
+    const foreignAL2CoOccupant = bodyAL2.stillBlockedCoOccupants?.find((c) => c.repoPath === foreignAL2);
+    check("(AL2, 25d0d45b) ...and in stillBlockedCoOccupants, with a route id", !!foreignAL2CoOccupant?.route?.id);
+    check("(AL2, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses", !!foreignAL2CoOccupant === (assertRepoNotQuarantined(foreignAL2).ok === false));
   } finally {
     await appAL.close();
     dbAL.close();
@@ -2765,7 +2775,87 @@ function hashKey(key) {
   }
 }
 
+// ===================== (AR) card 25d0d45b (Round 5) — `contentKeptBlockedBy` (and, where this exact
+// branch composes one, the reworded reason text) reaches the REAL HTTP response on every clear route:
+// /clear-by-path {repoPath}, /clear-by-path {id}, and /clear {projectId}. The final re-CR's own probe
+// shape: Y independently quarantined; X = Y's own subdirectory (no own .git, so X's real canonical key
+// is always Y's); X's own armable tmp sits at a WHOLLY DIFFERENT repo R's own hash. Clearing R must
+// forward the disclosure naming Y — never a routed co-occupant. RED at tip `cb9cb648` (round 4's own
+// tip, before this round's own carriage fix landed the field onto these three routes). =====================
+{
+  function setupProbeAR(tag) {
+    const y = freshDir(`y${tag}`);
+    fs.mkdirSync(path.join(y, ".git"), { recursive: true });
+    const r = freshDir(`r${tag}`);
+    fs.mkdirSync(path.join(r, ".git"), { recursive: true });
+    const keyR = canonicalRepoLockKey(r);
+    const x = path.join(y, `ghost-subdir-${tag}`);
+    fs.mkdirSync(x, { recursive: true });
+    enterMergeQuarantine(y, "loom/y-branch", `y's own real, independent raise (${tag})`);
+    enterMergeQuarantine(r, "loom/r-branch", `r's own real, UNRELATED raise (${tag})`);
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(keyR)}.json.tmp-88950-cafed0${tag}`), JSON.stringify({
+      repoPath: x, branch: "loom/x-branch", reason: `X's own stray tmp, mismatched onto R's own hash (${tag})`,
+      enteredAt: Date.now(), tokens: [createHash("sha256").update(`${tag}-token-${sfx}`).digest("hex")],
+    }, null, 2) + "\n");
+    return { y, r, x, keyR };
+  }
+
+  const TMPAR = mkdtempManaged("loom-mqcbp-gw-ar-");
+  const PORTAR = 48700 + ((process.pid + 173) % 400);
+  const HAR = { host: `127.0.0.1:${PORTAR}`, origin: `http://127.0.0.1:${PORTAR}`, "content-type": "application/json" };
+  const dbAR = new Db(path.join(TMPAR, "loom.db"));
+  const stubAR = {};
+  const appAR = await buildServer({
+    db: dbAR, pty: stubAR, sessions: stubAR, mcp: stubAR, orchMcp: stubAR, platformMcp: stubAR, auditMcp: stubAR,
+    userAuditMcp: stubAR, setupMcp: stubAR, runMcp: stubAR, control: stubAR, usageStatus: stubAR,
+  });
+  try {
+    // --- (AR1) /clear-by-path {repoPath} -> clearMergeQuarantineByRecordedPath -> tryClearMergeQuarantineByOwnIdentity's own "content-kept-only" branch, which composes a reason via contentKeptOnlyReasonFor ---
+    const { y: yAR1, r: rAR1, x: xAR1 } = setupProbeAR("ar1");
+    const clearAR1 = await appAR.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HAR, payload: { repoPath: rAR1 } });
+    check("(AR1) POST /clear-by-path {repoPath} -> 200", clearAR1.statusCode === 200);
+    const bodyAR1 = clearAR1.json();
+    check("*** THE FIX (AR1) *** X is content-kept, never a routed co-occupant, over REAL HTTP", (bodyAR1.contentKeptRepoPaths ?? []).includes(xAR1) && !bodyAR1.stillBlockedCoOccupants?.some((c) => c.repoPath === xAR1));
+    const blockedByAR1 = bodyAR1.contentKeptBlockedBy?.find((b) => b.repoPath === xAR1);
+    check("*** THE FIX (AR1) *** contentKeptBlockedBy reaches the HTTP response, naming Y with a real id", blockedByAR1?.blockedBy?.repoPath === yAR1 && !!blockedByAR1?.blockedBy?.id);
+    check("*** THE FIX (AR1) *** the reason text names Y, the next-boot arming, and that clearing Y does not release X", typeof bodyAR1.reason === "string" && bodyAR1.reason.includes(yAR1) && bodyAR1.reason.toLowerCase().includes("next boot") && bodyAR1.reason.toLowerCase().includes("does not release"));
+
+    // --- (AR2) /clear-by-path {id} -> clearMergeQuarantineLatchFile's own matched-ACTIVE branch (R is
+    // resolvable and active) -> clearMergeQuarantineByKey directly. This branch names no reason text for
+    // a pure content-kept keep (unaffected by this round's reason-composing fix, which lives only in
+    // tryClearMergeQuarantineByOwnIdentity/clearMergeQuarantineReporting) -- assert the FIELD only. ---
+    const { y: yAR2, r: rAR2, x: xAR2, keyR: keyRAR2 } = setupProbeAR("ar2");
+    const idAR2 = hashKey(keyRAR2);
+    const clearAR2 = await appAR.inject({ method: "POST", url: "/internal/merge-quarantine/clear-by-path", headers: HAR, payload: { id: idAR2 } });
+    check("(AR2) POST /clear-by-path {id} -> 200", clearAR2.statusCode === 200);
+    const bodyAR2 = clearAR2.json();
+    check("*** THE FIX (AR2) *** X is content-kept, never a routed co-occupant, over REAL HTTP", (bodyAR2.contentKeptRepoPaths ?? []).includes(xAR2) && !bodyAR2.stillBlockedCoOccupants?.some((c) => c.repoPath === xAR2));
+    const blockedByAR2 = bodyAR2.contentKeptBlockedBy?.find((b) => b.repoPath === xAR2);
+    check("*** THE FIX (AR2) *** contentKeptBlockedBy reaches the HTTP response, naming Y with a real id", blockedByAR2?.blockedBy?.repoPath === yAR2 && !!blockedByAR2?.blockedBy?.id);
+
+    // --- (AR3) /clear {projectId} -> clearMergeQuarantineReporting -> clearMergeQuarantine -> (r is
+    // resolvable, owns its own fresh key) -> clearMergeQuarantineByKey directly, with the reason composed
+    // by clearMergeQuarantineReporting's own "latchKept" branch. ---
+    const { y: yAR3, r: rAR3, x: xAR3 } = setupProbeAR("ar3");
+    dbAR.insertProject({
+      id: "projAR3", name: "ProjAR3", repoPath: rAR3, vaultPath: rAR3, config: {}, createdAt: new Date().toISOString(),
+      archivedAt: null, reserved: false, referenceRepos: [], repos: [],
+    });
+    const clearAR3 = await appAR.inject({ method: "POST", url: "/internal/merge-quarantine/clear", headers: HAR, payload: { projectId: "projAR3" } });
+    check("(AR3) POST /clear {projectId} -> 200", clearAR3.statusCode === 200);
+    const bodyAR3 = clearAR3.json();
+    check("*** THE FIX (AR3) *** X is content-kept, never a routed co-occupant, over REAL HTTP", (bodyAR3.contentKeptRepoPaths ?? []).includes(xAR3) && !bodyAR3.stillBlockedCoOccupants?.some((c) => c.repoPath === xAR3));
+    const blockedByAR3 = bodyAR3.contentKeptBlockedBy?.find((b) => b.repoPath === xAR3);
+    check("*** THE FIX (AR3) *** contentKeptBlockedBy reaches the HTTP response, naming Y with a real id", blockedByAR3?.blockedBy?.repoPath === yAR3 && !!blockedByAR3?.blockedBy?.id);
+    check("*** THE FIX (AR3) *** the reason text names Y, the next-boot arming, and that clearing Y does not release X", typeof bodyAR3.reason === "string" && bodyAR3.reason.includes(yAR3) && bodyAR3.reason.toLowerCase().includes("next boot") && bodyAR3.reason.toLowerCase().includes("does not release"));
+    check("(AR3) ...and R's own clear never lifts, addresses, or names Y at all", !bodyAR3.liftedRepoPaths?.includes(yAR3) && !bodyAR3.stillBlockedCoOccupants?.some((c) => c.repoPath === yAR3));
+  } finally {
+    await appAR.close();
+    dbAR.close();
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it. Card 9cabd143: (Y) the sweep never deletes a filename a SURVIVING entry has since legitimately reclaimed as its own live physical latch (proven across a real restart, in a separate child process), (Z1)/(Z1-route) close the SAME gap at clearMergeQuarantineLatchFile's raw-fallback bypass site (over both the function and the real HTTP route), now reporting `latchKept`/`referencingRepoPaths` instead of a bare `ok:true` when a file survives. Round 2 (Code Review d37fd1aa): (Z2) is RE-POINTED — clearing a PENDING entry by id deletes its OWN file even when an unrelated entry's `orphanLatchFiles` merely lists it (check 1 alone must never protect an entry's own file; only genuine ownership, check 2, may), proven to stick across a real child-process restart and to agree with `/clear`/`/clear-by-path {repoPath}`; (AA) proves check (2)'s PENDING-ownership half is genuinely reachable (not just defensive) via the ordinary orphan-reference sweep; (AB) proves check (2)'s ACTIVE-ownership half also covers an entry's TRUE current write target (`quarantinePathFor`), not only its own (possibly stale, post-drift) `armedKeys`. Card 07e3ad30: (AJ) clearMergeQuarantineByKey's own pending-loop no longer loses a mid-iteration protect-call push to a `.filter()` reassignment — a foreign occupant's fresh mint, triggered by the remove branch, now survives IN-PROCESS (not just after a reboot), interleaved in one pass with an unrelated reduce and two wholly-unrelated pending entries that must (and do) survive untouched. (AK), added per Code Review 46d6e471: TWO sequential remove twins in one pass — the second twin's own splice index is correctly re-resolved after the array has both shrunk (the first twin's own removal) and grown (the first twin's own push) in between, with no stale-index corruption of the unrelated entry injected after both, and the fix's own defensive 'already absent' log never fires. Card 0a783fb2: (AL) both /clear-by-path forms (repoPath AND id) forward a content-based orphan keep over real HTTP as contentKeptRepoPaths, never folded into referencingRepoPaths — the gateway-level twin of merge-quarantine-orphan-sweep-content-aware.mjs's own module-level proofs. Code Review 47289f8d (round 2): (AM) a same-identity pending twin, not yet cleared at orphan-sweep time, is never reported as the cleared identity's own still-blocked co-occupant (the MAJOR self-reference fix, via excludeIdentities on sweepOrphanLatchFileIfUnreferenced). Card d48465e5 (item 3): (AN)/(AO) close the real-HTTP test gap for the 882d6cff round-4 clear-one-claimant shape — both /clear {projectId} and /clear-by-path {repoPath} forward latchKept:true + referencingRepoPaths over a real app.inject() call when a shared latch still has another pending claimant. Card 2a169469 (round 2, minor 4): (AP) /clear-by-path {repoPath} forwards stillQuarantined:true + reason over real HTTP for a contributor-blocked identity — the {repoPath} twin of (AC)'s own {id} proof. Card 1872935d (option D): (AQ) /clear {projectId} names alsoReleasedRepoPaths/alsoReleasedWarning over real HTTP for the sibling-key-contributor shape (6de79dc0) — present and naming the swept-up identity when a clear releases more than was addressed, absent for an ordinary single-identity clear; routed through /clear rather than /clear-by-path {repoPath} since the latter's identity-only matching cannot reach a bare dual-arm contributor at all."
+  ? "\n✅ ALL PASS — /internal/merge-quarantine/clear-by-path (repoPath AND id addressing, exactly-one-of validation, path-traversal id rejection), GET /internal/merge-quarantine/list (id/registered projection, incl. a dual-armed entry's own id/ids BEFORE it's cleared), the shared clearMergeQuarantineReporting helper (no drift between /clear and /clear-by-path), partitionQuarantinesByRegistration / db.listAllRegisteredRepoPaths (live + multi-repo + archived registration, never swallowing a registered+quarantined repo into the orphan bucket, and a registered-path spelling variant), clearMergeQuarantineLatchFile's round-2/3 fixes, quarantineLatchFileIdsFor's round-3 real-file-first ordering, clearMergeQuarantineByRecordedPath's round-4/5 stored-repoPath-addressed clear (the `{repoPath}` form's own immunity to key drift, clearing every matching active entry, and the pending-fallback drift) and legacyQuarantineHashFor's byte-identical behavior, PLUS round 6's governing-rule fixes — pending entries are matched by stored directPathIdentity, never a freshly re-walked canonicalRepoLockKey, at every site: (T) enterMergeQuarantine's pending-merge no longer adopts an unrelated pending entry's identity for a fresh raise, (U) clearMergeQuarantineByRecordedPath's pending branch drops EVERY identity-matching pending entry, (V) assertRepoNotQuarantined names the BLOCKING entry's own repoPath/latch id and points at /clear-by-path, and (W) partitionQuarantinesByRegistration no longer mis-registers a pending entry via an enclosing repo's key — all behave as designed (cards c0be9bf9, abccee85). Round 7: (X) clearMergeQuarantineByRecordedPath's own last-resort fallback no longer recomputes a fresh key from a never-quarantined (typo'd) given path — it reports not-found instead of collaterally lifting an unrelated enclosing repo's real quarantine. Card 6237bef6: (P)/(P2)/(P-SHARED) turn card abccee85's traced-not-fixed gap into hard, two-way checks — a pending entry's own orphanLatchFiles are now actually swept on clear, at all three pending-removal sites (clearMergeQuarantineByKey, clearMergeQuarantineLatchFile, and clearMergeQuarantineByRecordedPath, the third abccee85 never named), and an orphan file still referenced by a SURVIVING entry (active or pending) is never deleted out from under it. Card 9cabd143: (Y) the sweep never deletes a filename a SURVIVING entry has since legitimately reclaimed as its own live physical latch (proven across a real restart, in a separate child process), (Z1)/(Z1-route) close the SAME gap at clearMergeQuarantineLatchFile's raw-fallback bypass site (over both the function and the real HTTP route), now reporting `latchKept`/`referencingRepoPaths` instead of a bare `ok:true` when a file survives. Round 2 (Code Review d37fd1aa): (Z2) is RE-POINTED — clearing a PENDING entry by id deletes its OWN file even when an unrelated entry's `orphanLatchFiles` merely lists it (check 1 alone must never protect an entry's own file; only genuine ownership, check 2, may), proven to stick across a real child-process restart and to agree with `/clear`/`/clear-by-path {repoPath}`; (AA) proves check (2)'s PENDING-ownership half is genuinely reachable (not just defensive) via the ordinary orphan-reference sweep; (AB) proves check (2)'s ACTIVE-ownership half also covers an entry's TRUE current write target (`quarantinePathFor`), not only its own (possibly stale, post-drift) `armedKeys`. Card 07e3ad30: (AJ) clearMergeQuarantineByKey's own pending-loop no longer loses a mid-iteration protect-call push to a `.filter()` reassignment — a foreign occupant's fresh mint, triggered by the remove branch, now survives IN-PROCESS (not just after a reboot), interleaved in one pass with an unrelated reduce and two wholly-unrelated pending entries that must (and do) survive untouched. (AK), added per Code Review 46d6e471: TWO sequential remove twins in one pass — the second twin's own splice index is correctly re-resolved after the array has both shrunk (the first twin's own removal) and grown (the first twin's own push) in between, with no stale-index corruption of the unrelated entry injected after both, and the fix's own defensive 'already absent' log never fires. Card 0a783fb2: (AL) both /clear-by-path forms (repoPath AND id) forward a content-based orphan keep over real HTTP — the gateway-level twin of merge-quarantine-orphan-sweep-content-aware.mjs's own module-level proofs; since card 25d0d45b, a RESOLVABLE (or unresolvable-but-armable) foreign occupant is now armed in memory and forwarded via referencingRepoPaths/stillBlockedCoOccupants instead of contentKeptRepoPaths, with a real working {id} route proven by actually clearing it. Code Review 47289f8d (round 2): (AM) a same-identity pending twin, not yet cleared at orphan-sweep time, is never reported as the cleared identity's own still-blocked co-occupant (the MAJOR self-reference fix, via excludeIdentities on sweepOrphanLatchFileIfUnreferenced). Card d48465e5 (item 3): (AN)/(AO) close the real-HTTP test gap for the 882d6cff round-4 clear-one-claimant shape — both /clear {projectId} and /clear-by-path {repoPath} forward latchKept:true + referencingRepoPaths over a real app.inject() call when a shared latch still has another pending claimant. Card 2a169469 (round 2, minor 4): (AP) /clear-by-path {repoPath} forwards stillQuarantined:true + reason over real HTTP for a contributor-blocked identity — the {repoPath} twin of (AC)'s own {id} proof. Card 1872935d (option D): (AQ) /clear {projectId} names alsoReleasedRepoPaths/alsoReleasedWarning over real HTTP for the sibling-key-contributor shape (6de79dc0) — present and naming the swept-up identity when a clear releases more than was addressed, absent for an ordinary single-identity clear; routed through /clear rather than /clear-by-path {repoPath} since the latter's identity-only matching cannot reach a bare dual-arm contributor at all."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
