@@ -157,6 +157,12 @@ mirrored. Stays a named, accepted residual — tracked on card `97a5b64f`, not f
 reachable from this card's own two named repro shapes (both of which collide with an UNREGISTERED
 occupant, never a registered one).
 
+**`97a5b64f` confirmed:** this card's own field-parity fix (Step A) closed BOTH of `97a5b64f`'s own named
+write-site shapes (`mergeTokenIntoPendingEntries`, `rewriteOrphanLatchFilesAfterPartialClear`) with no fix
+of their own — pinned by `merge-quarantine-97a5b64f-armed-latch-writes-keep-fields.mjs`. The
+`registeredRepoPaths`-at-runtime residual above, and the other folded-in items that card carried, remain
+open, tracked on their own separately-scoped follow-up cards.
+
 ## Round 2 (Code Review of `39e173ac`) — BLOCKING-1 (new commit(s), a durable strand for resolvable T), SHOULD-1 (a parity bug), SHOULD-2 (tests)
 
 **BLOCKING-1 — `armQuarantineKey` REPLACES, never mutates, and Step B's own unconditional call durably
