@@ -718,10 +718,16 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
 // that newly crosses one of those shapes is visible as a count change here rather than silently absorbed.
 // Card 40646822 added one new write member (`gitMainlineWatermarkReset`, a `post<...>` call to the
 // human-only mainline-watermark reset route) — 214→215 total, 121→122 writes, reads unchanged at 93.
-check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write (93 reads / 122 writes / 215 members)", () => {
-  assert.equal(API_MEMBERS.total, 215, `api.ts now has ${API_MEMBERS.total} members, not 215`);
-  assert.equal(API_MEMBERS.reads.size, 93, `api.ts now has ${API_MEMBERS.reads.size} reads, not 93`);
+// Card e98bf784 added one new READ member (`webBundle`, a bare `get<...>` of the single-field
+// /api/web-bundle route) — 215→216 total, 93→94 reads, writes unchanged at 122.
+check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write and card e98bf784's webBundle read (94 reads / 122 writes / 216 members)", () => {
+  assert.equal(API_MEMBERS.total, 216, `api.ts now has ${API_MEMBERS.total} members, not 216`);
+  assert.equal(API_MEMBERS.reads.size, 94, `api.ts now has ${API_MEMBERS.reads.size} reads, not 94`);
   assert.equal(API_MEMBERS.writes.size, 122, `api.ts now has ${API_MEMBERS.writes.size} writes, not 122`);
+  // Pinned by name, not just by the count above: this member must stay a READ. If it ever starts
+  // classifying as a write, the route or its helper changed shape and the Tier-1 allowlisting of
+  // GET /api/web-bundle (gateway/trust-tier.ts) needs re-reviewing, not just this number bumping.
+  assert.ok(API_MEMBERS.reads.has("webBundle"), "api.webBundle must classify as a READ");
 });
 
 // ── card 66b9e590 — planted negative controls proving the "other calls" side is now fail-closed. ─────

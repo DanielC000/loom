@@ -13,7 +13,7 @@ import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measur
 import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition, deriveAttachmentKind, sanitizeBasename } from "../mcp/attachments.js";
 import { deleteProjectWorkDir } from "../projects/work-dir.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
-import { buildServedStatus } from "../served-status.js";
+import { buildServedStatus, currentWebBundle } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
@@ -1089,6 +1089,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // composition (`buildServedStatus`) with the MCP tool so the two surfaces can never drift apart — see
   // that function's own doc. ---
   app.get("/api/deploy-status", async () => buildServedStatus(deps.db));
+  // --- Card e98bf784: the CHEAP single-field read the open-tab "a new build is being served" check runs
+  // on ws-reconnect and on window focus. It exists precisely BECAUSE /api/deploy-status above is not
+  // suitable for that: `buildServedStatus` does a recursive disk walk plus a git call per request and
+  // documents itself as never polled on an interval. Shares `currentWebBundle()` with it so the two can
+  // never disagree about the same build. Tier-1: it discloses no more than GET /api/version (also
+  // Tier-1) already does — a build fingerprint; on the trusted-proxy class it is also already in the
+  // public index.html, though NOT on the direct-remote listener, where `/*` is Tier 0. ---
+  app.get("/api/web-bundle", async (): Promise<{ webBundle: string | null }> => ({ webBundle: currentWebBundle() }));
   // --- Update availability (Epic 2c-2, UI half) — READ-ONLY: the daemon's last npm-registry check on the
   // persisted release channel. The web reads this and shows an unobtrusive "Update available" banner ONLY
   // when `updateAvailable` (which requires `packaged:true` — a from-source daemon always reports

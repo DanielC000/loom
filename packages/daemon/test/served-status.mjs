@@ -49,7 +49,13 @@ process.env.HOME = sandboxHome;
 // set it up front for clarity) — assets/index-<hash>.js is what Vite actually produces.
 const fakeDist = path.join(tmpHome, "web-dist");
 fs.mkdirSync(path.join(fakeDist, "assets"), { recursive: true });
-fs.writeFileSync(path.join(fakeDist, "index.html"), "<html></html>");
+// index.html must NAME the entry chunk, exactly as a real vite build emits it: card e98bf784 made that
+// tag the source of truth for `webBundle` (a readdir of assets/ can pick an orphan index-*.js that
+// index.html does not reference). A scriptless stub here would make webBundle null, which no real built
+// dist ever is.
+fs.writeFileSync(path.join(fakeDist, "index.html"),
+  '<!doctype html><html><head><script type="module" crossorigin src="/assets/index-DEADBEEF.js"></script>'
+  + "</head><body><div id=\"root\"></div></body></html>");
 fs.writeFileSync(path.join(fakeDist, "assets", "index-DEADBEEF.js"), "/* fake bundle */");
 fs.writeFileSync(path.join(fakeDist, "assets", "index-DEADBEEF.css"), "/* fake styles */");
 process.env.LOOM_WEB_DIST = fakeDist;

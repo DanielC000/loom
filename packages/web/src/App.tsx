@@ -10,6 +10,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { SetupWizard } from "./components/SetupWizard";
 import { CredentialBanner } from "./components/CredentialBanner";
 import { GatewayTokenBanner } from "./components/GatewayTokenBanner";
+import { NewBuildNotice } from "./components/NewBuildNotice";
 import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
 import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionOpenTarget, isAnswerableRequest, type AttentionItem } from "./lib/attention";
@@ -319,6 +320,7 @@ function ShellBanners() {
       <CredentialBanner />
       <GatewayTokenBanner />
       <UpdateBanner />
+      <NewBuildNotice />
     </>
   );
 }

@@ -181,6 +181,8 @@ try {
     "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId", "GET /ws/fleet",
     // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.
     "GET /api/version", "GET /api/update-status", "GET /api/orchestration/status", "GET /api/orchestration/events",
+    // Card e98bf784 — the served web-bundle filename, same read-only class as /api/update-status.
+    "GET /api/web-bundle",
     "GET /api/schedules/history",
     "GET /api/projects/:id/git/log", "GET /api/projects/:id/git/branches",
     "GET /api/projects/:id/git/reference-repos/:index/log",

@@ -5,6 +5,7 @@ import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { createReconnectBackoff, createRefusalEpisode, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
+import { WEB_BUNDLE_QUERY_KEY } from "../lib/newBuild";
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 
 /**
@@ -217,6 +218,11 @@ export function FleetSocketProvider() {
         log("connected");
         seed();
         seedStatus(reconnecting);
+        // Card e98bf784 — a RECONNECT (never the first connect) is the strongest "the daemon restarted"
+        // signal this app has, and a restart is exactly when a rebuilt web bundle appears. Re-ask what is
+        // being served so a tab still running the old bundle can offer a reload. Cheap by construction:
+        // the query behind this key is the single-field /api/web-bundle, not /api/deploy-status.
+        if (reconnecting) qc.invalidateQueries({ queryKey: WEB_BUNDLE_QUERY_KEY });
         reconnecting = true;
       };
       socket.onmessage = (e) => {

@@ -116,6 +116,15 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   //     Promoted DELIBERATELY, one at a time — nothing here writes, executes, or lifecycles anything. ---
   { method: "GET", pattern: "/api/version" },
   { method: "GET", pattern: "/api/update-status" },
+  // Card e98bf784 — the served `assets/index-<hash>.js` filename, so an open tab can tell it is running
+  // a superseded bundle and offer a reload. Same class as /api/update-status directly above (a pure
+  // read; writes/executes/lifecycles nothing), and a remote tab needs it for the same reason a loopback
+  // one does — arguably more, since it is likelier to be long-lived. It discloses no more than
+  // GET /api/version (Tier-1) already does: a build fingerprint. On the trusted-proxy class it is also
+  // already in the public index.html — but NOT on the direct-remote listener, where `/*` is Tier 0 (see
+  // isStaticShellRoute below: only `cls.via === "proxy"` is exempted), so a direct-remote token holder
+  // never loaded that index.html and the /api/version comparison is the one that actually carries here.
+  { method: "GET", pattern: "/api/web-bundle" },
   { method: "GET", pattern: "/api/orchestration/status" },
   { method: "GET", pattern: "/api/orchestration/events" },
   // Read-only schedule run-history (the schedule-fire events) — pure read, no lifecycle. The schedule

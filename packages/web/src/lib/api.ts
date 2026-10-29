@@ -955,6 +955,9 @@ export const api = {
   version: () => get<{ version: string }>("/api/version"),
   // Epic 2c-2 — the daemon's npm "update available" status (read-only, polled into the banner).
   updateStatus: () => get<UpdateStatus>("/api/update-status"),
+  // Card e98bf784 — the served `assets/index-<hash>.js` filename, for the stale-tab reload notice. The
+  // CHEAP read: deliberately NOT /api/deploy-status, which costs a recursive disk walk plus a git call.
+  webBundle: () => get<{ webBundle: string | null }>("/api/web-bundle"),
   // Epic 2c-2 — trigger the self-update (stop→install→start). Loopback-only + packaged-only on the daemon
   // (a source daemon 409s); NOT an agent MCP tool — same trust boundary as /internal/shutdown. The daemon
   // acks then restarts, so this connection drops mid-flight — the caller treats that as "update started".

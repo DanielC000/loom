@@ -157,6 +157,51 @@ export interface ServedStatus {
   orphanedProjectWorkDirs: { count: number; entries: { dirName: string }[]; truncated: boolean };
 }
 
+/** The `src` of the first `<script type="module">` in a built index.html, or null. Attribute order is not
+ *  assumed: vite emits `type` before `src`, but nothing guarantees that. */
+function moduleScriptSrc(html: string): string | null {
+  for (const tag of html.match(/<script\b[^>]*>/gi) ?? []) {
+    if (!/\btype\s*=\s*["']module["']/i.test(tag)) continue;
+    const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag);
+    if (src) return src[1] ?? null;
+  }
+  return null;
+}
+
+/**
+ * The served web bundle's own identity — the entry-chunk filename a browser loading this dist RIGHT NOW
+ * would actually run. Null when the dist is absent, mid-rebuild, or its index.html names no module script.
+ *
+ * @decision e98bf784 — derive this from index.html's own module-script tag, never from a readdir of
+ * assets/. Never answer a repeated "is my bundle current?" check via `buildServedStatus` or
+ * `GET /api/deploy-status` (a recursive disk walk plus a git call). Never cache this.
+ *
+ * A readdir's FIRST `/^index-.*\.js$/` match is not necessarily the file index.html references. Two can
+ * coexist — a turbo cache restore that skipped vite's `emptyOutDir` (card 61fa0950, see
+ * `scripts/build-npm-package.mjs`'s orphan guard), or a future code-split chunk whose source is named
+ * `index.*` — and picking the wrong one pins every tab to a notice that Reload can never clear.
+ *
+ * `build-npm-package.mjs` deliberately prefers the vite manifest over "a regex scrape of index.html",
+ * which is the opposite choice to this one; it is not in conflict. That guard needs EVERY emitted file
+ * (so it must see dynamic-import chunks index.html never names); this needs EXACTLY the entry a tab runs,
+ * which is precisely what index.html names and all a tab can observe about itself. Reading the same file
+ * the browser reads is what makes the two sides comparable by construction rather than by coincidence.
+ *
+ * No `/^index-.*\.js$/` shape filter here on purpose: this reports what is SERVED, whatever vite names it.
+ * The consumer applies its own shape gate (`packages/web/src/lib/newBuild.ts`), so a naming change
+ * degrades to "no notice" rather than to a wrong one.
+ */
+export function currentWebBundle(): string | null {
+  try {
+    const html = fs.readFileSync(path.join(resolveWebDistDir(), "index.html"), "utf8");
+    const src = moduleScriptSrc(html);
+    if (!src) return null;
+    return src.split("/").pop() || null;
+  } catch {
+    return null; // dist not built, or index.html missing mid-rebuild
+  }
+}
+
 /**
  * Card f26339d7 — the SINGLE shared composition behind BOTH ways this daemon's own "what am I serving
  * right now" signal is surfaced: the agent-facing MCP tool `served_status` (mcp/orchestration.ts) and the
@@ -167,12 +212,7 @@ export interface ServedStatus {
  * discipline. Both call sites pass their own `db` handle; nothing here is session- or request-scoped.
  */
 export function buildServedStatus(db: Db): ServedStatus {
-  const webDist = resolveWebDistDir();
-  let webBundle: string | null = null;
-  try {
-    const assetsDir = path.join(webDist, "assets");
-    webBundle = fs.readdirSync(assetsDir).find((f) => /^index-.*\.js$/.test(f)) ?? null;
-  } catch { /* dist not built / no assets dir — webBundle stays null */ }
+  const webBundle = currentWebBundle();
   const liveSessionCount = db.listAllSessions().filter((s) => s.processState === "live").length;
   const storeStaleness = skillStoreStaleness();
   const assetsGitStatus = skillAssetsGitStatus();
