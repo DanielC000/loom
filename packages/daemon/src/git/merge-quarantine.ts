@@ -3190,11 +3190,15 @@ function blockedCoOccupant(repoPath: string, sourceFile: string): BlockedCoOccup
  * @decision 25d0d45b (Round 4) — REVERTS Round 3's widening to `stillBlockedEntryFor`: routing
  * `repoPath` to an independent identity's own entry is a DEAD route everywhere, lifting the WRONG one.
  * Back to pre-Round-3's exact-identity-match contract — see {@link classifyKeptRepoPath} instead.
+ *
+ * @decision 53d2c734 — own-entry match is by {@link directPathIdentity}, never a raw string compare —
+ * a spelling variant of `repoPath` is still its OWN entry. See the decision record for the scope.
  */
 function blockedCoOccupantForReferencer(repoPath: string, sourceFile: string): BlockedCoOccupant {
   if (physicalOwnerRepoPaths(sourceFile).includes(repoPath)) return blockedCoOccupant(repoPath, sourceFile);
-  const ownEntry = [...activeQuarantines.values()].find((e) => e.repoPath === repoPath)
-    ?? pendingUnresolvedQuarantines.find((p) => p.entry.repoPath === repoPath)?.entry;
+  const wantedIdentity = directPathIdentity(repoPath);
+  const ownEntry = [...activeQuarantines.values()].find((e) => directPathIdentity(e.repoPath) === wantedIdentity)
+    ?? pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === wantedIdentity)?.entry;
   if (!ownEntry) return { repoPath, route: { repoPath } };
   return { repoPath, route: { repoPath, id: quarantineLatchFileIdsFor(ownEntry)[0] } };
 }

@@ -436,18 +436,35 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
-  // (PROBE-SPELLING, Round 5 ruling, item 3 MINOR) -- Y is independently quarantined (own real raise,
-  // spelling B). A FOREIGN tmp residue at a WHOLLY DIFFERENT repo R's hash names Y's own SELF via a
-  // spelling/separator variant (spelling A -- same realpath/canonical key, a different literal string;
-  // same technique as (K) in merge-quarantine-clear-by-path.mjs). `blockedCoOccupantForReferencer`'s own
-  // raw string compare (`e.repoPath === repoPath`) MISSES this (different literal strings), so only
-  // `classifyKeptRepoPath`'s `directPathIdentity` equality (this round's MINOR fix) recognizes the
-  // blocker IS spelling-A's own entry (same identity as itself), never "a DIFFERENT identity". Pre-fix,
-  // this would wrongly report spelling-A as CONTENT-KEPT with a `blockedBy` disclosure naming itself.
+  // (card 53d2c734) -- `directPathIdentity` NEVER walks up, so widening `blockedCoOccupantForReferencer`'s
+  // own-entry match to it must never become Round 3's rejected "whatever entry blocks X" lookup: a ghost
+  // SUBDIRECTORY of X is never the SAME identity as X itself, even though X's own entry would legitimately
+  // block it via ancestor-walk key collapse elsewhere in this module.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const xIdentityNoWalk = makeRepo("identity-no-walk-x");
+    const xGhost = path.join(xIdentityNoWalk, "ghost-subdir");
+    check("(card 53d2c734) negative control: X/ghost's realpath genuinely differs from X's own, byte-for-byte", xGhost !== xIdentityNoWalk);
+    check("*** THE INVARIANT (card 53d2c734) *** directPathIdentity never walks up -- X/ghost is a DIFFERENT identity from X itself", mod.directPathIdentity(xGhost) !== mod.directPathIdentity(xIdentityNoWalk));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // (PROBE-SPELLING, Round 5 ruling, item 3 MINOR; card 53d2c734 widens the ROUTE too) -- Y is
+  // independently quarantined (own real raise, spelling B). A FOREIGN tmp residue at a WHOLLY DIFFERENT
+  // repo R's hash names Y's own SELF via a spelling/separator variant (spelling A -- same realpath/
+  // canonical key, a different literal string; same technique as (K) in merge-quarantine-clear-by-path.mjs).
+  // `classifyKeptRepoPath`'s `directPathIdentity` equality (Round 5's MINOR fix) already recognized the
+  // blocker IS spelling-A's own entry (same identity as itself), never "a DIFFERENT identity" -- pre-Round-5
+  // this would have wrongly reported spelling-A as CONTENT-KEPT with a `blockedBy` disclosure naming itself.
+  // `blockedCoOccupantForReferencer`'s own raw string compare (`e.repoPath === repoPath`) still missed the
+  // variant for the ROUTE itself (different literal strings) until card 53d2c734 widened that own-entry
+  // match to `directPathIdentity` too -- so the reported route now carries Y's OWN real `{id}`, not just a
+  // bare `{repoPath}`.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const ySpellB = makeRepo("probe-spelling-y");
     const r = makeRepo("probe-spelling-r");
+    const keyY = canonicalRepoLockKey(ySpellB);
     const keyR = canonicalRepoLockKey(r);
     const ySpellA = ySpellB + path.sep;
 
@@ -459,14 +476,22 @@ try {
     const clearResult = mod.clearMergeQuarantine(r);
     check("(probe-spelling) negative control: the two spellings are not literally identical strings", ySpellA !== ySpellB);
     check("(probe-spelling) Y's own stray tmp SURVIVES r's clear", fs.existsSync(yTmpAtRsHash));
-    // `blockedCoOccupantForReferencer` (deliberately left at its reverted, raw-string-compare contract
-    // per the ruling) still can't mint a WORKING `{id}` route for a spelling variant of its own entry --
-    // only `classifyKeptRepoPath`'s own disposition (live vs content-kept) is what this MINOR fix
-    // changes. Assert the DISPOSITION: a live blocked co-occupant (even sans a working id), never
-    // content-kept with a `blockedBy` disclosure wrongly naming itself as "a DIFFERENT identity".
+    // Assert the DISPOSITION: a live blocked co-occupant, never content-kept with a `blockedBy`
+    // disclosure wrongly naming itself as "a DIFFERENT identity".
     const ySpellACoOccupant = clearResult.stillBlockedCoOccupants?.find((c) => c.repoPath === ySpellA);
     check("*** THE FIX (probe-spelling) *** the spelling-variant is reported as a genuine blocked co-occupant (Y's OWN entry), never content-kept with a blockedBy naming itself", !!ySpellACoOccupant && !clearResult.contentKeptRepoPaths?.includes(ySpellA) && !clearResult.contentKeptBlockedBy?.some((b) => b.repoPath === ySpellA));
+    // *** THE FIX (card 53d2c734) *** the ROUTE's own id is Y's real latch id -- Y is a standalone,
+    // resolvable repo with its own unshared canonical key, so its latch id is a bare hash of that key
+    // (the SAME computation `quarantineLatchFileIdsFor` performs internally for an un-degraded entry).
+    const yOwnId = createHash("sha256").update(keyY).digest("hex").slice(0, 24);
+    check("*** THE FIX (probe-spelling) *** the route's own id is Y's REAL latch id, never absent/undefined", ySpellACoOccupant?.route?.id === yOwnId);
     check("(probe-spelling) ...and Y itself is untouched by r's clear -- still genuinely, independently quarantined", !clearResult.liftedRepoPaths?.includes(ySpellB) && mod.assertRepoNotQuarantined(ySpellB).ok === false);
+    // Prove the route is genuinely WORKING, not just a bit that happens to be set: clearing BY THAT ID
+    // actually lifts Y, the same convergence proof every other working-route scenario in this file uses.
+    if (ySpellACoOccupant?.route?.id) {
+      const clearByRoute = mod.clearMergeQuarantineLatchFile(ySpellACoOccupant.route.id);
+      check("*** THE FIX (probe-spelling) *** clearing the reported route's id genuinely lifts Y", clearByRoute.ok === true && clearByRoute.liftedRepoPaths?.includes(ySpellB) && mod.assertRepoNotQuarantined(ySpellB).ok === true);
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
