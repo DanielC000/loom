@@ -1,5 +1,14 @@
 # 028837ad — lift a cleared token from a pending identity armed PENDING mid-`clearMergeQuarantineByToken`
 
+**SUPERSEDED-BY-5d0820c7 (the narrow-record guard only):** this record's own "never widen
+`ArmableOrphanRecord`" ruling (Round 3, and in the "Do not" section below) is satisfied, not violated, by
+`5d0820c7`'s own fix — routing the arm's record-building through the ALREADY-EXISTING
+`latchEntryFromParsedRecord` helper, rather than a third hand-mirrored field list, is exactly what Round
+3's own "fix the WRITE instead" ruling was protecting against hand-mirroring from recurring. Round 3's
+own "Accepted, NAMED, pre-existing, OUT-OF-SCOPE residual (tracked on card `5d0820c7`)" paragraph already
+named this as the deferred continuation. Every write-side fix in THIS record (the rebase-onto-disk
+mechanism, `rebaseOntoRealDiskRecord`, the token-union fix) is UNCHANGED and still binding.
+
 Found by `1dd00dca`'s own round-3 narrow re-CR (`efbfe9d1`, 2026-10-28, PROBED) as a follow-up, not a
 blocker on that round. Investigate-first card; PRE-EXISTING, not a regression — the same strand existed
 before `1dd00dca`/`25d0d45b` too, just reached via boot instead of an in-process arm.

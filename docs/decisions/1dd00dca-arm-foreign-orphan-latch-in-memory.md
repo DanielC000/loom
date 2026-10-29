@@ -1,5 +1,14 @@
 # 1dd00dca — arm a kept foreign orphan latch in memory, this process only, the moment its own sweep proves it safe to keep
 
+**SUPERSEDED-BY-5d0820c7 (the narrow-record guard only):** this record's own "never widen the in-memory
+arm"/"never widen `ArmableOrphanRecord`" rulings (below, and in `028837ad`'s own record) are satisfied,
+not violated, by `5d0820c7`'s own fix — that card routes the arm's record-building through the
+ALREADY-EXISTING, already-shared `latchEntryFromParsedRecord` helper instead of a third hand-mirrored
+field list, closing the Lesson-277 failure mode these rulings actually guard against. Every OTHER ruling
+here (arm IN-MEMORY ONLY, gate via the pure `stillBlockedEntryFor`, call only from the same synchronous
+decision, never replicate the boot-only degraded-collision dance for the PRIMARY key) is UNCHANGED and
+still binding — see `5d0820c7`'s own record for the full scope of what changed and why.
+
 From Code Review `745c3736` of card `f2cc5f18` (gen 424, 2026-10-18). After `f2cc5f18`, when a full clear's
 own orphan sweep KEEPS an orphan latch file O because its content names a foreign repo T's real,
 uncovered token, O survives on disk, but nothing arms T in memory. T is not enforced within the same

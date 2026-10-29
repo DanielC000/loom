@@ -1,5 +1,13 @@
 # 702b4241 — distinguish an UNREADABLE boot-time quarantine latch from a genuinely CORRUPT one
 
+**SUPERSEDED-BY-5d0820c7 (the "ONE new caller" framing only):** `latchEntryFromParsedRecord`'s own doc
+comment ("a deliberate, narrow duplication for ONE new caller") now has a SECOND caller —
+`orphanSweepSafeToDelete`/`sweepTmpResidueForHashIfUnreferenced`'s own `armable` record construction
+(card `5d0820c7`). This does not reopen the "do not fold this into PASS 1/1b/safety-tmp's own inline
+parses" rule below — that rule is about never routing PASS 1/1b/safety-tmp's OWN read loops through this
+helper (each stays independently decision-anchored, never restructured); a second, unrelated caller
+reusing the SAME already-shared parse is exactly the kind of reuse this helper was built to allow.
+
 A pre-existing follow-up from Code Review `5d01bfbf` of `63e49ee2`. `63e49ee2` fixed the RUNTIME read
 sites (`differentUnresolvableOccupantRepoPathAt`, `foldInOnDiskTokensIfMarked`, and siblings) so a
 non-ENOENT read failure (EACCES, EMFILE, a mode-000 file in an otherwise-writable dir) is treated as
