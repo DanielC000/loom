@@ -1696,6 +1696,12 @@ const GATE_OP_RETAIN_MS = 5_000;
  *  `maxConcurrentGates × pin` against the documented 8-lane host-starvation failure level. */
 const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY: "3" };
 
+/** Card e2c8f5da — the 5 kinds `scripts/test-daemon.mjs`'s run-summary row distinguishes a gate child by,
+ *  stamped via `LOOM_GATE_KIND` below. A flat string, not `GateType` + the descriptor's
+ *  `landingCheckOnly`/`distImporterCheckOnly` flags: the gate child is a plain script with no DB access
+ *  and no `GateDescriptor`, so it needs one self-contained label, never derived from the DB. */
+type GateRunKind = "merge" | "worker" | "dist-importer" | "landing-check" | "deploy";
+
 /** @decision 720bb7ad — stamps `LOOM_GATE_OP_ID` (+ required `LOOM_GATE_BATCH_SIZE`) onto every gate
  *  child so a `test-daemon.mjs` run-summary row joins back to its op; never replace the `{ ...base, ... }`
  *  spread with a plain assignment, or a caller's own override (e.g. the concurrency pin) silently drops.
@@ -1710,9 +1716,14 @@ const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY
  *
  *  @decision 5eace211 — `projectId` is REQUIRED, never optional/defaulted: this is the one chokepoint
  *  every gate call routes through for `LOOM_PROJECT_WORK_DIR`, so a missing id must fail to compile, not
- *  silently reach a gate child with the var absent. */
-function gateOpIdEnvOverride(opId: string, batchSize: number, cap: number, projectId: string, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...base, ...projectWorkDirEnv(projectId), LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize), LOOM_GATE_CONCURRENT_CAP: String(cap) };
+ *  silently reach a gate child with the var absent.
+ *
+ *  Card e2c8f5da — ALSO stamps `LOOM_GATE_KIND` (required, same posture as `projectId`: every call site
+ *  states its own kind explicitly rather than letting one be silently omitted). An ad-hoc run outside the
+ *  daemon (a hand-run `pnpm --filter @loom/daemon test:daemon`) never sets this env var at all — the
+ *  reader records "ad-hoc", never guesses one of the 5 real kinds for an absent var. */
+function gateOpIdEnvOverride(opId: string, batchSize: number, cap: number, projectId: string, kind: GateRunKind, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...base, ...projectWorkDirEnv(projectId), LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize), LOOM_GATE_CONCURRENT_CAP: String(cap), LOOM_GATE_KIND: kind };
 }
 
 /** @decision a5d9c458 — the sentinel `findLiveSessionClaimingWorktreePath` returns for an
@@ -5635,7 +5646,7 @@ export class SessionService {
           quarantinedAtAdmission = admittedQuarantineCheck.reason;
           return Promise.resolve({ passed: false, failedStatus: null, failedSignal: null, failedTimedOut: false, steps: [] });
         }
-        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, orchestration.maxConcurrentGates, project.id), undefined, undefined, hooks, gateSpillPath(opId));
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, orchestration.maxConcurrentGates, project.id, "deploy"), undefined, undefined, hooks, gateSpillPath(opId));
       },
       "high",
     );
@@ -21181,7 +21192,7 @@ export class SessionService {
             // @decision d099087f — same for the round-trip state: a whole-gate re-run on the re-pinned tip is complete evidence for THAT tip
             // (c59165b8's contract); captureGatedTip below re-takes the reflog snapshots at the re-pin. Single-file/resumed links stay sticky.
             gateHeadLeftDuringRun = false; gateHeadReturned = false; gateHeadLeftAt = undefined; gateReflogUnverified = false; anyLinkPreHeadOff = undefined; anyLinkPreUnverified = false;
-            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id, "merge"), false, undefined, hooks, gateSpillFile);
             transientGateSpawned = true;
             if (r.passed) holdRepoGuardOnExit();
             return r;
@@ -21232,7 +21243,7 @@ export class SessionService {
             // DELIBERATELY NO `reunionAtAdmission()` (card b9e07a4a): this runs ONE test file, so re-unioning
             // onto a moved main would let the squash land on a base the other files never ran against; a
             // moved base instead fails closed via `requireCanonicalHead` at squash time.
-            await captureGatedTip(); const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), false, undefined, hooks, gateSpillFile);
+            await captureGatedTip(); const rr = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id, "merge"), false, undefined, hooks, gateSpillFile);
             // Only the LAST link's hold counts (the semaphore resets it per link), so a pass here that a
             // resume then follows is simply superseded — the card 7ad12202 self-deadlock cannot occur.
             if (rr.passed) holdRepoGuardOnExit();
@@ -21263,7 +21274,7 @@ export class SessionService {
                 // Card 3007bb04: this is the ONLY other link that can auto-extend (the retry links pass
                 // `allowExtend:false`), so its extend must feed `futileNow()` too, exactly like attempt 1's.
                 const resumeHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), undefined, undefined, resumeHooks, gateSpillFile);
+                await captureGatedTip(); const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id, "merge"), undefined, undefined, resumeHooks, gateSpillFile);
                 if (resumed.passed) holdRepoGuardOnExit();
                 return resumed;
               },
@@ -21311,7 +21322,7 @@ export class SessionService {
             // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — an ADDITIONAL
             // observer of the SAME event, never a replacement for the live registry's `entry.extended`.
             const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id), undefined, undefined, mirroredHooks, gateSpillFile);
+            await captureGatedTip(true); const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1, gateCap, project.id, "merge"), undefined, undefined, mirroredHooks, gateSpillFile);
             // CARD c24dd48a: a passing gate hands off to this method's own squash phase — keep the per-repo
             // guard held (`beginSquash`/`endSquash` extend then release it). A failing gate never squashes.
             if (r.passed) holdRepoGuardOnExit();
@@ -23299,7 +23310,7 @@ export class SessionService {
                 fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
                   batchRetryStartedAt = startedAt;
                   // Card a16c580b: ONE spill path for the whole batch op (`gateSpillPath(opId)` is pure).
-                  const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId), false, undefined, hooks, gateSpillPath(opId));
+                  const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId, "merge"), false, undefined, hooks, gateSpillPath(opId));
                   // Only the LAST link's hold counts (the semaphore resets it per link).
                   if (rr.passed) holdRepoGuardOnExit();
                   if (rr.passed && remaining.length > 0) batchPartialPassResult = rr;
@@ -23324,7 +23335,7 @@ export class SessionService {
                     fn: async (startedAt, _cancelSignal, hooks, _getMaxConcurrentGates, holdRepoGuardOnExit) => {
                       batchResumeStartedAt = startedAt;
                       // No re-union; `allowExtend` left at its default (card 7ad12202 [7]).
-                      const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId), undefined, undefined, hooks, gateSpillPath(opId));
+                      const resumed = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId, "merge"), undefined, undefined, hooks, gateSpillPath(opId));
                       if (resumed.passed) holdRepoGuardOnExit();
                       return resumed;
                     },
@@ -23383,7 +23394,7 @@ export class SessionService {
                   // eslint-disable-next-line no-console
                   console.warn(`[merge-batch] admission-time forfeit check threw (non-fatal — falling back to the end-of-gate check): ${err instanceof Error ? err.message : String(err)}`);
                 }
-                const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId), undefined, undefined, hooks, gateSpillPath(opId));
+                const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount, orchestration.maxConcurrentGates, finalProjectId, "merge"), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) holdRepoGuardOnExit();
                 return gr;
               }, "high", afterAttempt1, async (settled, thrown) => {
@@ -25064,7 +25075,7 @@ export class SessionService {
       try {
         result = await this.gateSemaphore.runExclusive(args.cap, descriptor, async (startedAt, cancelSignal, hooks) => {
           cancelSignalRef = cancelSignal;
-          const r = await runGateSeq(args.command, args.worktreePath, args.timeoutMs, undefined, gateOpIdEnvOverride(opId, 0, args.cap, args.projectId, WORKER_GATE_ENV_OVERRIDE), true, cancelSignal, hooks, gateSpillPath(opId));
+          const r = await runGateSeq(args.command, args.worktreePath, args.timeoutMs, undefined, gateOpIdEnvOverride(opId, 0, args.cap, args.projectId, "landing-check", WORKER_GATE_ENV_OVERRIDE), true, cancelSignal, hooks, gateSpillPath(opId));
           durationMs = Date.now() - startedAt;
           return r;
         }, "low");
@@ -25379,7 +25390,7 @@ export class SessionService {
           const gate = await runGateSeq(
             `pnpm --filter @loom/daemon test:daemon --only-file=${JSON.stringify(onlyFilePath)}`,
             worktreePath, gateTimeoutMs, undefined,
-            gateOpIdEnvOverride(opId, 0, gateCap, projectId, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, hooks, gateSpillPath(opId),
+            gateOpIdEnvOverride(opId, 0, gateCap, projectId, "dist-importer", WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, hooks, gateSpillPath(opId),
           );
           return { kind: "gate", gate, ranSize: runSet.length, matchedSize, corpusSize: runSetResult.corpusSize };
         },
@@ -26502,7 +26513,7 @@ export class SessionService {
                 // comment applies verbatim here) — `hooks.onExtend?.()` still fires so gate_queue/gate_status
                 // keep reading the SAME live signal they always have.
                 const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { workerGateExtended = true; hooks.onExtend?.(); } };
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, gateCap, project.id, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks, gateSpillPath(opId));
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, gateCap, project.id, "worker", WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks, gateSpillPath(opId));
               },
               "low",
             );

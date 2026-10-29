@@ -18,7 +18,7 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-rete
  *  run-key/kind logic (it never reads any field this fixture omits). `hostLoadAggregates` (card
  *  ec2d154b), when given, is stamped onto the run-summary row verbatim — this module treats it as
  *  opaque, so any plain object exercises the same survive-or-drop path a real one would. */
-function makeRun(runUid, fileCount, { crashed = false, hostLoadAggregates } = {}) {
+function makeRun(runUid, fileCount, { crashed = false, hostLoadAggregates, gateKind, gateConcurrentCap, warnNames } = {}) {
   const lines = [];
   lines.push(JSON.stringify({ kind: "run-start", runUid, runIndex: Number(runUid.split("-")[0]), poolSize: 2, testCount: fileCount, selected: [] }));
   for (let i = 0; i < fileCount; i++) {
@@ -28,6 +28,12 @@ function makeRun(runUid, fileCount, { crashed = false, hostLoadAggregates } = {}
   if (!crashed) {
     const summary = { kind: "run-summary", runUid, poolSize: 2, testCount: fileCount, executedCount: fileCount, failedCount: 0, durationMs: 1000 + fileCount };
     if (hostLoadAggregates !== undefined) summary.hostLoadAggregates = hostLoadAggregates;
+    // Card e2c8f5da: the gate-kind/concurrency-cap/declared-warning-names fields — same opaque,
+    // stamped-verbatim-onto-the-run-summary-row shape as hostLoadAggregates above, so this module's own
+    // whole-line-copy compaction treats them identically (never re-serializes a survivor's own fields).
+    if (gateKind !== undefined) summary.gateKind = gateKind;
+    if (gateConcurrentCap !== undefined) summary.gateConcurrentCap = gateConcurrentCap;
+    if (warnNames !== undefined) summary.warnNames = warnNames;
     lines.push(JSON.stringify(summary));
   }
   return lines;
@@ -188,6 +194,34 @@ function readRows(target) {
 
   const afterContent = fs.readFileSync(target, "utf8");
   check("[positive control] the SOURCE file is completely untouched when compaction fails mid-write", beforeContent === afterContent);
+}
+
+// ── gate kind / concurrency cap / warnNames (Card e2c8f5da) survive compaction on an OLD run-summary ──────
+// row, same mechanism as the hostLoadAggregates block above (this module writes back whole LINES, never
+// re-serializes a survivor's own object), exercised here for the three NEW fields specifically — the DoD
+// this card names for the retention/compaction side.
+{
+  const target = path.join(scratchRoot, "kind-warn-cap.ndjson");
+  const oldRun = makeRun("1-old", 5, { gateKind: "worker", gateConcurrentCap: 3, warnNames: ["codex-transcript-real-spawn"] });
+  // An ad-hoc old run — gateKind "ad-hoc", a null cap, and an empty warnNames list — proving a falsy-but-
+  // present value (null, []) survives just as faithfully as a real one, not dropped as if absent.
+  const adHocOldRun = makeRun("2-old", 5, { gateKind: "ad-hoc", gateConcurrentCap: null, warnNames: [] });
+  const recentRun = makeRun("3-recent", 5, { gateKind: "merge", gateConcurrentCap: 2, warnNames: [] });
+  writeNdjson(target, [...oldRun, ...adHocOldRun, ...recentRun]);
+
+  const result = compactGateTimingLogIfNeeded(target, { triggerBytes: 1, keepFullRuns: 1, maxCompactedSummaries: 1000 });
+  check("[positive control] compaction fires", result.compacted === true);
+
+  const after = readRows(target);
+  const survivor = after.find((r) => r.runUid === "1-old" && r.kind === "run-summary");
+  check("the OLD run's run-summary row survives compaction at all", survivor !== undefined);
+  check("its gateKind/gateConcurrentCap/warnNames survive BYTE-FOR-BYTE", survivor && survivor.gateKind === "worker" && survivor.gateConcurrentCap === 3 && survivor.warnNames.join(",") === "codex-transcript-real-spawn");
+
+  const adHocSurvivor = after.find((r) => r.runUid === "2-old" && r.kind === "run-summary");
+  check("an ad-hoc old run's kind:'ad-hoc'/null cap/empty warnNames survive just as faithfully (not dropped as if absent)", adHocSurvivor && adHocSurvivor.gateKind === "ad-hoc" && adHocSurvivor.gateConcurrentCap === null && Array.isArray(adHocSurvivor.warnNames) && adHocSurvivor.warnNames.length === 0);
+
+  const recentSurvivor = after.find((r) => r.runUid === "3-recent" && r.kind === "run-summary");
+  check("the RECENT run's fields survive too, as part of its full untouched detail", recentSurvivor && recentSurvivor.gateKind === "merge" && recentSurvivor.gateConcurrentCap === 2);
 }
 
 fs.rmSync(scratchRoot, { recursive: true, force: true });

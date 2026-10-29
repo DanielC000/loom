@@ -363,6 +363,48 @@ export function gateTimingOpId() {
   return process.env.LOOM_GATE_OP_ID || undefined;
 }
 
+/** Card e2c8f5da — the gate KIND (merge/worker/dist-importer/landing-check/deploy), threaded in via the
+ *  `LOOM_GATE_KIND` env var the daemon sets on every gate child (see `gateOpIdEnvOverride` in
+ *  sessions/service.ts). A measurement that had to pool merge gates with worker run_gates
+ *  (indistinguishable without the DB — the gap card 7639cc84 hit) can now discriminate off this row
+ *  alone. `"ad-hoc"` (never a guess at one of the 5 real kinds) for any caller that never set the env
+ *  var — a human's own local `pnpm --filter @loom/daemon test:daemon`, CI, or any other non-daemon-
+ *  spawned run. Exported as its own pure function so a test can assert the read directly without
+ *  spawning a real gate. */
+export function gateTimingRunKind() {
+  return process.env.LOOM_GATE_KIND || "ad-hoc";
+}
+
+/** Card e2c8f5da — the resolved `LOOM_GATE_CONCURRENT_CAP` the daemon stamped on this gate child (see
+ *  `gateOpIdEnvOverride`) — the daemon-wide gate concurrency this run competed for admission under, never
+ *  to be confused with `LOOM_GATE_TEST_CONCURRENCY`/`DEFAULT_CONCURRENCY`/`EFFECTIVE_POOL_SIZE`, which
+ *  size the test POOL within this one run. `null` (never a guessed default, e.g.
+ *  `resolveGateCapFromEnv`'s own fallback-to-2) when absent or unparseable — same "never a guess" posture
+ *  as `gateTimingRunKind` above: an ad-hoc run's absent cap must read as absent, not silently collide
+ *  with a real cap-2 run's own population. Exported as its own pure function for the same reason as
+ *  `gateTimingOpId`. */
+export function gateTimingConcurrentCap() {
+  const raw = process.env.LOOM_GATE_CONCURRENT_CAP;
+  if (raw === undefined) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Card 22d995ca: a DECLARED WARNING is a test's own `console.log("WARN  <message>")` line — the SAME
+ *  two-space convention `check()` already uses for `PASS  `/`FAIL  ` (see codex-transcript-real-spawn.mjs's
+ *  `reportGracefulStopExitCode`, the motivating case: a KNOWN, non-blocking accommodation that must stay
+ *  visible even when the file it lives in exits 0). Scanned across EVERY result's full captured `stdout`,
+ *  pass or fail alike — unlike a `FAIL` line, a PASSING file's own stdout is otherwise discarded entirely
+ *  once this run finishes, which was the actual defect: a non-blocking warning survived nowhere once the
+ *  file it lived in started passing. Exported as its own pure function (card e2c8f5da) so a test can
+ *  exercise the scan directly against a synthetic fixture `results` array — no real spawn needed. */
+export const WARN_LINE_RE = /^WARN {2}(.+)$/;
+export function collectDeclaredWarnings(results) {
+  return results
+    .map((r) => ({ name: r.name, lines: (r.stdout ?? "").split("\n").filter((l) => WARN_LINE_RE.test(l)) }))
+    .filter((w) => w.lines.length > 0);
+}
+
 /** Pure: the slowest `n` TIMED results (skipped/never-run entries have no `durationMs` and are excluded),
  *  descending. Exported so a test can drive it against synthetic result arrays directly. */
 export function topSlowestFiles(results, n = 20) {
@@ -2155,17 +2197,8 @@ if (isMain) {
   // any divergence).
   const executedCount = results.filter((r) => !r.skipped).length;
 
-  // Card 22d995ca: a DECLARED WARNING is a test's own `console.log("WARN  <message>")` line — the SAME
-  // two-space convention `check()` already uses for `PASS  `/`FAIL  ` (see codex-transcript-real-spawn.mjs's
-  // `reportGracefulStopExitCode`, the motivating case: a KNOWN, non-blocking accommodation that must stay
-  // visible even when the file it lives in exits 0). Scanned across EVERY result's full captured `stdout`,
-  // pass or fail alike — unlike `failed` above, a PASSING file's own stdout is otherwise discarded entirely
-  // once this run finishes (see the `FAILURES:` epilogue below, which only ever reads `failed`), which was
-  // the actual defect: a non-blocking warning survived nowhere once the file it lived in started passing.
-  const WARN_LINE_RE = /^WARN {2}(.+)$/;
-  const declaredWarnings = results
-    .map((r) => ({ name: r.name, lines: (r.stdout ?? "").split("\n").filter((l) => WARN_LINE_RE.test(l)) }))
-    .filter((w) => w.lines.length > 0);
+  // See collectDeclaredWarnings' own doc (above, near gateTimingOpId) for what this scans and why.
+  const declaredWarnings = collectDeclaredWarnings(results);
 
   console.log(`\n${pass}/${SELECTED.length} hermetic daemon test files passed — all selected files executed (a skip would have exited above). (pool size ${EFFECTIVE_POOL_SIZE})`);
   // Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
@@ -2214,6 +2247,10 @@ if (isMain) {
       // Card 720bb7ad DoD-3: see gateTimingOpId's own doc — omitted (not a fabricated empty string) for
       // any caller that never set LOOM_GATE_OP_ID.
       opId: gateTimingOpId(),
+      // Card e2c8f5da: see gateTimingRunKind/gateTimingConcurrentCap's own docs — the measurement that
+      // proposed this card had to pool gate kinds together for want of exactly these two fields.
+      gateKind: gateTimingRunKind(),
+      gateConcurrentCap: gateTimingConcurrentCap(),
       runStartTs: gateTimingRunStartTs,
       runEndTs: gateTimingRunEndTs,
       durationMs: gateTimingWallClockMs,
@@ -2231,6 +2268,13 @@ if (isMain) {
       executedCount,
       failedCount: failed.length,
       failedNames: failed.map((f) => f.name),
+      // Card e2c8f5da: the names of every file that emitted a declared `WARN  ` line this run (see
+      // `declaredWarnings` above) — e.g. codex-transcript-real-spawn's own graceful-stop exit-code
+      // accommodation (`_codex-graceful-stop.mjs`). Parallels `failedNames` immediately above: a list of
+      // NAMES, never the warning message text itself (that stays in this run's own console output /
+      // outputTail, not duplicated onto every NDJSON row). A name can appear once even if that file
+      // emitted more than one WARN line.
+      warnNames: declaredWarnings.map((w) => w.name),
       hostBefore: gateTimingHostBefore,
       hostAfter: gateTimingHostAfter,
       // Card ec2d154b: per-run CPU/disk/mem aggregates over this run's OWN "host-sample" ticks — see this

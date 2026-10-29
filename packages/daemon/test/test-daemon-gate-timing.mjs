@@ -22,6 +22,9 @@ import {
   formatGateTimingSummaryLines,
   neverCompletedFiles,
   gateTimingOpId,
+  gateTimingRunKind,
+  gateTimingConcurrentCap,
+  collectDeclaredWarnings,
   classifyFailureDetail,
 } from "../scripts/test-daemon.mjs";
 
@@ -110,6 +113,93 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-test
   const rows = fs.readFileSync(target, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   check("a row WITH an opId carries it verbatim", rows[0].opId === "real-op-id-here");
   check("a row with opId:undefined OMITS the key entirely (not JSON `null`) — proof a reader can tell 'no id available' apart from a fabricated value", !("opId" in rows[1]));
+}
+
+// ── gateTimingRunKind / gateTimingConcurrentCap / collectDeclaredWarnings (card e2c8f5da) ────────────────
+{
+  const savedKind = process.env.LOOM_GATE_KIND;
+  const savedCap = process.env.LOOM_GATE_CONCURRENT_CAP;
+  try {
+    // [negative control] the common case — a human's own local `pnpm --filter @loom/daemon test:daemon`,
+    // or CI, never sets either env var. Must record "ad-hoc"/null, never guess at a real kind/cap.
+    delete process.env.LOOM_GATE_KIND;
+    delete process.env.LOOM_GATE_CONCURRENT_CAP;
+    check("[negative control] gateTimingRunKind reads 'ad-hoc' (never a guess) when the env var is unset", gateTimingRunKind() === "ad-hoc");
+    check("[negative control] gateTimingConcurrentCap reads null (never a guessed default) when the env var is unset", gateTimingConcurrentCap() === null);
+    process.env.LOOM_GATE_KIND = "";
+    check("[negative control] an EMPTY string env var ALSO reads as 'ad-hoc', never a fabricated ''", gateTimingRunKind() === "ad-hoc");
+    process.env.LOOM_GATE_CONCURRENT_CAP = "not-a-number";
+    check("[negative control] an unparseable cap reads null, never NaN or a fabricated number", gateTimingConcurrentCap() === null);
+    process.env.LOOM_GATE_CONCURRENT_CAP = "0";
+    check("[negative control] a non-positive cap reads null (0/negative are never a real concurrency cap)", gateTimingConcurrentCap() === null);
+
+    // [positive control] the daemon sets both (gateOpIdEnvOverride in sessions/service.ts) — real values
+    // round-trip verbatim.
+    process.env.LOOM_GATE_KIND = "worker";
+    check("[positive control] a real kind round-trips verbatim", gateTimingRunKind() === "worker");
+    process.env.LOOM_GATE_CONCURRENT_CAP = "3";
+    check("[positive control] a real cap round-trips as a number", gateTimingConcurrentCap() === 3);
+  } finally {
+    if (savedKind === undefined) delete process.env.LOOM_GATE_KIND; else process.env.LOOM_GATE_KIND = savedKind;
+    if (savedCap === undefined) delete process.env.LOOM_GATE_CONCURRENT_CAP; else process.env.LOOM_GATE_CONCURRENT_CAP = savedCap;
+  }
+
+  // [negative control] an ordinary passing file's stdout (PASS lines only, no declared WARN) contributes
+  // nothing — the common case, so this must not false-positive.
+  const passingOnly = [
+    { name: "ordinary-passing-file", stdout: "PASS  (A) first assertion\nPASS  (B) second assertion\n" },
+  ];
+  check("[negative control] a file with only PASS lines yields zero declared warnings", collectDeclaredWarnings(passingOnly).length === 0);
+
+  // [positive control] a FIXTURE stdout carrying the real accommodation WARN shape — copied verbatim from
+  // _codex-graceful-stop.mjs's `evaluateCodexGracefulStopExit` (the motivating case this card names) —
+  // is detected by name, with NO real codex spawn anywhere in this test.
+  const accommodationWarnLine = "WARN  ⚠️  ACCOMMODATION (cards a35e2bd8, 176bdb0c): the real codex process exited with code 1 (not 0) after an INTENDED graceful stop. This is the KNOWN, LIVE, UNFIXED flake family measured at 2/13 ≈ 15.4% on 176bdb0c — NOT failing the gate on this observation.";
+  const withAccommodationWarn = [
+    { name: "ordinary-passing-file", stdout: "PASS  (A) first assertion\n" },
+    { name: "codex-transcript-real-spawn", stdout: `PASS  the real codex process exited (code=1) after an intended graceful stop — known accommodated flake\n${accommodationWarnLine}\n` },
+  ];
+  const warnings = collectDeclaredWarnings(withAccommodationWarn);
+  check("[positive control] exactly one file is named as carrying a declared warning", warnings.length === 1 && warnings[0].name === "codex-transcript-real-spawn");
+  check("[positive control] the file with only PASS lines is NOT named", !warnings.some((w) => w.name === "ordinary-passing-file"));
+  check("the declared warning's own line text is captured verbatim", warnings[0].lines[0] === accommodationWarnLine);
+
+  // [positive control] TWO distinct WARN lines in the SAME file still produce ONE entry (file-granular,
+  // like `failedNames`), with both lines captured.
+  const twoWarnLines = [{ name: "multi-warn-file", stdout: `${accommodationWarnLine}\nWARN  second distinct warning\n` }];
+  const twoWarnResult = collectDeclaredWarnings(twoWarnLines);
+  check("[positive control] two WARN lines in one file produce exactly one named entry", twoWarnResult.length === 1 && twoWarnResult[0].name === "multi-warn-file");
+  check("both distinct WARN lines are captured, in order", twoWarnResult[0].lines.join("|") === `${accommodationWarnLine}|WARN  second distinct warning`);
+
+  // The run-summary row itself, pinning the three DoD-required shapes:
+  const kindTarget = path.join(scratchRoot, "kind-warn-rows.ndjson");
+  // 1) A PASSING run, daemon-spawned (a real kind/cap present), no warnings.
+  appendGateTimingRow(kindTarget, {
+    kind: "run-summary", runUid: "pass-run", gateKind: "merge", gateConcurrentCap: 3,
+    failedCount: 0, failedNames: [], warnNames: collectDeclaredWarnings(passingOnly).map((w) => w.name),
+  });
+  // 2) A run whose file emits the accommodation WARN (via the fixture above — no real codex spawn).
+  appendGateTimingRow(kindTarget, {
+    kind: "run-summary", runUid: "warn-run", gateKind: "worker", gateConcurrentCap: 3,
+    failedCount: 0, failedNames: [], warnNames: collectDeclaredWarnings(withAccommodationWarn).map((w) => w.name),
+  });
+  // 3) An ad-hoc run (no daemon env at all) — kind "ad-hoc", cap null, never a guess. Explicitly unset
+  // both vars here (never trust the ambient env, restored above to whatever it already was — THIS test
+  // file may itself be running under a real daemon-spawned gate, which would leave both genuinely set).
+  const savedKind2 = process.env.LOOM_GATE_KIND;
+  const savedCap2 = process.env.LOOM_GATE_CONCURRENT_CAP;
+  delete process.env.LOOM_GATE_KIND;
+  delete process.env.LOOM_GATE_CONCURRENT_CAP;
+  appendGateTimingRow(kindTarget, {
+    kind: "run-summary", runUid: "ad-hoc-run", gateKind: gateTimingRunKind(), gateConcurrentCap: gateTimingConcurrentCap(),
+    failedCount: 0, failedNames: [], warnNames: [],
+  });
+  if (savedKind2 === undefined) delete process.env.LOOM_GATE_KIND; else process.env.LOOM_GATE_KIND = savedKind2;
+  if (savedCap2 === undefined) delete process.env.LOOM_GATE_CONCURRENT_CAP; else process.env.LOOM_GATE_CONCURRENT_CAP = savedCap2;
+  const kindRows = fs.readFileSync(kindTarget, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  check("[positive control] the passing run's row carries its real gateKind/gateConcurrentCap and an empty warnNames", kindRows[0].gateKind === "merge" && kindRows[0].gateConcurrentCap === 3 && kindRows[0].warnNames.length === 0);
+  check("[positive control] the accommodation-WARN run's row names the fixture file in warnNames", kindRows[1].gateKind === "worker" && kindRows[1].warnNames.join(",") === "codex-transcript-real-spawn");
+  check("[positive control] the ad-hoc run's row records kind 'ad-hoc' and a null cap — never a guessed real kind/cap", kindRows[2].gateKind === "ad-hoc" && kindRows[2].gateConcurrentCap === null);
 }
 
 // ── computeTestSourceBytes (card 90678ee9 DoD-5) ────────────────────────────────────────────────────────
