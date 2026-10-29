@@ -3052,7 +3052,7 @@ function pendingDivertCollisionFilenameFor(repoPath: string): string {
  * whether it narrows (`new Set()` when it does not), or the re-read-and-union above can resurrect a
  * caller's own just-dropped token. See the decision record.
  */
-function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>): { filename: string; entry: MergeQuarantineEntry } | false {
+function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, rebaseOntoRealDiskRecord = false): { filename: string; entry: MergeQuarantineEntry } | false {
   let target = filename;
   let toWrite = entry;
   if (keptUnreadableLatchFiles.has(filename)) {
@@ -3075,6 +3075,23 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, d
       toWrite = { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), filename])] };
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] refusing to rename over ${filename} — it is still marked UNREADABLE (never confirmed safe to overwrite); diverting ${entry.repoPath}'s own pending-divert record to ${target} instead and tracking ${filename} as an orphan reference.`);
+    }
+  } else if (rebaseOntoRealDiskRecord && droppedTokens.size > 0) {
+    // @decision 028837ad (Round 3, BLOCKING 1) — rebases onto `filename`'s REAL on-disk record, opt-in
+    // ONLY (never other callers' own default) — their `entry` is already the correct computed value.
+    const reread = readPendingDivertFileAt(path.join(MERGE_QUARANTINE_DIR, filename));
+    if (reread.state === "entry" && directPathIdentity(reread.entry.repoPath) === directPathIdentity(entry.repoPath)) {
+      // @decision 028837ad (Round 5, B-1) — union EVERY field via `unionIntoOnDiskPendingEntry` (never a
+      // tokens-only hand-rolled merge, Round 4's own gap) so an IN-MEMORY-ONLY field (a prior failed
+      // write) survives too; carry `entry.armedKeys` forward — it is never persisted to disk.
+      const unioned = unionIntoOnDiskPendingEntry(reread.entry, entry);
+      toWrite = { ...unioned, tokens: unioned.tokens.filter((t) => !droppedTokens.has(t)), armedKeys: entry.armedKeys };
+    } else if (reread.state === "enoent") {
+      // Nothing real there to preserve — `entry` already reflects the drop; write it as given.
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] refusing to narrow ${filename} — its own current on-disk content is unreadable, corrupt, or belongs to a DIFFERENT identity than ${entry.repoPath} (changed underneath); failing CLOSED rather than risk silently dropping a field disk still has. The PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-arm with the token(s) this call meant to drop still counted as outstanding.`);
+      return false;
     }
   }
   let fd: number | undefined;
@@ -4768,7 +4785,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     // `live.sourceFile` unconditionally: a marked basename redirects to a fresh record instead.
     // @decision 2dd97aaa (Follow-up 535fd69d) — `updated` drops `token`; pass it as `droppedTokens` — `tombstoneIfNotSurviving`
     // above does not protect this write when `token` is still "surviving" on another in-memory record.
-    const written = writePendingDivertFile(live.sourceFile, updated, new Set([token]));
+    // @decision 028837ad (Round 3, BLOCKING 1) — `rebaseOntoRealDiskRecord:true`: `live.entry` can be
+    // this card's own arm-derived, deliberately narrow model (1dd00dca/25d0d45b) — see the decision record.
+    const written = writePendingDivertFile(live.sourceFile, updated, new Set([token]), true);
     if (written) {
       if (written.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, written.entry);
       // @decision 9c681680 — same in-place mutation as above, no index lookup needed.
@@ -4973,6 +4992,10 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
     console.error(`[merge-quarantine] refusing to release token for ${repoPath} via clearMergeQuarantineByToken — ${preClear.reason}`);
     return;
   }
+  // @decision 028837ad — captured at CALL START, BEFORE the pre-loop pass below: that pass's own
+  // full-lift branch can itself arm a NEW foreign identity mid-pass, so capturing any later would wrongly
+  // exclude it too. See the decision record for the full mechanism and the 3315b08a interaction.
+  const identitiesPendingBeforeCall = new Set(pendingUnresolvedQuarantines.map((p) => directPathIdentity(p.entry.repoPath)));
   const activeMatches = new Set<MergeQuarantineEntry>();
   for (const [, entry] of activeQuarantines) {
     if (entry.tokens.includes(token)) activeMatches.add(entry);
@@ -4991,6 +5014,15 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
     seen.add(entry);
     clearActiveEntryTokenAtKey(k, entry, token);
   }
+  // @decision 028837ad — a FRESH, independent second pending pass: `nonTwinPendingIndices` above is a
+  // snapshot taken before the active loop, blind to a foreign identity armed PENDING mid-call. Never
+  // reorder the pass above instead — its own `activeMatches` identities go stale once the loop runs.
+  const activeMatchesAfterLoop = new Set<MergeQuarantineEntry>();
+  for (const [, entry] of activeQuarantines) {
+    if (entry.tokens.includes(token)) activeMatchesAfterLoop.add(entry);
+  }
+  const postArmPendingIndices = collectPendingIndices((p) => p.entry.tokens.includes(token) && !activeMatchesAfterLoop.has(p.entry) && !identitiesPendingBeforeCall.has(directPathIdentity(p.entry.repoPath)));
+  clearTokenFromPendingIndices(postArmPendingIndices, token);
 }
 
 /**
@@ -5109,6 +5141,8 @@ function unlinkLatchFileConfirmed(filename: string): boolean {
  * @decision 1dd00dca — never widen this to a full `MergeQuarantineEntry`-shaped carry-forward; the
  * in-memory arm this feeds is deliberately narrow (never a resolvedKey/contributor union).
  */
+// @decision 028837ad (Round 3, REVERTS Round 2's own widening) — see the decision record's own
+// "Round 3" section for why the fix now lives in the WRITE, not in widening this record again.
 interface ArmableOrphanRecord {
   repoPath: string;
   branch: string;
