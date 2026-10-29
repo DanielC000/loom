@@ -1133,8 +1133,12 @@ function quarantinePathFor(repoPath: string): string {
  * @decision 8db913e2 (Follow-up 4b06875f, Round 3) — `options.explicitResolvedKeyRule` defaults OFF,
  * SEMANTICALLY (never byte-) equivalent to the pre-card `{...older}` spread — see the decision record
  * for the boot fail-open an unscoped rule reproduces.
+ *
+ * @decision 6b327712 — `options.retainConflictingKeysInResolvedKeys` defaults OFF (byte-identical to
+ * every existing caller); ON, a conflict keeps both keys as PLURAL `resolvedKeys` candidates instead of
+ * dropping them — never widen past its one opt-in caller. See the decision record.
  */
-function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry, options?: { explicitResolvedKeyRule?: boolean }): MergeQuarantineEntry {
+function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry, options?: { explicitResolvedKeyRule?: boolean; retainConflictingKeysInResolvedKeys?: boolean }): MergeQuarantineEntry {
   const aIsPlaceholder = isPlaceholderEntryShape(a);
   const bIsPlaceholder = isPlaceholderEntryShape(b);
   const [older, newer] = aIsPlaceholder !== bIsPlaceholder
@@ -1184,11 +1188,15 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
     : newer.resolvedKey === undefined
       ? (conflictExclusions?.has(older.resolvedKey) ? undefined : older.resolvedKey)
     : undefined;
+  // @decision 6b327712 — the PLURAL array's own exclusions are a SEPARATE variable from the scalar's
+  // `conflictExclusions` above: `retainConflictingKeysInResolvedKeys` only widens what survives here,
+  // never what the scalar `resolvedKey` above resolves to.
+  const pluralConflictExclusions = options?.retainConflictingKeysInResolvedKeys ? undefined : conflictExclusions;
   const filterConflicts = (keys: string[] | undefined): string[] =>
-    conflictExclusions ? (keys ?? []).filter((k) => !conflictExclusions.has(k)) : (keys ?? []);
+    pluralConflictExclusions ? (keys ?? []).filter((k) => !pluralConflictExclusions.has(k)) : (keys ?? []);
   const resolvedKeysRaw = unionResolvedKeysRetaining(
     filterConflicts(older.resolvedKeys),
-    [...filterConflicts(newer.resolvedKeys), ...(!conflictExclusions && older.resolvedKey !== undefined ? [older.resolvedKey] : []), ...(!conflictExclusions && newer.resolvedKey !== undefined ? [newer.resolvedKey] : [])],
+    [...filterConflicts(newer.resolvedKeys), ...(!pluralConflictExclusions && older.resolvedKey !== undefined ? [older.resolvedKey] : []), ...(!pluralConflictExclusions && newer.resolvedKey !== undefined ? [newer.resolvedKey] : [])],
     `unionQuarantineEntries(${older.repoPath})`,
   );
   const resolvedKeys = resolvedKeysRaw.length > 0 ? resolvedKeysRaw : undefined;
@@ -3084,8 +3092,21 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, d
       // @decision 028837ad (Round 5, B-1) — union EVERY field via `unionIntoOnDiskPendingEntry` (never a
       // tokens-only hand-rolled merge, Round 4's own gap) so an IN-MEMORY-ONLY field (a prior failed
       // write) survives too; carry `entry.armedKeys` forward — it is never persisted to disk.
-      const unioned = unionIntoOnDiskPendingEntry(reread.entry, entry);
-      toWrite = { ...unioned, tokens: unioned.tokens.filter((t) => !droppedTokens.has(t)), armedKeys: entry.armedKeys };
+      // @decision 6b327712 (item 3) — `retainConflictingKeysInResolvedKeys:true` ONLY at this one call
+      // site: a conflicting resolvedKey survives as a plural candidate instead of being dropped entirely.
+      const unioned = unionIntoOnDiskPendingEntry(reread.entry, entry, { retainConflictingKeysInResolvedKeys: true });
+      // @decision 6b327712 (item 1, Round 2 B-1) — strip a contributor ONLY when DISK resurrected it (it
+      // is in `entry.reducedContributorRepoPaths` but NOT in `entry.contributorRepoPaths`) — a re-raise
+      // can LEGITIMATELY re-add a reduced contributor in memory; never strip what memory itself affirms.
+      const reducedIdentities = new Set((entry.reducedContributorRepoPaths ?? []).map((r) => directPathIdentity(r)));
+      const entryContributorIdentities = new Set((entry.contributorRepoPaths ?? []).map((c) => directPathIdentity(c)));
+      const contributorRepoPaths = unioned.contributorRepoPaths?.filter((c) => !reducedIdentities.has(directPathIdentity(c)) || entryContributorIdentities.has(directPathIdentity(c)));
+      toWrite = {
+        ...unioned,
+        tokens: unioned.tokens.filter((t) => !droppedTokens.has(t)),
+        armedKeys: entry.armedKeys,
+        contributorRepoPaths: contributorRepoPaths && contributorRepoPaths.length > 0 ? contributorRepoPaths : undefined,
+      };
     } else if (reread.state === "enoent") {
       // Nothing real there to preserve — `entry` already reflects the drop; write it as given.
     } else {
@@ -3988,9 +4009,13 @@ function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { stat
  * on a record with nothing to carry there" rule; a pending-only record is never armed anywhere.
  *
  * @decision 8db913e2 (Follow-up 6451a749)
+ *
+ * @decision 6b327712 — `options.retainConflictingKeysInResolvedKeys` defaults OFF (every pre-existing
+ * caller stays byte-identical) and is threaded straight through to {@link unionQuarantineEntries}'s own
+ * option of the same name — see that function's own doc for what it changes and why.
  */
-function unionIntoOnDiskPendingEntry(onDisk: MergeQuarantineEntry, entry: MergeQuarantineEntry): MergeQuarantineEntry {
-  const merged = unionQuarantineEntries(onDisk, entry, { explicitResolvedKeyRule: true });
+function unionIntoOnDiskPendingEntry(onDisk: MergeQuarantineEntry, entry: MergeQuarantineEntry, options?: { retainConflictingKeysInResolvedKeys?: boolean }): MergeQuarantineEntry {
+  const merged = unionQuarantineEntries(onDisk, entry, { explicitResolvedKeyRule: true, retainConflictingKeysInResolvedKeys: options?.retainConflictingKeysInResolvedKeys });
   return merged.armedKeys && merged.armedKeys.length > 0 ? merged : { ...merged, armedKeys: undefined };
 }
 
