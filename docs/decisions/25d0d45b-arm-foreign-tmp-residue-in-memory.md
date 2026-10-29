@@ -333,6 +333,49 @@ the folded sweep result actually carries one.
   because a SAME-identity sibling tmp was armed earlier in this SAME loop; worded as plainly "ARMED",
   never "now ARMED".
 
+## Round 5 (`420d431a` on card 25d0d45b; carriage re-CR `ae80d92a`, 2026-10-29) — `contentKeptBlockedBy`
+## dropped by a delegated clear, missing on REST, a reason-text gap, and a spelling-variant own-entry MINOR
+
+**The defect:** `tryClearMergeQuarantineByOwnIdentity` forwarded a delegated `clearMergeQuarantineByKey`
+result's `contentKeptRepoPaths` but silently DROPPED that same result's own `contentKeptBlockedBy` —
+losing the blocker disclosure for every caller of this shared helper (`clearMergeQuarantineByRecordedPath`
+and `clearMergeQuarantine`'s own delegated branches). Separately, the field never reached the REST
+boundary at all: `/clear`, `/clear-by-path {repoPath}`, and `/clear-by-path {id}` all forwarded
+`contentKeptRepoPaths` but never `contentKeptBlockedBy` — a human reading any of the three responses saw
+WHICH repoPath was content-kept but never WHO was refusing it right now. And `contentKeptOnlyReasonFor`'s
+own prose, where it fired, never named the blocker at all.
+
+**The fix:**
+- `tryClearMergeQuarantineByOwnIdentity` now folds a delegated `clearMergeQuarantineByKey` result's
+  `contentKeptBlockedBy` into its own map, alongside the pre-existing `contentKeptRepoPaths` fold (MAJOR —
+  merge-quarantine.ts ~:6974).
+- `contentKeptBlockedBy` now rides alongside `contentKeptRepoPaths`, unconditionally, at all three REST
+  routes (gateway/server.ts ~:3293, ~:3346, ~:3371) — `/clear`, `/clear-by-path {repoPath}`, and
+  `/clear-by-path {id}`.
+- `contentKeptOnlyReasonFor`'s prose now names the real blocker, that it will arm at the next boot, and
+  that clearing it does NOT release the content-kept identity — the call site rebuilds the repoPath-keyed
+  Map it wants from the array-shaped `contentKeptBlockedBy` the result actually carries (merge-quarantine.ts
+  ~:7974).
+- `classifyKeptRepoPath`'s own-entry test (the "is this repoPath blocked by ITS OWN entry, or by a
+  different identity" check) now compares via `directPathIdentity`, never a raw string — a
+  spelling/case/separator variant of a kept repoPath's own entry used to fail the bare string match and
+  get wrongly reported as content-kept, blocked by a "different" identity that was actually itself (MINOR
+  — merge-quarantine.ts ~:3220-3226).
+
+**Tests:** the (AR) scenario in `merge-quarantine-clear-by-path.mjs` (~L2778) proves `contentKeptBlockedBy`
+reaches real HTTP on all three routes, RED at tip `cb9cb648` (Round 4's own tip, before this fix landed).
+The "probe-spelling" scenario in `merge-quarantine-25d0d45b-arm-foreign-tmp-residue-in-memory.mjs`
+(~L441-468) pins the `classifyKeptRepoPath`/`directPathIdentity` MINOR fix.
+
+**Carriage re-CR `ae80d92a` (2026-10-29):** reviewed this round's own fix — verdict HEALTHY. One
+non-blocking, consistency-only residual was PROBED and carded separately (`53d2c734`, backlog, not fixed
+here): `blockedCoOccupantForReferencer` (merge-quarantine.ts ~:3194-3199) still matches its own entry by
+raw string rather than `directPathIdentity`, so for a spelling variant of X, `classifyKeptRepoPath`
+correctly says "live, routed to its own id" but the `{id}` rebuild inside `clearMergeQuarantineByKey`'s
+own `stillBlockedCoOccupants` composition (~:6265) drops the id — the reported route becomes
+`{repoPath: variant}` with no `id`. Probed as NOT a dead route (`clear-by-path(variant)` still lifts it by
+`repoPath`) — only the `{id}` alternative is missing.
+
 ## Do not
 
 - Do not re-litigate any of `1dd00dca`'s own rulings for the shared helper — arm IN-MEMORY ONLY; never
