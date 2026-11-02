@@ -34,6 +34,7 @@ import { sweepStaleGateOnlyFiles } from "./orchestration/gate-spill.js";
 import { SessionService } from "./sessions/service.js";
 import { CodescapeSupervisor, codescapeBootRepoPaths } from "./codescape/supervisor.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
+import { MidTurnContextSampler } from "./sessions/mid-turn-context-sampler.js";
 import { TaskMcpRouter } from "./mcp/server.js";
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { PlatformMcpRouter } from "./mcp/platform.js";
@@ -690,6 +691,9 @@ async function main(): Promise<void> {
       // this session's billed usage isn't lost (the periodic tick may have missed the last segment). The
       // sampler skips run / no-transcript sessions itself. Best-effort: never disturb the exit path.
       try { if (exited) void usageSampler.onSessionExit(exited).catch(() => { /* async best-effort */ }); } catch { /* never disturb the exit path */ }
+      // Mid-turn context sampler (card c5b234aa): drop this session's incremental-reader cache — it never
+      // ticks again once exited. Forward ref, same pattern as `usageSampler` above (and `sessions`/`orchMcp`).
+      try { midTurnContextSampler.onSessionExit(sessionId); } catch { /* never disturb the exit path */ }
       mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); operatorMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, {
@@ -1535,6 +1539,16 @@ async function main(): Promise<void> {
   contextWatcher.start();
   console.log(`[boot] context-recycle watcher on (${recycleRatio > 0 ? `env-forced ratio ${recycleRatio}` : `per-project ratio, platform default ${resolved.orchestration.recycleAtContextRatio}`}, tick ${ctxWatchMs}ms)`);
 
+  // Mid-turn context sampler (card c5b234aa) — re-reads every LIVE, BUSY, context-telemetry-capable
+  // session's transcript incrementally on the SAME cadence as the context-recycle watcher above, so
+  // `ctxInputTokens` advances DURING a long turn instead of staying frozen at the previous turn's Stop
+  // reading (the gap a 47-minute worker turn exhausted silently through). Writes through the SAME
+  // ctx_input_tokens/ctx_turns/ctx_updated_at columns the Stop hook uses — see MidTurnContextSampler's own
+  // doc for the full design and the Stop-hook race guard.
+  const midTurnContextSampler = new MidTurnContextSampler({ db, intervalMs: ctxWatchMs });
+  midTurnContextSampler.start();
+  console.log(`[boot] mid-turn context sampler on (tick ${ctxWatchMs}ms)`);
+
   // Asleep-at-the-Wheel watcher — nudges a LIVE manager that has silently dropped its orchestration
   // loop (idle, no live workers, backlog open) to report why and resume. Per-project leash via
   // resolveConfig (idleNudgeMinutes; 0 disables); recycle takes precedence (shares recycleRatio).
@@ -1963,7 +1977,7 @@ async function main(): Promise<void> {
       step("companionStop");
       void companionController.stop().catch(() => { /* never block the exit */ });
       step("watchersStop");
-      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop(); memoryDedupWatcher.stop();
+      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); midTurnContextSampler.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop(); memoryDedupWatcher.stop();
       step("finalLog");
       console.log(`[shutdown] graceful stop (${reason})`);
     }, () => process.exit(0)); // clean stop — NOT exit 75 (the supervisor's restart sentinel)

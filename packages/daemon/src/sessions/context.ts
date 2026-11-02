@@ -304,6 +304,10 @@ interface IncrementalUsageCache {
  *
  * IN-MEMORY (per UsageSampler instance): a daemon restart constructs a fresh reader ⇒ empty cache ⇒ the
  * first tick full-parses ⇒ the same cumulative as today ⇒ the DB-aware first-sight path runs identically.
+ *
+ * See {@link IncrementalContextStatsReader} below — its sibling for `MidTurnContextSampler` (card
+ * c5b234aa), sharing this exact byte-offset/partial-line-buffer mechanism by deliberate duplication, not
+ * a shared helper (a p3 follow-up tracks extracting one).
  */
 export class IncrementalRunUsageReader {
   private cache = new Map<string, IncrementalUsageCache>();
@@ -375,4 +379,237 @@ export class IncrementalRunUsageReader {
 
   /** Clear ALL cached state (the corrective reset — force a fresh full parse on the next tick). */
   clear(): void { this.cache.clear(); }
+}
+
+/** A mid-turn context sample — the SAME occupancy shape {@link readContextStats} returns (last-turn
+ *  input+cache tokens, a running turn count, the last-seen model), minus the two text fields that reader
+ *  also carries (`lastAssistantText`/`lastUserText`) — the mid-turn sampler never needs them. */
+export interface IncrementalContextSample {
+  inputTokens: number;
+  turns: number;
+  model: string | null;
+}
+
+/** Per-session incremental parse state for {@link IncrementalContextStatsReader} — mirrors
+ *  {@link IncrementalUsageCache} exactly EXCEPT there is no dedup `seen` set: this reader never sums, it
+ *  overwrites, so a line straddling a chunk boundary can never be double-counted in the first place. */
+interface IncrementalContextCache {
+  engineSessionId: string;
+  /** The resolved absolute path this entry's `offset`/`partialBytes` are relative to — a cache reset
+   *  trigger in its own right (Code Review round 3, card c5b234aa): if a LATER call resolves to a
+   *  DIFFERENT path for the same engineSessionId (e.g. `resolveTranscriptFile`'s dir-encoding-drift scan
+   *  finds the transcript somewhere new), the old byte offsets describe positions in a different file and
+   *  are meaningless against this one — see the `read()` reset below. */
+  filePath: string;
+  offset: number;
+  partialBytes: Buffer;
+  turns: number;
+  /** Last-seen `inputTokens` (input + cache_read + cache_creation) from an assistant line carrying usage;
+   *  null until the first such line is seen — the null-vs-measured discipline `readContextStats` itself
+   *  uses (a usage-less assistant line is skipped, never folded in as a bogus zero). */
+  lastInputTokens: number | null;
+  lastModel: string | null;
+}
+
+/**
+ * Negative-cache TTL for a transcript that `read()` could not find at all — neither the bare
+ * {@link engineTranscriptPath} nor {@link resolveTranscriptFile}'s dir-encoding-drift scan. Without this,
+ * a session whose transcript genuinely can't be found re-pays that scan's SYNC `readdirSync` over the
+ * whole transcript root (it caches only HITS) on every single sampler tick forever (Code Review round 3,
+ * card c5b234aa). A few minutes is long enough to collapse that into an occasional cost instead of a
+ * per-tick one, short enough that a transcript created shortly after this miss is found again promptly.
+ */
+const TRANSCRIPT_MISS_NEGATIVE_CACHE_TTL_MS = 3 * 60_000;
+
+/**
+ * Fold ONE transcript JSONL line into `state`, LAST-WINS (never summed) — mirrors `readContextStats`'s own
+ * loop body exactly (same skip conditions, same order: turns++ before the usage check, so a usage-less
+ * assistant line still advances `turns`), so this incremental fold is byte-identical in its RESULT to
+ * running that full-file loop over the same lines. No dedup is needed (unlike {@link accumulateUsageLine}):
+ * each new line is itself the new "last," so a split-message duplicate line simply overwrites with the
+ * same value, never an over-count.
+ *
+ * Returns true iff THIS line actually carried a usage-bearing assistant message (i.e. it set
+ * `state.lastInputTokens`) — false for a blank line, bad JSON, a non-assistant line (user/tool_result),
+ * a synthetic API-error line, or an assistant line with no `usage` field. The caller needs this to tell
+ * "a complete new line arrived, but it wasn't a fresh usage reading" apart from "a fresh usage reading
+ * arrived" — `state.lastInputTokens == null` alone can't do that once a PRIOR call has already set it,
+ * since it then stays non-null forever regardless of what the current call's own lines were.
+ */
+function foldContextLine(state: { turns: number; lastInputTokens: number | null; lastModel: string | null }, line: string): boolean {
+  if (!line.trim()) return false;
+  let o: Record<string, unknown>;
+  try { o = JSON.parse(line); } catch { return false; }
+  if (o.type !== "assistant" || !o.message) return false;
+  if (o.isApiErrorMessage === true) return false; // synthetic API-error line — see readContextStats's own doc
+  state.turns++;
+  const msg = o.message as { usage?: Record<string, unknown>; model?: string };
+  if (typeof msg.model === "string") state.lastModel = msg.model;
+  if (!msg.usage) return false;
+  state.lastInputTokens =
+    num(msg.usage.input_tokens) + num(msg.usage.cache_read_input_tokens) + num(msg.usage.cache_creation_input_tokens);
+  return true;
+}
+
+/**
+ * INCREMENTAL + ASYNC mid-turn context-occupancy reader — the sibling of
+ * {@link IncrementalRunUsageReader} above, built for `MidTurnContextSampler` instead of `UsageSampler`.
+ * Deliberately a SEPARATE class, not a refactor of its sibling into shared plumbing: that reader's
+ * byte-identical-by-construction invariant is load-bearing for cost tracking and isn't worth risking here
+ * (a follow-up tracks extracting the shared byte-offset/partial-line-buffer mechanics the two classes
+ * duplicate). See that class's own doc for the full mechanism this one copies verbatim: per-session
+ * `{engineSessionId, offset, partialBytes}` cache, `fs.promises` stat+read of only `[lastReadEnd, size)`,
+ * UTF-8-safe partial-line buffering, reset-on-rotation (the session's `engineSessionId` changed — card
+ * 8a5bd0d0) and reset-on-truncation (`size < lastReadEnd`). Two real differences from that sibling: the
+ * FOLD (this reader tracks "last-wins" occupancy — {@link foldContextLine} — instead of a deduped
+ * cumulative sum, so it has no `seen` set to carry), and PATH RESOLUTION (this reader falls back to
+ * {@link resolveTranscriptFile}'s dir-encoding-drift scan, caching the winning path per session —
+ * {@link resolvedPathCache} below — when the bare {@link engineTranscriptPath} misses; the sibling reader
+ * deliberately does NOT, an accepted gap for cost-tracking but not for exhaustion-prevention, where a
+ * session that silently never samples is exactly the failure this class exists to close).
+ */
+export class IncrementalContextStatsReader {
+  private cache = new Map<string, IncrementalContextCache>();
+  /**
+   * Card c5b234aa, Code Review round 2: the ONE-TIME-resolved absolute path for a session whose bare
+   * {@link engineTranscriptPath} missed and {@link resolveTranscriptFile}'s scan-fallback (card f10a6f40
+   * dir-encoding drift) found it elsewhere. Without this, a drifted session would either (a) silently
+   * never sample at all (if this reader only ever tried the bare path, the two-path asymmetry this fixes)
+   * or (b) re-pay a `resolveTranscriptFile` call — and, on a cold `resolvedPathCache` miss there, a real
+   * `readdirSync` of the whole transcript root — on EVERY tick forever. Keyed by sessionId (not
+   * engineSessionId): cleared alongside `cache` on rotation/drop/clear, so a stale resolved path from an
+   * ABANDONED engine id can never survive into the new one.
+   */
+  private resolvedPathCache = new Map<string, string>();
+  /**
+   * Negative cache for a session whose transcript could not be found at all (neither the bare path nor
+   * `resolveTranscriptFile`'s scan) — see {@link TRANSCRIPT_MISS_NEGATIVE_CACHE_TTL_MS}'s own doc for
+   * why this exists. Keyed by sessionId; `missedAt` is `Date.now()` at the miss. Cleared alongside
+   * `cache`/`resolvedPathCache` on rotation/drop/clear.
+   *
+   * Card c5b234aa (Code Review round 4): also carries the `engineSessionId` the miss was recorded
+   * under. A session whose transcript is NEVER found keeps no `cache` entry at all (that only gets
+   * created once a file is actually located), so the rotation-clear below — which keys off an existing
+   * `cache` entry's `engineSessionId` — can never fire for such a session; without this field, a stale
+   * miss recorded under an ABANDONED engine session id would wrongly suppress a fresh scan for the NEW
+   * one for the rest of the TTL window. `read()` below treats a miss recorded under a different
+   * `engineSessionId` as no cache hit at all.
+   */
+  private missCache = new Map<string, { engineSessionId: string; missedAt: number }>();
+
+  /**
+   * Return `sessionId`'s mid-turn occupancy IF (and only if) this call actually folded in a new, complete
+   * usage-bearing assistant line — null otherwise, on EVERY "nothing new" path (no new bytes at all, a
+   * new chunk that's still a buffered partial line, an IO error, or a complete new line with no `usage`
+   * field). This is a deliberate difference from {@link IncrementalRunUsageReader}, whose `read` always
+   * returns the latest-known cumulative even on a no-op tick: a cumulative is meaningful to re-report
+   * unchanged, but re-writing an UNCHANGED mid-turn reading into the DB on every tick would churn
+   * `ctx_updated_at` for no reason and defeat its own purpose (telling a reader "was this reading taken
+   * just now") — so the caller (`MidTurnContextSampler`) writes ONLY when this returns non-null.
+   */
+  async read(sessionId: string, cwd: string, engineSessionId: string): Promise<IncrementalContextSample | null> {
+    let entry = this.cache.get(sessionId);
+    if (entry && entry.engineSessionId !== engineSessionId) {
+      this.cache.delete(sessionId);
+      this.resolvedPathCache.delete(sessionId); // a resolved path from the ABANDONED engine id is stale too
+      this.missCache.delete(sessionId); // a stale miss from the ABANDONED engine id must not suppress a fresh scan
+      entry = undefined;
+    }
+
+    const bareFile = engineTranscriptPath(cwd, engineSessionId);
+    let file = this.resolvedPathCache.get(sessionId) ?? bareFile;
+    let size: number;
+    try {
+      size = (await fs.promises.stat(file)).size;
+    } catch {
+      // Bare path (or a previously-resolved path) missed. A recent miss for THIS engine id suppresses the
+      // scan fallback below (see TRANSCRIPT_MISS_NEGATIVE_CACHE_TTL_MS's own doc) — the cheap bare stat
+      // above still runs every tick, so a transcript that appears mid-window is still found on its own.
+      // Card c5b234aa (round 4): a miss recorded under a DIFFERENT engineSessionId is no cache hit at all
+      // — see missCache's own doc for why the rotation-clear above can't be relied on for this case.
+      const miss = this.missCache.get(sessionId);
+      if (miss && miss.engineSessionId === engineSessionId && Date.now() - miss.missedAt < TRANSCRIPT_MISS_NEGATIVE_CACHE_TTL_MS) return null;
+      // Fall back to resolveTranscriptFile's own dir-encoding-drift scan ONCE — it has its own internal
+      // engineSessionId-keyed cache (see that function's own doc), so repeating this call across ticks
+      // would already skip the real readdir after the first hit; caching the WINNING PATH here too
+      // additionally skips resolveTranscriptFile's own existsSync-plus-cache-lookup overhead on every
+      // later tick, going straight to a bare stat.
+      const resolved = resolveTranscriptFile(cwd, engineSessionId);
+      if (!resolved) {
+        this.missCache.set(sessionId, { engineSessionId, missedAt: Date.now() });
+        return null; // genuinely missing/unreadable — nothing to report
+      }
+      this.missCache.delete(sessionId);
+      this.resolvedPathCache.set(sessionId, resolved);
+      file = resolved;
+      try { size = (await fs.promises.stat(file)).size; }
+      catch { return null; }
+    }
+
+    if (!entry) {
+      entry = { engineSessionId, filePath: file, offset: 0, partialBytes: Buffer.alloc(0), turns: 0, lastInputTokens: null, lastModel: null };
+      this.cache.set(sessionId, entry);
+    } else if (entry.filePath !== file) {
+      // The resolved path changed to a DIFFERENT file since the last read (e.g. resolveTranscriptFile's
+      // drift scan found the transcript somewhere new) — entry.offset/partialBytes describe byte
+      // positions in that OTHER file and are meaningless against this one; reset + full re-read from 0.
+      entry = { engineSessionId, filePath: file, offset: 0, partialBytes: Buffer.alloc(0), turns: 0, lastInputTokens: null, lastModel: null };
+      this.cache.set(sessionId, entry);
+    }
+    let lastReadEnd = entry.offset + entry.partialBytes.length;
+    if (size < lastReadEnd) {
+      // Truncation/shrink of the same file → the byte offsets are meaningless → reset + full re-read from 0.
+      entry = { engineSessionId, filePath: file, offset: 0, partialBytes: Buffer.alloc(0), turns: 0, lastInputTokens: null, lastModel: null };
+      this.cache.set(sessionId, entry);
+      lastReadEnd = 0;
+    }
+    if (size === lastReadEnd) return null; // no new bytes — nothing new to report
+
+    const len = size - lastReadEnd;
+    const buf = Buffer.alloc(len);
+    let got = 0;
+    try {
+      const fh = await fs.promises.open(file, "r");
+      try {
+        // See IncrementalRunUsageReader.read's own comment: loop until `len` is filled (a short read can
+        // return fewer bytes) so we never account bytes we didn't actually read.
+        while (got < len) {
+          const { bytesRead } = await fh.read(buf, got, len - got, lastReadEnd + got);
+          if (bytesRead === 0) break;
+          got += bytesRead;
+        }
+      } finally { await fh.close(); }
+    } catch { return null; } // read failed → skip this tick, nothing new to report
+
+    const combined = Buffer.concat([entry.partialBytes, got === len ? buf : buf.subarray(0, got)]);
+    const lastNl = combined.lastIndexOf(0x0A);
+    if (lastNl === -1) {
+      entry.partialBytes = combined; // still no complete line — buffer everything, offset unchanged
+      return null; // the new bytes exist but no COMPLETE line arrived yet — nothing new to report
+    }
+    const complete = combined.subarray(0, lastNl + 1);
+    entry.partialBytes = combined.subarray(lastNl + 1);
+    entry.offset += complete.length;
+    // Card c5b234aa, Code Review round 2: track whether THIS call's own batch of new lines folded in a
+    // fresh usage reading — `entry.lastInputTokens == null` alone cannot tell that apart from "a PRIOR
+    // call already set it and this batch was a user line / tool_result / API-error line that changed
+    // nothing," which would silently re-report an old reading as fresh (a false ctxMidTurn:true, and
+    // churn on every such line with no new usage to report).
+    let foldedUsage = false;
+    for (const line of complete.toString("utf8").split("\n")) {
+      if (foldContextLine(entry, line)) foldedUsage = true;
+    }
+    if (!foldedUsage) return null; // this batch had nothing usage-bearing — nothing new to report
+    return { inputTokens: entry.lastInputTokens!, turns: entry.turns, model: entry.lastModel };
+  }
+
+  /** Drop ONE session's cache entry (on session exit — it never ticks again). */
+  drop(sessionId: string): void {
+    this.cache.delete(sessionId);
+    this.resolvedPathCache.delete(sessionId);
+    this.missCache.delete(sessionId);
+  }
+
+  /** Clear ALL cached state (force a fresh full parse on the next tick). */
+  clear(): void { this.cache.clear(); this.resolvedPathCache.clear(); this.missCache.clear(); }
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, contextPercentFor } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 
@@ -92,16 +92,19 @@ export class BusyWorkerWatcher {
       if (alreadyFlagged) continue;
 
       const n = Math.round(busyForMin);
+      // Card c5b234aa: the mid-turn sampler keeps `w.ctxInputTokens` fresh WHILE this worker is still
+      // busy (not just at its last Stop), so this reads the LIVE occupancy, not a stale pre-turn one.
+      const ctxPct = contextPercentFor(w.ctxInputTokens, w.model);
       db.appendEvent({
         id: randomUUID(), ts: nowIso, managerSessionId: managerId, workerSessionId: w.id,
         taskId: w.taskId ?? null, kind: "worker_stuck",
-        detail: { reason: "busy_no_progress", minutesBusy: n },
+        detail: { reason: "busy_no_progress", minutesBusy: n, ctxPct },
       });
       const msg =
         `[loom:worker-busy-long] worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} has been ` +
-        `in a single turn ~${n}min — likely a long build/test gate. If that's unexpected, check on it with ` +
-        `worker_status; re-nudge (worker_message) or recycle if it's genuinely stuck. (Informational — Loom does ` +
-        `not auto-kill the worker.)`;
+        `in a single turn ~${n}min (context: ${ctxPct != null ? `~${ctxPct}%` : "unknown"}) — likely a long build/test gate. ` +
+        `If that's unexpected, check on it with worker_status; re-nudge (worker_message) or recycle if it's genuinely ` +
+        `stuck. (Informational — Loom does not auto-kill the worker.)`;
       try { pty.enqueueStdin(managerId, msg); } catch { /* manager not live */ }
       // eslint-disable-next-line no-console
       console.log(`[busy-worker-watcher] worker ${w.id} busy ~${n}m in one turn → advisory to manager ${managerId}`);

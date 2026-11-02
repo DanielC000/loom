@@ -293,7 +293,10 @@ export class ContextWatcher {
   /**
    * EMERGENCY INTERRUPT (Trigger A) — needs a REAL `ctxInputTokens` reading; the null gap is
    * `checkBlindTurn`'s (Trigger B's) job, deliberately not this method's.
-   * @decision 9f279c7b — de-dups per still-current reading; a refusal never advances that state.
+   * @decision 9f279c7b — fires AT MOST ONCE PER SESSION ID; a refusal never advances that state.
+   * @decision c5b234aa — round 4: NO re-arm key at all (see the decision record for why three
+   *   successive per-turn keys — per-reading, `lastActivity`, `turnSeq` — each reopened the same
+   *   cascade from a different direction). A recycle mints a fresh session id, which re-arms naturally.
    */
   private checkEmergencyOccupancy(db: Db, m: Session, cfg: OrchestrationConfig, r: number, window: number, nowIso: string): void {
     if (cfg.emergencyRecycleAtContextRatio <= 0) return; // disabled for this project
@@ -301,14 +304,10 @@ export class ContextWatcher {
     if (!this.deps.pty.isAlive(m.id)) return;
     if (!this.deps.emergencyInterrupt) return; // no daemon-internal hook wired (e.g. a narrower test harness)
 
-    // `>=`, not `>`: skip unless ctxUpdatedAt is STRICTLY NEWER than our last fire. Unlike checkBlindTurn's
-    // identical-looking `already.ts > m.lastActivity` (safe there because a turn start is always at least
-    // `managerBlindTurnMinutes` in the past by the time it fires), ctxUpdatedAt here can be stamped in the
-    // SAME reading the fire itself reacts to, so a `>` comparison can tie on an identical or coarser-grained
-    // timestamp and wrongly re-fire for a reading that hasn't actually advanced (caught by this file's own
-    // de-dup test: three ticks against one unchanged ctxUpdatedAt fired three times under `>`).
-    const already = db.getLatestEventForManagerByKind(m.id, "context_emergency_interrupt");
-    if (already && m.ctxUpdatedAt && already.ts >= m.ctxUpdatedAt) return; // already fired for THIS reading
+    // Card c5b234aa (Code Review round 4) — ANY prior fire for this session id, ever (legacy-shaped
+    // event included — presence alone is enough, no field on it is even read), blocks a second one for
+    // the life of this session. No re-arm key at all: see the decision record for why.
+    if (db.getLatestEventForManagerByKind(m.id, "context_emergency_interrupt")) return;
 
     const pct = Math.round(r * 100);
     const kw = Math.round(window / 1000);

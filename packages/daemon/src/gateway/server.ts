@@ -3526,8 +3526,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // null, byte-identical to every existing caller.
           lastError?: string | null;
           // Measured context occupancy (card b449be97) — the ONLY way an e2e spec can seed a session with
-          // a real ctxInputTokens reading; nothing else writes ctx_input_tokens outside the pty's own
-          // onContextStats. `0` is a legitimate MEASURED value (a real 0% meter), distinct from the
+          // a real ctxInputTokens reading; outside this test-only route, every write goes through the
+          // pty's own onContextStats (the Stop hook) or MidTurnContextSampler (card c5b234aa, mid-turn,
+          // via setContextCountersIfUnchanged) — never anywhere else. `0` is a legitimate MEASURED value
+          // (a real 0% meter), distinct from the
           // omitted/null "never measured" case ContextUsage renders as a dash — use `??`, never `||`, at
           // every hop that touches this field, or the measured-zero case collapses into "never measured".
           ctxInputTokens?: number | null;

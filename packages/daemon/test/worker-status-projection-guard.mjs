@@ -77,6 +77,10 @@ const EXPECTED_KEYS = [
   // (boolean | null) — lets a manager tell "structurally unmeasurable on this harness" (codex today) apart
   // from "not yet measured" (see neverCompletedTurn) for a null ctxInputTokens/ctxPct/ctxTurns/model.
   "contextTelemetry",
+  // Card c5b234aa: ctxMidTurn — true only while ctxInputTokens/ctxPct were measured DURING the turn
+  // that's still running (the mid-turn sampler), vs carried over from before it started. `ctxUpdatedAt`
+  // above (a raw session-row field) already covers the measuredAt half for this response shape.
+  "ctxMidTurn",
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
   "unconfirmedDeliveryMs",
   // Card 8882e2ca: kickoffConfirmPending — non-null only while this worker's turn-1 kickoff is

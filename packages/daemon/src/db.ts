@@ -7332,6 +7332,26 @@ export class Db {
     this.notifySessionChanged(id);
   }
   /**
+   * Compare-and-set counterpart of {@link setContextCounters}, for the mid-turn sampler ONLY (the Stop
+   * hook keeps calling the unconditional setter above — it is always authoritative). Writes ONLY when the
+   * row is STILL busy AND its `ctx_updated_at` is UNCHANGED from `expectedCtxUpdatedAt` — `IS` is SQLite's
+   * NULL-safe equality, so a still-unmeasured (`NULL`) expectation compares correctly too. Returns true iff
+   * the row was actually written; false means the write was correctly skipped (never an error either way).
+   *
+   * @decision c5b234aa — never drop the `busy = 1` / `ctx_updated_at IS ?` guard, and never call this
+   * (instead of the unconditional setter) from the Stop hook — only the mid-turn sampler may be raced.
+   */
+  setContextCountersIfUnchanged(
+    id: string, c: { ctxInputTokens: number; ctxTurns: number; model?: string | null }, expectedCtxUpdatedAt: string | null,
+  ): boolean {
+    const info = this.db.prepare(
+      "UPDATE sessions SET ctx_input_tokens = ?, ctx_turns = ?, model = COALESCE(?, model), ctx_updated_at = ? " +
+      "WHERE id = ? AND busy = 1 AND ctx_updated_at IS ?",
+    ).run(c.ctxInputTokens, c.ctxTurns, c.model ?? null, new Date().toISOString(), id, expectedCtxUpdatedAt);
+    if (info.changes > 0) this.notifySessionChanged(id);
+    return info.changes > 0;
+  }
+  /**
    * Card 343441bd: bump the completed-worker-turn counter — called EXACTLY ONCE per real Stop/StopFailure
    * (see PtyHostEvents.onTurnCompleted). Deliberately its own tiny UPDATE (not folded into
    * setContextCounters, which is conditional on a successful transcript read) so it fires unconditionally

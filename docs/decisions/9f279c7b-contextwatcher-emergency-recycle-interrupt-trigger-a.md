@@ -44,6 +44,9 @@ Throws ONLY if the target session is unknown (mirrors `redirectSessionAsCompanio
 - Do not poll/wait for a merge-danger window to clear here — `ContextWatcher.tick()` already re-runs on
   its own interval, so a refusal just means the next tick retries; a bounded wait belongs to the
   full-shutdown path, not this one.
+- Do not de-dup this interrupt's "already fired" check on `lastActivity`, `turnSeq`, or any other
+  per-turn key — round 4 (see the round-4 section below) removed the re-arm key entirely. The interrupt
+  fires AT MOST ONCE PER SESSION ID, full stop; a recycle (fresh session id) is the only re-arm.
 
 ## ContextWatcher's own trigger conditions and de-dup (`checkEmergencyOccupancy`)
 
@@ -52,13 +55,34 @@ boundary) — which never arrives for a manager stuck in one long turn. The SECO
 `emergencyRecycleAtContextRatio` floor (validated ≥ the ordinary ratio at resolve time, `config.ts`)
 bypasses the queue entirely and fires this interrupt instead.
 
-Fires AT MOST once per still-current `ctxInputTokens` reading, re-arming at the manager's NEXT Stop (a
-genuinely fresh reading, possibly still over the floor — correctly re-fires) or on recycle (a brand-new
-session id) — mirrors `checkBlindTurn`'s own
-episode-boundary pattern, one field over (`ctxUpdatedAt` here vs. `lastActivity` there). A refusal (no
-hook wired, session died, or the merge-danger window above) does NOT advance this de-dup state — only
-a FIRED interrupt does — so the very next tick's retry (see the MERGE-DANGER GUARD bullet above) starts
-from the same untried state, never a false success.
+@decision c5b234aa — **Round 4 (current): fires AT MOST ONCE PER SESSION ID, full stop — no re-arm key
+at all.** `checkEmergencyOccupancy` checks only whether ANY `context_emergency_interrupt` event already
+exists for this session id; if so, it never fires again for that id. A recycle mints a fresh session id,
+which re-arms naturally. A refusal (no hook wired, session died, or the merge-danger window above) does
+NOT record an event, so the very next tick's retry starts from the same untried state.
+
+**Why no re-arm key survives:** three successive rounds each tried a different per-TURN re-arm key, and
+each one reopened the same cascade from a different direction — the fire this interrupt causes is not
+inert (it Esc-interrupts a live turn and its settle/drain mechanics touch `busy`/`lastActivity` without
+ever completing a real turn), so any signal meant to distinguish "a genuinely new turn" from "the
+wind-down this fire itself produced" kept finding a path back to false-positive re-arm:
+- Round 1: per-`ctxInputTokens`-READING — broke the instant `MidTurnContextSampler` started bumping
+  `ctxUpdatedAt` on every tick while busy; the reading-keyed check could never again find itself
+  satisfied, so the interrupt re-fired on nearly every tick, including during its own wind-down turn.
+- Round 2: switched to `lastActivity` — broken by the fire's OWN delivery mechanics:
+  `interruptForRedirect`'s Esc → settle → `setBusy(false)`/`drainPending`/`setBusy(true)` stamps
+  `last_activity` on both edges, pushing it past the fire's own `ts` on the very next tick even though no
+  genuinely new turn started.
+- Round 3: switched to `turnSeq` (a genuine completed-turn counter, bumped only by a real
+  Stop/`onTurnCompleted`) — broken by either a real Stop landing inside the ~1.5s redirect-settle window,
+  or a multi-turn wind-down whose first turn completes normally: either way `turnSeq` advances without a
+  genuinely fresh emergency-worthy turn having started, re-arming the interrupt mid-wind-down.
+
+Per the standing lesson that three review rounds each finding a NEW way the SAME heuristic breaks means
+the fix is to shrink the heuristic's surface, not patch it a fourth time: round 4 removes the re-arm key
+entirely rather than hunting for a fourth signal. The repeated-reminder job this would otherwise do is
+already covered by the ordinary ratio nudge (cadence-limited, queued, never Esc), the `context_escalated`
+escalation, and the blind-turn advisory — none of which need the emergency interrupt to repeat.
 
 Trigger B (`checkBlindTurn`) deliberately does NOT escalate into this interrupt: it has no occupancy
 number to justify cancelling a turn, and a real gen-235 specimen (a manager blind for a long window

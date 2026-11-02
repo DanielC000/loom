@@ -236,6 +236,41 @@ function cleanup(e) {
   check("(10) a negative stuckWorkerMinutes is rejected", bad.ok === false);
 }
 
+// ============================ (11) card c5b234aa: the notice + event carry the LIVE ctx% ============================
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-11");
+  // A busy, stale worker whose ctxInputTokens is already measured (as the mid-turn sampler would have
+  // set it, mid-turn, with no Stop involved) — 700_000 of a 1M claude-opus-4-8 window ≈ 70%.
+  e.db.insertSession({
+    id: "wkr-ctx-11", projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-wkr-ctx-11", title: null,
+    cwd: e.projId, processState: "live", resumability: "resumable", busy: true,
+    createdAt: minutesAgo(65), lastActivity: minutesAgo(65), lastError: null, role: "worker",
+    parentSessionId: "mgr-11", taskId: "tk-wkr-ctx-11",
+    ctxInputTokens: 700_000, ctxTurns: 12, model: "claude-opus-4-8",
+  });
+  e.alive.add("wkr-ctx-11");
+  e.watcher.tick(NOW);
+  const ev11 = stuckEvents(e, "wkr-ctx-11")[0];
+  check("(11) worker_stuck event detail carries ctxPct (~70%, not null/omitted)", ev11?.detail?.ctxPct === 70);
+  const text11 = e.enqueued[0]?.text ?? "";
+  check("(11) [loom:worker-busy-long] notice text carries the SAME ~70% reading", /context: ~70%/.test(text11));
+  cleanup(e);
+}
+
+// ============================ (12) card c5b234aa: ctxPct renders "unknown", never a measured 0% ============================
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-12");
+  seedWorker(e, "wkr-nctx-12", "mgr-12"); // never measured — ctxInputTokens stays null (seedWorker's default)
+  e.watcher.tick(NOW);
+  const ev12 = stuckEvents(e, "wkr-nctx-12")[0];
+  check("(12) worker_stuck event detail carries ctxPct:null (never a measured 0) when unmeasured", ev12?.detail?.ctxPct === null);
+  const text12 = e.enqueued[0]?.text ?? "";
+  check("(12) [loom:worker-busy-long] notice renders \"unknown\", never \"~0%\"", /context: unknown/.test(text12) && !/context: ~0%/.test(text12));
+  cleanup(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — BusyWorkerWatcher surfaces a LIVE worker busy past the per-project window (lastActivity not advancing, the ONLY signal — a pty-output gate is unreachable dead code given healIfStuck) EXACTLY ONCE per long turn (one worker_stuck event under the owning manager + one softened [loom:worker-busy-long] advisory nudge — informational, never a kill or hang alarm); is SILENT when the worker is progressing / idle / disabled(0) / orphaned(no live manager) / human-paused (worker, manager, or global); confirms the raised 60m default (55m busy is NOT flagged); re-arms when the worker makes progress (a stale prior-episode event doesn't suppress a new one, a same-episode one does); honors a per-project stuckWorkerMinutes override; ignores managers; and the zod orchestrationOverride accepts stuckWorkerMinutes (negatives rejected)."
   : `\n❌ ${failures} FAILURE(S).`);

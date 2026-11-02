@@ -214,6 +214,32 @@ const STALE_DIRECTIVE_TURN_THRESHOLD = 3;
  */
 const STALE_REPORT_TURN_THRESHOLD = 3;
 
+// Card c5b234aa: {ctxMeasuredAt, ctxMidTurn} — ctxMeasuredAt mirrors `ctxUpdatedAt` (when this ctx
+// reading was last written, by either the Stop hook or the mid-turn sampler); ctxMidTurn is true ONLY
+// while that reading was taken DURING the turn that's STILL running (busy && ctxUpdatedAt at-or-after the
+// current turn's own rising edge, `lastActivity` — the same invariant context-watcher.ts's checkBlindTurn
+// already relies on) — false (never a bare null) once idle, or whenever ctxUpdatedAt predates the current
+// turn (a stale, carried-over-from-before-this-turn reading — exactly the gap card 8c7dfc65 exists to
+// close). `null` input (no session row to read, a placeholder row) returns the not-determinable
+// {ctxMeasuredAt:null, ctxMidTurn:null} pair. Module-scope (not a `buildServer`-local const) because
+// `registerMyContext` and `buildServer`'s `fleetView`/`worker_status` are separate method scopes that
+// both need it.
+//
+// ⚠️ APPROXIMATE, not exact: `lastActivity` is the current turn's rising edge for the mid-turn sampler's
+// own purposes, but it is ALSO bumped by several OTHER, turn-unrelated writes — `Db.setLastError`, `setProcessState`,
+// `setEngineSessionId`, and the capabilities/skills/connections patch (db.ts) all stamp it too. So a
+// mid-turn bump from one of THOSE (not a real turn boundary) can make `ctxMidTurn` read `false` for a
+// reading that is, in fact, still perfectly fresh — it self-corrects the moment the NEXT sample lands
+// (the sampler's next tick re-stamps `ctxUpdatedAt` past the new `lastActivity` again). Never read a
+// single `false` here as proof a reading is stale; it is a useful signal, not an exact one.
+function ctxMidTurnFields(
+  w: Pick<Session, "busy" | "ctxUpdatedAt" | "lastActivity"> | null,
+): { ctxMeasuredAt: string | null; ctxMidTurn: boolean | null } {
+  return w
+    ? { ctxMeasuredAt: w.ctxUpdatedAt ?? null, ctxMidTurn: w.busy && w.ctxUpdatedAt != null && w.ctxUpdatedAt >= w.lastActivity }
+    : { ctxMeasuredAt: null, ctxMidTurn: null };
+}
+
 /** `gate_status(opId)` is a read-only lookup, scoped per-caller, with no pass/fail outcome path of its
  *  own.
  *
@@ -1636,6 +1662,9 @@ export class OrchestrationMcpRouter {
         ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand, ...(mergeGate ? { mergeGate } : {}), columns, measured: false,
         note: "context not measured yet (no completed turn) — occupancy unknown; contextWindow/model " +
           "reflect the CONFIGURED profile model when set, else the DEFAULT_CONTEXT_WINDOW fallback",
+        // Card c5b234aa — see ctxMidTurnFields's own doc (fleetView, mcp/orchestration.ts). Trivially
+        // false here: ctxInputTokens is null, so there is no reading to be mid-turn OR stale.
+        ctxMidTurn: ctxMidTurnFields(s ?? null).ctxMidTurn,
         composerDirtyLen,
         composerDirtyLenBelieved,
         unconfirmedDeliveryMs,
@@ -1652,6 +1681,9 @@ export class OrchestrationMcpRouter {
       pct: Math.round((ctxInputTokens / contextWindow) * 100),
       model,
       measuredAt,
+      // Card c5b234aa — see ctxMidTurnFields's own doc (fleetView, mcp/orchestration.ts): true only while
+      // `ctxInputTokens` above was measured DURING the turn that's still running.
+      ctxMidTurn: ctxMidTurnFields(s ?? null).ctxMidTurn,
       gateCommand,
       ...(mergeGate ? { mergeGate } : {}),
       columns,
@@ -1702,8 +1734,18 @@ export class OrchestrationMcpRouter {
         description:
           "Read YOUR OWN context occupancy (no args — server-derived from your session). Returns " +
           "{loomSessionId, engineSessionId, ctxInputTokens, contextWindow, pct, model, measuredAt, " +
-          "gateCommand}: pct is your measured " +
-          "context size as a percentage of your model's window. Use it at a clean seam to self-assess — " +
+          "ctxMidTurn, gateCommand}: pct is your measured " +
+          "context size as a percentage of your model's window. `ctxMidTurn` (card c5b234aa) is true " +
+          "only while `ctxInputTokens`/`pct` were measured DURING the turn that's still running (Loom's " +
+          "own mid-turn sampler, not just your last completed turn's Stop reading) — false means either " +
+          "you're idle (the reading is from your last completed turn, which is accurate while idle) or " +
+          "your current turn hasn't been re-sampled yet (the reading may be stale relative to how much " +
+          "you've actually consumed so far this turn). ⚠️ APPROXIMATE, not exact: a few OTHER writes " +
+          "(a recorded error, a process-state change, an engine-session-id rotation, a capability patch) " +
+          "also bump the same `lastActivity` this is keyed against, so a `false` reading can occasionally " +
+          "mean one of those rather than a genuinely stale sample — it self-corrects on the sampler's " +
+          "very next tick either way, so never treat one `false` as proof the reading is stale. " +
+          "Use it at a clean seam to self-assess — " +
           "a manager to decide whether to recycle_me, a worker to worker_report that it's getting heavy. " +
           "`loomSessionId` is the id the DAEMON uses for you — it's what a manager/durable event row/" +
           "peer frame names you by, and the one to state when SELF-IDENTIFYING in a report (e.g. \"my " +
@@ -3031,6 +3073,10 @@ export class OrchestrationMcpRouter {
           // hand from ctxInputTokens+model. Null structurally for a codex-harness worker too (no
           // hook-based capture on that harness — see codex-adapter.ts's own doc).
           ctxPct: contextPercentFor(w.ctxInputTokens, w.model),
+          // Card c5b234aa — see ctxMidTurnFields's own doc: tells a reader whether this ctxInputTokens
+          // reading was taken DURING the turn that's still running (fresh) or carried over from before it
+          // started (potentially stale — the exact gap card 8c7dfc65 exists to close).
+          ...ctxMidTurnFields(w),
           // Card 5a8a74e1 — see contextTelemetryFor's own doc. `false` here is what makes a codex worker's
           // `ctxInputTokens`/`ctxPct`/`ctxTurns`/`model` null reads decidable as "never measurable on this
           // harness" instead of the ambiguous "not yet measured" a bare null (or `neverCompletedTurn`,
@@ -3085,6 +3131,7 @@ export class OrchestrationMcpRouter {
         branch: null,
         ctxInputTokens: null,
         ctxPct: null,
+        ...ctxMidTurnFields(null), // no worktree/pty exists yet — not determinable here
         contextTelemetry: null, // no worktree/pty exists yet — harness not determinable here, never a silent false
         neverCompletedTurn: true,
         model: null,
@@ -3133,6 +3180,7 @@ export class OrchestrationMcpRouter {
         branch: null,
         ctxInputTokens: null,
         ctxPct: null,
+        ...ctxMidTurnFields(null), // no worktree/pty exists yet — not determinable here
         contextTelemetry: null, // no worktree/pty exists yet — harness not determinable here, never a silent false
         neverCompletedTurn: true,
         model: null,
@@ -3187,6 +3235,9 @@ export class OrchestrationMcpRouter {
           branch: w.branch ?? null,
           ctxInputTokens: w.ctxInputTokens ?? null,
           ctxPct: contextPercentFor(w.ctxInputTokens, w.model),
+          // busy:false forced above (this worker already exited) — mirror that here rather than reading
+          // w.busy, so ctxMidTurn is deterministically false for this row regardless of stale DB state.
+          ...ctxMidTurnFields({ busy: false, ctxUpdatedAt: w.ctxUpdatedAt, lastActivity: w.lastActivity }),
           contextTelemetry: contextTelemetryFor(w.harness),
           neverCompletedTurn: (w.turnSeq ?? 0) === 0,
           model: w.model ?? null,
@@ -3234,6 +3285,7 @@ export class OrchestrationMcpRouter {
         branch: d.branch,
         ctxInputTokens: null,
         ctxPct: null,
+        ...ctxMidTurnFields(null), // already stopped — not determinable here
         contextTelemetry: null, // harness isn't tracked on a DanglingWorkerEntry (already stopped) — not determinable here
         neverCompletedTurn: null,
         model: null,
@@ -3308,6 +3360,10 @@ export class OrchestrationMcpRouter {
           ...projectSessionRowFields(w),
           // Card 808ee811 — see fleetView's identical field for the full doc.
           ctxPct: contextPercentFor(w.ctxInputTokens, w.model),
+          // Card c5b234aa — see ctxMidTurnFields's own doc (fleetView); `ctxUpdatedAt` is already present
+          // above via projectSessionRowFields, so only the derived boolean is added here (no ctxMeasuredAt
+          // duplicate of a field this response already carries).
+          ctxMidTurn: ctxMidTurnFields(w).ctxMidTurn,
           // Card 5a8a74e1 — see contextTelemetryFor's own doc (fleetView) for the full reading guide.
           contextTelemetry: contextTelemetryFor(w.harness),
           neverCompletedTurn: (w.turnSeq ?? 0) === 0,

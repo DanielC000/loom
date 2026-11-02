@@ -141,28 +141,92 @@ const OVER_FLOOR_CTX = 900_000;
   cleanup(e);
 }
 
-// RE-ARM: once a fresh (newer) ctxUpdatedAt lands — a real Stop happened, and the reading is STILL over
-// the floor — the interrupt fires again. Simulates the "manager published 0.92 and immediately entered
-// another long turn" case the card's MANAGER DECISION explicitly calls out as NOT vacuous.
+// ONCE-PER-SESSION (card c5b234aa, Code Review round 4): three successive rounds each tried a different
+// per-TURN re-arm key (per-reading, `lastActivity`, `turnSeq`) and each one reopened the same cascade
+// from a different direction — see `docs/decisions/9f279c7b-*.md`'s round-4 section for the full history.
+// Round 4 removes the re-arm key entirely: this interrupt fires AT MOST ONCE PER SESSION ID, full stop.
+//
+// (a) A Stop lands INSIDE the ~1.5s redirect-settle window — turnSeq bumps, a new turn starts, still over
+// the floor. Round 3's `turnSeq`-keyed de-dup would read this as "a completed turn, re-arm" and fire
+// again; round 4 must not.
 {
   const e = makeEnv({ projectConfig: { orchestration: { emergencyRecycleAtContextRatio: 0.85 } } });
-  seedManager(e, "mgr-rearm", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date(Date.now() - 60_000).toISOString() });
+  seedManager(e, "mgr-oncepersession", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date(Date.now() - 60_000).toISOString() });
   e.watcher.tick();
-  check("re-arm setup: first reading fires once", emergencyEvents(e, "mgr-rearm").length === 1);
-  const firstFireTs = emergencyEvents(e, "mgr-rearm")[0].ts;
-  // A fresh Stop landed: `setContextCounters` is the REAL write path a Stop hook uses (db.ts) — it stamps
-  // ctx_updated_at to "now" itself, so this reproduces an actual fresh-reading edge, not a hand-picked
-  // timestamp. The de-dup check (`already.ts >= m.ctxUpdatedAt`) needs the NEW ctxUpdatedAt to be
-  // STRICTLY later than the first fire's own event `ts` — millisecond-resolution ISO strings CAN tie when
-  // two calls land in the same synchronous tick, so this polls the OBSERVABLE wall clock until it has
-  // genuinely advanced past that `ts`, rather than guessing a sleep duration that happens to be enough
-  // (fixed-wait-witness-guard.mjs: a blind sleep adjacent to a check() needs a witness; this is that
-  // witness — an executable poll on the real precondition, not a trusted-by-convention delay).
-  await waitUntil(() => new Date().toISOString() > firstFireTs, { label: "wall clock strictly past the first fire's event ts" });
-  e.db.setContextCounters("mgr-rearm", { ctxInputTokens: OVER_FLOOR_CTX, ctxTurns: 2 });
+  check("round-4 setup: first reading fires once", emergencyEvents(e, "mgr-oncepersession").length === 1);
+
+  e.db.incrementTurnSeq("mgr-oncepersession"); // a real Stop lands inside the settle window
+  e.db.setBusy("mgr-oncepersession", true); // the new turn's own rising edge
+  e.db.setContextCounters("mgr-oncepersession", { ctxInputTokens: OVER_FLOOR_CTX, ctxTurns: 2 }); // still over the floor
   e.watcher.tick();
-  check("re-arm: a fresh (newer) still-over-floor reading fires a SECOND event", emergencyEvents(e, "mgr-rearm").length === 2);
-  check("re-arm: a second interrupt call was made", e.interrupts.length === 2);
+  check("(a) a Stop inside the settle window bumps turnSeq, but round 4 still does NOT re-fire",
+    emergencyEvents(e, "mgr-oncepersession").length === 1 && e.interrupts.length === 1);
+
+  // (b) The wind-down turn now genuinely completes for real (another Stop) and a SECOND new turn starts,
+  // still over the floor — this is the multi-turn-wind-down case round 3 missed. Still must not re-fire:
+  // this session has already fired once, period.
+  e.db.incrementTurnSeq("mgr-oncepersession");
+  e.db.setBusy("mgr-oncepersession", false);
+  e.db.setBusy("mgr-oncepersession", true);
+  e.db.setContextCounters("mgr-oncepersession", { ctxInputTokens: OVER_FLOOR_CTX, ctxTurns: 3 });
+  e.watcher.tick();
+  check("(b) wind-down turn completed + a new turn, still over the floor: STILL no second interrupt (once per session)",
+    emergencyEvents(e, "mgr-oncepersession").length === 1 && e.interrupts.length === 1);
+  cleanup(e);
+}
+
+// (c) A DIFFERENT (recycled) session id, also over the floor, fires its OWN first interrupt — a recycle
+// minting a fresh session id is the ONLY thing that re-arms this check now.
+{
+  const e = makeEnv({ projectConfig: { orchestration: { emergencyRecycleAtContextRatio: 0.85 } } });
+  seedManager(e, "mgr-old", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date().toISOString() });
+  e.watcher.tick();
+  check("(c) setup: the OLD session fires once", emergencyEvents(e, "mgr-old").length === 1);
+
+  seedManager(e, "mgr-new", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date().toISOString() });
+  e.watcher.tick();
+  check("(c) a DIFFERENT (recycled) session id, also over the floor, fires its own first interrupt",
+    emergencyEvents(e, "mgr-new").length === 1);
+  check("(c) the old session's own count is untouched by the new session's fire", emergencyEvents(e, "mgr-old").length === 1);
+  check("(c) two interrupt calls total, one per distinct session id", e.interrupts.length === 2);
+  cleanup(e);
+}
+
+// (d) A PRE-EXISTING (legacy-shape, no turnSeqAtFire field) event for this session blocks any fire at
+// all — presence alone is the whole rule now, so a round-3-era event (or any older one) still correctly
+// suppresses a round-4 fire.
+{
+  const e = makeEnv({ projectConfig: { orchestration: { emergencyRecycleAtContextRatio: 0.85 } } });
+  seedManager(e, "mgr-legacy", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date().toISOString() });
+  e.db.appendEvent({
+    id: "legacy-evt", ts: new Date(Date.now() - 3_600_000).toISOString(), managerSessionId: "mgr-legacy",
+    kind: "context_emergency_interrupt", detail: { pct: 90, delivered: true, interrupting: false }, // no turnSeqAtFire — legacy shape
+  });
+  e.watcher.tick();
+  check("(d) a pre-existing (legacy-shape) event for this session → no fire at all",
+    emergencyEvents(e, "mgr-legacy").length === 1 /* just the seeded one */ && e.interrupts.length === 0);
+  cleanup(e);
+}
+
+// NOT RE-ARM: card c5b234aa's own cascade bug, as a regression test — a FRESH ctxUpdatedAt (the mid-turn
+// sampler ticking) WITHOUT a new turn (lastActivity unchanged) must NOT fire a second interrupt. This is
+// the exact scenario that cascaded under the old per-READING de-dup.
+{
+  const e = makeEnv({ projectConfig: { orchestration: { emergencyRecycleAtContextRatio: 0.85 } } });
+  seedManager(e, "mgr-sampler-cascade", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date(Date.now() - 60_000).toISOString() });
+  e.watcher.tick();
+  check("cascade regression setup: first reading fires once", emergencyEvents(e, "mgr-sampler-cascade").length === 1);
+  const firstFireTs2 = emergencyEvents(e, "mgr-sampler-cascade")[0].ts;
+  await waitUntil(() => new Date().toISOString() > firstFireTs2, { label: "wall clock strictly past the first fire's event ts" });
+  // Simulates MidTurnContextSampler re-stamping ctxUpdatedAt mid-turn — the SAME turn, lastActivity
+  // untouched — several times in a row, exactly what used to re-trigger the interrupt on every tick.
+  for (let i = 0; i < 3; i++) {
+    e.db.setContextCounters("mgr-sampler-cascade", { ctxInputTokens: OVER_FLOOR_CTX, ctxTurns: 1 });
+    e.watcher.tick();
+  }
+  check("cascade regression: a bumped ctxUpdatedAt with NO new turn does NOT re-fire (still exactly 1 event)",
+    emergencyEvents(e, "mgr-sampler-cascade").length === 1);
+  check("cascade regression: no additional interrupt call was made", e.interrupts.length === 1);
   cleanup(e);
 }
 
@@ -200,6 +264,6 @@ const OVER_FLOOR_CTX = 900_000;
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ContextWatcher's emergency interrupt (Trigger A) fires for a manager whose last known reading crosses emergencyRecycleAtContextRatio, honestly records the real delivered/interrupting outcome (never inherits 49fdcbbc's collapse-to-success bug), stays silent when disabled/under-floor/no-hook/not-alive, fires at most once per still-current reading and re-arms on a fresh Stop, and a refused attempt (e.g. a merge-danger window) records nothing so the very next tick retries cleanly."
+  ? "\n✅ ALL PASS — ContextWatcher's emergency interrupt (Trigger A) fires for a manager whose last known reading crosses emergencyRecycleAtContextRatio, honestly records the real delivered/interrupting outcome (never inherits 49fdcbbc's collapse-to-success bug), stays silent when disabled/under-floor/no-hook/not-alive, fires AT MOST ONCE PER SESSION ID with no re-arm key at all (round 4 — neither a Stop inside the settle window nor a genuinely new wind-down turn re-arms it), a different (recycled) session id fires its own first interrupt, a pre-existing legacy-shape event blocks any fire, and a refused attempt (e.g. a merge-danger window) records nothing so the very next tick retries cleanly."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
