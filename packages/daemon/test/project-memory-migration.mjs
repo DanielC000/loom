@@ -462,7 +462,127 @@ try {
   cleanupPathSync(tmpHome4);
 }
 
+// ===== FIFTH scenario (card 57a91801): a pre-`expires_at`-column project_memory DB — the EXACT shape
+// every real Loom install has TODAY (has `trigger_glob` from card aeec1880, but no `expires_at` yet).
+// Proves migrateProjectMemory()'s new ADD COLUMN reaches an existing table with real rows, backfills every
+// pre-existing note's expiresAt to null (''  ⇒  never expires), and that a POST-migration expiresAt write
+// persists and round-trips correctly — including actually gating kickoff delivery once it has passed —
+// against a note that predates the migration. A SEPARATE tmp dir — all four earlier scenarios' `finally`
+// blocks above already deleted their own tmpHomes.
+const tmpHome5 = path.join(os.tmpdir(), `loom-pm-expiresat-migration-${Date.now()}-${process.pid}`);
+fs.mkdirSync(tmpHome5, { recursive: true });
+const dbFile5 = path.join(tmpHome5, "legacy-pre-expires-at-column.db");
+const projId5 = randomUUID();
+const noteId5 = randomUUID();
+const t4 = "2026-01-01T00:00:00.000Z";
+
+{
+  const raw = new Database(dbFile5);
+  raw.pragma("journal_mode = WAL");
+  raw.exec(`
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL, vault_path TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, archived_at TEXT, reserved INTEGER NOT NULL DEFAULT 0
+    );
+    -- project_memory WITH trigger_glob (card aeec1880) but WITHOUT expires_at — the real shape every Loom
+    -- install has today, immediately before this card.
+    CREATE TABLE project_memory (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      key TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      text TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      tags TEXT NOT NULL DEFAULT '[]',
+      version INTEGER NOT NULL DEFAULT 1,
+      request_ids TEXT,
+      trigger_glob TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_retrieved_at TEXT,
+      retrieval_count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(project_id, key)
+    );
+    CREATE INDEX idx_project_memory_project ON project_memory(project_id, pinned, last_retrieved_at);
+    CREATE VIRTUAL TABLE project_memory_fts USING fts5(title, text, content='project_memory', content_rowid='rowid');
+    CREATE TRIGGER project_memory_ai AFTER INSERT ON project_memory BEGIN
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+    CREATE TRIGGER project_memory_ad AFTER DELETE ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+    END;
+    CREATE TRIGGER project_memory_au AFTER UPDATE OF title, text ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+  `);
+  raw.prepare("INSERT INTO projects (id, name, repo_path, vault_path, config_json, created_at, archived_at, reserved) VALUES (?, ?, ?, ?, '{}', ?, NULL, 0)")
+    .run(projId5, "Pre-ExpiresAt Project", projId5, projId5, t4);
+  // A real pre-existing PINNED note, written before expires_at existed — this is the row the migration
+  // must reach, and the one "byte-identical behavior" is actually about.
+  raw.prepare(
+    "INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, version, trigger_glob, created_at, updated_at, last_retrieved_at, retrieval_count) VALUES (?, ?, 'pre-existing-pinned-note', 'A note from before expiry', 'this pinned note predates the expires_at column', 1, '[]', 1, '', ?, ?, NULL, 0)",
+  ).run(noteId5, projId5, t4, t4);
+  raw.close();
+
+  const cols0 = new Set(new Database(dbFile5, { readonly: true }).prepare("PRAGMA table_info(project_memory)").all().map((c) => c.name));
+  check("(ea-migrate setup) the synthesized pre-migration table has NO expires_at column yet", !cols0.has("expires_at"));
+}
+
+let db5;
+try {
+  let ctorError5 = null;
+  try {
+    const { Db } = await import("../dist/db.js");
+    db5 = new Db(dbFile5);
+  } catch (err) {
+    ctorError5 = err;
+  }
+  check("(ea-migrate) constructing Db against a pre-expires_at-column project_memory DB does not throw", ctorError5 === null);
+  if (ctorError5) console.log(`    threw: ${ctorError5?.stack || ctorError5}`);
+
+  if (!ctorError5) {
+    const raw2 = new Database(dbFile5, { readonly: true });
+    try {
+      const cols = raw2.prepare("PRAGMA table_info(project_memory)").all().map((c) => c.name);
+      check("(ea-migrate) the `expires_at` column was added to the existing table", cols.includes("expires_at"));
+    } finally {
+      raw2.close();
+    }
+
+    // ===== the pre-existing PINNED row backfills expiresAt to null ("never expires"), untouched otherwise,
+    // and still rides UNCONDITIONALLY — byte-identical behavior proven at the retrieval layer too. =====
+    const { retrieveProjectMemoryForKickoff } = await import("../dist/sessions/project-memory-recall.js");
+    const preExisting = db5.getProjectMemoryByKey(projId5, "pre-existing-pinned-note");
+    check("(ea-migrate) the pre-existing note is still readable post-migration", preExisting?.text === "this pinned note predates the expires_at column");
+    check("(ea-migrate) the pre-existing note backfills expiresAt to null (same as a brand-new note that never set one)", preExisting?.expiresAt === null);
+    check("(ea-migrate) the pre-existing note's version survived the migration untouched", preExisting?.version === 1);
+    const framedUnrelated = retrieveProjectMemoryForKickoff(db5, projId5, "a completely unrelated kickoff about something else entirely");
+    check("(ea-migrate) a migrated pre-existing pinned note with no expiry still rides an UNRELATED kickoff (unconditional pinning, unaffected by this card)",
+      typeof framedUnrelated === "string" && framedUnrelated.includes("this pinned note predates the expires_at column"));
+
+    // ===== a POST-migration write with expiresAt actually persists against this upgraded-in-place row,
+    // AND actually gates kickoff delivery once it has passed (not just "the column has a value"). =====
+    const pastDate = "2020-01-01";
+    const updated = db5.upsertProjectMemoryChecked(projId5, { key: "pre-existing-pinned-note", text: "the real next edit", expiresAt: pastDate }, 500, preExisting.version);
+    check("(ea-migrate) a post-migration write with expiresAt against a MIGRATED row succeeds", updated.ok === true);
+    check("(ea-migrate) expiresAt actually persisted on the migrated row", updated.entry?.expiresAt === pastDate);
+    const framedAfterExpiry = retrieveProjectMemoryForKickoff(db5, projId5, "a completely unrelated kickoff about something else entirely");
+    check("(ea-migrate) the MIGRATED row, once expired, no longer rides any kickoff",
+      framedAfterExpiry === null || !framedAfterExpiry.includes("the real next edit"));
+    const stillReadable = db5.getProjectMemoryByKey(projId5, "pre-existing-pinned-note");
+    check("(ea-migrate) the expired MIGRATED row is still readable directly (not deleted)", stillReadable?.text === "the real next edit");
+
+    // ===== a brand-new post-migration note with no expiresAt behaves exactly as before this card =====
+    const fresh = db5.upsertProjectMemory(projId5, { key: "brand-new-post-migration", text: "no expiry here" }, 500);
+    check("(ea-migrate) a brand-new post-migration note with expiresAt omitted defaults to null", fresh.expiresAt === null);
+  }
+} finally {
+  try { db5?.close(); } catch { /* ignore */ }
+  cleanupPathSync(tmpHome5);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired). Also: Db boots clean against a real pre-`version`-column project_memory DB (card a5f98bb4), migrateProjectMemory() ADD COLUMNs `version` and backfills every pre-existing row to 1 in place, and the version-based optimistic-concurrency guard (stale-rejected, correct-accepted, version bumps by exactly 1) works correctly against a note that predates the migration — not just against brand-new rows. Also: Db boots clean against a real pre-`request_ids`-column project_memory DB (card e6d270b3 — the exact shape every Loom install has TODAY), migrateProjectMemory() ADD COLUMNs `request_ids`, every pre-existing note backfills requestIds to null, and a post-migration requestIds write persists correctly against a note that predates the migration. Also: Db boots clean against a real pre-`trigger_glob`-column project_memory DB (card aeec1880), migrateProjectMemory() ADD COLUMNs `trigger_glob`, every pre-existing note backfills triggerGlob to null, a migrated PINNED note with no predicate still rides an unrelated kickoff unconditionally (DoD-3's backward-compat guarantee, proven at the retrieval layer against a real upgraded-in-place DB, not just a fixture), and a post-migration triggerGlob write persists correctly against a note that predates the migration."
+  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired). Also: Db boots clean against a real pre-`version`-column project_memory DB (card a5f98bb4), migrateProjectMemory() ADD COLUMNs `version` and backfills every pre-existing row to 1 in place, and the version-based optimistic-concurrency guard (stale-rejected, correct-accepted, version bumps by exactly 1) works correctly against a note that predates the migration — not just against brand-new rows. Also: Db boots clean against a real pre-`request_ids`-column project_memory DB (card e6d270b3 — the exact shape every Loom install has TODAY), migrateProjectMemory() ADD COLUMNs `request_ids`, every pre-existing note backfills requestIds to null, and a post-migration requestIds write persists correctly against a note that predates the migration. Also: Db boots clean against a real pre-`trigger_glob`-column project_memory DB (card aeec1880), migrateProjectMemory() ADD COLUMNs `trigger_glob`, every pre-existing note backfills triggerGlob to null, a migrated PINNED note with no predicate still rides an unrelated kickoff unconditionally (DoD-3's backward-compat guarantee, proven at the retrieval layer against a real upgraded-in-place DB, not just a fixture), and a post-migration triggerGlob write persists correctly against a note that predates the migration. Also: Db boots clean against a real pre-`expires_at`-column project_memory DB (card 57a91801), migrateProjectMemory() ADD COLUMNs `expires_at`, every pre-existing note backfills expiresAt to null, a migrated PINNED note with no expiry still rides an unrelated kickoff unconditionally, a post-migration expiresAt write persists correctly AND actually gates kickoff delivery once it has passed, and the expired migrated row stays directly readable (not deleted)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

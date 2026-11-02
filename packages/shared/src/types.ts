@@ -3002,6 +3002,27 @@ export interface ProjectMemoryEntry {
    * reachable than an ordinary unpinned note.
    */
   triggerGlob: string | null;
+  /**
+   * @decision 57a91801 — gates KICKOFF DELIVERY only (every tier); never read as deletion, an eviction
+   * exemption, or a near-duplicate exclusion. See the decision record for the full field contract.
+   */
+  expiresAt: string | null;
+}
+
+/**
+ * Card 57a91801 — true iff `m.expiresAt` names an instant at or before `nowMs`. `null`/`undefined`
+ * (every note written before this field existed, and every hermetic test fixture that never sets it)
+ * is never expired — this is the single shared predicate `db.ts`, `project-memory-recall.ts`, and
+ * `mcp/memory.ts` all defer to, so "is this note still deliverable" can never silently diverge between
+ * the write-time advisories and the real kickoff digest. A stored value that fails to parse as a date
+ * (should be unreachable past `memory_write`'s own format validation, but defensive here too) is treated
+ * as NOT expired — a corrupt/legacy value must make a note LESS likely to be wrongly hidden, never more.
+ */
+export function isProjectMemoryExpired(m: { expiresAt?: string | null }, nowMs: number = Date.now()): boolean {
+  if (!m.expiresAt) return false;
+  const t = Date.parse(m.expiresAt);
+  if (Number.isNaN(t)) return false;
+  return t <= nowMs;
 }
 
 /**

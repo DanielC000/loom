@@ -10,7 +10,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Proves, in order:
 //   (1) the DB-layer boundary (Db.upsertProjectMemory) rejects ESC/C0/C1 in text/title/tags/triggerGlob/
-//       key/requestIds, reporting byte class + character index — never the offending bytes or content;
+//       expiresAt/key/requestIds, reporting byte class + character index — never the offending bytes or content;
 //   (2) `\t`/`\n`/`\r` are NOT rejected (ordinary multi-line text survives, matching 49b382d9's own
 //       carve-out — the two mechanisms share one classification, security/control-chars.ts);
 //   (3) upsertProjectMemoryChecked surfaces the SAME rejection, discriminable from a version conflict;
@@ -102,6 +102,12 @@ try {
 
   const rejTrigger = db.upsertProjectMemory(projId, { key: "note-4", text: "clean text", triggerGlob: `packages/${C1}/**` }, 500);
   check("(5) C1 in triggerGlob -> rejected, field=triggerGlob", "rejected" in rejTrigger && rejTrigger.field === "triggerGlob");
+
+  // ===== (5a) card 57a91801: ESC in expiresAt -> rejected at the SAME store boundary, even though
+  // memory_write's own date-format validation would already catch an unparseable string first — this is
+  // the DB-layer defense for a raw/direct writer that bypasses that validation entirely. =====
+  const rejExpiresAt = db.upsertProjectMemory(projId, { key: "note-4b", text: "clean text", expiresAt: `2026-01-01${ESC}` }, 500);
+  check("(5a) ESC in expiresAt -> rejected, field=expiresAt", "rejected" in rejExpiresAt && rejExpiresAt.field === "expiresAt" && rejExpiresAt.byteClass === "ESC");
 
   // ===== (5b) card 9f02dee5 (Code Review correction): ESC in a requestIds[] entry -> rejected at the
   // store boundary. `requestIds` is a free-text injection surface too (annotateRequestLink renders a
@@ -211,6 +217,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project memory's store boundary (Db.upsertProjectMemory) rejects an ESC/C0/C1 control byte in text/title/tags/triggerGlob/key/requestIds, reporting byte class + position (never content); the memory_write MCP tool and the raw e2e test-seed REST route both funnel through it and both reject identically; a clean write on every path is unaffected; a legacy row bypassing the store check still renders its requestIds annotation safely (stripped at annotateRequestLink); and host.ts's own strip helper now imports the shared classification instead of keeping a second copy."
+  ? "\n✅ ALL PASS — project memory's store boundary (Db.upsertProjectMemory) rejects an ESC/C0/C1 control byte in text/title/tags/triggerGlob/expiresAt/key/requestIds, reporting byte class + position (never content); the memory_write MCP tool and the raw e2e test-seed REST route both funnel through it and both reject identically; a clean write on every path is unaffected; a legacy row bypassing the store check still renders its requestIds annotation safely (stripped at annotateRequestLink); and host.ts's own strip helper now imports the shared classification instead of keeping a second copy."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -559,6 +559,19 @@ export class TaskMcpRouter {
           "advisory, it never blocks the write; consider `memory_write`-ing the NAMED existing key instead " +
           "of accumulating a near-duplicate under a different one. Never present on an update to an " +
           "existing key (that's the mechanism for fixing a flagged duplicate, not something to re-flag). " +
+          "Optional `expiresAt` (card 57a91801) — an ISO date/datetime (UTC, e.g. \"2026-12-01\") past " +
+          "which this note is excluded from EVERY kickoff tier (pinned AND related) — relevant for a note " +
+          "that should only compete for context while something stays true (e.g. an investigation is " +
+          "live), rather than either riding forever or being left to `memory_forget` manually. The note " +
+          "is NOT deleted when it expires — `memory_read`/`memory_list` keep returning it in full, " +
+          "annotated `expired:true`, and it still counts toward `memory.maxNotes` eviction and near-" +
+          "duplicate matching exactly like any other note; only kickoff delivery is gated. Same PATCH " +
+          "semantics as `triggerGlob`: omit to leave the stored expiry unchanged, pass `\"\"` explicitly " +
+          "to clear it back to \"never expires,\" or pass a date to set it — must parse as a valid date " +
+          "or the write is rejected. This write's response may carry an `expiryStatus` ({message, " +
+          "alreadyExpired?}) when `expiresAt` is (effectively, post-write) set — purely advisory, never " +
+          "blocks the write; `alreadyExpired:true` means the date you just set has ALREADY passed, so " +
+          "this note won't ride any kickoff tier until it's cleared or moved forward. " +
           "Card 8d158088: REFUSED with {error} if this specific call is CONFIRMED to have originated from " +
           "a sub-agent (a Task/Agent sub-call), rather than your own top-level turn — project memory is " +
           "shared, durable knowledge meant to reflect the calling agent's own reasoning; call this " +
@@ -577,6 +590,7 @@ export class TaskMcpRouter {
           tags: z.array(z.string()).optional(),
           requestIds: z.array(z.string()).optional(),
           triggerGlob: z.string().optional(),
+          expiresAt: z.string().optional(),
           baseVersion: z.number().int().optional(),
         }),
       },
@@ -644,7 +658,10 @@ export class TaskMcpRouter {
           "`backlinks` — one line per OTHER note whose text `[[wikilinks]]` to this note's key, resolved live " +
           "at THIS read (never stored, never counted against this note's own byte cap); `[]` is a measured " +
           "zero (nothing links here), not an absent field; past 20 inbound links a trailing line reports " +
-          "\"showing 20 of N\" rather than truncating silently. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "\"showing 20 of N\" rather than truncating silently. Each note also carries `expired` (card " +
+          "57a91801, `expiresAt` set AND already past) — an expired note is NOT deleted, it's still " +
+          "returned here in full; `expired:true` just means it's currently excluded from every kickoff " +
+          "tier (pinned and related). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
           "(a per-note write cap bounds one row, but not the ROW COUNT) the notes spill to a scratch file " +
           "instead of inlining, and the response becomes a `{notesFile,notesChars,rowCount,note}` pointer at " +
           "that same NDJSON text — page it with Read or grep it.",
@@ -677,7 +694,9 @@ export class TaskMcpRouter {
           "Also carries `backlinks` — one line per OTHER note whose text `[[wikilinks]]` to THIS note's key, " +
           "resolved live at THIS read (never stored, never counted against this note's own byte cap); `[]` " +
           "is a measured zero (nothing links here), not an absent field; past 20 inbound links a trailing " +
-          "line reports \"showing 20 of N\" rather than truncating silently.",
+          "line reports \"showing 20 of N\" rather than truncating silently. Also carries `expired` (card " +
+          "57a91801, `expiresAt` set AND already past) — the note is still returned here in full either " +
+          "way; `expired:true` just means it's currently excluded from every kickoff tier.",
         inputSchema: strictShape({ key: z.string() }),
       },
       async ({ key }) => ok(readProjectMemory(db, projectId, key)),

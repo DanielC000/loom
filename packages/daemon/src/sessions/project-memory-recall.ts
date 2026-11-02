@@ -1,5 +1,5 @@
 import type { ProjectMemoryEntry } from "@loom/shared";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateNote } from "./project-memory-annotations.js";
 
@@ -197,13 +197,18 @@ function floorSectionTokens(floorBlocks: string[]): number {
  *  `pinned && never-drop` (NOT the tag alone — {@link isNeverDrop} filters `pinnedNotes`, which the caller
  *  must already have restricted to `pinned:true` rows, e.g. via `db.listPinnedProjectMemory`) — mirrors
  *  {@link composeProjectMemoryDigest}'s own floor-tier predicate exactly, so a note tagged `never-drop`
- *  but left unpinned is structurally excluded here too, same as it is from the packer. */
+ *  but left unpinned is structurally excluded here too, same as it is from the packer.
+ *
+ *  @decision 57a91801 — also excludes an expired note defensively (db.listPinnedProjectMemory already
+ *  excludes one SQL-side; this guards a direct-fixture caller too) via the one shared
+ *  {@link isProjectMemoryExpired} predicate. See the decision record. */
 export function computeFloorTierStatus(
   pinnedNotes: ProjectMemoryEntry[],
   budgetTokens: number,
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
 ): { floorCount: number; floorTokens: number; budgetTokens: number; overBudget: boolean; roughFitCount: number } {
-  const floorSorted = sortPinnedByRecency(pinnedNotes.filter(isNeverDrop));
+  const live = pinnedNotes.filter((m) => !isProjectMemoryExpired(m));
+  const floorSorted = sortPinnedByRecency(live.filter(isNeverDrop));
   const floorBlocks = floorSorted.map((m) => noteBlock(m, annotate(m)));
   const floorTokens = floorSectionTokens(floorBlocks);
   const overBudget = floorTokens > budgetTokens;
@@ -359,9 +364,12 @@ export function computeRestTierStatus(
   roughFitCount: number;
   roughCycleKickoffs: number | null;
 } {
-  const floorBlocks = sortPinnedByRecency(pinnedNotes.filter(isNeverDrop)).map((m) => noteBlock(m, annotate(m)));
+  // @decision 57a91801 — excludes an expired note defensively, same reasoning as computeFloorTierStatus
+  // immediately above (db.listPinnedProjectMemory already excludes one SQL-side for the real caller).
+  const live = pinnedNotes.filter((m) => !isProjectMemoryExpired(m));
+  const floorBlocks = sortPinnedByRecency(live.filter(isNeverDrop)).map((m) => noteBlock(m, annotate(m)));
   const floorTokens = floorSectionTokens(floorBlocks);
-  const restBlocks = sortPinnedByRecency(pinnedNotes.filter((m) => !isNeverDrop(m))).map((m) => noteBlock(m, annotate(m)));
+  const restBlocks = sortPinnedByRecency(live.filter((m) => !isNeverDrop(m))).map((m) => noteBlock(m, annotate(m)));
   const restCount = restBlocks.length;
   const reserveTokens = Math.floor(budgetTokens * RELATED_RESERVE_FRACTION);
   const restCapEstimate = Math.max(0, budgetTokens - floorTokens - reserveTokens);
@@ -442,6 +450,10 @@ export function composeProjectMemoryDigest(
   droppedRestKeys: string[];
   droppedRelatedKeys: string[];
 } {
+  // @decision 57a91801 — excludes an expired note from BOTH tiers defensively (the real caller already
+  // excludes one SQL-side; this makes a direct-fixture caller/test correct too). See the decision record.
+  pinned = pinned.filter((m) => !isProjectMemoryExpired(m));
+  related = related.filter((m) => !isProjectMemoryExpired(m));
   if (pinned.length === 0 && related.length === 0) {
     return { digest: null, includedIds: [], droppedFloorKeys: [], droppedRestKeys: [], droppedRelatedKeys: [] };
   }

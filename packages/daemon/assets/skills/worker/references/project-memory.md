@@ -6,7 +6,7 @@ provenance discipline.
 
 Capture a durable fact with `memory_write` (`mcp__loom-tasks__memory_write`). Its exact params are
 **`key`**, **`text`**, and optional **`title`**, **`pinned`**, **`tags`**, **`requestIds`**,
-**`triggerGlob`**, and **`baseVersion`** — these `memory_*` tools are DEFERRED, so ToolSearch-load them
+**`triggerGlob`**, **`expiresAt`**, and **`baseVersion`** — these `memory_*` tools are DEFERRED, so ToolSearch-load them
 first and use those names verbatim; a GUESSED param (`args`/`value`/`content`) is silently stripped and
 the call fails validation for the missing required field. Pass a stable `key` (re-writing the same key
 UPDATES in place — refine, don't mint near-duplicates), a short `title`, and a compact `text` (≤4000
@@ -24,10 +24,12 @@ also gates an UPDATE: to overwrite an existing key, read it and pass its current
 `baseVersion` — a stale or omitted base is rejected with the current note returned so you reconcile.
 **Stamp a durable note with light provenance** (`verified: <date> against <mainline>`) and cite
 identifiers that survive — commit SUBJECTS, symbol names — never ephemeral ones (a pre-squash branch SHA
-rots on merge; line numbers drift). **If a note's validity has an expiry, write it as a runnable
-predicate** (a grep / commit-presence / card-state check), not prose like "until X lands" — with the
-honest caveat that nothing runs that predicate for you today, so it only pays off when an agent thinks
-to check it.
+rots on merge; line numbers drift). **If a note's CONTENT can go stale, write the staleness check as a
+runnable predicate** (a grep / commit-presence / card-state check), not prose like "until X lands" — with
+the honest caveat that nothing runs that predicate for you today, so it only pays off when an agent
+thinks to check it. That's a different concern from a note's RELEVANCE being time-boxed (e.g. "only
+matters while this investigation is live") — for that, set `expiresAt` instead (see below): it's an
+actual mechanism, not a prose reminder nobody automatically acts on.
 
 **Seeing what a note used to say (`memory_history`):** every UPDATE that actually changes `text` (never
 a metadata-only patch, and never a key's own first write) appends a row to that key's append-only
@@ -51,6 +53,13 @@ kickoff, full stop — set `triggerGlob` to a path glob (e.g. `"src/memory/**"`)
 unconditional delivery to a kickoff whose text names a matching path; on any other kickoff it competes
 for relevance via full-text search, same as an unpinned note. Only meaningful on a note that's pinned
 and NOT also tagged `"never-drop"` — a never-drop floor note always bypasses its own trigger, by design.
+
+**Retiring a time-boxed note from kickoffs (`expiresAt`):** a note relevant only "while this stays
+true" (an investigation is live, a migration is in flight) otherwise either rides forever or has to be
+remembered and `memory_forget`-ed later. Set `expiresAt` to an ISO date (e.g. `"2026-12-01"`) and, past
+that date, the note stops competing for ANY kickoff tier — pinned or related — without being deleted:
+`memory_read`/`memory_list` still return it in full, annotated `expired`. Omit to leave a stored expiry
+unchanged, pass `""` explicitly to clear it back to "never expires," or pass a new date to move it.
 
 **A near-duplicate advisory on a brand-new key.** When the note you're about to write under a NEW key
 closely resembles an existing one, the write still succeeds but its response carries a

@@ -1,5 +1,5 @@
 import type { ProjectMemoryEntry, ProjectMemoryHistoryEntry } from "@loom/shared";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
 import { annotateBacklinks, annotateBacklinksBulk } from "../sessions/project-memory-backlinks.js";
@@ -80,6 +80,12 @@ export interface MemoryWriteInput {
    * {@link computeTriggerGateStatus} for the informational signal this write returns either way.
    */
   triggerGlob?: string;
+  /**
+   * @decision 57a91801 — gates kickoff-tier delivery only, never deletion; see the decision record.
+   * Same PATCH semantics as `triggerGlob` (omit preserves, `""` clears, a value sets); must parse as a
+   * valid date (`Date.parse`), e.g. `"2026-12-01"`.
+   */
+  expiresAt?: string;
   /** The `version` the caller last read for this key (memory_read/memory_list/a prior memory_write
    *  response) — required to UPDATE an existing key; irrelevant for a brand-new one. Deliberately an
    *  integer version counter, NOT a timestamp — see {@link writeProjectMemory}. */
@@ -88,6 +94,10 @@ export interface MemoryWriteInput {
 
 /** Bounds hardening for `triggerGlob` — a predicate is meant to be a short path pattern, not free text. */
 const MAX_TRIGGER_GLOB_CHARS = 200;
+
+/** Bounds hardening for `expiresAt` — generous for a full ISO-8601 datetime ("2026-12-01T00:00:00.000Z"
+ *  is 24 chars) while still catching an obviously-wrong value before the date-parse check even runs. */
+const MAX_EXPIRES_AT_CHARS = 40;
 
 export interface MemoryWriteConflict {
   error: string;
@@ -164,6 +174,31 @@ export interface RestTierSignal {
 export interface TriggerGateSignal {
   message: string;
   inert?: true;
+}
+
+/**
+ * @decision 57a91801 — purely advisory, same posture as {@link TriggerGateSignal}; never turns a write
+ * that would otherwise succeed into a rejection. See the decision record for the field contract.
+ */
+export interface ExpiryStatusSignal {
+  message: string;
+  alreadyExpired?: true;
+}
+
+function computeExpiryStatus(entry: ProjectMemoryEntry): ExpiryStatusSignal | undefined {
+  if (!entry.expiresAt) return undefined;
+  if (isProjectMemoryExpired(entry)) {
+    return {
+      alreadyExpired: true,
+      message: `expiresAt ("${entry.expiresAt}") is already in the past — this note will NOT ride any ` +
+        "kickoff tier (pinned or related) until expiresAt is cleared (pass \"\") or moved forward; it " +
+        "stays readable via memory_read/memory_list in the meantime, annotated expired.",
+    };
+  }
+  return {
+    message: `this note stops riding every kickoff tier once "${entry.expiresAt}" passes — it stays ` +
+      "readable via memory_read/memory_list after that (annotated expired), never deleted.",
+  };
 }
 
 /**
@@ -273,7 +308,7 @@ export function writeProjectMemory(
   projectId: string,
   input: MemoryWriteInput,
 ):
-  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal; evictionStatus?: EvictionCandidateSignal; nearDuplicateStatus?: NearDuplicateSignal })
+  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal; evictionStatus?: EvictionCandidateSignal; nearDuplicateStatus?: NearDuplicateSignal; expiryStatus?: ExpiryStatusSignal })
   | { error: string }
   | MemoryWriteConflict
   | MemoryWriteTooLong {
@@ -348,6 +383,20 @@ export function writeProjectMemory(
   if (triggerGlob && triggerGlob.length > MAX_TRIGGER_GLOB_CHARS) {
     return { error: `triggerGlob is too long (${triggerGlob.length} chars, max ${MAX_TRIGGER_GLOB_CHARS})` };
   }
+  // @decision 57a91801 — same "" ⇒ explicit-clear / omitted ⇒ preserve convention as triggerGlob above,
+  // PLUS a real format check (triggerGlob has none — a glob is free-form by nature; a date is not).
+  const expiresAt = input.expiresAt === undefined ? undefined : input.expiresAt.trim();
+  if (expiresAt) {
+    if (expiresAt.length > MAX_EXPIRES_AT_CHARS) {
+      return { error: `expiresAt is too long (${expiresAt.length} chars, max ${MAX_EXPIRES_AT_CHARS})` };
+    }
+    if (Number.isNaN(Date.parse(expiresAt))) {
+      return {
+        error: `expiresAt must be a valid ISO date or datetime (e.g. "2026-12-01") — "${expiresAt}" does ` +
+          "not parse as a date",
+      };
+    }
+  }
   // Trim/drop blanks only — no format validation (no regex-sniffing a "real" request id; an id that
   // resolves to nothing just annotates fail-visibly at read time, see project-memory-request-links.ts).
   const requestIds = input.requestIds === undefined
@@ -363,7 +412,7 @@ export function writeProjectMemory(
     : db.findNearDuplicateProjectMemory(projectId, title ?? "", text);
   const result = db.upsertProjectMemoryChecked(
     projectId,
-    { key, title, text, pinned: input.pinned, tags: input.tags, requestIds, triggerGlob },
+    { key, title, text, pinned: input.pinned, tags: input.tags, requestIds, triggerGlob, expiresAt },
     memoryConfig.maxNotes,
     input.baseVersion,
   );
@@ -394,6 +443,7 @@ export function writeProjectMemory(
   const triggerGateStatus = computeTriggerGateStatus(result.entry);
   const evictionStatus = computeEvictionCandidateStatus(db, projectId, result.entry, memoryConfig.maxNotes);
   const nearDuplicateStatus = computeNearDuplicateSignal(nearDuplicateCandidate);
+  const expiryStatus = computeExpiryStatus(result.entry);
   return {
     ...result.entry,
     ...(neverDropStatus ? { neverDropStatus } : {}),
@@ -401,6 +451,7 @@ export function writeProjectMemory(
     ...(triggerGateStatus ? { triggerGateStatus } : {}),
     ...(evictionStatus ? { evictionStatus } : {}),
     ...(nearDuplicateStatus ? { nearDuplicateStatus } : {}),
+    ...(expiryStatus ? { expiryStatus } : {}),
   };
 }
 
@@ -505,8 +556,12 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *  Kept as its OWN field, deliberately never merged into
  *  `requestAnnotations` — the two are unrelated kinds of link. ALWAYS an array (never omitted), so
  *  an empty `backlinks: []` is a MEASURED zero — "this note has no inbound links" — structurally
- *  distinguishable from absent. */
-export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[] };
+ *  distinguishable from absent.
+ *
+ *  @decision 57a91801 — `expired` is `isProjectMemoryExpired(entry)` at THIS read (mem0's own
+ *  `show_expired` escape hatch): `memory_read`/`memory_list` keep returning the note regardless, this
+ *  just names whether it's currently excluded from every kickoff tier. */
+export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[]; expired: boolean };
 
 /** `backlinks` is a REQUIRED, already-resolved value — never an optional override with a per-note
  *  fallback (card d305f1a2 residual: the old `backlinksOverride?` defaulted to {@link annotateBacklinks}'s
@@ -522,6 +577,7 @@ function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlin
     requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds),
     everDelivered: entry.retrievalCount > 0,
     backlinks,
+    expired: isProjectMemoryExpired(entry),
   };
 }
 

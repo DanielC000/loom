@@ -128,7 +128,7 @@ import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
 import type { MergeGateOutcomeEntry } from "@loom/shared";
 import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
-import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig } from "@loom/shared";
+import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig, isProjectMemoryExpired } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 import { findControlCharViolation, stripEscapeAndControlChars, type ControlByteClass } from "./security/control-chars.js";
@@ -1508,6 +1508,10 @@ CREATE TABLE IF NOT EXISTS project_memory (
                                            -- note's delivery to a matching kickoff; '' (mirrors title's own
                                            -- empty-means-unset convention) = no predicate, behaves exactly
                                            -- like an ordinary pinned note. See ProjectMemoryEntry.triggerGlob.
+  -- @decision 57a91801 — gates kickoff delivery only; see ProjectMemoryEntry.expiresAt's own doc + the
+  -- decision record for the full contract (eviction/dedup/deletion are all unaffected by this field).
+  expires_at TEXT NOT NULL DEFAULT '',    -- optional ISO expiry; '' (same empty-means-unset convention as
+                                           -- trigger_glob above) = never expires.
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_retrieved_at TEXT,                 -- NULL until first retrieved; feeds LRU-by-retrieval eviction
@@ -2327,6 +2331,10 @@ const PROJECT_MEMORY_ADDED_COLUMNS: Record<string, string> = {
   // ("no predicate") in place — the same starting point a brand-new, predicate-less note gets, so an
   // existing `pinned:true` note is byte-identical in behavior after this migration runs.
   trigger_glob: "TEXT NOT NULL DEFAULT ''",
+  // Expiry (card 57a91801). NOT NULL + constant DEFAULT '' backfills every legacy note to '' ("never
+  // expires") in place — the same starting point a brand-new note gets, so every existing note is
+  // byte-identical in behavior after this migration runs.
+  expires_at: "TEXT NOT NULL DEFAULT ''",
 };
 
 /** Columns added to `companion_config` after its initial ship; applied to existing DBs by
@@ -9032,32 +9040,34 @@ export class Db {
    */
   upsertProjectMemory(
     projectId: string,
-    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string },
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string; expiresAt?: string },
     maxNotes: number,
   ): ProjectMemoryEntry | ProjectMemoryControlCharRejection {
     const rejection = findProjectMemoryControlCharRejection(input);
     if (rejection) return rejection;
     const now = new Date().toISOString();
     // PATCH semantics on update (card 249004c3, extended to requestIds by card e6d270b3, triggerGlob by
-    // card aeec1880): title/pinned/tags/requestIds/triggerGlob each bind as SQL NULL when the caller omits
-    // them, and COALESCE against the pre-existing row's own column in the ON CONFLICT branch — an omitted
-    // field survives an update untouched instead of resetting to a default. A brand-new row has no
-    // existing value to fall back to, so the INSERT branch's COALESCE lands on the same "" / false / []
-    // defaults the old unconditional bind used — the create path is byte-identical either way. requestIds
-    // has no such default to coalesce to on INSERT (NULL — "links nothing" — IS its correct create-time
-    // default), so it binds directly rather than via COALESCE there. An EXPLICIT clear (pinned:false,
-    // tags:[], requestIds:[], title:"", or triggerGlob:"") still binds a concrete non-null value, so
-    // COALESCE takes it as-is on UPDATE — the escape hatch stays reachable. `triggerGlob` mirrors `title`'s
-    // exact binding shape (`?? null`, not a ternary/ JSON.stringify) since both are plain nullable-in-JS/
-    // empty-string-in-SQL text fields with the identical "" ⇒ unset convention.
+    // card aeec1880, expiresAt by card 57a91801): title/pinned/tags/requestIds/triggerGlob/expiresAt each
+    // bind as SQL NULL when the caller omits them, and COALESCE against the pre-existing row's own column
+    // in the ON CONFLICT branch — an omitted field survives an update untouched instead of resetting to a
+    // default. A brand-new row has no existing value to fall back to, so the INSERT branch's COALESCE
+    // lands on the same "" / false / [] defaults the old unconditional bind used — the create path is
+    // byte-identical either way. requestIds has no such default to coalesce to on INSERT (NULL — "links
+    // nothing" — IS its correct create-time default), so it binds directly rather than via COALESCE
+    // there. An EXPLICIT clear (pinned:false, tags:[], requestIds:[], title:"", triggerGlob:"", or
+    // expiresAt:"") still binds a concrete non-null value, so COALESCE takes it as-is on UPDATE — the
+    // escape hatch stays reachable. `triggerGlob`/`expiresAt` mirror `title`'s exact binding shape
+    // (`?? null`, not a ternary/JSON.stringify) since all three are plain nullable-in-JS/empty-string-in-
+    // SQL text fields with the identical "" ⇒ unset convention.
     this.db.prepare(
-      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, request_ids, trigger_glob, created_at, updated_at, last_retrieved_at, retrieval_count, version)
-       VALUES (@id, @projectId, @key, COALESCE(@title, ''), @text, COALESCE(@pinned, 0), COALESCE(@tags, '[]'), @requestIds, COALESCE(@triggerGlob, ''), @now, @now, NULL, 0, 1)
+      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, request_ids, trigger_glob, expires_at, created_at, updated_at, last_retrieved_at, retrieval_count, version)
+       VALUES (@id, @projectId, @key, COALESCE(@title, ''), @text, COALESCE(@pinned, 0), COALESCE(@tags, '[]'), @requestIds, COALESCE(@triggerGlob, ''), COALESCE(@expiresAt, ''), @now, @now, NULL, 0, 1)
        ON CONFLICT(project_id, key) DO UPDATE SET
          title = COALESCE(@title, title), text = @text,
          pinned = COALESCE(@pinned, pinned), tags = COALESCE(@tags, tags),
          request_ids = COALESCE(@requestIds, request_ids),
          trigger_glob = COALESCE(@triggerGlob, trigger_glob),
+         expires_at = COALESCE(@expiresAt, expires_at),
          updated_at = @now, version = version + 1`,
     ).run({
       id: randomUUID(),
@@ -9069,6 +9079,7 @@ export class Db {
       tags: input.tags === undefined ? null : JSON.stringify(input.tags),
       requestIds: input.requestIds === undefined ? null : JSON.stringify(input.requestIds),
       triggerGlob: input.triggerGlob ?? null,
+      expiresAt: input.expiresAt ?? null,
       now,
     });
     // Card 2bc735d3: exclude the row just written from eviction candidates — otherwise a brand-new row
@@ -9117,7 +9128,7 @@ export class Db {
    */
   upsertProjectMemoryChecked(
     projectId: string,
-    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string },
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string; expiresAt?: string },
     maxNotes: number,
     baseVersion: number | undefined,
   ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } | { ok: false; notFound: true } | ({ ok: false } & ProjectMemoryControlCharRejection) {
@@ -9214,10 +9225,16 @@ export class Db {
    *  sub-tier) rather than trusting caller order, precisely because trusting it once already let this
    *  comment's claim go silently false (the compose function discarded this order for a key-alphabetical
    *  sort). Don't let this comment go stale the same way again — if the delivery order ever changes, it
-   *  changes in `composeProjectMemoryDigest`, not by relying on this query's order. */
+   *  changes in `composeProjectMemoryDigest`, not by relying on this query's order.
+   *
+   *  @decision 57a91801 — excludes an expired pinned note SQL-side (lexicographic vs `now`, valid for
+   *  write-time-validated ISO-8601), so a write-time floor/REST size advisory calling this method is
+   *  never fooled either. See the decision record for the full field contract. */
   listPinnedProjectMemory(projectId: string): ProjectMemoryEntry[] {
-    return (this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? AND pinned = 1 ORDER BY updated_at DESC")
-      .all(projectId) as Row[]).map(toProjectMemoryEntry);
+    const now = new Date().toISOString();
+    return (this.db.prepare(
+      "SELECT * FROM project_memory WHERE project_id = ? AND pinned = 1 AND (expires_at = '' OR expires_at > ?) ORDER BY updated_at DESC",
+    ).all(projectId, now) as Row[]).map(toProjectMemoryEntry);
   }
   /** "Related" tier (kickoff injection §3) — top-`limit` notes whose title/text FTS5-MATCH the kickoff/
    *  task text, ranked by fts5's default bm25 `rank`. Deliberately excludes ORDINARY pinned rows (they
@@ -9232,18 +9249,23 @@ export class Db {
    *  (ftsProjectMemoryQuery) so free-form prose with FTS5-special characters (quotes, colons, hyphens,
    *  boolean keywords) can never throw a query-syntax error; an empty/all-stopword kickoff text or a
    *  genuine FTS5 error both degrade to "no related notes" (`[]`) rather than surfacing an error to the
-   *  caller. */
+   *  caller.
+   *
+   *  @decision 57a91801 — excludes an expired note SQL-side, not just post-fetch — filtering after this
+   *  query's own `LIMIT` would let an expired row silently consume one of `limit`'s slots and under-deliver
+   *  real matches ranked just past it. See the decision record for the full field contract. */
   searchProjectMemory(projectId: string, kickoffText: string, limit: number): ProjectMemoryEntry[] {
     if (limit <= 0) return [];
     const match = ftsProjectMemoryQuery(kickoffText);
     if (!match) return [];
+    const now = new Date().toISOString();
     try {
       return (this.db.prepare(
         `SELECT pm.* FROM project_memory pm
          JOIN project_memory_fts fts ON fts.rowid = pm.rowid
-         WHERE pm.project_id = ? AND (pm.pinned = 0 OR pm.trigger_glob != '') AND project_memory_fts MATCH ?
+         WHERE pm.project_id = ? AND (pm.pinned = 0 OR pm.trigger_glob != '') AND (pm.expires_at = '' OR pm.expires_at > ?) AND project_memory_fts MATCH ?
          ORDER BY rank LIMIT ?`,
-      ).all(projectId, match, limit) as Row[]).map(toProjectMemoryEntry);
+      ).all(projectId, now, match, limit) as Row[]).map(toProjectMemoryEntry);
     } catch {
       return [];
     }
@@ -9258,6 +9280,9 @@ export class Db {
    *
    * @decision b1f34988 — never use the raw `bm25()` score ALONE as the near-duplicate signal; pair it
    * with the coverage-fraction gate in `project-memory-dedup.ts` — see the decision record for why.
+   *
+   * @decision 57a91801 — this corpus is NEVER filtered by `expires_at`; an expired note is still a
+   * legitimate near-duplicate candidate. See that decision record for why.
    */
   findNearDuplicateProjectMemory(
     projectId: string,
@@ -9308,7 +9333,10 @@ export class Db {
    *  to protect the row it just wrote from being the row this same sweep deletes (a brand-new row is,
    *  by construction, in the most-evictable never-retrieved class). Excluding it never lets the store
    *  exceed `maxNotes`: `over` is already computed from the post-write count, so there are always at
-   *  least `over` OTHER unpinned rows available to satisfy it. */
+   *  least `over` OTHER unpinned rows available to satisfy it.
+   *
+   *  @decision 57a91801 — an expired UNPINNED row gets NO special exemption here; it counts toward
+   *  `maxNotes` and is evicted by this exact order like any other unpinned row. See the decision record. */
   private evictProjectMemoryOverCap(projectId: string, maxNotes: number, excludeKey?: string): void {
     if (maxNotes <= 0) return;
     const { c } = this.db.prepare("SELECT COUNT(*) AS c FROM project_memory WHERE project_id = ? AND pinned = 0")
@@ -11713,25 +11741,28 @@ function toTask(r0: unknown, deferralIds?: string[]): Task {
  *  {@link Db.upsertProjectMemory}'s own doc comment (card ea5fb00a) for why this check lives here. */
 export interface ProjectMemoryControlCharRejection {
   rejected: true;
-  field: "key" | "title" | "text" | "tags" | "triggerGlob" | "requestIds";
+  field: "key" | "title" | "text" | "tags" | "triggerGlob" | "requestIds" | "expiresAt";
   byteClass: ControlByteClass;
   index: number;
   error: string;
 }
 
 /** Scans every free-text column {@link Db.upsertProjectMemory} would otherwise write, in a fixed
- *  deterministic order (`key`, `title`, `text`, each `tags` entry, `triggerGlob`, each `requestIds`
- *  entry), returning the FIRST ESC/C0/C1 violation found or `null` if all are clean. `key` is checked even
- *  though the agent-facing `memory_write` path (mcp/memory.ts's `KEY_RE`) already restricts it upstream —
- *  the raw e2e test-seed route (gateway/server.ts) binds a caller-supplied `key` with no such check, and
- *  this function runs inside the ONE function both paths call, so neither can bypass it.
+ *  deterministic order (`key`, `title`, `text`, each `tags` entry, `triggerGlob`, `expiresAt`, each
+ *  `requestIds` entry), returning the FIRST ESC/C0/C1 violation found or `null` if all are clean. `key`
+ *  is checked even though the agent-facing `memory_write` path (mcp/memory.ts's `KEY_RE`) already
+ *  restricts it upstream — the raw e2e test-seed route (gateway/server.ts) binds a caller-supplied `key`
+ *  with no such check, and this function runs inside the ONE function both paths call, so neither can
+ *  bypass it. `expiresAt` is checked here too (card 57a91801) even though `memory_write`'s own date-
+ *  format validation already rejects anything that wouldn't parse as a date — a control byte that
+ *  somehow survives that (a raw e2e seed/DB-direct writer) must not reach the stored column either.
  *
  * @decision ea5fb00a — `requestIds` IS checked here: a linked id renders DIRECTLY into a kickoff-visible
  * annotation line on the "not found" path (project-memory-request-links.ts), so it's a free-text injection
  * surface like the others, not the opaque-id exception this card originally assumed. See its own record.
  */
 function findProjectMemoryControlCharRejection(input: {
-  key: string; title?: string; text: string; tags?: string[]; triggerGlob?: string; requestIds?: string[];
+  key: string; title?: string; text: string; tags?: string[]; triggerGlob?: string; requestIds?: string[]; expiresAt?: string;
 }): ProjectMemoryControlCharRejection | null {
   const candidates: { field: ProjectMemoryControlCharRejection["field"]; value: string }[] = [
     { field: "key", value: input.key },
@@ -11739,6 +11770,7 @@ function findProjectMemoryControlCharRejection(input: {
     { field: "text", value: input.text },
     ...(input.tags ?? []).map((t) => ({ field: "tags" as const, value: t })),
     { field: "triggerGlob", value: input.triggerGlob ?? "" },
+    { field: "expiresAt", value: input.expiresAt ?? "" },
     ...(input.requestIds ?? []).map((id) => ({ field: "requestIds" as const, value: id })),
   ];
   for (const { field, value } of candidates) {
@@ -11781,6 +11813,8 @@ function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {
     // Card aeec1880 — '' (the column's own DEFAULT, and every pre-existing/legacy row) ⇒ null ("no
     // predicate"), mirroring the row-shape convention already used for title's own "" default elsewhere.
     triggerGlob: (r.trigger_glob as string | null) || null,
+    // Card 57a91801 — same "" ⇒ null ("never expires") convention as triggerGlob immediately above.
+    expiresAt: (r.expires_at as string | null) || null,
   };
 }
 function toProjectMemoryHistoryEntry(r0: unknown): ProjectMemoryHistoryEntry {
