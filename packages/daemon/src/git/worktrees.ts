@@ -5773,6 +5773,13 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/role-surface-tools-named-in-doctrine.mjs",
   "packages/daemon/test/serve-static.mjs",
   "packages/daemon/test/serve-static-parity-guard.mjs",
+  // Card 36101180 (from investigate-first card 28b2ca6f): a direct reader (route (1)) of every real
+  // SKILL.md and references/** file under this tree, flagging a permission-widening frontmatter key
+  // (`allowed-tools:`/`hooks:`) or body shell-injection form (inline `` !`cmd` ``/fenced ` ```! `).
+  // Unlike codescape-privacy-guard.mjs (STATIC_GUARD_REPO_PATHS above), this guard's ONLY invalidator is
+  // real asset CONTENT under this tree — it reads no dist/web-bundle output and no other skill-doctrine
+  // text — so it belongs on THIS conditional list, not the unconditional one.
+  "packages/daemon/test/skill-permission-widening-guard.mjs",
   "packages/daemon/test/skills-codescape-reconcile.mjs",
   "packages/daemon/test/skills-conditional.mjs",
   "packages/daemon/test/skills-seed-asset-override-default.mjs",
