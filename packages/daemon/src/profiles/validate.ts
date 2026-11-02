@@ -252,6 +252,57 @@ export function roleChangeCapabilityCarryoverError(
 }
 
 /**
+ * @decision 509176c8 — do not let an agent-facing profile write set a non-empty explicit `skills`
+ * subset on a LOCKED-role profile — it bypasses `isTrustedForLockedRole`'s deliver-all filter. Checked
+ * own-key-present on the RAW payload/patch, mirroring `agentProfileKeyError`; clearing (null/[]) stays allowed.
+ */
+export function agentLockedRoleSkillsError(raw: unknown, resolvedRole: string | null | undefined): string | null {
+  if (resolvedRole == null || !LOCKED_PROFILE_ROLES.has(resolvedRole)) return null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !("skills" in (raw as Record<string, unknown>))) return null;
+  const skills = (raw as Record<string, unknown>).skills;
+  if (!Array.isArray(skills) || skills.length === 0) return null; // clearing/omitting is a reduction, always allowed
+  return `skills may not be set to a non-empty subset via an agent MCP tool on a profile whose role is "${resolvedRole}" (elevated/locked) — an explicit subset bypasses the locked-role skill-trust filter (record 509176c8), so a non-empty subset is human-only here too (via the Profiles UI / REST); clearing it (null/[]) is allowed`;
+}
+
+/**
+ * @decision 509176c8 — do not let a role-change patch that never mentions `skills` carry a stored
+ * non-empty subset onto a newly-locked role (the two-call bypass of {@link agentLockedRoleSkillsError}).
+ * Checked against the MERGED (post-patch) `skills`, not the stored value — a same-call clear is allowed.
+ */
+export function roleChangeLockedSkillsCarryoverError(
+  previousRole: string | null | undefined,
+  newRole: string | null | undefined,
+  mergedSkills: string[] | null | undefined,
+): string | null {
+  if ((previousRole ?? null) === (newRole ?? null)) return null; // not a role change
+  if (newRole == null || !LOCKED_PROFILE_ROLES.has(newRole)) return null; // only guards a flip INTO a locked role
+  if (!mergedSkills || mergedSkills.length === 0) return null;
+  return `cannot change role to "${newRole}": the resulting profile would carry a non-empty skills subset — that is human-only to set on an elevated/locked role (record 509176c8) — ask the human to change the role in the Profiles UI, or clear skills in the same patch`;
+}
+
+/**
+ * @decision 509176c8 — do not let a locked SESSION role inject a skills subset that came from a profile
+ * whose OWN role differs (an explicit-role divergence) — drop it, falling back to injectSkills' own
+ * trust-filtered deliver-all. Pure; pair with `SessionService.recordSkillsDropped` for the audit trail.
+ */
+export function sessionSkillsForRole(
+  sessionRole: SessionRole | null | undefined,
+  profileRole: SessionRole | null | undefined,
+  skills: string[] | null | undefined,
+): { skills: string[] | null; dropped: boolean } {
+  const normalized = skills && skills.length ? skills : null;
+  if (normalized == null) return { skills: null, dropped: false };
+  if (sessionRole == null || !LOCKED_PROFILE_ROLES.has(sessionRole)) return { skills: normalized, dropped: false };
+  if ((profileRole ?? null) === sessionRole) return { skills: normalized, dropped: false };
+  return { skills: null, dropped: true };
+}
+
+/** Human-readable reason for a `sessionSkillsForRole` drop — shared by every `recordSkillsDropped` caller. */
+export function lockedRoleSkillsDroppedReason(sessionRole: SessionRole, profileRole: SessionRole | null): string {
+  return `an explicit-role divergence (session role "${sessionRole}" vs the bound profile's own role "${profileRole ?? "null"}") dropped this session's skills subset — it fell back to the locked-role trust-filtered deliver-all (record 509176c8)`;
+}
+
+/**
  * @decision acd3c688 — the spawn-time sibling of `roleChangeCapabilityCarryoverError`: refuses an
  * explicit-role session MINT whose bound profile's own role differs and carries a forbidden-key grant.
  * `harness` and null→worker are both exempted below — see the decision record for why.

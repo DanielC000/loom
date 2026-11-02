@@ -1854,6 +1854,17 @@ export type OrchestrationEventKind =
   // workerSessionId/taskId convention as `harness_default_skipped`; `detail` carries { role, agentId,
   // profileId: string | null, reason }.
   | "harness_role_forced_claude"
+  // Card b8aabf5b — a session's skills subset was DROPPED at the resolveAgentSpawn chokepoint (or
+  // the carry-forward sibling in resume()/forkSession()/recyclePlatformLead) because the RESOLVED session
+  // role is LOCKED and the subset came from a profile whose OWN role differs — an explicit-role
+  // divergence (e.g. a worker-role profile's agent-written subset spawned under an explicit "auditor").
+  // injectSkills (skills/inject.ts) falls back to its own trust-filtered deliver-all instead; this never
+  // refuses the spawn. Same managerSessionId/workerSessionId/taskId convention as
+  // `harness_role_forced_claude`; `detail` carries { sessionRole, agentId, profileId: string | null,
+  // profileRole: string | null, reason, trigger?: "recycle" | "resume" | "fork" }. Audit-only — never
+  // added to EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS,
+  // same posture as `instructions_loaded`/`parked_manager_workers_unresumed`.
+  | "locked_role_skills_dropped"
   // Card 7955458e, Code Review MAJOR fix — a codex spawn's claude-side ISOLATION/secret-read denies that
   // codex structurally drops (settingsDirReadDeny/transcriptRootReadDeny/workerProjectTranscriptDeny/
   // permissionDeny). A SEPARATE kind from `codex_unsupported_capability` on purpose: this is a dropped
@@ -2208,7 +2219,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, watermark_finalize_withheld: true, commondir_trust_pinned: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_isolation_gap_disclosed: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, locked_role_skills_dropped: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
   credential_revoked: true,
   vault_autocommit_refused_code_repo: true,
