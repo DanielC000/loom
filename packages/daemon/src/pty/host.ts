@@ -8708,7 +8708,11 @@ export class PtyHost {
     // signal rides opts.sessionEnv (set by obsidianSessionEnv ONLY when obsidian.autoStart is on) — the
     // local `env` isn't built yet here, so derive it from opts.sessionEnv. Off ⇒ byte-identical injection.
     const obsidianEnabled = opts.sessionEnv?.LOOM_OBSIDIAN_AUTOSTART === "1";
-    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled, this.isSessionLive); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    // Card 31f997e7: the session's resolved registry-capability grant slugs (bridging the legacy
+    // browserTesting/documentConversion booleans + the capabilities array — same helper buildMcpServers
+    // uses below), so a capability-bound skill (CAPABILITY_BOUND_SKILLS, empty today) gates correctly.
+    const grantedCapabilitySlugs = resolveProfileCapabilities(opts).map((g) => g.slug);
+    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled, this.isSessionLive, grantedCapabilitySlugs); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report + the read-only my_context
     // (resolved server-side). A

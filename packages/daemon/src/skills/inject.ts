@@ -1,17 +1,60 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import type { SessionRole } from "@loom/shared";
-import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT } from "../paths.js";
+import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT, WORKTREES_DIR } from "../paths.js";
 import { claudeSkillsDir, doctrineGitExcludeEntries } from "../pty/claude-doctrine.js";
 import { isValidSkillName, isBundledSkill, skillProvenance } from "./store.js";
 import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
+// CR round 3 (card 31f997e7): a SEPARATE sidecar file, never merged into MANIFEST's own shape — keeps
+// every existing reader of MANIFEST (several other test files parse it directly) byte-for-byte
+// unaffected, and needs no legacy-format handling of its own (nothing pre-dates it). Absent (an old
+// worktree this version hasn't touched yet) ⇒ no fingerprints for anything in it, same as a parse error.
+const FINGERPRINTS_FILE = ".loom-skills-fingerprints.json";
 
 /** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
  *  these — when the session's project has `obsidian.autoStart` on. Every other skill is untouched. */
 const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "loom-session-end"]);
+
+/** Generic slug→skill-name binding (agent-tooling P4 phase 2): a bound skill is withheld from the
+ *  deliver-all default unless (a) `cwd` is a worktree-isolated cwd (see `isWorktreeCwd` below) AND (b)
+ *  the session's resolved capabilities include the named slug — see `injectSkills`'s own doc comment for
+ *  the full mechanism and residuals. Ships EMPTY here — this card adds only the mechanism; a real binding
+ *  (e.g. a `shadcn` skill bound to the `shadcn` capability) lands in a later card. `Object.create(null)`,
+ *  not `{}` (mirrors `store.ts`'s `emptyProvenanceMap`), paired with `passesCapabilityGate`'s own
+ *  `Object.hasOwn` read: neither a lookup here nor a caller-supplied override can resolve a prototype
+ *  property name ("constructor" and friends) as if it were a real binding.
+ *
+ *  @decision 31f997e7 — this gate is delivery hygiene, NOT a security boundary; never the only thing
+ *  standing between an agent and a capability. See the decision record for the full mechanism. */
+const CAPABILITY_BOUND_SKILLS: Record<string, string> = Object.create(null);
+
+/** Whether `cwd` is a worktree-isolated session home — i.e. genuinely exclusive to ONE session, never
+ *  shared with another live session the way `project.repoPath` is (manager/platform/setup/auditor/plain/
+ *  assistant sessions). A plain `path.relative` ancestor check against `WORKTREES_DIR`, the same idiom
+ *  `escapedAncestor` above uses — `WORKTREES_DIR` and `cwd` are both Loom-internal values here (never
+ *  attacker-controlled repo content), so no `realpathSync` symlink defense is needed, unlike that
+ *  function's own untrusted-ancestor check.
+ *
+ *  Every worker (tasked or taskless) spawns/resumes/forks/recycles with `cwd: worktreePath`, always
+ *  nested under `WORKTREES_DIR` (`git/worktrees.ts`'s `createWorktree`); every other role spawns with
+ *  `cwd: project.repoPath` (shared) except "run" (a disposable snapshot dir, moot here since a run
+ *  session's `capabilities` is hardcoded `[]` and can never be granted). A role check (`role ===
+ *  "worker"`) would be a proxy for this same fact; this checks the structural fact itself, so it
+ *  self-corrects if a future spawn path's cwd assignment ever drifts from today's role↔cwd mapping.
+ *
+ *  @decision 31f997e7 — the ONLY discriminator the capability-bound-skill gate trusts for "this cwd
+ *  belongs to this session alone." */
+function isWorktreeCwd(cwd: string): boolean {
+  const rel = path.relative(WORKTREES_DIR, cwd);
+  // CR round 2 (reviewer 3e7c525e) NIT: a bare `rel.startsWith("..")` false-negatives on a genuine
+  // descendant literally named e.g. "..foo" (a string-prefix match with no actual ".." path segment) —
+  // only an EXACT ".." segment, or one followed by a real separator, means "escaped".
+  return rel !== "" && rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel);
+}
 
 /** Map a Loom-DRIVEN session role to its operating-doctrine skill name in the store. A role here MUST get
  *  its doctrine skill no matter what the profile's pinned subset says (a subset that omits "worker" must
@@ -100,6 +143,14 @@ function sanitizeManifestEntries(raw: unknown, context: string): string[] {
   return safe;
 }
 
+/** Validate+bound one untrusted fingerprint value read from the manifest file. Anything else (not a
+ *  string, empty, oversized) reads as "no fingerprint" — the CR round-3 cleanup already treats that as
+ *  "cannot verify, don't delete," so a malformed value only ever makes the gate MORE conservative, never
+ *  less. */
+function sanitizeFingerprint(raw: unknown): string | null {
+  return typeof raw === "string" && raw.length > 0 && raw.length <= FINGERPRINT_MAX_LEN ? raw : null;
+}
+
 /** Read the manifest map. A legacy ARRAY (the pre-subset single-session format) is adopted AS the current
  *  session's record so it reconciles + retires cleanly on this run. Any other shape ⇒ empty map.
  *  A MISSING file is the normal first-run case (silent empty map); a present-but-CORRUPT manifest (a torn
@@ -109,7 +160,9 @@ function sanitizeManifestEntries(raw: unknown, context: string): string[] {
  *  Every entry — in the legacy array form and in every session's record in the dict form — is validated by
  *  `sanitizeManifestEntries` before it's trusted: the manifest is repo/worktree-committable and its entries
  *  flow straight into a prune `rmSync`, so an invalid entry here would otherwise be a path-escape/wipe
- *  vector (card 97e6a1c6). */
+ *  vector (card 97e6a1c6). This file's own shape is UNCHANGED by card 31f997e7 round 3 (content
+ *  fingerprints live in the separate {@link FINGERPRINTS_FILE} sidecar instead — see `readFingerprintsFile`
+ *  — specifically so every existing reader of this file stays byte-for-byte unaffected). */
 function readManifest(manifestPath: string, sessionId: string): Manifest {
   let text: string;
   try { text = fs.readFileSync(manifestPath, "utf8"); }
@@ -124,6 +177,34 @@ function readManifest(manifestPath: string, sessionId: string): Manifest {
     return out;
   }
   return {};
+}
+
+/** Read the {@link FINGERPRINTS_FILE} sidecar: `{ sid: { skillName: fingerprint } }`. Brand new as of
+ *  card 31f997e7 round 3 — there is no legacy format to migrate, so ABSENT (an old worktree, or any
+ *  worktree this version hasn't written to yet) and CORRUPT both simply read as `{}` (no fingerprint for
+ *  anything), the same fail-toward-keeping outcome the dead-claim cleanup already gives a missing entry.
+ *  Every sid's inner map is validated the same way: a skill-name key must pass `isSafeManifestEntry`
+ *  (mirrors the main manifest's own entry validation) and its value `sanitizeFingerprint`. */
+function readFingerprintsFile(fingerprintsPath: string): FingerprintMap {
+  let text: string;
+  try { text = fs.readFileSync(fingerprintsPath, "utf8"); }
+  catch { return {}; }
+  let raw: unknown;
+  try { raw = JSON.parse(text); }
+  catch (e) { console.log(`[skills] ignoring corrupt fingerprints file at ${fingerprintsPath}: ${(e as Error).message}`); return {}; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: FingerprintMap = {};
+  for (const [sid, m] of Object.entries(raw as Record<string, unknown>)) {
+    if (!m || typeof m !== "object" || Array.isArray(m)) continue;
+    const inner: Record<string, string> = {};
+    for (const [name, fp] of Object.entries(m as Record<string, unknown>)) {
+      if (!isSafeManifestEntry(name)) continue;
+      const sanitized = sanitizeFingerprint(fp);
+      if (sanitized) inner[name] = sanitized;
+    }
+    out[sid] = inner;
+  }
+  return out;
 }
 
 /**
@@ -156,6 +237,56 @@ function copySkillAtomic(src: string, dest: string): boolean {
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
   console.log(`[skills] failed to inject '${path.basename(dest)}' after 3 attempts: ${(lastErr as Error)?.message}`);
   return false;
+}
+
+/** sha256 hex is 64 chars; this bounds an UNTRUSTED fingerprint read from the manifest file (card
+ *  97e6a1c6's posture: the manifest lives in the repo/worktree and is committable) well above that, but
+ *  nowhere near unbounded. */
+const FINGERPRINT_MAX_LEN = 128;
+
+/** sid -> (skill name -> content fingerprint), the CR round-3 sibling of {@link Manifest} — see
+ *  `readFingerprintsFile`'s doc for the on-disk shape and `fingerprintSkillDir` for what the value means. */
+type FingerprintMap = Record<string, Record<string, string>>;
+
+/** Every regular FILE under `dir`, recursively, as POSIX-style relative paths, sorted for determinism.
+ *  A symlink/junction child is neither a file nor a directory per `Dirent` and is silently excluded —
+ *  never followed, matching this module's broader symlink-escape posture elsewhere. Throws on a read
+ *  error (missing dir, EPERM, …); the caller treats that as "cannot fingerprint," never as "empty." */
+function listFilesRecursiveSorted(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string, prefix: string) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(path.join(d, e.name), rel);
+      else if (e.isFile()) out.push(rel);
+    }
+  };
+  walk(dir, "");
+  return out.sort();
+}
+
+/**
+ * A deterministic content fingerprint for a skill DIRECTORY: sha256 over the sorted list of
+ * "<relative-path>:<sha256-of-that-file's-bytes>" lines. Recorded at placement time (right after a
+ * successful {@link copySkillAtomic} + any Obsidian fragment append — i.e. the FINAL bytes Loom actually
+ * left on disk, not an intermediate state) and compared later to decide whether the CR round-3 dead-claim
+ * cleanup may safely delete a dead session's claimed dir — see `injectSkills`'s own doc and the decision
+ * record.
+ *
+ * Returns null when the dir is missing or ANY file under it can't be read — "cannot verify" is never
+ * silently treated as "empty" or "matches," since every caller of this function must fail toward NOT
+ * deleting when it can't compute a fingerprint to compare against.
+ */
+function fingerprintSkillDir(dir: string): string | null {
+  let rels: string[];
+  try { rels = listFilesRecursiveSorted(dir); } catch { return null; }
+  const h = crypto.createHash("sha256");
+  for (const rel of rels) {
+    let content: Buffer;
+    try { content = fs.readFileSync(path.join(dir, ...rel.split("/"))); } catch { return null; }
+    h.update(`${rel}:${crypto.createHash("sha256").update(content).digest("hex")}\n`);
+  }
+  return h.digest("hex");
 }
 
 /**
@@ -256,10 +387,34 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
  * byte-identical to before this param existed — fail-safe: a caller that can't answer the question must
  * never cause a prune. A predicate that THROWS for one session id is treated the same way for THAT entry
  * only (keep it) — one bad lookup must never cost the rest of the manifest.
+ *
+ * `grantedCapabilities` (agent-tooling P4 phase 2, card 31f997e7): the session's resolved registry-
+ * capability slugs (e.g. via `resolveProfileCapabilities(opts).map(g => g.slug)` at the one production
+ * call site). Default/absent ⇒ no grants. Consulted ONLY against `capabilityBindings` (below) to decide
+ * whether a CAPABILITY-BOUND skill is included in the deliver-all default — see that param's own doc.
+ *
+ * `capabilityBindings` (card 31f997e7): skill name → the capability slug it requires. Defaults to the
+ * real `CAPABILITY_BOUND_SKILLS` map (ships empty in this card); overridable so a test can exercise the
+ * mechanism without any real bound skill existing in the store. A skill NOT in this map is never gated —
+ * byte-identical to before this param existed. Applies ONLY to the no-subset deliver-all default: an
+ * EXPLICIT non-empty `subset` naming a bound skill still wins (same "subset is a deliberate, human-
+ * attributable grant" posture `509176c8` already gives the locked-role filter — see that record).
+ *
+ * A bound skill ALSO requires `cwd` to be a worktree-isolated session home (`isWorktreeCwd` below), on
+ * top of the grant, and a dead session's own claimed copies in such a cwd are cleaned up rather than left
+ * to orphan — but ONLY when their current content fingerprint still matches what Loom recorded at
+ * placement (never a hand-edited or added-to dir, and never a legacy claim with no recorded fingerprint)
+ * — see the decision record for the reproduced incidents this closes, the data-loss finding that added
+ * the fingerprint check, and the residual that remains (an explicit `subset` still bypasses every check
+ * here).
+ *
+ * @decision 31f997e7 — delivery hygiene, not a security boundary; never the only thing standing between
+ * an agent and a capability.
  */
 export function injectSkills(
   cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false,
   isSessionLive?: (sessionId: string) => boolean,
+  grantedCapabilities?: Iterable<string>, capabilityBindings: Record<string, string> = CAPABILITY_BOUND_SKILLS,
 ): void {
   let storeNames: string[];
   try {
@@ -296,11 +451,20 @@ export function injectSkills(
   // next boot's rename-aside fix ever runs, so a still-"agent"-stamped collision must stay excluded even
   // once isBundledSkill is true. Provenance-only — never content-equality (see the decision record).
   const isLockedRole = role != null && LOCKED_PROFILE_ROLES.has(role);
+  // Card 31f997e7: a capability-bound skill (per `capabilityBindings`) is withheld from the deliver-all
+  // default unless `grantedCapabilities` includes its required slug. Applies ONLY here (the no-subset
+  // branch) — an explicit subset below bypasses this exactly like it already bypasses the locked-role
+  // filter (509176c8), so this never narrows that branch.
+  const grantedSlugs = grantedCapabilities instanceof Set ? grantedCapabilities : new Set(grantedCapabilities ?? []);
+  // @decision 31f997e7 — a bound skill is delivered ONLY into a worktree-isolated cwd, whatever the
+  // grant; see the decision record for why a grant-only gate orphans permanently.
+  const passesCapabilityGate = (n: string) => {
+    if (!Object.hasOwn(capabilityBindings, n)) return true; // unbound — never gated, regardless of cwd
+    return isWorktreeCwd(cwd) && grantedSlugs.has(capabilityBindings[n]);
+  };
   const want = subset && subset.length
     ? storeNames.filter((n) => subset.includes(n))
-    : isLockedRole
-      ? storeNames.filter(isTrustedForLockedRole)
-      : storeNames;
+    : storeNames.filter((n) => (!isLockedRole || isTrustedForLockedRole(n)) && passesCapabilityGate(n));
   // FORCE-INCLUDE the role's operating-doctrine skill regardless of the subset (a profile whose subset
   // omits "worker"/"orchestrate"/… must still ship its role doctrine). Only when present in the store and
   // not already wanted; a no-subset session already has every store skill, so this only bites under a subset.
@@ -319,17 +483,46 @@ export function injectSkills(
 
   const manifestPath = path.join(targetDir, MANIFEST);
   const manifest = readManifest(manifestPath, sessionId);
+  const fingerprintsPath = path.join(targetDir, FINGERPRINTS_FILE);
+  const fingerprints = readFingerprintsFile(fingerprintsPath);
   // Prune a manifest key for any OTHER session the caller-injected predicate says is not CURRENTLY
   // live/starting (card 9d73e537; see this function's own doc comment for why "live", not "resumable").
   // Never asked about our own key — this call IS that session, live, right now. A throw for one id is
   // swallowed and that entry is left alone (fail-safe), not treated as grounds to abandon the whole
-  // prune pass.
+  // prune pass. `deadClaimed`/`deadFingerprints` collect what each pruned key claimed (+ its recorded
+  // fingerprint(s), if any), BEFORE it's deleted — card 31f997e7 CR round 2/3 consumes these below to
+  // clean up a dead session's own copies in an isolated worktree cwd, ONLY when content still matches.
+  //
+  // CR round 4 (reviewer e11c6432) MINOR: iterate the UNION of both files' sids, not just `manifest`'s —
+  // a sid present only in `fingerprints` (its manifest key already gone some other way) would otherwise
+  // never get pruned from the sidecar and leak there forever.
+  const deadClaimed = new Set<string>();
+  // CR round 4 MINOR: a name -> SET of every dead claimant's recorded fingerprint for it, not a single
+  // last-writer-wins value — a `Map<string,string>` made the cleanup's outcome depend on manifest key
+  // iteration order whenever two different dead sids had claimed the SAME name with DIFFERENT recorded
+  // fingerprints (e.g. dead A placed v1, dead B later re-copied v2 over it). Deleting when the CURRENT
+  // fingerprint matches ANY dead claimant's is order-independent and still exactly as safe: every
+  // candidate fingerprint in the set is itself a real Loom-placement record, never a guess.
+  const deadFingerprints = new Map<string, Set<string>>();
   if (isSessionLive) {
-    for (const sid of Object.keys(manifest)) {
+    const allSids = new Set([...Object.keys(manifest), ...Object.keys(fingerprints)]);
+    for (const sid of allSids) {
       if (sid === sessionId) continue;
       let live = true;
       try { live = isSessionLive(sid); } catch { /* fail-safe: keep this entry on error */ }
-      if (!live) delete manifest[sid];
+      if (!live) {
+        for (const n of manifest[sid] ?? []) {
+          deadClaimed.add(n);
+          const fp = fingerprints[sid]?.[n];
+          if (fp) {
+            let set = deadFingerprints.get(n);
+            if (!set) { set = new Set(); deadFingerprints.set(n, set); }
+            set.add(fp);
+          }
+        }
+        delete manifest[sid];
+        delete fingerprints[sid];
+      }
     }
   }
   const myPrev = manifest[sessionId] ?? [];
@@ -337,6 +530,40 @@ export function injectSkills(
   // and are NOT the repo's own (the landmine-2 invariant: concurrent sessions share project.repoPath).
   const otherClaimed = new Set<string>();
   for (const [sid, ns] of Object.entries(manifest)) if (sid !== sessionId) for (const n of ns) otherClaimed.add(n);
+
+  // In an ISOLATED worktree cwd, a just-pruned dead session's manifest-claimed dirs are CANDIDATES for
+  // cleanup — closing the worktree-REUSE orphan (a stopped/rejected worker's worktree reused by a
+  // re-dispatch, possibly to a different agent with different grants; `git reset --hard` never touches
+  // untracked `.claude/skills`). `deadClaimed` is built exclusively from a dead session's OWN manifest
+  // entry, so a repo/user dir (never recorded in any session's manifest — see the "repo's own" skip
+  // below) is never even a candidate. But being claimed is a fact about when Loom placed it, not about
+  // what's there NOW: a worker may have hand-edited a FILE, or added one, since. CR round 3 (reviewer
+  // 085065b7) found the round-2 cleanup deleted that work outright — the owner's standing rule is never
+  // to destroy unfinished work, and a bare "it's in the manifest" was never proof the content was still
+  // Loom's own. A delete now requires the dir's CURRENT content fingerprint to match ANY ONE of the
+  // fingerprints recorded by a dead claimant of this name (`fingerprintSkillDir`, `deadFingerprints` —
+  // see that Map's own doc for why a SET, not one value) — any mismatch, or no recorded fingerprint at
+  // all (a legacy pre-round-3 claim), SKIPS the delete and leaves an orphan rather than risk data loss.
+  // Named residual (CR round 4 nit — `fingerprintSkillDir` only hashes regular FILE bytes): adding a
+  // symlink/junction child, or an empty subdirectory, changes neither the fingerprint nor the FILE
+  // content it covers, so a dir modified ONLY that way is still deleted — the symlink's own target is
+  // never touched either way (`fs.rmSync` on a symlink removes the link, never follows it).
+  //
+  // @decision 31f997e7 — never a shared cwd (card f4e93dbf's scope); never a dir outside a dead session's
+  // own recorded claim; never a dir whose current content fingerprint matches none of that claim's
+  // recorded fingerprints.
+  if (isWorktreeCwd(cwd)) {
+    for (const stale of deadClaimed) {
+      if (otherClaimed.has(stale)) continue; // a still-live session (e.g. a sibling fork) legitimately needs it
+      const recordedFps = deadFingerprints.get(stale);
+      if (!recordedFps || recordedFps.size === 0) { console.log(`[skills] keeping dead-session claim '${stale}': no recorded content fingerprint (a legacy claim) — cannot verify it's still Loom's own, so not deleting`); continue; }
+      const target = path.join(targetDir, stale);
+      const currentFp = fingerprintSkillDir(target);
+      if (!currentFp || !recordedFps.has(currentFp)) { console.log(`[skills] keeping dead-session claim '${stale}': on-disk content doesn't match any recorded Loom placement (edited, or files added) — not deleting`); continue; }
+      if (path.dirname(target) !== targetDir) { console.log(`[skills] refusing to remove out-of-scope dead-session manifest entry: ${stale}`); continue; }
+      try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
 
   // Read the Obsidian preflight fragment ONCE, and ONLY when the project enabled it AND a fragment-target
   // skill is actually being delivered — so with obsidian.autoStart off (the default) this asset is never
@@ -350,6 +577,11 @@ export function injectSkills(
 
   const placed: string[] = [];
   const failed: string[] = [];
+  // CR round 3 (card 31f997e7): the content fingerprint recorded for EVERY name this call places —
+  // computed AFTER the obsidian-fragment append below, so it's the FINAL bytes Loom actually left on
+  // disk, not an intermediate state. Replaces (never merges with) this session's prior fingerprint
+  // entry, mirroring how `placed` fully replaces `myPrev` below.
+  const placedFingerprints: Record<string, string> = {};
   for (const name of want) {
     const dest = path.join(targetDir, name);
     const exists = fs.existsSync(dest);
@@ -367,6 +599,8 @@ export function injectSkills(
       // ONLY the fragment-target skills, and ONLY when enabled + the fragment loaded. Runs after the fresh
       // base copy (copySkillAtomic re-copies the fragment-free store base first), so the append lands once.
       if (obsidianFragment && OBSIDIAN_FRAGMENT_SKILLS.has(name)) appendObsidianFragment(dest, obsidianFragment);
+      const fp = fingerprintSkillDir(dest);
+      if (fp) placedFingerprints[name] = fp; // absent (fingerprint failed) ⇒ a future dead-claim read sees it as unverifiable, never as a false match
     } else failed.push(name);
   }
 
@@ -388,6 +622,7 @@ export function injectSkills(
   // Atomic manifest write (tmp+rename, like store.ts): a torn write here corrupts the shared per-session
   // record — readManifest then has to discard it, losing every concurrent session's claims. Writing to a
   // tmp and renaming means a reader sees either the old whole map or the new whole map, never a half file.
+  // UNCHANGED shape by card 31f997e7 round 3 — see readManifest's own doc for why.
   const manifestTmp = `${manifestPath}.tmp`;
   try {
     fs.writeFileSync(manifestTmp, JSON.stringify(manifest));
@@ -396,7 +631,19 @@ export function injectSkills(
     console.log(`[skills] failed to write manifest ${manifestPath}: ${(e as Error).message}`);
     try { fs.rmSync(manifestTmp, { force: true }); } catch { /* best effort */ }
   }
-  hideFromGit(cwd, [...placed, MANIFEST]);
+
+  // CR round 3: the fingerprints sidecar (separate file, separate atomic write — see FINGERPRINTS_FILE's
+  // own doc for why it's never merged into MANIFEST's shape). Same tmp+rename discipline.
+  fingerprints[sessionId] = placedFingerprints; // full replace, same as `placed` above
+  const fingerprintsTmp = `${fingerprintsPath}.tmp`;
+  try {
+    fs.writeFileSync(fingerprintsTmp, JSON.stringify(fingerprints));
+    fs.renameSync(fingerprintsTmp, fingerprintsPath);
+  } catch (e) {
+    console.log(`[skills] failed to write fingerprints file ${fingerprintsPath}: ${(e as Error).message}`);
+    try { fs.rmSync(fingerprintsTmp, { force: true }); } catch { /* best effort */ }
+  }
+  hideFromGit(cwd, [...placed, MANIFEST, FINGERPRINTS_FILE]);
 
   // Surface any copy that never landed (after persisting the manifest + git-hide for what DID land, so the
   // partial success is recorded and recoverable). The caller treats this as non-fatal but it's now VISIBLE

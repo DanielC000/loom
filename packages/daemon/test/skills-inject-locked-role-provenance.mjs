@@ -49,7 +49,8 @@ const ALL_FOUR = ["agent-skill", "core-doctrine", "human-skill", "unstamped-skil
 const readDelivered = (cwd) => {
   const dir = path.join(cwd, ".claude", "skills");
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((n) => n !== ".loom-skills.json").sort();
+  // Card 31f997e7 CR round 3 added the ".loom-skills-fingerprints.json" sidecar alongside the manifest.
+  return fs.readdirSync(dir).filter((n) => n !== ".loom-skills.json" && n !== ".loom-skills-fingerprints.json").sort();
 };
 
 try {
