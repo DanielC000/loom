@@ -4634,6 +4634,21 @@ function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry,
 }
 
 /**
+ * Shared formatter for the "still blocked after a partial clear" log both {@link clearTokenFromPendingIndices}'s
+ * own reduce branch and {@link clearActiveEntryTokenAtKey}'s own reduce branch emit — ONE place, so their
+ * text can never drift apart. Takes the entry's own POST-WRITE state (never a pre-write local), and
+ * `writeFailed` to qualify the line when one or more of the durable write(s) this clear attempted did
+ * NOT actually land (the reduction is in-memory only there; that durable record still holds the token).
+ *
+ * @decision 55939b88 (round 2) — one formatter, called once per reduce, after every write this clear
+ * attempts (never inside a write branch itself). See the decision record.
+ */
+function logPartialClearStillBlocked(token: string, entry: MergeQuarantineEntry, writeFailed: boolean): void {
+  // eslint-disable-next-line no-console
+  console.warn(`[merge-quarantine] partial clear of token ${token} left ${entry.repoPath} (branch ${entry.branch}) still blocked by ${entry.tokens.length} outstanding token(s): ${entry.tokens.join(", ")}${entry.contributorRepoPaths?.length ? ` — also folds in other raiser(s): ${entry.contributorRepoPaths.join(", ")}` : ""}${writeFailed ? " (one or more durable records still hold the cleared token)" : ""}.`);
+}
+
+/**
  * Shared per-index clear body for {@link clearMergeQuarantineByToken}'s own universal by-token sweep —
  * removes `token` from each of `indices`' own pending entries (SET semantics: a full lift when it was
  * the last token, a durable rewrite otherwise). The ONLY caller computes `indices` by TOKEN alone across
@@ -4790,6 +4805,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     // comment on `clearTokenFromPendingIndices`'s own first tombstone call above.
     tombstoneIfNotSurviving([token], live.entry.repoPath);
     const writtenBasenames = new Set<string>([live.sourceFile]);
+    // @decision 55939b88 (round 2) — tracks whether ANY write attempt below (armed-key or pending-divert)
+    // failed, so the end-of-branch log can qualify itself as in-memory-only. See the decision record.
+    let writeFailed = false;
     // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens`
     // (DEFENSIVE — `64283e06`'s own posture: unreachable today, see that record).
     // @decision 4e987303 — thread the ADOPTED entry forward each iteration (never a stale captured local);
@@ -4799,6 +4817,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
       const result = writeLatchAndAdopt(activeQuarantines, updated, { ...NO_DROPS, tokens: new Set([token]) }, false, k, false, false);
       if (result === false) {
+        writeFailed = true;
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own armed copy at key ${k} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
       } else {
@@ -4820,10 +4839,14 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       live.sourceFile = written.filename;
       rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
     } else {
+      writeFailed = true;
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
     }
+    // @decision 55939b88 — log once here (never in a write branch above) via the shared formatter, using
+    // `live.entry`'s final post-write state, not the pre-write `remaining` local. See the decision record.
+    logPartialClearStillBlocked(token, live.entry, writeFailed);
   }
 }
 
@@ -4934,6 +4957,15 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // below actually wrote, so the dual-tracked-twin loop after it never redundantly rewrites the SAME
   // physical file a moment later — see that loop's own doc.
   const writtenFinalBasenames = new Set<string>();
+  // @decision 55939b88 (round 2) — tracks whether ANY write attempt below (armed-key or dual-tracked
+  // pending twin) failed, so the end-of-branch log can qualify itself as in-memory-only. See the
+  // decision record.
+  let writeFailed = false;
+  // @decision 55939b88 (round 3) — a LOG-ONLY union (never changing what is written/stored) of every
+  // write's own actual token/contributor set — a twin's own on-disk union can otherwise go unlogged. See
+  // the decision record.
+  const loggedTokens = new Set<string>();
+  const loggedContributors = new Set<string>();
   // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens` — the
   // tombstone call above can fail to protect this write (an unrelated in-memory record still holding
   // `token` at this instant defeats `tombstoneIfNotSurviving`'s own "surviving anywhere" scan).
@@ -4951,10 +4983,15 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       // durable at key `k`; a same-hash tmp holding anything outside it is never blindly deleted.
       sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(k), updated.tokens, undefined, false, []);
     } else {
+      writeFailed = true;
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath} at key ${k} after a partial clear — the PRE-EXISTING durable state (this repo's own latch file, final or tmp) is left UNTOUCHED there, so a restart before this is fixed may re-arm with the just-cleared token still counted as outstanding at THAT key (delays the eventual full lift; never a false lift).`);
     }
   }
+  // @decision 55939b88 (round 3) — seed the log-only union from `updated`'s own state AFTER the
+  // armed-key loop (which already feeds its own write results back into `updated`), never before.
+  for (const t of updated.tokens) loggedTokens.add(t);
+  for (const c of updated.contributorRepoPaths ?? []) loggedContributors.add(c);
   // @decision ae79d492 — an 883e29bc dual-tracked twin's own sourceFile is a SEPARATE physical file from
   // the armed key's final the loop above just wrote; never skip rewriting it too, or a reboot re-reads
   // its stale, un-reduced copy and re-unions the just-cleared token back in. See the decision record.
@@ -4974,12 +5011,21 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     const written = writePendingDivertFile(pending.sourceFile, updated, new Set([token]));
     if (written) {
       pendingUnresolvedQuarantines[idx] = { entry: written.entry, sourceFile: written.filename };
+      // @decision 55939b88 (round 3) — fold THIS twin's own written tokens/contributors into the
+      // log-only union (never into `updated` itself — see 702b4241 round 3's own rule above).
+      for (const t of written.entry.tokens) loggedTokens.add(t);
+      for (const c of written.entry.contributorRepoPaths ?? []) loggedContributors.add(c);
     } else {
+      writeFailed = true;
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
     }
   }
   rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames, new Set([token]));
+  // @decision 55939b88 (round 2/3) — same shared formatter as `clearTokenFromPendingIndices`'s own
+  // reduce branch, but the LOG-ONLY `loggedTokens`/`loggedContributors` union (round 3), never `updated`
+  // directly — `updated` itself stays exactly what was actually written/stored.
+  logPartialClearStillBlocked(token, { ...updated, tokens: [...loggedTokens], contributorRepoPaths: loggedContributors.size > 0 ? [...loggedContributors] : undefined }, writeFailed);
 }
 
 /**
