@@ -3039,6 +3039,11 @@ interface Live {
   // once markReady has run (whichever call actually clears it).
   readyFallbackTimer: NodeJS.Timeout | null;
   busySince: number | null;  // epoch ms when busy rose — for stuck-busy self-heal (BUSY_STALE_MS)
+  // Card 66ff7321 — set by markContextExhausted when a tick watcher detects the terminal
+  // "Prompt is too long" record; HOLDS delivery (idleEligible below, drainPending's own guard) so a
+  // queued message is never drained into this dead turn. Cleared on the next busy(true) rising edge
+  // (setBusy below) — see Session.contextExhaustedAt's own doc for the full lifecycle.
+  contextExhausted: boolean;
   // Card f18a2201 (item 2): set true in `persistBusy`'s catch when `events.onBusy` throws, cleared false
   // on its next successful call (from EITHER a real setBusy/setCodexBusy edge or reconcile()'s own
   // retry) — PtyHost has no DB read access, so this is the only proxy it has for "the DB busy column may
@@ -6526,6 +6531,7 @@ export class PtyHost {
       mcpSeenWaiters: [],
       mcpRouterSeenAt: new Map(),
       busySince: null,
+      contextExhausted: false,
       lastOutputAt: Date.now(),
       composerLen: 0,
       composerDirtyLen: 0,
@@ -6862,7 +6868,7 @@ export class PtyHost {
       logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
-      busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
+      busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, contextExhausted: false, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastSubmitExemptAsOwnNotice: false, startupPrompt: null, lastRawSubmit: null,
@@ -8129,7 +8135,7 @@ export class PtyHost {
       creationTimeReady: Promise.resolve(), // never armed — same reason as creationTime above
       logStream: openSessionLogStream(opts.id, "canned test seed"),
       logBroken: false,
-      busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
+      busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, contextExhausted: false, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastSubmitExemptAsOwnNotice: false, startupPrompt: null, lastRawSubmit: null,
@@ -10839,10 +10845,30 @@ export class PtyHost {
     // Card 850eb55c (round 2): same sibling relationship, now also vs `Live.startupCycleInFlight`'s own doc.
     // @decision b5ab3aa4 — do not treat this as sufficient on its own to submit immediately: it proves
     // only that THIS SESSION could take a turn right now, never that no older entry is already queued.
-    const idleEligible = live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live) && !this.isBlockedOnUnresolvedBootDialog(live) && !live.startupCycleInFlight;
+    // Card 66ff7321 — `!live.contextExhausted`: `busy` is already false the instant exhaustion is
+    // marked (markContextExhausted's own setBusy(false) call), so without this the ordinary
+    // !live.busy branch above would make an immediate-delivery write straight into the dead turn.
+    // Round 2: EXEMPT the human composer (senderId === HUMAN_COMPOSER_SENDER_ID, POST
+    // /api/sessions/:id/input) — a human acting IS the recovery (e.g. /compact), and its submit's own
+    // setBusy(true) rising edge is what clears the mark (line ~13817) for everything queued behind it.
+    // An agent/Loom entry's senderId is never this sentinel, so the hold stays in force for them.
+    const contextExhaustedHold = live.contextExhausted && senderId !== HUMAN_COMPOSER_SENDER_ID;
+    const idleEligible = live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !contextExhaustedHold && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live) && !this.isBlockedOnUnresolvedBootDialog(live) && !live.startupCycleInFlight;
     // @decision b5ab3aa4 — do not drop the `live.pending.length === 0` conjunct: without it, a new arrival
     // can jump an older entry that just became eligible in this same call, breaking FIFO delivery order.
-    if (idleEligible && live.pending.length === 0) {
+    //
+    // Card 66ff7321 (CR round 3, Major 1): while `live.contextExhausted` holds, EVERY entry already in
+    // `live.pending` is itself undeliverable — `drainPending`'s own unconditional early return on
+    // `live.contextExhausted` (above this call entirely) means nothing ahead of the composer entry could
+    // ever drain anyway, so there is no real FIFO order left to protect by making the composer wait
+    // behind it. Without this, the round-2 exemption above only ever fired on an EMPTY queue: the
+    // realistic case (a held worker report, an idle nudge, queued manager direction already sitting in
+    // `live.pending` when exhaustion hit) still queued the composer's own `/compact` FIFO-behind them,
+    // and since nothing can drain a held queue while `contextExhausted` is set, the composer message —
+    // the one write that can actually clear the mark — never ran either. Scoped tightly to
+    // `live.contextExhausted`: outside that state the conjunct above still applies byte-identically.
+    const composerRecoveryBypassesQueue = live.contextExhausted && senderId === HUMAN_COMPOSER_SENDER_ID;
+    if (idleEligible && (live.pending.length === 0 || composerRecoveryBypassesQueue)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -11828,7 +11854,11 @@ export class PtyHost {
    */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
-    if (!live?.alive || !live.ready || live.busy || live.pending.length === 0) return;
+    // Card 66ff7321 — `live.contextExhausted`: `busy` reads false the instant exhaustion is marked
+    // (markContextExhausted's own setBusy(false)), so without this the ordinary `live.busy` check
+    // alone would drain a queued message straight into the dead turn. Hold it for the recycle
+    // successor (or a human) instead — see Session.contextExhaustedAt's own doc for the clear path.
+    if (!live?.alive || !live.ready || live.busy || live.contextExhausted || live.pending.length === 0) return;
     // A Stop is in flight → do NOT submit a queued turn. The interrupt lowers busy and fires a Stop
     // hook; draining here would re-arm busy and defeat the stop (the queued turn "fights" the stop —
     // each Ctrl-C just interrupts the freshly-drained turn, so it takes N escalating clicks to land).
@@ -13842,10 +13872,32 @@ export class PtyHost {
     const prevBusySince = live.busySince;
     live.busy = busy;
     live.busySince = busy ? Date.now() : null; // track the rising edge for the stuck-busy heal
+    // Card 66ff7321 — a rising edge clears any prior context-exhaustion mark (a fresh resume's first
+    // turn, or any later turn that somehow starts on this same row); a fresh worker_recycle row never
+    // carries it forward at all (a brand-new row, never reaching this branch with it set).
+    if (busy) live.contextExhausted = false;
     // eslint-disable-next-line no-console
     console.log(`[busy] ${sessionId} -> ${busy ? "true" : "false"} (${reason})${!busy && prevBusySince != null ? ` afterMs=${Date.now() - prevBusySince}` : ""}`);
     this.persistBusy(sessionId, busy, live);
     this.broadcastControl(live, { type: "busy", busy });
+  }
+
+  /**
+   * Card 66ff7321 — mark a session CONTEXT-EXHAUSTED: called by a tick watcher
+   * (BusyWorkerWatcher/ContextWatcher), never a hook (no Stop/StopFailure ever fires for this
+   * failure). Sets `live.contextExhausted` (holds delivery — see `idleEligible`/`drainPending`'s own
+   * guards below) and clears busy via the ordinary falling-edge path. Claude-only (`live.kind ===
+   * "claude"`; codex lives in a separate map this method never reaches, and a "shell"/"canned" entry
+   * has no transcript this detector could ever match anyway). Returns false (a no-op) when there is
+   * no live claude session to mark, or it's already marked — the caller's own DB write is the
+   * authoritative once-per-episode latch; this is a cheap, redundant local guard on top of it.
+   */
+  markContextExhausted(sessionId: string): boolean {
+    const live = this.live.get(sessionId);
+    if (!live || live.kind !== "claude" || live.contextExhausted) return false;
+    live.contextExhausted = true;
+    this.setBusy(sessionId, false, "context-exhausted");
+    return true;
   }
 
   /** Read the current permission mode off the tail of a session's output ring (the repainted footer). */

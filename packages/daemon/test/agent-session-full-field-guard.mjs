@@ -58,7 +58,7 @@ const sessionRow = {
   worktreePath: "/wt/sess-1", branch: "loom/sess-1", reviewBaseSha: null, repoKey: null,
   gen: 0, recycledFrom: null, ctxInputTokens: 1234, ctxTurns: 3, turnSeq: 3,
   ctxUpdatedAt: "2026-09-04T00:01:00.000Z", model: "claude-opus-4-8", rateLimitedUntil: null,
-  rateLimitDeadline: null, browserTesting: false, documentConversion: false,
+  rateLimitDeadline: null, contextExhaustedAt: null, browserTesting: false, documentConversion: false,
   restrictedTools: false, noCommit: false, skills: null, connections: [], vaultWrite: false,
   companionLeadMode: false, capabilities: [], archivedAt: null, scheduledSpawn: false,
   // enrichment fields SessionListItem adds over bare Session — the property this card guarantees:
@@ -76,7 +76,7 @@ const EXPECTED_SESSION_FULL_KEYS = [
   "id", "projectId", "agentId", "engineSessionId", "title", "cwd", "processState", "resumability",
   "busy", "createdAt", "lastActivity", "lastError", "role", "parentSessionId", "taskId",
   "worktreePath", "branch", "reviewBaseSha", "repoKey", "gen", "recycledFrom", "ctxInputTokens",
-  "ctxTurns", "turnSeq", "ctxUpdatedAt", "model", "rateLimitedUntil", "rateLimitDeadline",
+  "ctxTurns", "turnSeq", "ctxUpdatedAt", "model", "rateLimitedUntil", "rateLimitDeadline", "contextExhaustedAt",
   "browserTesting", "documentConversion", "restrictedTools", "noCommit", "skills", "connections",
   "vaultWrite", "companionLeadMode", "capabilities", "archivedAt", "scheduledSpawn",
   "projectName", "agentName",

@@ -206,7 +206,16 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // risk and the queued nudge can't reach it," just detected via a different, turn-boundary-
     // independent signal (see the kind's own doc in shared/src/types.ts).
     case "context_blind_turn":
+    // Card 66ff7321: the manager/platform twin of worker_context_exhausted below — a manager/platform
+    // session's own context EXHAUSTED (the terminal "Prompt is too long" api-error, not merely high).
+    // Same class as its context_escalated/context_blind_turn siblings: nothing automated is left to
+    // notify (no parent to push into), so this is the human-attention surface's job via lastError too.
+    case "manager_context_exhausted":
       return "context-overflow";
+    // Card 66ff7321: a WORKER's own context EXHAUSTED — same "the owning manager already got a direct
+    // nudge, this is the secondary attention-surface sighting" shape as worker_stuck above.
+    case "worker_context_exhausted":
+      return "worker-blocked";
     case "platform_escalate":
       return "escalation";
     case "session_rate_limited":

@@ -62,7 +62,7 @@ const EXPECTED_KEYS = [
   "id", "projectId", "agentId", "engineSessionId", "title", "cwd", "processState", "resumability",
   "busy", "createdAt", "lastActivity", "lastError", "role", "parentSessionId", "taskId", "worktreePath",
   "branch", "reviewBaseSha", "repoKey", "gen", "recycledFrom", "ctxInputTokens", "ctxTurns", "turnSeq",
-  "ctxUpdatedAt", "model", "rateLimitedUntil", "rateLimitDeadline", "browserTesting", "documentConversion",
+  "ctxUpdatedAt", "model", "rateLimitedUntil", "rateLimitDeadline", "contextExhaustedAt", "browserTesting", "documentConversion",
   "restrictedTools", "noCommit", "skills", "connections", "vaultWrite", "companionLeadMode",
   "capabilities", "archivedAt", "scheduledSpawn",
   // Card 41f35bfe: `harness` is now ALWAYS present (an unset session's harness resolves to explicit

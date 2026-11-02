@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeContextExhaustedAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -399,6 +399,38 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     if (e.kind === "context_escalated") latestContext.set(e.managerSessionId, e);
   }
 
+  // Card 66ff7321 round 2 (CR finding): context EXHAUSTION (the engine's own terminal "Prompt is too
+  // long" rejection, ContextWatcher.checkContextExhaustion) was omitted here entirely — a manager/
+  // platform exhaustion with no companion grant surfaced to no one.
+  //
+  // Round 3 (CR finding #2): it's filed under `managerSessionId: m.id` for BOTH a project manager
+  // (`db.listLiveManagers()`) AND the platform Lead (`db.listLivePlatformSessions()`, role:"platform")
+  // — but `eventQueries` above fans out over `managers` (role==="manager" live sessions ONLY, card
+  // 43084723's own established shape), so a Lead's own exhaustion event was never fetched at all, not
+  // merely filtered out afterward. Own cross-session, kind-filtered query instead (same `43084723`
+  // reasoning as `kickoffDroppedEventsQuery` below) so a Lead's event reaches this surface too.
+  const contextExhaustedEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "manager_context_exhausted"],
+    queryFn: () => api.orchestrationEventsByKinds(["manager_context_exhausted"]),
+    refetchInterval: 4000,
+  });
+  // Unlike context_escalated/idle_escalated above (one-shot episodes with no "cleared" event),
+  // exhaustion is a SESSION STATE (`Session.contextExhaustedAt`, cleared in place by a human /compact or
+  // a fresh resume turn's busy(true) rising edge — see `pty/host.ts`'s `setBusy`). So instead of a bare
+  // "latest event per session" map, `activeContextExhaustedAlerts` (lib/fleet.ts, extracted the same way
+  // activeBootStuckAlerts/activeKickoffDroppedAlerts were, for the same unit-testable-without-React
+  // reason) takes a predicate that re-checks that LIVE row on every render — so a session that recovered
+  // in place, or is no longer live, drops its item without needing a dismiss. `all` already carries
+  // `contextExhaustedAt` on every row (`/api/sessions` spreads the full session row, db.ts's own row
+  // mapping) — a fresh read each render, never a stale snapshot. This predicate also restores the
+  // liveness drop the old managers-scoped fetch gave for free: the dedicated query above is NOT
+  // liveness-scoped at the fetch level the way `eventQueries` was.
+  const isStillContextExhausted = (sessionId: string): boolean => {
+    const s = all.find((x) => x.id === sessionId);
+    return !!s && s.processState === "live" && s.contextExhaustedAt != null;
+  };
+  const activeContextExhausted = activeContextExhaustedAlerts(contextExhaustedEventsQuery.data ?? [], isStillContextExhausted);
+
   // Give-up-recovery alarm (card c00231e2, PtyHost's own per-session episode counter): a manager/
   // platform-lead's submit GIVE-UP RECOVERY fired repeatedly inside a rolling window. Same shape as
   // context_escalated immediately above — no "cleared" event exists, so the latest one per LIVE manager
@@ -587,6 +619,16 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       dismissKey: `ce:${e.id}`, // context_escalated escalates once per episode (card 611e76ba)
       dismissHint: "Hide this alert — it returns on the next context escalation for this manager. The manager keeps running and still needs a handoff.",
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
+    });
+  }
+  for (const { event: e } of activeContextExhausted) {
+    const detail = (e.detail ?? {}) as { error?: string | null };
+    items.push({
+      key: `cx-${e.id}`, tone: "red", notify: "context-overflow", kind: "CONTEXT EXHAUSTED", sessionId: e.managerSessionId,
+      dismissKey: `cx:${e.id}`, // manager_context_exhausted fires at most once per episode (one terminal mark)
+      dismissHint: "Hide this alert — it returns if this manager hits context exhaustion again. The session's queue is held; recycle it to recover.",
+      text: `manager ${e.managerSessionId.slice(0, 8)} — context exhausted, the engine rejected the next prompt as too long` +
+        `${detail.error ? ` (${detail.error})` : ""}; recycle to recover`,
     });
   }
   for (const e of activeVaultLocks) {
@@ -846,7 +888,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     && bootStuckEventsQuery.data !== undefined && vaultLockEventsQuery.data !== undefined
     && codexGapEventsQuery.data !== undefined && recycleConsolidatedEventsQuery.data !== undefined
     && crashLoopAbandonedEventsQuery.data !== undefined && crashLoopRecoveredEventsQuery.data !== undefined
-    && kickoffDroppedEventsQuery.data !== undefined
+    && kickoffDroppedEventsQuery.data !== undefined && contextExhaustedEventsQuery.data !== undefined
     && eventQueries.every((q) => q.data !== undefined);
   const derivableSig = items.filter((it) => it.dismissKey).map((it) => it.dismissKey!).sort().join("\n");
   useEffect(() => {
@@ -864,7 +906,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     && !vaultLockEventsQuery.isPending && !codexGapEventsQuery.isPending
     && !recycleConsolidatedEventsQuery.isPending
     && !crashLoopAbandonedEventsQuery.isPending && !crashLoopRecoveredEventsQuery.isPending
-    && !kickoffDroppedEventsQuery.isPending
+    && !kickoffDroppedEventsQuery.isPending && !contextExhaustedEventsQuery.isPending
     && eventQueries.every((q) => !q.isPending);
 
   return { items: visible, count: visible.length, resolved };

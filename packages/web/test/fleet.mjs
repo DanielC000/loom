@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
-  activeBootStuckAlerts, activeKickoffDroppedAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
+  activeBootStuckAlerts, activeKickoffDroppedAlerts, activeContextExhaustedAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
   activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts,
   resolveAttentionProjectId, attentionItemInProject,
 } from "../src/lib/fleet.ts";
@@ -300,6 +300,74 @@ check("activeKickoffDroppedAlerts: a PLATFORM Lead's own drop (role:\"platform\"
   const alerts = activeKickoffDroppedAlerts([dropped], alwaysLive);
   assert.equal(alerts.length, 1, "a platform-role drop surfaces too — this helper gates on parentNudged, never role");
   assert.equal(alerts[0].event.detail.role, "platform");
+});
+
+// ── CONTEXT EXHAUSTED pairing (card 66ff7321 round 3, CR finding #2) ───────────────────────────────────
+// UNLIKE activeBootStuckAlerts/activeKickoffDroppedAlerts above, there is no second "resolved" event
+// kind — the predicate re-checks the LIVE session's own state (contextExhaustedAt + liveness) directly.
+const cxEv = (o = {}) => ({
+  id: `ev-${++evSeq}`,
+  ts: o.ts ?? new Date(evSeq).toISOString(),
+  kind: "manager_context_exhausted",
+  workerSessionId: null,
+  managerSessionId: o.managerSessionId ?? "sess-cx-1",
+  taskId: o.taskId ?? null,
+  detail: o.detail ?? { error: "invalid_request" },
+});
+const alwaysExhausted = () => true;
+const neverExhausted = () => false;
+
+check("activeContextExhaustedAlerts: a lone exhaustion event on a session STILL exhausted surfaces an alert", () => {
+  const ev = cxEv({ managerSessionId: "sess-a" });
+  const alerts = activeContextExhaustedAlerts([ev], alwaysExhausted);
+  assert.equal(alerts.length, 1, "exhausted ⇒ item");
+  assert.equal(alerts[0].sessionId, "sess-a");
+  assert.equal(alerts[0].event.id, ev.id);
+});
+
+check("activeContextExhaustedAlerts: a session that recovered in place (predicate now false) drops the item without any second event", () => {
+  const ev = cxEv({ managerSessionId: "sess-b" });
+  const alerts = activeContextExhaustedAlerts([ev], neverExhausted);
+  assert.equal(alerts.length, 0, "predicate false ⇒ none, even though only ONE event kind exists for this alert");
+});
+
+check("activeContextExhaustedAlerts: latest-wins per session — only the newest event's id is kept", () => {
+  const sid = "sess-c";
+  const older = cxEv({ managerSessionId: sid, ts: "2026-01-01T00:00:00.000Z" });
+  const newer = cxEv({ managerSessionId: sid, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeContextExhaustedAlerts([older, newer], alwaysExhausted);
+  assert.equal(alerts.length, 1, "one session ⇒ one item");
+  assert.equal(alerts[0].event.id, newer.id, "the NEWER event's id wins, not the older one");
+});
+
+check("activeContextExhaustedAlerts: unsorted input is sorted internally — order of the array passed in doesn't matter", () => {
+  const sid = "sess-d";
+  const older = cxEv({ managerSessionId: sid, ts: "2026-01-01T00:00:00.000Z" });
+  const newer = cxEv({ managerSessionId: sid, ts: "2026-01-01T00:00:01.000Z" });
+  const alerts = activeContextExhaustedAlerts([newer, older], alwaysExhausted);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].event.id, newer.id, "still the newer event's id, regardless of array order");
+});
+
+check("activeContextExhaustedAlerts: independent sessions are tracked separately — one exhausted, one recovered", () => {
+  const evA = cxEv({ managerSessionId: "sess-e" });
+  const evB = cxEv({ managerSessionId: "sess-f" });
+  const alerts = activeContextExhaustedAlerts([evA, evB], (sid) => sid === "sess-e");
+  assert.equal(alerts.length, 1, "only the still-exhausted session surfaces");
+  assert.equal(alerts[0].sessionId, "sess-e");
+});
+
+check("activeContextExhaustedAlerts: a PLATFORM Lead's own exhaustion (managerSessionId is the Lead's own id) surfaces exactly like a manager's", () => {
+  const ev = cxEv({ managerSessionId: "lead-a" });
+  const alerts = activeContextExhaustedAlerts([ev], alwaysExhausted);
+  assert.equal(alerts.length, 1, "this helper gates on the predicate alone, never role — a Lead's event is indistinguishable from a manager's by shape");
+  assert.equal(alerts[0].sessionId, "lead-a");
+});
+
+check("activeContextExhaustedAlerts: an unrelated event kind is ignored entirely", () => {
+  const unrelated = { ...cxEv({ managerSessionId: "sess-g" }), kind: "context_escalated" };
+  const alerts = activeContextExhaustedAlerts([unrelated], alwaysExhausted);
+  assert.equal(alerts.length, 0, "only manager_context_exhausted rows are considered");
 });
 
 // ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) — extracted out of lib/attention.ts ──────

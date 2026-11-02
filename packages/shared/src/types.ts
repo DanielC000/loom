@@ -859,6 +859,16 @@ export interface Session {
    */
   rateLimitDeadline?: string | null;
   /**
+   * ISO instant this session's transcript last showed the terminal context-exhaustion api-error
+   * record. null = not exhausted. busy is cleared to false the moment this is set; Loom holds its
+   * pending queue rather than draining into the dead turn. Clears on the next busy(true) rising
+   * edge — a fresh worker_recycle row never carries it forward (a new session row), and a resume's
+   * first turn clears it on the SAME session row.
+   * @decision 66ff7321 — detected by TICK (BusyWorkerWatcher/ContextWatcher), never a hook: no
+   * Stop/StopFailure fires for this failure (empirically verified against a real specimen).
+   */
+  contextExhaustedAt?: string | null;
+  /**
    * Opt-in browser-automation capability, resolved from the session's Profile at spawn and PINNED
    * here (mirrors `role`): a per-session stdio Playwright MCP is injected iff this is true. Persisted
    * so EVERY respawn path (resume / fork / recycle) carries the capability forward unchanged — a
@@ -1293,6 +1303,25 @@ export type OrchestrationEventKind =
   // manager decides whether to check on it. Emitted ONCE per episode (re-arms when the worker makes
   // progress, i.e. lastActivity advances).
   | "worker_stuck"
+  // Context-EXHAUSTION detection (BusyWorkerWatcher, card 66ff7321): a LIVE worker's transcript tail
+  // showed the terminal "Prompt is too long" api-error record — no Stop/StopFailure hook ever fires
+  // for this failure (empirically verified), so this is TICK-detected, never hook-delivered. Filed
+  // under the OWNING MANAGER (managerSessionId) with workerSessionId/taskId set; `detail` carries
+  // { error? } (the raw api-error code, never required to equal a specific value — a future variant
+  // must still be recorded, not silently missed). busy is cleared to false as a side effect of
+  // detection (PtyHost.markContextExhausted), and the worker's pending queue is HELD, never drained,
+  // until a worker_recycle (keeps the worktree/branch) or resume. Emitted ONCE per exhaustion episode
+  // — `context_exhausted_at` itself is the de-dup latch (null again only on the next busy rising
+  // edge), mirroring `worker_stuck`'s own episode-boundary convention.
+  | "worker_context_exhausted"
+  // Context-EXHAUSTION detection, manager/platform twin (ContextWatcher, card 66ff7321): same terminal
+  // record, same tick-detected mechanism, for a LIVE manager or platform-Lead session instead of a
+  // worker. Filed under the session itself (managerSessionId = its own id, no workerSessionId — there
+  // is no owning parent to notify). No direct nudge (nothing above a manager to push into) — surfaced
+  // via the SAME human-attention classification `context_escalated`/`context_blind_turn` already use
+  // (companion/attention-push.ts `classify()` → "context-overflow") plus `lastError`, never a new push
+  // channel. `detail` carries { error? }, same shape as `worker_context_exhausted`.
+  | "manager_context_exhausted"
   // MCP-silence watchdog (IdleWatcher, card d1521fca): a LIVE, non-recycled session whose MCP traffic
   // has gone quiet — one router stale while another stays recent (ASYMMETRIC), or every established
   // router stale at once (ALL-SILENT) — while the session itself shows no sign of having simply gone
@@ -2206,6 +2235,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true,
   give_up_recovery_escalated: true, worker_stuck: true, mcp_silence_detected: true,
+  worker_context_exhausted: true, manager_context_exhausted: true,
   worktree_vanished: true,
   manager_manage: true, session_message: true, session_steer_dropped: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
@@ -3783,6 +3813,7 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "question_asked", "question_amended", "request_escalated",
   "idle_escalated", "idle_report",
   "context_escalated", "context_blind_turn", "context_emergency_interrupt",
+  "worker_context_exhausted", "manager_context_exhausted",
   "platform_escalate",
   "session_rate_limited", "rate_limit_bailed",
   "schedule_fired", "poll_fired", "wake_fired",

@@ -11406,10 +11406,13 @@ export class SessionService {
     // (c) Interrupt ONLY when the redirect was HELD (the target was busy). For an idle target the redirect
     // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
     // cancel that very turn.
-    const r: RedirectResult = r0.delivered
+    // @decision 66ff7321 — a context-exhausted target has nothing in flight to interrupt (busy already
+    // false); report the ordinary next-turn-boundary hold, never a false after-interrupt claim.
+    const exhausted = target.contextExhaustedAt != null;
+    const r: RedirectResult = r0.delivered || exhausted
       ? { ...r0, discarded: flushed.length }
       : { ...r0, landsAt: "after-interrupt", interrupting: true, discarded: flushed.length };
-    if (!r.delivered) this.pty.interruptForRedirect(target.id);
+    if (!r.delivered && !exhausted) this.pty.interruptForRedirect(target.id);
     // @decision 99339bcd — queuedMsgId + turnSeqAtDelivery must be stamped on BOTH the held and immediate
     //  redirect paths, never held-only — the immediate path has no session_message_queued record to
     //  collide with, but still needs both fields or session_message_gave_up/resolveDirectiveOutcome misread it.
@@ -15707,6 +15710,11 @@ export class SessionService {
   handleBusyEdge(sessionId: string, busy: boolean): void {
     try {
       this.db.setBusy(sessionId, busy);
+      // Card 66ff7321 — a rising edge clears any prior context-exhaustion mark on THIS row (a resume's
+      // first turn; a fresh worker_recycle row never reaches here with one set at all, since recycle
+      // always constructs a brand-new row). Guarded internally to rows actually marked, so an ordinary
+      // turn-start on a session that was never exhausted never touches lastError.
+      if (busy) this.db.clearContextExhaustedOnResume(sessionId);
     } catch (err) {
       console.error(`[busy] ${sessionId} db.setBusy(${busy}) failed — the busy DB column may now be stale (PtyHost.reconcile() heals it on its next tick):`, (err as Error)?.message ?? err);
     }

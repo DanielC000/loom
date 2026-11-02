@@ -4,6 +4,7 @@ import type { OrchestrationConfig, Session } from "@loom/shared";
 import type { Db } from "../db.js";
 import { claudeAdapter } from "../pty/claude-adapter.js";
 import { codexAdapter } from "../pty/codex-adapter.js";
+import { checkContextExhaustion } from "./context-exhaustion.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface ContextPty {
@@ -18,6 +19,9 @@ export interface ContextPty {
    * this call) — card 49fdcbbc: tick() below must not treat that as a sent nudge.
    */
   enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number; queued?: boolean };
+  /** Card 66ff7321 — mark a session context-exhausted (holds delivery, clears busy). See
+   *  PtyHost.markContextExhausted's own doc. Returns false when there's no live claude session to mark. */
+  markContextExhausted(sessionId: string): boolean;
 }
 
 export interface ContextWatcherDeps {
@@ -127,6 +131,14 @@ export class ContextWatcher {
     const nowIso = now.toISOString();
 
     for (const m of db.listLiveManagers()) {
+      // Card 66ff7321 — CONTEXT-EXHAUSTION detection, checked FIRST and unconditionally for every busy
+      // manager, same shape as BusyWorkerWatcher's own worker-side check (see that file's doc for why
+      // this must be tick-detected: no Stop/StopFailure hook ever fires for this failure).
+      if (this.checkContextExhaustion(db, pty, m, nowIso)) continue;
+      // Round 2: an ALREADY-exhausted session (marked on an earlier tick) must also skip every ordinary
+      // signal below — see isAlreadyContextExhausted's own doc.
+      if (this.isAlreadyContextExhausted(m)) continue;
+
       const project = db.getProject(m.projectId);
       if (!project) continue;
       const cfg = resolveConfig(project.config).orchestration;
@@ -229,6 +241,11 @@ export class ContextWatcher {
     // here; only IdleWatcher covers them). So this loop runs ONLY the telemetry-less turn-count fallback,
     // gated on the adapter capability: a claude Lead is skipped outright (byte-identical to before).
     for (const lead of db.listLivePlatformSessions()) {
+      // Card 66ff7321 — CONTEXT-EXHAUSTION detection, same shape as the manager loop above, checked
+      // BEFORE the claude-lead skip just below: this detector applies regardless of ctx-telemetry
+      // capability (a codex lead's transcript simply never matches, no separate gate needed).
+      if (this.checkContextExhaustion(db, pty, lead, nowIso)) continue;
+      if (this.isAlreadyContextExhausted(lead)) continue;
       if (contextTelemetryFor(lead.harness)) continue;
       const project = db.getProject(lead.projectId);
       if (!project) continue;
@@ -288,6 +305,49 @@ export class ContextWatcher {
     db.recordContextNudge(m.id, nowIso);
     // eslint-disable-next-line no-console
     console.log(`[context-watcher] nudged manager ${m.id} to recycle by turn count (${result.delivered ? "delivered" : "queued, lands next turn"}; ${turns} turns >= ${limit}, no context telemetry, unanswered→${state.unanswered + 1})`);
+  }
+
+  /**
+   * Card 66ff7321 — CONTEXT-EXHAUSTION detection, manager/platform twin of
+   * `BusyWorkerWatcher`'s own worker-side check (see that file's doc for the full mechanism and why
+   * this must be tick-detected rather than hook-delivered). Returns `true` iff this session was found
+   * exhausted THIS tick (whether or not a fresh mark was actually applied) — the caller's signal to
+   * `continue` past the rest of this session's ordinary context-nudge logic, which would otherwise
+   * read a now-false `busy` and a stale `ctxInputTokens` reading.
+   *
+   * No direct nudge — there is no owning parent to push into (a manager/platform session is the top
+   * of its own lineage). Surfaced via the SAME human-attention classification `context_escalated`/
+   * `context_blind_turn` already use (companion/attention-push.ts `classify()` → "context-overflow")
+   * plus `lastError`, never a new push channel.
+   */
+  private checkContextExhaustion(db: Db, pty: ContextPty, m: Session, nowIso: string): boolean {
+    if (!m.busy || m.harness === "codex" || !m.engineSessionId) return false;
+    const exhaustion = checkContextExhaustion(m.cwd, m.engineSessionId, m.harness);
+    if (!exhaustion) return false;
+    const marked = pty.markContextExhausted(m.id);
+    if (marked) {
+      db.setContextExhausted(m.id, nowIso, `Context exhausted — the engine rejected the next prompt as too long (${exhaustion.matchedText}).`);
+      db.appendEvent({
+        id: randomUUID(), ts: nowIso, managerSessionId: m.id, kind: "manager_context_exhausted",
+        detail: { error: exhaustion.error ?? null },
+      });
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] manager/platform ${m.id} CONTEXT-EXHAUSTED (${exhaustion.error ?? "unknown error"}) — busy cleared, queue held, surfaced via lastError/attention-push`);
+    }
+    return true;
+  }
+
+  /**
+   * Round 2 (CR finding, reviewer 6ba057e4): `checkContextExhaustion` above only returns `true` on the
+   * TICK it first marks a session — on every LATER tick `m.busy` already reads false (the mark cleared
+   * it), so that method's own `!m.busy` guard returns `false` and the caller does NOT `continue`,
+   * falling through into the recycle-ratio nudge, the unanswered-cap escalation, and the emergency
+   * interrupt with a now-stale `ctxInputTokens` reading — none of which can ever reach an engine that
+   * will never produce another Stop. Call this SEPARATELY, right after `checkContextExhaustion`, on
+   * EVERY tick (not just the marking one) to skip all of that for as long as the mark stands.
+   */
+  private isAlreadyContextExhausted(m: Session): boolean {
+    return m.contextExhaustedAt != null;
   }
 
   /**

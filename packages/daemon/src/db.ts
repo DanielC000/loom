@@ -2111,6 +2111,10 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // no DEFAULT: every legacy row backfills to NULL = "unknown, fall back to the interim rule" (see
   // Session.forcedPlain's own doc + SessionService.effectiveForcePlain). No index references this column.
   forced_plain: "INTEGER",
+  // Card 66ff7321 — terminal context-exhaustion mark, see Session.contextExhaustedAt's own doc.
+  // Nullable, no DEFAULT: every legacy row backfills to NULL = "not exhausted". No index references
+  // this column.
+  context_exhausted_at: "TEXT",
 };
 
 /** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
@@ -7409,6 +7413,41 @@ export class Db {
     this.notifySessionChanged(id);
   }
 
+  /**
+   * The fixed, named-prefix portion of every `lastError` this card's own detectors write (both
+   * `busy-worker-watcher.ts` and `context-watcher.ts` — the variable `matchedText` tail never changes
+   * this prefix). {@link clearContextExhaustedOnResume} below keys on it, round 2 (CR finding).
+   */
+  static readonly CONTEXT_EXHAUSTED_LAST_ERROR_PREFIX = "Context exhausted";
+
+  /**
+   * Card 66ff7321 — stamp (or clear, passing `exhaustedAt: null`) a session's terminal
+   * context-exhaustion mark + human-readable lastError. Mirrors {@link setRateLimitedUntil}'s shape.
+   * Bumps last_activity so the UI reflects the change.
+   */
+  setContextExhausted(id: string, exhaustedAt: string | null, lastError: string | null): void {
+    this.db.prepare("UPDATE sessions SET context_exhausted_at = ?, last_error = ?, last_activity = ? WHERE id = ?")
+      .run(exhaustedAt, lastError, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
+  }
+
+  /**
+   * Clear a context-exhaustion mark on the turn's rising edge (PtyHost.setBusy, busy going true). A
+   * fresh worker_recycle row needs no call here (its `context_exhausted_at` is already NULL by
+   * construction — see `worker-recycle-is-always-fresh-never-resume` project memory). GUARDED to rows
+   * actually marked, and `last_error` clears only while it still carries this card's own prefix.
+   * @decision 66ff7321 — do not clear `last_error` unconditionally on this WHERE guard alone; a later,
+   * unrelated write (e.g. a crash-loop banner) must survive once the exhaustion prefix no longer matches.
+   */
+  clearContextExhaustedOnResume(id: string): void {
+    const result = this.db.prepare(
+      "UPDATE sessions SET context_exhausted_at = NULL, " +
+      "last_error = CASE WHEN last_error LIKE ? THEN NULL ELSE last_error END " +
+      "WHERE id = ? AND context_exhausted_at IS NOT NULL",
+    ).run(`${Db.CONTEXT_EXHAUSTED_LAST_ERROR_PREFIX}%`, id);
+    if (result.changes > 0) this.notifySessionChanged(id);
+  }
+
   // --- Asleep-at-the-Wheel idle watchdog state (FOUNDATION; persisted per-manager, parity with the
   // rate-limit accessors above). Nothing reads/writes these yet — the IdleWatcher ticker and the
   // idle_report tool that drive them are later tasks. Kept as dedicated accessors rather than fields
@@ -11271,6 +11310,7 @@ function toSession(r0: unknown): Session {
     model: (r.model as string) ?? null,
     rateLimitedUntil: (r.rate_limited_until as string) ?? null,
     rateLimitDeadline: (r.rate_limit_deadline as string) ?? null,
+    contextExhaustedAt: (r.context_exhausted_at as string) ?? null,
     archivedAt: (r.archived_at as string) ?? null,
     // @decision 963462f5 — genuine TRI-STATE: NULL must stay null (legacy/unknown), never collapse to
     // false like the NOT-NULL boolean columns above.

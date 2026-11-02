@@ -1,13 +1,38 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { resolveConfig, contextPercentFor } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
+import { checkContextExhaustion } from "./context-exhaustion.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface BusyWorkerPty {
   isAlive(sessionId: string): boolean;
   /** Nudge text into the session's busy-gated queue (waits if the target is mid-turn). */
   enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number };
+  /** Card 66ff7321 — mark a session context-exhausted (holds delivery, clears busy). See
+   *  PtyHost.markContextExhausted's own doc. Returns false when there's no live claude session to mark. */
+  markContextExhausted(sessionId: string): boolean;
+}
+
+/**
+ * Card 66ff7321 — best-effort "what did it last land" for the context-exhausted notice. Bounded
+ * (short timeout), NEVER THROWS and never rejects — a worktree that's mid-GC, or a git hiccup, must
+ * never block anything. `cwd` is the worker's own worktree path (git/worktrees.ts), never the shared
+ * canonical repo, so this is an ordinary, uncontended, read-only local git call — no canonicalGit/
+ * lock involved.
+ * @decision 66ff7321 — round 2 (CR finding): this was `execFileSync`, up to a 3s SYNCHRONOUS block
+ * on the daemon's event loop per tick — async `execFile` instead, per CLAUDE.md's event-loop
+ * discipline (the same class of hazard `createWorktree`'s own async-spawn split already guards).
+ */
+function tryReadLastCommitSummary(cwd: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", cwd, "log", "-1", "--format=%h %s"], { timeout: 3000, encoding: "utf8" }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      const line = (stdout ?? "").trim();
+      resolve(line || null);
+    });
+  });
 }
 
 export interface BusyWorkerWatcherDeps {
@@ -65,6 +90,55 @@ export class BusyWorkerWatcher {
     for (const w of db.listLiveWorkers()) {
       if (!w.busy) continue;                                   // idle worker → not this watchdog's job
       if (!pty.isAlive(w.id)) continue;                        // db says live but pty is gone → skip
+
+      // Card 66ff7321 — CONTEXT-EXHAUSTION detection, checked FIRST and unconditionally for every busy
+      // claude worker (no staleness window — the terminal record is dispositive the instant it's seen).
+      // No Stop/StopFailure hook ever fires for this failure (empirically verified), so this tick is
+      // the ONLY place it can be caught. Claude-only: a codex transcript is a different wire format
+      // entirely and would simply never match, but skip the wasted read outright.
+      if (w.harness !== "codex" && w.engineSessionId) {
+        const exhaustion = checkContextExhaustion(w.cwd, w.engineSessionId, w.harness);
+        if (exhaustion) {
+          const marked = pty.markContextExhausted(w.id);
+          if (marked) {
+            // The DB mark is a fact about the WORKER, independent of whether anyone's listening — stamp
+            // it regardless of manager liveness (mirrors a real exhaustion: true whether or not it's
+            // ever reported). The durable event + notice, below, mirror the ordinary busy-long path's
+            // OWN liveness gate ("the owning manager must exist and be live for the signal to be
+            // actionable") for consistency.
+            db.setContextExhausted(w.id, nowIso, `Context exhausted — the engine rejected the next prompt as too long (${exhaustion.matchedText}).`);
+            const managerId = w.parentSessionId;
+            const manager = managerId ? db.getSession(managerId) : null;
+            if (managerId && manager && manager.processState === "live") {
+              db.appendEvent({
+                id: randomUUID(), ts: nowIso, managerSessionId: managerId, workerSessionId: w.id,
+                taskId: w.taskId ?? null, kind: "worker_context_exhausted",
+                detail: { error: exhaustion.error ?? null },
+              });
+              // Round 2 — tryReadLastCommitSummary is now async (no event-loop-blocking execFileSync);
+              // the notice build + enqueue moves into its `.then()` so `tick()` itself stays fully
+              // synchronous. The durable event above is already appended before this fires, so nothing
+              // load-bearing waits on the git read — only the human-facing notice text's last-commit
+              // detail lags by however long the bounded read takes.
+              tryReadLastCommitSummary(w.cwd).then((lastCommit) => {
+                const msg =
+                  `[loom:worker-context-exhausted] worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
+                  `just hit the terminal "${exhaustion.matchedText}" — its context is EXHAUSTED and it can no longer take a turn. ` +
+                  `busy has been cleared and any queued direction is HELD (not drained into the dead turn). ` +
+                  `worker_recycle it — this keeps its worktree/branch intact for the successor.` +
+                  (lastCommit ? ` Its branch's last commit: ${lastCommit}.` : "");
+                try { pty.enqueueStdin(managerId, msg); } catch { /* manager not live — the durable event stands */ }
+                // eslint-disable-next-line no-console
+                console.log(`[busy-worker-watcher] worker ${w.id} CONTEXT-EXHAUSTED (${exhaustion.error ?? "unknown error"}) → notice to manager ${managerId}`);
+              }).catch(() => { /* tryReadLastCommitSummary's own Promise never rejects — belt and braces */ });
+            } else {
+              // eslint-disable-next-line no-console
+              console.log(`[busy-worker-watcher] worker ${w.id} CONTEXT-EXHAUSTED (${exhaustion.error ?? "unknown error"}) — no live owning manager to notify (orphan; boot-reconcile's concern)`);
+            }
+          }
+          continue; // handled (or already marked by a prior tick) — skip the ordinary busy-long check below
+        }
+      }
 
       const project = db.getProject(w.projectId);
       if (!project) continue;

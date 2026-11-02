@@ -285,3 +285,75 @@ export function readTranscript(cwd: string, engineSessionId: string): Transcript
   if (!file) return [];
   return parseTranscriptFile(file);
 }
+
+/**
+ * Card 66ff7321 — the terminal "Prompt is too long" / context-exhaustion api-error record. Keyed
+ * on this NAMED allowlist (never widen to a generic api-error/invalid_request match — every OTHER
+ * `isApiErrorMessage` class, e.g. a rate-limit or billing error, is OUT OF SCOPE and must never
+ * notify as exhaustion): today exactly one pattern, the literal text the real specimen (worker
+ * 09e8c9f1, 2026-11-02) carried.
+ * @decision 66ff7321 — add a FUTURE variant text here, never loosen the record-shape predicate below.
+ */
+export const CONTEXT_EXHAUSTION_TEXT_PATTERNS: readonly RegExp[] = [/^Prompt is too long/i];
+
+export interface ContextExhaustionMatch {
+  /** The record's own `error` field verbatim (e.g. "invalid_request") — recorded, never required to
+   *  equal a specific value, so a future CLI variant is still captured rather than silently missed. */
+  error?: string;
+  /** The matched assistant-text content, verbatim. */
+  matchedText: string;
+}
+
+/**
+ * A genuine new human-authored turn (`type:"user"` whose content is NOT purely tool_result blocks —
+ * see `classifyRole`'s identical distinction above). A tool-result submission is also `type:"user"` on
+ * the wire but is bookkeeping for the SAME turn, never a new one, so it must not count here.
+ *
+ * @decision 66ff7321 — do not drop the `isMeta` check below: a real `type:"user"` record the CLI
+ * stamps `isMeta:true` (its own metaTexts/hook-caveat content) is never human-authored and must not
+ * count as a genuine turn, even though its content shape otherwise passes every check below.
+ */
+function isGenuineUserTurn(rec: Record<string, unknown>): boolean {
+  if (rec.type !== "user") return false;
+  if (rec.isMeta === true) return false;
+  const content = (rec.message as { content?: unknown } | undefined)?.content;
+  if (typeof content === "string") return true;
+  if (!Array.isArray(content)) return false;
+  return !(content.length > 0 &&
+    content.every((b) => b !== null && typeof b === "object" && (b as Record<string, unknown>).type === "tool_result"));
+}
+
+/**
+ * Detect the terminal context-exhaustion record in `tailText` (an arbitrary byte-bounded SUFFIX of a
+ * transcript file — its first line may be a truncated JSON fragment, skipped rather than a parse
+ * failure). Keys on the RECORD SHAPE (`type:"assistant"` + `message.model === "<synthetic>"` +
+ * `isApiErrorMessage === true` + text matching {@link CONTEXT_EXHAUSTION_TEXT_PATTERNS}), never a
+ * bare substring scan, and returns non-null ONLY when that record is also the LATEST
+ * `type:"assistant"` record in `tailText` — a later real (non-synthetic-model) assistant record means
+ * the session went on to produce real output and is no longer exhausted.
+ * @decision 66ff7321 — a marker is ALSO superseded by a later genuine user turn with no assistant
+ * reply yet, or by a compact-boundary/summary record (round-2 fix, record has the real wire shapes).
+ */
+export function detectContextExhaustionInTail(tailText: string): ContextExhaustionMatch | null {
+  let latest: ContextExhaustionMatch | null = null;
+  for (const rawLine of tailText.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let rec: Record<string, unknown>;
+    try { rec = JSON.parse(line); } catch { continue; } // a bounded tail's first line may be a truncated fragment
+    if (rec.type === "assistant") {
+      const message = rec.message as { model?: unknown; content?: unknown } | undefined;
+      const content = message?.content;
+      const firstBlock = Array.isArray(content) ? (content[0] as Record<string, unknown> | undefined) : undefined;
+      const text = firstBlock?.type === "text" && typeof firstBlock.text === "string" ? firstBlock.text : undefined;
+      const isMatch = message?.model === "<synthetic>" && rec.isApiErrorMessage === true
+        && typeof text === "string" && CONTEXT_EXHAUSTION_TEXT_PATTERNS.some((re) => re.test(text));
+      latest = isMatch ? { error: typeof rec.error === "string" ? rec.error : undefined, matchedText: text as string } : null;
+      continue;
+    }
+    if (isGenuineUserTurn(rec) || rec.type === "summary" || (rec.type === "system" && rec.subtype === "compact_boundary")) {
+      latest = null;
+    }
+  }
+  return latest;
+}

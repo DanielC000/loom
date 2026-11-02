@@ -369,6 +369,36 @@ export function activeKickoffDroppedAlerts(
   return out;
 }
 
+// ── CONTEXT EXHAUSTED pairing (card 66ff7321 round 3, CR finding #2) ───────────────────────────────────
+// Extracted out of lib/attention.ts's useAttention, same reason as activeBootStuckAlerts/
+// activeKickoffDroppedAlerts above: `manager_context_exhausted` is filed under `managerSessionId: m.id`
+// for BOTH a project manager (role:"manager") and the platform Lead (role:"platform") — see
+// ContextWatcher.tick's two loops — so this must be fed from a cross-session, kind-filtered query, never
+// a per-manager (role==="manager" only) fan-out, same `43084723` reasoning. UNLIKE the other two pairings
+// above, there is no second "resolved"/"cleared" event kind to pair against — exhaustion is a SESSION
+// STATE (`Session.contextExhaustedAt`), cleared in place by a human /compact or a fresh resume turn's
+// busy(true) rising edge (`pty/host.ts`'s `setBusy`) — so the caller's own predicate re-checks that LIVE
+// state (and liveness) directly, rather than a second event kind ever superseding the first.
+export interface ContextExhaustedAlert { event: OrchestrationEvent; sessionId: string }
+
+export function activeContextExhaustedAlerts(
+  events: readonly OrchestrationEvent[],
+  isStillExhausted: (sessionId: string) => boolean,
+): ContextExhaustedAlert[] {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  for (const e of sorted) {
+    if (e.kind !== "manager_context_exhausted") continue;
+    latest.set(e.managerSessionId, e);
+  }
+  const out: ContextExhaustedAlert[] = [];
+  for (const e of latest.values()) {
+    if (!isStillExhausted(e.managerSessionId)) continue; // recovered in place, or no longer live
+    out.push({ event: e, sessionId: e.managerSessionId });
+  }
+  return out;
+}
+
 // ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) ──────────────────────────────────────────
 // Extracted out of lib/attention.ts's useAttention, same reason as activeBootStuckAlerts above: given a
 // combined, unsorted merge_request/merge_done/merge_rejected stream, keeps the LATEST per (taskId ||
