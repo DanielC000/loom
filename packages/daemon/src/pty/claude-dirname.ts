@@ -8,3 +8,11 @@
 
 /** The directory name Claude Code discovers project-local doctrine (skills, settings) under. */
 export const CLAUDE_DOCTRINE_DIR = ".claude";
+
+/** `permission-scan.ts` re-exports this so every existing consumer is unaffected.
+ *
+ * @decision 015fdb23 — CR round 4, item 7: lives HERE so a module that only needs this label (e.g.
+ * `companion/attention-push.ts`) doesn't acquire `permission-scan.ts`'s own `inject.ts`/pty-doctrine
+ * imports transitively — same leaf-module reasoning as `CLAUDE_DOCTRINE_DIR` above.
+ */
+export const CWD_SKILLS_SCAN_SCOPE = `<cwd>/${CLAUDE_DOCTRINE_DIR}/skills`;

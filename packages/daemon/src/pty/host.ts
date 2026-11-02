@@ -8,7 +8,7 @@ import { CODEX_RESTRICTED_TOOLS_REASON, TRANSCRIPT_ROOT_DENY_ROLES, codexPermiss
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
-import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
+import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES, isLoomDrivenRole } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { wrapStdioMountWithEnvIsolation } from "./env-isolation.js";
 import {
@@ -32,6 +32,7 @@ import { ensureTrustedResilient } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
+import { scanCwdSkillsForPermissionFrontmatter, CWD_SKILLS_SCAN_SCOPE, skillPermissionFindingPath } from "../skills/permission-scan.js";
 import { readContextStats, type ContextStats, isToolResultOnly, userTurnText } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { TRANSCRIPT_ROOT_READ_DENY_RULE, otherProjectTranscriptDenyRules } from "./claude-transcript.js";
@@ -4128,6 +4129,10 @@ export interface PtyHostEvents {
    *  ("what instruction content did this session load") doesn't need them. Optional so every existing
    *  PtyHostEvents implementer (test doubles included) stays byte-identical without providing it. */
   onInstructionsLoaded?(sessionId: string, info: { filePath: string; memoryType: string; loadReason: string; globs?: string[]; triggerFilePath?: string; parentFilePath?: string; agentId?: string; agentType?: string }): void;
+  /** @decision 015fdb23 — fires even on a clean scan for role `"assistant"`, and always on `incomplete`
+   *  (round 4); see the decision record's "Round 3"/"Round 4" sections for why. `contentHash` (card
+   *  979f29b9) is the dedupe-key component — never written onto the durable event. */
+  onSkillPermissionFrontmatterWarning?(sessionId: string, info: { role: SessionRole | null; scope: string; findings: { name: string; fields: string[]; contentHash: string }[]; truncated: { cap: string; names: string[]; skippedCount?: number; size?: number; mtimeMs?: number }[]; incomplete: boolean }): void;
   /** @decision b987f086 — onCodexUnsupportedCapability: two independent reasons (a stdio-only MCP server;
    *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended — and never relied
    *  on alone, since profiles/validate.ts's save-time rejection can't catch a profile that predates it. */
@@ -4245,7 +4250,7 @@ export { LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES };
  *  ({@link HARNESS_SCHEDULING_TOOLS}) disallow are separate, each with its own role scope. */
 export function disallowedToolsForRole(role?: SessionRole | null): string[] {
   const out: string[] = [];
-  if (role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(role)) {
+  if (isLoomDrivenRole(role)) {
     out.push(...HUMAN_PROMPT_TOOLS);
   }
   switch (role) {
@@ -8730,7 +8735,44 @@ export class PtyHost {
     // browserTesting/documentConversion booleans + the capabilities array — same helper buildMcpServers
     // uses below), so a capability-bound skill (CAPABILITY_BOUND_SKILLS, empty today) gates correctly.
     const grantedCapabilitySlugs = resolveProfileCapabilities(opts).map((g) => g.slug);
-    try { injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled, this.isSessionLive, grantedCapabilitySlugs); } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    let injectedClaimedNames: readonly string[] = [];
+    let injectedClaimedFingerprints: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+    try {
+      const injected = injectSkills(opts.cwd, opts.sessionId, opts.skills ?? null, opts.role, obsidianEnabled, this.isSessionLive, grantedCapabilitySlugs);
+      injectedClaimedNames = injected.claimedNames;
+      injectedClaimedFingerprints = injected.claimedFingerprints;
+    } catch (e) { console.log(`[pty] injectSkills failed (non-fatal): ${(e as Error).message}`); }
+    // Card 015fdb23: bounded, synchronous, right next to injectSkills's own already-synchronous I/O
+    // above — flags a non-Loom-owned `<cwd>/.claude/skills` skill carrying `allowed-tools:`/`hooks:`
+    // frontmatter (the two fields `disableSkillShellExecution` below has no lever for). Never let a scan
+    // hiccup block a spawn, same posture as injectSkills itself.
+    //
+    // @decision 015fdb23 — CR round 3, finding 2: gated on `isLoomDrivenRole` so manager/platform/
+    // operator/plain sessions (the owner's own, interactive or already-watched) never get console noise
+    // or an event about their own repo — see the decision record's "Round 3" section.
+    if (isLoomDrivenRole(opts.role)) {
+      try {
+        const scan = scanCwdSkillsForPermissionFrontmatter(opts.cwd, injectedClaimedNames, injectedClaimedFingerprints);
+        // Card 979f29b9 requirement (a): a loud, explicit daemon line naming the repo-relative path(s)
+        // and vector(s) — independent of the durable event/owner-push below, never gated on role.
+        for (const f of scan.findings) {
+          console.error(`[pty][skill-permission-widening] ${opts.sessionId}: ${skillPermissionFindingPath(f.name)} carries ${f.fields.join(", ")} — Loom does not own this file, never stripped, see card 979f29b9`);
+        }
+        for (const t of scan.truncated) {
+          console.error(`[pty][skill-permission-widening] ${opts.sessionId}: scan truncated at the ${t.cap} cap (${CWD_SKILLS_SCAN_SCOPE}) — ${t.names.join(", ") || "none named"}${t.skippedCount ? ` (${t.skippedCount} total skipped)` : ""} may hide an undetected finding, see card 015fdb23`);
+        }
+        // CR round 4, item 2: a scan that could NOT fully run is itself a loud line — never silently
+        // folded into "nothing to report" just because no finding/truncation came out of it.
+        if (scan.incomplete) {
+          console.error(`[pty][skill-permission-widening] ${opts.sessionId}: scan INCOMPLETE (I/O error reading ${CWD_SKILLS_SCAN_SCOPE}) — results may be missing a finding, see card 015fdb23`);
+        }
+        // `assistant` always fires (even on a clean scan) so the handler can clear a stale dedupe key —
+        // every other in-scope role only fires when there's something to report (see the decision record).
+        if (scan.findings.length || scan.truncated.length || scan.incomplete || opts.role === "assistant") {
+          this.events.onSkillPermissionFrontmatterWarning?.(opts.sessionId, { role: opts.role ?? null, scope: CWD_SKILLS_SCAN_SCOPE, findings: scan.findings, truncated: scan.truncated, incomplete: scan.incomplete });
+        }
+      } catch (e) { console.log(`[pty] skill permission-frontmatter scan failed (non-fatal): ${(e as Error).message}`); }
+    }
     // Both managers AND workers get the orchestration MCP — but a role-gated surface: managers
     // get the full coordination tools, workers get only worker_report + the read-only my_context
     // (resolved server-side). A
@@ -8854,7 +8896,9 @@ export class PtyHost {
     // all — deliberately NOT `opts.repoPath`, which is documented above as always the project's main
     // checkout and would disagree with what decision-records.mjs itself checks at runtime (it walks up
     // from the session's own cwd). See writeSessionSettings's own doc for the staleness window this implies.
-    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd, opts.docLint);
+    // Card 015fdb23: every LOOM_DRIVEN_ROLES role, never manager/platform/operator/a plain session — see
+    // isLoomDrivenRole's own doc + the decision record for why `assistant` needs no special-casing here.
+    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd, opts.docLint, isLoomDrivenRole(opts.role));
     // Card ed0757d6 Code Review fix, WIDENED by card a50b8afd's own Code Review: everything from HERE
     // (not just from the eventual node-pty spawn call) can throw — in particular `writeSessionMcpConfig`
     // below (a Windows renameSync EPERM, a real documented footgun) — and a throw anywhere in this whole

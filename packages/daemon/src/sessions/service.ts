@@ -39,6 +39,7 @@ import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainl
 import { GitReader } from "../git/reader.js";
 import { GitWriter, unsafeBranchNameReason } from "../git/writer.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
+import { comparisonKey } from "../projects/repos.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR, projectWorkDirEnv, projectWorkDir } from "../paths.js";
@@ -12918,6 +12919,75 @@ export class SessionService {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(`[instructions-loaded] ${sessionId} handleInstructionsLoaded threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
+  /**
+   * Folds in card 979f29b9's dedupe shape; see the decision record's "Round 3"/"Round 4" sections for
+   * the clean-scan key-clearing and why `info.incomplete` is never treated as clean.
+   *
+   * @decision 015fdb23 — appends the durable event only when there's something to report; the owner
+   * push is suppressed on a repeat via `detail.isRepeat`.
+   */
+  handleSkillPermissionFrontmatterWarning(sessionId: string, info: { role: SessionRole | null; scope: string; findings: { name: string; fields: string[]; contentHash: string }[]; truncated?: { cap: string; names: string[]; skippedCount?: number; size?: number; mtimeMs?: number }[]; incomplete?: boolean }): void {
+    try {
+      const s = this.db.getSession(sessionId);
+      const truncated = info.truncated ?? [];
+      const incomplete = info.incomplete === true;
+      // CR round 4, item 2: a scan that could not fully run is NEVER "nothing to report" — treat it the
+      // same as a real finding/truncation for every decision below.
+      const hasSomething = info.findings.length > 0 || truncated.length > 0 || incomplete;
+      // Card 979f29b9: dedupe per (cwd, sorted {name,contentHash}[] + truncated) — ONLY for the role
+      // whose warning can actually reach the owner (every other in-scope role already classifies
+      // "notice", never pushed, so there is nothing to dedupe for it; skip the extra app_meta read/write
+      // on its spawn).
+      let isRepeat = false;
+      if (info.role === "assistant" && s?.cwd) {
+        const metaKey = `skill-perm-warn-last:${comparisonKey(s.cwd)}`;
+        if (!hasSomething) {
+          // CR round 3, finding 5: a CLEAN scan clears the stale dedupe key — a later re-appearance of
+          // the SAME content that was already alerted on once must re-alert, not stay deduped forever
+          // against a sighting from before the repo went clean.
+          this.db.deleteMeta(metaKey);
+          return; // nothing to report — no durable event for a clean spawn
+        }
+        if (incomplete) {
+          // CR round 4, item 2: an incomplete scan never clears, and never UPDATES, the stored dedupe
+          // key — it didn't genuinely re-verify the repo, so it must neither erase a real prior sighting
+          // nor be trusted as a new baseline to compare future scans against. Always surfaces
+          // (isRepeat:false) rather than risk silently deduping away a real I/O-error warning.
+        } else {
+          // CR round 4, item 4: skippedCount/size/mtimeMs make the key content-aware for a truncation
+          // too — a hooked skill whose file keeps changing while still past the readBytes cap (or whose
+          // "entries" skip count changes) must keep re-alerting, never dedupe against stale metadata.
+          const currentKey = JSON.stringify({
+            findings: [...info.findings].map((f) => ({ name: f.name, hash: f.contentHash })).sort((a, b) => a.name.localeCompare(b.name)),
+            truncated: [...truncated]
+              .map((t) => ({ cap: t.cap, names: [...t.names].sort(), skippedCount: t.skippedCount ?? null, size: t.size ?? null, mtimeMs: t.mtimeMs ?? null }))
+              .sort((a, b) => a.cap.localeCompare(b.cap)),
+          });
+          isRepeat = this.db.getMeta(metaKey) === currentKey;
+          if (!isRepeat) this.db.setMeta(metaKey, currentKey);
+        }
+      } else if (!hasSomething) {
+        return; // other in-scope roles: nothing to report, no dedupe bookkeeping to do either
+      }
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+        workerSessionId: sessionId, taskId: s?.taskId ?? null,
+        kind: "skill_permission_frontmatter_warning",
+        detail: {
+          role: info.role, scope: info.scope,
+          // contentHash is the dedupe key's own internal input — never persisted on the durable event.
+          findings: info.findings.map((f) => ({ name: f.name, fields: f.fields })),
+          ...(truncated.length ? { truncated } : {}),
+          ...(incomplete ? { incomplete: true } : {}),
+          ...(info.role === "assistant" ? { isRepeat } : {}),
+        },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[skill-permission-frontmatter-warning] ${sessionId} handleSkillPermissionFrontmatterWarning threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
     }
   }
 

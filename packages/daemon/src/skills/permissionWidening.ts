@@ -44,6 +44,23 @@ function topLevelFrontmatterKeys(content: string): string[] {
 }
 
 /**
+ * True when `content` OPENS a frontmatter block (`---` at the very start) but its own CLOSING fence is
+ * not found anywhere in `content` — i.e. a reader that only has `content` (e.g. a byte-capped read)
+ * cannot be sure it saw the whole block. False for a file with no frontmatter at all (nothing to miss)
+ * AND for a file whose frontmatter closes well within `content` even if the file continues on with an
+ * arbitrarily large, unrelated body afterward — only the block's OWN completeness matters here, not the
+ * file's total size.
+ *
+ * Reuses this module's own `FRONTMATTER_RE` — never a second hand-rolled fence pattern (card 87a51903).
+ *
+ * @decision 015fdb23 — never report a byte-capped read as truncated merely because the FILE is larger
+ * than the cap; only a frontmatter block that itself didn't close within what was read carries risk.
+ */
+export function frontmatterReadIncomplete(content: string): boolean {
+  return /^---\r?\n/.test(content) && !FRONTMATTER_RE.test(content);
+}
+
+/**
  * An inline `` !`cmd` `` shell injection in the body.
  *
  * The `(?<!`)` lookbehind is load-bearing, not cosmetic: without it, ordinary prose that merely

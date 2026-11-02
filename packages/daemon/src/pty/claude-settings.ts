@@ -229,6 +229,10 @@ export function writeSessionSettings(
   // `vaultPath`. OMITTED/false ⇒ that hook is never wired, same as before this param existed; every caller
   // that doesn't thread it (see the test population) stays byte-identical.
   docLint?: boolean,
+  // Card 015fdb23: true for a LOOM_DRIVEN_ROLES session (see host.ts's isLoomDrivenRole), never for
+  // manager/platform/operator/a plain session. OMITTED/false ⇒ the settings object carries no such key,
+  // byte-identical to before this param existed.
+  disableSkillShellExecution?: boolean,
 ): string {
   const hookCmd = {
     hooks: [{ type: "command", command: `node "${RELAY_SCRIPT}" ${sessionId} ${PORT} ${hookToken}` }],
@@ -294,6 +298,7 @@ export function writeSessionSettings(
     includeCoAuthoredBy: false,
     env: RESUME_GATE_ENV_OVERRIDE,
     ...AUTO_MODE_ENTRY_WARNING_OVERRIDE,
+    ...(disableSkillShellExecution ? { disableSkillShellExecution: true } : {}),
   };
   // Card ea2fbcca DoD item 1: validate BEFORE this reaches disk. See assertValidHooksShape's own doc for
   // the shape asserted and the deliberate fail-loud-and-refuse posture.

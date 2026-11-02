@@ -15,6 +15,32 @@ const MANIFEST = ".loom-skills.json"; // records which skill names EACH session 
 // worktree this version hasn't touched yet) ⇒ no fingerprints for anything in it, same as a parse error.
 const FINGERPRINTS_FILE = ".loom-skills-fingerprints.json";
 
+/**
+ * DAEMON-SIDE placement fingerprints, keyed by `cwd` then skill name — never read from disk. The
+ * {@link FINGERPRINTS_FILE} sidecar above lives INSIDE the very `.claude/skills` directory the cwd-skill
+ * permission scan (`permission-scan.ts`) reads, so anything that can write `evil/SKILL.md` there can also
+ * forge a manifest + sidecar entry claiming Loom itself placed it — and the scan would then wrongly trust
+ * that forged claim and skip scanning it. This map is populated ONLY at the exact instant THIS daemon
+ * process's own `injectSkills` call below places a skill (see `recordLoomPlacedFingerprint`), so nothing a
+ * repo/worktree can write to disk can ever populate it. It does not survive a daemon restart: a claimed
+ * name with no entry here fails toward being SCANNED, never toward being trusted (see the decision
+ * record's "After a daemon restart" note). Never consulted by the dead-claim cleanup below, which is a
+ * different concern (safe deletion of an orphaned worktree dir) that legitimately needs cross-restart
+ * persistence and keeps reading the file-based sidecar.
+ *
+ * @decision 015fdb23 — CR round 4, item 3: the cwd sidecar is never trusted for the scan's own exclusion
+ * decision; only this daemon-side registry is.
+ */
+const loomPlacedFingerprintsByCwd = new Map<string, Map<string, Set<string>>>();
+
+function recordLoomPlacedFingerprint(cwd: string, name: string, fingerprint: string): void {
+  let byName = loomPlacedFingerprintsByCwd.get(cwd);
+  if (!byName) { byName = new Map(); loomPlacedFingerprintsByCwd.set(cwd, byName); }
+  let set = byName.get(name);
+  if (!set) { set = new Set(); byName.set(name, set); }
+  set.add(fingerprint);
+}
+
 /** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
  *  these — when the session's project has `obsidian.autoStart` on. Every other skill is untouched. */
 const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "loom-session-end"]);
@@ -277,7 +303,7 @@ function listFilesRecursiveSorted(dir: string): string[] {
  * silently treated as "empty" or "matches," since every caller of this function must fail toward NOT
  * deleting when it can't compute a fingerprint to compare against.
  */
-function fingerprintSkillDir(dir: string): string | null {
+export function fingerprintSkillDir(dir: string): string | null {
   let rels: string[];
   try { rels = listFilesRecursiveSorted(dir); } catch { return null; }
   const h = crypto.createHash("sha256");
@@ -411,11 +437,36 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
  * @decision 31f997e7 — delivery hygiene, not a security boundary; never the only thing standing between
  * an agent and a capability.
  */
+/** Card 015fdb23: every skill name `injectSkills` placed for THIS call, or any other session sharing
+ *  this cwd (per the shared manifest) — i.e. everything in the target dir that IS Loom's own doing.
+ *  Returned so `createPty`'s own cwd-skill permission scan can treat anything else in that directory as
+ *  the repo's own, un-Loom-owned content, without re-parsing the manifest file a second time.
+ *
+ *  `claimedFingerprints` (CR round 3, card 015fdb23; round 4 moved its SOURCE — see below): for each
+ *  claimed name, every content fingerprint Loom itself actually recorded placing there — from THIS call's
+ *  own placement, or from any OTHER live session sharing this cwd THIS SAME DAEMON PROCESS has placed for
+ *  (read from the in-memory {@link loomPlacedFingerprintsByCwd} registry, never the on-disk
+ *  {@link FINGERPRINTS_FILE} sidecar the dead-claim cleanup above still trusts for ITS OWN, different
+ *  purpose). A caller must use this to verify a claimed name's CURRENT on-disk content still matches what
+ *  Loom actually placed, rather than trusting bare manifest membership — a claimed name whose SKILL.md
+ *  was edited AFTER placement, OR whose manifest/sidecar entry was forged by anything that can write
+ *  `.claude/skills` (CR round 4, item 3), has no matching entry in this registry and so a caller that
+ *  blindly trusted `claimedNames` alone would wrongly treat edited/forged (possibly hostile) content as
+ *  Loom's own trusted copy. */
+export interface InjectSkillsResult {
+  claimedNames: readonly string[];
+  claimedFingerprints: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+/** Shared empty-map constant for every early-return `InjectSkillsResult` above — avoids allocating a
+ *  fresh (always-empty) `Map` at each of those call sites. */
+const EMPTY_FINGERPRINTS: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+
 export function injectSkills(
   cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false,
   isSessionLive?: (sessionId: string) => boolean,
   grantedCapabilities?: Iterable<string>, capabilityBindings: Record<string, string> = CAPABILITY_BOUND_SKILLS,
-): void {
+): InjectSkillsResult {
   let storeNames: string[];
   try {
     // Filtered through the SAME `isValidSkillName` predicate the manifest-entry sanitizer uses (card
@@ -424,7 +475,7 @@ export function injectSkills(
     // sanitizeManifestEntries rejects it), then permanently misread as "repo's own" — never refreshed,
     // never pruned, and logged as invalid on every subsequent spawn.
     storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).filter(isValidSkillName);
-  } catch { return; } // no store yet
+  } catch { return { claimedNames: [], claimedFingerprints: EMPTY_FINGERPRINTS }; } // no store yet
   const targetDir = claudeSkillsDir(cwd);
   const claudeDir = path.dirname(targetDir);
   // Refuse BEFORE any write if `.claude` or `.claude/skills` is a symlink/junction redirecting outside
@@ -436,7 +487,7 @@ export function injectSkills(
   const escaped = escapedAncestor(cwd, [claudeDir, targetDir]);
   if (escaped) {
     console.log(`[skills] refusing injection: ${escaped.path} resolves to ${escaped.real}, outside this session's working directory (${cwd}) — skill injection skipped for this session`);
-    return;
+    return { claimedNames: [], claimedFingerprints: EMPTY_FINGERPRINTS };
   }
   fs.mkdirSync(targetDir, { recursive: true });
 
@@ -600,7 +651,10 @@ export function injectSkills(
       // base copy (copySkillAtomic re-copies the fragment-free store base first), so the append lands once.
       if (obsidianFragment && OBSIDIAN_FRAGMENT_SKILLS.has(name)) appendObsidianFragment(dest, obsidianFragment);
       const fp = fingerprintSkillDir(dest);
-      if (fp) placedFingerprints[name] = fp; // absent (fingerprint failed) ⇒ a future dead-claim read sees it as unverifiable, never as a false match
+      if (fp) {
+        placedFingerprints[name] = fp; // absent (fingerprint failed) ⇒ a future dead-claim read sees it as unverifiable, never as a false match
+        recordLoomPlacedFingerprint(cwd, name, fp); // CR round 4, item 3 — daemon-side, never disk-read
+      }
     } else failed.push(name);
   }
 
@@ -649,6 +703,22 @@ export function injectSkills(
   // partial success is recorded and recoverable). The caller treats this as non-fatal but it's now VISIBLE
   // in the daemon log instead of a silent missing-skill.
   if (failed.length) throw new Error(`injectSkills: failed to deliver ${failed.length} skill(s) to ${targetDir}: ${failed.join(", ")}`);
+  // CR round 4 (card 015fdb23, finding 3): read from the DAEMON-SIDE registry (`loomPlacedFingerprintsByCwd`
+  // above) for THIS cwd, never from the on-disk `fingerprints` sidecar — that file lives inside the very
+  // directory the cwd-skill permission scan reads, so anything able to write `evil/SKILL.md` there could
+  // also forge a sidecar entry claiming Loom placed it. The registry can only ever have been populated by
+  // THIS process's own placements (see `recordLoomPlacedFingerprint`), so a forged on-disk entry for a
+  // name this process never actually placed here has no matching set and so is NOT excluded from the scan.
+  const claimedNames = [...new Set([...placed, ...otherClaimed])];
+  const registry = loomPlacedFingerprintsByCwd.get(cwd);
+  const claimedFingerprints = new Map<string, Set<string>>();
+  if (registry) {
+    for (const name of claimedNames) {
+      const set = registry.get(name);
+      if (set && set.size) claimedFingerprints.set(name, new Set(set));
+    }
+  }
+  return { claimedNames, claimedFingerprints };
 }
 
 /** Append local git-ignore patterns for the injected skill dirs + manifest, PLUS Claude Code's own

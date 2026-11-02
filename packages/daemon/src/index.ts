@@ -538,6 +538,10 @@ async function main(): Promise<void> {
     // `instructions_loaded` event. See PtyHostEvents.onInstructionsLoaded's own doc / docs/decisions/
     // 8c70e33c-instructions-loaded-audit-event.md / SessionService.handleInstructionsLoaded's own doc.
     onInstructionsLoaded: (sessionId, info) => sessions.handleInstructionsLoaded(sessionId, info),
+    // Card 015fdb23: a non-Loom-owned cwd skill carries allowed-tools/hooks frontmatter — `sessions`
+    // records the durable event and, for role "assistant", pushes the louder owner-visible nudge. See
+    // PtyHostEvents.onSkillPermissionFrontmatterWarning's own doc / SessionService.handleSkillPermissionFrontmatterWarning's own doc.
+    onSkillPermissionFrontmatterWarning: (sessionId, info) => sessions.handleSkillPermissionFrontmatterWarning(sessionId, info),
     // Card b987f086: a codex spawn declared a capability (a stdio MCP server, or codescape) this harness
     // structurally cannot mount — `sessions` (forward reference, same pattern as onCodexBootStuck above)
     // decides how to record the durable event + fail loud to the recipient AND the sender/manager. See

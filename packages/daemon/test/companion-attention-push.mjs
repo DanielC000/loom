@@ -494,6 +494,71 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   // claude_boot_dialog_resolved above.
   check("classify: manager_kickoff_dropped_resolved → null (a resolve clears an alert, never a fresh one)",
     classify("manager_kickoff_dropped_resolved", {}) === null);
+  // Card 015fdb23: "assistant" is the one locked role that runs in an ordinary, worker-writable user
+  // project — its spawn-time skill-permission-frontmatter warning gets the owner-visible push
+  // ("escalation"); every other in-scope role's is "notice" (durable, not pushed by default).
+  check("classify: skill_permission_frontmatter_warning(role:assistant) → escalation",
+    classify("skill_permission_frontmatter_warning", { role: "assistant" }) === "escalation");
+  check("classify: skill_permission_frontmatter_warning(role:worker) → notice (quieter — not the one exposed locked role)",
+    classify("skill_permission_frontmatter_warning", { role: "worker" }) === "notice");
+  check("classify: skill_permission_frontmatter_warning(role:setup) → notice too",
+    classify("skill_permission_frontmatter_warning", { role: "setup" }) === "notice");
+  // Card 979f29b9: isRepeat (stamped by SessionService.handleSkillPermissionFrontmatterWarning's own
+  // dedupe decision, never re-derived here) suppresses the owner push on a repeat of the SAME content.
+  check("classify: skill_permission_frontmatter_warning(role:assistant, isRepeat:true) → notice (push suppressed on a repeat)",
+    classify("skill_permission_frontmatter_warning", { role: "assistant", isRepeat: true }) === "notice");
+  check("classify: skill_permission_frontmatter_warning(role:assistant, isRepeat:false) → escalation still (a genuine change re-alerts)",
+    classify("skill_permission_frontmatter_warning", { role: "assistant", isRepeat: false }) === "escalation");
+  check("classify: skill_permission_frontmatter_warning(role:assistant, no isRepeat field) → escalation (defensive default: never silently suppressed)",
+    classify("skill_permission_frontmatter_warning", { role: "assistant" }) === "escalation");
+  {
+    const skillEvt = {
+      id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", workerSessionId: "w-12345678",
+      taskId: "task-1", kind: "skill_permission_frontmatter_warning",
+      detail: { role: "assistant", scope: "<cwd>/.claude/skills", findings: [{ name: "sketchy-skill", fields: ["allowed-tools", "hooks"] }] },
+    };
+    const skillLine = alertLine(skillEvt, "escalation", "Proj A");
+    check("alertLine: skill_permission_frontmatter_warning names the role, the flagged skill, and the scope limit",
+      skillLine.includes("assistant") && skillLine.includes("sketchy-skill") && skillLine.includes("<cwd>/.claude/skills"));
+    check("alertLine: skill_permission_frontmatter_warning stays within ALERT_LINE_MAX_CHARS even with many findings",
+      alertLine({ ...skillEvt, detail: { ...skillEvt.detail, findings: Array.from({ length: 40 }, (_, i) => ({ name: `skill-${i}`, fields: ["hooks"] })) } }, "escalation", "Proj A").length <= 200);
+
+    // CR round 4, item 5: a TRUNCATION-only event (no real findings — the `truncNote` branch) was
+    // untested before this round. The line must name the affected skill(s) (bounded) and skippedCount —
+    // a bare "scan truncated at its X cap" told the owner nothing about WHICH skill(s) or how many.
+    const truncOnlyEvt = {
+      id: "x2", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", workerSessionId: "w-12345678",
+      taskId: "task-1", kind: "skill_permission_frontmatter_warning",
+      detail: {
+        role: "assistant", scope: "<cwd>/.claude/skills", findings: [],
+        truncated: [{ cap: "entries", names: ["zzz-evil", "yyy-bad"], skippedCount: 9 }],
+      },
+    };
+    const truncOnlyLine = alertLine(truncOnlyEvt, "escalation", "Proj A");
+    check("alertLine (truncation-only): names the cap kind", truncOnlyLine.includes("entries"));
+    check("alertLine (truncation-only): names the affected skill(s)", truncOnlyLine.includes("zzz-evil") && truncOnlyLine.includes("yyy-bad"));
+    check("alertLine (truncation-only): carries the skippedCount", truncOnlyLine.includes("9"));
+    check("alertLine (truncation-only): never claims a real finding ('permission-widening frontmatter in' is findings-only phrasing)",
+      !truncOnlyLine.includes("permission-widening frontmatter in"));
+
+    // CR round 4, item 5 (names bound): a pathological names list must not blow the line budget — only
+    // TRUNC_NOTE_NAMES_MAX are shown, with a "+N more" tail, and the overall ALERT_LINE_MAX_CHARS cap
+    // still holds regardless.
+    const manyNamesEvt = {
+      ...truncOnlyEvt,
+      detail: { ...truncOnlyEvt.detail, truncated: [{ cap: "entries", names: Array.from({ length: 50 }, (_, i) => `skill-${i}`), skippedCount: 50 }] },
+    };
+    const manyNamesLine = alertLine(manyNamesEvt, "escalation", "Proj A");
+    check("alertLine (truncation-only, many names): stays within ALERT_LINE_MAX_CHARS", manyNamesLine.length <= 200);
+    check("alertLine (truncation-only, many names): names only a bounded prefix, with a '+N more' tail",
+      manyNamesLine.includes("skill-0") && /\+\d+ more/.test(manyNamesLine));
+
+    // Round 4, item 2's own owner-facing surface: an INCOMPLETE scan (no findings, no truncation) must
+    // also say so, never render as the generic bare fallback.
+    const incompleteEvt = { ...truncOnlyEvt, detail: { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true } };
+    const incompleteLine = alertLine(incompleteEvt, "escalation", "Proj A");
+    check("alertLine (incomplete-only): says the scan was incomplete", /incomplete/i.test(incompleteLine));
+  }
   // Card ab3c965d: confirms the pre-existing session_message_gave_up kind (the WORKER-scoped sibling of
   // manager_kickoff_dropped — see that kind's own doc in shared/src/types.ts) still classifies exactly as
   // before this card — null, the same as any other kind with no case in classify()'s switch. This kind has

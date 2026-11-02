@@ -550,6 +550,12 @@ export function mountsTaskMcp(role: SessionRole | null): boolean {
  *  stuck-dialog detector's own, deliberately separate, role set. */
 export const LOOM_DRIVEN_ROLES: readonly SessionRole[] = ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"];
 
+/** @decision 015fdb23 — the ONE place that tests `LOOM_DRIVEN_ROLES` membership; call this, never
+ *  hand-roll `role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(role)` at a new call site. */
+export function isLoomDrivenRole(role: SessionRole | null | undefined): boolean {
+  return !!role && (LOOM_DRIVEN_ROLES as readonly string[]).includes(role);
+}
+
 /** @decision e2a3c613 — the boot-dialog-stuck detector's own role set, kept separate from
  *  {@link LOOM_DRIVEN_ROLES} so manager/platform coverage here never leaks into disallowedToolsForRole. */
 export const BOOT_DIALOG_DETECTOR_ROLES: readonly SessionRole[] = [...LOOM_DRIVEN_ROLES, "manager", "platform"];
@@ -1831,6 +1837,9 @@ export type OrchestrationEventKind =
   // null for it — a resolve clears an alert, it is never itself a fresh one) and never added to
   // `EVENT_TRIGGER_EVENT_KINDS`, for the identical reason.
   | "claude_boot_dialog_resolved"
+  // @decision 015fdb23 — `detail`: { role, scope: "<cwd>/.claude/skills", findings: {name,fields}[] };
+  // one event per spawn. Detect + notify only, never strip. See record for the scope/classify rule.
+  | "skill_permission_frontmatter_warning"
   // Card b987f086 — a codex spawn declared ≥1 capability the harness structurally cannot mount: either an
   // MCP server this session resolved is not `{type:"http"}` (codex has no stdio-MCP-server concept — see
   // pty/codex-host.ts's `unsupportedCodexMcpServers`), or the project's `codescape.enabled` is true (codex
@@ -2219,7 +2228,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, watermark_finalize_withheld: true, commondir_trust_pinned: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, locked_role_skills_dropped: true, codex_isolation_gap_disclosed: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, skill_permission_frontmatter_warning: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, locked_role_skills_dropped: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
   credential_revoked: true,
   vault_autocommit_refused_code_repo: true,

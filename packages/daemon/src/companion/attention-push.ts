@@ -35,6 +35,9 @@ import type { Db } from "../db.js";
 import type { HeartbeatPty } from "./heartbeat.js";
 import { resolveCompanionGrant, type ResolvedGrantScope } from "./capabilities.js";
 import { inAppHomeRoute } from "./in-app.js";
+// CR round 4, item 7 (card 015fdb23): imported from the LEAF module, never `../skills/permission-scan.js`
+// — that file pulls in `inject.js` + pty-doctrine transitively, weight this module has no need for.
+import { CWD_SKILLS_SCAN_SCOPE } from "../pty/claude-dirname.js";
 
 /** The trusted-daemon framing tag — also the marker the no-stacking guard matches in the pending queue
  *  (mirrors HEARTBEAT_TAG/REMINDER_TAG). */
@@ -78,6 +81,10 @@ const ALERT_LINE_MAX_CHARS = 200;
  *  decision-pending line) — keeps a long title from dominating the line before the overall cap even
  *  applies. */
 const ALERT_TITLE_MAX_CHARS = 100;
+/** @decision 015fdb23 — CR round 4, item 5: bounds how many truncated-skill names one
+ *  `skill_permission_frontmatter_warning` truncation entry names in the Companion alert line, so a
+ *  pathological entries-cap hit doesn't dominate the line before `ALERT_LINE_MAX_CHARS` even applies. */
+const TRUNC_NOTE_NAMES_MAX = 3;
 /** Card ee05750e: same pattern as ALERT_TITLE_MAX_CHARS. By the time a reason reaches this surface it has
  *  already passed `normalizeResumeOneResult`'s allowlist (resume-nudge.ts) — never an arbitrary re-thrown
  *  message — but one of the 7 allowlisted messages is itself up to ~140 chars; this keeps ANY one reason
@@ -216,6 +223,14 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // resolve this, a human must. See docs/decisions/e2a3c613-*.md for the full reasoning.
     case "claude_boot_dialog_stuck":
       return detail?.parentNudged === false ? "escalation" : null;
+    // Card 015fdb23: "assistant" is the one locked role that runs in an ordinary, worker-writable user
+    // project (see the background report behind this card) — its warning gets the owner-visible push;
+    // every other in-scope role's is "notice" (durable, visible on the event log, not pushed by default).
+    // Card 979f29b9: `detail.isRepeat` (stamped by SessionService.handleSkillPermissionFrontmatterWarning,
+    // never re-derived here) suppresses the push on a repeat of the SAME (cwd, skill-content) set — the
+    // durable event still lands every spawn either way, only the owner push is gated on this.
+    case "skill_permission_frontmatter_warning":
+      return detail?.role === "assistant" && detail?.isRepeat !== true ? "escalation" : "notice";
     // Card ab3c965d: a MANAGER's own turn-1 kickoff exhausted its give-up budget with no parent to
     // notify — same shape/reasoning as claude_boot_dialog_stuck immediately above (a manager always
     // sets parentNudged:false, since it never has a parent at all), reusing "escalation" for the same
@@ -470,6 +485,34 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       const sigName = typeof detail.signatureName === "string" ? detail.signatureName : "none recognized";
       const roleLabel = typeof detail.role === "string" ? detail.role : "session";
       line = `${projectName}: ${roleLabel} never reached SessionStart — possible blocking CLI dialog (${sigName}) — ${who}`;
+      break;
+    }
+    case "skill_permission_frontmatter_warning": {
+      const roleLabel = typeof detail.role === "string" ? detail.role : "session";
+      const scope = typeof detail.scope === "string" ? detail.scope : CWD_SKILLS_SCAN_SCOPE;
+      const names = Array.isArray(detail.findings) && detail.findings.length
+        ? detail.findings.map((f) => (f && typeof f === "object" && "name" in f ? String((f as { name: unknown }).name) : "?")).join(", ")
+        : null;
+      // CR round 3, finding 1: a bound hit (`detail.truncated`) escalates for the Companion exactly
+      // like a real finding — a padded repo must not evade this push just because the finding it was
+      // hiding fell past the scan's own cap. CR round 4, item 5: name the affected skill(s) (bounded)
+      // and skippedCount too — a bare "scan truncated at its X cap" told the owner nothing about WHICH
+      // skill(s) or how many were skipped.
+      const truncNote = Array.isArray(detail.truncated) && detail.truncated.length
+        ? detail.truncated.map((t) => {
+            if (!t || typeof t !== "object") return "scan truncated";
+            const tt = t as { cap?: unknown; names?: unknown; skippedCount?: unknown };
+            const cap = typeof tt.cap === "string" ? tt.cap : "?";
+            const tNames = Array.isArray(tt.names) ? tt.names.map(String) : [];
+            const shown = tNames.slice(0, TRUNC_NOTE_NAMES_MAX);
+            const more = tNames.length > shown.length ? `, +${tNames.length - shown.length} more` : "";
+            const skippedCount = typeof tt.skippedCount === "number" ? tt.skippedCount : null;
+            return `scan truncated at its ${cap} cap${shown.length ? `: ${shown.join(", ")}${more}` : ""}${skippedCount !== null ? ` (${skippedCount} skipped)` : ""}`;
+          }).join("; ")
+        : null;
+      const incompleteNote = detail.incomplete === true ? "scan INCOMPLETE (I/O error) — may be missing a finding" : null;
+      const what = [names ? `permission-widening frontmatter in ${names}` : null, truncNote, incompleteNote].filter(Boolean).join(" — ") || "a permission-widening concern";
+      line = `${projectName}: ${roleLabel} spawn found ${what} (${scope}, unmanaged by Loom) — ${who}`;
       break;
     }
     // Code Review 5f95e7a1: named explicitly, same discipline as claude_boot_dialog_stuck immediately
