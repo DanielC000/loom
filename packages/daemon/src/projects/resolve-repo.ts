@@ -26,6 +26,16 @@ export interface ResolvedRepo {
    * `Project.noGateByDesign`, never by this field (there is no registry entry for it to read from).
    */
   noGateByDesign: boolean;
+  /**
+   * Card d9332365/3e92e23b: the project's resolved `orchestration.commitTrailers`/`commitLogBody` —
+   * UNLIKE `gateCommand`/`ungatedLandingCheckCommand` above, there is no registry-entry-level override
+   * for either (no per-repo toolchain-divergence reasoning applies to a provenance/audit-trail toggle),
+   * so every resolved repo (primary and registry alike) carries the SAME project-level resolved value.
+   * Exposed here so the merge path (sibling cards 9a5d040c/5933734e) can read it off the one `ResolvedRepo`
+   * it already resolves per repo key, without a separate `resolveConfig` call.
+   */
+  commitTrailers: "on" | "off";
+  commitLogBody: "on" | "off";
 }
 
 /**
@@ -72,19 +82,31 @@ export class UnknownRepoKeyError extends Error {
  * no task-shaped object to accidentally hand it.
  */
 export function resolveRepoByKey(project: Project, repoKey: string | null | undefined): ResolvedRepo {
+  // Card d9332365/3e92e23b: resolved once here (not inside either branch) since commitTrailers/
+  // commitLogBody carry no per-entry override — both branches read the SAME project-level resolved value.
+  const resolvedOrch = resolveConfig(project.config).orchestration;
   if (repoKey === undefined || repoKey === null || repoKey === "primary") {
-    const resolvedOrch = resolveConfig(project.config).orchestration;
     return {
       key: "primary",
       path: project.repoPath,
       gateCommand: resolvedOrch.gateCommand || undefined,
       ungatedLandingCheckCommand: resolvedOrch.ungatedLandingCheckCommand || undefined,
       noGateByDesign: false,
+      commitTrailers: resolvedOrch.commitTrailers,
+      commitLogBody: resolvedOrch.commitLogBody,
     };
   }
   const entry = project.repos.find((r) => r.key === repoKey);
   if (!entry) throw new UnknownRepoKeyError(repoKey, project.id);
-  return { key: entry.key, path: entry.path, gateCommand: entry.gateCommand, ungatedLandingCheckCommand: entry.ungatedLandingCheckCommand, noGateByDesign: !!entry.noGateByDesign };
+  return {
+    key: entry.key,
+    path: entry.path,
+    gateCommand: entry.gateCommand,
+    ungatedLandingCheckCommand: entry.ungatedLandingCheckCommand,
+    noGateByDesign: !!entry.noGateByDesign,
+    commitTrailers: resolvedOrch.commitTrailers,
+    commitLogBody: resolvedOrch.commitLogBody,
+  };
 }
 
 /**

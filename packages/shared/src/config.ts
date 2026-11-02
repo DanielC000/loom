@@ -447,6 +447,26 @@ export interface OrchestrationConfig {
    */
   mergeGateInterval?: number;
   /**
+   * Card d9332365/3e92e23b: per-project (+ per-repo via `ResolvedRepo`, mirroring `gateCommand`'s own
+   * exposure there), HUMAN-only switch for the reserved `Loom-Worker-Branch` / `Loom-Landed-Tip` /
+   * `Loom-Worker-Base` / `Loom-Worker-PathSet` trailer paragraph a solo-squash or batch landing appends
+   * to the commit message. "on" (default) = today's behavior, byte-identical. "off" = the landing code
+   * (sibling cards 9a5d040c/5933734e) omits the trailer paragraph entirely — the Claude-Session strip
+   * stays unconditional and is never coupled to this key. Same trust tier as `mergeGate` — the party a
+   * provenance/audit-trail toggle governs must never be able to loosen its own governor — so this is on
+   * `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` (mcp/platform.ts): rejected by the agent-facing validator and
+   * the elevated Platform Lead's `project_configure` alike. No env/platform layer.
+   */
+  commitTrailers: "on" | "off";
+  /**
+   * Card d9332365/3e92e23b: sibling of {@link commitTrailers}, same resolution/trust shape — HUMAN-only,
+   * per-project (+ per-repo via `ResolvedRepo`), default "on". Controls the solo squash's auto-assembled
+   * worker-commit-log BODY (`deriveWorkerCommitLogBody`) independently of the trailer paragraph above —
+   * the body is prose, not a reserved trailer key (`@decision 8b7b81e0`), and a user may want one without
+   * the other. "off" = the sibling card 9a5d040c's landing code omits the worker-commit-log body.
+   */
+  commitLogBody: "on" | "off";
+  /**
    * THE CANONICAL DOC for this field (card bd9a483b) — every other mention (mcp/platform.ts's schema,
    * the `worker_merge_confirm`/`merge_batch` tool descriptions, `sessions/service.ts`'s
    * `runUngatedLandingCheck`) points HERE rather than restating the mechanics; update this comment, not
@@ -1674,7 +1694,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "", commitTrailers: "on", commitLogBody: "on" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -2227,6 +2247,10 @@ export function resolveConfig(
       gateCommand: override.orchestration?.gateCommand ?? d.orchestration.gateCommand,
       mergeGate: override.orchestration?.mergeGate ?? d.orchestration.mergeGate,
       ...((override.orchestration?.mergeGateInterval ?? d.orchestration.mergeGateInterval) === undefined ? {} : { mergeGateInterval: (override.orchestration?.mergeGateInterval ?? d.orchestration.mergeGateInterval) as number }),
+      // Card d9332365/3e92e23b: same precedence shape as mergeGateInterval immediately above — override
+      // ?? default, no env/platform layer. Both default "on" (byte-identical to today's behavior).
+      commitTrailers: override.orchestration?.commitTrailers ?? d.orchestration.commitTrailers,
+      commitLogBody: override.orchestration?.commitLogBody ?? d.orchestration.commitLogBody,
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
       gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
       // Card bd9a483b: the interval-skip safety-net check + its paired timeout — same resolution shape as

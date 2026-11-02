@@ -230,6 +230,11 @@ const orchestrationOverride = z.object({
   // Per-project, HUMAN-only gate interval (card 6f13746c): ungated landings allowed while mergeGate is "off". Omitted from the
   // agent path with mergeGate (see agentOrchestrationOverride) so `.strict()` rejects it.
   mergeGateInterval: z.number().int().min(1).max(MERGE_GATE_INTERVAL_MAX).optional(),
+  // Card d9332365/3e92e23b: HUMAN-only merge-commit-trailer toggles — same trust tier as mergeGate (the
+  // party a provenance/audit-trail switch governs must never loosen its own governor). Omitted from the
+  // agent path below (see agentOrchestrationOverride) so `.strict()` rejects both.
+  commitTrailers: z.enum(["on", "off"]).optional(),
+  commitLogBody: z.enum(["on", "off"]).optional(),
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
   // omitted from the agent path with it (see agentOrchestrationOverride). Bounds come from
   // ORCHESTRATION_TIMEOUT_MS_BOUNDS (@loom/shared) — the SAME table the Settings UI reads to state the
@@ -374,6 +379,9 @@ export const HUMAN_ONLY_PROJECT_CONFIG_KEYS: readonly string[] = ["harness"];
  *  top-level list above is `Object.hasOwn`-only and cannot see a nested key. */
 export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = [
   "orchestration.mergeGate", "orchestration.mergeGateInterval", "permission.startupModeCycles",
+  // Card d9332365/3e92e23b — same trust tier as mergeGate/mergeGateInterval just above: the toggle that
+  // governs Loom's own merge-provenance audit trail must never be settable by the party it governs.
+  "orchestration.commitTrailers", "orchestration.commitLogBody",
   // Card 59fa6403 round 2 (b13df292, owner ruling): the notice rate limit is the SAME trust shape as
   // mergeGate — the party it governs must never be able to loosen its own governor — so it's blocked
   // even from the elevated Lead, not just the top-level omission below.
@@ -526,6 +534,8 @@ const agentOrchestrationOverride = orchestrationOverride
     deployCommand: true, deployCommandTimeoutMs: true,
     alertWebhook: true, alertWebhookTimeoutMs: true,
     maxNoticesPerHour: true,
+    // Card d9332365/3e92e23b — same trust tier as mergeGate/mergeGateInterval just above.
+    commitTrailers: true, commitLogBody: true,
     // Card 432765ab — see maxNoticesPerHour's own comment just above for the reasoning.
     attachmentMaxBytes: true, attachmentMaxCount: true,
   })
