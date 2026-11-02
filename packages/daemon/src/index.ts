@@ -74,7 +74,8 @@ import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
-import { reenterMergeQuarantinesAtBoot, partitionQuarantinesByRegistration } from "./git/merge-quarantine.js";
+import { reenterMergeQuarantinesAtBoot, partitionQuarantinesByRegistration, setRegisteredRepoPathsProvider } from "./git/merge-quarantine.js";
+import { computeCanonicalRepoPaths } from "./projects/canonical-repo-paths.js";
 import { runGracefulTeardown, computeFlushVaultsStepBudgetMs, reportAndConsumeHardShutdownWatchdogRecord } from "./graceful-teardown.js";
 
 async function main(): Promise<void> {
@@ -1123,12 +1124,7 @@ async function main(): Promise<void> {
   //
   // Computed HERE (round 6, item #8 — moved up from after `startGatewayListeners` below) so it's ready for
   // the quarantine re-entry immediately below, which itself must run before ANY request can be served.
-  const canonicalRepoPaths = new Set<string>();
-  for (const project of db.listProjects()) {
-    for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
-      if (repoPath) canonicalRepoPaths.add(repoPath);
-    }
-  }
+  const canonicalRepoPaths = computeCanonicalRepoPaths(db);
   // QUARANTINE RE-ENTRY (round 4, Code Review b2ebf41f, ruling 2a; MOVED HERE in round 6, Code Review
   // item #8) — unlike the crash-recovery latch (read further below), a quarantine latch is NOT
   // consumed-then-discarded: it RE-ARMS the same refusal this process would have applied had it never
@@ -1145,6 +1141,10 @@ async function main(): Promise<void> {
   // orphan latch collapses into ONE summary line instead of its own per-entry warning; a latch for a repo
   // that's still a registered project (live, reserved, OR archived — db.listAllRegisteredRepoPaths())
   // keeps the full, unchanged, per-entry warning below.
+  // @decision 1de37538 (round 2, S1) — calls the SAME `computeCanonicalRepoPaths(db)` helper live on
+  // every use, never `db.listAllRegisteredRepoPaths()` (also counts reserved/archived) — PASS 1's own
+  // `registeredRepoPaths` param below is `canonicalRepoPaths`, so Step B must read the identical list.
+  setRegisteredRepoPathsProvider(() => computeCanonicalRepoPaths(db));
   const { registered: registeredQuarantines, orphaned: orphanedQuarantines } =
     partitionQuarantinesByRegistration(reenterMergeQuarantinesAtBoot([...canonicalRepoPaths]), db.listAllRegisteredRepoPaths());
   for (const q of registeredQuarantines) {

@@ -6004,6 +6004,13 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // that the onExit hook wires reconcileNeverStartedRecycleSuccessor(exited.id, info.intended) after
   // archiveOnExit(exited) — a literal call-text/ordering match with no other check re-verifying it.
   "packages/daemon/test/recycle-successor-onexit-wiring.mjs",
+  // Card 1de37538 (round 3, Code Review): same shape as recycle-successor-onexit-wiring.mjs immediately
+  // above — reads real packages/daemon/src/index.ts SOURCE directly (never dist/**), comment-stripped
+  // (via the shared _strip-comments.mjs helper) before matching, asserting that BOTH the
+  // `canonicalRepoPaths` assignment AND the `setRegisteredRepoPathsProvider` call reference
+  // `computeCanonicalRepoPaths(db)` — never `db.listAllRegisteredRepoPaths()` for the latter (round 2's
+  // own S1 parity bug). A literal call-argument match with no other check re-verifying it.
+  "packages/daemon/test/merge-quarantine-1de37538-canonical-repo-paths-parity.mjs",
   "packages/daemon/test/setup-project-init-rest.mjs",
   "packages/daemon/test/setup-templates-rest.mjs",
   "packages/daemon/test/shell-terminal.mjs",

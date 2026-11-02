@@ -133,29 +133,45 @@ Round 2's BLOCKING-1 below), which is a correctness defect, not a conservative o
 weaker" framing holds cleanly ONLY for the UNRESOLVABLE case, where unioning never touches a primary-key
 slot to begin with.
 
-**`provenanceUnknown` is deliberately NEVER set by Step B's own secondary-key union, in any shape** —
-checked at source, not assumed. PASS 1 only marks it (`:8833-8840`) via
+**SUPERSEDED BY `1de37538`, IN PART — `provenanceUnknown` is NO LONGER unconditionally "never set by Step
+B," for the THIRD shape only.** This section originally reported the gap below as a named, accepted
+residual, open-ended, across THREE shapes. Card `1de37538` closed ONE of them — the third (see below) —
+by having Step B share PASS 1's own `secondaryArmClaimsADifferentRegisteredIdentitysKey`/
+`priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity` predicates (hoisted to module scope) via a
+late-bound, live-called `setRegisteredRepoPathsProvider` seam, wired once from `index.ts`. **The "true
+ONLY when the provider is unset" qualifier applies ONLY to that third-shape sentence below — it is NOT a
+blanket statement about this whole section.** The first two shapes' own claim (PASS 1 itself never marks
+`provenanceUnknown` for them either, regardless of any provider) is an independent fact about PASS 1's own
+predicate short-circuiting, untouched by `1de37538` and true UNCONDITIONALLY — see the paragraph below for
+why. See `docs/decisions/1de37538-runtime-registered-repo-paths-provider-seam.md` for the fix, the
+corrected repro (the first attempt failed for a reason worth reading before trusting any future repro of
+this shape), and why option (b) — a provider seam — was chosen over threading the list through every
+runtime caller.
+
+**For the FIRST TWO shapes THIS card's own repros exercise (T unresolvable vs. a resolvable, freshly-
+verified occupant), `provenanceUnknown` is never set by Step B — UNCONDITIONALLY, regardless of whether
+`1de37538`'s provider is wired or not** — checked at source, not assumed. PASS 1 only marks it via
 `secondaryArmClaimsADifferentRegisteredIdentitysKey`/`priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity`
-(~`:8737-8747`), BOTH of which test membership in `registeredRepoPaths` — a BOOT-scoped list (the
-roster of registered projects passed to `reenterMergeQuarantinesAtBoot`) with no runtime-clear-time
-equivalent available to this card's own call sites. For the two shapes this card's own repros exercise
-(T unresolvable vs. a resolvable, freshly-verified occupant), traced at source AND confirmed empirically
-(the OCCUPIED-KEY test's own in-process vs. post-reboot check): PASS 1 itself does NOT mark it there
-either (`secondaryArmClaimsADifferentRegisteredIdentitysKey` short-circuits on
+(inside `armKeyUnlessDegradedCollision`), BOTH of which test membership in `registeredRepoPaths`. PASS 1
+itself does NOT mark it there either, for either of these two shapes
+(`secondaryArmClaimsADifferentRegisteredIdentitysKey` short-circuits on
 `isRepoPathCurrentlyResolvable(entry.repoPath)` being false; `priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity`
-short-circuits on `!isKeyVerifiedFor(prior.repoPath, key)` being false). **Named, accepted residual
-(corrected by round 3's own SHOULD-1 — the gap is NOT scoped to a resolvable claimant alone):** a
-secondary claimant — RESOLVABLE (`secondaryArmClaimsADifferentRegisteredIdentitysKey`) OR UNRESOLVABLE
-(`priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity`, when the PRIOR occupant dual-arms a key
-whose OTHER key is itself a different REGISTERED identity — e.g. U dual-armed `[keyU, keyV]` with V a
-registered real repo, T a ghost whose own `resolvedKey` is `keyV`) — colliding with a different
-REGISTERED identity's key is a shape where PASS 1 WOULD mark `provenanceUnknown` (closing `clear-by-id`
-specifically) but Step B cannot, for lack of a runtime `registeredRepoPaths` equivalent, for EITHER shape
-— the PRIMARY concern (the key staying blocked) is unaffected either way (the token union itself still
-happens); only the narrower, additional `clear-by-id` refusal PASS 1 adds in these sub-shapes is not
-mirrored. Stays a named, accepted residual — tracked on card `97a5b64f`, not fixed here. Not reproduced as
-reachable from this card's own two named repro shapes (both of which collide with an UNREGISTERED
-occupant, never a registered one).
+short-circuits on `!isKeyVerifiedFor(prior.repoPath, key)` being false) — unaffected by `1de37538` either
+way, since neither shape ever reaches either predicate's TRUE branch. **The THIRD shape — a secondary
+claimant colliding with a DIFFERENT REGISTERED identity's key (e.g. U dual-armed `[keyU, keyV]` with V a
+registered real repo, T a ghost whose own `resolvedKey` is `keyV`) — is the one `1de37538` actually
+closed, but only HALF of it: only `priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity` (the
+UNRESOLVABLE-claimant branch, which has no decline check) can ever reach Step B's stamp at all.** The
+RESOLVABLE-claimant sub-shape (`secondaryArmClaimsADifferentRegisteredIdentitysKey`) is DECLINED outright
+by Step B's own pre-existing different-identity-occupant guard (round 3's "decline for ANY different-
+identity occupant, fresh or stale" above, widened by card `1c70e6db`'s own follow-up to fresh occupants
+too) BEFORE the stamp check this card's Step B edit runs ever gets a chance to see it — so that predicate
+is, in practice, unreachable dead code inside Step B specifically, not a shape `1de37538` closed. It was
+never "closed" by stamping at all; it was already handled, differently, by that pre-existing decline.
+Confirmed via a corrected repro (for the reachable, unresolvable-claimant half) after an initial attempt
+failed to reach either predicate at all (see `1de37538`'s own record for why). The PRIMARY concern (the
+key staying blocked) was never affected either way — only the narrower, additional `clear-by-id` refusal
+PASS 1 adds in this sub-shape.
 
 **`97a5b64f` confirmed:** this card's own field-parity fix (Step A) closed BOTH of `97a5b64f`'s own named
 write-site shapes (`mergeTokenIntoPendingEntries`, `rewriteOrphanLatchFilesAfterPartialClear`) with no fix
@@ -325,10 +341,10 @@ rather than restated here: PASS 1's CASE 2 (`armKeyUnlessDegradedCollision`) is 
   rule still governs the PRIMARY key only; it does not forbid this card's own secondary-key union step.
 - Do not set `provenanceUnknown: true` on a Step B secondary-key union without FIRST re-deriving, at
   source, whether PASS 1 would mark it for that SAME shape (via the two named predicates in "Step B"
-  above) — a runtime `registeredRepoPaths` equivalent would need to exist before this could ever be
-  mirrored faithfully; setting it unconditionally changes a THIRD party's (the occupant's) own clear-by-id
-  behaviour in a way a reboot would not, which is exactly the class of divergence this whole card exists
-  to close, not reopen.
+  above) — setting it unconditionally changes a THIRD party's (the occupant's) own clear-by-id behaviour
+  in a way a reboot would not. **Card `1de37538` built the runtime `registeredRepoPaths` equivalent this
+  bullet once said would need to exist** — Step B now calls the SAME shared predicates PASS 1 does; don't
+  re-derive a SECOND, independent copy of them.
 - Do not construct a "Shape 1" (resolvedKey names a different repo) test with T as a ghost SUBDIRECTORY
   of the named repo — `canonicalRepoLockKey`'s own ancestor walk finds the parent's key regardless of any
   explicit `resolvedKey`, via the pre-existing `883e29bc` pending-lookup fallback, and the test would pass

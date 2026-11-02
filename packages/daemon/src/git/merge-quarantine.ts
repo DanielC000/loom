@@ -409,6 +409,32 @@ function latchEntryFromParsedRecord(parsed: Record<string, unknown> & { repoPath
 
 const activeQuarantines = new Map<string, MergeQuarantineEntry>();
 
+/** @decision 1de37538 — a late-bound, LIVE-called (never snapshotted) registered-repo-paths provider,
+ *  so Step B can share PASS 1's own registered-identity predicates without a db/registry import. See
+ *  the decision record for why this seam, not threading the list through every runtime caller. */
+let registeredRepoPathsProvider: (() => string[]) | null = null;
+
+/** Set (or, with `null`, clear) the live registered-repo-paths provider — call ONCE, at boot, from
+ *  index.ts, beside the existing `db.listAllRegisteredRepoPaths()` boot call. Never call this from a
+ *  test or from any other runtime site; the provider is a boot-time wiring concern only. */
+export function setRegisteredRepoPathsProvider(fn: (() => string[]) | null): void {
+  registeredRepoPathsProvider = fn;
+}
+
+/** Reads the provider LIVE, every call — never cached. Returns `[]` (today's pre-1de37538 behavior,
+ *  fail-OPEN on the clear-by-id refusal surface only — this never affects the primary blocking guarantee
+ *  either way) when no provider is set, or when the set provider throws. */
+function liveRegisteredRepoPaths(): string[] {
+  if (!registeredRepoPathsProvider) return [];
+  try {
+    return registeredRepoPathsProvider();
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] registeredRepoPathsProvider threw (${(e as Error).message}) — treating this call as having no registered repos known (fail toward the pre-1de37538 behavior, never toward a stricter refusal).`);
+    return [];
+  }
+}
+
 /** Dedup set for {@link wouldOverwriteDifferentUnresolvableOccupant}'s own refusal log — one entry per
  *  `<final path>|<occupant identity>` pair, so a query repeated many times over one process's lifetime
  *  logs the refusal ONCE, not once per query. Never cleared mid-process; a fresh process (reboot) starts
@@ -594,6 +620,23 @@ function collectCrossTierSiblingIndices(key: string, excludeIndices: number[]): 
  *  gate every cross-tier absorb INTO an already-armed/already-raised entry on this check first. */
 function isKeyVerifiedFor(repoPath: string, key: string): boolean {
   return isRepoPathCurrentlyResolvable(repoPath) && canonicalRepoLockKey(repoPath) === key;
+}
+
+/** @decision 1de37538 — hoisted to module scope, taking `registeredRepoPaths` as a parameter, so Step B
+ *  can call the IDENTICAL predicate PASS 1 uses rather than re-implementing it. Pure hoist. */
+function secondaryArmClaimsADifferentRegisteredIdentitysKey(entry: MergeQuarantineEntry, key: string, entryClaimIsTautological: boolean, registeredRepoPaths: string[]): boolean {
+  return !entryClaimIsTautological
+    && isRepoPathCurrentlyResolvable(entry.repoPath)
+    && canonicalRepoLockKey(entry.repoPath) !== key
+    && registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key) && directPathIdentity(p) !== directPathIdentity(entry.repoPath));
+}
+
+/** @decision 1de37538 — see {@link secondaryArmClaimsADifferentRegisteredIdentitysKey}'s own doc; the
+ *  SAME foreignness test, against the STANDING `prior` instead of the incoming `entry`. */
+function priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(prior: MergeQuarantineEntry, key: string, registeredRepoPaths: string[]): boolean {
+  return isRepoPathCurrentlyResolvable(prior.repoPath)
+    && !isKeyVerifiedFor(prior.repoPath, key)
+    && registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key) && directPathIdentity(p) !== directPathIdentity(prior.repoPath));
 }
 
 /** Every PENDING entry whose own repoPath is CURRENTLY RESOLVABLE and genuinely, freshly
@@ -5345,6 +5388,17 @@ function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntr
         continue;
       }
     }
+    // @decision 1de37538 — mirror PASS 1's own stamp before unioning cross-identity, via the SAME
+    // shared predicates fed by the LIVE provider (never a boot snapshot). See the decision record for
+    // why this never fires on the `resolvableNow` branch (declined above) — only the unresolvable one.
+    const priorAtKey = activeQuarantines.get(key);
+    if (priorAtKey && directPathIdentity(priorAtKey.repoPath) !== directPathIdentity(armedEntry.repoPath)) {
+      const liveRegistered = liveRegisteredRepoPaths();
+      if (secondaryArmClaimsADifferentRegisteredIdentitysKey(armedEntry, key, false, liveRegistered)
+        || priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(priorAtKey, key, liveRegistered)) {
+        armedEntry = { ...armedEntry, provenanceUnknown: true };
+      }
+    }
     armedEntry = armQuarantineKey(activeQuarantines, key, armedEntry);
   }
   // @decision 5d0820c7 — the PENDING push is deferred until AFTER the secondary-key loop, using the
@@ -8830,17 +8884,9 @@ function reenterMergeQuarantinesAtBootImpl(
   // @decision e7652e06 (round 3, Lead ruling) — never DECLINE a secondary arm for colliding with a
   // different, registered identity — db0a9db0 already answers this (let the union form, mark it
   // `provenanceUnknown`, rely on clear-by-id's existing refusal). See {@link armKeyUnlessDegradedCollision}.
-  const secondaryArmClaimsADifferentRegisteredIdentitysKey = (entry: MergeQuarantineEntry, key: string, entryClaimIsTautological: boolean): boolean =>
-    !entryClaimIsTautological
-    && isRepoPathCurrentlyResolvable(entry.repoPath)
-    && canonicalRepoLockKey(entry.repoPath) !== key
-    && registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key) && directPathIdentity(p) !== directPathIdentity(entry.repoPath));
-  // @decision e7652e06 (round 4) — the SAME foreignness test as above, against the STANDING `prior`
-  // instead of the incoming `entry` — order-independent (B1): see the decision record's "Round 4".
-  const priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity = (prior: MergeQuarantineEntry, key: string): boolean =>
-    isRepoPathCurrentlyResolvable(prior.repoPath)
-    && !isKeyVerifiedFor(prior.repoPath, key)
-    && registeredRepoPaths.some((p) => isKeyVerifiedFor(p, key) && directPathIdentity(p) !== directPathIdentity(prior.repoPath));
+  // @decision 1de37538 — both predicates now live at module scope, taking `registeredRepoPaths`
+  // explicitly (see their own doc there) — removed from this closure; the two call sites below now pass
+  // this function's own `registeredRepoPaths` param directly.
   /**
    * Routes EVERY `armQuarantineKey` call in this function's read loops through here instead, never a
    * bare call — covering both a PRIMARY arm (`key` is `entry`'s own just-computed `currentKey` — pass
@@ -8930,8 +8976,8 @@ function reenterMergeQuarantinesAtBootImpl(
     // identity — mark it when EITHER side's claim at `key` is non-fresh (round 4/B1: order-independent,
     // see the decision record). Never a same-identity re-arm or an evicted prior.
     if (priorStillAtKey && directPathIdentity(priorStillAtKey.repoPath) !== directPathIdentity(entry.repoPath)
-      && (secondaryArmClaimsADifferentRegisteredIdentitysKey(entry, key, entryClaimIsTautological)
-        || priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(priorStillAtKey, key))) {
+      && (secondaryArmClaimsADifferentRegisteredIdentitysKey(entry, key, entryClaimIsTautological, registeredRepoPaths)
+        || priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(priorStillAtKey, key, registeredRepoPaths))) {
       entry = { ...entry, provenanceUnknown: true };
     }
     const result = armQuarantineKey(byRepoKey, key, entry);
