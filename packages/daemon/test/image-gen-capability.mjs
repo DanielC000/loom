@@ -1,30 +1,35 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Agent-tooling P4 follow-on (board card b93cfd10, provider decided a4058e7a): the SECOND real
-// credential-tied catalog capability — image generation via Google Gemini/Imagen, mounted as a plain
-// "bundled" (npx-resolved) capability_defs row, unlike github's own now-bespoke "github-binary" kind. This
-// test's job mirrors github-capability.mjs: prove the seed shape, the generic resolveCapabilityServer/
-// buildMcpServers dispatch, the credential tie (secret in env, never args), AND the bundled/command-kind
-// scratch-dir env-var injection this row is the first to actually exercise (`outputDirEnvVar` on the
-// "bundled" provision kind, added in registry.ts alongside this row) — via a fixture "echo-env" script
-// standing in for the real `mcp-imagenate` npx package so this stays DETERMINISTIC + CLAUDE-FREE +
-// NETWORK-FREE (no real npx/network resolution of the seeded row itself is exercised here).
+// credential-tied catalog capability — image generation via Google Gemini/Imagen. CARD e7d6e43b migrated
+// this row off its original "bundled" (npx-resolved) shape onto the new seed-only "npm-pinned" kind
+// (installed once under `<LOOM_HOME>/node/`, never a per-spawn npx re-resolve) — see
+// npm-pinned-provision.mjs/npm-pinned-migration.mjs for that kind's own hermetic coverage. This test's job
+// mirrors github-capability.mjs: prove the (now npm-pinned) seed shape, the generic
+// resolveCapabilityServer/buildMcpServers dispatch, the credential tie (secret in env, never args), AND the
+// scratch-dir env-var injection this row is the first to actually exercise (`outputDirEnvVar`) — via a
+// fixture "echo-env" script standing in for the real `mcp-imagenate` package so this stays DETERMINISTIC +
+// CLAUDE-FREE + NETWORK-FREE (no real install/network resolution of the seeded row itself is exercised
+// here; `LOOM_NPM_PINNED_NO_PROVISION=1` keeps the real row's own cold resolve from kicking a real install
+// as a side effect of this test).
 //
 // Proves:
 //   (a) seedDefaultCapabilities seeds an "image-gen" row (alongside "github"), seed-if-absent (idempotent),
 //       with the documented shape: requiresConnection, secretEnvVar "GEMINI_API_KEY", provision
-//       {kind:"bundled", command:"npx", args:["-y","mcp-imagenate"], outputDirEnvVar}, wantsScratchDir true,
-//       and an "mcp__image-gen" tool allow entry.
+//       {kind:"npm-pinned", package:"mcp-imagenate", version:<pinned exact semver>, binRelativeToPackageJson,
+//       outputDirEnvVar}, wantsScratchDir true, and an "mcp__image-gen" tool allow entry.
 //   (b) the description states the spend-guard gap (Loom's connection rate/spend guard doesn't cover this
 //       MCP-subprocess path) — the card's explicit "say this at grant time" requirement.
 //   (c) resolveCapabilityServer resolves the seeded row generically (the SAME dispatch an owner-added row
-//       gets) — a bare "npx" command self-heals like every other bundled row.
+//       gets) — a cold (not-yet-installed) row resolves null, never throws.
 //   (d) end-to-end through buildMcpServers with a REAL P1 connection (created + decrypted via the real
 //       connections/store.ts): the Gemini key lands ONLY in the mounted server's env under GEMINI_API_KEY,
-//       never in args — proven via a fixture-forced resolution (bypassing any real npx/network dependency).
+//       never in args — proven via a fixture-forced resolution (bypassing any real install/network
+//       dependency; the fixture row uses kind "bundled" pointed directly at the echo-env script, which is
+//       orthogonal to the real row's own kind).
 //   (e) wantsScratchDir: true actually injects the session scratch dir into the mounted server's env under
-//       the row's own `outputDirEnvVar` ("NANO_BANANA_OUTPUT_DIR") — the new bundled/command-kind mechanism
-//       this row is the first to need (node-package's `--output-dir` CLI-arg convention doesn't apply to a
-//       bundled/command row at all until this capability's provision opts into `outputDirEnvVar`).
+//       the row's own `outputDirEnvVar` ("NANO_BANANA_OUTPUT_DIR") — the bundled/command/npm-pinned-kind
+//       mechanism this row is the first to need (node-package's `--output-dir` CLI-arg convention doesn't
+//       apply to any of those kinds at all until a provision opts into `outputDirEnvVar`).
 //   (f) the HARD DoD: the secret never rides claude's own argv (buildSpawnArgs) or the redacted spawn-log
 //       line, for THIS specific capability's mcp-config.
 //   (g) a REAL child_process spawn (not a mocked exec call) of the resolved {command,args,env} proves the
@@ -50,6 +55,11 @@ process.env.LOOM_HOME = tmpHome;
 // seeds both rows together — disable it so a cold resolve of the seeded "github" row never kicks a real
 // network download as a side effect of exercising this file.
 process.env.LOOM_GITHUB_MCP_NO_PROVISION = "1";
+// The image-gen row's own npm-pinned provisioning (card e7d6e43b) is likewise irrelevant to this test —
+// disable it so a cold resolve of the REAL seeded row never kicks a real background `npm install` as a
+// side effect of exercising this file (the credential-tie/scratch-dir plumbing is proven below via a
+// FIXTURE row instead, which never touches this real-provisioning path at all).
+process.env.LOOM_NPM_PINNED_NO_PROVISION = "1";
 
 const { Db } = await import("../dist/db.js");
 const { seedDefaultCapabilities, bundledCapabilities } = await import("../dist/capabilities/seed.js");
@@ -78,23 +88,24 @@ const igRow = db.getCapabilityDefBySlug("image-gen");
 check("(seed) the row exists in the db", !!igRow);
 check("(seed) name mentions Gemini/Imagen", /gemini|imagen/i.test(igRow.name));
 check("(seed) transport is stdio", igRow.transport === "stdio");
-check("(seed) kind is 'bundled' (a plain npx-resolved MCP, NOT the github-specific 'github-binary' kind)", igRow.kind === "bundled");
+check("(seed) kind is 'npm-pinned' (installed once under LOOM_HOME, NOT a per-spawn npx re-resolve — card e7d6e43b)", igRow.kind === "npm-pinned");
 check("(seed) requiresConnection is true", igRow.requiresConnection === true);
 check("(seed) secretEnvVar is 'GEMINI_API_KEY'", igRow.secretEnvVar === "GEMINI_API_KEY");
 check("(seed) wantsScratchDir is true (images must land on disk, not in the agent's context)", igRow.wantsScratchDir === true);
 check("(seed) tool allowlist grants the whole 'mcp__image-gen' server (mirrors the mcp__github convention)",
   JSON.parse(igRow.toolAllowlistJson).includes("mcp__image-gen"));
 const igProvision = JSON.parse(igRow.provisionJson);
-check("(seed) provision kind is 'bundled'", igProvision.kind === "bundled");
-check("(seed) provision.command is the bare 'npx' (self-heals at every spawn, never a frozen absolute path)", igProvision.command === "npx");
-check("(seed) provision.args resolve the chosen npm package", Array.isArray(igProvision.args) && igProvision.args.includes("-y") && igProvision.args.some((a) => a.includes("mcp-imagenate")));
-// CODE-REVIEW FIX (Major): the package must be PINNED to an exact version, not bare `npx -y mcp-imagenate`
-// — an unpinned npx re-resolves to whatever is "latest" at every spawn, so a future compromised release
-// would silently run with the user's live Gemini key, and the trust review documented in seed.ts's own doc
-// comment is specific to the version actually inspected (disk-write behavior, NANO_BANANA_OUTPUT_DIR
-// realpathSync sandboxing, provider-gated-by-key model registry) — not to "whatever mcp-imagenate becomes."
-check("(seed) the npm package arg is PINNED to an exact version (mcp-imagenate@<version>), never a bare unpinned package name",
-  igProvision.args.some((a) => /^mcp-imagenate@\d+\.\d+\.\d+/.test(a)));
+check("(seed) provision kind is 'npm-pinned'", igProvision.kind === "npm-pinned");
+check("(seed) provision.package is 'mcp-imagenate'", igProvision.package === "mcp-imagenate");
+// CODE-REVIEW FIX (Major, carried forward from the original bundled/npx shape): the package must be PINNED
+// to an exact version — an unpinned resolve would re-resolve to whatever is "latest" at install time, so a
+// future compromised release would silently run with the user's live Gemini key, and the trust review
+// documented in seed.ts's own doc comment is specific to the version actually inspected (disk-write
+// behavior, NANO_BANANA_OUTPUT_DIR realpathSync sandboxing, provider-gated-by-key model registry) — not to
+// "whatever mcp-imagenate becomes."
+check("(seed) the version is PINNED to an exact semver, never a bare/unpinned/range spec", /^\d+\.\d+\.\d+/.test(igProvision.version));
+check("(seed) provision.binRelativeToPackageJson names the installed package's own bin entry point",
+  typeof igProvision.binRelativeToPackageJson === "string" && igProvision.binRelativeToPackageJson.length > 0);
 check("(seed) provision.outputDirEnvVar names the env var the chosen MCP reads for its output directory",
   typeof igProvision.outputDirEnvVar === "string" && igProvision.outputDirEnvVar.length > 0);
 
@@ -115,9 +126,11 @@ check("(seed) exactly the bundled row count persists (github + image-gen, no dup
 check("(seed) bundledCapabilities() includes the 'image-gen' definition", bundledCapabilities().some((c) => c.slug === "image-gen"));
 
 // ===================== (c) resolveCapabilityServer resolves the REAL seeded row generically =====================
+// A fresh LOOM_HOME has never installed this package, and LOOM_NPM_PINNED_NO_PROVISION=1 (set above) means
+// the cold miss classifies 'disabled' rather than kicking a real install — so this resolves null
+// deterministically, never a real/unresolved-npx ambiguity like the old bundled/npx shape had.
 const resolvedNoSecret = resolveCapabilityServer(igRow, {});
-check("(resolve) with no connectionSecret and no scratchDir, mounts WITHOUT an env block (or unresolved if npx isn't on this machine's PATH)",
-  resolvedNoSecret === null || resolvedNoSecret.env === undefined);
+check("(resolve) cold (not yet installed) + provisioning disabled ⇒ resolves null, never partially mounts", resolvedNoSecret === null);
 
 // ===================== (d)+(e) end-to-end through buildMcpServers: credential tie AND scratch-dir env injection =====================
 const conn = createConnection(db, { name: "Test Gemini key", host: "generativelanguage.googleapis.com", authScheme: "bearer", secret: STUB_KEY });
@@ -131,12 +144,12 @@ const igRowFixture = {
   provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [ECHO_ENV_FIXTURE], outputDirEnvVar: igProvision.outputDirEnvVar }),
 };
 
-// (c continued) prove the REAL seeded row's own generic dispatch first — a cold/absent npx on this
-// machine resolves to null (graceful skip), never throws; the fixture-forced row below is what proves the
-// actual env-injection plumbing deterministically.
+// (c continued) prove the REAL seeded row's own generic dispatch first — a cold/not-yet-installed row
+// resolves to null (graceful skip), never throws; the fixture-forced row below is what proves the actual
+// env-injection plumbing deterministically.
 let realResolveThrew = false;
 try { resolveCapabilityServer(igRow, { scratchDir: STUB_SCRATCH_DIR, connectionSecret: STUB_KEY }); } catch { realResolveThrew = true; }
-check("(resolve) the real seeded row's generic dispatch never throws (graceful skip if npx/package isn't resolvable here)", !realResolveThrew);
+check("(resolve) the real seeded row's generic dispatch never throws (graceful skip if not yet installed)", !realResolveThrew);
 
 const resolvedFixture = resolveCapabilityServer(igRowFixture, { scratchDir: STUB_SCRATCH_DIR, connectionSecret: STUB_KEY });
 check("(fixture) the fixture-backed row resolves", !!resolvedFixture);
@@ -200,6 +213,6 @@ db.close();
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Image-generation capability (agent-tooling P4 follow-on b93cfd10, provider decided a4058e7a): seed-if-absent seeding of the Gemini/Imagen 'image-gen' row (bundled/npx, requiresConnection, GEMINI_API_KEY, wantsScratchDir, the spend-guard-gap description), generic resolveCapabilityServer/buildMcpServers dispatch, a REAL P1 connection's key injected ONLY into the mounted server's env, the NEW bundled/command-kind outputDirEnvVar scratch-dir injection (opt-in, additive), secret-free claude argv + redacted spawn log, and a REAL child_process spawn proving OS-level env-only delivery of BOTH the secret and the scratch dir with an argv-free subprocess — claude-free, network-free."
+  ? "\n✅ ALL PASS — Image-generation capability (agent-tooling P4 follow-on b93cfd10, provider decided a4058e7a; migrated to npm-pinned by card e7d6e43b): seed-if-absent seeding of the Gemini/Imagen 'image-gen' row (npm-pinned, requiresConnection, GEMINI_API_KEY, wantsScratchDir, the spend-guard-gap description), generic resolveCapabilityServer/buildMcpServers dispatch, a REAL P1 connection's key injected ONLY into the mounted server's env, the outputDirEnvVar scratch-dir injection (opt-in, additive), secret-free claude argv + redacted spawn log, and a REAL child_process spawn proving OS-level env-only delivery of BOTH the secret and the scratch dir with an argv-free subprocess — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

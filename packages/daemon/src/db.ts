@@ -1273,7 +1273,7 @@ CREATE TABLE IF NOT EXISTS capability_defs (
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   transport TEXT NOT NULL DEFAULT 'stdio',
-  kind TEXT NOT NULL,                        -- 'node-package' | 'python-venv' | 'bundled'
+  kind TEXT NOT NULL,                        -- 'node-package' | 'python-venv' | 'bundled' | 'command' | 'github-binary' | 'npm-pinned'
   provision_json TEXT NOT NULL,              -- kind-specific recipe (JSON)
   tool_allowlist_json TEXT NOT NULL DEFAULT '[]', -- JSON string[] of MCP tool names for --allowedTools
   wants_scratch_dir INTEGER NOT NULL DEFAULT 0,

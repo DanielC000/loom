@@ -54,7 +54,7 @@ import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
-import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer } from "../capabilities/registry.js";
+import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -1240,6 +1240,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const row = deps.db.getCapabilityDefBySlug("github");
     if (row) resolveCapabilityServer(row, {});
     return getCapabilityProvisionStatus("github") ?? { state: "idle" };
+  });
+
+  // --- GENERIC per-slug capability provisioning status + retry (card e7d6e43b). HUMAN/REST-ONLY
+  // (loopback), NOT an MCP tool — same trust posture as the two kind-specific pairs above. Works for any
+  // kind (not just npm-pinned); POST resets a terminal-failed status first so a retry always re-kicks,
+  // never silently suppressed by npm-pinned's own backoff — see
+  // docs/decisions/e7d6e43b-npm-pinned-shell-true-and-pin-scope.md. The two kind-specific pairs above are
+  // left untouched (a separate, deferred generalization).
+  app.get("/api/capabilities/:slug/provisioning", async (req) => {
+    const { slug } = req.params as { slug: string };
+    return getCapabilityProvisionStatus(slug) ?? { state: "idle" };
+  });
+  app.post("/api/capabilities/:slug/provisioning/retry", async (req) => {
+    const { slug } = req.params as { slug: string };
+    const row = deps.db.getCapabilityDefBySlug(slug);
+    if (row) {
+      resetCapabilityProvisionStatus(slug);
+      resolveCapabilityServer(row, {});
+    }
+    return getCapabilityProvisionStatus(slug) ?? { state: "idle" };
   });
 
   // --- Retained-worktree backlog (card 31df7e2f). HUMAN/REST-ONLY (loopback), NOT an MCP tool — same

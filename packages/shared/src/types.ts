@@ -318,8 +318,13 @@ export interface CapabilityGrant {
  *                      `<LOOM_HOME>/bin/github-mcp-server/<version>/`, mirroring `python-venv`'s
  *                      fs.existsSync-fast-path + background-provision pattern. SEED-ONLY (not owner-typeable
  *                      via `validateCapabilityDefInput`) — today just the bundled "github" capability.
+ *  - `npm-pinned`    — a pinned npm package installed with `npm install --ignore-scripts` into
+ *                      `<LOOM_HOME>/node/<package>/<version>/`, mirroring `github-binary`'s
+ *                      fs.existsSync-fast-path + background-provision pattern (card e7d6e43b). SEED-ONLY
+ *                      (not owner-typeable via `validateCapabilityDefInput`) — the "image-gen" capability's
+ *                      npx-resolved `mcp-imagenate` row is migrated onto this kind.
  */
-export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled" | "command" | "github-binary";
+export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled" | "command" | "github-binary" | "npm-pinned";
 
 /**
  * REST-facing summary of one catalog capability (builtin or owner-added) — never carries the raw

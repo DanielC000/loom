@@ -18,8 +18,14 @@
  * `migrateGithubCapabilityToBinary` (below) rewrites an EXISTING install's old `bundled`/npx row to this
  * shape at boot — see its own doc for the narrow-match/idempotency contract.
  *
- * "image-gen" (kind "bundled", NOT github-binary — that kind is github-specific and seed-only): a plain
- * `npx`-resolved MCP, `mcp-imagenate` (npm, MIT, github.com/mimo-3/mcp-imagenate).
+ * "image-gen" (kind "npm-pinned", migrated off its original "bundled"/npx form — card e7d6e43b): a pinned
+ * npm package, `mcp-imagenate` (npm, MIT, github.com/mimo-3/mcp-imagenate), installed with
+ * `npm install --ignore-scripts` into `<LOOM_HOME>/node/mcp-imagenate/<version>/` so its spawn hot path
+ * never pays an `npx` re-resolve/download. See `capabilities/npm-pinned.ts` for the
+ * download(install)+resolve pipeline and `registry.ts`'s `resolveNpmPinned` for the fs.existsSync-fast-path
+ * + background-provision resolution (mirrors `github-binary`). `migrateImageGenCapabilityToNpmPinned`
+ * (below) rewrites an EXISTING install's old `bundled`/npx row to this shape at boot — see its own doc for
+ * the narrow-match/idempotency contract.
  *
  * @decision b93cfd10 — chosen over several other Gemini-image MCPs surveyed at the time; see the
  * record for the full comparison (unconditional disk-write, output-dir sandboxing, maintenance
@@ -30,9 +36,8 @@
  * without revisiting this decision — it reopens a multi-provider surface deliberately left unused.
  *
  * Its own output-dir confinement is an ENV VAR (`NANO_BANANA_OUTPUT_DIR`), not a CLI flag like
- * Playwright's `--output-dir` — see `outputDirEnvVar` on `registry.ts`'s "bundled" provision kind
- * (a small additive extension added alongside this row) for the generic env-var-based scratch-dir
- * injection that requires.
+ * Playwright's `--output-dir` — see `outputDirEnvVar` on `registry.ts`'s "npm-pinned" provision kind for
+ * the generic env-var-based scratch-dir injection that requires.
  */
 import type { Db } from "../db.js";
 import type { CapabilityDefRow } from "./registry.js";
@@ -74,11 +79,12 @@ export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt"
       description:
         "Inject a per-session Google Gemini/Imagen image-generation MCP so a bound rig (e.g. Web Designer) can generate an image from a text prompt and have it written to disk in the session's own scratch dir — a PNG on disk is then real multimodal input via Claude Code's built-in Read, no extra plumbing needed. Needs a bound connection holding a Gemini API key (Google AI Studio). SPEND-GUARD GAP: Loom's connection rate/spend guard (ConnectionsGuardConfig) covers only the P2 authenticated_request HTTP path, NOT this MCP subprocess path — the MCP calls Google's API directly, outside Loom's own request path entirely. Spend control here rests on opt-in + off-by-default + low-frequency use, plus an OWNER-SET spend cap on the bound key in Google AI Studio/Cloud Console — Loom cannot rate-limit or cap spend on this path itself.",
       transport: "stdio",
-      kind: "bundled",
+      kind: "npm-pinned",
       provisionJson: JSON.stringify({
-        kind: "bundled",
-        command: "npx",
-        args: ["-y", `mcp-imagenate@${MCP_IMAGENATE_VERSION}`],
+        kind: "npm-pinned",
+        package: "mcp-imagenate",
+        version: MCP_IMAGENATE_VERSION,
+        binRelativeToPackageJson: "dist/index.js",
         outputDirEnvVar: "NANO_BANANA_OUTPUT_DIR",
       }),
       toolAllowlistJson: JSON.stringify(["mcp__image-gen"]),
@@ -142,5 +148,43 @@ export function migrateGithubCapabilityToBinary(db: Db): boolean {
   }
   if (!isLegacyNpxGithubProvision(provision)) return false; // owner-customized — leave it alone
   db.updateCapabilityDefProvision(row.id, "github-binary", JSON.stringify({ kind: "github-binary", version: GITHUB_MCP_SERVER_VERSION }));
+  return true;
+}
+
+/** The EXACT old (archived) provisionJson shape a pre-migration "image-gen" row carries — narrow-matched
+ *  by {@link migrateImageGenCapabilityToNpmPinned} so an owner-customized row is never touched. */
+function isLegacyNpxImageGenProvision(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const p = v as { kind?: unknown; command?: unknown; args?: unknown; outputDirEnvVar?: unknown };
+  return p.kind === "bundled" && p.command === "npx" && p.outputDirEnvVar === "NANO_BANANA_OUTPUT_DIR"
+    && Array.isArray(p.args) && p.args.length === 2 && p.args[0] === "-y" && p.args[1] === `mcp-imagenate@${MCP_IMAGENATE_VERSION}`;
+}
+
+/**
+ * Boot migration: rewrite an EXISTING install's "image-gen" capability_defs row from the archived
+ * `bundled`/npx-`mcp-imagenate` shape to the new `npm-pinned` shape (card e7d6e43b — replacing the
+ * per-spawn `npx` re-resolve with a one-time pinned install under `<LOOM_HOME>/node/`). Mirrors
+ * {@link migrateGithubCapabilityToBinary}'s exact narrow-match/idempotency contract: only a row whose
+ * `kind` is still `bundled` AND whose `provisionJson` is an EXACT match for the old npx shape is
+ * rewritten — an owner-customized row (any other command/args, or already migrated) is left completely
+ * untouched. A fresh install never has a pre-migration row at all (the row absent ⇒ no-op;
+ * `seedDefaultCapabilities` lands the NEW `npm-pinned` shape directly). Once migrated the row's `kind` is
+ * `npm-pinned`, so a later boot's narrow match no longer applies — safe to call on every boot.
+ */
+export function migrateImageGenCapabilityToNpmPinned(db: Db): boolean {
+  const row = db.getCapabilityDefBySlug("image-gen");
+  if (!row) return false;
+  if (row.kind !== "bundled") return false;
+  let provision: unknown;
+  try {
+    provision = JSON.parse(row.provisionJson);
+  } catch {
+    return false; // malformed row — leave it alone, not this migration's job to repair
+  }
+  if (!isLegacyNpxImageGenProvision(provision)) return false; // owner-customized — leave it alone
+  db.updateCapabilityDefProvision(row.id, "npm-pinned", JSON.stringify({
+    kind: "npm-pinned", package: "mcp-imagenate", version: MCP_IMAGENATE_VERSION,
+    binRelativeToPackageJson: "dist/index.js", outputDirEnvVar: "NANO_BANANA_OUTPUT_DIR",
+  }));
   return true;
 }

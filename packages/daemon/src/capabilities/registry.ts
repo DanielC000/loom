@@ -39,6 +39,8 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { loomGithubMcpBin, ensureGithubMcpBinaryAsync } from "./github-binary.js";
 import type { EnsureGithubBinaryOpts, EnsureGithubBinaryResult, GithubBinaryProvisionOutcome } from "./github-binary.js";
+import { loomNpmPinnedBin, ensureNpmPinnedAsync, validateNpmPinnedSpec } from "./npm-pinned.js";
+import type { EnsureNpmPinnedOpts, EnsureNpmPinnedResult, NpmPinnedProvisionOutcome } from "./npm-pinned.js";
 import { resolveExecutable } from "../pty/resolve-bin.js";
 import { LOOM_FIRST_PARTY_SERVER_IDS } from "../pty/tool-attribution.js";
 
@@ -78,7 +80,12 @@ export type CapabilityProvision =
   // omitted ⇒ byte-identical to before this field existed (no scratch dir is ever injected for that row).
   | { kind: "bundled"; command: string; args?: string[]; outputDirEnvVar?: string }
   | { kind: "command"; command: string; args?: string[]; outputDirEnvVar?: string }
-  | { kind: "github-binary"; version: string };
+  | { kind: "github-binary"; version: string }
+  // `binRelativeToPackageJson` mirrors node-package's field — the real npm package's own "bin" value,
+  // hardcoded at seed-authoring time (never read from the installed package.json at runtime).
+  // `outputDirEnvVar` mirrors bundled/command's field (card e7d6e43b migrates "image-gen" onto this kind
+  // and it needs its existing NANO_BANANA_OUTPUT_DIR scratch-dir injection to keep working).
+  | { kind: "npm-pinned"; package: string; version: string; binRelativeToPackageJson: string; outputDirEnvVar?: string };
 
 const NAME_MAX = 200;
 const DESCRIPTION_MAX = 2000;
@@ -273,7 +280,7 @@ export type CapabilityMcpServer = { type: "stdio"; command: string; args: string
  *  AND to more than one provisioning kind — python-venv and github-binary share this ONE tracker, keyed
  *  by slug, since slugs are unique across the whole catalog). */
 export type CapabilityProvisionState = "idle" | "installing" | "ready" | "failed";
-export interface CapabilityProvisionStatus { state: CapabilityProvisionState; reason?: ProvisionOutcome | GithubBinaryProvisionOutcome; errorTail?: string; binary?: string; lastAttemptAt?: number }
+export interface CapabilityProvisionStatus { state: CapabilityProvisionState; reason?: ProvisionOutcome | GithubBinaryProvisionOutcome | NpmPinnedProvisionOutcome; errorTail?: string; binary?: string; lastAttemptAt?: number }
 const provisionStatus = new Map<string, CapabilityProvisionStatus>();
 const provisionInFlight = new Map<string, Promise<void>>();
 const resolvedBinCache = new Map<string, string>();
@@ -281,6 +288,8 @@ type CapabilityProvisioner = (opts: EnsurePythonPackageOpts) => Promise<EnsurePy
 let provisioner: CapabilityProvisioner = ensurePythonPackageAsync;
 type GithubBinaryProvisioner = (opts: EnsureGithubBinaryOpts) => Promise<EnsureGithubBinaryResult>;
 let githubBinaryProvisioner: GithubBinaryProvisioner = ensureGithubMcpBinaryAsync;
+type NpmPinnedProvisioner = (opts: EnsureNpmPinnedOpts) => Promise<EnsureNpmPinnedResult>;
+let npmPinnedProvisioner: NpmPinnedProvisioner = ensureNpmPinnedAsync;
 
 /** Current per-slug provisioning status (a copy), or undefined if never attempted for this slug. */
 export function getCapabilityProvisionStatus(slug: string): CapabilityProvisionStatus | undefined {
@@ -304,12 +313,40 @@ export function __setGithubBinaryProvisionerForTest(fn?: GithubBinaryProvisioner
   resolvedBinCache.clear();
 }
 
+/** TEST-ONLY: swap the npm-pinned provisioner + reset ALL per-slug state (same shared tracker as above). */
+export function __setNpmPinnedProvisionerForTest(fn?: NpmPinnedProvisioner): void {
+  npmPinnedProvisioner = fn ?? ensureNpmPinnedAsync;
+  provisionStatus.clear();
+  provisionInFlight.clear();
+  resolvedBinCache.clear();
+}
+
 // Mirrors MARKITDOWN_PIP_TIMEOUT_MS (host.ts) — a heavy first pip install needs headroom, still bounded.
 const CAPABILITY_PIP_TIMEOUT_MS = 900_000;
 
+/** Cooldown after a TERMINAL `failed` outcome before a fresh npm-pinned install fires for the same slug —
+ *  stops an offline host from paying a full-timeout attempt on every spawn. Scoped to
+ *  {@link resolveNpmPinned} only (python-venv/github-binary's own tests issue consecutive same-slug
+ *  failures a shared cooldown would suppress) — see docs/decisions/e7d6e43b-npm-pinned-shell-true-and-pin-scope.md.
+ *  {@link resetCapabilityProvisionStatus} is the explicit human-retry bypass. */
+const NPM_PINNED_RETRY_COOLDOWN_MS = 60_000;
+
 /** One provisioning job's result — the shape every kind-specific provisioner (python-venv, github-binary,
  *  future kinds) normalizes to before handing it to the ONE shared kick/status machinery below. */
-interface CapabilityProvisionJobResult { binary: string | null; outcome: ProvisionOutcome | GithubBinaryProvisionOutcome; errorTail?: string }
+interface CapabilityProvisionJobResult { binary: string | null; outcome: ProvisionOutcome | GithubBinaryProvisionOutcome | NpmPinnedProvisionOutcome; errorTail?: string }
+
+/**
+ * The explicit, human-initiated bypass for {@link NPM_PINNED_RETRY_COOLDOWN_MS} — called by the
+ * provisioning-status REST retry routes right before re-resolving, never by any automatic/spawn-triggered
+ * path. Code Review round 2 finding: this must clear ONLY a TERMINAL `failed` status, never `ready`/
+ * `installing` — clearing unconditionally made a retry on an already-ready (or still-installing) slug
+ * report `idle` until the next resolve re-populates it (and, for `ready`, the per-slug cache short-circuit
+ * below never even reaches the code that would re-populate it — see those resolvers' own fix for why they
+ * now re-assert `ready` on every cache hit regardless).
+ */
+export function resetCapabilityProvisionStatus(slug: string): void {
+  if (provisionStatus.get(slug)?.state === "failed") provisionStatus.delete(slug);
+}
 
 /** Kick a per-slug BACKGROUND provisioning job — kind-agnostic (the caller's `run` closure does the actual
  *  kind-specific work: pip install, or download+verify+extract). Dedupes ONLY a genuinely in-flight job
@@ -348,7 +385,12 @@ function resolveNodePackage(provision: Extract<CapabilityProvision, { kind: "nod
 
 function resolvePythonVenv(slug: string, provision: Extract<CapabilityProvision, { kind: "python-venv" }>, pythonInterpreterPath?: string): string | null {
   const cached = resolvedBinCache.get(slug);
-  if (cached) return cached;
+  if (cached) {
+    // Re-assert on every cache hit (Code Review round 2) — a retry/reset elsewhere must never leave a
+    // cached-resolved slug reporting anything other than 'ready'.
+    provisionStatus.set(slug, { state: "ready", binary: cached, lastAttemptAt: Date.now() });
+    return cached;
+  }
   const bin = loomVenvBin(provision.binary);
   if (fs.existsSync(bin)) {
     resolvedBinCache.set(slug, bin);
@@ -372,7 +414,12 @@ function resolvePythonVenv(slug: string, provision: Extract<CapabilityProvision,
  */
 function resolveGithubBinary(slug: string, provision: Extract<CapabilityProvision, { kind: "github-binary" }>): string | null {
   const cached = resolvedBinCache.get(slug);
-  if (cached) return cached;
+  if (cached) {
+    // Re-assert on every cache hit (Code Review round 2) — a retry/reset elsewhere must never leave a
+    // cached-resolved slug reporting anything other than 'ready'.
+    provisionStatus.set(slug, { state: "ready", binary: cached, lastAttemptAt: Date.now() });
+    return cached;
+  }
   const override = process.env.LOOM_GITHUB_MCP_BIN;
   if (override) {
     const resolved = resolveExecutable(override);
@@ -391,6 +438,52 @@ function resolveGithubBinary(slug: string, provision: Extract<CapabilityProvisio
   }
   // cold → download+verify+extract in the BACKGROUND; skip this spawn
   kickCapabilityProvision(slug, () => githubBinaryProvisioner({ version: provision.version }));
+  return null;
+}
+
+/**
+ * Resolve a pinned npm package's bin for one capability_defs row — mirrors {@link resolveGithubBinary}'s
+ * shape exactly: a per-slug cache short-circuit, then a fast `fs.existsSync` on the resolved absolute
+ * path, and a background kick on a cold miss (never blocks the spawn hot path). No human-only override
+ * seam like `LOOM_GITHUB_MCP_BIN`/`LOOM_MARKITDOWN_BIN` exists for this kind today — add one if a real
+ * need for pointing an npm-pinned capability at an already-installed binary shows up.
+ */
+function resolveNpmPinned(slug: string, provision: Extract<CapabilityProvision, { kind: "npm-pinned" }>): string | null {
+  const cached = resolvedBinCache.get(slug);
+  if (cached) {
+    // Re-assert on every cache hit (Code Review round 2) — a retry/reset elsewhere must never leave a
+    // cached-resolved slug reporting anything other than 'ready'.
+    provisionStatus.set(slug, { state: "ready", binary: cached, lastAttemptAt: Date.now() });
+    return cached;
+  }
+  // ORDER IS LOAD-BEARING (Code Review finding — see the e7d6e43b decision record cited in
+  // npm-pinned.ts's module doc): validate BEFORE building/checking any path. A corrupted row's
+  // binRelativeToPackageJson (e.g. "../../x.js") would otherwise let loomNpmPinnedBin's path.join
+  // traverse OUTSIDE the intended install dir, and the fs.existsSync below would see a real, unrelated,
+  // already-existing file as "ready" — a validator bypass, since validateNpmPinnedSpec was previously
+  // only ever called from the cold/background path (ensureNpmPinnedAsync), never here on the hot path.
+  const invalid = validateNpmPinnedSpec(provision.package, provision.version, provision.binRelativeToPackageJson);
+  if (invalid) {
+    provisionStatus.set(slug, { state: "failed", reason: "invalid-spec", errorTail: invalid, lastAttemptAt: Date.now() });
+    return null;
+  }
+  const bin = loomNpmPinnedBin(provision.package, provision.version, provision.binRelativeToPackageJson);
+  if (fs.existsSync(bin)) {
+    resolvedBinCache.set(slug, bin);
+    provisionStatus.set(slug, { state: "ready", binary: bin, lastAttemptAt: Date.now() });
+    return bin;
+  }
+  // Backoff (Code Review Minor, see NPM_PINNED_RETRY_COOLDOWN_MS's own doc): don't fire a brand-new,
+  // full-timeout install attempt on every single spawn while the last one is still within its cooldown
+  // window — an explicit human retry bypasses this via resetCapabilityProvisionStatus.
+  const existing = provisionStatus.get(slug);
+  if (existing?.state === "failed" && existing.lastAttemptAt != null && Date.now() - existing.lastAttemptAt < NPM_PINNED_RETRY_COOLDOWN_MS) {
+    return null;
+  }
+  // cold → install in the BACKGROUND; skip this spawn
+  kickCapabilityProvision(slug, () => npmPinnedProvisioner({
+    package: provision.package, version: provision.version, binRelativeToPackageJson: provision.binRelativeToPackageJson,
+  }));
   return null;
 }
 
@@ -450,6 +543,12 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
   } else if (provision.kind === "github-binary") {
     const bin = resolveGithubBinary(row.slug, provision);
     if (bin) server = { command: bin, args: ["stdio"] };
+  } else if (provision.kind === "npm-pinned") {
+    // Mounted like node-package (node + an absolute bin script) — but WITHOUT that branch's hardcoded
+    // `--output-dir` CLI flag (Playwright's own convention, not generic); an npm-pinned row's scratch dir
+    // (if any) rides the shared outputDirEnvVar env-injection below instead, same as bundled/command.
+    const bin = resolveNpmPinned(row.slug, provision);
+    if (bin) server = { command: process.execPath, args: [bin] };
   }
   if (!server) return null;
   const env: Record<string, string> = {};
@@ -462,7 +561,7 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
   // doc): a CLI that takes its output directory via its OWN env var rather than a flag (unlike the
   // node-package branch's hardcoded `--output-dir` arg above). Additive: only fires when a row's provision
   // explicitly sets it, so every existing bundled/command row (none of which set it today) is unaffected.
-  if ((provision.kind === "bundled" || provision.kind === "command") && provision.outputDirEnvVar && row.wantsScratchDir && ctx.scratchDir) {
+  if ((provision.kind === "bundled" || provision.kind === "command" || provision.kind === "npm-pinned") && provision.outputDirEnvVar && row.wantsScratchDir && ctx.scratchDir) {
     env[provision.outputDirEnvVar] = ctx.scratchDir;
   }
   const hasEnv = Object.keys(env).length > 0;

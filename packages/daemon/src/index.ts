@@ -18,7 +18,8 @@ import { runBootRecoveryPrefix } from "./sessions/boot-backstop.js";
 import { kickProjectsWorkRootUsageRefresh } from "./sessions/project-work-dir-usage.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
-import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
+import { seedDefaultCapabilities, migrateGithubCapabilityToBinary, migrateImageGenCapabilityToNpmPinned } from "./capabilities/seed.js";
+import { prewarmNpmPinnedForProfilesAtBoot } from "./capabilities/prewarm.js";
 import { seedPlatformHome, migratePlatformPrompts, getPlatformHomePaths } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
@@ -222,6 +223,26 @@ async function main(): Promise<void> {
     if (migrateGithubCapabilityToBinary(db)) console.log("[boot] migrated the 'github' capability off the archived npx package to the Loom-managed github-mcp-server binary");
   } catch (err) {
     console.warn(`[boot] github capability provisioning migration failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Card e7d6e43b: the "image-gen" analog of the github migration above — rewrite an EXISTING install's
+  // old bundled/npx-mcp-imagenate row onto the new npm-pinned provisioning (a fresh install's seed above
+  // already lands the new shape directly). Narrow + idempotent (see migrateImageGenCapabilityToNpmPinned's
+  // doc). Best-effort: a throw here must never gate boot — the row just stays on its old (still-working) shape.
+  try {
+    if (migrateImageGenCapabilityToNpmPinned(db)) console.log("[boot] migrated the 'image-gen' capability off the npx-resolved mcp-imagenate package to a Loom-managed npm-pinned install");
+  } catch (err) {
+    console.warn(`[boot] image-gen capability provisioning migration failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Card e7d6e43b, Code Review Minor: pre-warm every "npm-pinned" capability row at least one profile
+  // grants, same posture as prewarmMarkitdownForProfilesAtBoot — so the first session that grants it
+  // usually finds the install already warm instead of hitting the provision-on-first-spawn cold-skip
+  // window. Fully async/best-effort (delegates to resolveCapabilityServer's own background kick); a
+  // throw here must never gate boot.
+  try {
+    const prewarmed = prewarmNpmPinnedForProfilesAtBoot(db);
+    if (prewarmed.length) console.log(`[boot] pre-warming npm-pinned capability install(s): ${prewarmed.join(", ")}`);
+  } catch (err) {
+    console.warn(`[boot] npm-pinned capability prewarm failed (continuing boot): ${(err as Error).message}`);
   }
   // "Getting Started" → "Platform" home rename backfill — rename an EXISTING install's reserved setup-home
   // ROW before seedSetupHome runs. seedSetupHome is seed-if-absent keyed on the NEW name, so if it ran first

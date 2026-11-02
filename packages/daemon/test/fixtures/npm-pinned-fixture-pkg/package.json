@@ -1,0 +1,12 @@
+{
+  "name": "loom-npm-pinned-fixture",
+  "version": "1.0.0",
+  "description": "Tiny fixture package for the npm-pinned capability's real-spawn smoke test (card e7d6e43b) — installed via a real `npm install --ignore-scripts` from a LOCAL tarball, never the real npm registry. No dependencies. Carries a postinstall script ON PURPOSE (card e7d6e43b, Code Review Minor) so the real-spawn test can prove --ignore-scripts actually suppresses it, with a positive control (a plain npm install of the SAME tarball) proving the script is genuinely capable of running.",
+  "bin": {
+    "loom-npm-pinned-fixture": "bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "private": true
+}

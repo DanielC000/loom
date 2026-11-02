@@ -365,6 +365,10 @@ check("(regression) an old-shape call (no capabilities/capabilityCatalog fields 
 // ===================== (e) validateCapabilityDefInput =====================
 check("(validate) a reserved slug is rejected",
   validateCapabilityDefInput({ slug: "browser-testing", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: "/bin/x" }, toolAllowlist: [] }).ok === false);
+// Card e7d6e43b: "npm-pinned" (like "github-binary") is SEED-ONLY — an owner can never create one via this
+// validator's kind whitelist, structurally (the whitelist simply never lists it), proven here directly.
+check("(validate) kind 'npm-pinned' is REJECTED — seed-only, never owner-typeable (card e7d6e43b)",
+  validateCapabilityDefInput({ slug: "arb-npm", name: "x", description: "", transport: "stdio", kind: "npm-pinned", provision: { package: "cowsay", version: "1.6.0", binRelativeToPackageJson: "cli.js" }, toolAllowlist: [] }).ok === false);
 // ===================== command provision-kind (P4 follow-on): owner-typed-therefore-trusted =====================
 const commandOk = validateCapabilityDefInput({
   slug: "arb", name: "x", description: "", transport: "stdio", kind: "command",

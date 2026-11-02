@@ -751,6 +751,7 @@ export const LOOM_HOME_WRITE_DENY_REGISTRY: readonly LoomHomeWriteDenyEntry[] = 
   { relPath: "codescape", kind: "dir" },
   { relPath: "python", kind: "dir" }, // also covers python/venv, python/hf-cache, python/kokoro-cache — all nested
   { relPath: "bin", kind: "dir" }, // also covers bin/github-mcp-server/<version>
+  { relPath: "node", kind: "dir" }, // card e7d6e43b — npm-pinned capability installs, e.g. node/<package>/<version>
   { relPath: "deploy-backup", kind: "dir" },
   { relPath: "merge-danger-latches", kind: "dir" },
   { relPath: "merge-quarantines", kind: "dir" },
