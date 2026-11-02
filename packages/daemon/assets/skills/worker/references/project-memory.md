@@ -29,6 +29,14 @@ predicate** (a grep / commit-presence / card-state check), not prose like "until
 honest caveat that nothing runs that predicate for you today, so it only pays off when an agent thinks
 to check it.
 
+**Seeing what a note used to say (`memory_history`):** every UPDATE that actually changes `text` (never
+a metadata-only patch, and never a key's own first write) appends a row to that key's append-only
+history. Read it back with `memory_history`(`key`[, `limit`]) — newest-first, each row
+`{oldText, newText, version, updatedAt}`. Reach for it before minting a new "-evidence" sibling note or
+re-typing an old claim into a decision record just to explain why a fact changed — the prior wording is
+already there. `memory_forget` also deletes that key's history — forgetting means forgetting, so a later
+write under the same key starts a fresh lineage, not a resumed one.
+
 **Linking a note to a Request (`requestIds`):** a note touching an owner gate — a pending approval,
 authorization, or spend — records the request id in `requestIds` (an array), NOT just its id/state
 written into `text` by hand. Every future read (kickoff injection, `memory_read`, `memory_list`)

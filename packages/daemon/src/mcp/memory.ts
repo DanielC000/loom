@@ -1,4 +1,4 @@
-import type { ProjectMemoryEntry } from "@loom/shared";
+import type { ProjectMemoryEntry, ProjectMemoryHistoryEntry } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
@@ -547,4 +547,34 @@ export function readProjectMemory(db: Db, projectId: string, key: string): Proje
   const found = db.getProjectMemoryByKey(projectId, key.trim());
   if (!found) return { error: `no memory note with key "${key}" on this project` };
   return withLinks(db, projectId, found, annotateBacklinks(db, projectId, found.key));
+}
+
+/** A bounded cap on `memory_history`'s own `limit` param — independent of, and tighter than, the
+ *  DB-layer per-key row cap ({@link Db.pruneProjectMemoryHistoryOverCap}, 50 rows); this just bounds one
+ *  READ's result size regardless of how that cap is configured. */
+export const MAX_MEMORY_HISTORY_LIMIT = 200;
+const DEFAULT_MEMORY_HISTORY_LIMIT = 50;
+
+/**
+ * Card 5ccc2462: this key's append-only prior-text history, newest-first — a SEPARATE, cheap, on-demand
+ * tool rather than a field folded into {@link readProjectMemory}/`memory_read`. Chosen over the field
+ * because the two reads have different shapes and different costs: an ordinary `memory_read` is the
+ * common, cheap path (one row, whatever its CURRENT text is) that every kickoff-adjacent lookup pays for,
+ * while history grows (bounded, but still) as a note is edited over and over — folding it in would make
+ * every plain `memory_read` pay to fetch data most callers never asked for. A note's CURRENT state and
+ * its PAST states are also genuinely different questions ("what does this say now" vs. "what did this
+ * used to say, and why did it change") — splitting them mirrors how Loom already keeps other append-only
+ * audit logs (e.g. `gate_history`) as their own read path rather than attached to the live row they
+ * describe. Does not error on an unknown/never-written key — returns `{entries:[]}`, since "no history
+ * exists yet" is a normal, expected answer, not a fault (mirroring `memory_forget`'s own
+ * idempotent-on-missing shape). `memory_forget` (round 2, card 5ccc2462) DELETES this key's history
+ * entirely, in the same transaction as the live-row delete — a forgotten note's past text is gone, not
+ * just hidden; a fresh `memory_write` under the same key afterward starts a brand-new lineage.
+ */
+export function readProjectMemoryHistory(
+  db: Db, projectId: string, key: string, limit?: number,
+): { entries: ProjectMemoryHistoryEntry[] } {
+  const trimmedKey = key.trim();
+  const boundedLimit = Math.min(Math.max(1, limit ?? DEFAULT_MEMORY_HISTORY_LIMIT), MAX_MEMORY_HISTORY_LIMIT);
+  return { entries: db.getProjectMemoryHistory(projectId, trimmedKey, boundedLimit) };
 }

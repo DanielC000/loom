@@ -119,7 +119,7 @@ import type {
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
-  ProjectLink, ProjectMemoryEntry,
+  ProjectLink, ProjectMemoryEntry, ProjectMemoryHistoryEntry,
   DeferredItem, DeferredItemStatus, TaskRelationType,
   GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
   RepoRegistryEntry, PlatformConfigHistoryEntry, ProjectConfigHistoryEntry,
@@ -1535,6 +1535,30 @@ CREATE TRIGGER IF NOT EXISTS project_memory_au AFTER UPDATE OF title, text ON pr
   INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
   INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
 END;
+-- Append-only history of a project-memory note's PRIOR text (card 5ccc2462) — one row per update that
+-- actually CHANGES "text" (written inside the same transaction as upsertProjectMemoryChecked; a
+-- metadata-only patch, e.g. title/pinned/tags with "text" omitted or resent byte-identical, writes no
+-- row — see upsertProjectMemoryChecked's own call site). Scoped by "key", NOT a live foreign key to
+-- project_memory.id — memory_id records which incarnation of the row produced each transition.
+-- memory_forget DELETES every row for its key, in the same transaction as the live-row delete (card
+-- 5ccc2462 round 2, reversing round 1's "forget does not purge history" — a forgotten note can hold a
+-- pasted secret or a wrong personal detail, and leaving every prior version readable with no purge path
+-- would make "forget" a lie) — see deleteProjectMemory's own doc comment. Bounded per (project_id, key)
+-- at PROJECT_MEMORY_HISTORY_MAX_ROWS_PER_KEY rows, pruned oldest-first in the same transaction as the
+-- insert (each row stores BOTH old and new text, so this is not a free-growing log) — see
+-- recordProjectMemoryHistory's own doc comment. Every column exists at CREATE TABLE time (no ALTER TABLE
+-- needed), so there is no base-schema index referencing a migration-added column for this table.
+CREATE TABLE IF NOT EXISTS project_memory_history (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  memory_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  version INTEGER NOT NULL,               -- the project_memory.version this transition PRODUCED (old_text was version-1's text, new_text is this version's)
+  old_text TEXT NOT NULL,
+  new_text TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_memory_history_key ON project_memory_history(project_id, key, updated_at);
 
 -- @decision 2a6a292a round 20 (card aa7677fa) — a Loom-owned ledger (never git-derived); see that record's
 -- round-20 section for why a forged commit can never enter it and so can never make a walk reach trust.
@@ -1901,6 +1925,16 @@ function parseWatermarkFinalizeSkipMarker(raw: string | undefined): WatermarkFin
  * (card ec0be17e) for why this exact ordering was chosen and reviewed.
  */
 const PROJECT_MEMORY_EVICTION_ORDER = "last_retrieved_at IS NOT NULL, last_retrieved_at ASC, created_at ASC";
+
+/**
+ * Bounded-store cap for `project_memory_history` (card 5ccc2462 round 2) — the newest N rows per
+ * (project_id, key), pruned oldest-first by {@link Db.pruneProjectMemoryHistoryOverCap} immediately
+ * after every history-producing write, in the SAME transaction as the write itself. Each history row
+ * stores BOTH a note's old AND new text, so an unbounded history would grow roughly twice as fast as the
+ * note's own text — this is the one place that growth is actually capped. 50 is a deliberately generous
+ * but finite choice: enough edits to be useful ("what did this say a few months ago"), never unbounded.
+ */
+const PROJECT_MEMORY_HISTORY_MAX_ROWS_PER_KEY = 50;
 
 /**
  * One boot-reconcile Pass-A session whose repoKey can never resolve (card c33f94b2: three such records
@@ -9097,9 +9131,60 @@ export class Db {
       }
       const result = this.upsertProjectMemory(projectId, input, maxNotes);
       if ("rejected" in result) return { ok: false, ...result };
+      // Card 5ccc2462: append-only history row, written in this SAME transaction, ONLY when `text`
+      // actually changed — `existing` is undefined on a brand-new key (nothing prior to record), and a
+      // metadata-only patch leaves `input.text` equal to `existing.text` (writeProjectMemory resolves an
+      // omitted `text` to the existing row's own stored body before calling this method), so comparing
+      // the two strings here — never whether the caller's `input` happened to include a `text` field —
+      // is what correctly distinguishes a real edit from a metadata-only touch.
+      if (existing && existing.text !== input.text) {
+        this.recordProjectMemoryHistory(projectId, result.id, input.key, result.version, existing.text, input.text);
+        this.pruneProjectMemoryHistoryOverCap(projectId, input.key);
+      }
       return { ok: true, entry: result };
     });
     return run();
+  }
+  /** Append-only history write (card 5ccc2462) — called ONLY from inside {@link upsertProjectMemoryChecked}'s
+   *  own transaction, and only when `text` genuinely changed; see the `project_memory_history` CREATE
+   *  TABLE's own doc comment for why this is keyed by `key` rather than a live FK to `memoryId`. */
+  private recordProjectMemoryHistory(
+    projectId: string, memoryId: string, key: string, version: number, oldText: string, newText: string,
+  ): void {
+    this.db.prepare(
+      `INSERT INTO project_memory_history (id, project_id, memory_id, key, version, old_text, new_text, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(randomUUID(), projectId, memoryId, key, version, oldText, newText, new Date().toISOString());
+  }
+  /** Bounded-store backstop for `project_memory_history` (card 5ccc2462 round 2) — each row stores BOTH
+   *  old AND new text, so an unbounded append-only log would grow twice as fast as the note itself; this
+   *  keeps only the newest {@link PROJECT_MEMORY_HISTORY_MAX_ROWS_PER_KEY} rows per (project_id, key),
+   *  pruning the OLDEST rows first (by `version`, which is monotonic and collision-free within one key's
+   *  unbroken lineage — unlike `updated_at`, which can collide at millisecond resolution). Called ONLY
+   *  from inside {@link upsertProjectMemoryChecked}'s own transaction, immediately after the insert above,
+   *  so a row is never visible even momentarily past the cap. Mirrors {@link evictProjectMemoryOverCap}'s
+   *  own count-then-delete-the-overflow shape. */
+  private pruneProjectMemoryHistoryOverCap(projectId: string, key: string): void {
+    const { c } = this.db.prepare(
+      "SELECT COUNT(*) AS c FROM project_memory_history WHERE project_id = ? AND key = ?",
+    ).get(projectId, key) as { c: number };
+    const over = c - PROJECT_MEMORY_HISTORY_MAX_ROWS_PER_KEY;
+    if (over <= 0) return;
+    this.db.prepare(
+      `DELETE FROM project_memory_history WHERE id IN (
+         SELECT id FROM project_memory_history WHERE project_id = ? AND key = ? ORDER BY version ASC LIMIT ?
+       )`,
+    ).run(projectId, key, over);
+  }
+  /** Read-only (card 5ccc2462): this key's append-only prior-text history, newest-first, capped at
+   *  `limit` — and, independently, at {@link PROJECT_MEMORY_HISTORY_MAX_ROWS_PER_KEY} rows total per key
+   *  (see {@link pruneProjectMemoryHistoryOverCap}). `memory_forget` deletes this key's history entirely
+   *  (see `deleteProjectMemory`'s own doc comment) — a fresh `memory_write` under the same key afterward
+   *  starts a brand-new lineage, it does not resume the deleted one. */
+  getProjectMemoryHistory(projectId: string, key: string, limit = 50): ProjectMemoryHistoryEntry[] {
+    return (this.db.prepare(
+      `SELECT * FROM project_memory_history WHERE project_id = ? AND key = ? ORDER BY updated_at DESC, version DESC LIMIT ?`,
+    ).all(projectId, key, limit) as Row[]).map(toProjectMemoryHistoryEntry);
   }
   getProjectMemoryByKey(projectId: string, key: string): ProjectMemoryEntry | undefined {
     const r = this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? AND key = ?").get(projectId, key) as Row | undefined;
@@ -9109,9 +9194,18 @@ export class Db {
     return (this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? ORDER BY pinned DESC, updated_at DESC")
       .all(projectId) as Row[]).map(toProjectMemoryEntry);
   }
-  /** Explicit curation (`memory_forget`). Idempotent on a missing key. Returns whether a row was deleted. */
+  /** Explicit curation (`memory_forget`). Idempotent on a missing key. Returns whether a row was deleted.
+   *  Card 5ccc2462 round 2 (reversing round 1): ALSO deletes this key's `project_memory_history` rows, in
+   *  the SAME transaction as the live-row delete — "forget" must mean forget. A forgotten note can have
+   *  held a pasted secret or a wrong personal detail; leaving every prior version of its text readable
+   *  via `getProjectMemoryHistory`/`memory_history` with no purge path at all would make this tool a lie.
+   *  Accepted cost: a later `memory_write` under the same key starts a BRAND-NEW lineage — it does NOT
+   *  resume the deleted one — since there is nothing left to resume. */
   deleteProjectMemory(projectId: string, key: string): boolean {
-    return this.db.prepare("DELETE FROM project_memory WHERE project_id = ? AND key = ?").run(projectId, key).changes > 0;
+    return this.db.transaction(() => {
+      this.db.prepare("DELETE FROM project_memory_history WHERE project_id = ? AND key = ?").run(projectId, key);
+      return this.db.prepare("DELETE FROM project_memory WHERE project_id = ? AND key = ?").run(projectId, key).changes > 0;
+    })();
   }
   /** Always-injected tier (kickoff injection §3) — every pinned note, newest-updated first as fetched.
    *  Pinned rows are never evicted and never counted against `maxNotes` (owner decision #2). Card
@@ -11649,6 +11743,14 @@ function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {
     // Card aeec1880 — '' (the column's own DEFAULT, and every pre-existing/legacy row) ⇒ null ("no
     // predicate"), mirroring the row-shape convention already used for title's own "" default elsewhere.
     triggerGlob: (r.trigger_glob as string | null) || null,
+  };
+}
+function toProjectMemoryHistoryEntry(r0: unknown): ProjectMemoryHistoryEntry {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectId: r.project_id as string, key: r.key as string,
+    version: r.version as number, oldText: r.old_text as string, newText: r.new_text as string,
+    updatedAt: r.updated_at as string,
   };
 }
 /** Turn free-form kickoff/task text into a safe FTS5 MATCH query: split into word tokens, drop short

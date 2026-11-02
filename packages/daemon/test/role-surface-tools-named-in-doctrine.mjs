@@ -75,7 +75,6 @@ allow("orchestration manager", ["schedule_create", "schedule_get", "schedule_lis
 allow("orchestration manager", ["worker_relink"], "SELF: explicit self-heal backstop every per-worker tool already runs automatically; description is the contract");
 allow("loom-tasks (manager)", ["wake_cancel", "wake_list"], "SELF: siblings of wake_me, which is named; description is the contract");
 allow("loom-tasks (manager)", ["tasks_defer_item", "tasks_defer_item_ack"], "SELF: structured defer-item hand-off between cards; description is the contract");
-allow("loom-tasks (worker)", ["memory_forget"], "SELF: rarely-needed inverse of memory_write; description is the contract");
 allow("loom-tasks (worker)", ["tasks_defer_item", "tasks_defer_item_ack"], "SELF: structured defer-item hand-off between cards; description is the contract");
 allow("platform", ["agent_create", "agent_delete", "agent_get", "agent_update", "profile_assign",
   "profile_delete", "profile_get", "project_archive", "project_create", "project_get", "project_init", "project_update",

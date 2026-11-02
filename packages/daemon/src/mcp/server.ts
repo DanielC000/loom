@@ -12,7 +12,7 @@ import {
   listProjectTaskRequests, getProjectTaskRequest, deferTaskItem, updateDeferredItemStatus, countProjectTasks, countProjectTasksAsync,
   spillableTaskGet, spillableTaskUpdateResult, pickFields, applyBodyExcerpt, resolveParentIdFilter,
 } from "./tasks.js";
-import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
+import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory, readProjectMemoryHistory, MAX_MEMORY_HISTORY_LIMIT } from "./memory.js";
 import { registerDecisionTools } from "./decisions.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
@@ -675,6 +675,28 @@ export class TaskMcpRouter {
         inputSchema: strictShape({ key: z.string() }),
       },
       async ({ key }) => ok(readProjectMemory(db, projectId, key)),
+    );
+    server.registerTool(
+      "memory_history",
+      {
+        description:
+          "Read ONE project-scoped memory note's APPEND-ONLY prior-text history by key — every PAST " +
+          "version of its `text`, newest-first. A row exists only for an UPDATE that actually changed " +
+          "`text` (a metadata-only patch — title/pinned/tags/etc with `text` omitted or resent " +
+          "byte-identical — never writes one, and neither does the key's own first `memory_write`, which " +
+          "has no prior text to record). Each row is {id,projectId,key,version,oldText,newText,updatedAt} " +
+          "— `version` is the note's `ProjectMemoryEntry.version` that this transition PRODUCED, so " +
+          "`oldText` was the note's text as of `version - 1` and `newText` is its text as of `version`. " +
+          "An unknown or never-edited key returns `{entries:[]}`, never an error — no history existing yet " +
+          "is a normal answer, not a fault. `limit` (optional, default 50, max " + MAX_MEMORY_HISTORY_LIMIT +
+          ") bounds how many rows come back from this one read; the STORE itself also keeps only the " +
+          "newest 50 rows per key, oldest pruned automatically on every edit. `memory_forget` DELETES " +
+          "this key's history too, in the same transaction as the note itself — a forgotten note's past " +
+          "text is gone, not just hidden; a later `memory_write` under the same key starts a brand-new " +
+          "lineage, it does not resume the deleted one.",
+        inputSchema: strictShape({ key: z.string(), limit: z.number().optional() }),
+      },
+      async ({ key, limit }) => ok(readProjectMemoryHistory(db, projectId, key, limit)),
     );
 
     // The @decision anchor index (card dbad4b59) — universal, every project session, read-only. See

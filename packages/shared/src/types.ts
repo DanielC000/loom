@@ -3005,6 +3005,26 @@ export interface ProjectMemoryEntry {
 }
 
 /**
+ * One row of a project-memory note's append-only prior-text history (card 5ccc2462) — written whenever a
+ * `memory_write` update actually CHANGES `text` (a metadata-only patch — title/pinned/tags/etc with
+ * `text` omitted or resent byte-identical — writes no row; neither does a brand-new key, which has no
+ * prior text to record). `version` is the `ProjectMemoryEntry.version` this transition PRODUCED: `oldText`
+ * was the note's text as of `version - 1`, `newText` is its text as of `version`. Scoped to the note's
+ * `key`, not a live foreign key to its row `id` — a `memory_forget` followed by a fresh `memory_write`
+ * under the same key keeps appending to the SAME history, since "what has this key said over time" spans
+ * every incarnation of that key (see `memory_history`'s own tool description for the full rationale).
+ */
+export interface ProjectMemoryHistoryEntry {
+  id: string;
+  projectId: ProjectId;
+  key: string;
+  version: number;
+  oldText: string;
+  newText: string;
+  updatedAt: string;
+}
+
+/**
  * One note's INBOUND `[[wikilink]]` backlinks (card e4e180ad), structured for navigation rather than the
  * prose annotation lines the agent-facing `memory_read`/`memory_list` tools render (see the daemon's
  * `mcp/memory.ts` `ProjectMemoryEntryWithLinks.backlinks: string[]`) — this is the shape
