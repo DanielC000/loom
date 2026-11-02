@@ -3282,7 +3282,7 @@ function blockedCoOccupant(repoPath: string, sourceFile: string): BlockedCoOccup
 
 /**
  * The SAME "name it and how to clear it" job as {@link blockedCoOccupant}, for a `repoPath` reached via
- * one of {@link sweepOrphanLatchFileIfUnreferenced}/{@link sweepOwnLatchFileUnlessOwnedElsewhere}/
+ * one of {@link sweepOrphanLatchFilesUnioned}/{@link sweepOwnLatchFileUnlessOwnedElsewhere}/
  * {@link sweepTmpResidueForHashIfUnreferenced}'s own `referencingRepoPaths`/`keptEntries` — a repoPath can
  * land there two structurally different ways, and only one of them makes `sourceFile`'s own id a WORKING
  * clear-by-id route for it.
@@ -4881,23 +4881,18 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       //
       // @decision 8db913e2 (Follow-up 0a783fb2) — this path has NO human-facing return (clearMergeQuarantineByToken
       // is `void`), so fold only to LOG, same disclosure-safe convention as the warning just above.
-      const orphanContentKept = new Map<string, string>();
-      const orphanKeptRepoPaths: string[] = [];
       // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — exclude this entry's OWN identity,
       // same reason as every other orphan-sweep call site.
       const excludeOwnIdentity = new Set([identity]);
-      let orphanUnattributed = false;
-      for (const orphanFile of orphanFilesToSweep) {
-        const folded = foldOrphanSweepResult(sweepOrphanLatchFileIfUnreferenced(orphanFile, live.entry.tokens, excludeOwnIdentity), orphanFile, orphanContentKept);
-        orphanKeptRepoPaths.push(...folded.referencingRepoPaths);
-        if (folded.unattributed) orphanUnattributed = true;
-      }
-      const orphanNamed = [...orphanKeptRepoPaths, ...orphanContentKept.keys()];
+      // @decision 9f387d7e — ONE call over the whole set, never a per-file loop: unions a shared foreign
+      // identity's orphan refs before arming — see `sweepOrphanLatchFilesUnioned`'s own doc.
+      const orphanSweepResult = sweepOrphanLatchFilesUnioned(orphanFilesToSweep, live.entry.tokens, excludeOwnIdentity);
+      const orphanNamed = [...orphanSweepResult.referencingRepoPaths.map((r) => r.repoPath), ...orphanSweepResult.contentKept.map((c) => c.repoPath)];
       // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d, NIT) — an unattributed keep (kept
       // but nothing nameable) must ALSO log, not just a named one, or it silently vanishes here.
-      if (orphanNamed.length > 0 || orphanUnattributed) {
+      if (orphanNamed.length > 0 || orphanSweepResult.anyUnattributed) {
         // eslint-disable-next-line no-console
-        console.warn(`[merge-quarantine] a token-clear's own full lift also kept ${orphanNamed.length} orphan file reference(s) alive${orphanUnattributed ? " (plus at least one more, unattributed)" : ""} (no human route reaches this path — logging only)${orphanNamed.length > 0 ? `: ${orphanNamed.map((rp) => `'${rp}'`).join(", ")}` : ""}.`);
+        console.warn(`[merge-quarantine] a token-clear's own full lift also kept ${orphanNamed.length} orphan file reference(s) alive${orphanSweepResult.anyUnattributed ? " (plus at least one more, unattributed)" : ""} (no human route reaches this path — logging only)${orphanNamed.length > 0 ? `: ${orphanNamed.map((rp) => `'${rp}'`).join(", ")}` : ""}.`);
       }
       continue;
     }
@@ -5220,7 +5215,7 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
 
 /**
  * repoPaths of every surviving entry that currently OWNS `filename` as its own CURRENT physical latch —
- * check (2) from {@link sweepOrphanLatchFileIfUnreferenced}'s own doc, factored out so a caller deleting
+ * check (2) from {@link orphanLatchFileSweepDecision}'s own doc, factored out so a caller deleting
  * an entry's OWN file (see {@link sweepOwnLatchFileUnlessOwnedElsewhere}) can gate on ownership alone,
  * never on a mere `orphanLatchFiles` reference. An active entry owns `filename` if ANY key it is
  * currently armed under hashes to it, OR (round 2, item 3) if `filename` is its TRUE current write
@@ -5230,7 +5225,7 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
  * pending entry owns `filename` if its own `sourceFile` is it.
  *
  * @decision 9cabd143 — round 2, item 4: the PENDING half of this check protects a case
- * {@link sweepOrphanLatchFileIfUnreferenced}'s own call sites (e.g. clearMergeQuarantineByKey's
+ * {@link sweepOrphanLatchFilesUnioned}'s own call sites (e.g. clearMergeQuarantineByKey's
  * orphan-reference sweep) genuinely reach — see test (AA) and the decision record.
  *
  * @decision 882d6cff (round 4) — the FRESH-recompute half is gated on `e.repoPath` being CURRENTLY
@@ -5516,11 +5511,19 @@ function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntr
  * @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d, MAJOR) — `excludeIdentities` drops any
  * candidate referencer sharing an identity with the clear CURRENTLY IN PROGRESS — a same-identity record
  * is never a "co-occupant"; see the decision record's own section for the self-reference bug this closes.
+ *
+ * @decision 9f387d7e — never arm or classify a `"foreign"` outcome here; {@link sweepOrphanLatchFilesUnioned}
+ * — the ONLY caller — is where that must happen, batched by identity.
  */
-function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: string[], excludeIdentities?: ReadonlySet<string>): { kept: boolean; referencingRepoPaths: string[]; contentKeptRepoPath?: string; blockedBy?: ContentKeptBlockedBy } {
+function orphanLatchFileSweepDecision(filename: string, candidateTokens: string[], excludeIdentities?: ReadonlySet<string>):
+  | { outcome: "deleted" }
+  | { outcome: "referenced"; referencingRepoPaths: string[] }
+  | { outcome: "own-content" }
+  | { outcome: "unattributed" }
+  | { outcome: "foreign"; repoPath: string; armable?: MergeQuarantineEntry } {
   // @decision 63e49ee2 (round 3) — a read-failure-kept file has no identity to attribute; keep it with
   // no referencing repoPath, never gated on `orphanLatchFiles`/`physicalOwnerRepoPaths` alone.
-  if (keptUnreadableLatchFiles.has(filename)) return { kept: true, referencingRepoPaths: [] };
+  if (keptUnreadableLatchFiles.has(filename)) return { outcome: "unattributed" };
   const referencingRepoPaths = new Set<string>();
   for (const e of activeQuarantines.values()) {
     if (excludeIdentities?.has(directPathIdentity(e.repoPath))) continue;
@@ -5534,49 +5537,106 @@ function sweepOrphanLatchFileIfUnreferenced(filename: string, candidateTokens: s
     if (excludeIdentities?.has(directPathIdentity(rp))) continue;
     referencingRepoPaths.add(rp);
   }
-  if (referencingRepoPaths.size > 0) return { kept: true, referencingRepoPaths: [...referencingRepoPaths] };
+  if (referencingRepoPaths.size > 0) return { outcome: "referenced", referencingRepoPaths: [...referencingRepoPaths] };
   const safety = orphanSweepSafeToDelete(filename, candidateTokens);
   if (!safety.safe) {
     // @decision 2dd97aaa — a `parsedRepoPath` sharing `excludeIdentities`' own identity is the clearer's
     // OWN stale content, never a true foreign claimant — never report it as a content-kept claimant here,
     // not just exclude it from the referencer scan above.
     const ownContent = !!safety.parsedRepoPath && !!excludeIdentities?.has(directPathIdentity(safety.parsedRepoPath));
-    // @decision 1dd00dca — arm it in memory, THIS PROCESS ONLY, synchronously right here (never deferred
-    // to a later pass) when it's genuinely foreign and armable; never for the clearer's own stale content.
-    if (!ownContent && safety.armable) armForeignOrphanContentInMemoryIfUnenforced(safety.armable, [filename]);
-    // @decision 25d0d45b (Round 4) — disposition via `classifyKeptRepoPath`: live ONLY when the
-    // blocking entry is `safety.parsedRepoPath`'s OWN content, never a collapsed-key sibling's.
-    const classification = !ownContent && safety.parsedRepoPath ? classifyKeptRepoPath(safety.parsedRepoPath, filename) : undefined;
-    const isLive = classification?.live === true;
-    // eslint-disable-next-line no-console
-    console.error(isLive
-      ? `[merge-quarantine] orphan latch ${filename} stays on disk, unreferenced by itself — its own content for '${safety.parsedRepoPath}' is now ARMED and enforced in this process instead; reported as a genuine blocked co-occupant, not a content-only keep.`
-      : `[merge-quarantine] keeping orphan latch ${filename} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for${!ownContent && safety.parsedRepoPath ? ` (its own parsed content names repoPath '${safety.parsedRepoPath}')` : ""}; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.${classification && !classification.live && classification.blockedBy ? ` Its own content stays on disk and arms at the next boot; it is refused right now by a DIFFERENT identity's own entry (${classification.blockedBy.repoPath}) — clearing THAT identity does not release this one.` : ""}`);
-    // @decision 8db913e2 (Follow-up f2cc5f18, Code Review 745c3736) — a caller must be able to SEE this
-    // keep, never a silent `{kept:true, referencingRepoPaths:[]}` indistinguishable from "nothing to
-    // report" — name the parsed foreign repoPath when the content gave us one.
-    //
-    // @decision 8db913e2 (Follow-up 0a783fb2) — a CONTENT-parsed repoPath never shares
-    // `referencingRepoPaths` with a true in-memory referencer again — see `foldOrphanSweepResult`.
-    //
-    // @decision 25d0d45b (Round 4) — a live outcome (repoPath's OWN entry) routes through
-    // `referencingRepoPaths`; every other case is `contentKeptRepoPath`, with `blockedBy` when some
-    // DIFFERENT identity's own entry is what's actually refusing it right now.
-    if (isLive) {
-      return { kept: true, referencingRepoPaths: [safety.parsedRepoPath!] };
+    if (ownContent || !safety.parsedRepoPath) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] keeping orphan latch ${filename} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.`);
+      return { outcome: ownContent ? "own-content" : "unattributed" };
     }
-    return {
-      kept: true, referencingRepoPaths: [], contentKeptRepoPath: ownContent ? undefined : safety.parsedRepoPath,
-      ...(classification && !classification.live && classification.blockedBy ? { blockedBy: classification.blockedBy } : {}),
-    };
+    // @decision 9f387d7e — NEITHER armed NOR classified here: see this function's own doc. The caller
+    // (`sweepOrphanLatchFilesUnioned`) arms this identity — unioned with every sibling orphan ref of the
+    // SAME identity in its own batch — and classifies/logs the final disposition only AFTER that arm runs.
+    return { outcome: "foreign", repoPath: safety.parsedRepoPath, armable: safety.armable };
   }
   unlinkLatchFile(filename);
-  return { kept: false, referencingRepoPaths: [] };
+  return { outcome: "deleted" };
 }
 
 /**
- * Fold ONE {@link sweepOrphanLatchFileIfUnreferenced}-shaped result into a caller's own running kept
- * state — shared by every orphan-sweep call site.
+ * Run {@link orphanLatchFileSweepDecision} over a whole set of orphan-latch basenames, in order, THEN arm
+ * each distinct FOREIGN identity exactly once (unioned across every orphan ref of that identity in THIS
+ * call) before classifying/logging the final disposition — the orphan twin of
+ * {@link sweepTmpResidueForHashIfUnreferenced}'s own 25d0d45b union (merge-quarantine.ts ~:5774-5867:
+ * collect per identity into `armableByIdentity`, arm once per identity after the loop, classify after
+ * the arm phase). Still race-free: everything below runs in ONE synchronous call — no `await`/timer/I/O
+ * callback runs between any two files — and nothing here can throw: `orphanLatchFileSweepDecision`'s own
+ * on-disk read is already try/caught inside {@link orphanSweepSafeToDelete} (ENOENT/EACCES/corrupt-JSON
+ * all return normally), and every step after it (`unionQuarantineEntries`, `classifyKeptRepoPath`,
+ * `armForeignOrphanContentInMemoryIfUnenforced`) is pure in-memory Map/object work.
+ *
+ * `deleted`/`own-content`/`unattributed` outcomes need no further work here — the decision call already
+ * unlinked (deleted) or logged (own-content/unattributed) them; `own-content` and `unattributed` both
+ * fold into `anyUnattributed`, mirroring {@link foldOrphanSweepResult}'s own pre-9f387d7e fold (an
+ * ownContent keep was never named as a content-kept claimant, but still surfaced as SOMETHING kept).
+ *
+ * @decision 9f387d7e — every call site routes through this ONE helper; never re-copy its
+ * `armableByIdentity`-bucket-then-arm-once shape into a new call site's own loop.
+ */
+function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: string[], excludeIdentities?: ReadonlySet<string>): {
+  referencingRepoPaths: Array<{ repoPath: string; sourceFile: string }>;
+  contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>;
+  anyUnattributed: boolean;
+} {
+  const referencingRepoPaths: Array<{ repoPath: string; sourceFile: string }> = [];
+  const contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }> = [];
+  let anyUnattributed = false;
+  const armableByIdentity = new Map<string, { record: MergeQuarantineEntry; basenames: string[] }>();
+  const deferredForeign: Array<{ repoPath: string; sourceFile: string }> = [];
+  for (const f of files) {
+    const decision = orphanLatchFileSweepDecision(f, candidateTokens, excludeIdentities);
+    if (decision.outcome === "referenced") {
+      for (const rp of decision.referencingRepoPaths) referencingRepoPaths.push({ repoPath: rp, sourceFile: f });
+    } else if (decision.outcome === "own-content" || decision.outcome === "unattributed") {
+      anyUnattributed = true;
+    } else if (decision.outcome === "foreign") {
+      deferredForeign.push({ repoPath: decision.repoPath, sourceFile: f });
+      if (decision.armable) {
+        const identity = directPathIdentity(decision.repoPath);
+        const bucket = armableByIdentity.get(identity);
+        if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, decision.armable); }
+        else armableByIdentity.set(identity, { record: decision.armable, basenames: [f] });
+      }
+    }
+    // "deleted": nothing more to do — already unlinked by the decision call above.
+  }
+  // @decision 9f387d7e — arm each identity ONCE here, with the union collected above, never per-file
+  // inline inside the loop above.
+  for (const [, bucket] of armableByIdentity) {
+    const armResult = armForeignOrphanContentInMemoryIfUnenforced(bucket.record, bucket.basenames, "orphan");
+    if (armResult === "already-enforced") {
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] ${bucket.record.repoPath}'s own kept orphan latch (${bucket.basenames.join(", ")}) was NOT armed in memory — that identity, or its own canonical key, is already enforced elsewhere in this process.`);
+    }
+  }
+  // @decision 9f387d7e — classify AFTER the whole arm phase above, mirroring
+  // `sweepTmpResidueForHashIfUnreferenced`'s own `deferredAttributedKept` loop: the final disposition
+  // (armed-and-blocked vs content-kept) isn't knowable from this file's own armable-ness alone — a
+  // sibling orphan of the SAME identity, armed earlier in this same batch, can already have enforced it.
+  for (const { repoPath, sourceFile } of deferredForeign) {
+    const classification = classifyKeptRepoPath(repoPath, sourceFile);
+    if (classification.live) {
+      referencingRepoPaths.push({ repoPath, sourceFile });
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] orphan latch ${sourceFile} stays on disk, unreferenced by itself — its own content for '${repoPath}' is ARMED and enforced in this process; reported as a genuine blocked co-occupant, not a content-only keep.`);
+    } else {
+      contentKept.push({ repoPath, sourceFile, ...(classification.blockedBy ? { blockedBy: classification.blockedBy } : {}) });
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] keeping orphan latch ${sourceFile} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for (its own parsed content names repoPath '${repoPath}'); fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.${classification.blockedBy ? ` Its own content stays on disk and arms at the next boot; it is refused right now by a DIFFERENT identity's own entry (${classification.blockedBy.repoPath}) — clearing THAT identity does not release this one.` : ""}`);
+    }
+  }
+  return { referencingRepoPaths, contentKept, anyUnattributed };
+}
+
+/**
+ * Fold ONE {@link sweepOwnLatchFileUnlessOwnedElsewhere}-shaped result into a caller's own running kept
+ * state — shared by every own-latch-sweep call site (every orphan-sweep call site now goes through
+ * {@link sweepOrphanLatchFilesUnioned} instead, which does its own, equivalent folding internally).
  *
  * @decision 8db913e2 (Follow-up 0a783fb2) — one helper for every orphan-sweep call site, so a TRUE
  * in-memory referencer, a CONTENT-parsed repoPath (no live entry — never folds into
@@ -5699,7 +5759,7 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
 }
 
 /**
- * The `.json.tmp-<pid>` twin of {@link sweepOrphanLatchFileIfUnreferenced}'s check (1) — deletes every tmp
+ * The `.json.tmp-<pid>` twin of {@link orphanLatchFileSweepDecision}'s check (1) — deletes every tmp
  * residue file for `hash` EXCEPT one whose EXACT filename a surviving entry's own `orphanLatchFiles` still
  * lists, keeping (and reporting) that one instead. The ownership scan is NOT entry-scoped: it checks
  * `activeQuarantines` as a whole, so the ENTRY whose own key `hash` is — the one actually being
@@ -5750,7 +5810,7 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
 // mirrors `deleteMergeQuarantineLatchByKey`'s own required param; every caller decides explicitly.
 // @decision 1fea8b15 (round 2) — `ownIdentityTokensByFile` is REQUIRED too (pass `[]` where not
 // applicable): each entry's own tokens apply ONLY when checking that EXACT `sourceFile`, never any other.
-// @decision 25d0d45b — `excludeIdentities` is OPTIONAL (mirrors `sweepOrphanLatchFileIfUnreferenced`'s
+// @decision 25d0d45b — `excludeIdentities` is OPTIONAL (mirrors `orphanLatchFileSweepDecision`'s
 // own shape): every pre-existing call site that never risks resurrecting its own just-cleared identity
 // (the entry stays active/pending through this call, so `stillBlockedEntryFor` already no-ops on it)
 // passes nothing; only a call site whose own identity may have ALREADY been fully removed from
@@ -5821,7 +5881,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
         console.error(`[merge-quarantine] keeping tmp residue ${f} UNTOUCHED (left stale) — no surviving entry references it, its own content could not be read, and could not be positively proven to hold only token(s) this write/clear already accounts for; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.`);
       } else if (safety.parsedRepoPath) {
         // @decision 25d0d45b — never offer the clearer's OWN content to the arm phase below (mirrors
-        // `sweepOrphanLatchFileIfUnreferenced`'s own `ownContent` check) — see the decision record.
+        // `orphanLatchFileSweepDecision`'s own `ownContent` check) — see the decision record.
         const identity = directPathIdentity(safety.parsedRepoPath);
         const ownContent = !!excludeIdentities?.has(identity);
         if (ownContent) {
@@ -5897,7 +5957,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
  * OTHER entry's stale `orphanLatchFiles` reference re-arms on the next boot. See the decision record.
  */
 function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens?: string[]): { kept: boolean; referencingRepoPaths: string[] } {
-  // @decision 63e49ee2 (round 3) — same identity-less keep as {@link sweepOrphanLatchFileIfUnreferenced}.
+  // @decision 63e49ee2 (round 3) — same identity-less keep as {@link orphanLatchFileSweepDecision}.
   //
   // @decision 8db913e2 (Follow-up 95ea8d3f) — a stale mark must not outlive the resolved read failure that set it; see the
   // decision record for the pending-sweep-vs-deleteMergeQuarantineLatchByKey gap this closes. Omitting
@@ -6454,11 +6514,14 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — exclude this clear's OWN identity
   // from the orphan-sweep's own true-referencer check — see that function's own doc for why.
   const excludeOwnIdentity = new Set([identity]);
-  for (const orphanFile of orphanFilesToSweep) {
-    const folded = foldOrphanSweepResult(sweepOrphanLatchFileIfUnreferenced(orphanFile, candidateTokens, excludeOwnIdentity), orphanFile, keptContentRepoPaths, keptContentBlockedBy);
-    for (const rp of folded.referencingRepoPaths) orphanReferencingRepoPaths.set(rp, orphanFile);
-    if (folded.unattributed) anyKeptUnattributed = true;
+  // @decision 9f387d7e — ONE call over the whole set; see `sweepOrphanLatchFilesUnioned`'s own doc.
+  const orphanSweepResult = sweepOrphanLatchFilesUnioned(orphanFilesToSweep, candidateTokens, excludeOwnIdentity);
+  for (const { repoPath, sourceFile } of orphanSweepResult.referencingRepoPaths) orphanReferencingRepoPaths.set(repoPath, sourceFile);
+  for (const { repoPath, sourceFile, blockedBy } of orphanSweepResult.contentKept) {
+    keptContentRepoPaths.set(repoPath, sourceFile);
+    if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
   }
+  if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
   // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
@@ -7363,15 +7426,16 @@ function tryClearMergeQuarantineByOwnIdentity(
     // fold it through the shared helper, same as every other orphan-sweep call site.
     //
     // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — exclude this clear's OWN identity
-    // (the MAJOR self-reference fix) — see sweepOrphanLatchFileIfUnreferenced's own doc for why.
+    // (the MAJOR self-reference fix) — see orphanLatchFileSweepDecision's own doc for why.
     const excludeOwnIdentity = new Set([identity]);
-    const orphanContentKept = new Map<string, string>();
-    for (const orphanFile of orphanFilesToSweep) {
-      const folded = foldOrphanSweepResult(sweepOrphanLatchFileIfUnreferenced(orphanFile, pendingCandidateTokens, excludeOwnIdentity), orphanFile, orphanContentKept, keptContentBlockedBy);
-      for (const rp of folded.referencingRepoPaths) keptReferencingRepoPaths.set(rp, blockedCoOccupantForReferencer(rp, orphanFile));
-      if (folded.unattributed) anyKeptUnattributed = true;
+    // @decision 9f387d7e — ONE call over the whole set; see `sweepOrphanLatchFilesUnioned`'s own doc.
+    const orphanSweepResult = sweepOrphanLatchFilesUnioned(orphanFilesToSweep, pendingCandidateTokens, excludeOwnIdentity);
+    for (const { repoPath, sourceFile } of orphanSweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(repoPath, blockedCoOccupantForReferencer(repoPath, sourceFile));
+    for (const { repoPath, blockedBy } of orphanSweepResult.contentKept) {
+      keptContentRepoPaths.add(repoPath);
+      if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
     }
-    for (const rp of orphanContentKept.keys()) keptContentRepoPaths.add(rp);
+    if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
     // @decision 0d3b64c6 (round 2, S1) — `repoPath` (this function's own RAW parameter), never the
     // already-normalized `identity` local.
     tombstoneIfNotSurviving(pendingCandidateTokens, repoPath, pendingTouchedBasenames);
@@ -8498,40 +8562,43 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
     // pending entry's own tokens, captured as each is processed above, before `tombstoneIfNotSurviving`.
     //
+    // Belt-and-suspenders: `${id}.json` is check-2-only (9cabd143 unchanged) ONLY when it's actually one
+    // of the entries matched/removed above; otherwise it may be a DIFFERENT surviving entry's own orphan
+    // reference sharing this hash prefix — in case something under this exact id sits on disk but was
+    // never captured as an in-memory pending entry (e.g. a sibling tmp this process never parsed).
+    //
+    // @decision 9f387d7e — when it's a mere orphan reference (not itself a matched pending's own
+    // sourceFile), fold it into the SAME union-and-arm-once batch as every other orphan ref collected
+    // above: a sibling orphan sharing ITS identity must union with it, never arm independently via a
+    // separate call. See `sweepOrphanLatchFilesUnioned`'s own doc.
+    const matchedSourceFileEntry = matchedPending.find((p) => p.sourceFile === `${id}.json`);
+    const idJsonIsMatchedSourceFile = matchedSourceFileEntry !== undefined;
+    if (!idJsonIsMatchedSourceFile) orphanFilesToSweep.add(`${id}.json`);
     // @decision 8db913e2 (Follow-up 0a783fb2) — this sweep's own result used to be discarded entirely —
     // fold it through the shared helper, same as every other orphan-sweep call site.
-    const orphanContentKept = new Map<string, string>();
-    for (const orphanFile of orphanFilesToSweep) {
-      const folded = foldOrphanSweepResult(sweepOrphanLatchFileIfUnreferenced(orphanFile, pendingCandidateTokens, matchedIdentities), orphanFile, orphanContentKept, keptContentBlockedBy);
-      for (const rp of folded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, orphanFile)); }
-      if (folded.unattributed) anyKeptUnattributed = true;
+    const orphanSweepResult = sweepOrphanLatchFilesUnioned(orphanFilesToSweep, pendingCandidateTokens, matchedIdentities);
+    // @decision 182c01cc (round 5, MAJOR) — `blockedCoOccupantForReferencer`, never the bare
+    // `blockedCoOccupant`: a repoPath here can be a mere `orphanLatchFiles` cross-reference to
+    // `${id}.json` too, for which that id is a fixed point, not a working route. See that function's own doc.
+    for (const { repoPath, sourceFile } of orphanSweepResult.referencingRepoPaths) { keptRepoPaths.add(repoPath); keptCoOccupants.set(repoPath, blockedCoOccupantForReferencer(repoPath, sourceFile)); }
+    for (const { repoPath, blockedBy } of orphanSweepResult.contentKept) {
+      keptContentRepoPaths.add(repoPath);
+      if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
     }
-    for (const rp of orphanContentKept.keys()) keptContentRepoPaths.add(rp);
+    if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
     // @decision 0d3b64c6 (round 2, S1) — call once PER raw spelling in the bucket (never the normalized
     // `bucketIdentity` alone), so every distinct literal form actually seen gets its own attribution.
     for (const bucket of byIdentityForTombstone.values()) for (const raw of bucket.rawRepoPaths) tombstoneIfNotSurviving(bucket.tokens, raw, bucket.basenames);
-    // Belt-and-suspenders: sweep this id's own final (if any) and any remaining tmp residue directly, in
-    // case something under this exact id sits on disk but was never captured as an in-memory pending
-    // entry (e.g. a sibling tmp this process never parsed).
-    //
-    // @decision be79f4d5 — `${id}.json` is check-2-only (9cabd143 unchanged) ONLY when it's actually one
-    // of the entries matched/removed above; otherwise it may be a DIFFERENT surviving entry's own
-    // orphan reference sharing this hash prefix, so route it through the full check-1-AND-2 sweep.
-    const matchedSourceFileEntry = matchedPending.find((p) => p.sourceFile === `${id}.json`);
-    const idJsonIsMatchedSourceFile = matchedSourceFileEntry !== undefined;
-    const finalSweep = idJsonIsMatchedSourceFile
+    // @decision 9f387d7e — `${id}.json` IS itself one of the matched pending entries' own sourceFile:
+    // excluded from the union above (never a mere orphan reference in that case) and instead swept
+    // directly via the SAME own-latch path every matched pending entry's own sourceFile already went
+    // through at the top of this branch.
+    if (idJsonIsMatchedSourceFile) {
       // @decision 656fdf39 (CR 66fad7ed round 2) — the matched entry's OWN (already-reconciled) tokens.
-      ? sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`, matchedSourceFileEntry.entry.tokens)
-      // @decision 8db913e2 (Follow-up f2cc5f18) — same `pendingCandidateTokens`, still in scope.
-      : sweepOrphanLatchFileIfUnreferenced(`${id}.json`, pendingCandidateTokens, matchedIdentities);
-    // @decision 182c01cc (round 5, MAJOR) — `blockedCoOccupantForReferencer`, never the bare
-    // `blockedCoOccupant`: a repoPath here can be a mere `orphanLatchFiles` cross-reference to
-    // `${id}.json`, for which that id is a fixed point, not a working route. See that function's own doc.
-    const finalContentKept = new Map<string, string>();
-    const finalFolded = foldOrphanSweepResult(finalSweep, `${id}.json`, finalContentKept, keptContentBlockedBy);
-    for (const rp of finalFolded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, `${id}.json`)); }
-    if (finalFolded.unattributed) anyKeptUnattributed = true;
-    for (const rp of finalContentKept.keys()) keptContentRepoPaths.add(rp);
+      const finalFolded = foldOrphanSweepResult(sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`, matchedSourceFileEntry.entry.tokens), `${id}.json`, new Map());
+      for (const rp of finalFolded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, `${id}.json`)); }
+      if (finalFolded.unattributed) anyKeptUnattributed = true;
+    }
     // @decision be79f4d5 — ownership-checked (never the unconditional sibling): a DIFFERENT, surviving
     // pending/active entry can own a `.tmp-<pid>` residue sharing THIS exact hash prefix (e.g. its own
     // stale graduation source) even though no entry actually matched/removed above claims it.
@@ -8594,25 +8661,28 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // @decision 25d0d45b (Round 4) — a disclosure for a content-kept repoPath genuinely refused right now
   // by a DIFFERENT identity's own entry — never a working route for the content-kept repoPath.
   const ownContentBlockedBy = new Map<string, ContentKeptBlockedBy>();
-  const ownFolded = foldOrphanSweepResult(sweepOrphanLatchFileIfUnreferenced(`${id}.json`, []), `${id}.json`, ownContentKept, ownContentBlockedBy);
+  // @decision 9f387d7e — routed through the shared helper with a single-element file list, for
+  // uniformity with every other orphan-sweep call site (no union need: there is only ever one file here).
+  const ownSweepResult = sweepOrphanLatchFilesUnioned([`${id}.json`], []);
   // @decision be79f4d5 — the tmp-residue twin of the `.json` sweep just above: ownership-checked, never
   // an unconditional-by-hash delete. `content-checked`, `[]` as `candidateTokens` (same as the sibling
   // `.json` sweep above) — nothing is being lifted here, so nothing is already accounted for.
   const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, [], undefined, false, []);
-  const keptRepoPaths = new Set<string>([...ownFolded.referencingRepoPaths, ...tmpSweep.referencingRepoPaths]);
+  const keptRepoPaths = new Set<string>([...ownSweepResult.referencingRepoPaths.map((r) => r.repoPath), ...tmpSweep.referencingRepoPaths]);
   // @decision 182c01cc (round 4, CR3 finding 4) — a real `BlockedCoOccupant[]`, never a hard-coded `[]`
   // — see the decision record's "Round 4" section.
   const keptCoOccupants = new Map<string, BlockedCoOccupant>();
   // @decision 182c01cc (round 5, MAJOR) — same fix as the active-match branch above: `${id}.json`'s own id
   // is not a working route for a mere `orphanLatchFiles` cross-referencer — see blockedCoOccupantForReferencer's own doc.
-  for (const rp of ownFolded.referencingRepoPaths) keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, `${id}.json`));
+  for (const { repoPath, sourceFile } of ownSweepResult.referencingRepoPaths) keptCoOccupants.set(repoPath, blockedCoOccupantForReferencer(repoPath, sourceFile));
   for (const ke of tmpSweep.keptEntries) keptCoOccupants.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile));
   // @decision 21ec39e5 — a content-parsed tmp keep never joins `keptCoOccupants` (no live entry backs it)
   // — fold it into the SAME `ownContentKept` map the `.json` sweep above already feeds.
+  for (const { repoPath, sourceFile, blockedBy } of ownSweepResult.contentKept) { ownContentKept.set(repoPath, sourceFile); if (blockedBy) ownContentBlockedBy.set(repoPath, blockedBy); }
   for (const ke of tmpSweep.contentKeptEntries) { ownContentKept.set(ke.repoPath, ke.sourceFile); if (ke.blockedBy) ownContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
   // @decision 8db913e2 (Follow-up f2cc5f18) — a KEPT sweep with no attributable repoPath must still
   // surface as `latchKept`, mirroring `clearMergeQuarantineByKey`'s own `anyKeptUnattributed`.
-  const anyKeptUnattributed = ownFolded.unattributed || tmpSweep.anyUnattributed;
+  const anyKeptUnattributed = ownSweepResult.anyUnattributed || tmpSweep.anyUnattributed;
   // @decision 182c01cc (round 2/4) — this raw fallback's own sweeps never relocate anything, but a kept
   // one is real (round 4 fix).
   return {
