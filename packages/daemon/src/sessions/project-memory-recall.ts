@@ -3,6 +3,7 @@ import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateNote } from "./project-memory-annotations.js";
 import { buildMentionsIndex } from "./project-memory-references.js";
+import { buildBacklinksIndex } from "./project-memory-backlinks.js";
 import { extractPathTokens } from "./project-memory-path-tokens.js";
 
 /**
@@ -780,11 +781,14 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   // annotateNote re-scanning the whole project memory + task list on every one of the (up to dozens of)
   // notes this digest considers. See that card's own decision record for the measured before/after.
   const mentionsIndex = buildMentionsIndex(db, projectId);
+  // Card 527ed4f0 — same build-once fix applied to the OTHER per-note scan annotateNote used to run:
+  // backlinks. See docs/decisions/527ed4f0-backlinks-index-build-once.md for the measured before/after.
+  const backlinksIndex = buildBacklinksIndex(db, projectId);
   // Card e4e180ad: combined annotate (linked-Request state + inbound [[wikilink]] backlinks + the
   // prebuilt mentions index above) — the SAME function mcp/memory.ts's computeNeverDropStatus uses to
   // size the floor tier, so the two can never silently diverge on what counts toward a note's
   // rendered/estimated size.
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex);
   const { framed, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
     buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate, kickoffText);
   // Card 926e4ac8 — these three daemon-log lines render from the RETURNED key-only arrays (titles aren't

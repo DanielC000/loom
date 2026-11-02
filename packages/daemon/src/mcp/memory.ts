@@ -2,7 +2,7 @@ import type { ProjectMemoryEntry, ProjectMemoryHistoryEntry } from "@loom/shared
 import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
-import { annotateBacklinks, annotateBacklinksBulk } from "../sessions/project-memory-backlinks.js";
+import { annotateBacklinks, annotateBacklinksBulk, buildBacklinksIndex } from "../sessions/project-memory-backlinks.js";
 import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
 import { buildMentionsIndex } from "../sessions/project-memory-references.js";
@@ -478,11 +478,13 @@ function computeNeverDropStatus(
   const pinnedNow = db.listPinnedProjectMemory(projectId);
   // Card a140598a round 2 — built ONCE for this status computation, never once per floor-tier note.
   const mentionsIndex = buildMentionsIndex(db, projectId);
+  // Card 527ed4f0 — same build-once fix for the OTHER per-note scan annotateNote used to run: backlinks.
+  const backlinksIndex = buildBacklinksIndex(db, projectId);
   // Card e4e180ad: uses the SAME combined annotate as the real kickoff digest (project-memory-recall.ts's
   // retrieveProjectMemoryForKickoff) — backlinks ride in the floor tier's rendered size exactly like
   // linked-request annotations already did, so this status can never under-report against what the
   // packer's own in-digest ALARM line actually computes (see composeProjectMemoryDigest's DoD-6 cross-check).
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex);
   const status = computeFloorTierStatus(pinnedNow, budgetTokens, annotate);
   return {
     floorCount: status.floorCount,
@@ -516,7 +518,9 @@ function computeRestTierSignal(
   const pinnedNow = db.listPinnedProjectMemory(projectId);
   // Card a140598a round 2 — built ONCE for this status computation, never once per REST-tier note.
   const mentionsIndex = buildMentionsIndex(db, projectId);
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex);
+  // Card 527ed4f0 — same build-once fix for the OTHER per-note scan annotateNote used to run: backlinks.
+  const backlinksIndex = buildBacklinksIndex(db, projectId);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex);
   const status = computeRestTierStatus(pinnedNow, budgetTokens, annotate);
   const cycle = status.roughCycleKickoffs;
   return {
