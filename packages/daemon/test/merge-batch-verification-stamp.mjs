@@ -8,7 +8,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // THE FIX: `landBranchCommitsIndividually` (git/batch-merge.ts) already computes its own
 // `Loom-Worker-PathSet` digest (or discovers the stamp failed) while landing each branch — a per-branch
-// `pathSetStamped` flag rides back on `BatchLandedBranch`. `mergeBatchTracked`'s landed-branch loop now
+// `pathSetStamp` field rides back on `BatchLandedBranch`. `mergeBatchTracked`'s landed-branch loop now
 // derives a verification tier from that flag for FREE (no extra git call) and threads it into
 // `finishAlreadyMerged`/`finalizeMerge`'s existing `mergedVerification` param: `"pathset"` when the stamp
 // landed (the normal case), `"trailer-only"` when it didn't.

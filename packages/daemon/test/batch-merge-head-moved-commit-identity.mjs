@@ -24,7 +24,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // parent>` right after the plain commit, and again right after the pathset `--amend`. THE FIX (round 2):
 // `verifyCommitParentAndTree` now also returns the raw commit body; the batch path additionally verifies
 // a non-tip commit carries NO `Loom-Worker-*` trailer at all, and the tip's trailer names THIS branch and
-// carries the Base/PathSet THIS process actually computed (or neither, matching `pathSetStamped`) — never
+// carries the Base/PathSet THIS process actually computed (or neither, matching `pathSetStamp`) — never
 // merely "a trailer is present". Residual, honestly named (inherited from 2a6a292a round 22/23, same as
 // before): a commit with the CORRECT parent, tree, AND trailers, differing only in an unrelated part of
 // the SUBJECT line or author identity, is still unverified — this round closes the Loom trailer forgery

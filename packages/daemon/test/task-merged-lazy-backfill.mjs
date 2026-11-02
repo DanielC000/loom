@@ -16,6 +16,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       repo) still 200s with the row returned unchanged — never a 500 over a cache-fill failure.
 //   (4) a task that ALREADY has a persisted mergedSha is returned as-is, no backfill attempted (proven by
 //       the returned mergedSha being the pre-seeded value, not re-derived from git).
+//   (6a) card 5933734e (Code Review 295fdd33, round 2): a commitTrailers:"off" project's scan is skipped
+//       ENTIRELY, even when a sha-matching commit exists that would trivially backfill if the scan ran —
+//       the skip is keyed on the project's config, never on what the scan would or wouldn't find.
+//   (6b) a TRAILERED legacy card (mergedSha set, mergedVerification null) DOES still backfill verification
+//       when the scan's own sha matches the one already recorded — the case 634edd2b/d6d40edd built this
+//       for in the first place; sha/repoKey stay untouched, only verification is filled in.
+//   (6c) a TRAILERED card whose scan resolves a DIFFERENT sha than the one recorded (e.g. the same branch
+//       landed twice) writes NOTHING — never overwrites an existing, different mergedSha.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/task-merged-lazy-backfill.mjs
 import fs from "node:fs";
@@ -54,6 +62,10 @@ execSync("git init -q && git -c user.email=x@loom -c user.name=x commit --allow-
 const db = new Db(path.join(tmpHome, "test.db"));
 db.insertProject({ id: "pRepo", name: "Repo Project", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "pGone", name: "Moved Repo Project", repoPath: path.join(os.tmpdir(), `loom-lazy-backfill-gone-${Date.now()}-${process.pid}`), vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+// Card 5933734e (Code Review 295fdd33 round 2): a SEPARATE project with commitTrailers:"off" — shares the
+// SAME repo as pRepo (the toggle governs behavior, not which bytes are on disk), so a commit trailered
+// for a pTrailersOff task is just as findable BY GIT as any pRepo one; only the config differs.
+db.insertProject({ id: "pTrailersOff", name: "Trailers-Off Project", repoPath: repo, vaultPath: repo, config: { orchestration: { commitTrailers: "off" } }, createdAt: now, archivedAt: null });
 
 try {
   const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
@@ -121,6 +133,52 @@ try {
   const res5 = await app.inject({ method: "GET", url: `/api/tasks/${t5.id}` });
   check("(5) a stale-repoKey task's sha is still found (degraded scan against primary)", res5.json().mergedSha === landedSha5);
   check("(5) mergedRepoKey backfills to null (primary — where it was ACTUALLY found), NOT the stale 'no-such-registry-entry' key", res5.json().mergedRepoKey === null);
+
+  // ===== (6a) card 5933734e: a commitTrailers:"off" repo's scan is skipped ENTIRELY — even when a REAL
+  // commit exists bearing the EXACT sha already recorded (so if the scan ran at all, it would trivially
+  // backfill the verification), it must NOT run, proving the skip is keyed on the project's config, not
+  // on whatever the scan would or wouldn't have found =====
+  const t6a = { id: `lazy-trailersoff-${Date.now()}`, projectId: "pTrailersOff", title: "trailers-off batch landing", body: "", columnKey: "done", position: 5, priority: "p2", createdAt: now, updatedAt: now };
+  db.insertTask(t6a);
+  const branch6a = `loom/${taskKey(t6a.id)}`;
+  git(repo, `-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(z): trailers-off landing (its branch's trailer still lands structurally)" -m "Loom-Worker-Branch: ${branch6a}"`);
+  const landedSha6a = git(repo, "log -1 --format=%H").slice(0, 7);
+  db.updateTask(t6a.id, { mergedSha: landedSha6a, mergedRepoKey: null, mergedVerification: null });
+  const res6a = await app.inject({ method: "GET", url: `/api/tasks/${t6a.id}` });
+  check("(6a) GET 200s", res6a.statusCode === 200);
+  check("(6a) mergedSha is unchanged (still the recorded sha)", res6a.json().mergedSha === landedSha6a);
+  check("(6a) mergedVerification STAYS null — the scan never ran despite a sha-matching commit existing", res6a.json().mergedVerification == null);
+  check("(6a) the PERSISTED column is also unchanged — no write happened at all", db.getTask(t6a.id)?.mergedVerification == null);
+
+  // ===== (6b) a TRAILERED (commitTrailers "on", the default) legacy card with mergedSha already set but
+  // mergedVerification null — this IS the case 634edd2b/d6d40edd built the backfill for: the scan's own
+  // sha matches the one already recorded, so verification backfills while sha/repoKey stay untouched =====
+  const t6b = { id: `lazy-trailered-legacy-${Date.now()}`, projectId: "pRepo", title: "trailered legacy card, null verification", body: "", columnKey: "done", position: 6, priority: "p2", createdAt: now, updatedAt: now };
+  db.insertTask(t6b);
+  const branch6b = `loom/${taskKey(t6b.id)}`;
+  git(repo, `-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(z): trailered legacy landing" -m "Loom-Worker-Branch: ${branch6b}"`);
+  const landedSha6b = git(repo, "log -1 --format=%H").slice(0, 7);
+  db.updateTask(t6b.id, { mergedSha: landedSha6b, mergedRepoKey: null, mergedVerification: null });
+  const res6b = await app.inject({ method: "GET", url: `/api/tasks/${t6b.id}` });
+  check("(6b) GET 200s", res6b.statusCode === 200);
+  check("(6b) mergedSha stays exactly the recorded (sha-matched) value", res6b.json().mergedSha === landedSha6b);
+  check("(6b) mergedVerification IS backfilled (the scan's sha matched the recorded one)", res6b.json().mergedVerification != null);
+  check("(6b) the PERSISTED column reflects the backfilled verification too", db.getTask(t6b.id)?.mergedVerification != null);
+
+  // ===== (6c) a TRAILERED card whose scan resolves a DIFFERENT sha than the one already recorded (e.g. the
+  // same branch name landed twice) — nothing is written, sha and verification both stay exactly as seeded =====
+  const t6c = { id: `lazy-trailered-mismatch-${Date.now()}`, projectId: "pRepo", title: "trailered card, scan finds a different sha", body: "", columnKey: "done", position: 7, priority: "p2", createdAt: now, updatedAt: now };
+  db.insertTask(t6c);
+  const branch6c = `loom/${taskKey(t6c.id)}`;
+  git(repo, `-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(z): stale earlier trailered landing" -m "Loom-Worker-Branch: ${branch6c}"`);
+  const staleLandedSha6c = git(repo, "log -1 --format=%H").slice(0, 7);
+  db.updateTask(t6c.id, { mergedSha: "cafef00", mergedRepoKey: null, mergedVerification: null });
+  check("(6c) setup: the stale trailered commit's sha genuinely differs from the recorded one", staleLandedSha6c !== "cafef00");
+  const res6c = await app.inject({ method: "GET", url: `/api/tasks/${t6c.id}` });
+  check("(6c) GET 200s", res6c.statusCode === 200);
+  check("(6c) the response's mergedSha is UNCHANGED (never overwritten by the stale, differently-shaped commit)", res6c.json().mergedSha === "cafef00");
+  check("(6c) the response's mergedVerification STAYS null (never backfilled from an unrelated commit's own tier)", res6c.json().mergedVerification == null);
+  check("(6c) the PERSISTED column is also unchanged — no write happened at all", db.getTask(t6c.id)?.mergedSha === "cafef00");
 } finally {
   db.close();
   cleanupPathSync(tmpHome);
@@ -128,6 +186,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/tasks/:id lazily backfills a pre-existing merged card's ship-state on first open (resolves + persists, so a second read is served from the column with no re-scan), leaves a genuinely unmerged task's mergedSha null with no error, degrades to a plain 200 (never a 500) when the underlying git lookup fails (a moved/deleted project repo), and never re-derives ship-state for a task that already has it persisted."
+  ? "\n✅ ALL PASS — GET /api/tasks/:id lazily backfills a pre-existing merged card's ship-state on first open (resolves + persists, so a second read is served from the column with no re-scan), leaves a genuinely unmerged task's mergedSha null with no error, degrades to a plain 200 (never a 500) when the underlying git lookup fails (a moved/deleted project repo), never re-derives ship-state for a task that already has it persisted, skips the scan entirely for a commitTrailers:\"off\" project even when a sha-matching commit exists, backfills a trailered legacy card's null verification when the scan's sha matches the recorded one, and writes nothing when a trailered card's scan resolves a different sha than the one already recorded."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

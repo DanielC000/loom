@@ -69,6 +69,20 @@ export interface BatchGitDeps {
    *  branch-gone ledger gate, card c13666c6) — see that field's own doc on `BoundedGitDeps`
    *  (git/worktrees.ts) for what it does and why it must stay opt-in. */
   goneBranchLedger?: GoneBranchLedgerFacts;
+  /**
+   * Card 5933734e (child of d9332365, sibling of the solo path's own `commitTrailers` on
+   * `BoundedGitDeps`, git/worktrees.ts): the project's resolved `orchestration.commitTrailers` — threaded
+   * down from the one production caller (`mergeBatchTracked`, sessions/service.ts) the same way
+   * `goneBranchLedger` above is. Defaults to `"on"` whenever absent/undefined — every existing direct
+   * caller (every test file that constructs these deps without this key) stays byte-identical.
+   * `commitTrailers:"off"` does NOT skip the in-process trailer-namespace audit
+   * (`verifyLoomTrailersExactAndReadable`, inside {@link landBranchCommitsIndividually}) — it still runs
+   * with `expected: {}`, and `verifyLoomNamespaceExact` still REJECTS any reserved Loom-* line it finds,
+   * so a verified landing with trailers off is real proof the commit carries zero reserved-namespace
+   * lines, not a skipped check. `commitLogBody` has no batch-path equivalent — a batch never assembles a
+   * worker-commit-log body (see this file's header doc); do not add it here.
+   */
+  commitTrailers?: "on" | "off";
 }
 
 function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
@@ -135,16 +149,13 @@ export interface BatchLandedBranch extends BatchCandidate {
    *  {@link strippedTrailerCount}.
    *  @decision 95940402 (round 4, R2) */
   strippedReservedLineCount?: number;
-  /** Whether the tip commit's follow-up `Loom-Worker-Base`/`Loom-Worker-PathSet` amend (card d62dad73
-   *  phase 2) actually landed. `true` for the ordinary case; `false` when that best-effort amend failed
-   *  (rare — logged at the stamp site, {@link landBranchCommitsIndividually}) and the branch landed WITHOUT
-   *  either trailer, degrading its later verification to the weaker `trailer-only` tier with no other trace
-   *  (card 1d3f500e / Code Review `c00a136c` — previously this was a `console.warn` only, invisible to the
-   *  batch report). Omitted (not present) on a `noop` landing, which reuses an already-landed commit and so
-   *  never attempts a stamp — that omission is what tells a `false` (a REAL, this-run stamp failure) apart
-   *  from a commit that predates this trailer entirely or was never stamped for any other reason. Does NOT
-   *  fail the merge itself: the commit above already landed and stays valid without the trailers. */
-  pathSetStamped?: boolean;
+  /** Outcome of the tip commit's follow-up `Loom-Worker-Base`/`Loom-Worker-PathSet` amend (card d62dad73
+   *  phase 2): `"stamped"` (ordinary case), `"failed"` (best-effort amend failed — degrades verification
+   *  to `trailer-only`, card 1d3f500e), or `"disabled"` (card 5933734e — `commitTrailers:"off"`, amend
+   *  never attempted; a caller must map this to `mergedVerification: null`, never a trailer tier with no
+   *  trailer behind it). Omitted on a `noop` landing (no stamp attempted, distinct from `"failed"`). Never
+   *  a defaulted-true boolean — always a value this call positively knows. Never fails the merge itself. */
+  pathSetStamp?: "stamped" | "failed" | "disabled";
   /** The branch tip the batch ASSEMBLED from (card 42daa283). A commit a worker adds afterwards is not in the
    *  batch and not in this sha, so the finalizer compares the live tip against it and RETAINS the branch +
    *  worktree when it moved, rather than `branch -D`-ing a commit that never landed. */
@@ -219,7 +230,7 @@ interface LandResult {
   emptyKind?: MergeEmptyKind;
   strippedTrailerCount?: number;
   strippedReservedLineCount?: number;
-  pathSetStamped?: boolean;
+  pathSetStamp?: "stamped" | "failed" | "disabled";
   /** The branch tip this landing was assembled from (resolved once, at the top of the land). */
   branchTip?: string;
   /** TYPED signal (round 4, Code Review b2ebf41f) — true iff `ok:false` because the CANONICAL repo is
@@ -468,6 +479,9 @@ async function landBranchCommitsIndividually(
     // The branch's own tip is already an ancestor of the batch's current HEAD — nothing new to land
     // (typically: already landed by an earlier candidate in THIS batch, or already on main before the
     // batch was cut). Classify exactly like the solo path's own noop branch.
+    // KNOWN RESIDUAL, tracked on card e8d4fdc3 (found during card 5933734e's investigation, not fixed
+    // here): with `orchestration.commitTrailers:"off"`, this trailer grep misclassifies an already-landed
+    // branch as STAGE_EMPTY_RETRY instead of ALREADY_MERGED.
     const landedSha = await findLandedSquashCommit(batchWorktreePath, branch, batchHeadBefore, deps);
     return landedSha
       ? { ok: true, noop: true, emptyKind: "ALREADY_MERGED", sha: landedSha, branchTip }
@@ -651,7 +665,9 @@ async function landBranchCommitsIndividually(
   // @decision 95940402 (round 4, R2) — how many RESERVED Loom-* lines (never line 0, see A2's own check
   // above) `stripReservedLoomTrailerLines` removed across this branch's own commits, 0 in the common case.
   let strippedReservedLineCount = 0;
-  let pathSetStamped = true;
+  // Card 5933734e: never a defaulted-true boolean — "disabled" when trailers are off (the amend below is
+  // never attempted at all), "stamped" otherwise unless the amend genuinely fails (set to "failed" below).
+  let pathSetStamp: "stamped" | "failed" | "disabled" = deps.commitTrailers === "off" ? "disabled" : "stamped";
   // Tracks HEAD across iterations so each commit's own `git commit` can be verified to have actually
   // moved HEAD — see the empty-commit check right after the commit call below for why this can't just
   // be inferred from the commit call resolving.
@@ -787,11 +803,13 @@ async function landBranchCommitsIndividually(
     // same spot, so by the time `finalMessage` is built the worker's own body is already clean of both.
     const { message: reservedStrippedMessage, strippedCount: reservedStrippedThisCommit } = stripReservedLoomTrailerLines(cleanedMessage);
     if (reservedStrippedThisCommit > 0) strippedReservedLineCount += reservedStrippedThisCommit;
-    const finalMessage = isLast ? `${reservedStrippedMessage}\n\nLoom-Worker-Branch: ${branch}\n` : `${reservedStrippedMessage}\n`;
+    // Card 5933734e: the `Loom-Worker-Branch` trailer is skipped entirely when `commitTrailers` is "off" —
+    // same shape as the non-tip case (no reserved line appended at all).
+    const finalMessage = isLast && deps.commitTrailers !== "off" ? `${reservedStrippedMessage}\n\nLoom-Worker-Branch: ${branch}\n` : `${reservedStrippedMessage}\n`;
     // @decision 458028ae — predict git's own commit cleanup here, before committing, and drop ONLY this
     // candidate on any non-ok kind — a worker message that collapses to nothing but blank lines would
     // otherwise promote the tip's trailer into the subject with no paragraph boundary left to recover it.
-    const expectedPlainTrailers: Record<string, string> = isLast ? { "Loom-Worker-Branch": branch } : {};
+    const expectedPlainTrailers: Record<string, string> = isLast && deps.commitTrailers !== "off" ? { "Loom-Worker-Branch": branch } : {};
     const predictedMessage = predictGitCleanupWhitespace(finalMessage);
     // @decision 75199847 — do not rely on `verifyLoomTrailersExactAndReadable` alone to catch an EMPTY
     // predicted message: with `{}` expected (the non-tip case) it reports `ok:true` vacuously, since
@@ -915,7 +933,7 @@ async function landBranchCommitsIndividually(
     // authoritative); for non-tip (no amend) this IS the check.
     //
     // @decision 95940402 (round 3/4)
-    const expectedTrailersAfterPlainCommit: Record<string, string> = isLast ? { "Loom-Worker-Branch": branch } : {};
+    const expectedTrailersAfterPlainCommit: Record<string, string> = isLast && deps.commitTrailers !== "off" ? { "Loom-Worker-Branch": branch } : {};
     const plainTrailerVerify = verifyLoomTrailersExactAndReadable(verifiedPlain.body ?? "", expectedTrailersAfterPlainCommit);
     if (!plainTrailerVerify.ok) {
       // @decision 45036494 — only "forged" aborts the batch; "displaced"/"unreadable" (a legitimate
@@ -944,6 +962,9 @@ async function landBranchCommitsIndividually(
     // effort, matching {@link mergeBranchLocked}'s own PathSet capture: a failure here just omits both
     // trailers (the commit above already landed and stays valid without them, degrading to the existing
     // `trailer-only` tier) rather than failing an otherwise-successful branch.
+    // Card 5933734e: the whole Base/PathSet amend is skipped when `commitTrailers` is "off" — nothing to
+    // stamp, nothing to verify; `pathSetStamp` already reads "disabled" from its init above.
+    if (deps.commitTrailers !== "off") {
     let amendMessageFile: { dir: string; file: string } | undefined;
     try {
       // `currentHead` was just verified (above) to be this commit's own real sha — no need to re-query.
@@ -993,13 +1014,14 @@ async function landBranchCommitsIndividually(
         }
       } catch { /* unknown — treat as not landed, same as before */ }
       if (!amendLanded) {
-        pathSetStamped = false;
+        pathSetStamp = "failed";
         // eslint-disable-next-line no-console
         console.warn(`[git] landBranchCommitsIndividually: Loom-Worker-Base/PathSet capture failed for ${branch} — ` +
           `commit lands without either trailer: ${(e as Error).message}`);
       }
     } finally {
       if (amendMessageFile) cleanupCommitMessageFile(amendMessageFile.dir);
+    }
     }
   }
 
@@ -1035,8 +1057,15 @@ async function landBranchCommitsIndividually(
   // hidden-paragraph line, unlike a check that only reads parseLoomTrailerBlock's resolved fields.
   //
   // @decision 95940402 (round 3/4, Code Review 820ce6e3)
-  const expectedFinalTrailers: Record<string, string> = { "Loom-Worker-Branch": branch };
-  if (pathSetStamped) {
+  // Card 5933734e: `{}` when trailers are off — the documented no-op shape of
+  // `verifyLoomTrailersExactAndReadable` (nothing expected, nothing to round-trip); `verifyLoomNamespaceExact`
+  // still REJECTS any reserved Loom-* line found, so a passing check here with trailers off is real proof
+  // the commit carries zero reserved-namespace lines, never a vacuously-skipped check. With trailers off,
+  // `pathSetStamp` is always "disabled" (the amend above never ran), so THIS check re-reads the SAME
+  // commit the plain-commit check (~line 937, `plainTrailerVerify`) already verified — that earlier check
+  // is the effective guard in this mode; this one is a no-op re-confirmation, not a second opportunity.
+  const expectedFinalTrailers: Record<string, string> = deps.commitTrailers === "off" ? {} : { "Loom-Worker-Branch": branch };
+  if (pathSetStamp === "stamped") {
     expectedFinalTrailers["Loom-Worker-Base"] = batchHeadBefore;
     if (computedPathSetDigest !== undefined) expectedFinalTrailers["Loom-Worker-PathSet"] = computedPathSetDigest;
   }
@@ -1099,7 +1128,7 @@ async function landBranchCommitsIndividually(
     }
   }
 
-  return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, strippedReservedLineCount, pathSetStamped, branchTip, ...(trailerAdvisory ? { trailerAdvisory } : {}) };
+  return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, strippedReservedLineCount, pathSetStamp, branchTip, ...(trailerAdvisory ? { trailerAdvisory } : {}) };
 }
 
 /**
@@ -1286,7 +1315,7 @@ export async function assembleBatchBranches(
       dropped.push({ ...c, reason: "batch land reported ok with no sha/subject" });
       continue;
     }
-    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, strippedReservedLineCount: r.strippedReservedLineCount, pathSetStamped: r.pathSetStamped, assembledTip: r.branchTip, ...(r.trailerAdvisory ? { trailerAdvisory: r.trailerAdvisory } : {}) });
+    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, strippedReservedLineCount: r.strippedReservedLineCount, pathSetStamp: r.pathSetStamp, assembledTip: r.branchTip, ...(r.trailerAdvisory ? { trailerAdvisory: r.trailerAdvisory } : {}) });
     assembledTipSha = r.sha;
   }
   return { landed, dropped, assembledTipSha };

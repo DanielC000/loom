@@ -37,11 +37,14 @@ export type TaskWithMerged = Omit<Task, "mergedVerification"> & {
    * See this type's own doc above — the persisted, at-merge-time-frozen sibling of `merged.verification`.
    * A solo squash-confirm always stamps `"content"`. A batch landing (`merge_batch`, card d6d40edd)
    * stamps `"pathset"` (its own `Loom-Worker-PathSet` digest landed) or `"trailer-only"` (that stamp
-   * failed) for a freshly-landed branch — but `null` for one whose content was already present elsewhere
-   * in the batch's own ancestry (a `noop` landing reuses an already-landed sha with no fresh stamp of its
-   * own). `null` here otherwise means either pre-`d6d40edd` batch history, or a solo ALREADY_MERGED/
-   * boot-reconcile landing — both wait on the web board drawer's lazy backfill (human-triggered, not
-   * agent-facing) to fill in from a live `merged.verification` read; never read `null` as an anomaly.
+   * failed) for a freshly-landed branch on a `commitTrailers:"on"` project (the default) — but `null` for
+   * one whose content was already present elsewhere in the batch's own ancestry (a `noop` landing reuses
+   * an already-landed sha with no fresh stamp of its own), and `null` too for a batch landing on a project
+   * with `orchestration.commitTrailers:"off"` (card 5933734e — neither trailer was ever written, so
+   * neither tier has any evidence behind it). `null` here otherwise means either pre-`d6d40edd` batch
+   * history, or a solo ALREADY_MERGED/boot-reconcile landing — all wait on the web board drawer's lazy
+   * backfill (human-triggered, not agent-facing) to fill in from a live `merged.verification` read; never
+   * read `null` as an anomaly.
    */
   mergedVerificationAtMerge: "content" | "pathset" | "trailer-only" | null;
 };

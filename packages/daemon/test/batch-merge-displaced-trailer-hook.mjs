@@ -161,7 +161,7 @@ try {
     const multi = v.landed.find((lb) => lb.branch === w1.branch);
     const body = git(repo, "log", "-1", "--format=%B", multi.sha);
     check("(B) the Base/PathSet amend still landed on the multi-commit branch (re-built from Loom's own clean message, re-displaced by the SAME hook)", /Loom-Worker-Base:/.test(body) && /Loom-Worker-PathSet:/.test(body) && /Signed-off-by:/.test(body));
-    // Note: `BatchLandedBranch.pathSetStamped` itself is never copied into the settled response's
+    // Note: `BatchLandedBranch.pathSetStamp` itself is never copied into the settled response's
     // `landed[]` entries (a pre-existing gap, unrelated to this card) — `mergedVerification` (derived
     // from it) IS persisted onto the task, so check the real outcome there instead.
     check("(B) mergedVerification persisted as \"pathset\" on the task (the amend succeeded)", ctx.db.getTask(w1.taskId)?.mergedVerification === "pathset");

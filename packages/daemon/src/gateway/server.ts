@@ -4755,15 +4755,41 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const withRelations = (row: Task) => ({ ...row, ...buildRelationView(deps.db, row) });
     // @decision 1eebc46a — lazy single-task ship-state backfill; use setTaskMergedInfoNoTouch (never
     // updateTask) and stamp resolved.repoKey (never t.repoKey); a failure here must fall through, not 500.
+    // @decision 5933734e — a trailers-off repo's scan is skipped entirely (it can never converge: no
+    // reserved trailer was ever written to find); otherwise the scan may ONLY fill a null verification
+    // for the sha ALREADY recorded, never write a mergedSha that differs from an existing one.
     if (!t.mergedSha || t.mergedVerification == null) {
       try {
-        const resolved = await resolveMergedInfo(deps.db, t.projectId, t);
-        if (resolved.merged) {
-          deps.db.setTaskMergedInfoNoTouch(t.id, {
-            mergedSha: resolved.merged.sha, mergedRepoKey: resolved.repoKey, mergedDate: resolved.merged.date,
-            mergedVerification: resolved.merged.verification ?? null,
-          });
-          return withRelations(deps.db.getTask(t.id) ?? t);
+        const project = deps.db.getProject(t.projectId);
+        let commitTrailersOff = false;
+        if (project) {
+          try { commitTrailersOff = resolveRepoByKey(project, t.repoKey).commitTrailers === "off"; }
+          catch { /* stale repoKey — resolveMergedInfo below degrades the same way; don't skip on its account */ }
+        }
+        if (!commitTrailersOff) {
+          const resolved = await resolveMergedInfo(deps.db, t.projectId, t);
+          if (resolved.merged) {
+            // Re-read immediately before writing: this scan is a separate, later read than the row this
+            // handler started with, so a REAL landing that completed in the meantime must never be
+            // clobbered by this best-effort retroactive scan.
+            const fresh = deps.db.getTask(t.id);
+            if (!fresh?.mergedSha) {
+              deps.db.setTaskMergedInfoNoTouch(t.id, {
+                mergedSha: resolved.merged.sha, mergedRepoKey: resolved.repoKey, mergedDate: resolved.merged.date,
+                mergedVerification: resolved.merged.verification ?? null,
+              });
+              return withRelations(deps.db.getTask(t.id) ?? t);
+            } else if (fresh.mergedSha === resolved.merged.sha && fresh.mergedVerification == null && resolved.merged.verification != null) {
+              // SAME sha already recorded — safe to backfill the verification tier alone; sha/repoKey/
+              // date are already correct and stay untouched. A DIFFERENT resolved sha (any other shape)
+              // falls through below writing nothing — never overwrite an existing, different mergedSha.
+              deps.db.setTaskMergedInfoNoTouch(t.id, {
+                mergedSha: fresh.mergedSha, mergedRepoKey: fresh.mergedRepoKey ?? null, mergedDate: fresh.mergedDate ?? null,
+                mergedVerification: resolved.merged.verification,
+              });
+              return withRelations(deps.db.getTask(t.id) ?? t);
+            }
+          }
         }
       } catch { /* best-effort cache-fill; fall through and return the row unchanged */ }
     }

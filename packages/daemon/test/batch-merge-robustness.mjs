@@ -23,10 +23,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (8) Claude-Session TRAILER STRIPPING (card b7f965d2) — a worker's own doctrine-violating
 //       Claude-Session trailer is stripped from every landed commit, tip and non-tip alike, while author
 //       identity/date and Loom-Worker-* trailers survive.
-//   (9) pathSetStamped (card 1d3f500e) — a forced failure of the follow-up Loom-Worker-Base/PathSet amend
-//       surfaces as a structured `pathSetStamped:false` on the landed branch (previously only a
-//       console.warn), and is DISTINCT from (9b) a noop landing, which omits the field entirely rather
-//       than reporting `false` for a stamp it never attempted.
+//   (9) pathSetStamp (card 1d3f500e, renamed tri-state by card 5933734e) — a forced failure of the
+//       follow-up Loom-Worker-Base/PathSet amend surfaces as a structured `pathSetStamp:"failed"` on the
+//       landed branch (previously only a console.warn), and is DISTINCT from (9b) a noop landing, which
+//       omits the field entirely rather than reporting a stamp it never attempted.
 // Run: 1) build daemon (pnpm build), 2) node test/batch-merge-robustness.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -303,11 +303,11 @@ try {
     check("(8) the clean branch's landed body carries no Claude-Session trailer (never had one)", !cleanBody.includes("Claude-Session"));
   }
 
-  // ── (9) pathSetStamped SURFACES A FAILED trailer-stamp (card 1d3f500e / Code Review c00a136c) ──────────
+  // ── (9) pathSetStamp SURFACES A FAILED trailer-stamp (card 1d3f500e / Code Review c00a136c) ────────────
   //     Previously a failed follow-up `git commit --amend` (Loom-Worker-Base/PathSet) was only a
   //     console.warn — nothing structured reached LandResult/BatchLandedBranch/the batch report, so a
   //     stamp failure silently degraded a branch to the weaker "trailer-only" tier with a daemon-log line
-  //     as its only trace. `pathSetStamped` makes that outcome a first-class field on the result.
+  //     as its only trace. `pathSetStamp` makes that outcome a first-class field on the result.
   //
   //     DoD-3 CONSTRAINT (measured 2026-09-04): every PRODUCTION pathset-from-batch observation so far is a
   //     SINGLE-COMMIT branch, where `batchHeadBefore === sha^` degenerately — a control built on one would
@@ -347,28 +347,28 @@ try {
     check("(9) the branch still landed BOTH its commits (not partially, not dropped)",
       result.landed.length === 1 && result.dropped.length === 0 && git(repo, `rev-list --count ${baseMainSha}..HEAD`) === "2");
     const landed = result.landed[0];
-    check("(9) pathSetStamped:false surfaces the forced stamp failure", landed.pathSetStamped === false);
+    check("(9) pathSetStamp:\"failed\" surfaces the forced stamp failure", landed.pathSetStamp === "failed");
     const body = git(repo, `log -1 --format=%B ${landed.sha}`);
     check("(9) the landed commit carries NO Loom-Worker-PathSet/-Base trailer (the amend never landed)",
       !body.includes("Loom-Worker-PathSet:") && !body.includes("Loom-Worker-Base:"));
     check("(9) the landed commit STILL carries its Loom-Worker-Branch trailer (only the follow-up amend failed)",
       body.includes(`Loom-Worker-Branch: ${multi.branch}`));
 
-    // The mechanism pathSetStamped:false exists to make VISIBLE rather than silently discoverable only via
+    // The mechanism pathSetStamp:"failed" exists to make VISIBLE rather than silently discoverable only via
     // a downstream getTaskMergedInfo tier read: verification degrades to the weaker trailer-only tier.
     removeWorktree(repo, multi.worktreePath);
     deleteBranchAndGc(repo, multi.branch);
     __resetMergedCommitMapCacheForTest();
     const board = await getTaskMergedInfo(repo, multi.taskId);
     check("(9) getTaskMergedInfo still resolves the branch (trailer presence alone)", board !== null && landed.sha.startsWith(board.sha));
-    check("(9) verification tier degrades to \"trailer-only\", matching the surfaced pathSetStamped:false",
+    check("(9) verification tier degrades to \"trailer-only\", matching the surfaced pathSetStamp:\"failed\"",
       board?.verification === "trailer-only");
   }
 
   // ── (9b) DISTINGUISH a stamp failure from a stamp that was never attempted at all (a noop landing) ─────
   //     assembleBatchBranches classifies a candidate a noop when its OWN branch tip is already an ancestor
   //     of the batch worktree's HEAD (mergeBase === branchTip) — no cherry-pick, no commit, no stamp is
-  //     ever attempted, so pathSetStamped must be OMITTED (key absent), never an explicit `false`.
+  //     ever attempted, so pathSetStamp must be OMITTED (key absent), never an explicit value.
   //     Constructed directly here (force the candidate's branch ref onto the already-landed commit) rather
   //     than by re-submitting the SAME pre-land candidate through a second real batch landing: a batch/solo
   //     landing always cherry-picks into a BRAND NEW commit, so a branch's ORIGINAL (pre-land) tip is never
@@ -383,8 +383,8 @@ try {
     const baseMainSha = git(repo, "rev-parse HEAD");
     const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-stamp-noop-a-${sfx}`);
     const first = await runBatchedMerge(repo, batchWt, baseMainSha, [solo], passGate);
-    check("(9b) precondition: the first landing succeeds normally with pathSetStamped:true",
-      first.ok === true && first.landed[0]?.pathSetStamped === true);
+    check("(9b) precondition: the first landing succeeds normally with pathSetStamp:\"stamped\"",
+      first.ok === true && first.landed[0]?.pathSetStamp === "stamped");
 
     // Force the candidate's OWN branch ref back onto `baseMainSha` (its OWN pre-land fork point, a PROPER
     // ANCESTOR of the landed commit, not the landed commit itself) — constructs the exact precondition
@@ -407,8 +407,8 @@ try {
       dropped.length === 0 && landed.length === 1 && landed[0].noop === true);
     check("(9b) the noop's sha is the SAME already-landed commit (reused, not re-created)",
       landed[0].sha === landedSha);
-    check("(9b) a noop landing OMITS pathSetStamped entirely (key absent) — distinct from an explicit false",
-      !("pathSetStamped" in landed[0]));
+    check("(9b) a noop landing OMITS pathSetStamp entirely (key absent) — distinct from an explicit value",
+      !("pathSetStamp" in landed[0]));
   }
 
 } finally {
@@ -418,6 +418,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a forged/wrong PathSet digest is rejected, a rename-following cherry-pick stamps the landed path, a worker's own Claude-Session trailer is stripped from every landed commit, a stamp failure surfaces as pathSetStamped:false distinct from a noop's omitted key. See batch-merge-robustness-redundancy.mjs for the rest. See batch-merge.mjs for the core landing mechanics and the PathSet/Base stamp basics."
+  ? "\n✅ ALL PASS — a forged/wrong PathSet digest is rejected, a rename-following cherry-pick stamps the landed path, a worker's own Claude-Session trailer is stripped from every landed commit, a stamp failure surfaces as pathSetStamp:\"failed\" distinct from a noop's omitted key. See batch-merge-robustness-redundancy.mjs for the rest. See batch-merge.mjs for the core landing mechanics and the PathSet/Base stamp basics."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

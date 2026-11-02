@@ -1,11 +1,11 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card b89681c2 (discovered from review lane 1, card 2785fbc2, m6) traced a possible false
-// `pathSetStamped:true` / `mergedVerification:"pathset"`: the theory was that the batch tip's follow-up
+// `pathSetStamp:"stamped"` / `mergedVerification:"pathset"`: the theory was that the batch tip's follow-up
 // `git commit --amend` (Loom-Worker-Base/PathSet stamp, git/batch-merge.ts) goes through simple-git's
 // `raw()`, which CAN resolve a non-zero exit with empty stderr as success (verified real, but for a
 // DIFFERENT call shape: `git merge-base --is-ancestor` / `rev-parse --verify --quiet` EXIT-STATUS reads —
 // see docs/decisions/bc2240d7 and 4fa36502) — so a `commit-msg`/`pre-commit` hook exiting 1 on the amend
-// would leave `pathSetStamped:true` uncorrected.
+// would leave `pathSetStamp:"stamped"` uncorrected.
 //
 // batch-merge-robustness.mjs's existing case (9) already proves the DOWNSTREAM handling is correct GIVEN
 // a thrown amend error — but it forces that error with a MOCKED `gitFactory` that synchronously throws,
@@ -30,7 +30,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       handler (git/batch-merge.ts, right after the amend call) ALREADY re-verifies by re-reading the
 //       real HEAD + the landed commit's own trailer content (`parseLoomTrailerBlock`) rather than trusting
 //       the call's resolution — exactly the DoD's "verify by state, not by the call resolving" shape —
-//       before setting `pathSetStamped`.
+//       before setting `pathSetStamp`.
 //
 // This file is additional REAL-HOOK regression coverage (not a fix): it proves RED-then-GREEN is not
 // needed because there is no red state to produce — this is a POSITIVE test that the real path behaves
@@ -98,7 +98,7 @@ function installFailingAmendHook(repo) {
 }
 
 try {
-  // ── (A) REAL hook fails the amend's git child — pathSetStamped:false, no false "pathset" claim ────────
+  // ── (A) REAL hook fails the amend's git child — pathSetStamp:"failed", no false "pathset" claim ───────
   {
     const repo = path.join(os.tmpdir(), `loom-bm-amend-hook-fail-${sfx}`);
     makeRepo(repo);
@@ -115,7 +115,7 @@ try {
     check("(A) the branch still landed BOTH its commits (not partially, not dropped)",
       result.landed.length === 1 && result.dropped.length === 0 && git(repo, `rev-list --count ${baseMainSha}..HEAD`) === "2");
     const landed = result.landed[0];
-    check("(A) pathSetStamped:false surfaces the real hook's amend failure", landed?.pathSetStamped === false);
+    check("(A) pathSetStamp:\"failed\" surfaces the real hook's amend failure", landed?.pathSetStamp === "failed");
 
     const body = git(repo, `log -1 --format=%B ${landed.sha}`);
     check("(A) the landed commit carries NO Loom-Worker-PathSet/-Base trailer (the amend never landed)",
@@ -155,7 +155,7 @@ try {
     const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-amend-hook-batch-pass-${sfx}`);
     const result = await runBatchedMerge(repo, batchWt, baseMainSha, [multi], passGate);
     check("(B) precondition: a non-blocking real hook still lands the stamp normally",
-      result.ok === true && result.landed[0]?.pathSetStamped === true);
+      result.ok === true && result.landed[0]?.pathSetStamp === "stamped");
     const body = git(repo, `log -1 --format=%B ${result.landed[0].sha}`);
     check("(B) the landed commit carries the Loom-Worker-Base/PathSet trailers (amend succeeded)",
       body.includes("Loom-Worker-Base:") && body.includes("Loom-Worker-PathSet:"));
@@ -170,7 +170,7 @@ try {
   }
 } finally {
   console.log(failures === 0
-    ? "\n✅ ALL PASS — a REAL (not mocked) commit-msg hook failing the batch tip's Loom-Worker-Base/PathSet amend correctly surfaces pathSetStamped:false and a \"trailer-only\" verification tier, never a false \"pathset\" claim; a non-blocking real hook still lands the stamp normally."
+    ? "\n✅ ALL PASS — a REAL (not mocked) commit-msg hook failing the batch tip's Loom-Worker-Base/PathSet amend correctly surfaces pathSetStamp:\"failed\" and a \"trailer-only\" verification tier, never a false \"pathset\" claim; a non-blocking real hook still lands the stamp normally."
     : `\n❌ ${failures} check(s) failed`);
   process.exitCode = failures === 0 ? 0 : 1;
 }

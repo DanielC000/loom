@@ -22699,7 +22699,7 @@ export class SessionService {
     /** REQUIRED (card a5be590f): the repo this landing was in (`null` = primary) — stamped on `merge_done`, whose repo scope releases the branch hold. Never optional: an omitted one would write a legacy-shaped row that releases the hold in EVERY repo. */
     repoKey: string | null;
     /** Forwarded verbatim into {@link finalizeMerge} — see that method's own doc for who can state this
-     *  for free (card d6d40edd: `mergeBatchTracked` now can, from `pathSetStamped`) and who omits it. */
+     *  for free (card d6d40edd: `mergeBatchTracked` now can, from `pathSetStamp`) and who omits it. */
     mergedVerification?: "content" | "pathset" | "trailer-only" | null;
     /** See the `@decision c35b60c4` anchor in this method's doc above. */
     suppressNotify?: boolean;
@@ -23739,7 +23739,9 @@ export class SessionService {
           //  scoped to end at the squash, not the outer `finally` (finalize never moves main's HEAD).
           let result: Awaited<ReturnType<typeof runBatchedMerge>>;
           try {
-            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory, goneBranchLedger: this.db.getGoneBranchLedgerFacts(finalProjectId, batchRepoKey) }, (landed) => {
+            // Card 5933734e: thread the project's resolved commitTrailers through the SAME deps object
+            // `goneBranchLedger` already rides — `target` (resolveRepoByKey, above) already carries it.
+            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory, goneBranchLedger: this.db.getGoneBranchLedgerFacts(finalProjectId, batchRepoKey), commitTrailers: target.commitTrailers }, (landed) => {
               // @decision 1ac74580 — one event per LANDED candidate, fired by runBatchedMerge itself right
               // before the fast-forward; never stamp `branch` (see that record's own Do-not).
               for (const c of landed) {
@@ -24070,14 +24072,17 @@ export class SessionService {
             // a stale retry, so finishAlreadyMerged's own push would fire once per branch. This method
             // sends ONE aggregate notice for the whole batch instead (see the settle callback below).
             //
-            // mergedVerification (card d6d40edd): a freshly-landed branch (noop:false) reports its own
-            // `Loom-Worker-PathSet` stamp outcome for free (landBranchCommitsIndividually already computed
-            // it in this SAME call) — "pathset" when the stamp landed, else the commit has neither trailer
-            // and degrades to "trailer-only" (see BatchLandedBranch.pathSetStamped's own doc). A `noop`
-            // landing reuses an already-landed sha with no fresh stamp attempt of its own — leave it null
-            // (unknown) rather than guessing at a tier nothing here actually verified.
+            // mergedVerification (card d6d40edd, tri-state honesty fix card 5933734e): a freshly-landed
+            // branch (noop:false) reports its own `Loom-Worker-PathSet` stamp outcome for free
+            // (landBranchCommitsIndividually already computed it in this SAME call) — "pathset" when the
+            // stamp landed, "trailer-only" when the stamp was attempted and failed (see
+            // BatchLandedBranch.pathSetStamp's own doc). `pathSetStamp === "disabled"` means
+            // `orchestration.commitTrailers` was "off" for this landing — NEITHER trailer was ever
+            // written, so neither tier has any evidence behind it; this must read null (unknown), never a
+            // false "pathset" claim with nothing stamped. A `noop` landing reuses an already-landed sha
+            // with no fresh stamp attempt of its own — leave it null (unknown) too, same reasoning.
             const mergedVerification: "pathset" | "trailer-only" | null =
-              lb.noop ? null : lb.pathSetStamped === false ? "trailer-only" : "pathset";
+              lb.noop ? null : lb.pathSetStamp === "stamped" ? "pathset" : lb.pathSetStamp === "failed" ? "trailer-only" : null;
             // @decision 42daa283 — a commit added to this branch AFTER the batch assembled it (e.g. while the gate
             //  ran) is not in the batch HEAD, and finalizeMerge `branch -D`s + force-removes the worktree, which
             //  would silently destroy it under a "landed" batch. Compare the live tip to the assembled one and, if it
@@ -27905,15 +27910,12 @@ export class SessionService {
     repoKey: string | null;
     /**
      * Which verification mode produced `mergedSha` (card 52e978ad) — see `Task.mergedVerification`'s own
-     * doc. The fresh-squash "Green" caller states `"content"` for free: `merge.sha` there is the commit
-     * `mergeBranchLocked` just created from the live branch content in the SAME call, no separate check
-     * needed. A batch landing (card d6d40edd — `mergeBatchTracked`'s `finishAlreadyMerged` call) states
-     * `"pathset"`/`"trailer-only"` for free too: `landBranchCommitsIndividually` already computed its own
-     * `Loom-Worker-PathSet` digest (or found it couldn't) in the SAME landing call, so its caller derives
-     * the tier from that `pathSetStamped` flag rather than re-verifying anything. The remaining
-     * ALREADY_MERGED / boot-reconcile callers derive `mergedSha` from `findLandedSquashCommit`, which does
-     * NOT report its own verification mode — they omit this, leaving the column null until the drawer's
-     * lazy backfill (`GET /api/tasks/:id`) fills it in from a real `getTaskMergedInfo` read.
+     * doc. The fresh-squash "Green" caller states `"content"` for free (no separate check needed). A batch
+     * landing (card d6d40edd) states `"pathset"`/`"trailer-only"` for free too, derived from
+     * `landBranchCommitsIndividually`'s own `pathSetStamp` — but `null` when `commitTrailers:"off"` (card
+     * 5933734e, `pathSetStamp === "disabled"`: neither trailer was ever written, no tier to claim). The
+     * remaining ALREADY_MERGED / boot-reconcile callers omit this entirely, leaving the column null until
+     * the drawer's lazy backfill (`GET /api/tasks/:id`) fills it in from a real `getTaskMergedInfo` read.
      */
     mergedVerification?: "content" | "pathset" | "trailer-only" | null;
     /** Card e8df2659: stamped onto the `merge_done` event when the human-only merge-gate switch was OFF

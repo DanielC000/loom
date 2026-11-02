@@ -3405,9 +3405,16 @@ export class PlatformMcpRouter {
           "the frozen at-merge value doesn't move) — never treat a disagreement between them as a bug. " +
           "`mergedVerificationAtMerge:null` on a MERGED card means one of: a solo " +
           "ALREADY_MERGED/boot-reconcile landing, a `noop` batch landing (content already present elsewhere " +
-          "in the batch), or pre-fix history — NEVER an anomaly to chase; it backfills lazily only via the " +
-          "web board drawer (human-triggered, not agent-facing). A freshly-landed batch branch DOES stamp " +
-          "\"pathset\"/\"trailer-only\" eagerly, same as a solo squash-confirm stamps \"content\". " +
+          "in the batch), a batch landing on a project with `orchestration.commitTrailers:\"off\"` (card " +
+          "5933734e — no reserved trailer was ever written, so there is nothing to verify), or pre-fix " +
+          "history — NEVER an anomaly to chase. The web board drawer's lazy backfill (human-triggered, not " +
+          "agent-facing) CAN fill this in on a later read, but ONLY when its own scan resolves the SAME " +
+          "sha already recorded on the row (never a different one — that writes nothing), and NEVER AT " +
+          "ALL for a `commitTrailers:\"off\"` repo (card 5933734e): that scan is trailer-keyed and a " +
+          "trailers-off landing wrote no trailer, so it structurally cannot ever converge. A " +
+          "freshly-landed batch branch on a `commitTrailers:\"on\"` project (the default) still stamps " +
+          "\"pathset\"/\"trailer-only\" eagerly AT LANDING TIME, same as a solo squash-confirm stamps " +
+          "\"content\". " +
           "Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
           "default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, " +
           "returns the bare tasks array (today's shape, unchanged) — otherwise, or whenever you pass " +
