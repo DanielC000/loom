@@ -51,3 +51,12 @@ kickoff, full stop — set `triggerGlob` to a path glob (e.g. `"src/memory/**"`)
 unconditional delivery to a kickoff whose text names a matching path; on any other kickoff it competes
 for relevance via full-text search, same as an unpinned note. Only meaningful on a note that's pinned
 and NOT also tagged `"never-drop"` — a never-drop floor note always bypasses its own trigger, by design.
+
+**A near-duplicate advisory on a brand-new key.** When the note you're about to write under a NEW key
+closely resembles an existing one, the write still succeeds but its response carries a
+`nearDuplicateStatus` ({message, key, score, coverage}) naming the existing key it resembles — a cheap,
+local full-text check, no LLM/embeddings, never a block. Treat it as a strong nudge to `memory_write` the
+NAMED key instead (refining it, per the stable-key discipline above) rather than minting a second note on
+the same topic — exactly the accumulation this check exists to catch. It never fires on an UPDATE to an
+existing key, so fixing a flagged duplicate by updating the named key is itself silent, not a repeat
+nag.

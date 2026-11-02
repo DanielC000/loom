@@ -9248,6 +9248,44 @@ export class Db {
       return [];
     }
   }
+  /** Card b1f34988 — the near-duplicate CANDIDATE for a note's `title`+`text` about to be written: the top
+   *  FTS5 bm25 hit against this project's EXISTING corpus, plus a coverage fraction (see {@link
+   *  NearDuplicateCandidate}). `excludeKey` lets a caller scanning EXISTING notes (e.g. a periodic sweep)
+   *  exclude a note's own key from matching itself — `memory_write`'s own write-time call never needs it,
+   *  since a brand-new key is by definition not yet in the index. Same degrade-to-`undefined` posture as
+   *  {@link searchProjectMemory}: an empty/all-short-token query or a genuine FTS5 error both mean
+   *  "nothing to compare," never a thrown error.
+   *
+   * @decision b1f34988 — never use the raw `bm25()` score ALONE as the near-duplicate signal; pair it
+   * with the coverage-fraction gate in `project-memory-dedup.ts` — see the decision record for why.
+   */
+  findNearDuplicateProjectMemory(
+    projectId: string,
+    title: string,
+    text: string,
+    excludeKey?: string,
+  ): NearDuplicateCandidate | undefined {
+    const tokens = tokenizeForProjectMemoryFts(`${title}\n${text}`);
+    if (tokens.length === 0) return undefined;
+    const match = quoteFtsTokens(tokens);
+    try {
+      const row = this.db.prepare(
+        `SELECT pm.key AS key, pm.title AS title, pm.text AS text, bm25(project_memory_fts) AS score
+         FROM project_memory pm
+         JOIN project_memory_fts fts ON fts.rowid = pm.rowid
+         WHERE pm.project_id = ? AND project_memory_fts MATCH ?${excludeKey ? " AND pm.key != ?" : ""}
+         ORDER BY score LIMIT 1`,
+      ).get(
+        ...(excludeKey ? [projectId, match, excludeKey] : [projectId, match]),
+      ) as { key: string; title: string; text: string; score: number } | undefined;
+      if (!row) return undefined;
+      const haystack = `${row.title}\n${row.text}`.toLowerCase();
+      const present = tokens.filter((t) => haystack.includes(t));
+      return { key: row.key, score: row.score, coverage: present.length / tokens.length };
+    } catch {
+      return undefined;
+    }
+  }
   /** Bump `lastRetrievedAt`/`retrievalCount` for notes actually INCLUDED in an injected kickoff (feeds the
    *  LRU-by-retrieval eviction above — a rarely-matched-but-used note survives over a stale one). Small,
    *  bounded id list (pinned + topK, never more than a handful) — one UPDATE per id inside a transaction
@@ -11753,16 +11791,34 @@ function toProjectMemoryHistoryEntry(r0: unknown): ProjectMemoryHistoryEntry {
     updatedAt: r.updated_at as string,
   };
 }
-/** Turn free-form kickoff/task text into a safe FTS5 MATCH query: split into word tokens, drop short
- *  (<3 char) tokens, dedupe, quote each as an FTS5 string literal (doubling embedded quotes) and OR them
- *  together — so prose containing FTS5-special characters (quotes, hyphens, colons, boolean keywords)
- *  can never throw a query-syntax error, and any matching token surfaces a note. Capped at 32 tokens
- *  (small-corpus queries never need more; keeps the query cheap). Empty/all-short-token input ⇒ "" (the
- *  caller's "nothing to search for" signal). */
-function ftsProjectMemoryQuery(text: string): string {
+/** Shared tokenizer behind {@link ftsProjectMemoryQuery} and {@link findNearDuplicateProjectMemory}'s
+ *  coverage computation: word tokens, drop short (<3 char) tokens, dedupe, lowercase, cap at 32 (small-
+ *  corpus queries never need more; keeps the query cheap). `[]` ⇒ "nothing to search for". */
+function tokenizeForProjectMemoryFts(text: string): string[] {
   const tokens = (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((t) => t.length >= 3).slice(0, 32);
-  const unique = Array.from(new Set(tokens.map((t) => t.toLowerCase())));
-  return unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ");
+  return Array.from(new Set(tokens.map((t) => t.toLowerCase())));
+}
+
+function quoteFtsTokens(tokens: string[]): string {
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ");
+}
+
+/** Turn free-form kickoff/task text into a safe FTS5 MATCH query: quote each token as an FTS5 string
+ *  literal (doubling embedded quotes) and OR them together — so prose containing FTS5-special characters
+ *  (quotes, hyphens, colons, boolean keywords) can never throw a query-syntax error, and any matching
+ *  token surfaces a note. Empty/all-short-token input ⇒ "" (the caller's "nothing to search for" signal). */
+function ftsProjectMemoryQuery(text: string): string {
+  return quoteFtsTokens(tokenizeForProjectMemoryFts(text));
+}
+
+/** Card b1f34988 — the top FTS5 hit for a near-duplicate CANDIDATE query, plus a coverage fraction: how
+ *  many of the query's own tokens are textually present (case-insensitive substring) in the matched
+ *  note's title+text. `score` is the raw `bm25()` value (SQLite's convention: more negative = more
+ *  relevant), so a near-duplicate check compares `score <= threshold`, not `>=`. */
+export interface NearDuplicateCandidate {
+  key: string;
+  score: number;
+  coverage: number;
 }
 function toPresetPrompt(r0: unknown): PresetPrompt {
   const r = r0 as Row;

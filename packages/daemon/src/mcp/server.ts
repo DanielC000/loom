@@ -553,6 +553,12 @@ export class TaskMcpRouter {
           "`\"packages/daemon/src/memory/**\"`) to set it — matched against path-like substrings found " +
           "literally in the RECEIVING session's own kickoff/task text (the same text driving the RELATED " +
           "tier's own match), not against real touched files (unknowable this early). " +
+          "Card b1f34988: on a BRAND-NEW key only, this response may carry a `nearDuplicateStatus` " +
+          "({message, key, score, coverage}) when the new note's title+text closely resembles an EXISTING " +
+          "note (local FTS5 bm25 + token-overlap check, zero metered tokens, no LLM/embeddings) — purely " +
+          "advisory, it never blocks the write; consider `memory_write`-ing the NAMED existing key instead " +
+          "of accumulating a near-duplicate under a different one. Never present on an update to an " +
+          "existing key (that's the mechanism for fixing a flagged duplicate, not something to re-flag). " +
           "Card 8d158088: REFUSED with {error} if this specific call is CONFIRMED to have originated from " +
           "a sub-agent (a Task/Agent sub-call), rather than your own top-level turn — project memory is " +
           "shared, durable knowledge meant to reflect the calling agent's own reasoning; call this " +

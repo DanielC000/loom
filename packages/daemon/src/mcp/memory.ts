@@ -5,6 +5,7 @@ import { annotateRequestLinks } from "../sessions/project-memory-request-links.j
 import { annotateBacklinks, annotateBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
+import { computeNearDuplicateSignal, type NearDuplicateSignal } from "../sessions/project-memory-dedup.js";
 
 // Project-scoped SHARED memory tool business logic (card 2fd9abf9). EVERY function takes the projectId
 // resolved SERVER-SIDE from the session id — the agent never passes a projectId, mirroring tasks.ts.
@@ -272,7 +273,7 @@ export function writeProjectMemory(
   projectId: string,
   input: MemoryWriteInput,
 ):
-  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal; evictionStatus?: EvictionCandidateSignal })
+  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal; evictionStatus?: EvictionCandidateSignal; nearDuplicateStatus?: NearDuplicateSignal })
   | { error: string }
   | MemoryWriteConflict
   | MemoryWriteTooLong {
@@ -353,6 +354,13 @@ export function writeProjectMemory(
     ? undefined
     : input.requestIds.map((id) => id.trim()).filter((id) => id.length > 0);
   const memoryConfig = resolveConfig(db.getProject(projectId)?.config).memory;
+  // Card b1f34988 — the near-duplicate advisory only fires on a brand-new KEY (`!existing`): an update to
+  // an existing key is deliberately exempt (that's the mechanism for FIXING a near-duplicate — "update
+  // that key instead" — not something to nag about on every subsequent edit of the SAME note). Queried
+  // against the EXISTING corpus BEFORE this write lands, so a brand-new row is never self-matched.
+  const nearDuplicateCandidate = existing
+    ? undefined
+    : db.findNearDuplicateProjectMemory(projectId, title ?? "", text);
   const result = db.upsertProjectMemoryChecked(
     projectId,
     { key, title, text, pinned: input.pinned, tags: input.tags, requestIds, triggerGlob },
@@ -385,12 +393,14 @@ export function writeProjectMemory(
   const restTierStatus = computeRestTierSignal(db, projectId, result.entry, memoryConfig.budgetTokens);
   const triggerGateStatus = computeTriggerGateStatus(result.entry);
   const evictionStatus = computeEvictionCandidateStatus(db, projectId, result.entry, memoryConfig.maxNotes);
+  const nearDuplicateStatus = computeNearDuplicateSignal(nearDuplicateCandidate);
   return {
     ...result.entry,
     ...(neverDropStatus ? { neverDropStatus } : {}),
     ...(restTierStatus ? { restTierStatus } : {}),
     ...(triggerGateStatus ? { triggerGateStatus } : {}),
     ...(evictionStatus ? { evictionStatus } : {}),
+    ...(nearDuplicateStatus ? { nearDuplicateStatus } : {}),
   };
 }
 
