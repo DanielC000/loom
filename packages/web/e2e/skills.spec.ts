@@ -280,6 +280,125 @@ test("the SKILL.md row shows the user's ACTUAL edits, not an empty block under a
   expect(reset.ok).toBe(true);
 });
 
+// --- Permission-widening disclosure (card 87a51903) ------------------------------------------------
+// Claude Code's skill loader honours `allowed-tools:`, `hooks:` and a body `!` command with no
+// workspace-trust gate. Loom DISCLOSES them and never strips them, so what this pins is that the notice
+// is actually on screen for a skill that carries them, ABSENT for one that doesn't, and that it names
+// each vector rather than showing one undifferentiated "warning" chip.
+//
+// Both fixtures are USER skills created through the real REST write path (POST + PUT, stamped "human"),
+// so nothing here depends on a bundled asset's content, and both are deleted at the end to leave the
+// shared worker-scoped daemon's store as it was found.
+const PW_DIRTY = "pw-e2e-dirty";
+const PW_CLEAN = "pw-e2e-clean";
+const PW_SENTINEL = "pw-e2e-sentinel-9f31";
+
+async function putSkill(baseURL: string, name: string, content: string) {
+  const created = await fetch(`${baseURL}/api/skills`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }),
+  });
+  expect([201, 409]).toContain(created.status); // 409 ⇒ a prior run left it; the PUT below still pins content
+  const put = await fetch(`${baseURL}/api/skills/${name}`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ content }),
+  });
+  expect(put.ok).toBe(true);
+}
+
+test("a skill carrying permission-widening frontmatter is flagged, naming each vector; a clean one is not", async ({ page, loomDaemon }) => {
+  // All three vectors at once, so one fixture covers the enumeration. The sentinel string is what proves
+  // the page is reading THIS daemon's store — a sibling worker's identical-looking Skills page cannot
+  // contain it.
+  const dirty = [
+    "---",
+    `name: ${PW_DIRTY}`,
+    `description: ${PW_SENTINEL} fixture carrying every vector`,
+    "allowed-tools: Bash(*)",
+    "hooks:",
+    "  Stop:",
+    "    - type: command",
+    "      command: node noop.js",
+    "---",
+    "",
+    `# ${PW_DIRTY}`,
+    "",
+    "Context: !`node noop.js`",
+    "",
+    "```!",
+    "node noop.js",
+    "```",
+    "",
+  ].join("\n");
+  const clean = [
+    "---",
+    `name: ${PW_CLEAN}`,
+    `description: ${PW_SENTINEL} fixture with nothing to flag`,
+    "---",
+    "",
+    `# ${PW_CLEAN}`,
+    "",
+    "Ordinary doctrine. Mind the `!` operator, and never set allowed-tools: or hooks: in a skill you ship.",
+    "",
+  ].join("\n");
+
+  await putSkill(loomDaemon.baseURL, PW_DIRTY, dirty);
+  await putSkill(loomDaemon.baseURL, PW_CLEAN, clean);
+
+  try {
+    // Confirm the arranged state is real through the server's own read BEFORE asserting on any UI, and
+    // assert the fixture's IDENTITY (the sentinel + the exact vector sets), so a silent fallback to some
+    // other daemon's store fails loudly rather than rendering a plausible, wrong page.
+    const rows = await fetch(`${loomDaemon.baseURL}/api/skills`).then((r) => r.json()) as
+      Array<{ name: string; description: string; permissionWidening?: string[] }>;
+    const dirtyRow = rows.find((r) => r.name === PW_DIRTY);
+    const cleanRow = rows.find((r) => r.name === PW_CLEAN);
+    expect(dirtyRow?.description).toContain(PW_SENTINEL);
+    expect(cleanRow?.description).toContain(PW_SENTINEL);
+    expect(dirtyRow?.permissionWidening).toEqual(["allowed-tools", "hooks", "shell-inline", "shell-fenced"]);
+    expect("permissionWidening" in (cleanRow ?? {})).toBe(false); // omitted, not an empty array
+
+    await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
+
+    // ABSENT on the clean skill — asserted FIRST, while nothing has yet rendered a notice, so a stray
+    // selector that matches everything can't make this half pass vacuously.
+    await skillButton(page, PW_CLEAN).click();
+    await expect(page.locator("textarea")).toHaveValue(new RegExp(PW_SENTINEL));
+    await expect(page.getByTestId("skill-permission-warning")).toHaveCount(0);
+    await expect(page.getByTestId("skill-permission-badge")).toHaveCount(0);
+
+    // PRESENT on the dirty skill: the header badge, the banner, and one row per vector naming the
+    // construct AND what it does.
+    await skillButton(page, PW_DIRTY).click();
+    await expect(page.locator("textarea")).toHaveValue(new RegExp(PW_SENTINEL));
+    await expect(page.getByTestId("skill-permission-badge")).toBeVisible();
+    const banner = page.getByTestId("skill-permission-warning");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("widens what a session can do");
+    await expect(banner).toContainText("Loom does not remove these");
+    await expect(page.getByTestId("skill-permission-vector-allowed-tools")).toContainText("skip the permission check");
+    await expect(page.getByTestId("skill-permission-vector-hooks")).toContainText("rest of the session");
+    await expect(page.getByTestId("skill-permission-vector-shell-inline")).toContainText("when the skill loads");
+    await expect(page.getByTestId("skill-permission-vector-shell-fenced")).toContainText("when the skill loads");
+
+    // The notice follows the CONTENT, not a one-time stamp: editing the vectors out through the real Save
+    // control clears it, which is the observable before/after a render-only check would miss.
+    await page.locator("textarea").fill(clean.replace(PW_CLEAN, PW_DIRTY));
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByTestId("skill-permission-warning")).toHaveCount(0);
+    await expect(page.getByTestId("skill-permission-badge")).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const after = await fetch(`${loomDaemon.baseURL}/api/skills`).then((r) => r.json()) as Array<{ name: string; permissionWidening?: string[] }>;
+        return "permissionWidening" in (after.find((s) => s.name === PW_DIRTY) ?? {});
+      })
+      .toBe(false);
+  } finally {
+    // CLEANUP: both fixtures are user skills this spec created, so deleting them restores the store.
+    for (const name of [PW_DIRTY, PW_CLEAN]) {
+      await fetch(`${loomDaemon.baseURL}/api/skills/${name}`, { method: "DELETE" });
+    }
+  }
+});
+
 // A stale `shippedHash` must be REFUSED, not silently applied — assets/** is read live, so `shipped` can
 // change between the diff being read and the button being clicked. Driven at the REST layer because the
 // race is a server-side guard: the UI's job is only to carry the token it was handed.

@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { SkillPermissionVector } from "@loom/shared";
 import { api, type SkillMergePreview, type SkillFileState } from "../lib/api";
 import { Panel, Button, Input, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, type Tone } from "../theme";
@@ -89,6 +90,9 @@ export default function Skills() {
   // user skill that isn't stamped "human", so an agent-written or unstamped one silently never reaches a
   // Companion/Setup/etc. session. `provenance` is undefined for a bundled skill (not applicable there).
   const provenance = selectedSkill?.provenance ?? null;
+  // card 87a51903 — read off the LIST entry (not the single-skill read) so the sidebar dot and the
+  // editor banner can never disagree about the same skill; both are derived from one server scan.
+  const permissionVectors = selectedSkill?.permissionWidening ?? [];
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
@@ -108,7 +112,8 @@ export default function Skills() {
                 {s.name}<span style={{ color: color.textMuted }}>{s.bundled ? "  ·  bundled" : "  ·  local"}</span>
               </span>
               <StatusDots customized={!!s.customized} updateAvailable={!!s.updateAvailable}
-                notTrusted={!s.bundled && s.provenance !== "human"} />
+                notTrusted={!s.bundled && s.provenance !== "human"}
+                vectors={s.permissionWidening ?? []} />
             </Button>
           ))}
           {skills.data?.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No skills yet.</span>}
@@ -124,6 +129,7 @@ export default function Skills() {
           <SkillEditor key={`${selected}:${reloadNonce}`} name={selected} content={current.data.content}
             bundled={bundled} customized={customized} updateAvailable={updateAvailable}
             mdCustomized={mdCustomized} mdUpdateAvailable={mdUpdateAvailable} provenance={provenance} canPublish={isDev}
+            permissionVectors={permissionVectors}
             onSave={(content) => save.mutate({ name: selected, content })} saving={save.isPending}
             onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
             onReset={() => reset.mutate(selected)} resetting={reset.isPending}
@@ -137,29 +143,103 @@ export default function Skills() {
 
 // Compact sidebar status: a cyan dot for "customized", an amber dot for "update available". Restrained —
 // the full-text badges live in the editor header; here it's a glanceable signal with a hover title.
-function StatusDots({ customized, updateAvailable, notTrusted }: { customized: boolean; updateAvailable: boolean; notTrusted: boolean }) {
-  if (!customized && !updateAvailable && !notTrusted) return null;
+// The permission-widening dot is RED, the one red signal on this page: amber already carries two
+// unrelated states here, and this ranks above both (card 87a51903).
+function StatusDots({ customized, updateAvailable, notTrusted, vectors }: {
+  customized: boolean; updateAvailable: boolean; notTrusted: boolean; vectors: SkillPermissionVector[];
+}) {
+  if (!customized && !updateAvailable && !notTrusted && !vectors.length) return null;
   return (
     <span style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
       {customized && <Dot tone="cyan" title="Customized — you edited this skill" />}
       {updateAvailable && <Dot tone="amber" title="Update available — Loom shipped a newer version" />}
       {notTrusted && <Dot tone="amber" title="Not delivered to locked roles (Companion, Setup…) — save it here to trust it" />}
+      {!!vectors.length && <Dot tone="red" title={`${PERMISSION_SIGNAL_LABEL}: ${vectors.map((v) => PERMISSION_VECTORS[v].code).join(", ")}`} />}
     </span>
   );
 }
 function Dot({ tone, title }: { tone: Tone; title: string }) {
-  const c = { cyan: color.cyan, amber: color.amber } as Record<string, string>;
+  const c = { cyan: color.cyan, amber: color.amber, red: color.red } as Record<string, string>;
   return <span title={title} style={{ width: 7, height: 7, borderRadius: 7, background: c[tone] ?? color.textMuted, display: "inline-block" }} />;
+}
+
+// --- Permission-widening disclosure (card 87a51903) -------------------------------------------------
+// Claude Code's skill loader honours these with no workspace-trust gate, so a skill carrying one does
+// more than its text implies. Loom deliberately does NOT strip them — a human-written skill may want
+// them, the same trust tier as a permission allowDelta — so this surface is purely informational.
+// Detection is server-side (`skills/permissionWidening.ts`); the copy below is the only place that
+// translates a vector id into what it actually does.
+//
+// @decision 87a51903 — disclose, never strip. Do not turn this notice into a gate, and do not
+// re-derive detection in the client: the server field is the one source.
+const PERMISSION_SIGNAL_LABEL = "Grants tools or runs shell";
+// `code` is the construct VERBATIM, so it doubles as what to search the SKILL.md for; `where` and `does`
+// are prose and stay OUTSIDE the code span.
+const PERMISSION_VECTORS: Record<SkillPermissionVector, { code: string; where: string; does: string }> = {
+  "allowed-tools": {
+    code: "allowed-tools:",
+    where: "in the frontmatter",
+    does: "pre-approves the listed tools for the turn that loads this skill, so those calls skip the permission check",
+  },
+  hooks: {
+    code: "hooks:",
+    where: "in the frontmatter",
+    does: "registers shell hooks that keep running for the rest of the session, on later turns too — denying tools does not stop them",
+  },
+  "shell-inline": {
+    code: "!`cmd`",
+    where: "in the body",
+    does: "runs a shell command when the skill loads, before the agent takes its first turn",
+  },
+  "shell-fenced": {
+    code: "```!",
+    where: "in the body",
+    does: "runs the block's shell commands when the skill loads, before the agent takes its first turn",
+  },
+};
+
+// The banner: a red hairline, one row per detected vector — same restrained shape as UpdateBanner's
+// amber one, never a filled block. Rendered under the header badge, above the editor, so the reader
+// sees what the skill does before they read (or edit) it.
+function PermissionWideningBanner({ vectors }: { vectors: SkillPermissionVector[] }) {
+  return (
+    <div data-testid="skill-permission-warning"
+      style={{ border: `1px solid ${color.red}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
+        background: color.panel2, display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>
+        This skill widens what a session can do.
+      </span>
+      <ul style={{ margin: 0, paddingLeft: 16, display: "flex", flexDirection: "column", gap: 4 }}>
+        {vectors.map((v) => (
+          <li key={v} data-testid={`skill-permission-vector-${v}`}
+            style={{ color: color.textDim, fontFamily: font.mono, fontSize: 11, lineHeight: 1.55 }}>
+            <code style={{ color: color.text }}>{PERMISSION_VECTORS[v].code}</code>{" "}
+            {PERMISSION_VECTORS[v].where} — {PERMISSION_VECTORS[v].does}.
+          </li>
+        ))}
+      </ul>
+      {/* Separated by a hairline, not by a dimmer tone: `color.textMuted` measures 3.14:1 on this panel,
+          under the 4.5:1 floor for text this size — and this is the line that tells the reader nothing is
+          broken, so it must not be the least readable thing in the banner. */}
+      <span style={{ color: color.textDim, fontFamily: font.mono, fontSize: 11, lineHeight: 1.55,
+        borderTop: `1px solid ${color.border}`, paddingTop: 6 }}>
+        Loom does not remove these. If you wrote or installed this skill on purpose, nothing is wrong —
+        edit the SKILL.md above to drop them if you didn't mean to.
+      </span>
+    </div>
+  );
 }
 
 // Remounted per skill (key=name:nonce) so the textarea resets on switch / reset / adopt; after Save the
 // query refetches and `dirty` clears against the new content. Mirrors the agent-preset / task editors.
 function SkillEditor({
   name, content, bundled, customized, updateAvailable, mdCustomized, mdUpdateAvailable, provenance, canPublish,
+  permissionVectors,
   onSave, saving, onDelete, deleting, onReset, resetting, onAdopt, adopting, adoptError, onPublish, publishing,
 }: {
   name: string; content: string; bundled: boolean; customized: boolean; updateAvailable: boolean;
   mdCustomized: boolean; mdUpdateAvailable: boolean; provenance: "agent" | "human" | null; canPublish: boolean;
+  permissionVectors: SkillPermissionVector[];
   onSave: (c: string) => void; saving: boolean; onDelete: () => void; deleting: boolean;
   onReset: () => void; resetting: boolean; onAdopt: (content?: string) => void; adopting: boolean; adoptError: Error | null;
   onPublish: () => void; publishing: boolean;
@@ -195,6 +275,12 @@ function SkillEditor({
             <Badge tone="amber">not delivered to locked roles</Badge>
           </span>
         )}
+        {!!permissionVectors.length && (
+          <span data-testid="skill-permission-badge"
+            title={`${PERMISSION_SIGNAL_LABEL}: ${permissionVectors.map((v) => PERMISSION_VECTORS[v].code).join(", ")}`}>
+            <Badge tone="red">{PERMISSION_SIGNAL_LABEL}</Badge>
+          </span>
+        )}
         <span style={{ color: color.textMuted, fontSize: 12 }}>· SKILL.md</span>
         <span style={{ flex: 1 }} />
         {confirmDel ? (
@@ -205,6 +291,11 @@ function SkillEditor({
           </>
         ) : <Button variant="danger" onClick={() => setConfirmDel(true)}>Delete</Button>}
       </div>
+
+      {/* Permission-widening notice (card 87a51903) — FIRST of the banners: it describes what the skill
+          will DO to a session, which outranks the customization/update states below it. Informational
+          only; Loom never strips these. */}
+      {!!permissionVectors.length && <PermissionWideningBanner vectors={permissionVectors} />}
 
       {/* Update banner — only when Loom has shipped a newer version. Groups the adopt affordance with a
           "what shipped changed" expander so the user sees the incoming change before adopting. */}

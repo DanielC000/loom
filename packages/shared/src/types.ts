@@ -4280,7 +4280,29 @@ export interface SkillSummary {
    *  the "not delivered to locked roles" note: a locked role's deliver-all default withholds anything
    *  that isn't `"human"` (card 509176c8). */
   provenance?: "agent" | "human" | null;
+  /** Permission-widening constructs this skill's SKILL.md carries (card 87a51903) — informational
+   *  DISCLOSURE only: Loom never strips these, because a human-written skill may legitimately want
+   *  them. OMITTED (never `[]`) when the skill is clean, matching this interface's other
+   *  conditionally-present fields — so absence means "detected, nothing found", not "not checked".
+   *  Detected by `skills/permissionWidening.ts` — see `SkillPermissionVector` for what each one does. */
+  permissionWidening?: SkillPermissionVector[];
 }
+
+/**
+ * A permission-widening construct Claude Code's skill loader honours with NO workspace-trust gate
+ * (card 28b2ca6f's probes; card 87a51903 surfaces them in the Skills UI). Each id names a DIFFERENT
+ * mechanism with a different blast radius, so they are reported separately rather than as one boolean:
+ *  - `allowed-tools`  frontmatter key — pre-approves the listed tools for the turn that loads the
+ *                     skill, so those calls skip the permission check entirely. In `auto` mode (Loom's
+ *                     default) it also lets a body `!` command run at render with no classifier pass.
+ *  - `hooks`          frontmatter key — registers shell hooks that keep firing for the REST OF THE
+ *                     SESSION. Hooks are not tools, so `--disallowedTools` / a `restrictedTools` deny
+ *                     list cannot contain them.
+ *  - `shell-inline`   a body inline `` !`cmd` `` — runs a shell command when the skill renders,
+ *                     before any model turn.
+ *  - `shell-fenced`   a body fenced ` ```! ` block — the block form of the same render-time execution.
+ */
+export type SkillPermissionVector = "allowed-tools" | "hooks" | "shell-inline" | "shell-fenced";
 
 // --- Context-window sizing -------------------------------------------------------------------
 /** Fallback window for an unknown / not-yet-measured model — the classic Claude context size. */

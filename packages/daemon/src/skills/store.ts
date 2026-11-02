@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { diff3Merge } from "node-diff3";
 import type { SkillSummary } from "@loom/shared";
 import { SKILLS_DIR, SKILL_BASE_DIR, SKILL_PROVENANCE_FILE } from "../paths.js";
+import { permissionWideningField } from "./permissionWidening.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/skills -> daemon root -> assets/skills. Overridable via LOOM_ASSET_SKILLS so hermetic tests can
@@ -354,6 +355,9 @@ export function listSkills(): SkillSummary[] {
       // @decision 509176c8 — omitted for a bundled skill: trust there turns on `isBundledSkill` alone,
       // not this flat stamp, so echoing it would invite exactly the wrong read.
       ...(isBundled ? {} : { provenance: skillProvenance(e.name) }),
+      // Permission-widening constructs in THIS content (bundled or not — a bundled skill's store copy
+      // is user-editable, so it is not exempt). Disclosure only; see `skills/permissionWidening.ts`.
+      ...permissionWideningField(content),
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));

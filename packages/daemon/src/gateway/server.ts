@@ -84,6 +84,7 @@ import { listProjectLinks, createProjectLink, deleteProjectLink } from "../proje
 import { isActiveDocumentContentType, listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
+import { permissionWideningField } from "../skills/permissionWidening.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
@@ -4395,7 +4396,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { name } = req.params as { name: string };
     const s = readSkill(name);
     if (!s) return reply.code(404).send({ error: "skill not found" });
-    return s;
+    // Same field, same omit-when-clean convention, as the list response above (card 87a51903) — added
+    // HERE rather than inside `readSkill()` on purpose: that helper is also the MCP skill_read/skill_edit
+    // and user-audit read path, and this is a UI disclosure, not something those contracts asked for.
+    return { ...s, ...permissionWideningField(s.content) };
   });
   app.post("/api/skills", async (req, reply) => {
     const b = (req.body ?? {}) as { name?: string; content?: string };
