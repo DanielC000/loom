@@ -60,6 +60,7 @@ import { ResumeDocWatcher } from "./orchestration/resume-doc-watcher.js";
 import { snapshotAllResumeDocsAtBoot } from "./orchestration/resume-doc-snapshot.js";
 import { CrashRecoveryWatcher, recordUnexpectedExit, listCrashRecoveryEligibleSessionIds } from "./orchestration/crash-recovery-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
+import { MemoryDedupWatcher } from "./orchestration/memory-dedup-watcher.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline, rateLimitedUntil, resumeResetFromUsageStatus } from "./orchestration/usage-limit.js";
@@ -1617,6 +1618,16 @@ async function main(): Promise<void> {
       : `[boot] db-backup ticker off (${resolved.backup.enabled ? "interval 0" : "disabled"})`,
   );
 
+  // Card 446d97f0: periodic, zero-LLM likely-duplicate-notes report sweep — per-project cadence
+  // (`memory.duplicateReportIntervalHours`, default 24h, `<= 0` disables it for that project), so this
+  // outer tick just needs to be frequent enough to notice a newly-due project reasonably promptly.
+  const memoryDedupWatcher = new MemoryDedupWatcher({
+    db,
+    intervalMs: Number(process.env.LOOM_MEMORY_DEDUP_WATCH_INTERVAL_MS) || undefined,
+  });
+  memoryDedupWatcher.start();
+  console.log("[boot] memory-dedup report ticker on");
+
   // Vault auto-committer — start ONE VaultVersioner per UNIQUE governing repo root so agent doc rewrites
   // (the mandated rewrite-in-place loom-doc-hygiene flow, done with the plain Write/Edit tool) accrue git
   // history and a destructive overwrite has a recovery path. Without this the class was dead code: only
@@ -1927,7 +1938,7 @@ async function main(): Promise<void> {
       step("companionStop");
       void companionController.stop().catch(() => { /* never block the exit */ });
       step("watchersStop");
-      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
+      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop(); memoryDedupWatcher.stop();
       step("finalLog");
       console.log(`[shutdown] graceful stop (${reason})`);
     }, () => process.exit(0)); // clean stop — NOT exit 75 (the supervisor's restart sentinel)

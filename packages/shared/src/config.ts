@@ -184,7 +184,7 @@ export function resolveCodescapeConfig(override?: unknown): CodescapeConfig {
 /**
  * Project-scoped SHARED memory tuning (card 2fd9abf9) — the FTS5 kickoff-injection budget, per-project
  * default `resolveConfig` layer → per-project override, exactly like every other numeric knob here (no ad
- * hoc reads). All three are benign tuning numbers (no host-launch/exfil capability, unlike `gateCommand`/
+ * hoc reads). All four are benign tuning numbers (no host-launch/exfil capability, unlike `gateCommand`/
  * `alertWebhook`), so they stay on the AGENT-facing config validator too — see `platform.ts`.
  */
 export interface MemoryConfig {
@@ -198,6 +198,14 @@ export interface MemoryConfig {
   /** Per-project cap on UNPINNED notes; writing past it evicts the least-recently-RETRIEVED unpinned
    *  row(s) (owner decision #2). Pinned notes are never evicted and never counted. `<= 0` disables the cap. */
   maxNotes: number;
+  /**
+   * Card 446d97f0 — cadence (hours) of the periodic, zero-LLM likely-duplicate-notes sweep
+   * (`orchestration/memory-dedup-watcher.ts`): a daemon-internal watcher, never an agent session, pairs
+   * this project's memory corpus against itself using the SAME `isNearDuplicateCandidate` signal the
+   * write-time advisory (card b1f34988) uses, and files/updates ONE board card naming the candidates for a
+   * human/lead to review. `<= 0` disables the sweep entirely for this project.
+   */
+  duplicateReportIntervalHours: number;
 }
 
 /**
@@ -218,6 +226,10 @@ export const MEMORY_CONFIG_MAX = {
   budgetTokens: 25000,
   topK: 50,
   maxNotes: 1000,
+  // Card 446d97f0: a hard ceiling on the dup-report cadence, same bounds-hardening posture as the three
+  // above — 720h (30 days) is generous for "rarely," while still stopping a fat-fingered override from
+  // effectively disabling the sweep forever without going through the explicit `<= 0` off-switch.
+  duplicateReportIntervalHours: 720,
 } as const;
 
 /** Card 6f13746c: upper bound of `orchestration.mergeGateInterval` (lower bound 1). */
@@ -1717,7 +1729,10 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // this default and `MAX_TEXT_BYTES` are both literally `4000`, in two DIFFERENT units (tokens here,
   // bytes there) — coincidence, not a derived relationship; changing one does NOT rescale the other. See
   // `memory.ts`'s `MAX_TEXT_BYTES` comment for the reverse-direction statement of the same arithmetic.
-  memory: { budgetTokens: 4000, topK: 8, maxNotes: 500 },
+  // duplicateReportIntervalHours default 24 (card 446d97f0): a daily sweep is frequent enough to catch a
+  // fresh duplicate quickly without re-deriving the full-corpus pairing pass (see the watcher's own doc)
+  // more often than the corpus can meaningfully change.
+  memory: { budgetTokens: 4000, topK: 8, maxNotes: 500, duplicateReportIntervalHours: 24 },
   // Session-usage telemetry (epic c9924bcd): daemon-global sampler cadence (5m) + sample retention (90d).
   usageSampleIntervalMs: 300000,
   usageSampleRetentionDays: 90,
@@ -2317,6 +2332,10 @@ export function resolveConfig(
       budgetTokens: Math.min(override.memory?.budgetTokens ?? d.memory.budgetTokens, MEMORY_CONFIG_MAX.budgetTokens),
       topK: Math.min(override.memory?.topK ?? d.memory.topK, MEMORY_CONFIG_MAX.topK),
       maxNotes: Math.min(override.memory?.maxNotes ?? d.memory.maxNotes, MEMORY_CONFIG_MAX.maxNotes),
+      duplicateReportIntervalHours: Math.min(
+        override.memory?.duplicateReportIntervalHours ?? d.memory.duplicateReportIntervalHours,
+        MEMORY_CONFIG_MAX.duplicateReportIntervalHours,
+      ),
     },
     // Daemon-global (no per-project layer): the session-usage sampler cadence + retention. Sweep G5 fixes
     // the doc/code mismatch — these previously fell straight to the platform default here, never actually

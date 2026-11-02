@@ -53,14 +53,20 @@ db.insertProject({ id: projId2, name: "Other Project", repoPath: tmpHome, vaultP
 try {
   // ===================== fix #2: resolveConfig clamps memory knobs to MEMORY_CONFIG_MAX =====================
   {
-    const pathological = resolveConfig({ memory: { budgetTokens: 999999, topK: 999, maxNotes: 999999 } }).memory;
+    const pathological = resolveConfig({ memory: { budgetTokens: 999999, topK: 999, maxNotes: 999999, duplicateReportIntervalHours: 999999 } }).memory;
     check("(clamp) an absurd budgetTokens override is clamped to MEMORY_CONFIG_MAX.budgetTokens",
       pathological.budgetTokens === MEMORY_CONFIG_MAX.budgetTokens);
     check("(clamp) an absurd topK override is clamped to MEMORY_CONFIG_MAX.topK", pathological.topK === MEMORY_CONFIG_MAX.topK);
     check("(clamp) an absurd maxNotes override is clamped to MEMORY_CONFIG_MAX.maxNotes", pathological.maxNotes === MEMORY_CONFIG_MAX.maxNotes);
-    const normal = resolveConfig({ memory: { budgetTokens: 100, topK: 3 } }).memory;
+    check("(clamp, card 446d97f0) an absurd duplicateReportIntervalHours override is clamped to MEMORY_CONFIG_MAX.duplicateReportIntervalHours",
+      pathological.duplicateReportIntervalHours === MEMORY_CONFIG_MAX.duplicateReportIntervalHours);
+    const normal = resolveConfig({ memory: { budgetTokens: 100, topK: 3, duplicateReportIntervalHours: 6 } }).memory;
     check("(clamp) a value WELL UNDER the ceiling is untouched (not force-clamped down)",
-      normal.budgetTokens === 100 && normal.topK === 3);
+      normal.budgetTokens === 100 && normal.topK === 3 && normal.duplicateReportIntervalHours === 6);
+    check("(clamp, card 446d97f0) duplicateReportIntervalHours:0 (the off-switch) is preserved, not treated as unset",
+      resolveConfig({ memory: { duplicateReportIntervalHours: 0 } }).memory.duplicateReportIntervalHours === 0);
+    check("(default, card 446d97f0) an unset duplicateReportIntervalHours falls back to the platform default (24)",
+      resolveConfig(undefined).memory.duplicateReportIntervalHours === 24);
   }
 
   // ===================== pure compose: composeProjectMemoryDigest =====================

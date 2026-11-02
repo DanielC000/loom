@@ -70,4 +70,8 @@ existing one still succeeds, but the response carries a `nearDuplicateStatus`
 LLM/embeddings, never a block. Act on it by `memory_write`-ing the NAMED key instead of letting a second
 note on the same topic accumulate — the exact drift this check exists to catch across a fleet of workers
 who can't see each other's writes in real time. It never fires on an UPDATE, so refining the named key
-to fold in the new information is itself silent.
+to fold in the new information is itself silent. The same signal also runs as a periodic, zero-LLM
+background sweep over the whole corpus, filing a board card of likely-duplicate pairs for you to review
+(never auto-merging, deleting, or rewriting a note, and never naming a pair where either note is
+currently expired) — expect that card to appear on the board from time to time rather than dispatching
+anyone to go look for duplicates.

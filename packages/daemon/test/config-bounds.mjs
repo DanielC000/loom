@@ -215,6 +215,28 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
   // already derives from the same live constant — not duplicated here.
 }
 
+// --- memory.duplicateReportIntervalHours (card 446d97f0): same benign-knob tier, same derive-from-the-
+// live-constant discipline as memory.budgetTokens above — never a second hardcoded ceiling literal.
+{
+  const mem = (m) => ({ memory: m });
+  const MAX = MEMORY_CONFIG_MAX.duplicateReportIntervalHours;
+
+  check(`memory.duplicateReportIntervalHours:${MAX} (at the live ceiling) accepted on the human path`,
+    validateProjectConfigOverride(mem({ duplicateReportIntervalHours: MAX })).ok === true);
+  check(`memory.duplicateReportIntervalHours:${MAX + 1} (one over the live ceiling) rejected on the human path`,
+    validateProjectConfigOverride(mem({ duplicateReportIntervalHours: MAX + 1 })).ok === false);
+  check(`memory.duplicateReportIntervalHours:${MAX} (at the live ceiling) accepted on the agent path`,
+    validateAgentProjectConfigOverride(mem({ duplicateReportIntervalHours: MAX })).ok === true);
+  check(`memory.duplicateReportIntervalHours:${MAX + 1} (one over the live ceiling) rejected on the agent path`,
+    validateAgentProjectConfigOverride(mem({ duplicateReportIntervalHours: MAX + 1 })).ok === false);
+
+  check("memory.duplicateReportIntervalHours:0 (the off-switch) accepted", validateProjectConfigOverride(mem({ duplicateReportIntervalHours: 0 })).ok === true);
+  check("memory.duplicateReportIntervalHours:-1 (below floor) rejected", validateProjectConfigOverride(mem({ duplicateReportIntervalHours: -1 })).ok === false);
+  check("memory.duplicateReportIntervalHours:1.5 (non-integer) rejected", validateProjectConfigOverride(mem({ duplicateReportIntervalHours: 1.5 })).ok === false);
+  check("memory.duplicateReportIntervalHours:0 (the off-switch) accepted on the agent path (same benign tier as budgetTokens/topK/maxNotes)",
+    validateAgentProjectConfigOverride(mem({ duplicateReportIntervalHours: 0 })).ok === true);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio/emergencyRecycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..MAX_TIMER_DELAY_MS (policy cap removed, only the raw timer limit remains); alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), resolveConfig clamps an emergency floor below the ordinary ratio (never below 0-disabled) while passing an already-valid ordering through unchanged, bounds memory.budgetTokens to the live MEMORY_CONFIG_MAX ceiling on BOTH the human and agent paths without a second hardcoded literal, and keeps the existing .strict()/bounds guarantees intact."
   : `\n❌ ${failures} FAILURE(S).`);

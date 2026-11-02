@@ -482,6 +482,7 @@ interface ProjectConfigFields {
   memoryBudgetTokens: string;
   memoryTopK: string;
   memoryMaxNotes: string;
+  memoryDuplicateReportIntervalHours: string;
   rotationMarkers: RotationMarker[];
   rotationHeading: string;
   rotationFloor: string;
@@ -518,6 +519,7 @@ function projectConfigFieldsOf(ov: ProjectConfigOverride): ProjectConfigFields {
     memoryBudgetTokens: numStr(ov.memory?.budgetTokens),
     memoryTopK: numStr(ov.memory?.topK),
     memoryMaxNotes: numStr(ov.memory?.maxNotes),
+    memoryDuplicateReportIntervalHours: numStr(ov.memory?.duplicateReportIntervalHours),
     rotationMarkers: structuredClone(orch?.rotationMarkers ?? []),
     rotationHeading: orch?.rotationLiveCommitmentsHeading ?? "",
     rotationFloor: numStr(orch?.rotationLiveCommitmentsFloor),
@@ -561,6 +563,7 @@ const PROJECT_CONFIG_COMPARERS: FieldComparers<ProjectConfigFields> = {
   idleNudge: trimmedEq, stuckWorker: trimmedEq, blindTurn: trimmedEq, maxUnanswered: trimmedEq,
   idleSnooze: trimmedEq, rotationFloor: trimmedEq, gateTimeout: trimmedEq, webhookTimeout: trimmedEq,
   deployTimeout: trimmedEq, memoryBudgetTokens: trimmedEq, memoryTopK: trimmedEq, memoryMaxNotes: trimmedEq,
+  memoryDuplicateReportIntervalHours: trimmedEq,
   rotationMarkers: (a, b) => JSON.stringify(normalizedMarkers(a)) === JSON.stringify(normalizedMarkers(b)),
   // A three-valued control over two stored keys: compare what it WRITES, not the draft, so e.g. a stale
   // interval left behind by switching to `never` is correctly not an edit.
@@ -597,6 +600,7 @@ const PROJECT_CONFIG_FIELD_LABELS: Record<keyof ProjectConfigFields, string> = {
   memoryBudgetTokens: "Budget (tokens)",
   memoryTopK: "Related notes (top K)",
   memoryMaxNotes: "Max unpinned notes",
+  memoryDuplicateReportIntervalHours: "Duplicate-report sweep interval (hours)",
   rotationMarkers: "Rotation markers",
   rotationHeading: "Live-commitments heading",
   rotationFloor: "Numbered-item floor",
@@ -667,6 +671,7 @@ function ConfigEditor({ project }: { project: Project }) {
   const [memoryBudgetTokens, setMemoryBudgetTokens] = useState(mounted.memoryBudgetTokens);
   const [memoryTopK, setMemoryTopK] = useState(mounted.memoryTopK);
   const [memoryMaxNotes, setMemoryMaxNotes] = useState(mounted.memoryMaxNotes);
+  const [memoryDuplicateReportIntervalHours, setMemoryDuplicateReportIntervalHours] = useState(mounted.memoryDuplicateReportIntervalHours);
   // Resume-doc rotation integrity (card 1069c8e1) — the three fields `resume_doc_check` reads. Modeled
   // here because THIS surface is the human-symmetric one: on every AGENT-facing config-write path
   // (manager project_update, setup project_configure) mergeConfigOverride's additiveOnlyRotationGuard
@@ -698,7 +703,8 @@ function ConfigEditor({ project }: { project: Project }) {
     allowText, gateCommand, ungatedLandingCheckCommand, ungatedLandingCheckTimeout, cadence, maxWorkers, maxManagers, recycle, emergencyRecycle, idleNudge,
     stuckWorker, blindTurn, maxUnanswered, idleSnooze, docLint, pythonInterpreter, gateTimeout,
     webhookTimeout, deployCommand, deployTimeout, alertWebhookUrl, alertWebhookEventsText,
-    memoryBudgetTokens, memoryTopK, memoryMaxNotes, rotationMarkers, rotationHeading, rotationFloor,
+    memoryBudgetTokens, memoryTopK, memoryMaxNotes, memoryDuplicateReportIntervalHours,
+    rotationMarkers, rotationHeading, rotationFloor,
     harnessDefault, harnessScope,
   };
   const applyFields = (v: ProjectConfigFields) => {
@@ -712,6 +718,7 @@ function ConfigEditor({ project }: { project: Project }) {
     setWebhookTimeout(v.webhookTimeout); setDeployCommand(v.deployCommand); setDeployTimeout(v.deployTimeout);
     setAlertWebhookUrl(v.alertWebhookUrl); setAlertWebhookEventsText(v.alertWebhookEventsText);
     setMemoryBudgetTokens(v.memoryBudgetTokens); setMemoryTopK(v.memoryTopK); setMemoryMaxNotes(v.memoryMaxNotes);
+    setMemoryDuplicateReportIntervalHours(v.memoryDuplicateReportIntervalHours);
     setRotationMarkers(v.rotationMarkers); setRotationHeading(v.rotationHeading); setRotationFloor(v.rotationFloor);
     setHarnessDefault(v.harnessDefault); setHarnessScope(v.harnessScope);
   };
@@ -847,12 +854,13 @@ function ConfigEditor({ project }: { project: Project }) {
       else unset.push("python.interpreterPath");
     }
 
-    // memory: shared-notes tuning (budgetTokens/topK/maxNotes) — each field blank → unset (inherit the
-    // platform default, itself clamped to MEMORY_CONFIG_MAX by resolveConfig).
+    // memory: shared-notes tuning (budgetTokens/topK/maxNotes/duplicateReportIntervalHours) — each field
+    // blank → unset (inherit the platform default, itself clamped to MEMORY_CONFIG_MAX by resolveConfig).
     const mem: Partial<MemoryConfig> = {};
     if (include("memoryBudgetTokens")) applyNumField(mem, "budgetTokens", memoryBudgetTokens, unset, "memory");
     if (include("memoryTopK")) applyNumField(mem, "topK", memoryTopK, unset, "memory");
     if (include("memoryMaxNotes")) applyNumField(mem, "maxNotes", memoryMaxNotes, unset, "memory");
+    if (include("memoryDuplicateReportIntervalHours")) applyNumField(mem, "duplicateReportIntervalHours", memoryDuplicateReportIntervalHours, unset, "memory");
     if (Object.keys(mem).length) o.memory = mem;
 
     // sessionEnv — the WRITE-ONLY secret map (card 32b23f0f). It was ALREADY a delta before the rest of
@@ -1291,6 +1299,9 @@ function ConfigEditor({ project }: { project: Project }) {
             effective={resolved.memory.topK} def={defaults.memory.topK} note={`1-${MEMORY_CONFIG_MAX.topK}`} />
           <NumField label="Max unpinned notes" value={memoryMaxNotes} set={setMemoryMaxNotes}
             effective={resolved.memory.maxNotes} def={defaults.memory.maxNotes} note={`0-${MEMORY_CONFIG_MAX.maxNotes} · <= 0 disables the cap`} />
+          <NumField label="Duplicate-report sweep interval (hours)" value={memoryDuplicateReportIntervalHours} set={setMemoryDuplicateReportIntervalHours}
+            effective={resolved.memory.duplicateReportIntervalHours} def={defaults.memory.duplicateReportIntervalHours}
+            note={`0-${MEMORY_CONFIG_MAX.duplicateReportIntervalHours} · <= 0 disables the sweep`} />
         </div>
       </Panel>
 

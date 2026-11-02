@@ -68,4 +68,8 @@ local full-text check, no LLM/embeddings, never a block. Treat it as a strong nu
 NAMED key instead (refining it, per the stable-key discipline above) rather than minting a second note on
 the same topic — exactly the accumulation this check exists to catch. It never fires on an UPDATE to an
 existing key, so fixing a flagged duplicate by updating the named key is itself silent, not a repeat
-nag.
+nag. The same signal also runs as a periodic, zero-LLM background sweep over the whole corpus, filing a
+board card of likely-duplicate pairs for a human/lead to review (never auto-merging, deleting, or
+rewriting a note, and never naming a pair where either note is currently expired) — nothing you need to
+call, but expect the resulting card to show up on the board from time to time if this project's notes
+drift toward overlap.
