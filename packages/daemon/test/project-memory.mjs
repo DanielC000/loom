@@ -930,8 +930,10 @@ try {
   // ===================== AT-SCALE positive control (card b4c4699e): the DAEMON-LOG drop notices =====================
   // The digest-text drop notices (routine ⚠️ and never-drop 🚨 ALARM) are covered at scale, against the
   // real compiled composeProjectMemoryDigest, in project-memory-pinned-order.mjs. This section covers the
-  // OTHER two call sites of the same summarizeDroppedKeys helper — the daemon console.warn/console.error
-  // log lines emitted by retrieveProjectMemoryForKickoff — which that hermetic file can't reach (no DB).
+  // daemon console.warn/console.error log lines emitted by retrieveProjectMemoryForKickoff — which that
+  // hermetic file can't reach (no DB). Card 926e4ac8: these log lines render a bare, joined key list
+  // (never the in-digest `key — title` formatting — see that card's own doc comment in the source), so
+  // this section's own checks (matching each dropped KEY against the rendered log line) are unaffected.
   // Forces 30+ drops in EACH of the routine and never-drop sub-tiers — genuinely above the OLD
   // MAX_LISTED_DROPPED_KEYS=8 threshold, unlike the pre-existing 4-drop coverage elsewhere in this file,
   // which would pass identically whether or not the truncation bug existed.

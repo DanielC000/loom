@@ -127,8 +127,11 @@ try {
     // first-ever drop and is marked "(never delivered)" inline. The independent reference must reproduce
     // that same marker to stay a faithful byte-for-byte comparison — it is NOT reverting the marker
     // feature, only reflecting it in the hand-rolled expectation.
+    // Card 926e4ac8 — mkEntry sets `title: key` (see above), so the real function now also appends
+    // " — <title>" (here, the key itself again) before the "(never delivered)" marker; reflected here
+    // too, same as the marker above, for the same reason (not reverting the feature).
     const expectedDigest = reference.droppedKeys.length > 0
-      ? [reference.section, `⚠️ ${reference.droppedKeys.length} pinned note(s) dropped for budget: ${reference.droppedKeys.map((k) => `${k} (never delivered)`).join(", ")}`].join("\n\n")
+      ? [reference.section, `⚠️ ${reference.droppedKeys.length} pinned note(s) dropped for budget: ${reference.droppedKeys.map((k) => `${k} — ${k} (never delivered)`).join(", ")}`].join("\n\n")
       : reference.section;
     const { digest, droppedRestKeys } = composeProjectMemoryDigest(pinnedCorpus, [], BUDGET_TOKENS);
     check("(empty-related) sanity: this reference/corpus combination genuinely drops some pinned notes (a non-vacuous check)",
@@ -180,7 +183,16 @@ try {
       mkEntry("related-best-match", 3130, { pinned: false }),
       mkEntry("related-second-match", 3130, { pinned: false }),
     ];
-    const { digest, includedIds, droppedRestKeys } = composeProjectMemoryDigest(pinnedCorpus, related, BUDGET_TOKENS);
+    // Card 926e4ac8 — pinnedCorpus's own `title: key` (mkEntry's default; see above) means its ~18
+    // dropped-this-round keys now each cost real extra bytes in the REST overflow line's `key — title`
+    // formatting, not just the bare key as before that card. Measured: this ate exactly enough of the
+    // margin at the plain BUDGET_TOKENS to flip `related-best-match` from included to dropped (+50 tokens
+    // already restores it) — a genuine, accepted consequence of titles now competing for the same shared
+    // budget (see that card's own "added bytes are counted" test), not a bug in this section's own claim.
+    // +200 restores a comfortable margin well above the +50 actually needed, so this section keeps
+    // demonstrating "related still delivers" robustly rather than sitting exactly on the new edge.
+    const RESERVE_TEST_BUDGET_TOKENS = BUDGET_TOKENS + 200;
+    const { digest, includedIds, droppedRestKeys } = composeProjectMemoryDigest(pinnedCorpus, related, RESERVE_TEST_BUDGET_TOKENS);
 
     check("(reserve) at least one related note is delivered despite an over-budget pinned set",
       includedIds.includes("id-related-best-match"));

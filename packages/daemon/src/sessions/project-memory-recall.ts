@@ -46,8 +46,24 @@ export const NEVER_DROP_TAG = "never-drop";
  *  needs to see, not something to hide from them. Keys are cheap (~20-40 bytes each) relative to a note
  *  BODY — the actual expensive thing `budgetTokens` protects — so this was never the part worth economising
  *  on. */
-function summarizeDroppedKeys(keys: string[]): string {
-  return keys.join(", ");
+function summarizeDroppedKeys(entries: { key: string; title: string }[]): string {
+  return entries.map((e) => formatDroppedEntry(e.key, e.title)).join(", ");
+}
+
+/** Card 926e4ac8 (mem0-comparison idea #1, `Projects/Loom/Design/Project Memory vs mem0 — Comparison.md`
+ *  §1) — a dropped note's title gives a reader enough to decide "is this worth a `memory_read`" from the
+ *  drop line alone, instead of a bare key. Truncated to a fixed budget so one long title can't blow out
+ *  this (deliberately uncapped — see {@link summarizeDroppedKeys} above) list; the KEY itself is never
+ *  truncated, only the title appended after it. A title-less entry (empty after {@link sanitizeTitle} —
+ *  `title` is `NOT NULL DEFAULT ''` at the DB layer, so this is a real, not merely theoretical, case)
+ *  falls back to the bare key, byte-identical to the pre-this-card line. */
+const DROPPED_TITLE_MAX_CHARS = 60;
+
+function formatDroppedEntry(key: string, title: string): string {
+  const t = sanitizeTitle(title);
+  if (!t) return key;
+  const truncated = t.length > DROPPED_TITLE_MAX_CHARS ? `${t.slice(0, DROPPED_TITLE_MAX_CHARS)}…` : t;
+  return `${key} — ${truncated}`;
 }
 
 /** Card 6def8bf4 DoD-5 — marks which dropped REST keys have NEVER been delivered even once
@@ -58,9 +74,15 @@ function summarizeDroppedKeys(keys: string[]): string {
  *  ordinary repeat drop, worth distinguishing inline even though it stays the SAME routine ⚠️ severity as
  *  every other REST overflow (the louder 🚨 ALARM stays reserved for the never-drop tier's distinct,
  *  stronger promise — this is not that). `neverDelivered` is a `Set<string>` of keys, not a boolean per
- *  entry, so this stays a pure string-formatting helper with no `ProjectMemoryEntry` dependency. */
-function summarizeDroppedRestKeys(keys: string[], neverDelivered: Set<string>): string {
-  return keys.map((k) => (neverDelivered.has(k) ? `${k} (never delivered)` : k)).join(", ");
+ *  entry. Card 926e4ac8 — the "(never delivered)" marker is appended AFTER the key/title pair ({@link
+ *  formatDroppedEntry}), never between them. */
+function summarizeDroppedRestKeys(entries: { key: string; title: string }[], neverDelivered: Set<string>): string {
+  return entries
+    .map((e) => {
+      const base = formatDroppedEntry(e.key, e.title);
+      return neverDelivered.has(e.key) ? `${base} (never delivered)` : base;
+    })
+    .join(", ");
 }
 
 /** Card 71192d47 — the charset a memory key is drawn from (mcp/memory.ts's `KEY_RE`: letters/digits/-/_).
@@ -440,6 +462,11 @@ export function composeProjectMemoryDigest(
   let pinnedSection: string | null = null;
   const droppedFloorKeys: string[] = [];
   const droppedRestKeys: string[] = [];
+  // Card 926e4ac8 — tracked ALONGSIDE the key-only arrays above, never REPLACING them: the return
+  // contract (and every existing caller/test) treats droppedFloorKeys/droppedRestKeys as plain string[]
+  // of keys, so these carry the full entry (title included) only for formatting the in-digest drop lines.
+  const droppedFloorEntries: ProjectMemoryEntry[] = [];
+  const droppedRestEntries: ProjectMemoryEntry[] = [];
   // Card 6def8bf4 DoD-5 — tracked ALONGSIDE droppedRestKeys, never folded into it: the return contract
   // (and every existing caller/test) treats droppedRestKeys as a plain string[] of keys, so this stays a
   // side-channel used only to format the routine overflow line's text below.
@@ -478,8 +505,10 @@ export function composeProjectMemoryDigest(
         // pack maximally: skip an oversized note, keep trying the rest of THIS note's own sub-tier
         if (isNeverDrop(m)) {
           droppedFloorKeys.push(m.key);
+          droppedFloorEntries.push(m);
         } else {
           droppedRestKeys.push(m.key);
+          droppedRestEntries.push(m);
           if (m.lastRetrievedAt === null) droppedRestNeverDelivered.add(m.key);
         }
         continue;
@@ -511,7 +540,7 @@ export function composeProjectMemoryDigest(
       const floorFitCount = floorSorted.length - droppedFloorKeys.length;
       const alarmLine = `🚨 ALARM: ${droppedFloorKeys.length} note(s) tagged "${NEVER_DROP_TAG}" were STILL DROPPED ` +
         `— floor tier ≈ ${floorTotalTokens} tok vs budget ${budgetTokens} tok; ${floorFitCount} of ${floorSorted.length} fit ` +
-        `— this is a BROKEN GUARANTEE, not routine overflow: ${summarizeDroppedKeys(droppedFloorKeys)}`;
+        `— this is a BROKEN GUARANTEE, not routine overflow: ${summarizeDroppedKeys(droppedFloorEntries)}`;
       pinnedSection = pinnedSection
         ? [pinnedSection, alarmLine].join(SECTION_SEP)
         : ["## Pinned project memory (always included)", alarmLine].join(SECTION_SEP);
@@ -525,7 +554,7 @@ export function composeProjectMemoryDigest(
       }
     }
     if (droppedRestKeys.length > 0) {
-      const overflowLine = `⚠️ ${droppedRestKeys.length} pinned note(s) dropped for budget: ${summarizeDroppedRestKeys(droppedRestKeys, droppedRestNeverDelivered)}`;
+      const overflowLine = `⚠️ ${droppedRestKeys.length} pinned note(s) dropped for budget: ${summarizeDroppedRestKeys(droppedRestEntries, droppedRestNeverDelivered)}`;
       pinnedSection = pinnedSection
         ? [pinnedSection, overflowLine].join(SECTION_SEP)
         : ["## Pinned project memory (always included)", overflowLine].join(SECTION_SEP);
@@ -553,12 +582,13 @@ export function composeProjectMemoryDigest(
     const finalPack = packRelatedPrefix(related, remaining, annotate);
     relatedSection = finalPack.section;
     includedIds.push(...finalPack.includedIds);
-    droppedRelatedKeys = related.slice(finalPack.droppedFrom).map((r) => r.key);
+    const droppedRelatedEntries = related.slice(finalPack.droppedFrom);
+    droppedRelatedKeys = droppedRelatedEntries.map((r) => r.key);
     // Card fddd58ef — "N of M", not a bare count: the denominator is what separates "a couple got
     // trimmed" from "this tier delivered nothing" (see the doc comment above). Same idiom as the pinned
-    // tiers otherwise: unconditional once known, uncapped key list via summarizeDroppedKeys.
+    // tiers otherwise: unconditional once known, uncapped key+title list via summarizeDroppedKeys.
     if (droppedRelatedKeys.length > 0) {
-      const overflowLine = `⚠️ ${droppedRelatedKeys.length} of ${related.length} related note(s) dropped for budget: ${summarizeDroppedKeys(droppedRelatedKeys)}`;
+      const overflowLine = `⚠️ ${droppedRelatedKeys.length} of ${related.length} related note(s) dropped for budget: ${summarizeDroppedKeys(droppedRelatedEntries)}`;
       relatedSection = relatedSection
         ? [relatedSection, overflowLine].join(SECTION_SEP)
         : ["## Related project memory (matched your kickoff)", overflowLine].join(SECTION_SEP);
@@ -745,22 +775,26 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
   const { framed, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
     buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate, kickoffText);
+  // Card 926e4ac8 — these three daemon-log lines render from the RETURNED key-only arrays (titles aren't
+  // carried through the return contract), so they stay a bare `.join(", ")`, byte-identical to before —
+  // the key+title formatting ({@link summarizeDroppedKeys}) is for the IN-DIGEST lines above, what the
+  // kickoff reader actually sees; these lines are server-side daemon logs, a separate audience.
   if (droppedFloorKeys.length > 0) {
     console.error(
       `[project-memory] ALARM project ${projectId}: ${droppedFloorKeys.length} "${NEVER_DROP_TAG}"-tagged ` +
-      `pinned note(s) dropped for budget (broken guarantee): ${summarizeDroppedKeys(droppedFloorKeys)}`,
+      `pinned note(s) dropped for budget (broken guarantee): ${droppedFloorKeys.join(", ")}`,
     );
   }
   if (droppedRestKeys.length > 0) {
     console.warn(
       `[project-memory] project ${projectId}: ${droppedRestKeys.length} pinned note(s) dropped for budget: ` +
-      summarizeDroppedKeys(droppedRestKeys),
+      droppedRestKeys.join(", "),
     );
   }
   if (droppedRelatedKeys.length > 0) {
     console.warn(
       `[project-memory] project ${projectId}: ${droppedRelatedKeys.length} of ${related.length} related note(s) ` +
-      `dropped for budget: ${summarizeDroppedKeys(droppedRelatedKeys)}`,
+      `dropped for budget: ${droppedRelatedKeys.join(", ")}`,
     );
   }
   // Card 71192d47 — the daemon-log mirror of the in-digest 🔴 line: a key THIS kickoff cited that got
@@ -771,7 +805,7 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
     .filter((k) => isKeyCitedInText(kickoffText, k));
   if (citedDropped.length > 0) {
     const line = `[project-memory] project ${projectId}: ${citedDropped.length} note(s) this kickoff cited ` +
-      `by key were dropped for budget: ${summarizeDroppedKeys(citedDropped)}`;
+      `by key were dropped for budget: ${citedDropped.join(", ")}`;
     if (citedDropped.some((k) => droppedFloorKeys.includes(k))) console.error(line);
     else console.warn(line);
   }
