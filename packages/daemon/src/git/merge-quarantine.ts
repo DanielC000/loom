@@ -2570,10 +2570,13 @@ function consumeMatchedPendingsIntoArmedEntry(
         // @decision 2dd97aaa (Follow-up 535fd69d) — `foreignUnion` only ever UNIONS this group's own members; it never drops
         // a token, so `droppedTokens` is empty.
         const written = writePendingDivertFile(base.sourceFile, foreignUnion, new Set());
-        if (written) {
+        if (written.ok) {
           if (written.entry !== foreignUnion) replaceEntryEverywhere(activeQuarantines, foreignUnion, written.entry);
           pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
         } else {
+          // @decision 59e758e5 (round 3) — never unlink here: this write was not proven secured
+          // elsewhere (the round-1 "strict subset" reasoning was retracted — see the decision record).
+          // Keep the stranded tmp; boot's own tmp-recovery pass re-arms it as a fail-closed duplicate.
           pendingUnresolvedQuarantines.push({ entry: foreignUnion, sourceFile: base.sourceFile });
           // eslint-disable-next-line no-console
           console.error(`[merge-quarantine] could not durably persist a merged sibling pending latch for ${foreignUnion.repoPath} at ${base.sourceFile} after an unrelated raise's own divert — the PRE-EXISTING durable state there is left UNTOUCHED (still enforced in THIS process).`);
@@ -3103,7 +3106,27 @@ function pendingDivertCollisionFilenameFor(repoPath: string): string {
  * whether it narrows (`new Set()` when it does not), or the re-read-and-union above can resurrect a
  * caller's own just-dropped token. See the decision record.
  */
-function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, rebaseOntoRealDiskRecord = false): { filename: string; entry: MergeQuarantineEntry } | false {
+/**
+ * @decision 59e758e5 (B1) — the CALLER decides when unlinking a stranded tmp is safe, never this
+ * function itself; never call this before that decision is made. Never throws past the caller's error.
+ */
+function unlinkStrandedTmpBestEffort(tmp: string): void {
+  try {
+    fs.unlinkSync(tmp);
+  } catch (unlinkErr) {
+    if ((unlinkErr as NodeJS.ErrnoException).code !== "ENOENT") {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] also failed to remove the tmp ${tmp} left behind by a failed pending-divert write: ${(unlinkErr as Error).message}`);
+    }
+  }
+}
+
+/**
+ * @decision 59e758e5 (B1) — on a failed rename, never unlink the stranded tmp here (reverts 0a9fc7fc's
+ * own unconditional unlink) — it can be the ONLY durable copy of `toWrite` left anywhere, and unlinking
+ * it before a caller's own fallback secures that content elsewhere is a real data-loss fail-open.
+ */
+function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, droppedTokens: ReadonlySet<string>, rebaseOntoRealDiskRecord = false): { ok: true; filename: string; entry: MergeQuarantineEntry } | { ok: false; strandedTmp?: string } {
   let target = filename;
   let toWrite = entry;
   if (keptUnreadableLatchFiles.has(filename)) {
@@ -3155,7 +3178,7 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, d
     } else {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] refusing to narrow ${filename} — its own current on-disk content is unreadable, corrupt, or belongs to a DIFFERENT identity than ${entry.repoPath} (changed underneath); failing CLOSED rather than risk silently dropping a field disk still has. The PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-arm with the token(s) this call meant to drop still counted as outstanding.`);
-      return false;
+      return { ok: false }; // never attempted a write — nothing stranded
     }
   }
   let fd: number | undefined;
@@ -3176,12 +3199,12 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, d
     // writes are (Phase 0 fsyncs the directory ONCE after the whole batch) — fsync the directory here,
     // per call, so the rename's own directory-entry visibility is durable too, not just the file's bytes.
     fsyncQuarantineDir();
-    return { filename: target, entry: toWrite };
+    return { ok: true, filename: target, entry: toWrite };
   } catch (e) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already broken; nothing more to close */ } }
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] FAILED to durably persist the pending-divert latch for ${entry.repoPath} (branch '${entry.branch}'): ${(e as Error).message}`);
-    return false;
+    return { ok: false, strandedTmp: tmp };
   }
 }
 
@@ -3699,7 +3722,9 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // through `clearedTokens` at READ time, via `readSurvivingOnDiskTokens`), never a narrowing of a token
   // set this call itself decided to drop; `droppedTokens` is empty.
   const written = writePendingDivertFile(filename, toWrite, new Set());
-  if (!written) {
+  if (!written.ok) {
+    // @decision 59e758e5 (round 3) — never unlink: `toWrite` can carry a memory-only token `final`'s
+    // own bytes never received (round-1's "already duplicated" claim was false here). Keep the tmp.
     // @decision 4900c365 (round 2) — re-establish an in-memory record that OWNS `final` at its OWN
     // current name (self-referenced in `orphanLatchFiles`): enforces in THIS process too, not only on a
     // later boot, and every reference-aware sweep in this module already honours this ownership shape.
@@ -3806,6 +3831,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
  * @decision 8db913e2 (Follow-up 3d27c045) — `merged` must ALSO carry that twin's own `armedKeys` forward (via {@link
  * unionArmedKeys}), not just get re-pointed to by `replaceEntryEverywhere` — see the decision record for
  * the post-reboot re-block this fixes.
+ *
+ * @decision 59e758e5 — on a write failure, falls back to {@link attemptDivertSafetyTmpFallback} like
+ * {@link divertRaiseEntry}'s own double-fault branch. Do not drop this fallback: without it, `merged`'s
+ * token is enforced in-process only and is silently LOST on the next reboot.
  */
 function mergeTokenIntoPendingEntries(indices: number[], token: string): string {
   const matched = indices.map((i) => pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine);
@@ -3866,13 +3895,37 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   // @decision 2dd97aaa (Follow-up 535fd69d) — `merged` unions `matched` plus the new `token`; it never drops a token, so
   // `droppedTokens` is empty.
   const written = writePendingDivertFile(base.sourceFile, merged, new Set());
-  if (written) {
+  if (written.ok) {
     if (written.entry !== merged) replaceEntryEverywhere(activeQuarantines, merged, written.entry);
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
   } else {
-    pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] canonical repo ${merged.repoPath} is quarantined IN THIS PROCESS ONLY right now (merged into its own still-unresolvable pending latch) — the durable pending-divert latch failed to re-write (see the error just above), so a daemon restart BEFORE that is fixed would silently LIFT this quarantine instead of re-arming it. Investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
+    console.error(`[merge-quarantine] canonical repo ${merged.repoPath} is quarantined IN THIS PROCESS ONLY right now (merged into its own still-unresolvable pending latch) — the durable pending-divert latch ALSO failed to re-write; investigate immediately.`);
+    // @decision 59e758e5 — same double-fault fallback as {@link divertRaiseEntry}'s own: without it,
+    // `merged`'s token is enforced in-process only and is silently LOST on the next reboot.
+    const safetyTmpBasename = attemptDivertSafetyTmpFallback(merged);
+    if (safetyTmpBasename) {
+      const secured: MergeQuarantineEntry = {
+        ...merged,
+        orphanLatchFiles: [...new Set([...(merged.orphanLatchFiles ?? []), safetyTmpBasename, base.sourceFile])],
+      };
+      replaceEntryEverywhere(activeQuarantines, merged, secured);
+      pendingUnresolvedQuarantines.push({ entry: secured, sourceFile: safetyTmpBasename });
+      // base.sourceFile's own bytes are now stale (never rewritten, since this write failed) and fully
+      // superseded by the safety-tmp; sweep it so it never survives as an untracked orphan a later boot
+      // could independently re-arm from.
+      sweepOwnLatchFileUnlessOwnedElsewhere(base.sourceFile);
+      // @decision 59e758e5 (B1) — the fallback above just secured `merged` at the safety-tmp. The
+      // stranded tmp can hold MORE than that (writePendingDivertFile's keptUnreadable branch may union
+      // `final`'s on-disk content in) — safe to unlink anyway, since untouched `final` still carries it.
+      if (written.strandedTmp) unlinkStrandedTmpBestEffort(written.strandedTmp);
+    } else {
+      // Triple fault (card 59e758e5, B1) — keep BOTH the pre-existing record AND the stranded tmp: the
+      // tmp is the ONLY copy holding the new token, so unlinking it here would durably lose it. A later
+      // boot's own tmp-recovery pass arms it as a fail-closed duplicate instead — the accepted shape
+      // this call had before 0a9fc7fc.
+      pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
+    }
   }
   return token;
 }
@@ -3946,9 +3999,10 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
 }
 
 /**
- * Fallback for {@link divertRaiseEntry}'s own DOUBLE FAULT: the divert's own pending-divert write ALSO
- * failed (e.g. ENOSPC), so `entry` is enforced in THIS PROCESS ONLY and would otherwise be silently lost
- * on the next reboot. {@link writeSafetyTmpResidueAtHash}'s own output IS already recovered at boot
+ * Fallback for a DOUBLE FAULT shared by {@link divertRaiseEntry} and {@link mergeTokenIntoPendingEntries}
+ * (card 59e758e5): the caller's own pending-divert write ALSO failed (e.g. ENOSPC), so `entry` is
+ * enforced in THIS PROCESS ONLY and would otherwise be silently lost on the next reboot. {@link
+ * writeSafetyTmpResidueAtHash}'s own output IS already recovered at boot
  * (`reenterMergeQuarantinesAtBoot`'s dedicated safety-tmp recovery pass, which recomputes
  * `canonicalRepoLockKey(entry.repoPath)` itself rather than trusting the hash embedded in the filename —
  * so the hash passed here need not be "correct" for ANY given degraded/collided shape, only distinct from
@@ -4158,7 +4212,7 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
   // @decision 2dd97aaa (Follow-up 535fd69d) — `toWrite` is `reconcilePendingDivertTarget`'s own mint/union result; it never
   // drops a token, so `droppedTokens` is empty.
   const written = writePendingDivertFile(filename, toWrite, new Set());
-  if (written) {
+  if (written.ok) {
     if (written.entry !== toWrite) replaceEntryEverywhere(activeQuarantines, toWrite, written.entry);
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
     return;
@@ -4173,8 +4227,15 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
     const secured: MergeQuarantineEntry = { ...toWrite, orphanLatchFiles: [...new Set([...(toWrite.orphanLatchFiles ?? []), safetyTmpBasename])] };
     replaceEntryEverywhere(activeQuarantines, toWrite, secured);
     pendingUnresolvedQuarantines.push({ entry: secured, sourceFile: safetyTmpBasename });
+    // @decision 59e758e5 (B1) — the fallback above just secured `toWrite` at the safety-tmp. The
+    // stranded tmp can hold MORE than that (writePendingDivertFile's keptUnreadable branch may union
+    // `final`'s on-disk content in) — safe to unlink anyway, since untouched `final` still carries it.
+    if (written.strandedTmp) unlinkStrandedTmpBestEffort(written.strandedTmp);
   } else {
-    // Triple fault — nothing durable to re-point to; keep the pre-existing (accepted-residual) shape.
+    // Triple fault (card 59e758e5, B1) — keep the stranded tmp: it is the ONLY durable copy of
+    // `toWrite` anywhere, so unlinking it here would durably lose the raise entirely. A later boot's
+    // own tmp-recovery pass arms it as a fail-closed duplicate instead — the accepted shape this call
+    // had before 0a9fc7fc.
     pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
   }
 }
@@ -4249,7 +4310,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   // @decision 2dd97aaa (Follow-up 535fd69d) — `merged` unions `all` (every matched twin plus the raise's own `entry`); it
   // never drops a token, so `droppedTokens` is empty.
   const written = writePendingDivertFile(base.sourceFile, merged, new Set());
-  if (written) {
+  if (written.ok) {
     if (written.entry !== merged) replaceEntryEverywhere(activeQuarantines, merged, written.entry);
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
     return;
@@ -4271,8 +4332,15 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
     // (never rewritten, since this write failed) and fully superseded by the safety-tmp; sweep it so it
     // never survives as an untracked orphan a later boot could independently re-arm from (the P3g repro).
     sweepOwnLatchFileUnlessOwnedElsewhere(base.sourceFile);
+    // @decision 59e758e5 (B1) — the fallback above just secured `merged` at the safety-tmp. The
+    // stranded tmp can hold MORE than that (writePendingDivertFile's keptUnreadable branch may union
+    // `final`'s on-disk content in) — safe to unlink anyway, since untouched `final` still carries it.
+    if (written.strandedTmp) unlinkStrandedTmpBestEffort(written.strandedTmp);
   } else {
-    // Triple fault — nothing durable to re-point to; keep the pre-existing (accepted-residual) shape.
+    // Triple fault (card 59e758e5, B1) — keep BOTH the pre-existing record AND the stranded tmp: the
+    // tmp is the ONLY copy holding the full merged union, so unlinking it here would durably lose
+    // whatever token(s) it alone carries. A later boot's own tmp-recovery pass arms it as a fail-closed
+    // duplicate instead — the accepted shape this call had before 0a9fc7fc.
     pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
   }
 }
@@ -4669,7 +4737,10 @@ function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry,
     }
     // @decision 2dd97aaa (Follow-up 535fd69d) — thread the caller's own `droppedTokens` through: this write narrows the
     // folded orphan file, and omitting it can resurrect the just-dropped tokens from a stale copy.
-    if (!writePendingDivertFile(orphanFile, updated, droppedTokens)) {
+    const writtenOrphan = writePendingDivertFile(orphanFile, updated, droppedTokens);
+    if (!writtenOrphan.ok) {
+      // @decision 59e758e5 (round 3) — never unlink: a redirect (keptUnreadable) can leave `orphanFile`
+      // not holding this narrowing. Keep the tmp; boot's recovery pass re-arms it as a duplicate.
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${updated.repoPath} into its own folded orphan latch file ${orphanFile} after a partial clear — that file's own PRE-EXISTING (un-reduced) bytes are left UNTOUCHED, so a restart before this is fixed may re-arm the just-cleared token from it.`);
     }
@@ -4875,7 +4946,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     // @decision 028837ad (Round 3, BLOCKING 1) — `rebaseOntoRealDiskRecord:true`: `live.entry` can be
     // this card's own arm-derived, deliberately narrow model (1dd00dca/25d0d45b) — see the decision record.
     const written = writePendingDivertFile(live.sourceFile, updated, new Set([token]), true);
-    if (written) {
+    if (written.ok) {
       if (written.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, written.entry);
       // @decision 9c681680 — same in-place mutation as above, no index lookup needed.
       live.entry = written.entry;
@@ -4883,6 +4954,8 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
     } else {
       writeFailed = true;
+      // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere (round-1's "subset"
+      // reasoning was retracted). Keep the tmp; boot's recovery pass re-arms it as a duplicate.
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
@@ -5052,7 +5125,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     // @decision 2dd97aaa (Follow-up 535fd69d) — `updated` drops `token`; pass it as `droppedTokens`, same reason as
     // `clearTokenFromPendingIndices`'s own identical write above.
     const written = writePendingDivertFile(pending.sourceFile, updated, new Set([token]));
-    if (written) {
+    if (written.ok) {
       pendingUnresolvedQuarantines[idx] = { entry: written.entry, sourceFile: written.filename };
       // @decision 55939b88 (round 3) — fold THIS twin's own written tokens/contributors into the
       // log-only union (never into `updated` itself — see 702b4241 round 3's own rule above).
@@ -5060,6 +5133,8 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       for (const c of written.entry.contributorRepoPaths ?? []) loggedContributors.add(c);
     } else {
       writeFailed = true;
+      // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere (round-1's "subset"
+      // reasoning was retracted). Keep the tmp; boot's recovery pass re-arms it as a duplicate.
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
     }
@@ -6273,13 +6348,15 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // copy of this twin can hold OTHER tokens of `entry` already dropped from `p.entry.tokens` in
       // memory by an earlier reduce whose write failed — a strict superset, always safe here.
       const writtenTwin = writePendingDivertFile(p.sourceFile, updated, new Set(entry!.tokens));
-      if (writtenTwin) {
+      if (writtenTwin.ok) {
         // @decision b47cf261 — re-point every in-memory reference BEFORE the hand assignment below, or
         // activeQuarantines is left pointing at the now-stale `updated`, breaking 64283e06's twin invariant.
         if (writtenTwin.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, writtenTwin.entry);
         p.entry = writtenTwin.entry;
         p.sourceFile = writtenTwin.filename;
       } else {
+        // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere (round-1's "subset"
+        // reasoning was retracted). Keep the tmp; boot's recovery pass re-arms it as a duplicate.
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin at ${p.sourceFile} after this clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with an already-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       }
@@ -6290,7 +6367,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // @decision 9c681680 — pass `writtenTwin.entry` when truthy, never the stale pre-union `updated`,
       // mirroring the sibling clearTokenFromPendingIndices's own equivalent call — else an orphan file
       // only `writtenTwin.entry`'s own disk-unioned `orphanLatchFiles` names is never narrowed.
-      if (overlapTokens.length > 0) rewriteOrphanLatchFilesAfterPartialClear(writtenTwin ? writtenTwin.entry : updated, writtenBasenames, new Set(overlapTokens));
+      if (overlapTokens.length > 0) rewriteOrphanLatchFilesAfterPartialClear(writtenTwin.ok ? writtenTwin.entry : updated, writtenBasenames, new Set(overlapTokens));
       candidateTokens.push(...overlapTokens);
       continue; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched; nothing to splice
     }

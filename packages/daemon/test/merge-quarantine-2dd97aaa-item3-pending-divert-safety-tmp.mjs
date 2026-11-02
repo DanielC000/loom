@@ -3,13 +3,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // PENDING-DIVERT safety-tmp angle, construction 1: a second raise on an always-unresolvable identity
 // takes enterMergeQuarantine's `!verified` + existing-pending-match branch, mergeTokenIntoPendingEntries
 // (merge-quarantine.ts), which calls writePendingDivertFile(base.sourceFile, merged) to durably persist
-// the UNIONED token set. Unlike divertRaiseEntry (see the sibling test, -divert-double-fault.mjs), this
-// function has NO safety-tmp fallback of its own: if the write's own renameSync fails (EPERM) after its
-// tmp was already written and fsynced, it just logs and leaves base.sourceFile's own STALE bytes
-// (holding only the original token) untouched on disk, right next to the STRANDED tmp residue (never
-// cleaned up, never tracked in orphanLatchFiles) holding the FULL, correct merged set. This test checks
-// whether a fresh boot, with no in-memory state at all, still correctly recovers the full token set from
-// the stranded tmp alone, or loses the freshly-added token.
+// the UNIONED token set.
+//
+// @decision 59e758e5 — t2 must survive a write failure here via a tracked, self-referenced safety-tmp
+// fallback (card 7845ae33, landed together): never assume this write failure leaves the pending
+// record's own file stale on disk again — it is relocated, not stranded.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-2dd97aaa-item3-pending-divert-safety-tmp.mjs
 import fs from "node:fs";
@@ -73,9 +71,8 @@ function injectOneShotRenameFailure(targetPath) {
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 // SCENARIO 1 ("2dd97aaa-item3-pending-divert-safety-tmp-reboot-recovery") — a pre-existing pending entry
 // (token t1) + a second raise (token t2, mergeTokenIntoPendingEntries's own union-into-existing branch)
-// whose own writePendingDivertFile rename fails after its tmp is written. Confirms whether the safety-tmp fallback
-// + the stranded tmp residue it leaves behind both survive a fresh boot with the full {t1,t2} set, or
-// whether t2 (or t1) is lost.
+// whose own writePendingDivertFile rename fails after its tmp is written. Confirms t1 AND t2 both
+// survive a fresh boot, via the tracked safety-tmp fallback cards 59e758e5 + 7845ae33 land together.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 {
   const y = freshNeverExists("s1");
@@ -109,23 +106,40 @@ function injectOneShotRenameFailure(targetPath) {
     const parsed = readJsonSafe(path.join(MERGE_QUARANTINE_DIR, f));
     console.log(`(diagnostic)   ${f} -> ${parsed ? JSON.stringify({ repoPath: parsed.repoPath, tokens: parsed.tokens }) : "(unparsable/corrupt/not JSON)"}`);
   }
-  // `mergeTokenIntoPendingEntries` (unlike `divertRaiseEntry`) has NO safety-tmp fallback of its own on a
-  // write failure — it just logs and leaves the pending entry pointed at `base.sourceFile` unchanged, so
-  // `base.sourceFile`'s own STALE bytes (still holding only {t1}) are left on disk, untouched, next to the
-  // stranded tmp. This is the ACTUAL, observed behavior of this code path — not swept, unlike
-  // `divertRaiseEntry`'s own double-fault branch (see the sibling test).
-  diagnose("base.sourceFile is left stale on disk (mergeTokenIntoPendingEntries has no safety-tmp fallback to sweep it toward) — informational only, not the item-3 claim under test", fs.existsSync(baseSourcePath) && JSON.stringify(readJsonSafe(baseSourcePath)?.tokens) === JSON.stringify([t1]));
+  // `mergeTokenIntoPendingEntries` now mirrors `divertRaiseEntry`'s own safety-tmp double-fault fallback
+  // (card 7845ae33): on this write failure it re-points the record at a fresh, self-referenced safety-tmp
+  // holding BOTH tokens, then sweeps `base.sourceFile`'s own now-stale bytes off disk — so, unlike before
+  // 7845ae33, `base.sourceFile` should NOT survive on disk at all (not even holding only {t1}).
+  diagnose("base.sourceFile's own stale bytes were swept off disk once the safety-tmp fallback secured the union elsewhere — informational only, not the item-3 claim under test", !fs.existsSync(baseSourcePath));
 
   const rb = await rebootSim();
   rb.reenterMergeQuarantinesAtBoot([]); // y never exists on disk — nothing registered/resolvable
   const yAfterReboot = rb.listActiveMergeQuarantines().filter((e) => e.repoPath === y || e.tokens.includes(t1) || e.tokens.includes(t2));
   console.log(`(diagnostic) y's entries after reboot: ${JSON.stringify(yAfterReboot.map((e) => ({ repoPath: e.repoPath, tokens: e.tokens })))}`);
 
-  check("*** THE CLAIM *** t1 survives the reboot", rb.listActiveMergeQuarantines().some((e) => e.tokens.includes(t1)));
-  check("*** THE CLAIM *** t2 ALSO survives the reboot (this is what item 3 claims is lost)", rb.listActiveMergeQuarantines().some((e) => e.tokens.includes(t2)));
+  // Read EVERY pending/active record by CONTENT after reboot — never rely on a single-match view (e.g.
+  // activeMergeQuarantineFor), which could hide a split across two records each holding one token. First
+  // via the in-memory, freshly-booted view (itself derived purely from this fresh reboot's own disk read):
+  const allEntriesAfterReboot = rb.listActiveMergeQuarantines();
+  const allTokensAfterReboot = new Set(allEntriesAfterReboot.flatMap((e) => e.tokens ?? []));
+  check("*** THE CLAIM *** t1 survives the reboot", allTokensAfterReboot.has(t1));
+  check("*** THE FIX (card 7845ae33) *** t2 ALSO survives the reboot — mergeTokenIntoPendingEntries now has the same safety-tmp fallback divertRaiseEntry already has, via a tracked, self-referenced safety-tmp (never a stranded stray)", allTokensAfterReboot.has(t2));
+
+  // Second, independently: read every raw JSON file on disk naming y's repoPath directly, and union their
+  // own on-disk `tokens` — a content-level cross-check that doesn't go through any in-memory view at all.
+  const filesAfterRebootNamingY = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => readJsonSafe(path.join(MERGE_QUARANTINE_DIR, f))?.repoPath === y);
+  const onDiskTokensAfterReboot = new Set(filesAfterRebootNamingY.flatMap((f) => readJsonSafe(path.join(MERGE_QUARANTINE_DIR, f))?.tokens ?? []));
+  console.log(`(diagnostic) files on disk naming y's repoPath after reboot: ${JSON.stringify(filesAfterRebootNamingY)}`);
+  check("(content cross-check, by-content not by in-memory view) every file on disk naming y's repoPath, read directly, together hold BOTH t1 and t2", onDiskTokensAfterReboot.has(t1) && onDiskTokensAfterReboot.has(t2));
+
+  // No OTHER entry for `y` was spuriously created either — the fix didn't just move the duplicate-entry
+  // defect, it actually removed it, and the new fallback doesn't reopen it (both tokens land in ONE
+  // tracked record, not split across two).
+  const yEntriesPostReboot = allEntriesAfterReboot.filter((e) => e.repoPath === y);
+  check("*** FIX (cards 59e758e5 + 7845ae33) *** exactly ONE active entry exists for `y` after reboot — no duplicate/foreign residue entry, and no lossy split either", yEntriesPostReboot.length === 1);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL CHECKS PASS — t2 survives a reboot via the stranded tmp residue alone (mergeTokenIntoPendingEntries has no safety-tmp fallback of its own); item 3's premise does NOT reproduce in this construction."
+  ? "\n✅ ALL CHECKS PASS — t1 and t2 both survive the reboot as a single, non-duplicated entry, via mergeTokenIntoPendingEntries's own safety-tmp fallback (cards 59e758e5 + 7845ae33, landed together)."
   : `\n❌ ${failures} CHECK(S) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

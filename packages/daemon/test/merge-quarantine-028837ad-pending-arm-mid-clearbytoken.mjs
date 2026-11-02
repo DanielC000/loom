@@ -93,6 +93,33 @@ function injectOneShotRenameFailure(targetPath) {
   return { restore: () => { fs.renameSync = real; }, tripped: () => tripped };
 }
 
+// Card 59e758e5 (B1/B3) — same one-shot rename failure as above, but ALSO fails every open of a
+// `.tmp-safety-` path: the TRIPLE fault (rename AND the safety-tmp fallback's own write both failing)
+// that genuinely leaves memory outrunning STALE disk — now that a DOUBLE fault alone (the fallback
+// succeeding) secures the merged content durably before this scenario's own reduce ever runs.
+function injectOneShotRenameFailureWithSafetyTmpFailure(targetPath) {
+  const realRename = fs.renameSync;
+  const realOpen = fs.openSync;
+  let tripped = false;
+  let safetyHits = 0;
+  fs.renameSync = (src, dest) => {
+    if (!tripped && dest === targetPath) {
+      tripped = true;
+      fs.renameSync = realRename;
+      throw Object.assign(new Error("EPERM: simulated rename failure"), { code: "EPERM" });
+    }
+    return realRename(src, dest);
+  };
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === "string" && p.includes(".tmp-safety-")) {
+      safetyHits++;
+      throw Object.assign(new Error("ENOSPC: simulated safety-tmp disk-full"), { code: "ENOSPC" });
+    }
+    return realOpen(p, ...rest);
+  };
+  return { restore: () => { fs.renameSync = realRename; fs.openSync = realOpen; }, tripped: () => tripped, safetyHits: () => safetyHits };
+}
+
 try {
   // ═══════════════════════════════════════════════════════════════════════════════════════════════════
   // (ORPHAN) unresolvable T, armed PENDING mid-call via the orphan-latch sweep. O holds BOTH the clearer
@@ -328,11 +355,11 @@ try {
   // (EPERM-UNION, Round 4 B-1) a MEMORY-ONLY token must survive `clearTokenFromPendingIndices`'s own
   // reduce-write rebase onto disk. T10 is raised unresolvable (t1). Its SECOND raise (t2) takes
   // `mergeTokenIntoPendingEntries`'s own union-into-existing branch, whose durable write (~:3800) is
-  // forced to fail (EPERM) — t2 survives IN-MEMORY ONLY ("quarantined in this process only"), while disk
-  // still names ONLY [t1]. Clearing t1 then exercises the reduce-write's own `rebaseOntoRealDiskRecord:
-  // true` rebase: pre-fix, it took tokens from disk ALONE ([t1] minus t1 = []), adopting a ZERO-TOKEN
-  // entry into memory and durably losing t2 for good; the fix unions disk's own tokens with the
-  // in-memory entry's own before dropping the cleared token, so t2 survives both in-process and durably.
+  // forced to fail (EPERM), AND (card 59e758e5, B3) its own safety-tmp fallback is ALSO forced to fail —
+  // a genuine TRIPLE fault, restoring this scenario's own original "disk stays stale at [t1] while
+  // memory holds [t1,t2]" precondition: a mere DOUBLE fault (the fallback succeeding) now secures the
+  // merged content durably elsewhere before this scenario's own reduce ever runs, so it no longer
+  // exercises `rebaseOntoRealDiskRecord: true`'s rebase onto genuinely stale disk at all.
   // ═══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const T10 = path.join(os.tmpdir(), `loom-mq028837-eperm-union-t10-never-exists-${freshSfx()}`);
@@ -342,14 +369,15 @@ try {
     const sourceFile10 = mod.listPendingMergeQuarantinesTestOnly().find((p) => p.repoPath === T10)?.sourceFile;
     const sourcePath10 = path.join(mod.MERGE_QUARANTINE_DIR, sourceFile10);
 
-    const inject10 = injectOneShotRenameFailure(sourcePath10);
+    const inject10 = injectOneShotRenameFailureWithSafetyTmpFailure(sourcePath10);
     let t2;
     try {
-      t2 = enterMergeQuarantine(T10, "loom/t10-branch", "merge in progress for T10 (028837ad eperm-union, second raise, EPERM)");
+      t2 = enterMergeQuarantine(T10, "loom/t10-branch", "merge in progress for T10 (028837ad eperm-union, second raise, triple fault)");
     } finally {
       inject10.restore();
     }
     check("(eperm-union precondition) the injected rename failure actually tripped", inject10.tripped());
+    check("(eperm-union precondition, card 59e758e5 B3) the safety-tmp fallback's own write was ALSO forced to fail (genuine triple fault)", inject10.safetyHits() >= 1);
     const t10AfterSecondRaise = mod.activeMergeQuarantineFor(T10);
     check("(eperm-union precondition) t2 is outstanding IN-MEMORY right now, alongside t1", !!t10AfterSecondRaise && t10AfterSecondRaise.tokens.includes(t1) && t10AfterSecondRaise.tokens.includes(t2));
     const onDiskAfterEperm = JSON.parse(fs.readFileSync(sourcePath10, "utf8"));
@@ -357,9 +385,10 @@ try {
 
     mod.clearMergeQuarantineByToken(T10, t1);
     const t10EntryAfterReduce = mod.activeMergeQuarantineFor(T10);
-    check("*** FIX (eperm-union) *** T10 holds JUST [t2] in-process — t1 gone, t2 (memory-only before this reduce) survives the rebase-onto-disk write, never silently dropped to zero tokens", !!t10EntryAfterReduce && t10EntryAfterReduce.tokens.length === 1 && t10EntryAfterReduce.tokens[0] === t2);
-    const onDiskAfterReduce = JSON.parse(fs.readFileSync(sourcePath10, "utf8"));
-    check("*** FIX, ON DISK (eperm-union) *** the durable reduce-write persists [t2], not an empty token set", JSON.stringify(onDiskAfterReduce.tokens) === JSON.stringify([t2]));
+    check("T10 holds JUST [t2] in-process — t1 gone, t2 survives the reduce, never silently dropped to zero tokens", !!t10EntryAfterReduce && t10EntryAfterReduce.tokens.length === 1 && t10EntryAfterReduce.tokens[0] === t2);
+    const sourceFile10AfterClear = mod.listPendingMergeQuarantinesTestOnly().find((p) => p.repoPath === T10)?.sourceFile;
+    const onDiskAfterReduce = JSON.parse(fs.readFileSync(path.join(mod.MERGE_QUARANTINE_DIR, sourceFile10AfterClear), "utf8"));
+    check("ON DISK (eperm-union) the durable reduce-write persists [t2], not an empty token set", JSON.stringify(onDiskAfterReduce.tokens) === JSON.stringify([t2]));
 
     const freshT10 = await freshBootModule();
     freshT10.reenterMergeQuarantinesAtBoot([]); // T10 never exists on disk — nothing registered/resolvable
@@ -385,33 +414,36 @@ try {
     mod.pushPendingQuarantineTestOnly(collisionEntry11, collisionBasename11);
     check("(multi-eperm precondition) T11 now has TWO independent pending records sharing one identity", mod.listPendingMergeQuarantinesTestOnly().filter((p) => p.repoPath === T11).length === 2);
 
-    const inject11 = injectOneShotRenameFailure(sourcePathA11);
+    // Card 59e758e5 (B3) — a genuine TRIPLE fault (rename AND the safety-tmp fallback's own write both
+    // failing) restores this scenario's own original precondition: the primary file stays genuinely
+    // stale at [a] in memory's shadow, never swept or relocated.
+    const inject11 = injectOneShotRenameFailureWithSafetyTmpFailure(sourcePathA11);
     let tC11;
     try {
-      tC11 = enterMergeQuarantine(T11, "loom/t11-branch", "merge in progress for T11 (028837ad multi-eperm, third raise, token c, EPERM)");
+      tC11 = enterMergeQuarantine(T11, "loom/t11-branch", "merge in progress for T11 (028837ad multi-eperm, third raise, triple fault)");
     } finally {
       inject11.restore();
     }
     check("(multi-eperm precondition) the injected rename failure actually tripped", inject11.tripped());
+    check("(multi-eperm precondition, card 59e758e5 B3) the safety-tmp fallback's own write was ALSO forced to fail (genuine triple fault)", inject11.safetyHits() >= 1);
     check("(multi-eperm precondition) T11's two pending records are now merged into ONE in-memory record", mod.listPendingMergeQuarantinesTestOnly().filter((p) => p.repoPath === T11).length === 1);
     const t11AfterThirdRaise = mod.activeMergeQuarantineFor(T11);
     check("(multi-eperm precondition) the merged in-memory record carries all THREE tokens, provenanceUnknown, and the collision file as an orphanLatchFiles reference", !!t11AfterThirdRaise && [tA11, tB11, tC11].every((t) => t11AfterThirdRaise.tokens.includes(t)) && t11AfterThirdRaise.provenanceUnknown === true && (t11AfterThirdRaise.orphanLatchFiles ?? []).includes(collisionBasename11));
-    const primaryOnDiskAfterEperm = JSON.parse(fs.readFileSync(sourcePathA11, "utf8"));
-    check("(multi-eperm precondition) the primary file's own durable write genuinely failed — disk still names ONLY [a], no provenanceUnknown, no orphanLatchFiles", JSON.stringify(primaryOnDiskAfterEperm.tokens) === JSON.stringify([tA11]) && primaryOnDiskAfterEperm.provenanceUnknown === undefined && primaryOnDiskAfterEperm.orphanLatchFiles === undefined);
-    // `writePendingDivertFile`'s own catch path never unlinks the tmp it had already written+fsynced
-    // before the forced rename failure — a SEPARATE, pre-existing, out-of-scope residual (named, not
-    // fixed, by this card's own Round 5 — the tmp itself is never swept because nothing ever records it
-    // as "needed", unlike the collision file above, which this card's own fix DOES correctly reference
-    // and sweep). Clean it up here so it cannot stray into (and falsely redden) THIS scenario's own
-    // reboot assertion below, which is about the collision-file sweep, not the tmp-leak residual.
-    for (const f of fs.readdirSync(mod.MERGE_QUARANTINE_DIR)) {
-      if (f.startsWith(`${sourceFileA11}.tmp-`)) fs.rmSync(path.join(mod.MERGE_QUARANTINE_DIR, f));
-    }
+    check("(multi-eperm precondition) the primary file's own durable write genuinely failed — disk still names ONLY [a], no provenanceUnknown, no orphanLatchFiles", (() => {
+      const onDisk = JSON.parse(fs.readFileSync(sourcePathA11, "utf8"));
+      return JSON.stringify(onDisk.tokens) === JSON.stringify([tA11]) && onDisk.provenanceUnknown === undefined && onDisk.orphanLatchFiles === undefined;
+    })());
+    // `writePendingDivertFile`'s own catch path still unlinks ONLY a stranded tmp its own caller already
+    // decided is a safe subset elsewhere — on a triple fault, the raise caller KEEPS it (card 59e758e5,
+    // B1), so the ORDINARY stranded tmp from this failed rename is expected to survive here too.
+    const strandedTmps11 = fs.readdirSync(mod.MERGE_QUARANTINE_DIR).filter((f) => f.startsWith(`${sourceFileA11}.tmp-`) && !f.includes("-safety-"));
+    check("*** FIX, B1 (multi-eperm, tmp cleanup) *** the triple-faulted rename leaves the ORDINARY stranded tmp in place, holding the full merge — the accepted fail-closed duplicate, never unlinked before anything could secure it", strandedTmps11.length === 1 && [tA11, tB11, tC11].every((t) => JSON.parse(fs.readFileSync(path.join(mod.MERGE_QUARANTINE_DIR, strandedTmps11[0]), "utf8")).tokens.includes(t)));
 
     mod.clearMergeQuarantineByToken(T11, tA11);
     const t11AfterClearA = mod.activeMergeQuarantineFor(T11);
     check("*** FIX (multi-eperm) *** T11 holds [b,c] in-process — a gone, provenanceUnknown and the collision orphanLatchFiles reference SURVIVE the reduce, never silently dropped", !!t11AfterClearA && [tB11, tC11].every((t) => t11AfterClearA.tokens.includes(t)) && !t11AfterClearA.tokens.includes(tA11) && t11AfterClearA.provenanceUnknown === true && (t11AfterClearA.orphanLatchFiles ?? []).includes(collisionBasename11));
-    const primaryOnDiskAfterClearA = JSON.parse(fs.readFileSync(sourcePathA11, "utf8"));
+    const sourceFileA11AfterClearA = mod.listPendingMergeQuarantinesTestOnly().find((p) => p.repoPath === T11)?.sourceFile;
+    const primaryOnDiskAfterClearA = JSON.parse(fs.readFileSync(path.join(mod.MERGE_QUARANTINE_DIR, sourceFileA11AfterClearA), "utf8"));
     check("*** FIX, ON DISK (multi-eperm) *** the durable reduce-write ALSO persists provenanceUnknown and the collision orphanLatchFiles reference, not just tokens", primaryOnDiskAfterClearA.provenanceUnknown === true && (primaryOnDiskAfterClearA.orphanLatchFiles ?? []).includes(collisionBasename11));
 
     mod.clearMergeQuarantineByToken(T11, tB11);
@@ -419,9 +451,17 @@ try {
     check("*** NO RE-BLOCK (multi-eperm) *** T11 fully lifts in-process after all three clears", mod.assertRepoNotQuarantined(T11).ok === true);
     check("*** FIX, SWEPT (multi-eperm) *** the collision file is gone — correctly referenced and swept on the full lift, never left stale with an already-released token", !fs.existsSync(path.join(mod.MERGE_QUARANTINE_DIR, collisionBasename11)));
 
+    // @decision 59e758e5 (B1) — the stranded tmp from the triple fault is NEVER touched by this
+    // scenario's own three clears (untracked foreign residue), so a reboot DOES re-arm T11 from its
+    // stale pre-clear snapshot — fail-closed (over-blocking), never a loss; an accepted residual.
     const freshT11 = await freshBootModule();
     freshT11.reenterMergeQuarantinesAtBoot([]);
-    check("*** FIX, DURABILITY, NO RE-BLOCK (multi-eperm) *** a reboot agrees — T11 is NOT re-blocked by the already-released token b", freshT11.assertRepoNotQuarantined(T11).ok === true);
+    const t11PostRebootStale = freshT11.activeMergeQuarantineFor(T11);
+    check("*** ACCEPTED RESIDUAL, B1 (multi-eperm, reboot) *** T11 IS re-armed from the triple-faulted raise's own stranded tmp — fail-closed duplicate, not a loss", !!t11PostRebootStale && [tA11, tB11, tC11].every((t) => t11PostRebootStale.tokens.includes(t)));
+    freshT11.clearMergeQuarantineByToken(T11, tA11);
+    freshT11.clearMergeQuarantineByToken(T11, tB11);
+    freshT11.clearMergeQuarantineByToken(T11, tC11);
+    check("*** ACCEPTED RESIDUAL, B1 (multi-eperm, reboot) *** clearing that duplicate's own tokens too fully lifts it — a recoverable duplicate, never a stuck one", freshT11.assertRepoNotQuarantined(T11).ok === true);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════════════

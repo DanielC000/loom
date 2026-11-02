@@ -58,6 +58,19 @@ function contentIfExists(p) {
   try { return fs.readFileSync(p, "utf8"); } catch { return null; }
 }
 
+function readJsonIfExists(p) {
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
+}
+
+// Reads EVERY file in MERGE_QUARANTINE_DIR whose parsed content names `repoPath`, BY CONTENT — never a
+// single fixed-path lookup, which can miss a record that card 7845ae33's own safety-tmp fallback
+// relocated to an unpredictable basename — and unions their own on-disk `tokens`. Used where a scenario
+// used to assume a specific physical file still holds a token after a forced write failure.
+function onDiskTokensForTest(repoPath) {
+  const files = fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => readJsonIfExists(path.join(MERGE_QUARANTINE_DIR, f))?.repoPath === repoPath);
+  return { files, tokens: new Set(files.flatMap((f) => readJsonIfExists(path.join(MERGE_QUARANTINE_DIR, f))?.tokens ?? [])) };
+}
+
 let bootReimportCounter = 0;
 async function freshBootModule() {
   bootReimportCounter++;
@@ -139,6 +152,29 @@ function injectOpenSyncFailureForPrefix(prefix, code = "ENOSPC") {
     return real(p, ...rest);
   };
   return { restore: () => { fs.openSync = real; }, count: () => count };
+}
+
+// Card 59e758e5 (B1/B2) — same as injectOpenSyncFailureForPrefix, but ALSO fails every open of a
+// `.tmp-safety-` path: the TRIPLE fault (the primary write AND the safety-tmp fallback's own write both
+// failing) that genuinely leaves memory outrunning disk, now that a DOUBLE fault alone (this fallback
+// succeeding) secures the content durably before any later caller can ever observe staleness at
+// `prefix`. One combined monkeypatch, not two stacked ones, so restore order can never matter.
+function injectOpenSyncFailureForPrefixOrSafetyTmp(prefix, code = "ENOSPC") {
+  const real = fs.openSync;
+  let count = 0;
+  let safetyCount = 0;
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === "string" && p.startsWith(prefix)) {
+      count++;
+      throw Object.assign(new Error(`${code}: simulated disk-full`), { code });
+    }
+    if (typeof p === "string" && p.includes(".tmp-safety-")) {
+      safetyCount++;
+      throw Object.assign(new Error(`${code}: simulated safety-tmp disk-full`), { code });
+    }
+    return real(p, ...rest);
+  };
+  return { restore: () => { fs.openSync = real; }, count: () => count, safetyCount: () => safetyCount };
 }
 
 // Fails EVERY `fs.unlinkSync` of exactly `targetPath` with `code` (e.g. EPERM/EBUSY) — used for the N4
@@ -3692,11 +3728,15 @@ try {
   // content at `filename`, then OVERWROTE the in-memory record at `atFilenameIdx` with that disk-only
   // result. An in-memory record can legitimately hold MORE tokens than its own physical backing file
   // RIGHT NOW -- an EARLIER durable write for the SAME identity already failed ("quarantined IN THIS
-  // PROCESS ONLY": D's own SECOND raise, via `mergeTokenIntoPendingEntries`, has no safety-tmp fallback
-  // at all -- a failed rewrite leaves `merged` enforced purely in memory, at its own pre-existing
-  // `sourceFile`, with the physical file never touched). THE FIX (Round 2): also union the in-memory
-  // record at `atFilenameIdx` (never `atFinalBasenameIdx` -- `c9114934` forbids only that one) ON TOP of
-  // the disk-reconciled result, rather than letting the chokepoint's own disk read REPLACE it.
+  // PROCESS ONLY": at the time this card shipped, D's own SECOND raise, via
+  // `mergeTokenIntoPendingEntries`, had no safety-tmp fallback at all -- a failed rewrite left `merged`
+  // enforced purely in memory, at its own pre-existing `sourceFile`, with the physical file never
+  // touched). THE FIX (Round 2): also union the in-memory record at `atFilenameIdx` (never
+  // `atFinalBasenameIdx` -- `c9114934` forbids only that one) ON TOP of the disk-reconciled result,
+  // rather than letting the chokepoint's own disk read REPLACE it.
+  //
+  // @decision 59e758e5 (B2) — `mergeTokenIntoPendingEntries` gained its OWN safety-tmp fallback since,
+  // securing `merged` on a mere DOUBLE fault — the precondition below now needs a full TRIPLE fault.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const d = path.join(os.tmpdir(), `loom-mqrpf-6451a749-im-d-nonexistent-${freshSfx()}`);
@@ -3707,18 +3747,22 @@ try {
   check("(6451a749-inmemory precondition) D's first token is durably on disk",
     (contentIfExists(pendingPath) ?? "").includes(tD1));
 
-  // D raises AGAIN while every open of `pendingPath` (and its own write-tmp) fails. This reaches
+  // D raises AGAIN while every open of `pendingPath` (and its own write-tmp) fails, AND the safety-tmp
+  // fallback's own write ALSO fails — card 59e758e5's own TRIPLE fault (B2). This reaches
   // `mergeTokenIntoPendingEntries` (D is still unresolvable, and its own first pending entry already
-  // matches by identity) -- that function's own failed-write branch has NO safety-tmp fallback at all,
-  // so `merged` (tD1+tD2) is pushed into `pendingUnresolvedQuarantines` regardless of the write's own
-  // outcome, leaving it enforced IN MEMORY ONLY while the physical file still holds just tD1.
-  const injectD = injectOpenSyncFailureForPrefix(pendingPath);
+  // matches by identity); since BOTH the primary write and its own safety-tmp fallback fail, `merged`
+  // (tD1+tD2) stays pending at its OWN pre-existing `pendingPath` (in-memory only, never rewritten) —
+  // the physical file still holds just tD1, genuinely stale, restoring this scenario's original
+  // "memory outran disk at pendingPath" precondition (a mere DOUBLE fault, with the fallback
+  // succeeding, no longer leaves ANY staleness at `pendingPath` for a later raise to ever discover).
+  const injectD = injectOpenSyncFailureForPrefixOrSafetyTmp(pendingPath);
   let tD2;
   try {
-    tD2 = enterMergeQuarantine(d, "d-branch-2", "6451a749-inmemory: D's second raise, the rewrite fails with no safety-tmp fallback");
+    tD2 = enterMergeQuarantine(d, "d-branch-2", "6451a749-inmemory: D's second raise, triple fault (primary write AND safety-tmp fallback both fail)");
   } finally {
     injectD.restore();
   }
+  check("(6451a749-inmemory precondition) the safety-tmp fallback's own write was ALSO forced to fail (genuine triple fault, not merely a double one)", injectD.safetyCount() >= 1);
   check("(6451a749-inmemory precondition) D's second token is tracked IN-PROCESS", (() => {
     const e = activeMergeQuarantineFor(d);
     return !!e && e.tokens.includes(tD1) && e.tokens.includes(tD2);
@@ -3739,6 +3783,9 @@ try {
   }, null, 2) + "\n");
   const rToken = enterMergeQuarantine(r, "r-branch", "6451a749-inmemory: r raises, triggering protectDegradedOccupantBeforeDelete for D");
 
+  // @decision 59e758e5 (B2) — a genuine triple fault keeps D's own sourceFile at `pendingPath` (never
+  // relocated), so `atFilenameIdx` matches below and the round-2 union fix fires as this scenario was
+  // built to prove — never vacuous via a relocated record.
   check("*** THE FIX (6451a749-inmemory) *** D's own second token (held in memory only before this raise) is now durably written to disk, never silently dropped",
     (contentIfExists(pendingPath) ?? "").includes(tD2));
   check("(6451a749-inmemory) D's first token AND the newly-discovered current token also survive the union",
@@ -3746,6 +3793,10 @@ try {
       const c = contentIfExists(pendingPath) ?? "";
       return c.includes(tD1) && c.includes("6451a749-im-current-token");
     })());
+  // Kept as an extra, content-wide cross-check — never only the single fixed `pendingPath` read above.
+  const onDiskD = onDiskTokensForTest(d);
+  check("(6451a749-inmemory, by-content cross-check) every token is found SOMEWHERE across every file naming D's repoPath",
+    onDiskD.tokens.has(tD1) && onDiskD.tokens.has(tD2) && onDiskD.tokens.has("6451a749-im-current-token"));
   check("*** THE FIX (6451a749-inmemory) *** D's own second token is STILL tracked IN-PROCESS after the raise (never dropped by the re-point)",
     (activeMergeQuarantineFor(d)?.tokens ?? []).includes(tD2));
 
@@ -3791,15 +3842,17 @@ try {
     collisionFile !== undefined && /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json$/.test(collisionFile));
   const collisionPath = path.join(MERGE_QUARANTINE_DIR, collisionFile);
 
-  // D raises AGAIN while every open of its own COLLISION file (not the primary) fails -- the SAME
-  // `mergeTokenIntoPendingEntries` shape as `6451a749-inmemory` above, just at a different physical name.
-  const injectD = injectOpenSyncFailureForPrefix(collisionPath);
+  // D raises AGAIN while every open of its own COLLISION file (not the primary) fails, AND the
+  // safety-tmp fallback's own write ALSO fails -- the SAME triple-fault shape as `6451a749-inmemory`
+  // above (card 59e758e5, B2), just at a different physical name.
+  const injectD = injectOpenSyncFailureForPrefixOrSafetyTmp(collisionPath);
   let tD2;
   try {
-    tD2 = enterMergeQuarantine(d, "d-branch-2", "6451a749-inmemory-collision: D's second raise, the collision-file rewrite fails with no safety-tmp fallback");
+    tD2 = enterMergeQuarantine(d, "d-branch-2", "6451a749-inmemory-collision: D's second raise, triple fault (collision-file rewrite AND safety-tmp fallback both fail)");
   } finally {
     injectD.restore();
   }
+  check("(6451a749-inmemory-collision precondition) the safety-tmp fallback's own write was ALSO forced to fail (genuine triple fault)", injectD.safetyCount() >= 1);
   check("(6451a749-inmemory-collision precondition) D's second token is tracked IN-PROCESS", (() => {
     const e = activeMergeQuarantineFor(d);
     return !!e && e.tokens.includes(tD1) && e.tokens.includes(tD2);
@@ -3824,6 +3877,8 @@ try {
 
   check("(6451a749-inmemory-collision) the foreign occupant's own primary file is byte-identical throughout",
     contentIfExists(primaryPath) === foreignContentBefore);
+  // @decision 59e758e5 (B2) — the triple fault keeps D's own sourceFile at `collisionPath` (never
+  // relocated), so the round-2 union fix below fires exactly as this scenario was built to prove.
   check("*** THE FIX (6451a749-inmemory-collision) *** D's own second token (held in memory only, at the COLLISION file) is now durably written to disk, never silently dropped",
     (contentIfExists(collisionPath) ?? "").includes(tD2));
   check("(6451a749-inmemory-collision) D's first token AND the newly-discovered current token also survive the union",
@@ -3831,6 +3886,10 @@ try {
       const c = contentIfExists(collisionPath) ?? "";
       return c.includes(tD1) && c.includes("6451a749-imc-current-token");
     })());
+  // Kept as an extra, content-wide cross-check — never only the single fixed `collisionPath` read above.
+  const onDiskDc = onDiskTokensForTest(d);
+  check("(6451a749-inmemory-collision, by-content cross-check) every token is found SOMEWHERE across every file naming D's repoPath",
+    onDiskDc.tokens.has(tD1) && onDiskDc.tokens.has(tD2) && onDiskDc.tokens.has("6451a749-imc-current-token"));
   check("*** THE FIX (6451a749-inmemory-collision) *** D's own second token is STILL tracked IN-PROCESS after the raise",
     (activeMergeQuarantineFor(d)?.tokens ?? []).includes(tD2));
 
@@ -4397,16 +4456,16 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
-  // Card f00e9de8 ("f00e9de8-dropped-tokens-finalbasename-only") -- accepted residual, LOGGING-ONLY fix.
-  // c9114934 forbids unioning atFinalBasenameIdx's own tokens into toWrite (see docs/decisions/f00e9de8-
-  // *.md for why that is still correct even with cd5a3cf9's identity gate) -- so when the twin genuinely
-  // holds an in-memory-only token never reflected in its own stale backing file, the atFinalBasenameIdx-
-  // only re-point silently drops it. Setup: the SAME single-file twin shape as `37452ddd-twin-repoint-
-  // finalbasename`, but D raises a SECOND time BEFORE R raises (not after) -- D's existing-branch raise
-  // durably rewrites D's OWN armed-key latch (hash(Ks).json, a NEW file), never <Krhash>.json (D's only
-  // OTHER physical reference, and the exact file `final` will read when R later raises) -- so by the time
-  // R raises, the twin's in-memory tokens have genuinely outrun that one stale file, with no injected
-  // failure at all (Q2 of the decision record's own mechanism).
+  // Card f00e9de8 ("f00e9de8-dropped-tokens-finalbasename-only") -- originally an accepted residual,
+  // LOGGING-ONLY fix: c9114934 forbids unioning atFinalBasenameIdx's own tokens into toWrite (see
+  // docs/decisions/f00e9de8-*.md for why that is still correct even with cd5a3cf9's identity gate) -- so
+  // when the twin genuinely holds an in-memory-only token never reflected in its own stale backing file,
+  // the atFinalBasenameIdx-only re-point silently drops it.
+  //
+  // @decision 59e758e5 — D's twin is pending-tracked at R's own final basename, so card 7845ae33's own
+  // fallback secures+sweeps it before R raises: R finds `final` MISSING, never reaching the drop branch
+  // below (confirmed: no warning, no loss).
+  //
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const s = makeToplevelRepo("f00e9de8-fb-s");
@@ -4434,9 +4493,7 @@ try {
   // (enterMergeQuarantine's own `!verified` branch), which merges the fresh token into memory
   // UNCONDITIONALLY (replaceEntryEverywhere runs before the write attempt) but then tries to durably
   // rewrite the twin's OWN pending sourceFile, which IS <Krhash>.json here. Inject a write failure on
-  // THAT exact file so the in-memory merge still succeeds (e1cb7d33: a raise must persist) while the
-  // durable copy stays stale -- the genuine "memory outran disk" shape this card's own decision record
-  // (Q2) describes, with no OTHER file touched.
+  // THAT exact file -- card 7845ae33's own fallback now intercepts this and secures the merge elsewhere.
   const injectFB = injectOpenSyncFailureForPrefix(KrFinalPath);
   let dExtraTokenFB;
   try {
@@ -4447,37 +4504,106 @@ try {
   check("(f00e9de8-dropped-tokens-finalbasename-only precondition) the durable rewrite was actually attempted (and injected to fail)", injectFB.count() >= 1);
   check("(f00e9de8-dropped-tokens-finalbasename-only precondition) the extra token is live in memory",
     new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFB));
-  check("*** SETUP PROOF (f00e9de8-dropped-tokens-finalbasename-only) *** <Krhash>.json itself is STILL STALE -- it never carries the extra token, only X's original",
-    (() => {
-      const onDisk = JSON.parse(fs.readFileSync(KrFinalPath, "utf8"));
-      return new Set(onDisk.tokens).has("f00e9de8-fb-tok-x") && !new Set(onDisk.tokens).has(dExtraTokenFB);
-    })());
+  check("*** NEW (card 7845ae33) *** <Krhash>.json is SWEPT after the safety-tmp fallback relocated D's merged record -- no longer left stale",
+    !fs.existsSync(KrFinalPath));
 
   const warningsFB = [];
   const realWarnFB = console.warn;
   console.warn = (...args) => { warningsFB.push(args.join(" ")); realWarnFB(...args); };
   let rTokenFB;
   try {
-    rTokenFB = enterMergeQuarantine(r, "r-branch", "f00e9de8-dropped-tokens-finalbasename-only: r raises, triggers protect's atFinalBasenameIdx-only branch while the twin holds an in-memory-only token");
+    rTokenFB = enterMergeQuarantine(r, "r-branch", "f00e9de8-dropped-tokens-finalbasename-only: r raises onto what is now a MISSING final (card 7845ae33 swept it) -- never reaches protect's atFinalBasenameIdx-only branch at all");
   } finally {
     console.warn = realWarnFB;
   }
   check("(f00e9de8-dropped-tokens-finalbasename-only) R's own token lands directly at its own final",
     (contentIfExists(KrFinalPath) ?? "").includes(rTokenFB));
-  check("*** THE WARNING (f00e9de8-dropped-tokens-finalbasename-only) *** fires exactly once, naming a dropped count of 1",
-    warningsFB.length === 1 && warningsFB[0].includes("protect-repoint-dropped-tokens") && warningsFB[0].includes("dropped 1 in-memory-only token"));
-  check("*** THE WARNING (f00e9de8-dropped-tokens-finalbasename-only) *** NEVER names the dropped token's own value",
-    !warningsFB.some((w) => w.includes(dExtraTokenFB)));
-  check("*** ACCEPTED RESIDUAL (f00e9de8-dropped-tokens-finalbasename-only) *** the extra in-memory-only token IS genuinely dropped by the re-point -- this documents the residual, not a regression",
-    !new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFB));
-  check("(f00e9de8-dropped-tokens-finalbasename-only) X's own original token and R's own token both survive",
+  check("*** NEW (card 7845ae33) *** NO warning fires -- the atFinalBasenameIdx-only drop path is never reached via this trigger any more (final was already missing, not merely stale)",
+    warningsFB.length === 0);
+  check("*** NEW, NO LOSS (card 7845ae33) *** the extra in-memory-only token SURVIVES -- f00e9de8's own accepted residual no longer reproduces via this trigger",
+    new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFB));
+  check("(f00e9de8-dropped-tokens-finalbasename-only) X's own original token, the extra token, AND R's own token all survive",
     (() => {
       const t = new Set(activeMergeQuarantineFor(s)?.tokens ?? []);
-      return t.has("f00e9de8-fb-tok-x") && new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? [])).has(rTokenFB);
+      return t.has("f00e9de8-fb-tok-x") && t.has(dExtraTokenFB) && new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? [])).has(rTokenFB);
     })());
 
   clearMergeQuarantineByToken(d, "f00e9de8-fb-tok-x");
+  clearMergeQuarantineByToken(d, dExtraTokenFB);
   clearMergeQuarantineByToken(r, rTokenFB);
+  clearMergeQuarantineByRecordedPath(d);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // Card f00e9de8 ("f00e9de8-dropped-tokens-finalbasename-only-triple-fault", card 59e758e5 B4) -- the
+  // SAME construction as the scenario just above, but a genuine TRIPLE fault (the primary rewrite AND
+  // the safety-tmp fallback's own write both failing) restores the ORIGINAL f00e9de8 precondition:
+  // `<Krhash>.json` stays genuinely stale (never swept, never relocated), so R's later raise DOES reach
+  // `protectOccupantContentBeforeDelete`'s atFinalBasenameIdx-only branch and its own documented,
+  // accepted-residual drop (with a warning) fires exactly as f00e9de8 originally pinned. The scenario
+  // just above shows this residual no longer reproduces via a mere double fault; THIS one confirms it is
+  // still fully live via a triple fault (or any other trigger that leaves `final` genuinely stale).
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  {
+  const s = makeToplevelRepo("f00e9de8-fbtf-s");
+  const Ks = canonicalRepoLockKey(s);
+  const r = makeToplevelRepo("f00e9de8-fbtf-r");
+  const Kr = canonicalRepoLockKey(r);
+  const Krhash = createHash("sha256").update(Kr).digest("hex").slice(0, 24);
+  const d = path.join(os.tmpdir(), `loom-mqrpf-f00e9de8-fbtf-d-nonexistent-${freshSfx()}`);
+
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+  const KrFinalPath = path.join(MERGE_QUARANTINE_DIR, `${Krhash}.json`);
+  fs.writeFileSync(KrFinalPath, JSON.stringify({
+    repoPath: d, branch: "d-branch", reason: "f00e9de8-dropped-tokens-finalbasename-only-triple-fault: D degraded, filed at R's own name but resolvedKey=S's key",
+    enteredAt: Date.now(), tokens: ["f00e9de8-fbtf-tok-x"], resolvedKey: Ks,
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([]);
+  check("(f00e9de8-dropped-tokens-finalbasename-only-triple-fault precondition) the TWIN exists: D armed at S's own key, pending ref at R's own final basename",
+    (() => {
+      const direct = activeMergeQuarantineFor(s);
+      return !!direct && direct.repoPath === d && new Set(direct.tokens).has("f00e9de8-fbtf-tok-x");
+    })());
+
+  const injectFB = injectOpenSyncFailureForPrefixOrSafetyTmp(KrFinalPath);
+  let dExtraTokenFBTF;
+  try {
+    dExtraTokenFBTF = enterMergeQuarantine(d, "d-extra-branch", "f00e9de8-dropped-tokens-finalbasename-only-triple-fault: D raises again BEFORE R, triple fault (primary rewrite AND safety-tmp fallback both fail)");
+  } finally {
+    injectFB.restore();
+  }
+  check("(f00e9de8-dropped-tokens-finalbasename-only-triple-fault precondition) both the primary rewrite AND the safety-tmp fallback's own write were forced to fail", injectFB.count() >= 1 && injectFB.safetyCount() >= 1);
+  check("(f00e9de8-dropped-tokens-finalbasename-only-triple-fault precondition) the extra token is live in memory",
+    new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFBTF));
+  check("(f00e9de8-dropped-tokens-finalbasename-only-triple-fault precondition) <Krhash>.json stays genuinely STALE -- never swept, never relocated (card 59e758e5, B1: the triple-fault branch keeps the pre-existing record in place)",
+    fs.existsSync(KrFinalPath) && !(contentIfExists(KrFinalPath) ?? "").includes(dExtraTokenFBTF));
+
+  const warningsFBTF = [];
+  const realWarnFBTF = console.warn;
+  console.warn = (...args) => { warningsFBTF.push(args.join(" ")); realWarnFBTF(...args); };
+  let rTokenFBTF;
+  try {
+    rTokenFBTF = enterMergeQuarantine(r, "r-branch", "f00e9de8-dropped-tokens-finalbasename-only-triple-fault: r raises, genuinely triggering protect's atFinalBasenameIdx-only branch");
+  } finally {
+    console.warn = realWarnFBTF;
+  }
+  check("(f00e9de8-dropped-tokens-finalbasename-only-triple-fault) R's own token lands directly at its own final",
+    (contentIfExists(KrFinalPath) ?? "").includes(rTokenFBTF));
+  check("*** THE RESIDUAL, STILL LIVE (f00e9de8-dropped-tokens-finalbasename-only-triple-fault) *** the warning fires exactly once, naming a dropped count of 1",
+    warningsFBTF.length === 1 && warningsFBTF[0].includes("protect-repoint-dropped-tokens") && warningsFBTF[0].includes("dropped 1 in-memory-only token"));
+  check("*** THE RESIDUAL, STILL LIVE *** the warning NEVER names the dropped token's own value",
+    !warningsFBTF.some((w) => w.includes(dExtraTokenFBTF)));
+  check("*** ACCEPTED RESIDUAL, STILL LIVE *** the extra in-memory-only token IS genuinely dropped by the re-point -- this documents the residual, not a regression",
+    !new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFBTF));
+  check("(f00e9de8-dropped-tokens-finalbasename-only-triple-fault) X's own original token and R's own token both survive",
+    (() => {
+      const t = new Set(activeMergeQuarantineFor(s)?.tokens ?? []);
+      return t.has("f00e9de8-fbtf-tok-x") && new Set(listActiveMergeQuarantines().flatMap((e) => e.tokens ?? [])).has(rTokenFBTF);
+    })());
+
+  clearMergeQuarantineByToken(d, "f00e9de8-fbtf-tok-x");
+  clearMergeQuarantineByToken(r, rTokenFBTF);
   clearMergeQuarantineByRecordedPath(d);
   }
 
@@ -4493,9 +4619,10 @@ try {
   // only token is then added by directly mutating the twin's own live, shared object (`activeMergeQuarantineFor`
   // returns the live reference, not a copy) -- the cheapest, most reliable way to put the twin in the
   // "memory outran disk" state this test needs without going through a raise that could re-shape the
-  // fixture; the finalbasename-only scenario above already covers the realistic write-FAILURE trigger
-  // for this same divergence, so this scenario's own job is only to prove the both-indices branch logs
-  // identically. Y is untouched and still correctly unions into `toWrite` via atFilenameIdx (c9114934
+  // fixture; the `-triple-fault` finalbasename-only scenario above already covers the realistic
+  // write-FAILURE trigger for this same divergence (card 59e758e5, B4 — a mere double fault no longer
+  // reaches this state at all), so this scenario's own job is only to prove the both-indices branch
+  // logs identically. Y is untouched and still correctly unions into `toWrite` via atFilenameIdx (c9114934
   // permits that union; only atFinalBasenameIdx's own entry -- X -- is forbidden as a union source).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
