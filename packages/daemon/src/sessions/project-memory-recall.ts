@@ -2,6 +2,8 @@ import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateNote } from "./project-memory-annotations.js";
+import { buildMentionsIndex } from "./project-memory-references.js";
+import { extractPathTokens } from "./project-memory-path-tokens.js";
 
 /**
  * Loom PROJECT MEMORY — project-scoped SHARED knowledge (card 2fd9abf9), the fleet-wide sibling of the
@@ -667,19 +669,11 @@ export function buildFramedProjectMemory(
  * @decision aeec1880 — never gate this on "next tool called" (unknowable at kickoff time; would need new
  * mid-session plumbing in every MCP router) or "card label" (Task has no such field) — a touched-path glob
  * over kickoffText is the only predicate needing zero new plumbing at this call site.
+ *
+ * `extractPathTokens` itself moved to project-memory-path-tokens.ts (card a140598a round 2) so this file
+ * can import from project-memory-references.ts (to build its mentions index, below) without the two
+ * modules importing each other in a cycle.
  */
-const PATH_TOKEN_RE = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g;
-
-/** Extracts path-like tokens (2+ `/`-separated segments of path-safe characters) from free-form prose —
- *  a kickoff/task title+body routinely contains a literal repo path this way. Trailing prose punctuation
- *  that can glue onto a mentioned path (e.g. "...see `packages/daemon/src/db.ts`." or
- *  "(packages/daemon/src/db.ts)") is stripped before matching — never part of a real path. Leading
- *  punctuation never needs stripping: {@link PATH_TOKEN_RE} only ever starts a match on a path-safe
- *  character. */
-function extractPathTokens(text: string): string[] {
-  const found = text.match(PATH_TOKEN_RE) ?? [];
-  return found.map((t) => t.replace(/[.,:;)\]'"]+$/, ""));
-}
 
 /** Compiles a glob (`*`/`**`/`?`, anchored full-token match) into a RegExp — the identical semantics to
  *  `git/worktrees.ts`'s `pathGlobToRegExp` (deny-glob matching against real diff paths), reimplemented
@@ -781,10 +775,16 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   const pinnedIds = new Set(pinned.map((m) => m.id));
   const related = relatedRaw.filter((m) => !pinnedIds.has(m.id));
   if (allPinned.length === 0 && related.length === 0) return null;
-  // Card e4e180ad: combined annotate (linked-Request state + inbound [[wikilink]] backlinks) — the SAME
-  // function mcp/memory.ts's computeNeverDropStatus uses to size the floor tier, so the two can never
-  // silently diverge on what counts toward a note's rendered/estimated size.
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
+  // Card a140598a round 2 — built EXACTLY ONCE per composition (never per note): a single corpus +
+  // task-list fetch feeds every note's mentions lookup below via an O(1) Map.get, instead of
+  // annotateNote re-scanning the whole project memory + task list on every one of the (up to dozens of)
+  // notes this digest considers. See that card's own decision record for the measured before/after.
+  const mentionsIndex = buildMentionsIndex(db, projectId);
+  // Card e4e180ad: combined annotate (linked-Request state + inbound [[wikilink]] backlinks + the
+  // prebuilt mentions index above) — the SAME function mcp/memory.ts's computeNeverDropStatus uses to
+  // size the floor tier, so the two can never silently diverge on what counts toward a note's
+  // rendered/estimated size.
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex);
   const { framed, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
     buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate, kickoffText);
   // Card 926e4ac8 — these three daemon-log lines render from the RETURNED key-only arrays (titles aren't

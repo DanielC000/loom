@@ -8584,6 +8584,15 @@ export class Db {
   countTasks(projectId: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?").get(projectId) as { c: number }).c;
   }
+  /** Card a140598a round 3 — bare id column ONLY, never a full board read: project-memory-references.ts's
+   *  `buildCardIdPrefixCounts` only ever reads `id.slice(0,8)`, so this skips `toTask`'s per-row JSON
+   *  parsing/field mapping AND the separate `loadDeferralIds` join `listTasks` always pays — measured
+   *  ~64ms → a small fraction of that at 4,700 tasks, the single biggest line item in the mentions
+   *  index's own cost breakdown (see that card's decision record, "Round 3"). */
+  listTaskIds(projectId: string): string[] {
+    return (this.db.prepare("SELECT id FROM tasks WHERE project_id = ?").all(projectId) as { id: string }[])
+      .map((r) => r.id);
+  }
   getTask(id: string): Task | undefined {
     const r = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     return r ? toTask(r, this.deferralBlockerIds(id)) : undefined;

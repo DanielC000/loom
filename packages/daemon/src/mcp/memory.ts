@@ -5,6 +5,7 @@ import { annotateRequestLinks } from "../sessions/project-memory-request-links.j
 import { annotateBacklinks, annotateBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
+import { buildMentionsIndex } from "../sessions/project-memory-references.js";
 import { computeNearDuplicateSignal, type NearDuplicateSignal } from "../sessions/project-memory-dedup.js";
 
 // Project-scoped SHARED memory tool business logic (card 2fd9abf9). EVERY function takes the projectId
@@ -475,11 +476,13 @@ function computeNeverDropStatus(
     };
   }
   const pinnedNow = db.listPinnedProjectMemory(projectId);
+  // Card a140598a round 2 — built ONCE for this status computation, never once per floor-tier note.
+  const mentionsIndex = buildMentionsIndex(db, projectId);
   // Card e4e180ad: uses the SAME combined annotate as the real kickoff digest (project-memory-recall.ts's
   // retrieveProjectMemoryForKickoff) — backlinks ride in the floor tier's rendered size exactly like
   // linked-request annotations already did, so this status can never under-report against what the
   // packer's own in-digest ALARM line actually computes (see composeProjectMemoryDigest's DoD-6 cross-check).
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex);
   const status = computeFloorTierStatus(pinnedNow, budgetTokens, annotate);
   return {
     floorCount: status.floorCount,
@@ -511,7 +514,9 @@ function computeRestTierSignal(
 ): RestTierSignal | undefined {
   if (!entry.pinned || entry.tags.includes(NEVER_DROP_TAG)) return undefined;
   const pinnedNow = db.listPinnedProjectMemory(projectId);
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
+  // Card a140598a round 2 — built ONCE for this status computation, never once per REST-tier note.
+  const mentionsIndex = buildMentionsIndex(db, projectId);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex);
   const status = computeRestTierStatus(pinnedNow, budgetTokens, annotate);
   const cycle = status.roughCycleKickoffs;
   return {
