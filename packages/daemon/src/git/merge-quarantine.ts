@@ -5109,7 +5109,11 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   // @decision 028837ad — captured at CALL START, BEFORE the pre-loop pass below: that pass's own
   // full-lift branch can itself arm a NEW foreign identity mid-pass, so capturing any later would wrongly
   // exclude it too. See the decision record for the full mechanism and the 3315b08a interaction.
-  const identitiesPendingBeforeCall = new Set(pendingUnresolvedQuarantines.map((p) => directPathIdentity(p.entry.repoPath)));
+  //
+  // @decision 58a3f730 — filtered to a pending record that ALREADY held `token` at call start, never
+  // mere pending presence: the relocate-foreign-occupant path can fold `token` into an already-pending
+  // record mid-call, which a presence-only exclusion strands forever — never widen back to bare presence.
+  const identitiesPendingBeforeCall = new Set(pendingUnresolvedQuarantines.filter((p) => p.entry.tokens.includes(token)).map((p) => directPathIdentity(p.entry.repoPath)));
   const activeMatches = new Set<MergeQuarantineEntry>();
   for (const [, entry] of activeQuarantines) {
     if (entry.tokens.includes(token)) activeMatches.add(entry);

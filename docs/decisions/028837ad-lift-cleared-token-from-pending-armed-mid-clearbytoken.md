@@ -76,15 +76,21 @@ invoking `clearTokenFromPendingIndices` on them) never reaches that branch at al
 what the original design deliberately left ambiguous — reproduced as a genuine regression (RED on the fixed
 code, GREEN on `git checkout HEAD --`-reverted pre-fix code, confirmed by direct `node` runs of both).
 
-**The fix for this second regression (as it now stands — superseded once in Round 3, see below):** exclude,
-from the post-loop pass, any identity already represented in `pendingUnresolvedQuarantines` at CALL START
-(`identitiesPendingBeforeCall`, captured before even the pre-loop pass runs — Round 3 moved this earlier
-still; see Round 3's own B-1 section for why "right after the pre-loop pass" was itself still too late).
-This is safe and sufficient because `armForeignOrphanContentInMemoryIfUnenforced` itself gates on
+**The fix for this second regression (as it now stands — superseded once in Round 3, see below, and
+NARROWED by `58a3f730`):** exclude, from the post-loop pass, any identity whose pending record ALREADY
+HELD `token` in `pendingUnresolvedQuarantines` at CALL START (`identitiesPendingBeforeCall`, captured
+before even the pre-loop pass runs — Round 3 moved this earlier still; see Round 3's own B-1 section for
+why "right after the pre-loop pass" was itself still too late). This is safe and sufficient for
+`armForeignOrphanContentInMemoryIfUnenforced` specifically, because it itself gates on
 `stillBlockedEntryFor` — a genuinely NEW mid-call arm can only ever happen for an identity with ZERO live
-representation (active or pending) anywhere at arm time, so excluding an already-represented identity can
-only ever skip an identity this pass was never going to need to catch in the first place; it can never
-exclude the real bug-fix target.
+representation (active or pending) anywhere at arm time, so excluding an identity that already held
+`token` can never exclude THIS pass's own bug-fix target. **It is NOT a safety argument for every other
+mechanism that can mutate a pending record mid-call, and the broader original criterion here — "any
+identity already represented at call start," regardless of whether it held `token` — was FALSIFIED by
+`58a3f730`:** the pre-existing relocate-foreign-occupant path (`c9114934`/`d4b25feb`) can fold `token` into
+an ALREADY-pending identity's existing record, which that broader criterion wrongly excluded too,
+permanently stranding it. See `docs/decisions/58a3f730-lift-a-token-relocated-into-an-already-pending-record.md`
+for the narrowed, now-correct criterion and why it stays identity-keyed rather than record/reference-keyed.
 
 **The durability mechanism — why a reboot does NOT re-arm `tA` from `O`'s on-disk bytes:** the re-invoked
 `clearTokenFromPendingIndices`'s own "reduce" branch calls `writePendingDivertFile(live.sourceFile,
@@ -280,7 +286,9 @@ fail-open and reverted it). This divergence is REAL, PRE-EXISTING, and NOT intro
 relocate-foreign-occupant path (`c9114934`/`d4b25feb`) when the identity was already pending at call
 start.** Found during Round 2's review; not this card's own mechanism (the relocate path is
 `c9114934`/`d4b25feb`'s own, pre-dating this card entirely) and not fixed here per the Lead's own explicit
-ruling.
+ruling. **FIXED by `58a3f730`** (its own record: `docs/decisions/58a3f730-lift-a-token-relocated-into-an-already-pending-record.md`)
+— `identitiesPendingBeforeCall` narrowed from bare pending presence to "already held `token` at call
+start," never widened or record-keyed.
 
 **Behaviour change, stated plainly:** after this call site's own reduce, the in-memory entry is REPLACED
 by the rebased record (as of Round 5, the full union of disk and memory — see "Round 5" below) rather than
