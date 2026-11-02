@@ -1,0 +1,239 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
+// Card 9a5d040c (child of d9332365) — commitTrailers/commitLogBody GATING on the SOLO squash path
+// (git/worktrees.ts's mergeBranchLocked). Card 3e92e23b (merged, see commit-trailers-config.mjs) already
+// proved the CONFIG resolves correctly; this suite proves the MERGE-PATH BEHAVIOR for all four on/off
+// combinations, end to end through the SAME confirmWorkerMergeTracked call production uses — not just a
+// bare mergeBranch invocation — so the ledger/mergedSha/watermark readers are exercised for real.
+// REAL git, a REAL Db/SessionService, NO claude and NO live daemon.
+//
+// Proves:
+//   (1) both "on" (config omitted — every existing project's default) — byte-identical message shape to
+//       today: all four reserved trailers + the worker-commit-log body present.
+//   (2) trailers "off", body "on" — NO Loom-* trailer line anywhere in the landed message; the body is
+//       STILL present (card 9a5d040c: the two keys are independent); the in-process parent+tree
+//       verification is unaffected (proven via the SAME ledger read solo-landed-tip-ledger-fast-path.mjs's
+//       own scenario (A) uses: getVerifiedLandedTip resolves to the pre-squash tip, which only happens on
+//       a "verified" landedBase); mergedSha/mergedVerification="content" and the mainline watermark all
+//       advance exactly as in (1).
+//   (3) trailers "on", body "off" — trailers present; NO "Worker commits:" body block.
+//   (4) both "off" — subject-only message (plus trailing newline); ledger/mergedSha/watermark still hold.
+//   (A) RE-CONFIRM, trailers "off" — a SECOND `mergeBranch` call on the SAME already-landed branch must
+//       still end as a no-op (never a second squash commit), even though `findLandedSquashCommit`'s own
+//       retroactive "ALREADY_MERGED" classification is itself trailer-keyed (`git log
+//       --grep=Loom-Worker-Branch:`) and finds nothing with trailers off — the squash's own `!staged`
+//       short-circuit (a CONTENT check: `git diff --cached` after `git merge --squash`) is what actually
+//       prevents a second commit, never the trailer. Asserted directly against `git rev-list --count`.
+//
+// Run: 1) build (pnpm --filter @loom/daemon build), 2) node packages/daemon/test/commit-trailers-solo-merge.mjs
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { commitAll } from "./_git-commit.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { registerForCleanup, useOwnLoomHome, mkdtempManaged } from "./_tmp-fixture.mjs";
+import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
+process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), `loom-no-such-codex-bin-${process.pid}`);
+useOwnLoomHome("loom-ctsm-home-");
+
+requireHermeticEnv();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const distUrl = (p) => pathToFileURL(path.join(__dirname, "..", "dist", p)).href;
+const { Db } = await import(distUrl("db.js"));
+const { SessionService } = await import(distUrl("sessions/service.js"));
+const { OrchestrationControl } = await import(distUrl("orchestration/control.js"));
+const { createWorktree, mergeBranch } = await import(distUrl("git/worktrees.js"));
+const { mainlineWatermarkKey } = await import(distUrl("git/mainline-watch.js"));
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const IDENT = { GIT_AUTHOR_NAME: "ctsm", GIT_AUTHOR_EMAIL: "ctsm@loom", GIT_COMMITTER_NAME: "ctsm", GIT_COMMITTER_EMAIL: "ctsm@loom" };
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...IDENT }, stdio: ["ignore", "pipe", "pipe"] }).trim();
+const GIT_ID = "-c user.email=ctsm@loom -c user.name=ctsm";
+const now = new Date().toISOString();
+const noReap = async () => ({ killedPids: [] });
+const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+const tmpDirs = [];
+
+function makeRepo(tag) {
+  const repo = mkdtempManaged(`loom-ctsm-repo-${tag}-`);
+  fs.writeFileSync(path.join(repo, "README.md"), "# ctsm\n");
+  git(repo, "init", "-q", "-b", "main"); git(repo, "config", "core.autocrlf", "false");
+  git(repo, "config", "user.email", "ctsm@loom"); git(repo, "config", "user.name", "ctsm");
+  commitAll(repo, "init", GIT_ID);
+  // resolveMainlineBranch (git/worktrees.ts) reads refs/remotes/origin/HEAD — a bare symbolic-ref is
+  // enough, no real remote needed (same recipe solo-landed-tip-ledger-fast-path.mjs's own makeRepo uses).
+  git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  return repo;
+}
+
+function boot() {
+  const db = new Db();
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000, gateOpRetainMs: 0, reapWorktreeProcesses: noReap, runGate: async () => ({ passed: true, steps: [{ step: "gate", durationMs: 1, status: 0 }] }) });
+  return { db, sessions };
+}
+
+let seq = 0;
+function newProject(tag, repo, orchestrationConfig) {
+  const sfx = `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const projId = `ctsm-proj-${sfx}`, agentId = `ctsm-agent-${sfx}`, mgrId = `ctsm-mgr-${sfx}`;
+  const d = boot();
+  d.db.insertProject({ id: projId, name: `CTSM-${tag}`, repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate", ...orchestrationConfig } }, createdAt: now, archivedAt: null });
+  d.db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  d.db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // @decision 5958c149 — "expectedMainlineBranch" is ABSENT for a never-landed project (first sight),
+  // which would make every ledger-write gate in this file's own confirms false. Seed it directly.
+  d.db.setMeta(mainlineWatermarkKey(projId, "primary"), JSON.stringify({ branch: "main", sha: git(repo, "rev-parse", "HEAD") }));
+  return { ...d, projId, agentId, mgrId, repo };
+}
+
+async function addWorker(ctx, tag, fileContent) {
+  const n = `${tag}${++seq}`;
+  const taskId = `ctsm-${n}-task`, workerId = `ctsm-${n}-wkr`;
+  ctx.db.insertTask({ id: taskId, projectId: ctx.projId, title: `feat(test): ${n}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const { worktreePath, branch } = await createWorktree(ctx.repo, ctx.projId, taskId);
+  registerForCleanup(worktreePath);
+  fs.writeFileSync(path.join(worktreePath, `${n}.ts`), fileContent);
+  commitAll(worktreePath, `feat(test): ${n} work`, GIT_ID);
+  const preSquashTip = git(worktreePath, "rev-parse", "HEAD");
+  ctx.db.insertSession({ id: workerId, projectId: ctx.projId, agentId: ctx.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: ctx.mgrId, taskId, worktreePath, branch });
+  return { taskId, workerId, worktreePath, branch, preSquashTip, n };
+}
+
+const confirm = (ctx, workerId, forceRemoveWorktree) => awaitTrackedSettle(() => ctx.sessions.confirmWorkerMergeTracked(ctx.mgrId, workerId, forceRemoveWorktree), { label: "confirmWorkerMergeTracked", timeoutMs: 240_000, pendingOps: ctx.sessions.pendingOps });
+
+const TRAILER_KEYS = ["Loom-Worker-Branch", "Loom-Landed-Tip", "Loom-Worker-Base", "Loom-Worker-PathSet"];
+const hasAnyTrailer = (body) => TRAILER_KEYS.some((k) => body.includes(`${k}: `));
+const hasAllTrailers = (body) => TRAILER_KEYS.every((k) => new RegExp(`^${k}: `, "m").test(body));
+const hasBody = (body) => body.includes("Worker commits:");
+
+// ======================= (1) both "on" (config omitted — the default) =======================
+{
+  const repo = makeRepo("1");
+  const ctx = newProject("1", repo, {});
+  const w = await addWorker(ctx, "1", "export const one = 1;\n");
+  const r = await confirm(ctx, w.workerId);
+  const v = r.ok ? r.value : { __unsettled: r };
+  check("(1) setup control: confirm settled and landed", r.settled === true && v.merged === true);
+  const landedSha = git(repo, "log", "-1", "--format=%H");
+  const msg = git(repo, "log", "-1", "--format=%B", landedSha);
+  check("(1) both on: all four reserved trailers are present", hasAllTrailers(msg));
+  check("(1) both on: the worker-commit-log body is present", hasBody(msg));
+  check("(1) both on: the ledger's worker_landed_tip equals the pre-squash branch head", ctx.db.getVerifiedLandedTip(ctx.projId, "primary", landedSha) === w.preSquashTip);
+  const task = ctx.db.getTask(w.taskId);
+  check("(1) both on: mergedSha is stamped", task?.mergedSha === landedSha.slice(0, 7));
+  check("(1) both on: mergedVerification is \"content\"", task?.mergedVerification === "content");
+  check("(1) both on: the mainline watermark advanced to the landed sha", JSON.parse(ctx.db.getMeta(mainlineWatermarkKey(ctx.projId, "primary"))).sha === landedSha);
+  ctx.db.close();
+}
+
+// ======================= (2) trailers "off", body "on" =======================
+{
+  const repo = makeRepo("2");
+  const ctx = newProject("2", repo, { commitTrailers: "off" });
+  const w = await addWorker(ctx, "2", "export const two = 2;\n");
+  const r = await confirm(ctx, w.workerId);
+  const v = r.ok ? r.value : { __unsettled: r };
+  check("(2) setup control: confirm settled and landed", r.settled === true && v.merged === true);
+  const landedSha = git(repo, "log", "-1", "--format=%H");
+  const msg = git(repo, "log", "-1", "--format=%B", landedSha);
+  check("(2) trailers off: NO reserved trailer line appears anywhere in the landed message", !hasAnyTrailer(msg));
+  check("(2) trailers off, body on: the worker-commit-log body is STILL present (independent keys)", hasBody(msg));
+  check("(2) trailers off: the parent+tree verification is UNAFFECTED — the ledger's worker_landed_tip still " +
+    "equals the pre-squash branch head (this only happens on a \"verified\" landedBase)",
+    ctx.db.getVerifiedLandedTip(ctx.projId, "primary", landedSha) === w.preSquashTip);
+  const task = ctx.db.getTask(w.taskId);
+  check("(2) trailers off: mergedSha is STILL stamped", task?.mergedSha === landedSha.slice(0, 7));
+  check("(2) trailers off: mergedVerification is STILL \"content\" (derived from merge.sha, never a trailer read)", task?.mergedVerification === "content");
+  check("(2) trailers off: the mainline watermark STILL advanced to the landed sha", JSON.parse(ctx.db.getMeta(mainlineWatermarkKey(ctx.projId, "primary"))).sha === landedSha);
+  ctx.db.close();
+}
+
+// ======================= (3) trailers "on", body "off" =======================
+{
+  const repo = makeRepo("3");
+  const ctx = newProject("3", repo, { commitLogBody: "off" });
+  const w = await addWorker(ctx, "3", "export const three = 3;\n");
+  const r = await confirm(ctx, w.workerId);
+  const v = r.ok ? r.value : { __unsettled: r };
+  check("(3) setup control: confirm settled and landed", r.settled === true && v.merged === true);
+  const landedSha = git(repo, "log", "-1", "--format=%H");
+  const msg = git(repo, "log", "-1", "--format=%B", landedSha);
+  check("(3) body off: all four reserved trailers are STILL present", hasAllTrailers(msg));
+  check("(3) body off: NO \"Worker commits:\" block appears", !hasBody(msg));
+  check("(3) body off: the ledger's worker_landed_tip equals the pre-squash branch head", ctx.db.getVerifiedLandedTip(ctx.projId, "primary", landedSha) === w.preSquashTip);
+  ctx.db.close();
+}
+
+// ======================= (4) both "off" =======================
+{
+  const repo = makeRepo("4");
+  const ctx = newProject("4", repo, { commitTrailers: "off", commitLogBody: "off" });
+  const w = await addWorker(ctx, "4", "export const four = 4;\n");
+  const r = await confirm(ctx, w.workerId);
+  const v = r.ok ? r.value : { __unsettled: r };
+  check("(4) setup control: confirm settled and landed", r.settled === true && v.merged === true);
+  const landedSha = git(repo, "log", "-1", "--format=%H");
+  const msg = git(repo, "log", "-1", "--format=%B", landedSha);
+  check("(4) both off: NO reserved trailer line appears anywhere in the landed message", !hasAnyTrailer(msg));
+  check("(4) both off: NO \"Worker commits:\" block appears", !hasBody(msg));
+  check("(4) both off: the subject itself still landed intact", msg.split("\n")[0] === `feat(test): ${w.n}`);
+  check("(4) both off: the ledger's worker_landed_tip STILL equals the pre-squash branch head (parent+tree proof is trailer-independent)", ctx.db.getVerifiedLandedTip(ctx.projId, "primary", landedSha) === w.preSquashTip);
+  const task = ctx.db.getTask(w.taskId);
+  check("(4) both off: mergedSha is STILL stamped", task?.mergedSha === landedSha.slice(0, 7));
+  check("(4) both off: mergedVerification is STILL \"content\"", task?.mergedVerification === "content");
+  check("(4) both off: the mainline watermark STILL advanced to the landed sha", JSON.parse(ctx.db.getMeta(mainlineWatermarkKey(ctx.projId, "primary"))).sha === landedSha);
+  ctx.db.close();
+}
+
+// ======================= (A) RE-CONFIRM with trailers "off": never a second squash commit =======================
+// Deliberately at the BARE mergeBranch level (manager directive, not confirmWorkerMergeTracked) — this is
+// about mergeBranch's own re-entrant behavior on an already-landed branch, independent of the session/task
+// bookkeeping layer above it.
+{
+  const repo = makeRepo("5");
+  const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const taskId = `ctsm-a-task-${sfx}`;
+  const branch = `loom/a-${sfx}`;
+  const wt = mkdtempManaged(`loom-ctsm-wtA-`);
+  tmpDirs.push(wt);
+  git(repo, "worktree", "add", "-q", "-b", branch, wt, "HEAD");
+  fs.writeFileSync(path.join(wt, "a.ts"), "export const a = 1;\n");
+  git(wt, "add", "-A");
+  git(wt, "commit", "-q", "-m", "a work");
+  try { git(repo, "worktree", "remove", "--force", wt); } catch { /* best-effort */ }
+
+  const countBefore = Number(git(repo, "rev-list", "--count", "main"));
+  const first = await mergeBranch(repo, branch, taskId, { commitTrailers: "off" });
+  check("(A) precondition: the first landing succeeded", first.ok === true && typeof first.sha === "string" && !first.noop);
+  const countAfterFirst = Number(git(repo, "rev-list", "--count", "main"));
+  check("(A) precondition: exactly one new commit landed from the first call", countAfterFirst === countBefore + 1);
+  const firstMsg = git(repo, "log", "-1", "--format=%B", first.sha);
+  check("(A) precondition: the first landing really carries NO reserved trailer (trailers off)", !hasAnyTrailer(firstMsg));
+
+  // THE ACTUAL TEST: a second mergeBranch call on the SAME branch, now fully landed and with no new
+  // worker commits — findLandedSquashCommit's own ALREADY_MERGED lookup greps for Loom-Worker-Branch,
+  // which this landing never wrote, so it degrades to STAGE_EMPTY_RETRY — but the squash's OWN
+  // content-based empty-diff check must still make this a noop either way.
+  const second = await mergeBranch(repo, branch, taskId, { commitTrailers: "off" });
+  check("(A) THE FIX'S OWN GATE: the re-confirm ends as a no-op (ok:true, noop:true), never a refusal or a second real commit", second.ok === true && second.noop === true);
+  check("(A) the classification is honestly STAGE_EMPTY_RETRY (not ALREADY_MERGED) — trailers off means " +
+    `findLandedSquashCommit's grep finds nothing, which is the expected, documented degradation (got: ${second.emptyKind})`,
+    second.emptyKind === "STAGE_EMPTY_RETRY");
+  const countAfterSecond = Number(git(repo, "rev-list", "--count", "main"));
+  check("(A) THE ACTUAL ASSERTION: git rev-list --count main is UNCHANGED after the re-confirm — no double-land", countAfterSecond === countAfterFirst);
+}
+
+console.log(failures === 0
+  ? "\n✅ ALL PASS — commitTrailers/commitLogBody gate the solo squash's message exactly as specified " +
+    "(independently togglable), leave the in-process parent+tree verification, the landed-tip ledger, " +
+    "mergedSha/mergedVerification, and the mainline watermark advance completely unaffected in every " +
+    "combination, and a trailers-off re-confirm never double-lands despite the retroactive ALREADY_MERGED " +
+    "lookup itself being trailer-keyed."
+  : `\n❌ ${failures} FAILURE(S).`);
+for (const d of tmpDirs) {
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+}
+process.exit(failures === 0 ? 0 : 1);

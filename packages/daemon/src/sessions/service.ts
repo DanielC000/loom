@@ -21748,7 +21748,9 @@ export class SessionService {
     // landed-content-diverged refusal just below, inside mergeBranch) already logs its own event or
     // mutates nothing, so firing here keeps a pre-squash crash indistinguishable from review-only.
     evt("merge_landing_started", {});
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory, goneBranchLedger }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
+    // Card 9a5d040c: thread the project's resolved commitTrailers/commitLogBody through the SAME deps
+    // object `goneBranchLedger` already rides — `targetRepo` (resolveRepoByKey) already carries both.
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory, goneBranchLedger, commitTrailers: targetRepo.commitTrailers, commitLogBody: targetRepo.commitLogBody }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
     // @decision 2a6a292a round 20 (card aa7677fa) — record the ledger entry UNCONDITIONALLY (independent
     // of mainlineCheckedTip): a landing whose own tripwire check fail-opened still needs a walkable row.
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — gated on `merge.landedBase` too: an unverified

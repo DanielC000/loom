@@ -214,6 +214,20 @@ export interface BoundedGitDeps {
    *  threaded down from a caller that knows the project/repoKey/mainline-branch (sessions/service.ts,
    *  mcp/tasks.ts) — this module is pure-git and has no DB of its own. */
   goneBranchLedger?: GoneBranchLedgerFacts;
+  /**
+   * Card 9a5d040c (child of d9332365): the project's resolved `orchestration.commitTrailers`/
+   * `commitLogBody` (see `projects/resolve-repo.ts`'s `ResolvedRepo`), threaded down from the one
+   * production caller (`confirmWorkerMerge`, sessions/service.ts) the same way `goneBranchLedger` above
+   * is. Both default to `"on"` whenever absent/undefined — every existing direct caller (every test file
+   * that constructs `mergeBranch`'s deps without these keys) stays byte-identical. `commitTrailers:"off"`
+   * does NOT skip the in-process trailer-namespace audit (`verifyLoomTrailersExactAndReadable`, inside
+   * `mergeBranchLocked`'s own `verifyLandedAsOwnCommit` closure) — it still runs with `expected: {}`,
+   * and `verifyLoomNamespaceExact` still REJECTS any reserved Loom-* line it finds, so a verified
+   * landing with trailers off is real proof the commit carries zero reserved-namespace lines, not a
+   * skipped check.
+   */
+  commitTrailers?: "on" | "off";
+  commitLogBody?: "on" | "off";
 }
 
 /**
@@ -11189,15 +11203,25 @@ async function mergeBranchLocked(
     // block's own doc, card c862f14c, for why the two must not share a base and for that equivalence
     // proof). Best-effort: a capture failure just omits the body from this commit.
     let workerCommitLogBody: string | undefined;
-    try {
-      const mergeBaseForSquashMeta = (await withTimeout(git.raw(["merge-base", "HEAD", `refs/heads/${branch}`]), timeoutMs, "git merge-base (canonical, squash metadata)")).trim();
-      workerCommitLogBody = await deriveWorkerCommitLogBody(repoPath, branch, mergeBaseForSquashMeta, subject, deps);
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn(`[git] mergeBranchLocked: worker-commit-log body capture failed for ${branch}: ${(e as Error).message}`);
+    // Card 9a5d040c: the worker-commit-log body is independent of the reserved trailer paragraph (card
+    // 8b7b81e0) — gated on its OWN `commitLogBody` key, never on `commitTrailers` below.
+    if (deps.commitLogBody !== "off") {
+      try {
+        const mergeBaseForSquashMeta = (await withTimeout(git.raw(["merge-base", "HEAD", `refs/heads/${branch}`]), timeoutMs, "git merge-base (canonical, squash metadata)")).trim();
+        workerCommitLogBody = await deriveWorkerCommitLogBody(repoPath, branch, mergeBaseForSquashMeta, subject, deps);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`[git] mergeBranchLocked: worker-commit-log body capture failed for ${branch}: ${(e as Error).message}`);
+      }
     }
     const bodyBlock = workerCommitLogBody ? `\n\n${workerCommitLogBody}` : "";
-    let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n${resolvedBranchHead ? `Loom-Landed-Tip: ${resolvedBranchHead}\n` : ""}`;
+    // Card 9a5d040c: the reserved trailer lines are skipped entirely when `commitTrailers` is "off" —
+    // the in-process identity verification below (verifyCommitParentAndTree, via the closure further
+    // down) is untouched either way; only the TEXT written into the commit changes here.
+    const trailerLines = deps.commitTrailers !== "off"
+      ? `\n\nLoom-Worker-Branch: ${branch}\n${resolvedBranchHead ? `Loom-Landed-Tip: ${resolvedBranchHead}\n` : ""}`
+      : "\n";
+    let message = `${subject}${bodyBlock}${trailerLines}`;
     // Card fdc991be/2267e8fa: on a host where git can't resolve an identity for this commit (a fresh
     // end-user machine, or a CI runner), the squash commit below otherwise fails with "Author identity
     // unknown" AFTER the gate has already run. `identityEnv` was already resolved before the squash
@@ -11223,7 +11247,12 @@ async function mergeBranchLocked(
     try {
       preCommitHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, pathset base)")).trim();
       stampedPathSetDigest = await stagedPathSetDigest(git, timeoutMs);
-      message = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${preCommitHead}\nLoom-Worker-PathSet: ${stampedPathSetDigest}\n`;
+      // Card 9a5d040c: the TEXT written for these two trailers is gated on `commitTrailers`; the capture
+      // above (preCommitHead/stampedPathSetDigest) stays unconditional either way — it feeds the
+      // parent+tree identity check below regardless of whether its values are ever written into `message`.
+      if (deps.commitTrailers !== "off") {
+        message = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${preCommitHead}\nLoom-Worker-PathSet: ${stampedPathSetDigest}\n`;
+      }
       stagedTree = (await withTimeout(git.raw(["write-tree"]), timeoutMs, "git write-tree (canonical, pre-commit tree capture)")).trim();
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -11250,11 +11279,21 @@ async function mergeBranchLocked(
       // git-read failures and resolves {ok:false} rather than throwing.
       const verify = await verifyCommitParentAndTree(git, timeoutMs, sha, preCommitHead, stagedTree);
       if (!verify.ok) return { landedBase: undefined };
-      const expectedTrailers: Record<string, string> = { "Loom-Worker-Branch": branch };
-      if (resolvedBranchHead) expectedTrailers["Loom-Landed-Tip"] = resolvedBranchHead;
-      if (stampedPathSetDigest !== undefined) {
-        expectedTrailers["Loom-Worker-Base"] = preCommitHead;
-        expectedTrailers["Loom-Worker-PathSet"] = stampedPathSetDigest;
+      // Card 9a5d040c: `commitTrailers === "off"` ⇒ `expectedTrailers` stays `{}` — the documented no-op
+      // shape of `verifyLoomTrailersExactAndReadable` (nothing expected, nothing to round-trip). The
+      // parent+tree proof just above is COMPLETELY unaffected by this gate. Code Review: the call below
+      // is NOT vacuous with `expected: {}` — `verifyLoomNamespaceExact` still runs and REJECTS any
+      // reserved Loom-* line found in the landed message, so an `{ok:true}` here with trailers off is a
+      // real proof that the commit carries ZERO reserved-namespace lines, not a skipped check. Never
+      // optimise this call away just because `expected` is empty.
+      const expectedTrailers: Record<string, string> = {};
+      if (deps.commitTrailers !== "off") {
+        expectedTrailers["Loom-Worker-Branch"] = branch;
+        if (resolvedBranchHead) expectedTrailers["Loom-Landed-Tip"] = resolvedBranchHead;
+        if (stampedPathSetDigest !== undefined) {
+          expectedTrailers["Loom-Worker-Base"] = preCommitHead;
+          expectedTrailers["Loom-Worker-PathSet"] = stampedPathSetDigest;
+        }
       }
       const trailerCheck = verifyLoomTrailersExactAndReadable(verify.body ?? "", expectedTrailers);
       if (trailerCheck.ok) return { landedBase: preCommitHead };
@@ -11307,9 +11346,19 @@ async function mergeBranchLocked(
         // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.
         if (treeDeathUnconfirmed(e)) {
           raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("squash commit could not be confirmed dead after a kill"), opId);
+          // Card 9a5d040c Code Review: the ALREADY_MERGED wording below is a promise about
+          // `findLandedSquashCommit`, which greps for the `Loom-Worker-Branch:` trailer — FALSE when
+          // `commitTrailers` is "off" (that grep finds nothing). The content-based empty-diff check
+          // still prevents a duplicate commit either way; only the CLASSIFICATION differs.
+          const retryOutcome = deps.commitTrailers === "off"
+            ? "simply retrying this merge will land cleanly if the content is still missing, or settle as a " +
+              "no-op (STAGE_EMPTY_RETRY, not ALREADY_MERGED — commitTrailers is \"off\", so the trailer-based " +
+              "already-landed detection finds nothing) if it already landed — either way, never a duplicate commit"
+            : "simply retrying this merge will detect any already-landed content as ALREADY_MERGED and finalize " +
+              "without creating a duplicate commit";
           return {
             ok: false,
-            reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message} — the commit may have already landed despite this failure (the real git child's own commit may have completed before or after the kill could be confirmed); canonical repo may need manual inspection, but once a human clears the quarantine, simply retrying this merge will detect any already-landed content as ALREADY_MERGED and finalize without creating a duplicate commit`,
+            reason: `squash commit's git process tree could not be confirmed dead after a kill — refusing further cleanup to avoid racing it: ${(e as Error).message} — the commit may have already landed despite this failure (the real git child's own commit may have completed before or after the kill could be confirmed); canonical repo may need manual inspection, but once a human clears the quarantine, ${retryOutcome}`,
             quarantined: true,
           };
         }
