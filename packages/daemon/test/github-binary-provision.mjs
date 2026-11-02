@@ -81,9 +81,11 @@ resolveCapabilityServer(ghRow, {});
 gate.resolve({ binary: READY_BIN, outcome: "ready" });
 await flush();
 check("(3) resolves ready after the single in-flight job settles", getCapabilityProvisionStatus("github")?.state === "ready");
-check("(3) the resolved binary is cached (a later call returns the warm binary, no re-kick)",
-  resolveCapabilityServer(ghRow, {})?.command === READY_BIN);
-check("(3) invocation contract: args is ['stdio']", JSON.stringify(resolveCapabilityServer(ghRow, {})?.args) === JSON.stringify(["stdio"]));
+// Card fafae623, Code Review round 1 item 3: resolveCapabilityServer returns the RAW mount now
+// (env-isolation wrapping moved to buildMcpServers' own chokepoint loop).
+const warmGithub = resolveCapabilityServer(ghRow, {});
+check("(3) the resolved binary is cached (a later call returns the warm binary, no re-kick)", warmGithub?.command === READY_BIN);
+check("(3) invocation contract: args is ['stdio']", JSON.stringify(warmGithub?.args) === JSON.stringify(["stdio"]));
 
 // ===================== (4) classified outcomes =====================
 __setGithubBinaryProvisionerForTest(fixed({ binary: null, outcome: "unsupported-platform" }));

@@ -54,7 +54,7 @@ import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
-import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
+import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, updateCapabilityDefPassEnv, requirePassEnvKey, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -2975,6 +2975,27 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.delete("/api/capabilities/:id", async (req) => {
     deleteCapabilityDef(deps.db, (req.params as { id: string }).id);
     return { ok: true };
+  });
+  // Card fafae623: the ONE post-create-editable field on an owner-added capability — `passEnv`, the
+  // human-only escape hatch widening that capability's env-isolating launcher allow list with named
+  // ambient env vars. Every other field is still create-time-only (no general "edit" route exists).
+  app.patch("/api/capabilities/:id", async (req, reply) => {
+    const rawBody = req.body ?? {};
+    // Code Review round 2 (reviewer 7b1b9aa0): a primitive JSON body (e.g. a bare `"x"`/`42`/`true`)
+    // used to reach `requirePassEnvKey`'s own `"passEnv" in body` check, which throws a TypeError (500)
+    // for a non-object RHS — checked here, before that call, so a malformed body is a 400, never a crash.
+    if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) {
+      return reply.code(400).send({ error: "request body must be a JSON object" });
+    }
+    const body = rawBody as Record<string, unknown>;
+    const keyError = requirePassEnvKey(body);
+    if (keyError) return reply.code(400).send({ error: keyError });
+    try {
+      const updated = updateCapabilityDefPassEnv(deps.db, (req.params as { id: string }).id, body.passEnv);
+      return reply.send(updated);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
   });
 
   // --- Owner-declared project links (board card 2349d90c): a symmetric link between two projects — the

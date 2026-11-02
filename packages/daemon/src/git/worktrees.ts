@@ -5759,6 +5759,10 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/codescape-prompt-block.mjs",
   "packages/daemon/test/decision-records.mjs",
   "packages/daemon/test/dev-server.mjs",
+  // Card fafae623: direct reader (route (1)) of assets/env-isolated-launch.mjs — the env-isolating
+  // launcher asset every Loom-built stdio MCP mount launches through. Editing that asset's source
+  // changes what this test's real-spawn matrix observes.
+  "packages/daemon/test/env-isolated-launch.mjs",
   "packages/daemon/test/ensure-obsidian.mjs",
   // Card 61d0c029: asserts packages/daemon/assets/git-resolve.mjs (the standalone win32 absolute-git-path
   // resolver the two shipped session hooks import) stays behaviorally identical to its dist/git/bounded.js
@@ -5786,6 +5790,10 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/skills-store-durability.mjs",
   "packages/daemon/test/spawn-command-line-preflight.mjs",
   "packages/daemon/test/vault-lint.mjs",
+  // Card fafae623: direct reader (route (1)) of assets/env-isolated-launch.mjs — pins its duplicated
+  // needsWindowsCmdShim/parseNpmCmdShim/winCmdShimSpawnTarget source text and behavior byte-identical
+  // to pty/resolve-bin.ts's own copy. Editing the asset's duplicated logic changes what this asserts.
+  "packages/daemon/test/win-cmd-shim-parity.mjs",
 ];
 
 /** The test files that raw-scan real, uncompiled `packages/daemon/src/**` TEXT and/or compiled `dist/**`

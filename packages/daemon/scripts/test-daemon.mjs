@@ -490,6 +490,11 @@ export const NOT_HERMETIC = new Set([
   // model turn — same cost/flake rationale as the real-spawn files above — proof-once, manual-only, not
   // scheduled. Run manually per its own header comment; re-run after a `claude` CLI upgrade (the
   // InstructionsLoaded hook's own existence/field names are an engine behavior, not Loom's own code).
+  "env-isolation-real-spawn", // card fafae623 Code Review round 1 (reviewer b5883c03), item B2: one
+  // real, authenticated `claude` process, one real MCP handshake — same cost/flake rationale as the
+  // real-spawn files above (an unapproved recurring spend on the owner's account on every merge gate) —
+  // proof-once, manual-only, not scheduled. Run manually per its own header comment; re-run after a
+  // `claude` CLI upgrade (the stdio-MCP-spawn env-inheritance behavior this proves is the engine's own).
 ]);
 
 // Directories that are established non-test containers under test/ — never descended into by the

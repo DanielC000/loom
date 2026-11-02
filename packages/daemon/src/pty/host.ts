@@ -10,6 +10,7 @@ import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, Capabi
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
+import { wrapStdioMountWithEnvIsolation } from "./env-isolation.js";
 import {
   type OrphanSweepRow, parseWin32SweepTicks, parseOrphanSweepLine, WIN32_SWEEP_PS_COMMAND,
   isHelperPidCollision, enumerateWin32SweepRows, enumerateWin32SweepRowForPid,
@@ -1932,6 +1933,9 @@ export function playwrightMcpServer(outputDir?: string): { type: "stdio"; comman
   if (!cli) return null;
   const args = [cli, "--headless", "--isolated"];
   if (outputDir) args.push("--output-dir", outputDir);
+  // Card fafae623, Code Review round 1 item 3: env-isolation wrapping moved OUT of this producer and
+  // into buildMcpServers' ONE chokepoint loop (applied to every non-http mount there) — this function
+  // returns the raw, unwrapped mount, exactly as before this card.
   return { type: "stdio", command: process.execPath, args };
 }
 
@@ -2147,6 +2151,8 @@ export function prewarmMarkitdown(pythonInterpreterPath?: string): void {
 export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "stdio"; command: string; args: string[] } | null {
   const bin = resolveMarkitdownBin(pythonInterpreterPath);
   if (!bin) return null;
+  // Card fafae623, Code Review round 1 item 3: env-isolation wrapping moved OUT of this producer and
+  // into buildMcpServers' ONE chokepoint loop — this function returns the raw, unwrapped mount.
   return { type: "stdio", command: bin, args: [] };
 }
 
@@ -2289,6 +2295,11 @@ export function buildMcpServers(o: {
   const mcpServers: Record<string, unknown> = {
     [LOOM_TASKS_SERVER_ID]: { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}`, ...authHeaders },
   };
+  // Card fafae623, Code Review round 1 item 3: a side-channel from the catalog loop below to the ONE
+  // env-isolation chokepoint loop near the end of this function — a catalog row's `passEnv` isn't part
+  // of the mount shape itself, so it can't be read back off `mcpServers[key]` the way its own declared
+  // `env` keys can. Keyed by the SAME string every mount is stored under in `mcpServers`.
+  const passEnvByMountKey: Record<string, string[]> = {};
   if (wantsOrch) {
     mcpServers[LOOM_ORCHESTRATION_SERVER_ID] = {
       type: "http",
@@ -2399,6 +2410,7 @@ export function buildMcpServers(o: {
     });
     if (server) {
       mcpServers[def.slug] = server;
+      passEnvByMountKey[def.slug] = def.passEnv ?? [];
     } else {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);
@@ -2438,9 +2450,15 @@ export function buildMcpServers(o: {
   }
   // @decision 8d26596b — force LOOM_MCP_TOKEN to "" on every non-http mount here, ONE chokepoint,
   // unconditionally on both platforms, never per-producer — see blanksMcpToken's own doc for the keying.
-  for (const mount of Object.values(mcpServers)) {
-    const m = mount as { type?: string; env?: Record<string, string> };
+  //
+  // @decision fafae623 — never move env-isolation wrapping back into a per-producer function; keep it
+  // in THIS loop so a future stdio producer can't forget it. Capture `m.env`'s own keys BEFORE the
+  // LOOM_MCP_TOKEN blank below, never after.
+  for (const [key, mount] of Object.entries(mcpServers)) {
+    const m = mount as { type?: string; command?: string; args?: string[]; env?: Record<string, string> };
     if (blanksMcpToken(m)) {
+      const declaredEnvKeys = Object.keys(m.env ?? {}).filter((k) => k !== MCP_TOKEN_ENV_VAR);
+      wrapStdioMountWithEnvIsolation(m, [...declaredEnvKeys, ...(passEnvByMountKey[key] ?? [])]);
       m.env = { ...(m.env ?? {}), [MCP_TOKEN_ENV_VAR]: "" };
     }
   }

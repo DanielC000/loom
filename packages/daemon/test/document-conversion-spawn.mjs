@@ -56,6 +56,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveProfile } = await import("@loom/shared");
+const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 
 const AGENT = { startupPrompt: "agent own prompt" };
 
@@ -97,15 +98,20 @@ check("(a) ON adds exactly the markitdown key (everything else unchanged)",
 
 const md = on.markitdown;
 check("(a) markitdown entry is a stdio server", md?.type === "stdio");
-check("(a) command is the resolved ABSOLUTE markitdown bin", typeof md?.command === "string" && path.isAbsolute(md.command) && md.command === MARKITDOWN_BIN);
-check("(a) args is an array (markitdown-mcp speaks STDIO by default — no args needed)",
-  Array.isArray(md?.args) && md.args.length === 0);
-// markitdownMcpServer() (the exported builder) agrees with what buildMcpServers embedded. Card 8d26596b:
-// buildMcpServers' OWN chokepoint additionally blanks LOOM_MCP_TOKEN on every stdio mount, which the raw
-// producer (markitdownMcpServer) never does on its own — account for that one key rather than asserting
-// byte-identical objects.
-check("(a) markitdownMcpServer() returns the same absolute-path stdio entry, modulo the chokepoint's LOOM_MCP_TOKEN blank",
-  JSON.stringify({ ...markitdownMcpServer(), env: { [MCP_TOKEN_ENV_VAR]: "" } }) === JSON.stringify(md));
+check("(a) command is the env-isolating launcher, an ABSOLUTE node path", typeof md?.command === "string" && path.isAbsolute(md.command) && md.command === process.execPath);
+// Card fafae623: every stdio mount routes through Loom's env-isolating launcher — unwrap to reach
+// markitdown's own real command/args.
+const mdUnwrapped = unwrapLauncherMount(md);
+check("(a) the mount is routed through the env-isolating launcher", !!mdUnwrapped);
+check("(a) the REAL (unwrapped) command is the resolved ABSOLUTE markitdown bin", mdUnwrapped?.realCommand === MARKITDOWN_BIN);
+check("(a) the REAL args is an array (markitdown-mcp speaks STDIO by default — no args needed)",
+  Array.isArray(mdUnwrapped?.realArgs) && mdUnwrapped.realArgs.length === 0);
+// markitdownMcpServer() (the exported builder) agrees with what buildMcpServers embedded. Card fafae623,
+// Code Review round 1 item 3: markitdownMcpServer returns the RAW (unwrapped) mount now — compare
+// against the UNWRAPPED form of what buildMcpServers actually embedded.
+const rawMarkitdown = markitdownMcpServer();
+check("(a) markitdownMcpServer() returns the same command/args buildMcpServers wraps (modulo the chokepoint's wrap+LOOM_MCP_TOKEN blank)",
+  mdUnwrapped.realCommand === rawMarkitdown.command && JSON.stringify(mdUnwrapped.realArgs) === JSON.stringify(rawMarkitdown.args));
 check("(8d26596b) the markitdown mount's env carries LOOM_MCP_TOKEN blanked to the empty string", md.env?.[MCP_TOKEN_ENV_VAR] === "");
 
 // a plain (role-null) document session still gets the server (document conversion is orthogonal to role).

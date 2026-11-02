@@ -60,6 +60,16 @@ export interface CapabilityDefRow {
   requiresConnection: boolean;
   /** Env var name the credential is injected under when requiresConnection; null when not applicable. */
   secretEnvVar: string | null;
+  /**
+   * Card fafae623: HUMAN-ONLY (never agent-writable, never set on a seed row — github-binary's seed
+   * row always gets `[]`) extra env KEY NAMES this ONE capability's env-isolating launcher should also
+   * forward from its own inherited env, beyond the fixed base allowlist. The escape hatch for an
+   * owner-added `command`/`python-venv` tool that relies on an AMBIENT daemon-host env var (exported by
+   * the owner, outside Loom's `secretEnvVar` delivery mechanism) — without this, such a tool silently
+   * stops seeing that var once every stdio mount is isolated. Validated by {@link validatePassEnv} —
+   * a strict env-name regex plus {@link passEnvReservedReason}'s denylist; defaults to `[]`.
+   */
+  passEnv: string[];
   createdAt: string;
 }
 
@@ -69,6 +79,9 @@ export interface CapabilitiesDbStore {
   getCapabilityDefBySlug(slug: string): CapabilityDefRow | undefined;
   createCapabilityDef(input: Omit<CapabilityDefRow, "id" | "createdAt">): CapabilityDefRow;
   deleteCapabilityDef(id: string): void;
+  /** Card fafae623: update only `passEnv` on an existing row, returning the updated row — `undefined`
+   *  when `id` doesn't name an existing row (never throws; the caller maps that to a descriptive Error). */
+  updateCapabilityDefPassEnv(id: string, passEnv: string[]): CapabilityDefRow | undefined;
 }
 
 export type CapabilityProvision =
@@ -112,16 +125,56 @@ function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
 }
 
+/** Card fafae623: a strict POSIX-style env-variable-name shape — every `passEnv` entry must match this,
+ *  on top of {@link PASS_ENV_RESERVED_DENYLIST} below. Rejects anything that isn't a plain identifier
+ *  (no spaces, no `=`, no shell metacharacters) — there is no legitimate env var name this excludes. */
+export const ENV_KEY_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Card fafae623: a `passEnv` entry matching any of these (case-insensitive) is rejected, ON TOP of the
+ *  charset check above — an owner widening a capability's ambient-env allowlist must never be able to
+ *  name Loom's own per-session credential or claude's own control vars, which a strict-shape regex alone
+ *  would still allow. `LOOM_MCP_TOKEN` is also covered by the `LOOM_` prefix rule, kept as its own
+ *  explicit check so the rule reads directly rather than only by implication. */
+const PASS_ENV_RESERVED_PREFIXES = ["CLAUDE_CODE_", "LOOM_"];
+const PASS_ENV_RESERVED_EXACT = ["LOOM_MCP_TOKEN"];
+export function passEnvReservedReason(name: string): string | null {
+  const upper = name.toUpperCase();
+  if (PASS_ENV_RESERVED_EXACT.includes(upper)) return `'${name}' is a reserved Loom credential name`;
+  for (const prefix of PASS_ENV_RESERVED_PREFIXES) {
+    if (upper.startsWith(prefix)) return `'${name}' matches the reserved '${prefix}*' prefix`;
+  }
+  return null;
+}
+const PASS_ENV_MAX_KEYS = 32;
+/** Card fafae623: validate a `passEnv` array for either create or the PATCH-only update path. Shared so
+ *  the two call sites can never drift on what counts as a legal entry. */
+export function validatePassEnv(v: unknown): { ok: true; value: string[] } | { ok: false; error: string } {
+  if (v === undefined) return { ok: true, value: [] };
+  if (!Array.isArray(v) || v.length > PASS_ENV_MAX_KEYS) {
+    return { ok: false, error: `passEnv must be an array of at most ${PASS_ENV_MAX_KEYS} env var names` };
+  }
+  const seen = new Set<string>();
+  for (const entry of v) {
+    if (typeof entry !== "string" || !ENV_KEY_NAME_RE.test(entry)) {
+      return { ok: false, error: `passEnv entry ${JSON.stringify(entry)} is not a valid env var name` };
+    }
+    const reason = passEnvReservedReason(entry);
+    if (reason) return { ok: false, error: `passEnv entry rejected: ${reason}` };
+    seen.add(entry);
+  }
+  return { ok: true, value: [...seen] };
+}
+
 export interface ValidatedCapabilityDefInput {
   slug: string; name: string; description: string; transport: "stdio" | "http"; kind: CapabilityProvisionKind;
   provision: CapabilityProvision; toolAllowlist: string[]; wantsScratchDir: boolean; requiresConnection: boolean;
-  secretEnvVar: string | null;
+  secretEnvVar: string | null; passEnv: string[];
 }
 
 /** Validate an owner-added capability's create input. Non-throwing (mirrors validateConnectionInput). */
 export function validateCapabilityDefInput(input: {
   slug?: unknown; name?: unknown; description?: unknown; transport?: unknown; kind?: unknown;
   provision?: unknown; toolAllowlist?: unknown; wantsScratchDir?: unknown; requiresConnection?: unknown; secretEnvVar?: unknown;
+  passEnv?: unknown;
 }): { ok: true; value: ValidatedCapabilityDefInput } | { ok: false; error: string } {
   if (typeof input.slug !== "string" || !SLUG_RE.test(input.slug)) {
     return { ok: false, error: "slug must be lowercase kebab-case (a-z0-9-, starting with a letter/digit)" };
@@ -205,6 +258,8 @@ export function validateCapabilityDefInput(input: {
   if (requiresConnection && provisionOutputDirEnvVar && provisionOutputDirEnvVar === input.secretEnvVar) {
     return { ok: false, error: "outputDirEnvVar must not equal secretEnvVar (they would collide in the mounted server's env block)" };
   }
+  const passEnvResult = validatePassEnv(input.passEnv);
+  if (!passEnvResult.ok) return passEnvResult;
   return {
     ok: true,
     value: {
@@ -212,12 +267,13 @@ export function validateCapabilityDefInput(input: {
       transport: input.transport, kind: input.kind, provision, toolAllowlist,
       wantsScratchDir: !!input.wantsScratchDir, requiresConnection,
       secretEnvVar: requiresConnection ? (input.secretEnvVar as string) : null,
+      passEnv: passEnvResult.value,
     },
   };
 }
 
 function toSummary(row: CapabilityDefRow): CapabilitySummary {
-  return { id: row.id, slug: row.slug, name: row.name, description: row.description, transport: row.transport, kind: row.kind, requiresConnection: row.requiresConnection, builtin: false };
+  return { id: row.id, slug: row.slug, name: row.name, description: row.description, transport: row.transport, kind: row.kind, requiresConnection: row.requiresConnection, builtin: false, passEnv: row.passEnv };
 }
 
 /**
@@ -252,6 +308,7 @@ export function createCapabilityDef(db: CapabilitiesDbStore, input: Parameters<t
     slug: v.value.slug, name: v.value.name, description: v.value.description, transport: v.value.transport,
     kind: v.value.kind, provisionJson: JSON.stringify(v.value.provision), toolAllowlistJson: JSON.stringify(v.value.toolAllowlist),
     wantsScratchDir: v.value.wantsScratchDir, requiresConnection: v.value.requiresConnection, secretEnvVar: v.value.secretEnvVar,
+    passEnv: v.value.passEnv,
   });
   return toSummary(row);
 }
@@ -263,6 +320,30 @@ export function deleteCapabilityDef(db: CapabilitiesDbStore, id: string): void {
   // below. Low-risk edge — a python-venv capability deleted and then RE-CREATED under the exact same slug
   // would reuse its stale cached resolution/status rather than re-provisioning. Revisit if slug reuse
   // after delete becomes a real workflow; today deletion is expected to be rare and slugs aren't recycled.
+}
+
+/**
+ * Card fafae623: update ONLY an existing capability def's `passEnv` — the ONE field an owner may widen
+ * after creation (every other field is create-time-only; there is still no general "edit" route). Throws
+ * a descriptive Error on invalid input or an unknown id (mirrors createCapabilityDef's own throw style).
+ */
+export function updateCapabilityDefPassEnv(db: CapabilitiesDbStore, id: string, passEnv: unknown): CapabilitySummary {
+  const v = validatePassEnv(passEnv);
+  if (!v.ok) throw new Error(v.error);
+  const row = db.updateCapabilityDefPassEnv(id, v.value);
+  if (!row) throw new Error(`no capability def with id '${id}'`);
+  return toSummary(row);
+}
+
+/**
+ * Code Review round 1 (reviewer b5883c03), item 4: `PATCH /api/capabilities/:id`'s body MUST name the
+ * `passEnv` key explicitly — `{}` or a typo'd key name must be REJECTED, never silently treated as
+ * "clear it to []". Pure so the REST handler's requirement is directly unit-testable without a real
+ * HTTP server; `updateCapabilityDefPassEnv` itself stays agnostic to "was the key present at all" (it
+ * only ever sees the resolved value), so this check lives here, one level up, not inside it.
+ */
+export function requirePassEnvKey(body: Record<string, unknown>): string | null {
+  return "passEnv" in body ? null : "passEnv is required (pass [] explicitly to clear it)";
 }
 
 // --- generic resolution (owner-added rows only; the two builtins keep their own bespoke code in host.ts) ---
@@ -565,5 +646,10 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
     env[provision.outputDirEnvVar] = ctx.scratchDir;
   }
   const hasEnv = Object.keys(env).length > 0;
+  // Card fafae623, Code Review round 1 item 3: env-isolation wrapping moved OUT of this producer and
+  // into buildMcpServers' ONE chokepoint loop (so a FUTURE provision kind added here can't forget it
+  // the way this function once could) — this returns the raw, unwrapped mount. buildMcpServers reads
+  // `row.passEnv` itself (from the SAME catalog row its own caller already looked up) to compute that
+  // mount's `--allow` list; this function no longer needs to know about passEnv at all.
   return { type: "stdio", ...server, ...(hasEnv ? { env } : {}) };
 }

@@ -52,6 +52,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveProfile } = await import("@loom/shared");
+const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 
 const AGENT = { startupPrompt: "agent own prompt" };
 
@@ -80,28 +81,34 @@ check("(a) ON adds exactly the playwright key (everything else unchanged)",
 
 const pw = on.playwright;
 check("(a) playwright entry is a stdio server", pw?.type === "stdio");
-check("(a) command is an ABSOLUTE node path", typeof pw?.command === "string" && path.isAbsolute(pw.command));
-check("(a) args[0] is an ABSOLUTE path to the @playwright/mcp cli.js",
-  Array.isArray(pw?.args) && path.isAbsolute(pw.args[0]) && pw.args[0].endsWith("cli.js"));
-check("(a) the resolved cli.js exists on disk (pinned daemon dependency)", fs.existsSync(pw.args[0]));
+// Card fafae623: every stdio mount is rewritten to launch through Loom's env-isolating launcher —
+// command/args assertions below unwrap it first to reach Playwright's own real command/args.
+check("(a) command is the env-isolating launcher, an ABSOLUTE node path", typeof pw?.command === "string" && path.isAbsolute(pw.command) && pw.command === process.execPath);
+const pwUnwrapped = unwrapLauncherMount(pw);
+check("(a) the mount is routed through the env-isolating launcher", !!pwUnwrapped);
+check("(a) the REAL (unwrapped) command is an ABSOLUTE node path", typeof pwUnwrapped?.realCommand === "string" && path.isAbsolute(pwUnwrapped.realCommand));
+check("(a) the REAL args[0] is an ABSOLUTE path to the @playwright/mcp cli.js",
+  Array.isArray(pwUnwrapped?.realArgs) && path.isAbsolute(pwUnwrapped.realArgs[0]) && pwUnwrapped.realArgs[0].endsWith("cli.js"));
+check("(a) the resolved cli.js exists on disk (pinned daemon dependency)", fs.existsSync(pwUnwrapped.realArgs[0]));
 check("(a) headless + isolated flags are passed (unattended, per-worker isolation)",
-  pw.args.includes("--headless") && pw.args.includes("--isolated"));
+  pwUnwrapped.realArgs.includes("--headless") && pwUnwrapped.realArgs.includes("--isolated"));
 // playwrightMcpServer(dir) (the exported builder) agrees with what buildMcpServers embedded — and
 // buildMcpServers wires the per-session scratch dir, so the no-output-dir builder is NOT equal. Card
-// 8d26596b: buildMcpServers' OWN chokepoint additionally blanks LOOM_MCP_TOKEN on every stdio mount, which
-// the raw producer (playwrightMcpServer) never does on its own — so the comparison accounts for that one
-// key rather than asserting byte-identical objects.
-check("(a) playwrightMcpServer(scratchDir) returns the same absolute-path stdio entry, modulo the chokepoint's LOOM_MCP_TOKEN blank",
-  JSON.stringify({ ...playwrightMcpServer(sessionScratchDir("s1")), env: { [MCP_TOKEN_ENV_VAR]: "" } }) === JSON.stringify(pw));
+// fafae623, Code Review round 1 item 3: playwrightMcpServer returns the RAW (unwrapped) mount now — env-
+// isolation wrapping moved to buildMcpServers' own chokepoint loop — so the comparison is against the
+// UNWRAPPED form of what buildMcpServers actually embedded, not a byte-identical object compare.
+const rawPlaywright = playwrightMcpServer(sessionScratchDir("s1"));
+check("(a) playwrightMcpServer(scratchDir) returns the same command/args buildMcpServers wraps (modulo the chokepoint's wrap+LOOM_MCP_TOKEN blank)",
+  pwUnwrapped.realCommand === rawPlaywright.command && JSON.stringify(pwUnwrapped.realArgs) === JSON.stringify(rawPlaywright.args));
 check("(8d26596b) the playwright mount's env carries LOOM_MCP_TOKEN blanked to the empty string", pw.env?.[MCP_TOKEN_ENV_VAR] === "");
 
 // ===================== screenshot output defaults OUTSIDE the repo working tree (card 2218530e) =====================
 // The footgun: with no --output-dir, the Playwright MCP defaults captures to `<cwd>/.playwright-mcp`,
 // and cwd IS the project repo root — a stray-PNG-commit risk in a self-hosting repo. buildMcpServers
 // must wire --output-dir to a repo-EXTERNAL per-session scratch dir.
-const oi = pw.args.indexOf("--output-dir");
+const oi = pwUnwrapped.realArgs.indexOf("--output-dir");
 check("(out) the spawn passes --output-dir", oi !== -1);
-const outDir = pw.args[oi + 1];
+const outDir = pwUnwrapped.realArgs[oi + 1];
 check("(out) --output-dir is an ABSOLUTE path", typeof outDir === "string" && path.isAbsolute(outDir));
 check("(out) --output-dir is the per-session scratch dir (deterministic, under LOOM_HOME)",
   outDir === sessionScratchDir("s1"));
@@ -110,10 +117,12 @@ check("(out) the scratch dir lives under LOOM_HOME/tmp (repo-external, daemon-ow
 // An EXPLICIT caller-provided output dir is honored verbatim (the seam still threads a chosen path) —
 // and an absolute screenshot FILENAME bypasses --output-dir via playwright-core's path.resolve, so an
 // explicit caller path always lands where asked.
+// Card fafae623, Code Review round 1 item 3: playwrightMcpServer is called DIRECTLY here (not through
+// buildMcpServers), so it returns the RAW (unwrapped) mount — check .args directly, no unwrap needed.
 const explicit = path.join(tmpHome, "explicit-shots");
+const explicitArgs = playwrightMcpServer(explicit).args;
 check("(out) an explicit output dir passed to playwrightMcpServer is honored verbatim",
-  playwrightMcpServer(explicit).args.includes("--output-dir")
-  && playwrightMcpServer(explicit).args[playwrightMcpServer(explicit).args.indexOf("--output-dir") + 1] === explicit);
+  explicitArgs.includes("--output-dir") && explicitArgs[explicitArgs.indexOf("--output-dir") + 1] === explicit);
 // omitting the dir ⇒ NO --output-dir flag (byte-identical to the pre-output-dir spawn shape).
 check("(out) playwrightMcpServer() with no dir omits --output-dir (additive)",
   !playwrightMcpServer().args.includes("--output-dir"));
@@ -133,7 +142,7 @@ const scratchOn = scratchDirEnv("s1");
 check("(env) browserTesting spawn: LOOM_SCRATCH_DIR is present and equals sessionScratchDir(sessionId)",
   scratchOn.LOOM_SCRATCH_DIR === sessionScratchDir("s1"));
 check("(env) browserTesting spawn: LOOM_SCRATCH_DIR equals the Playwright --output-dir (same allowed root)",
-  scratchOn.LOOM_SCRATCH_DIR === on.playwright.args[on.playwright.args.indexOf("--output-dir") + 1]);
+  scratchOn.LOOM_SCRATCH_DIR === pwUnwrapped.realArgs[pwUnwrapped.realArgs.indexOf("--output-dir") + 1]);
 // THE ARM THAT COULD ACTUALLY DISCRIMINATE THE FIX: a plain (non-browser) session — a browser spawn would
 // have passed this check before AND after the fix, so it proves nothing about the widening on its own.
 check("(env) plain (non-browser) spawn: LOOM_SCRATCH_DIR IS present (widened — no longer browser-only)",
@@ -161,7 +170,8 @@ check("(env) projectWorkDirEnv never creates the dir on disk (pure — mirrors s
 // call site can't resurrect the old vault-littering behavior.
 const vault = path.join(tmpHome, "the-vault");
 const withVault = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", browserTesting: true, vaultPath: vault });
-const vaultOutDir = withVault.playwright.args[withVault.playwright.args.indexOf("--output-dir") + 1];
+const withVaultUnwrapped = unwrapLauncherMount(withVault.playwright);
+const vaultOutDir = withVaultUnwrapped.realArgs[withVaultUnwrapped.realArgs.indexOf("--output-dir") + 1];
 check("(vault) a vaultPath property on the call is IGNORED — --output-dir is still the scratch dir",
   vaultOutDir === sessionScratchDir("s1"));
 check("(vault) --output-dir is an ABSOLUTE path", path.isAbsolute(vaultOutDir));
@@ -297,7 +307,7 @@ try {
   const qaMcp = buildMcpServers({ sessionId: sQA.id, port: 4317, role: oQA.role, browserTesting: oQA.browserTesting });
   check("(e2e) QA agent: the spawn's mcp-config includes the playwright server", "playwright" in qaMcp);
   // DoD: the resolved default capture output dir is OUTSIDE the project repo working tree (repoPath).
-  const qaArgs = qaMcp.playwright.args;
+  const qaArgs = unwrapLauncherMount(qaMcp.playwright).realArgs;
   const qaOut = qaArgs[qaArgs.indexOf("--output-dir") + 1];
   const rel = path.relative(repo, qaOut);
   check("(e2e) QA agent: default screenshot output dir is OUTSIDE repoPath (no stray-PNG-in-repo)",

@@ -72,6 +72,9 @@ export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt"
       wantsScratchDir: false,
       requiresConnection: true,
       secretEnvVar: "GITHUB_PERSONAL_ACCESS_TOKEN",
+      // Card fafae623: seed rows never carry a passEnv widening — it's an owner-only escape hatch, set
+      // later via PATCH, never at seed time.
+      passEnv: [],
     },
     {
       slug: "image-gen",
@@ -91,6 +94,8 @@ export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt"
       wantsScratchDir: true,
       requiresConnection: true,
       secretEnvVar: "GEMINI_API_KEY",
+      // Card fafae623: see the "github" row's identical comment above.
+      passEnv: [],
     },
   ];
 }

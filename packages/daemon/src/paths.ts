@@ -393,6 +393,14 @@ export const WIN_JOB_LAUNCHER_PATH = path.join(__dirname, "..", "assets", "nativ
 /** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */
 export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lint.mjs");
 /**
+ * env-isolated-launch.mjs (card fafae623) ships as an asset too — a Loom-owned launcher every Loom-built
+ * stdio MCP mount's `command`/`args` is rewritten to invoke instead of the real target directly (see
+ * {@link pty/env-isolation.ts!wrapStdioMountWithEnvIsolation}). It rebuilds the real target's child env
+ * from a small fixed base allowlist plus a per-mount named `--allow` list, so the daemon's own ambient
+ * env, delivered project credentials, and `LOOM_MCP_TOKEN` never reach a stdio MCP's real process.
+ */
+export const ENV_ISOLATED_LAUNCH_SCRIPT = path.join(__dirname, "..", "assets", "env-isolated-launch.mjs");
+/**
  * decision-records.mjs (card 661b7d46) — the PostToolUse `Read` hook that appends complete, out-of-band
  * decision records to a `Read` result when the range actually returned intersects a `// @decision <id>`
  * source anchor. Ships as an asset, read live from the package dir like the other hooks here — no

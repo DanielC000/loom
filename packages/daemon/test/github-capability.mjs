@@ -192,6 +192,9 @@ try {
     resolveCapabilityServer(bareRow, {}) === null);
 
   fs.writeFileSync(fakeBinFile, ""); // "install" it, simulating npm/npx becoming available after boot
+  // Card fafae623, Code Review round 1 item 3: resolveCapabilityServer returns the RAW mount (env-isolation
+  // wrapping moved to buildMcpServers' own chokepoint loop — see capability-registry.mjs's dedicated
+  // chokepoint test for proof that a producer leaving its mount raw still ends up wrapped there).
   const resolvedAfterInstall = resolveCapabilityServer(bareRow, {});
   check("(self-heal) the EXACT SAME row + provisionJson (unchanged, no re-seed) resolves once the binary appears on PATH",
     resolvedAfterInstall?.command === fakeBinFile);

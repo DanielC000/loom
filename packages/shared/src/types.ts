@@ -344,6 +344,10 @@ export interface CapabilitySummary {
   requiresConnection: boolean;
   /** Loom-shipped (catalog seed) vs owner-added via the Settings UI/REST. */
   builtin: boolean;
+  /** Card fafae623: extra env KEY NAMES (never values) this capability's env-isolating launcher also
+   *  forwards, beyond the fixed base allowlist — absent for a builtin (which has no `passEnv` concept),
+   *  `[]` for an owner-added row that hasn't set any. HUMAN-ONLY to change (PATCH /api/capabilities/:id). */
+  passEnv?: string[];
 }
 
 // --- Bundled-profile customization (the profiles analog of skill customization) -------------------

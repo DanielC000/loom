@@ -60,6 +60,7 @@ const {
 const { validateProfile, agentProfileKeyError } = await import("../dist/profiles/validate.js");
 const { LOOM_FIRST_PARTY_SERVER_IDS } = await import("../dist/pty/tool-attribution.js");
 const { RESERVED_CAPABILITY_SLUGS } = await import("../dist/capabilities/registry.js");
+const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 fs.mkdirSync(SETTINGS_DIR, { recursive: true });
 
 // ===================== validateProfile / AGENT_FORBIDDEN_PROFILE_KEYS: capabilities is HUMAN-only =====================
@@ -128,8 +129,11 @@ const withFake = buildMcpServers({
   capabilities: [{ slug: "fake-thing" }], capabilityCatalog: [fakeBundled],
 });
 check("(owner-added) an enabled owner-added bundled capability mounts under its OWN slug key", "fake-thing" in withFake);
-check("(owner-added) command/args come straight from the bundled provision recipe",
-  withFake["fake-thing"].command === process.execPath && JSON.stringify(withFake["fake-thing"].args) === JSON.stringify(["--version"]));
+// Card fafae623: every stdio mount now routes through the env-isolating launcher — unwrap first.
+const fakeThingUnwrapped = unwrapLauncherMount(withFake["fake-thing"]);
+check("(owner-added) the mount is routed through the env-isolating launcher", !!fakeThingUnwrapped);
+check("(owner-added) the REAL command/args (once unwrapped) come straight from the bundled provision recipe",
+  fakeThingUnwrapped?.realCommand === process.execPath && JSON.stringify(fakeThingUnwrapped?.realArgs) === JSON.stringify(["--version"]));
 
 const withUnknownSlug = buildMcpServers({ sessionId: "s3", port: 4317, role: "worker", capabilities: [{ slug: "nope" }], capabilityCatalog: [] });
 check("(log-and-skip) an enabled capability absent from the catalog is skipped, never thrown",
@@ -342,8 +346,9 @@ const withMarkitdownSquat = buildMcpServers({
   sessionId: "s-42e9caf9-md", port: 4317, role: "worker", documentConversion: true,
   capabilities: [{ slug: "markitdown" }], capabilityCatalog: [markitdownSquatDef],
 });
+const realMarkitdownUnwrapped = unwrapLauncherMount(withMarkitdownSquat.markitdown);
 check("(42e9caf9) a catalog row squatting 'markitdown' never displaces the real markitdown mount",
-  Array.isArray(withMarkitdownSquat.markitdown?.args) && withMarkitdownSquat.markitdown.args.length === 0 && !withMarkitdownSquat.markitdown?.args?.includes("--version"));
+  !!realMarkitdownUnwrapped && realMarkitdownUnwrapped.realArgs.length === 0 && !realMarkitdownUnwrapped.realArgs.includes("--version"));
 
 // "codescape" isn't a capability grant at all (a separate per-project toggle) — exercised here with
 // codescapeEnabled left unset/false, so there is no real mount to defend; the reservation must still
@@ -404,9 +409,26 @@ const commandDef = {
   ...fakeBundled, slug: "arb-cmd", kind: "command",
   provisionJson: JSON.stringify({ kind: "command", command: process.execPath, args: ["--version"] }),
 };
+// Card fafae623, Code Review round 1 item 3: resolveCapabilityServer itself returns the RAW, unwrapped
+// mount now — env-isolation wrapping moved to buildMcpServers' own chokepoint loop (see capability-
+// chokepoint tests further below for proof that buildMcpServers wraps it anyway).
 const resolvedCommand = resolveCapabilityServer(commandDef, {});
 check("(command) resolveCapabilityServer mounts a command capability from its resolved abs command + args",
   resolvedCommand?.command === process.execPath && JSON.stringify(resolvedCommand?.args) === JSON.stringify(["--version"]));
+
+// ===================== Code Review round 1 (reviewer b5883c03) item 3 — THE STRUCTURAL CHOKEPOINT
+// GUARANTEE: a stdio producer (resolveCapabilityServer, proven raw/unwrapped two lines above) does NOT
+// wrap its own mount — buildMcpServers' ONE chokepoint loop does it regardless, so a FUTURE producer
+// that forgets to wrap (impossible to forget, since there's nothing left for it to do) still ends up
+// isolated. Reuses THIS SAME commandDef/row to prove the exact contrast: raw from the producer directly,
+// wrapped once it flows through buildMcpServers. =====================
+const withChokepointCommand = buildMcpServers({
+  sessionId: "s-chokepoint", port: 4317, role: "worker",
+  capabilities: [{ slug: "arb-cmd" }], capabilityCatalog: [commandDef],
+});
+const chokepointUnwrapped = unwrapLauncherMount(withChokepointCommand["arb-cmd"]);
+check("(chokepoint) buildMcpServers wraps a mount its OWN producer left raw — the chokepoint, not the producer, does the wrapping",
+  !!chokepointUnwrapped && chokepointUnwrapped.realCommand === process.execPath && JSON.stringify(chokepointUnwrapped.realArgs) === JSON.stringify(["--version"]));
 
 // credential tie (OQ1) covered for the command kind too, not just bundled.
 const commandCredDef = {
@@ -495,6 +517,7 @@ const coldAttempt = resolveCapabilityServer(venvDef, {});
 check("(venv) COLD resolves null the FIRST time (never blocks) and kicks background provisioning", coldAttempt === null);
 await new Promise((r) => setTimeout(r, 50)); // let the fake (async) provisioner's promise settle
 check("(venv) provisioning status reaches 'ready' via the FAKE provisioner", getCapabilityProvisionStatus("venv-thing")?.state === "ready");
+// Card fafae623, Code Review round 1 item 3: raw (unwrapped) — same reasoning as the 'command' kind above.
 const warmAttempt = resolveCapabilityServer(venvDef, {});
 check("(venv) a LATER call resolves the now-warm binary (no re-provisioning)", warmAttempt?.command === "/fake/venv/bin/a-fake-pypi-pkg");
 __setCapabilityProvisionerForTest(); // restore + reset all per-slug state

@@ -1279,6 +1279,7 @@ CREATE TABLE IF NOT EXISTS capability_defs (
   wants_scratch_dir INTEGER NOT NULL DEFAULT 0,
   requires_connection INTEGER NOT NULL DEFAULT 0,
   secret_env_var TEXT,                       -- env var name the P1 secret is injected under; NULL if N/A
+  pass_env_json TEXT NOT NULL DEFAULT '[]',  -- card fafae623: extra env KEY NAMES the launcher also forwards
   created_at TEXT NOT NULL
 );
 -- Owner-declared SYMMETRIC project link (board card 2349d90c) — the sole gate for the manager<->manager
@@ -2911,6 +2912,7 @@ export class Db {
     this.migrateDeliveredCredentialsAddedColumns();
     this.migrateDeliveredCredentials();
     this.migrateConnections();
+    this.migrateCapabilityDefs();
     this.migrateProjectMemory();
     this.migratePurgeLegacySessionEnvHistory();
     this.migratePurgeLegacyAlertWebhookHistory();
@@ -3488,6 +3490,20 @@ export class Db {
     );
     for (const [name, type] of Object.entries(CONNECTION_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE connections ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Card fafae623: ADD COLUMN `pass_env_json` to `capability_defs` for an existing DB (a fresh install
+   * already has it via CREATE TABLE). Nullable-safe default `'[]'` — a pre-card row backfills to "no
+   * extra allow-list keys", byte-identical to its prior (pre-launcher) behavior.
+   */
+  private migrateCapabilityDefs(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(capability_defs)").all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!have.has("pass_env_json")) {
+      this.db.exec("ALTER TABLE capability_defs ADD COLUMN pass_env_json TEXT NOT NULL DEFAULT '[]'");
     }
   }
 
@@ -5803,13 +5819,14 @@ export class Db {
   createCapabilityDef(input: Omit<CapabilityDefRow, "id" | "createdAt">): CapabilityDefRow {
     const row: CapabilityDefRow = { id: randomUUID(), createdAt: new Date().toISOString(), ...input };
     this.db.prepare(
-      `INSERT INTO capability_defs (id,slug,name,description,transport,kind,provision_json,tool_allowlist_json,wants_scratch_dir,requires_connection,secret_env_var,created_at)
-       VALUES (@id,@slug,@name,@description,@transport,@kind,@provisionJson,@toolAllowlistJson,@wantsScratchDir,@requiresConnection,@secretEnvVar,@createdAt)`,
+      `INSERT INTO capability_defs (id,slug,name,description,transport,kind,provision_json,tool_allowlist_json,wants_scratch_dir,requires_connection,secret_env_var,pass_env_json,created_at)
+       VALUES (@id,@slug,@name,@description,@transport,@kind,@provisionJson,@toolAllowlistJson,@wantsScratchDir,@requiresConnection,@secretEnvVar,@passEnvJson,@createdAt)`,
     ).run({
       ...row,
       wantsScratchDir: row.wantsScratchDir ? 1 : 0,
       requiresConnection: row.requiresConnection ? 1 : 0,
       secretEnvVar: row.secretEnvVar ?? null,
+      passEnvJson: JSON.stringify(row.passEnv ?? []),
     });
     return row;
   }
@@ -5818,11 +5835,20 @@ export class Db {
     this.db.prepare("DELETE FROM capability_defs WHERE id = ?").run(id);
   }
   /** Rewrite an EXISTING capability_defs row's kind + provisioning recipe in place (id/slug/name/description/
-   *  transport/toolAllowlistJson/wantsScratchDir/requiresConnection/secretEnvVar all UNCHANGED). Narrow surface
-   *  for `capabilities/seed.ts`'s boot migrations (e.g. the github npx→github-binary rewrite) — not a general
-   *  capability editor (there is none; owner-added rows are create/delete only). */
+   *  transport/toolAllowlistJson/wantsScratchDir/requiresConnection/secretEnvVar/passEnv all UNCHANGED). Narrow
+   *  surface for `capabilities/seed.ts`'s boot migrations (e.g. the github npx→github-binary rewrite) — not a
+   *  general capability editor. */
   updateCapabilityDefProvision(id: string, kind: CapabilityProvisionKind, provisionJson: string): void {
     this.db.prepare("UPDATE capability_defs SET kind = ?, provision_json = ? WHERE id = ?").run(kind, provisionJson, id);
+  }
+  /** Card fafae623: update ONLY `passEnv` on an existing capability_defs row — the one post-create-editable
+   *  field (every other field stays create-time-only). Returns the updated row, or `undefined` when `id`
+   *  doesn't name an existing row (idempotent-style miss, never throws). */
+  updateCapabilityDefPassEnv(id: string, passEnv: string[]): CapabilityDefRow | undefined {
+    const info = this.db.prepare("UPDATE capability_defs SET pass_env_json = ? WHERE id = ?").run(JSON.stringify(passEnv), id);
+    if (info.changes === 0) return undefined;
+    const r = this.db.prepare("SELECT * FROM capability_defs WHERE id = ?").get(id) as Row | undefined;
+    return r ? toCapabilityDefRow(r) : undefined;
   }
 
   // --- project_links (owner-declared symmetric project link, cross-project peer_message gate) ---
@@ -11985,12 +12011,17 @@ function toProjectLink(r0: unknown): ProjectLink {
 }
 function toCapabilityDefRow(r0: unknown): CapabilityDefRow {
   const r = r0 as Row;
+  let passEnv: string[] = [];
+  try {
+    const parsed = JSON.parse((r.pass_env_json as string) ?? "[]");
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) passEnv = parsed;
+  } catch { /* malformed row — degrade to no extra allow-list keys, never throw */ }
   return {
     id: r.id as string, slug: r.slug as string, name: r.name as string, description: (r.description as string) ?? "",
     transport: r.transport as "stdio" | "http", kind: r.kind as CapabilityProvisionKind,
     provisionJson: r.provision_json as string, toolAllowlistJson: (r.tool_allowlist_json as string) ?? "[]",
     wantsScratchDir: (r.wants_scratch_dir as number) === 1, requiresConnection: (r.requires_connection as number) === 1,
-    secretEnvVar: (r.secret_env_var as string) ?? null, createdAt: (r.created_at as string) ?? "",
+    secretEnvVar: (r.secret_env_var as string) ?? null, passEnv, createdAt: (r.created_at as string) ?? "",
   };
 }
 function toPresetPromptSuggestion(r0: unknown): PresetPromptSuggestion {
