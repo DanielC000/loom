@@ -1002,6 +1002,10 @@ const TEST_TIMEOUT_MS = 120_000;
 // splits did not stop the kills); the no-blanket-raise principle above stands. The nine 300s entries below
 // carrying "card a9119abf" are sized off in-suite max pass + tail, NOT off a solo-times-N factor.
 const TEST_TIMEOUT_OVERRIDES = {
+  "merge-confirm-verdict-cache-union-merge-refusal": 150_000, // card 3573d2fb: no prior override, measured
+    // right up against the 120s blanket ceiling under a loaded full-gate run (killed by SIGTERM). Measured
+    // solo, foreground, single lane: 69.3s (n=1, 2026-11-03, one host) — 57.8% of the 120s default. 150k
+    // gives ~2.2x the measured solo run.
   "cut-base-restamp-eligibility": 200_000, // card cc788ae4: 9 scenarios (1-7 + 5/5b forgery pairs), real git repos throughout — scenario 7's own over-cap proof chains 2001 real `commit-tree` objects (cheap individually, but 2001 sequential git spawns add up) to exercise the real, non-configurable CUT_BASE_RESTAMP_MAX_SCAN bound. Measured solo, foreground, single lane: 79.47s (n=1, 2026-10-28, one host) and 71s (Code Review's own measurement, same host class) — both past the ~60s new-file-timing guidance. 200k gives ~2.5x the slower measured run (79.47s).
   "merge-confirm-post-squash-throw-recovery": 300_000, // card 7f86c02f (Code Review follow-up S2): 10 real createWorktree + confirmWorkerMergeTracked/mergeBatchTracked scenarios (pre/post x solo/solo-after-5s/batch/concurrent, plus 2 probe-throws variants), one with a deliberate 5.6s sleep past MERGE_OP_RETAIN_MS. Measured solo, foreground, single lane: 119.47s and 120.66s (n=2, 2026-10-27, one host) — right at the 120s blanket ceiling. 300k gives ~2.5x the slower solo run (120.66s).
   "comment-anchor-lint": 300_000, // card 04d9f322: the file grew a new real-repo regression-pin section (a
