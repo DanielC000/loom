@@ -2427,8 +2427,13 @@ export function buildMcpServers(o: {
     if (server) {
       mcpServers[def.slug] = server;
       // Card 188d6a8c: the seeded github-binary capability's Go binary honors HTTP_PROXY/HTTPS_PROXY by
-      // default (net/http) — keyed on `def.kind`, a SEED-ONLY value validateCapabilityDefInput refuses
-      // from any owner input, never on `def.slug`/name (owner-collidable once the seeded row is deleted).
+      // default (net/http) — keyed on `def.kind === "github-binary"`, never on `def.slug`/name
+      // (owner-collidable once the seeded row is deleted). `validateCapabilityDefInput` refuses a direct
+      // owner-authored kind:"github-binary" row, but an owner CAN still reach this kind indirectly
+      // (delete the seeded row, POST a legacy npx row, let the boot migration rewrite it) — so the real
+      // invariant this keys on is that every github-binary row's executable is Loom's fixed,
+      // checksum-verified binary (or the human-only `LOOM_GITHUB_MCP_BIN` override), never a different
+      // executable, regardless of how that row's kind was set.
       // Every other catalog capability gets proxy keys ONLY via its own passEnv, unchanged.
       passEnvByMountKey[def.slug] = [
         ...(def.passEnv ?? []),

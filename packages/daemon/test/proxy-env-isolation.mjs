@@ -19,6 +19,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (e) a REAL child_process spawn proves an owner-added row's own explicit `passEnv:["HTTPS_PROXY"]`
 //       still reaches the real target with the credentialed value — the existing opt-in mechanism,
 //       unaffected by this card's scoping of the base allowlist.
+//   (f) card d2fece1f: a browserTesting:true session's Playwright mount gets NONE of PROXY_ENV_KEYS —
+//       confirmed (see the fafae623 record's own "Proxy credentials" section) Playwright doesn't read
+//       them at all, and the browserTesting grant path never reaches the per-mount passEnvByMountKey
+//       loop in the first place (it `continue`s before that loop).
+//   (g) card d2fece1f: the seeded image-gen capability (kind:"npm-pinned") gets NONE of PROXY_ENV_KEYS —
+//       the fixed entitlement is keyed on `def.kind === "github-binary"` only, and npm-pinned is not that
+//       kind, so it falls through to the same "no fixed entitlement" path as any other owner-added row.
 //
 // What this file does NOT cover (by construction, not oversight): a real end-to-end spawn of markitdown's
 // or github-binary's OWN resolved mount with a credentialed proxy value actually reaching the process.
@@ -162,9 +169,42 @@ const passEnvProxyRow = {
   check("(e) the real spawned target did NOT receive HTTP_PROXY (not named in this row's passEnv)", !("HTTP_PROXY" in echoed.env));
 }
 
+// ===================== (f) browserTesting:true: the Playwright mount gets NO PROXY_ENV_KEYS =====================
+{
+  const mcpServers = buildMcpServers({ sessionId: "s-playwright", port: 4317, role: "worker", browserTesting: true });
+  const unwrapped = unwrapLauncherMount(mcpServers.playwright);
+  check("(f) the playwright mount resolved (is @playwright/mcp installed?)", unwrapped !== null);
+  for (const k of PROXY_ENV_KEYS) {
+    check(`(f) the playwright mount's --allow list does NOT carry ${k} (browserTesting has no proxy entitlement)`, !unwrapped?.allowKeys.includes(k));
+  }
+}
+
+// ===================== (g) the npm-pinned image-gen mount gets NO PROXY_ENV_KEYS =====================
+// Forced resolution through a FIXTURE provisionJson (kind:"bundled" → echo-env.mjs, the same trick
+// image-gen-capability.mjs uses) so this never depends on a real mcp-imagenate install. `def.kind` (the
+// TOP-LEVEL field the entitlement actually keys on — never `provision.kind`) stays "npm-pinned" throughout.
+const imageGenRow = {
+  id: "cap-image-gen", slug: "image-gen", name: "Image Generation (Gemini/Imagen)", description: "",
+  transport: "stdio", kind: "npm-pinned",
+  provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [ECHO_ENV_FIXTURE] }),
+  toolAllowlistJson: "[]", wantsScratchDir: false, requiresConnection: false, secretEnvVar: null,
+  passEnv: [], createdAt: new Date().toISOString(),
+};
+{
+  const mcpServers = buildMcpServers({
+    sessionId: "s-image-gen", port: 4317, role: "worker",
+    capabilities: [{ slug: "image-gen" }], capabilityCatalog: [imageGenRow],
+  });
+  const unwrapped = unwrapLauncherMount(mcpServers["image-gen"]);
+  check("(g) the npm-pinned image-gen (fixture-resolved) mount mounted", unwrapped !== null);
+  for (const k of PROXY_ENV_KEYS) {
+    check(`(g) the npm-pinned image-gen mount's --allow list does NOT carry ${k} (no fixed entitlement for this kind)`, !unwrapped?.allowKeys.includes(k));
+  }
+}
+
 cleanupPathSync(tmpHome);
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — proxy env-key entitlement (card 188d6a8c): markitdown and the seeded github-binary capability get PROXY_ENV_KEYS (a fixed addition / kind-keyed respectively); a same-slug impostor row and an ordinary owner-added row with no passEnv get neither; and a REAL child_process spawn proves an owner's own passEnv:['HTTPS_PROXY'] still forwards the raw credentialed value end to end — claude-free, network-free."
+  ? "\n✅ ALL PASS — proxy env-key entitlement (cards 188d6a8c, d2fece1f): markitdown and the seeded github-binary capability get PROXY_ENV_KEYS (a fixed addition / kind-keyed respectively); a same-slug impostor row, an ordinary owner-added row with no passEnv, a browserTesting:true Playwright mount, and the npm-pinned image-gen mount all get neither; and a REAL child_process spawn proves an owner's own passEnv:['HTTPS_PROXY'] still forwards the raw credentialed value end to end — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

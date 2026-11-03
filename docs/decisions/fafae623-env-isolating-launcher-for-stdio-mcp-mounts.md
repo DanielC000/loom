@@ -170,6 +170,15 @@ card's own `worker_report blocked` on 2026-11-03) rather than assumed:
 - The seeded **github** capability (`kind: "github-binary"`, a Loom-downloaded, checksum-verified Go
   binary) plausibly needs them via Go's `net/http` default `ProxyFromEnvironment` behavior — inferred from
   Go stdlib convention, not measured against the binary's own source (not vendored in this repo).
+  **Correction (card `d2fece1f`):** an earlier draft of this record called `github-binary` "a kind no
+  owner input can produce" — false. `validateCapabilityDefInput` refuses a DIRECT owner-authored
+  `kind:"github-binary"` row, but an owner can still reach it indirectly: delete the seeded `"github"`
+  row, POST a legacy npx row (`kind:"bundled"`, `command:"npx"`, the archived
+  `@modelcontextprotocol/server-github` args), and the next boot's `migrateGithubCapabilityToBinary`
+  (`capabilities/seed.ts`) rewrites that row's `kind` to `"github-binary"` in place. The real invariant
+  this entitlement relies on is narrower and still holds: every `github-binary` row's executable is
+  Loom's fixed, checksum-verified binary (or the human-only `LOOM_GITHUB_MCP_BIN` override) — the
+  entitlement can never reach a different executable, regardless of how the row's `kind` got set.
 - **codescape** mounts as `{type:"http"}`, never wrapped by this launcher at all — out of scope.
 - A generic owner-added `node-package`/`bundled`/`command`/`npm-pinned` capability is tool-dependent; it
   already has the exact mechanism it needs (`passEnv`).
@@ -182,10 +191,11 @@ exists to serve), only to Loom's own entitled, seeded, network-reaching mounts v
 
 - **markitdown**: a fixed addition to its `--allow` list (hardcoded, since it's not a catalog row and has
   no `passEnv` field to opt into) — `passEnvByMountKey["markitdown"] = PROXY_ENV_KEYS`.
-- **The seeded github-binary capability**: keyed on `def.kind === "github-binary"` — a SEED-ONLY kind
-  `validateCapabilityDefInput` structurally rejects from any owner-supplied input (see its own `kind`
-  enum check), so this can never be forged by deleting+recreating a same-slug row. Never keyed on `slug`
-  or `name` — both are owner-collidable once the seeded row is deleted.
+- **The seeded github-binary capability**: keyed on `def.kind === "github-binary"`, never on `slug` or
+  `name` — both are owner-collidable once the seeded row is deleted. `validateCapabilityDefInput` refuses
+  a direct owner-authored `kind:"github-binary"` row, but the kind CAN still be reached indirectly (see
+  the correction above) — the entitlement holds anyway because every row of that kind is pinned to
+  Loom's fixed, checksum-verified executable, never a different one.
 - **Playwright**: nothing added (confirmed no need, above).
 - **Every other owner-added catalog capability**: proxy keys ONLY via its own existing human-only
   `passEnv` — no code change; the mechanism already existed.
@@ -194,6 +204,14 @@ This is a user-visible behavior change: an owner-added capability that relied on
 forwarding now needs `passEnv` set explicitly. No schemeless/malformed-proxy-value parser was added —
 without stripping, there is nothing to parse; an entitled mount's raw value passes through exactly as it
 did before this card, just scoped to who receives it.
+
+**Disclosed, unmeasured residual (card `d2fece1f`):** Chromium, launched by Playwright's own MCP server
+on headless Linux, may fall back to reading the standard `HTTP_PROXY`/`HTTPS_PROXY` env vars itself
+(independent of whether `@playwright/mcp` forwards them) — not measured either way in this card. The
+scoping change above is still the safe direction (it only ever REMOVES ambient proxy env from a mount
+that previously received it unconditionally), but a Linux user on a mandatory corporate proxy could lose
+Playwright's browser connectivity as a result, with no `passEnv`-shaped fix available today since
+Playwright isn't a catalog row. Not reopened by this card — tracked here for whoever picks it up next.
 
 ## Registry credentials (card `3faaab0d`)
 
@@ -232,8 +250,11 @@ fixed proxy-entitled mount (markitdown, github-binary) picks it up either.
   for proxy — card `3faaab0d`'s own investigation found no seeded row needs it at runtime; a future seeded
   row that genuinely does needs a fresh decision, not a silent copy of the proxy shape.
 - Do not key a mount's proxy entitlement on its `slug` or `name` — both are owner-collidable (delete the
-  seeded row, recreate one with the same slug). Key it on `def.kind === "github-binary"` (a SEED-ONLY kind
-  no owner input can produce) or on the hardcoded mount key (`"markitdown"`) for a non-catalog mount.
+  seeded row, recreate one with the same slug). Key it on `def.kind === "github-binary"` instead — not
+  because an owner can never reach that kind (they can, indirectly, via the delete-and-recreate +
+  boot-migration path above), but because every row of that kind, however it got there, is pinned to
+  Loom's fixed, checksum-verified executable — or on the hardcoded mount key (`"markitdown"`) for a
+  non-catalog mount.
 - Do not add a strip/parse step for a proxy value reaching an entitled mount — the decision was to scope
   WHO receives the raw value, never to sanitize it; stripping userinfo would break the credentialed
   corporate-proxy case that is the entire reason the value is forwarded.

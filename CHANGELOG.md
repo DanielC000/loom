@@ -14,6 +14,25 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
   install upgrades automatically on its next boot; if you've already customized your Platform agent's
   prompt, it keeps running exactly as you left it and instead gets a one-time board card offering the
   upgrade.
+- **Loom-mounted stdio MCP servers now get a small, allowlisted environment instead of inheriting the
+  daemon's full process environment.** Every MCP server Loom spawns over stdio for a session — Playwright,
+  markitdown, the seeded GitHub binary, and any capability you add yourself — launches through a per-mount
+  allowlist instead of inheriting everything the daemon process has, closing a gap where a token or
+  credential meant for a different mount, or the daemon's own ambient environment, could reach one it
+  wasn't meant for.
+- **`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and an environment-set `npm_config_registry` are no longer
+  forwarded to most stdio MCP mounts.** Both used to ride the shared base environment unconditionally —
+  including, for a proxy or registry URL with embedded `user:pass@host` credentials, to every mount
+  regardless of whether it could even use them. They're now scoped: markitdown and the seeded GitHub
+  capability still receive the proxy variables (both genuinely use them); nothing else does by default,
+  and nothing receives `npm_config_registry` by default. **Upgrade note:** if you added your own
+  capability that relies on an ambient `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, or on an
+  environment-set `npm_config_registry`, list that variable in the capability's `passEnv` via
+  `PATCH /api/capabilities/:id` (there's no Settings UI for this yet). A private registry configured in
+  `~/.npmrc` or a project `.npmrc` is unaffected, since `HOME`/`USERPROFILE` are still forwarded — only a
+  registry set via the environment is affected, and a `pnpm`-launched daemon always carried
+  `npm_config_registry` in its env (pnpm injects it), so this can affect any pnpm-launched daemon, not
+  just one with an explicit proxy configured.
 
 ## [0.31.0] — 2026-10-13
 
