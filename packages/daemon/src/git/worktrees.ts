@@ -214,6 +214,9 @@ export interface BoundedGitDeps {
    *  threaded down from a caller that knows the project/repoKey/mainline-branch (sessions/service.ts,
    *  mcp/tasks.ts) — this module is pure-git and has no DB of its own. */
   goneBranchLedger?: GoneBranchLedgerFacts;
+  /** @decision e8d4fdc3 — the ALREADY_MERGED fallback {@link findLandedSquashCommit} consults ONLY after
+   *  its own trailer walk finds nothing; absent (every existing caller) ⇒ byte-identical to today. */
+  workerTipLedger?: WorkerTipLedgerFacts;
   /**
    * Card 9a5d040c (child of d9332365): the project's resolved `orchestration.commitTrailers`/
    * `commitLogBody` (see `projects/resolve-repo.ts`'s `ResolvedRepo`), threaded down from the one
@@ -253,6 +256,25 @@ export interface GoneBranchLedgerFacts {
    *  used ONLY to rate-limit the `"error"`-verdict log line (never any DB query or caching decision) so a
    *  genuinely transient, repeatedly-failing lookup doesn't spam the log once per board read. */
   scopeKey: string;
+}
+
+/** @decision e8d4fdc3 — the ALREADY_MERGED fallback's DB-side input, threaded down like
+ *  {@link GoneBranchLedgerFacts} (`Db.getWorkerTipLedgerFacts`). Never backed by `mainline_landed_commits`'s
+ *  own trust-walk chain — see `batch_landed_worker_tips`'s CREATE TABLE doc, db.ts.
+ *  @decision e8d4fdc3 round 2 — never match on `workerTip` alone: a review fork cut from a landed
+ *  branch's own headSha shares that SAME tip without being that branch, and a tip-only match let it
+ *  finish and delete as "already landed". Both members below key on the BRANCH too. */
+export interface WorkerTipLedgerFacts {
+  /** Cheap DB-only pre-check, no git call: true when this scope has at least one row (solo or batch)
+   *  keyed to this worker BRANCH specifically. Lets {@link tryWorkerTipLedgerFallback} skip its own
+   *  `rev-parse` entirely for the common not-yet-landed population — see that function's own doc. */
+  hasAnyForBranch: (branch: string) => boolean;
+  /** This worker branch's own live tip -> the commit a PAST landing (solo or batch) landed it as, or
+   *  `null` on no match. Keyed on (`branch`, `workerTip`) TOGETHER — a tip match alone is never
+   *  sufficient (see this interface's own round-2 doc above). The CALLER must separately verify the
+   *  returned sha is still an ancestor of the ref being checked before trusting it — this never does
+   *  that verification itself. */
+  lookupByWorkerTip: (branch: string, workerTip: string) => string | null;
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -8093,6 +8115,37 @@ async function walkCandidates<C extends { strict: boolean }, R>(
   return null;
 }
 
+/** @decision e8d4fdc3 — consulted by {@link findLandedSquashCommit} ONLY after its own trailer walk finds
+ *  nothing (byte-identical when a trailer IS found). Never `--is-ancestor` for the read-time re-verify —
+ *  simple-git's `raw()` reads that subcommand's non-zero exit as success with empty output.
+ *  @decision e8d4fdc3 round 2 — `hasAnyForBranch` is consulted FIRST, before any git call: Pass A's own
+ *  not-yet-landed population must cost zero spawns (sessions/service.ts's own Pass A doc); only a branch
+ *  with a ledger row pays for the `rev-parse`. Lookup keys on (`branch`, tip), never tip alone. */
+async function tryWorkerTipLedgerFallback(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, branch: string, base: string, deps: BoundedGitDeps,
+): Promise<string | null> {
+  if (!deps.workerTipLedger) return null;
+  if (!deps.workerTipLedger.hasAnyForBranch(branch)) return null;
+  let liveTip: string;
+  try {
+    liveTip = (await withTimeout(
+      git.raw(["rev-parse", "--verify", "--end-of-options", `refs/heads/${branch}`]), timeoutMs, "git rev-parse branch (worker-tip ledger fallback)",
+    )).trim();
+  } catch {
+    return null;
+  }
+  const landedSha = deps.workerTipLedger.lookupByWorkerTip(branch, liveTip);
+  if (!landedSha) return null;
+  try {
+    const mergeBase = (await withTimeout(
+      git.raw(["merge-base", "--end-of-options", landedSha, base]), timeoutMs, "git merge-base (worker-tip ledger fallback)",
+    )).trim();
+    return mergeBase === landedSha ? landedSha : null;
+  } catch {
+    return null;
+  }
+}
+
 /** @decision 6ee48e4d — locates the squash-merge commit via the deterministic `Loom-Worker-Branch:` trailer.
  *
  *  RE-TASK GUARD confirms the trailer commit is NOT an ancestor of the branch tip when the branch still exists
@@ -8139,7 +8192,7 @@ export async function findLandedSquashCommit(
       const tolerant = tolerantFindLoomTrailerBlock(body);
       if (tolerant?.branch === branch) candidates.push({ sha, trailers: tolerant, strict: false });
     }
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) return await tryWorkerTipLedgerFallback(git, timeoutMs, branch, base, deps);
 
     // @decision c0d0eac9 round 3 (finding 1) — NOT separately try/caught: a throw here reaches this
     // function's OWN outer catch, failing the whole call to `null` — never degrade to `branchPresent:
@@ -8199,7 +8252,8 @@ export async function findLandedSquashCommit(
     };
 
     const walked = await walkCandidates(branch, "findLandedSquashCommit", candidates, verify);
-    return walked?.resolved ?? null;
+    if (walked?.resolved) return walked.resolved;
+    return await tryWorkerTipLedgerFallback(git, timeoutMs, branch, base, deps);
   } catch {
     return null; // fail safe: unknown signal → NOT landed → caller KEEPS the worktree
   }
@@ -9320,7 +9374,15 @@ export async function findLandedSquashCommitViaMap(
 ): Promise<{ hit: true; sha: string | null } | { hit: false; scanComplete: boolean }> {
   const { map, truncated } = await getMergedCommitMapCached(repoPath, base, deps);
   const candidates = map.get(branch);
-  if (!candidates || candidates.length === 0) return { hit: false, scanComplete: !truncated };
+  if (!candidates || candidates.length === 0) {
+    // @decision e8d4fdc3 — the map's own scan is trailer-only, so a confirmed-empty scan (scanComplete)
+    // proves only "no trailer anywhere", never "no ledger row either" — consult the SAME fallback
+    // {@link findLandedSquashCommit} does, so this caller isn't silently narrower than that one.
+    if (truncated) return { hit: false, scanComplete: false };
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const ledgerSha = await tryWorkerTipLedgerFallback(git, timeoutMs, branch, base, deps);
+    return ledgerSha ? { hit: true, sha: ledgerSha } : { hit: false, scanComplete: true };
+  }
   const resolved = await resolveMergedCommitMapHitList(repoPath, branch, candidates, base, deps);
   return { hit: true, sha: resolved?.resolved.sha ?? null };
 }
@@ -11346,14 +11408,15 @@ async function mergeBranchLocked(
         // the repo further, since resetOrSkip's `reset --hard` would race whatever might still be alive.
         if (treeDeathUnconfirmed(e)) {
           raisedToken = enterMergeQuarantine(repoPath, branch, unconfirmedKillReason("squash commit could not be confirmed dead after a kill"), opId);
-          // Card 9a5d040c Code Review: the ALREADY_MERGED wording below is a promise about
-          // `findLandedSquashCommit`, which greps for the `Loom-Worker-Branch:` trailer — FALSE when
-          // `commitTrailers` is "off" (that grep finds nothing). The content-based empty-diff check
-          // still prevents a duplicate commit either way; only the CLASSIFICATION differs.
+          // @decision e8d4fdc3 — this catch runs BEFORE recordMainlineLedgerEntryIfRepoUnchanged ever could
+          // (it needs mergeBranchLocked to return ok:true, which this branch never does), so e8d4fdc3's own
+          // ledger fallback never has a row to find here either — only the wording below is corrected.
           const retryOutcome = deps.commitTrailers === "off"
-            ? "simply retrying this merge will land cleanly if the content is still missing, or settle as a " +
-              "no-op (STAGE_EMPTY_RETRY, not ALREADY_MERGED — commitTrailers is \"off\", so the trailer-based " +
-              "already-landed detection finds nothing) if it already landed — either way, never a duplicate commit"
+            ? "simply retrying this merge will land cleanly if the content is still missing; if it already " +
+              "landed, neither the trailer-based nor the ledger-based already-landed detection has anything " +
+              "to find for THIS specific race (no trailer was written, and no ledger row was ever recorded " +
+              "for a landing this catch branch itself never confirmed) — the retry can surface as a HARD " +
+              "orphaned_zero_ahead refusal rather than a soft no-op; either way, never a duplicate commit"
             : "simply retrying this merge will detect any already-landed content as ALREADY_MERGED and finalize " +
               "without creating a duplicate commit";
           return {

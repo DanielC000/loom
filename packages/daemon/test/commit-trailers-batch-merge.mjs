@@ -26,6 +26,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) END TO END — a real `mergeBatchTracked` landing on a project configured `commitTrailers:"off"`
 //       ends with the raw `Task.mergedVerification` column `null` (never a false "pathset") for both
 //       landed tasks.
+//   (5) card e8d4fdc3 round 2 — the ledger fallback's REAL production coverage: a batch-landed branch
+//       whose finalize never ran (still live, tip unchanged) resolves via `findLandedSquashCommit`'s own
+//       ledger fallback when seeded with EXACTLY what production writes (lb.branch/lb.assembledTip/
+//       lb.sha) — round 1's own version of this scenario fabricated a workerLandedTip
+//       (`landBranchCommitsIndividually`'s own `mergeBase === branchTip` arm, which a real cherry-pick
+//       landing can never reach — see docs/decisions/e8d4fdc3-*.md's "Honesty correction"). Also proves
+//       the round-2 branch-keying fix: an UNRELATED branch sharing the SAME tip (e.g. a review fork) does
+//       NOT resolve via the fallback.
 //
 // Run: 1) build daemon (pnpm --filter @loom/daemon build), 2) node packages/daemon/test/commit-trailers-batch-merge.mjs
 import fs from "node:fs";
@@ -42,7 +50,7 @@ requireHermeticEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distUrl = (p) => pathToFileURL(path.join(__dirname, "..", "dist", p)).href;
-const { createWorktree } = await import(distUrl("git/worktrees.js"));
+const { createWorktree, findLandedSquashCommit } = await import(distUrl("git/worktrees.js"));
 const { runBatchedMerge } = await import(distUrl("git/batch-merge.js"));
 const { Db } = await import(distUrl("db.js"));
 const { SessionService } = await import(distUrl("sessions/service.js"));
@@ -195,6 +203,56 @@ const hasAllTrailers = (body) => TRAILER_KEYS.every((k) => new RegExp(`^${k}: `,
     check(`(4) THE HONESTY FIX: task ${label}'s raw Task.mergedVerification is null — NEVER a false "pathset" claim ` +
       `with no trailer behind it (got: ${JSON.stringify(task?.mergedVerification)})`, task?.mergedVerification === null);
   }
+  db.close();
+}
+
+// ========== (5) card e8d4fdc3 round 2 — the ledger fallback's REAL production coverage ====================
+// Round 1's own version of this scenario fabricated a workerLandedTip (main's own tip, via a throwaway
+// branch ref pinned directly to it) to force `landBranchCommitsIndividually`'s own `mergeBase === branchTip`
+// arm — a shape no real `recordBatchLandedWorkerTip` call ever produces, and round 2's own Code Review
+// found that arm is actually UNREACHABLE in production (a real cherry-pick always makes a NEW commit
+// distinct from the worker branch's own pre-landing tip). This version instead seeds EXACTLY what
+// production writes (`lb.branch`/`lb.assembledTip`/`lb.sha`, from a REAL, non-noop land) and exercises the
+// ledger fallback through `findLandedSquashCommit` directly, against the worker branch — STILL LIVE, since
+// finalize never ran — exactly as boot-reconcile Pass A or a solo re-confirm would see it. Also proves the
+// round-2 branch-keying fix: an UNRELATED branch sharing the SAME tip (e.g. a review fork cut from it) must
+// NOT resolve via the fallback.
+{
+  const repo = path.join(os.tmpdir(), `loom-ctbm-ledger-${sfx}`);
+  makeRepo(repo);
+  const projId5 = `ctbm-proj-5-${sfx}`;
+  const db = new Db();
+  db.insertProject({ id: projId5, name: "CTBM-LEDGER", repoPath: repo, vaultPath: repo, config: { orchestration: { commitTrailers: "off" } }, createdAt: now, archivedAt: null });
+
+  const a = await cutBranch(repo, "ledger-a", "ledger-a.txt", "ledger work a\n");
+  const baseMainSha = git(repo, "rev-parse HEAD");
+  const { worktreePath: batchWt1 } = await createWorktree(repo, projId5, `ctbm-batch-ledger1-${sfx}`);
+  registerForCleanup(batchWt1);
+  const result1 = await runBatchedMerge(repo, batchWt1, baseMainSha, [a], passGate, { commitTrailers: "off" });
+  check("(5) setup control: the first landing succeeded, non-noop", result1.ok === true && result1.landed.length === 1 && !result1.landed[0].noop);
+  const firstLandedSha = result1.landed[0].sha;
+  const firstAssembledTip = result1.landed[0].assembledTip;
+  check("(5) setup control: the first landing carries NO reserved trailer (trailers off)", !hasAnyTrailer(git(repo, `log -1 --format=%B ${firstLandedSha}`)));
+  check("(5) setup control: the landing reports a real assembledTip (what production actually writes)", typeof firstAssembledTip === "string" && firstAssembledTip.length === 40);
+  // Seed EXACTLY what production writes (lb.branch/lb.assembledTip/lb.sha) — never a fabricated value.
+  db.recordBatchLandedWorkerTip(projId5, "primary", a.branch, firstAssembledTip, firstLandedSha);
+
+  // Branch `a` is STILL LIVE, tip UNCHANGED at firstAssembledTip (finalize never ran) — exactly the shape
+  // boot-reconcile Pass A or a solo re-confirm would find it in. Trailers are off, so findLandedSquashCommit's
+  // own trailer walk finds nothing and this call exercises the ledger fallback directly.
+  const newMainSha = git(repo, "rev-parse HEAD");
+  const facts = db.getWorkerTipLedgerFacts(projId5, "primary");
+  const resolved = await findLandedSquashCommit(repo, a.branch, newMainSha, { commitTrailers: "off", workerTipLedger: facts });
+  check(`(5) THE FIX'S REAL COVERAGE: findLandedSquashCommit resolves the ledger fallback for a batch-landed branch whose finalize never ran (got: ${JSON.stringify(resolved)})`,
+    resolved === firstLandedSha);
+
+  // NEGATIVE (round-2 branch-keying fix): an UNRELATED branch sharing the SAME tip (e.g. a review fork cut
+  // from it) must NOT resolve via the fallback — a tip-only match would wrongly say this one landed too.
+  const forkBranchName = `ctbm-ledger-fork-${sfx}`;
+  git(repo, `branch ${forkBranchName} ${firstAssembledTip}`);
+  const forkResolved = await findLandedSquashCommit(repo, forkBranchName, newMainSha, { commitTrailers: "off", workerTipLedger: facts });
+  check(`(5) THE ROUND-2 FIX: an unrelated branch sharing the SAME tip does NOT resolve via the fallback (got: ${JSON.stringify(forkResolved)})`,
+    forkResolved === null);
   db.close();
 }
 

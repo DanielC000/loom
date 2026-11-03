@@ -2,7 +2,7 @@ import type { SimpleGit } from "simple-git";
 import { withTimeout, canonicalGit, killableCanonicalRaw, treeDeathUnconfirmed, describeGitFailure, canonicalFailureMessage, resolveGitIdentityFallbackArgs, unpinnedProbeFactoryFromLegacy, detectShallowCanonicalRepo, defaultTrustedMainRoot } from "./bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "./merge-quarantine.js";
 import { withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError } from "./repo-lock.js";
-import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, predictGitCleanupWhitespace, type MergeEmptyKind, type WorktreeGateStamp, type GoneBranchLedgerFacts } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, parseLoomTrailerBlock, checkCutBaseAncestry, resolveBranchTip, computeWorktreeGateStamp, gateStampsDiffer, verifyCommitParentAndTree, verifyLoomTrailersExactAndReadable, matchReservedLoomTrailerLine, stripReservedLoomTrailerLines, predictGitCleanupWhitespace, type MergeEmptyKind, type WorktreeGateStamp, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts } from "./worktrees.js";
 import { readHeadShaAndBranch } from "./mainline-watch.js";
 import { nonInteractiveEnv, localNonInteractiveEnv, stripClaudeSessionTrailer, writeCommitMessageFile, cleanupCommitMessageFile } from "./writer.js";
 import { pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
@@ -69,6 +69,10 @@ export interface BatchGitDeps {
    *  branch-gone ledger gate, card c13666c6) — see that field's own doc on `BoundedGitDeps`
    *  (git/worktrees.ts) for what it does and why it must stay opt-in. */
   goneBranchLedger?: GoneBranchLedgerFacts;
+  /** @decision e8d4fdc3 — threaded straight into every {@link findLandedSquashCommit} call this module
+   *  makes (same seam as `goneBranchLedger` above); see that field's own doc on `BoundedGitDeps`
+   *  (git/worktrees.ts). Absent (every existing caller) ⇒ byte-identical to today. */
+  workerTipLedger?: WorkerTipLedgerFacts;
   /**
    * Card 5933734e (child of d9332365, sibling of the solo path's own `commitTrailers` on
    * `BoundedGitDeps`, git/worktrees.ts): the project's resolved `orchestration.commitTrailers` — threaded
@@ -479,9 +483,9 @@ async function landBranchCommitsIndividually(
     // The branch's own tip is already an ancestor of the batch's current HEAD — nothing new to land
     // (typically: already landed by an earlier candidate in THIS batch, or already on main before the
     // batch was cut). Classify exactly like the solo path's own noop branch.
-    // KNOWN RESIDUAL, tracked on card e8d4fdc3 (found during card 5933734e's investigation, not fixed
-    // here): with `orchestration.commitTrailers:"off"`, this trailer grep misclassifies an already-landed
-    // branch as STAGE_EMPTY_RETRY instead of ALREADY_MERGED.
+    // @decision e8d4fdc3 round 2 (honesty correction) — this arm's own ledger fallback is UNREACHABLE in
+    // production (a real landing always cherry-picks a NEW commit, so `branchTip` never becomes an
+    // ancestor this way); kept threaded for call-site consistency, not because this line exercises it.
     const landedSha = await findLandedSquashCommit(batchWorktreePath, branch, batchHeadBefore, deps);
     return landedSha
       ? { ok: true, noop: true, emptyKind: "ALREADY_MERGED", sha: landedSha, branchTip }

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { DB_PATH, DAEMON_TEST_DIR, questionAttachmentDir } from "./paths.js";
-import type { EmitCompareNotApplicableKind, GoneBranchLedgerFacts } from "./git/worktrees.js";
+import type { EmitCompareNotApplicableKind, GoneBranchLedgerFacts, WorkerTipLedgerFacts } from "./git/worktrees.js";
 import { worktreeIdentityKey } from "./git/worktrees.js";
 import { parseMainlineWatermark, mainlineWatermarkKey, MAINLINE_DIVERT_EPISODE_PREFIX, MAINLINE_DEFER_STREAK_PREFIX, MAINLINE_BRANCH_TRUST_PREFIX, mainlineBranchTrustKey, goneBranchLedgerBoundaryKey, GONE_BRANCH_LEDGER_BOUNDARY_PREFIX, type MainlineWatermark } from "./git/mainline-watch.js";
 import { resolveTrustedToplevel, type CommondirTrustPin } from "./git/bounded.js";
@@ -1579,6 +1579,17 @@ CREATE INDEX IF NOT EXISTS idx_project_memory_history_key ON project_memory_hist
 -- "latest row for a scope" -- and must treat an absent row (no match, a pruned/deleted scope, or a legacy
 -- row with this column NULL) as exactly today's strict-trailer fallback, never a stale value from a
 -- different sha. See docs/decisions/5958c149-*.md.
+-- @decision e8d4fdc3 round 2 -- worker_branch is a THIRD, independent fact (fresh installs get it here;
+-- migrateMainlineLandedCommits() ADD COLUMNs it for a pre-existing DB -- same dual CREATE-TABLE+migrate
+-- shape worker_landed_tip above already uses; never in this CREATE TABLE's own INDEX statements though --
+-- SCHEMA's index statements run before migrate*()). It is the WORKER's own branch name (never the branch
+-- column above, which is the MAINLINE branch landed onto) -- the fallback
+-- Db.getLandedCommitByWorkerTip/getWorkerTipLedgerFacts now match on
+-- (project_id, repo_key, worker_branch, worker_landed_tip) together, never worker_landed_tip alone: a
+-- review fork cut from a landed branch's own headSha shares that SAME tip without being that branch, and
+-- the old tip-only match let that fork resolve as "this branch already landed" (the production Code
+-- Review repro this round fixes). A legacy row has worker_branch NULL and so can never satisfy an
+-- equality match against any real branch name -- fails closed by construction, no extra code needed.
 CREATE TABLE IF NOT EXISTS mainline_landed_commits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id TEXT NOT NULL REFERENCES projects(id),
@@ -1587,7 +1598,8 @@ CREATE TABLE IF NOT EXISTS mainline_landed_commits (
   tip TEXT NOT NULL,
   base TEXT NOT NULL,
   landed_at TEXT NOT NULL,
-  worker_landed_tip TEXT
+  worker_landed_tip TEXT,
+  worker_branch TEXT
 );
 -- The walk (Db.isMainlineLedgerReachable) looks up by (project_id, repo_key, branch, tip) and DOES use
 -- this index for that lookup. Round 5 (card c13666c6) measured via EXPLAIN QUERY PLAN that
@@ -1604,6 +1616,40 @@ CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_tip ON mainline_landed_co
 -- which index or scan shape answers it -- see git/worktrees.ts's classifyAgainstLedgerUncached). Kept
 -- rather than dropped, to avoid a migration for it.
 CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_branch_id ON mainline_landed_commits(project_id, repo_key, branch, id);
+
+-- @decision e8d4fdc3 -- a SEPARATE, trust-walk-INERT per-branch batch-landing record; the batch-side twin
+-- of mainline_landed_commits.worker_landed_tip (solo only -- that column is always NULL for a batch row).
+-- mainline_landed_commits' own tip/base chain is read by Db.isMainlineLedgerReachable for
+-- mainline-watermark TRUST (card aa7677fa rounds 19-21, docs/decisions/2a6a292a-*.md) -- a batch's own
+-- per-branch cherry-pick sub-range is NEVER a real historical mainline tip (only the batch's single
+-- baseMainSha->batchHeadSha fast-forward ever is), so recording per-branch rows THERE would inject
+-- non-genuine "mainline tip" states into a chain the trust walk assumes is built entirely from real
+-- landings. This table is NEVER read by isMainlineLedgerReachable, advanceMainlineWatermark{,ForBatch}, or
+-- any other trust decision -- it exists solely to answer "which batch-landed commit does worker branch
+-- tip X correspond to" (Db.getBatchLandedWorkerTip). Written UNCONDITIONALLY, immediately after a batch's
+-- cherry-pick actually lands a branch for real -- NEVER for a noop/already-merged classification, the
+-- same purity bar card aa7677fa round 20's "Do not" list holds mainline_landed_commits.worker_landed_tip
+-- to (a retroactive git-content/trailer-equivalence proof is weaker than "Loom's own merge code just ran,
+-- right now, with no adversarial ambiguity" and must never earn a row here either). See
+-- docs/decisions/e8d4fdc3-*.md.
+-- @decision e8d4fdc3 round 2 -- worker_branch is in the CREATE TABLE directly (never a migrate*() ADD
+-- COLUMN) because this table is new on this still-unreleased branch -- no production install has ever
+-- created it in the old 5-column shape, so there is nothing to migrate. NOT NULL (unlike
+-- mainline_landed_commits.worker_branch, which must tolerate a pre-existing legacy row): every writer of
+-- this table always has the worker's own branch name in hand. A reader matches on
+-- (project_id, repo_key, worker_branch, worker_landed_tip) together -- never worker_landed_tip alone; see
+-- that column's own doc on mainline_landed_commits above for why (a review fork sharing a landed branch's
+-- tip without being that branch).
+CREATE TABLE IF NOT EXISTS batch_landed_worker_tips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  repo_key TEXT NOT NULL,
+  worker_branch TEXT NOT NULL,
+  worker_landed_tip TEXT NOT NULL,
+  landed_sha TEXT NOT NULL,
+  landed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_batch_landed_worker_tips_lookup ON batch_landed_worker_tips(project_id, repo_key, worker_branch, worker_landed_tip);
 `;
 
 /**
@@ -2984,12 +3030,16 @@ export class Db {
    * @decision 5958c149 — never add an index on this column here; every lookup matches the table's
    * existing `(project_id, repo_key, branch, tip)` index, and SCHEMA's index statements run before any
    * migrate*(), so one referencing a migration-added column would throw on every existing install's boot.
+   * @decision e8d4fdc3 round 2 — ADD COLUMN `worker_branch` the same way, same NULL-backfill posture, same
+   * no-index-here rule; a legacy row's NULL branch can never equality-match a real branch name, so the
+   * migration alone makes it fail closed (see {@link Db.getLandedCommitByWorkerTip}).
    */
   private migrateMainlineLandedCommits(): void {
     const have = new Set(
       (this.db.prepare("PRAGMA table_info(mainline_landed_commits)").all() as { name: string }[]).map((c) => c.name),
     );
     if (!have.has("worker_landed_tip")) this.db.exec("ALTER TABLE mainline_landed_commits ADD COLUMN worker_landed_tip TEXT");
+    if (!have.has("worker_branch")) this.db.exec("ALTER TABLE mainline_landed_commits ADD COLUMN worker_branch TEXT");
   }
 
   /**
@@ -4060,6 +4110,9 @@ export class Db {
       // @decision c13666c6 round 3 — a rebind invalidates this scope's branch-gone ledger rows/boundary
       // too (ancestry in the OLD repo), cleared UNCONDITIONALLY here, never gated on W/marker existing.
       this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ?").run(id, repoKey);
+      // @decision e8d4fdc3 — the separate, trust-walk-inert batch ledger shares this table's own
+      // per-(project,repoKey) invalidation posture: a rebind means stale ancestry in the OLD repo.
+      this.db.prepare("DELETE FROM batch_landed_worker_tips WHERE project_id = ? AND repo_key = ?").run(id, repoKey);
       this.deleteMeta(goneBranchLedgerBoundaryKey(id, repoKey));
       // Card 1d9674c9 — same UNCONDITIONAL posture as the two deletes just above, never gated behind the
       // W/boot-alert-marker early-continue below: a rebind invalidates any pending finalize-withheld
@@ -4185,12 +4238,15 @@ export class Db {
    *
    * @decision 5958c149 — `workerLandedTip` is a SEPARATE fact from `tip`/`base`, never derived from
    * either; the caller stamps it ONLY from its own synchronous `verifyLandedAsOwnCommit` "ok"/"displaced"
-   * classification. Omitted (batch, or a solo landing short of that) writes NULL, unchanged otherwise. */
-  recordMainlineLandedCommit(projectId: string, repoKey: string, branch: string, tip: string, base: string, workerLandedTip?: string): void {
+   * classification. Omitted (batch, or a solo landing short of that) writes NULL, unchanged otherwise.
+   * @decision e8d4fdc3 round 2 — `workerBranch` is the worker's OWN branch (never the `branch` param
+   * above, the MAINLINE branch), threaded alongside `workerLandedTip` so {@link getLandedCommitByWorkerTip}
+   * matches on both together. Omitted writes NULL, same as `workerLandedTip` when absent. */
+  recordMainlineLandedCommit(projectId: string, repoKey: string, branch: string, tip: string, base: string, workerLandedTip?: string, workerBranch?: string): void {
     const hadPriorRows = this.db.prepare("SELECT 1 FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? LIMIT 1")
       .get(projectId, repoKey) !== undefined;
-    this.db.prepare("INSERT INTO mainline_landed_commits (project_id, repo_key, branch, tip, base, landed_at, worker_landed_tip) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(projectId, repoKey, branch, tip, base, new Date().toISOString(), workerLandedTip ?? null);
+    this.db.prepare("INSERT INTO mainline_landed_commits (project_id, repo_key, branch, tip, base, landed_at, worker_landed_tip, worker_branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(projectId, repoKey, branch, tip, base, new Date().toISOString(), workerLandedTip ?? null, workerBranch ?? null);
     if (!hadPriorRows) {
       const key = goneBranchLedgerBoundaryKey(projectId, repoKey);
       if (this.getMeta(key) === undefined) this.setMeta(key, base);
@@ -4211,6 +4267,60 @@ export class Db {
       .all(projectId, repoKey, tip) as { worker_landed_tip: string | null }[];
     const distinct = new Set(rows.map((r) => r.worker_landed_tip).filter((v): v is string => v !== null));
     return distinct.size === 1 ? [...distinct][0]! : null;
+  }
+  /** @decision e8d4fdc3 — the REVERSE of {@link getVerifiedLandedTip} (worker's live tip -> its squash
+   *  sha), solo only, same table, same fail-closed-on->1-distinct-match posture. Never trust the returned
+   *  sha without the caller separately re-verifying it is still an ancestor of the current mainline ref.
+   *  @decision e8d4fdc3 round 2 — keyed on (`branch`, `workerLandedTip`) TOGETHER, never tip alone: a
+   *  review fork sharing a landed branch's own tip (without being that branch) must not match. A legacy
+   *  row's NULL `worker_branch` can never equality-match a real name, so it fails closed for free. */
+  getLandedCommitByWorkerTip(projectId: string, repoKey: string, branch: string, workerLandedTip: string): string | null {
+    const rows = this.db.prepare("SELECT tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip = ?")
+      .all(projectId, repoKey, branch, workerLandedTip) as { tip: string }[];
+    const distinct = new Set(rows.map((r) => r.tip));
+    return distinct.size === 1 ? [...distinct][0]! : null;
+  }
+  /** @decision e8d4fdc3 — writes into the SEPARATE, trust-walk-inert `batch_landed_worker_tips` table,
+   *  never `mainline_landed_commits`. Append-only. Call ONLY right after a batch's cherry-pick actually
+   *  lands a branch for real — never for a noop/already-merged classification.
+   *  @decision e8d4fdc3 round 2 — `workerBranch` is NOT NULL on this table (unlike the solo-side sibling
+   *  column) — every writer always has the worker's own branch name in hand. */
+  recordBatchLandedWorkerTip(projectId: string, repoKey: string, workerBranch: string, workerLandedTip: string, landedSha: string): void {
+    this.db.prepare("INSERT INTO batch_landed_worker_tips (project_id, repo_key, worker_branch, worker_landed_tip, landed_sha, landed_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(projectId, repoKey, workerBranch, workerLandedTip, landedSha, new Date().toISOString());
+  }
+  /** @decision e8d4fdc3 — the batch-side twin of {@link getLandedCommitByWorkerTip}, read from the
+   *  SEPARATE `batch_landed_worker_tips` table. Same `null`-means-unknown, fail-closed-on->1-distinct-
+   *  match, and (round 2) (`branch`, `workerLandedTip`)-together keying posture as its sibling. */
+  getBatchLandedWorkerTip(projectId: string, repoKey: string, branch: string, workerLandedTip: string): string | null {
+    const rows = this.db.prepare("SELECT landed_sha FROM batch_landed_worker_tips WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip = ?")
+      .all(projectId, repoKey, branch, workerLandedTip) as { landed_sha: string }[];
+    const distinct = new Set(rows.map((r) => r.landed_sha));
+    return distinct.size === 1 ? [...distinct][0]! : null;
+  }
+  /** @decision e8d4fdc3 — the ONE construction point for {@link WorkerTipLedgerFacts} (git/worktrees.ts).
+   *  `lookupByWorkerTip` consults BOTH ledger sources for the same (branch, tip) and fails closed (`null`)
+   *  on a disagreement between them — never read by any mainline-watermark trust decision.
+   *  @decision e8d4fdc3 round 2 — `hasAnyForBranch` is a cheap DB-only pre-check (no tip needed) so
+   *  {@link tryWorkerTipLedgerFallback} can skip its own `rev-parse` for the common not-yet-landed
+   *  branch population — see that function's own doc for the boot-cost motivation. */
+  getWorkerTipLedgerFacts(projectId: string, repoKey: string): WorkerTipLedgerFacts {
+    return {
+      hasAnyForBranch: (branch: string) => {
+        const solo = this.db.prepare("SELECT 1 FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip IS NOT NULL LIMIT 1")
+          .get(projectId, repoKey, branch);
+        if (solo !== undefined) return true;
+        const batch = this.db.prepare("SELECT 1 FROM batch_landed_worker_tips WHERE project_id = ? AND repo_key = ? AND worker_branch = ? LIMIT 1")
+          .get(projectId, repoKey, branch);
+        return batch !== undefined;
+      },
+      lookupByWorkerTip: (branch: string, workerTip: string) => {
+        const solo = this.getLandedCommitByWorkerTip(projectId, repoKey, branch, workerTip);
+        const batch = this.getBatchLandedWorkerTip(projectId, repoKey, branch, workerTip);
+        if (solo !== null && batch !== null) return solo === batch ? solo : null;
+        return solo ?? batch;
+      },
+    };
   }
   /** @decision 2a6a292a round 20 (card aa7677fa) — a PURE DB walk, never a git call: a forged commit was
    *  never landed through Loom's own merge code, so it has no row here and always breaks the chain. Past
@@ -4591,6 +4701,9 @@ export class Db {
       // REFERENCES projects(id) FK, enforced (better-sqlite3 defaults foreign_keys=ON): delete the rows
       // first or the final `DELETE FROM projects` below throws for any project that has ever landed.
       this.db.prepare("DELETE FROM mainline_landed_commits WHERE project_id = ?").run(id);
+      // @decision e8d4fdc3 — same FK-ordering requirement as mainline_landed_commits just above: this
+      // table also REFERENCES projects(id).
+      this.db.prepare("DELETE FROM batch_landed_worker_tips WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${GONE_BRANCH_LEDGER_BOUNDARY_PREFIX}${id}:%`); // card c13666c6 round 3
       this.db.prepare("DELETE FROM app_meta WHERE key LIKE ?").run(`${MAINLINE_BRANCH_TRUST_PREFIX}${id}:%`); // card 2a6a292a round 21
       // @decision 3a5c5d4a (round 5) — the pin is keyed by LITERAL repoPath, not projectId, so it can't

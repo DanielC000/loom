@@ -30,7 +30,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, fastForwardCanonicalMain, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -19490,6 +19490,8 @@ export class SessionService {
     // @decision c13666c6 — resolved ONCE here, threaded through every findLandedSquashCommit/
     // tipAcrossLandedCheck deps object in this confirm, rather than re-queried per call site.
     const goneBranchLedger = this.db.getGoneBranchLedgerFacts(project.id, worker.repoKey ?? "primary");
+    // @decision e8d4fdc3 — same seam, for findLandedSquashCommit's trailers-off ALREADY_MERGED fallback.
+    const workerTipLedger = this.db.getWorkerTipLedgerFacts(project.id, worker.repoKey ?? "primary");
     // Card e8df2659: the HUMAN-only per-project `orchestration.mergeGate:"off"` switch. Routed through the
     // inert-diff-skip machinery below (same repo-guard-only admission, `gateRan:false`, `skipped:true`) with
     // `skipReason:"gate-disabled"`; ONLY the gate command is skipped — the union-merge/conflict refusal, the
@@ -19508,7 +19510,7 @@ export class SessionService {
       return !!task && !!terminalKey && task.columnKey === terminalKey;
     })();
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
-      const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, expectedMainlineRef, goneBranchLedger });
+      const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, expectedMainlineRef, goneBranchLedger, workerTipLedger });
       if (finished) return finished;
     }
 
@@ -20194,12 +20196,12 @@ export class SessionService {
       // `findLandedSquashCommit`'s re-task guard (below, via `mergeBranch`'s own noop classification) exists
       // to detect — misclassifying a legitimate ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY otherwise.
       // Card 13fc5227: a HELD branch (owedBase set) is never "already landed" as a whole — its late range is still owed, so it must not take the already-landed shortcut.
-      let preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger });
+      let preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger, workerTipLedger });
       // @decision c30952c1 — a null `preLanded` here is indistinguishable from "genuinely not landed";
       //  with the worktree also gone, falling through crashes uncaught below. Retry once, fresh, then
       //  refuse rather than let that propagate — never treat the unverified lookup as landed.
       if (!preLanded && !fs.existsSync(worktreePath)) {
-        preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger });
+        preLanded = owedBase ? null : await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger, workerTipLedger });
         if (!preLanded) return refuseWorktreeGoneLandingUnconfirmed("the already-landed lookup, retried once, found no landing");
       }
       if (!preLanded) {
@@ -20296,7 +20298,7 @@ export class SessionService {
         const worktreeGone = !fs.existsSync(worktreePath);
         const landedStamp = worktreeGone ? null : await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         if (worktreeGone || (landedStamp && landedStamp.head !== null && !landedStamp.dirty)) {
-          const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed", expectedMainlineRef, goneBranchLedger });
+          const finished = await this.finishSoloAlreadyLanded({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, repoKey: worker.repoKey ?? null, gateSkipped: "already-landed", expectedMainlineRef, goneBranchLedger, workerTipLedger });
           if (finished) return finished;
           // @decision 89bc3b86 — a gone worktree whose own finalize re-lookup also came back null must
           //  refuse here, never fall through into the freshStamp/reuse logic below, which mislabels a gone
@@ -21989,7 +21991,7 @@ export class SessionService {
     // in-process result: STRICTER than the row-write gate above ("ok"/"displaced" only, never
     // "unreadable" — that still gets an ordinary row, just with this column NULL).
     const verifiedLandedTip = merge.landedTip !== undefined && merge.landedBase !== undefined && (merge.trailerAdvisory === undefined || merge.trailerAdvisory === "displaced") ? merge.landedTip : undefined;
-    if (merge.ok && !merge.noop && merge.sha && merge.landedBase && expectedMainlineBranch) this.recordMainlineLedgerEntryIfRepoUnchanged(project.id, worker.repoKey ?? "primary", repoPath, expectedMainlineBranch, merge.sha, merge.landedBase, verifiedLandedTip);
+    if (merge.ok && !merge.noop && merge.sha && merge.landedBase && expectedMainlineBranch) this.recordMainlineLedgerEntryIfRepoUnchanged(project.id, worker.repoKey ?? "primary", repoPath, expectedMainlineBranch, merge.sha, merge.landedBase, verifiedLandedTip, branch);
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — pass `undefined`, never raw `merge.sha`,
     // whenever `merge.landedBase` is unset: a race INSIDE mergeBranch can leave `merge.sha` ALREADY
     // equal to a forged tip, so a bare `merge.sha` would sail through the `head.tip === mergeSha` check.
@@ -22647,11 +22649,14 @@ export class SessionService {
     // @decision c13666c6 — the same ledger facts confirmWorkerMerge resolved once; absent (a caller not
     // yet wired) skips the branch-gone ledger gate, byte-identical to before this card.
     goneBranchLedger?: GoneBranchLedgerFacts;
+    // @decision e8d4fdc3 — same seam, for findLandedSquashCommit's trailers-off ALREADY_MERGED fallback;
+    // absent (a caller not yet wired) just skips that fallback, byte-identical to before this card.
+    workerTipLedger?: WorkerTipLedgerFacts;
   }): Promise<ConfirmMergeResult | null> {
     // @decision 89bc3b86 — reuses the SAME `preLandedLookupGitFactory` test seam the pre-gate lookup
     //  threads through (never a second, dedicated seam): production callers never set it, so this is
     //  byte-identical outside a hermetic test that deliberately faults this specific re-lookup.
-    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger: a.goneBranchLedger }), a.projectId, a.repoKey);
+    const looked = await this.tipAcrossLandedCheck(a.repoPath, a.branch, () => findLandedSquashCommit(a.repoPath, a.branch, a.expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, gitFactory: this.preLandedLookupGitFactory, goneBranchLedger: a.goneBranchLedger, workerTipLedger: a.workerTipLedger }), a.projectId, a.repoKey);
     const alreadyLanded = looked.result;
     if (!alreadyLanded) return null;
     const guard = this.soloFinalizeTipGuard({ opId: a.opId, managerSessionId: a.managerSessionId, workerSessionId: a.workerSessionId, taskId: a.taskId, branch: a.branch, landedTip: looked.landedTip, branchGone: looked.branchGone, landedSha: alreadyLanded, repoKey: a.repoKey, tipUnverifiable: looked.tipUnverifiable });
@@ -23793,7 +23798,7 @@ export class SessionService {
           try {
             // Card 5933734e: thread the project's resolved commitTrailers through the SAME deps object
             // `goneBranchLedger` already rides — `target` (resolveRepoByKey, above) already carries it.
-            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory, goneBranchLedger: this.db.getGoneBranchLedgerFacts(finalProjectId, batchRepoKey), commitTrailers: target.commitTrailers }, (landed) => {
+            result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs, expectedBaseBranch, gitFactory: this.batchFfGitFactory, goneBranchLedger: this.db.getGoneBranchLedgerFacts(finalProjectId, batchRepoKey), workerTipLedger: this.db.getWorkerTipLedgerFacts(finalProjectId, batchRepoKey), commitTrailers: target.commitTrailers }, (landed) => {
               // @decision 1ac74580 — one event per LANDED candidate, fired by runBatchedMerge itself right
               // before the fast-forward; never stamp `branch` (see that record's own Do-not).
               for (const c of landed) {
@@ -23818,6 +23823,14 @@ export class SessionService {
             // read — the ff's own contract already guarantees HEAD === baseMainSha before it ran.
             if (result.ok && result.landed.length > 0 && result.batchHeadSha && expectedBaseBranch) {
               this.recordMainlineLedgerEntryIfRepoUnchanged(finalProjectId, batchRepoKey, finalRepoPath, expectedBaseBranch, result.batchHeadSha, baseMainSha);
+            }
+            // @decision e8d4fdc3 — the SEPARATE, trust-walk-inert per-branch record, ONE row per branch
+            // GENUINELY landed for real this call (never a `noop` entry).
+            if (result.ok) {
+              for (const lb of result.landed) {
+                if (lb.noop || !lb.assembledTip) continue;
+                try { this.db.recordBatchLandedWorkerTip(finalProjectId, batchRepoKey, lb.branch, lb.assembledTip, lb.sha); } catch (err) { console.warn(`[merge-batch] recordBatchLandedWorkerTip failed for ${lb.branch} (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+              }
             }
             if (result.ok && result.landed.length > 0) await this.advanceMainlineWatermarkForBatch(finalProjectId, batchRepoKey, finalRepoPath, batchCheckedTip, baseMainSha, result.batchHeadSha, managerSessionId); // card 59d2577a
             // Card 6f13746c: a passing batch gate records HERE — at the fast-forward, still INSIDE the repo guard (the `finally` below) — ONCE, with
@@ -25083,8 +25096,11 @@ export class SessionService {
    *  is silently bypassed for that caller.
    *  @decision 5958c149 — a skipped write (any `return` below) drops `workerLandedTip` along with the
    *  rest of the row, never partially — a later lookup for this sha then reads ABSENT, same as 26c12fac's
-   *  own "only ever makes a future lookup more conservative" rule; never a stale value from a wrong sha. */
-  private recordMainlineLedgerEntryIfRepoUnchanged(projectId: string, repoKey: string, repoPath: string, branch: string, tip: string, base: string, workerLandedTip?: string): void {
+   *  own "only ever makes a future lookup more conservative" rule; never a stale value from a wrong sha.
+   *  @decision e8d4fdc3 round 2 — `workerBranch` (the WORKER's own branch, never `branch` above, which is
+   *  the MAINLINE branch landed onto) is threaded through the SAME skip rules as `workerLandedTip` —
+   *  solo's own call site passes it; the batch call site (no single worker branch) omits it, writing NULL. */
+  private recordMainlineLedgerEntryIfRepoUnchanged(projectId: string, repoKey: string, repoPath: string, branch: string, tip: string, base: string, workerLandedTip?: string, workerBranch?: string): void {
     // @decision 26c12fac round 2 — a removed registry entry (UnknownRepoKeyError) takes this SAME skip
     // branch + log line as an ordinary repoPath mismatch, never the generic fail-open catch below.
     const skipAsMismatch = (why: string) => console.warn(`[mainline-watch] ledger record skipped: repoPath for (${projectId}, ${repoKey}) changed mid-flight (rebind race, card 26c12fac)${why}`);
@@ -25100,7 +25116,7 @@ export class SessionService {
         return;
       }
       if (literalRepoPathKey(currentPath) !== literalRepoPathKey(repoPath)) { skipAsMismatch(""); return; }
-      this.db.recordMainlineLandedCommit(projectId, repoKey, branch, tip, base, workerLandedTip);
+      this.db.recordMainlineLandedCommit(projectId, repoKey, branch, tip, base, workerLandedTip, workerBranch);
     } catch (err) {
       console.warn(`[mainline-watch] ledger record skipped (fail-open): ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -26094,7 +26110,8 @@ export class SessionService {
               const crExpectedRef = crWatermarkResolution.ref;
               // @decision c13666c6 — same branch-gone ledger gate confirmWorkerMerge itself threads.
               const crGoneBranchLedger = this.db.getGoneBranchLedgerFacts(project.id, worker.repoKey ?? "primary");
-              const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger: crGoneBranchLedger }).catch(() => null), project.id, worker.repoKey ?? null);
+              const crWorkerTipLedger = this.db.getWorkerTipLedgerFacts(project.id, worker.repoKey ?? "primary");
+              const crLooked = await this.tipAcrossLandedCheck(repo.path, worker.branch, () => findLandedSquashCommit(repo.path, worker.branch!, crExpectedRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger: crGoneBranchLedger, workerTipLedger: crWorkerTipLedger }).catch(() => null), project.id, worker.repoKey ?? null);
               const landedSha = crLooked.result;
               if (landedSha) {
                 const crGuard = this.soloFinalizeTipGuard({ opId, managerSessionId, workerSessionId, taskId, branch: worker.branch, landedTip: crLooked.landedTip, branchGone: crLooked.branchGone, landedSha, repoKey: worker.repoKey ?? null, tipUnverifiable: crLooked.tipUnverifiable });
@@ -28624,6 +28641,9 @@ export class SessionService {
     // @decision c13666c6 — same "once per (project,repoKey) this pass" memo, same key, for the
     // branch-gone ledger gate's DB-side facts.
     const goneBranchLedgerCache = new Map<string, GoneBranchLedgerFacts>();
+    // @decision e8d4fdc3 — same once-per-(project,repoKey)-this-pass memo, same key, for the trailers-off
+    // ALREADY_MERGED fallback's DB-side facts.
+    const workerTipLedgerCache = new Map<string, WorkerTipLedgerFacts>();
     const handledWorktrees = new Set<string>();
     // REBUILT here, not appended — this boot's Pass B is about to recompute the full retained set from
     // scratch, and a stale entry from a prior boot (e.g. a worktree since GC'd by hand) must not linger.
@@ -28898,6 +28918,11 @@ export class SessionService {
           goneBranchLedger = this.db.getGoneBranchLedgerFacts(project.id, s.repoKey ?? "primary");
           goneBranchLedgerCache.set(mainlineRefCacheKey, goneBranchLedger);
         }
+        let workerTipLedger = workerTipLedgerCache.get(mainlineRefCacheKey);
+        if (!workerTipLedger) {
+          workerTipLedger = this.db.getWorkerTipLedgerFacts(project.id, s.repoKey ?? "primary");
+          workerTipLedgerCache.set(mainlineRefCacheKey, workerTipLedger);
+        }
         // Card eb58b8bd round 2 (Code Review 509f716a minor 1): a stored watermark row can be perfectly
         // well-formed JSON and still name a branch that no longer exists (a master->main rename, a
         // manually deleted branch) — "ok" above only read the DB row, it never checked the branch is a
@@ -28955,12 +28980,12 @@ export class SessionService {
         // uncapped single-branch walk, so full-history detection is never silently narrowed.
         // Card cc9bce38: the branch tip is read around the whole lookup (`tipAcrossLandedCheck`) so the finalize below can CAS-delete at exactly the tip it was content-checked at.
         const paLooked = await this.tipAcrossLandedCheck(repoPath, s.branch!, async () => {
-          const viaMap = await findLandedSquashCommitViaMap(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps, goneBranchLedger });
+          const viaMap = await findLandedSquashCommitViaMap(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps, goneBranchLedger, workerTipLedger });
           return viaMap.hit
             ? viaMap.sha
             : viaMap.scanComplete
               ? null
-              : await findLandedSquashCommit(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps, goneBranchLedger }, () => { noPathSetTrailerNoticeCount++; });
+              : await findLandedSquashCommit(repoPath, s.branch!, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps, goneBranchLedger, workerTipLedger }, () => { noPathSetTrailerNoticeCount++; });
         }, project.id, s.repoKey ?? null);
         const landedSha = paLooked.result;
         if (!landedSha) continue;
