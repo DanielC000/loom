@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import type { EventTrigger, OrchestrationEvent, Project, QuestionInboxItem, Schedule, SessionListItem, UsageLimitsStatus } from "@loom/shared";
+import type { EventTrigger, OrchestrationEvent, Project, QuestionInboxItem, Schedule, SessionListItem, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { api } from "../lib/api";
 import { WORKSPACE_NODE_TABS, workspaceNodeTabOf } from "../nav";
 import { NodeTabHostProvider } from "../lib/nodeTabHost";
@@ -120,7 +120,16 @@ export default function WorkspaceHome() {
   const merges = mergeThroughput(historyQ.data?.items);
   const lastMerge = useMemo(() => lastMergeByProject(historyQ.data?.items), [historyQ.data]);
   const usage = usageQ.data?.available ? usageQ.data : null;
-  const fiveHour = usage?.fiveHour ?? null;
+  // The deck has room for ONE plan window, and WHICH one depends on the account's plan. A plan with
+  // no 5h limit reports a legitimate `fiveHour: null` alongside real `sevenDay` data (protocol.ts), so
+  // a tile hard-wired to 5h read "—"/"loading…" on it forever — the only branch that stated a reason
+  // was `!available`, and this plan IS available. 7d is the fallback because the protocol guarantees
+  // it on every available snapshot; the pop-over below still lists every window the plan reports.
+  const planWindow: { label: string; window: UsageWindow } | null = !usage
+    ? null
+    : usage.fiveHour
+      ? { label: "plan 5h", window: usage.fiveHour }
+      : { label: "plan 7d", window: usage.sevenDay };
 
   // One board read per project, sharing the EXACT ["board", id] entry pages/Board.tsx fills — so a
   // project card's open-card count is the same number that project's board shows, and opening it
@@ -239,10 +248,12 @@ export default function WorkspaceHome() {
       popover: <GateLaneList lanes={lanes} />,
     },
     {
-      key: "plan", label: "plan 5h", value: fiveHour ? `${Math.round(fiveHour.utilization)}%` : "—",
-      tone: !fiveHour ? "muted" : fiveHour.utilization >= 95 ? "red" : fiveHour.utilization >= 80 ? "amber" : "phosphor",
-      sub: fiveHour ? `resets ${relativeResets(fiveHour.resetsAt)}` : (usageQ.data && !usageQ.data.available ? usageQ.data.reason : "loading…"),
-      fill: fiveHour ? fiveHour.utilization / 100 : undefined,
+      key: "plan", label: planWindow?.label ?? "plan 5h",
+      value: planWindow ? `${Math.round(planWindow.window.utilization)}%` : "—",
+      // Highest band FIRST — ordered the other way, `>= 95` is unreachable and red is dead code.
+      tone: !planWindow ? "muted" : planWindow.window.utilization >= 95 ? "red" : planWindow.window.utilization >= 80 ? "amber" : "phosphor",
+      sub: planWindow ? `resets ${relativeResets(planWindow.window.resetsAt)}` : (usageQ.data && !usageQ.data.available ? usageQ.data.reason : "loading…"),
+      fill: planWindow ? planWindow.window.utilization / 100 : undefined,
       popover: <PlanUsageDetail usage={usage} />,
     },
     {

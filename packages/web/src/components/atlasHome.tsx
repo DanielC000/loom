@@ -760,9 +760,14 @@ export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
         <MeterRow label="7d sonnet" ratio={usage.sevenDaySonnet.utilization / 100}
           value={`${Math.round(usage.sevenDaySonnet.utilization)}%`} tone={t(usage.sevenDaySonnet.utilization)} />
       )}
-      {/* card 2ed68346: five_hour can be a confirmed-legitimate null on the real wire — omit the
-          reset line with it rather than crash or show a stale/placeholder countdown. */}
-      {usage.fiveHour && <BandFoot>5h resets {relativeResets(usage.fiveHour.resetsAt)}.</BandFoot>}
+      {/* card 2ed68346: five_hour can be a confirmed-legitimate null on the real wire. Name the
+          WEEKLY reset in that case rather than dropping the countdown — a plan with no 5h limit still
+          has a reset worth stating, and an empty foot read as "no reset is known for this account". */}
+      <BandFoot>
+        {usage.fiveHour
+          ? `5h resets ${relativeResets(usage.fiveHour.resetsAt)}.`
+          : `7d resets ${relativeResets(usage.sevenDay.resetsAt)}.`}
+      </BandFoot>
     </>
   );
 }
