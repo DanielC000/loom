@@ -22,28 +22,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (h) for a locked role, the skills that DO flow through (human/bundled) are STILL byte-identical,
 //       not stripped — the strip applies independently of delivery path, never doubly to these.
 //
-// Round 2 additions:
-//   (i) CRITICAL fix 1 — a strip WRITE FAILURE (forced EISDIR on the `.loom-permstrip-tmp` path) must
-//       fail CLOSED: the hazard never lands at `dest`, the name is recorded `failed` (never `placed`,
-//       never fingerprinted), and injectSkills surfaces it (throws, naming the skill) rather than
-//       silently delivering the unstripped hazard — a sibling fixture in the SAME call still lands.
-//   (j) MAJOR fix 3 (CR finding 4) — a bundled NAME whose store copy has DIVERGED from the shipped asset
-//       (an out-of-band write, never through the Skills UI or skillWriteData) is treated as non-human
-//       content and IS stripped, same as any other agent/unstamped skill.
-//   (k) a bundled name whose diverged store copy is HUMAN-stamped stays exempt (byte-identical) — the
-//       divergence check in (j) only narrows the UNSTAMPED/agent case, never overrides human provenance.
-//
-// Round 3 additions:
-//   (l) MAJOR fix 1, inject-level counterpart — `stripPermissionWidening` itself returning `null` (not a
-//       write failure) must ALSO be withheld, never delivered: a throwaway copy of inject.js, redirected
-//       to import a two-line permissionGuard.js STUB whose `stripPermissionWidening` always returns
-//       `null`, proves `injectSkills` reacts the same way it does to a write failure in (i) — throws
-//       naming the skill, never lands at `dest`, never in the manifest, never fingerprinted — exercising
-//       the `stripped === null` branch directly rather than the write-failure branch (i) already covers.
-//   (m) MINOR fix 2 — a bare `fs.rmSync(dest, …)` is not fail-safe: forcing it to throw EBUSY (the real
-//       failure shape correlated with the strip's own rename failure) must not leave the unstripped
-//       hazard sitting at `dest` — `quarantineUndeliverableDest`'s rename-aside fallback must fire, and
-//       nothing hazardous may remain anywhere under `.claude/skills` afterward.
+//   (i) a strip WRITE FAILURE (forced EISDIR on the `.loom-permstrip-tmp` path) fails CLOSED: the hazard
+//       never lands at `dest`, is never recorded `placed`/fingerprinted, and injectSkills surfaces it
+//       (throws, naming the skill) — a sibling fixture in the SAME call still lands.
+//   (j) a bundled NAME whose store copy has DIVERGED from the shipped asset (an out-of-band write) is
+//       treated as non-human content and IS stripped, same as any other agent/unstamped skill.
+//   (k) a bundled name whose diverged store copy is HUMAN-stamped stays exempt (byte-identical).
+//   (l) `stripPermissionWidening` itself returning `null` (not a write failure) is ALSO withheld, never
+//       delivered — exercised via a throwaway inject.js redirected to a permissionGuard.js stub.
+//   (m) a bare `fs.rmSync(dest, …)` is not fail-safe: forcing it to throw EBUSY must not leave the
+//       unstripped hazard at `dest` — `quarantineUndeliverableDest`'s rename-aside fallback (i) fires.
+//   (n) fallback (ii) — forcing BOTH rmSync and renameSync to throw falls through to overwriting
+//       `dest/SKILL.md` in place with the neutral stub; the stub has nothing left to detect.
+//   (o) fallback (iii) — forcing rmSync, renameSync, AND the stub write to ALL throw leaves the original
+//       hazard at `dest` unmodified and logs loudly (residual (b)) — nothing more Loom can do from here.
+// @decision 51a2462a
 //
 // Sets LOOM_HOME (store) AND LOOM_ASSET_SKILLS (bundled-asset lookup) to TEMP dirs BEFORE importing dist
 // (paths.ts/store.ts read both at module load). No claude, no live daemon.
@@ -249,11 +242,12 @@ try {
     (manifestJson["sess-strip-fail"] ?? []).includes("agent-clean"));
 
   // =====================================================================================================
-  // (l) round 3, MAJOR fix 1's inject-level counterpart: `stripPermissionWidening` returning `null` (not
-  // a write failure) must ALSO be withheld — a throwaway copy of inject.js redirected to import a
-  // two-line permissionGuard.js STUB whose stripPermissionWidening ALWAYS returns null, regardless of
-  // input. Every OTHER import inject.js makes (store.js, paths.js, …) stays the REAL module, since the
-  // mutant copy lives in the SAME dist/skills directory and those specifiers are untouched.
+  // (l) `stripPermissionWidening` returning `null` (not a write failure) must ALSO be withheld — a
+  // throwaway copy of inject.js redirected to a two-line permissionGuard.js STUB whose
+  // stripPermissionWidening ALWAYS returns null. Every OTHER import inject.js makes stays the REAL
+  // module, since the mutant copy lives in the SAME dist/skills directory and those specifiers are
+  // untouched.
+  // @decision 51a2462a
   // =====================================================================================================
   const cwdNullStrip = path.join(root, "nullstrip-cwd");
   fs.mkdirSync(cwdNullStrip, { recursive: true });
@@ -314,12 +308,11 @@ try {
   }
 
   // =====================================================================================================
-  // (m) round 3, MINOR fix 2: `fs.rmSync(dest, …)` alone is not fail-safe. Force it to throw EBUSY for
-  // ONE target skill's `dest` (the real failure shape — correlated with the SAME rename/write failure
-  // that forces the strip's own 3-attempt loop to give up, per `stripPermissionWideningFile`) and prove
-  // `quarantineUndeliverableDest`'s rename-aside fallback actually fires: `dest` is gone, nothing
-  // hazardous remains anywhere under `.claude/skills`, and the content is relocated (not silently lost)
-  // to the quarantine dir OUTSIDE that discovery tree.
+  // (m) `fs.rmSync(dest, …)` alone is not fail-safe. Force it to throw EBUSY for ONE target skill's
+  // `dest` and prove `quarantineUndeliverableDest`'s rename-aside fallback (i) actually fires: `dest` is
+  // gone, nothing hazardous remains anywhere under `.claude/skills`, and the content is relocated (not
+  // silently lost) to the quarantine dir OUTSIDE that discovery tree.
+  // @decision 51a2462a
   // =====================================================================================================
   const cwdRmFail = path.join(root, "rm-fail-cwd");
   fs.mkdirSync(cwdRmFail, { recursive: true });
@@ -374,9 +367,136 @@ try {
     hazardousRemaining.length === 0);
   const quarantineDir = path.join(cwdRmFail, ".claude", ".loom-quarantined-skills");
   check("(m) the content was RELOCATED (not silently lost) — the quarantine dir exists, outside .claude/skills",
-    fs.existsSync(quarantineDir) && fs.readdirSync(quarantineDir).some((n) => n.startsWith("agent-rm-fail-")));
+    fs.existsSync(quarantineDir) && fs.readdirSync(quarantineDir).includes("agent-rm-fail")); // fixed name — no timestamp/random suffix
   check("(m) a sibling fixture in the SAME call still lands normally",
     fs.existsSync(path.join(cwdRmFail, ".claude", "skills", "agent-clean", "SKILL.md")));
+
+  // =====================================================================================================
+  // (n) fallback (ii) — force BOTH `fs.rmSync(dest, …)` AND `fs.renameSync(dest, …)` to throw so
+  // `quarantineUndeliverableDest` falls through fallback (i) to (ii): `dest` stays exactly where it was
+  // (nothing removed or relocated), but its SKILL.md is overwritten in place with the neutral stub.
+  // @decision 51a2462a
+  // =====================================================================================================
+  const cwdStubFail = path.join(root, "stub-fail-cwd");
+  fs.mkdirSync(cwdStubFail, { recursive: true });
+  writeSkill("agent-stub-fail", hazardMd("agent-stub-fail"), "agent");
+  const stubFailDest = path.join(cwdStubFail, ".claude", "skills", "agent-stub-fail");
+
+  const realWriteFileSync3 = fs.writeFileSync;
+  const realRmSync2 = fs.rmSync;
+  const realRenameSync = fs.renameSync;
+  let stubFailRmTripped = false;
+  let stubFailRenameTripped = false;
+  fs.writeFileSync = (file, ...rest) => {
+    if (typeof file === "string" && file.includes("agent-stub-fail") && file.endsWith(".loom-permstrip-tmp")) {
+      throw Object.assign(new Error("EISDIR: simulated strip-write failure"), { code: "EISDIR" });
+    }
+    return realWriteFileSync3(file, ...rest);
+  };
+  fs.rmSync = (target, ...rest) => {
+    if (typeof target === "string" && path.resolve(target) === path.resolve(stubFailDest) && fs.existsSync(target)) {
+      stubFailRmTripped = true;
+      throw Object.assign(new Error("EBUSY: simulated rm failure"), { code: "EBUSY" });
+    }
+    return realRmSync2(target, ...rest);
+  };
+  fs.renameSync = (src, dst, ...rest) => {
+    if (typeof src === "string" && path.resolve(src) === path.resolve(stubFailDest)) {
+      stubFailRenameTripped = true;
+      throw Object.assign(new Error("EBUSY: simulated rename failure"), { code: "EBUSY" });
+    }
+    return realRenameSync(src, dst, ...rest);
+  };
+  let thrownStubFail;
+  try {
+    injectSkills(cwdStubFail, "sess-stub-fail", null, "worker");
+  } catch (e) { thrownStubFail = e; }
+  finally {
+    fs.writeFileSync = realWriteFileSync3;
+    fs.rmSync = realRmSync2;
+    fs.renameSync = realRenameSync;
+  }
+
+  check("(n) precondition: both the rm AND rename fault injections fired", stubFailRmTripped === true && stubFailRenameTripped === true);
+  check("(n) injectSkills still surfaces the underlying strip failure (throws, naming the skill)",
+    thrownStubFail instanceof Error && /agent-stub-fail/.test(thrownStubFail.message));
+  check("(n) dest is STILL IN PLACE (neither removed nor relocated — fallback (ii) overwrites in place)",
+    fs.existsSync(stubFailDest));
+  const stubContent = fs.readFileSync(path.join(stubFailDest, "SKILL.md"), "utf8");
+  check("(n) dest/SKILL.md was overwritten with the neutral stub naming the withheld skill",
+    stubContent.includes("agent-stub-fail") && stubContent.includes("Loom withheld"));
+  check("(n) the stub has NOTHING left to detect", detectPermissionWidening(stubContent).length === 0);
+  check("(n) a sibling fixture in the SAME call still lands normally",
+    fs.existsSync(path.join(cwdStubFail, ".claude", "skills", "agent-clean", "SKILL.md")));
+
+  // =====================================================================================================
+  // (o) fallback (iii) — force fs.rmSync, fs.renameSync, AND the stub-overwrite fs.writeFileSync to ALL
+  // throw: every fallback fails, so the hazard is left sitting at dest exactly as the decision record's
+  // residual (b) describes. Also captures console.log to prove the loud error-level line actually fires.
+  // @decision 51a2462a
+  // =====================================================================================================
+  const cwdLogFail = path.join(root, "log-fail-cwd");
+  fs.mkdirSync(cwdLogFail, { recursive: true });
+  writeSkill("agent-log-fail", hazardMd("agent-log-fail"), "agent");
+  const logFailDest = path.join(cwdLogFail, ".claude", "skills", "agent-log-fail");
+
+  const realWriteFileSync4 = fs.writeFileSync;
+  const realRmSync3 = fs.rmSync;
+  const realRenameSync2 = fs.renameSync;
+  const realConsoleLog = console.log;
+  let logFailRmTripped = false;
+  let logFailRenameTripped = false;
+  let logFailStubWriteTripped = false;
+  const loggedLines = [];
+  fs.writeFileSync = (file, ...rest) => {
+    if (typeof file === "string" && file.includes("agent-log-fail") && file.endsWith(".loom-permstrip-tmp")) {
+      throw Object.assign(new Error("EISDIR: simulated strip-write failure"), { code: "EISDIR" });
+    }
+    if (typeof file === "string" && path.resolve(file) === path.resolve(path.join(logFailDest, "SKILL.md"))) {
+      logFailStubWriteTripped = true;
+      throw Object.assign(new Error("EACCES: simulated stub-write failure"), { code: "EACCES" });
+    }
+    return realWriteFileSync4(file, ...rest);
+  };
+  fs.rmSync = (target, ...rest) => {
+    if (typeof target === "string" && path.resolve(target) === path.resolve(logFailDest) && fs.existsSync(target)) {
+      logFailRmTripped = true;
+      throw Object.assign(new Error("EBUSY: simulated rm failure"), { code: "EBUSY" });
+    }
+    return realRmSync3(target, ...rest);
+  };
+  fs.renameSync = (src, dst, ...rest) => {
+    if (typeof src === "string" && path.resolve(src) === path.resolve(logFailDest)) {
+      logFailRenameTripped = true;
+      throw Object.assign(new Error("EBUSY: simulated rename failure"), { code: "EBUSY" });
+    }
+    return realRenameSync2(src, dst, ...rest);
+  };
+  console.log = (...args) => { loggedLines.push(args.join(" ")); };
+  let thrownLogFail;
+  try {
+    injectSkills(cwdLogFail, "sess-log-fail", null, "worker");
+  } catch (e) { thrownLogFail = e; }
+  finally {
+    fs.writeFileSync = realWriteFileSync4;
+    fs.rmSync = realRmSync3;
+    fs.renameSync = realRenameSync2;
+    console.log = realConsoleLog;
+  }
+
+  check("(o) precondition: rm, rename, AND stub-write fault injections all fired",
+    logFailRmTripped === true && logFailRenameTripped === true && logFailStubWriteTripped === true);
+  check("(o) injectSkills still surfaces the underlying strip failure (throws, naming the skill)",
+    thrownLogFail instanceof Error && /agent-log-fail/.test(thrownLogFail.message));
+  check("(o) dest is STILL IN PLACE, UNMODIFIED — every fallback failed, nothing more Loom can do",
+    fs.existsSync(logFailDest));
+  const unstrippedContent = fs.readFileSync(path.join(logFailDest, "SKILL.md"), "utf8");
+  check("(o) dest/SKILL.md STILL carries the original unstripped hazard (residual (b) — no further mitigation)",
+    detectPermissionWidening(unstrippedContent).length > 0);
+  check("(o) a loud error-level log line was actually emitted naming the failure",
+    loggedLines.some((l) => l.includes("quarantine FAILED") && l.includes(logFailDest)));
+  check("(o) a sibling fixture in the SAME call still lands normally",
+    fs.existsSync(path.join(cwdLogFail, ".claude", "skills", "agent-clean", "SKILL.md")));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

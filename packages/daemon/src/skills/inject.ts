@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type { SessionRole } from "@loom/shared";
 import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT, WORKTREES_DIR } from "../paths.js";
-import { claudeSkillsDir, doctrineGitExcludeEntries } from "../pty/claude-doctrine.js";
+import { claudeSkillsDir, doctrineGitExcludeEntries, QUARANTINED_SKILLS_DIRNAME } from "../pty/claude-doctrine.js";
 import { isValidSkillName, isBundledSkill, skillProvenance, isPristineBundledContent } from "./store.js";
 import { stripPermissionWidening } from "./permissionGuard.js";
 import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
@@ -420,10 +420,14 @@ function stripPermissionWideningFile(skillDir: string): boolean {
 //
 // @decision 51a2462a round 3 — a bare `try { fs.rmSync(dest, …) } catch {}` is not enough; this is the
 // fail-safe replacement every "undeliverable skill" call site below must use instead.
+//
+// @decision 51a2462a round 4 — the quarantine dir uses ONE FIXED name per skill (never a timestamp+random
+// suffix), replacing any prior copy (best effort) — never accumulates unbounded dirs. See the decision
+// record's "Round 4" section for why a fixed name was chosen over pruning at `injectSkills`'s start.
 /**
  * (1) rename `dest` ASIDE, OUTSIDE the `.claude/skills` discovery tree entirely (a sibling under
- *     `.claude` named `.loom-quarantined-skills/<name>-<random>` — never a renamed/dotted sibling still
- *     INSIDE `skills/`, which Claude Code's own discovery walk would still find as a skill directory);
+ *     `.claude` named `.loom-quarantined-skills/<name>` — never a renamed/dotted sibling still INSIDE
+ *     `skills/`, which Claude Code's own discovery walk would still find as a skill directory);
  * (2) else overwrite `<dest>/SKILL.md` in place with a neutral, frontmatter-free stub naming the
  *     withheld skill — the hazardous construct is gone even though the directory itself couldn't move;
  * (3) else log loudly at error level — nothing more Loom can do from here (see the decision record's
@@ -436,9 +440,10 @@ function quarantineUndeliverableDest(dest: string, name: string, claudeDir: stri
   if (!fs.existsSync(dest)) return true;
 
   try {
-    const quarantineDir = path.join(claudeDir, ".loom-quarantined-skills");
+    const quarantineDir = path.join(claudeDir, QUARANTINED_SKILLS_DIRNAME);
     fs.mkdirSync(quarantineDir, { recursive: true });
-    const aside = path.join(quarantineDir, `${name}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
+    const aside = path.join(quarantineDir, name); // fixed name — replace any prior copy, never accumulate
+    try { fs.rmSync(aside, { recursive: true, force: true }); } catch { /* best effort — renameSync below fails closed anyway if this didn't actually clear it */ }
     fs.renameSync(dest, aside);
     console.log(`[skills] quarantine: could not remove ${dest}; relocated it to ${aside} (outside the skill-discovery tree)`);
     return true;

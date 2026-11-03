@@ -154,6 +154,53 @@ issues, all fixed in the same pass (worker round, no new card):
    postcondition both stay as defence in depth (item 1 above still needs them wired correctly), but a
    single pass now resolves any realistic stacked trigger on its own.
 
+## Round 4 — quarantine dir excluded unconditionally, bounded, fallbacks (ii)/(iii) tested (card `fb5b91c0`)
+
+A Code Review of round 3's own `quarantineUndeliverableDest` (worker `b666b7b3`) found the function itself
+sound but three gaps around it, all fixed in the same pass:
+
+1. **The quarantine dir was NOT git-excluded.** `hideFromGit`'s own entries (`doctrineGitExcludeEntries`,
+   `pty/claude-doctrine.ts`) only ever covered the skill names actually injected, plus
+   `settings.local.json` — never `.claude/.loom-quarantined-skills/` itself. A worker's own `git add -A`
+   (or a manager/plain session sharing `repoPath` as cwd) could COMMIT an unstripped, agent-authored
+   hazardous SKILL.md into repo history — Claude Code would never load it from there (no
+   skills/commands/agents segment in a git blob), but it's still a trust-boundary leak into history, and
+   a `git check-ignore` run against the un-fixed path confirmed it genuinely wasn't ignored. Fixed:
+   `doctrineGitExcludeEntries` now ALWAYS appends `/{CLAUDE_DOCTRINE_DIR}/{QUARANTINED_SKILLS_DIRNAME}/`
+   to its returned list, unconditionally — never gated on `skillNames`, and never gated on whether a
+   quarantine has actually happened yet in this session (the entry is written on EVERY `hideFromGit` call,
+   same as the `settings.local.json` entry already was). `QUARANTINED_SKILLS_DIRNAME` (new, exported from
+   `pty/claude-doctrine.ts`) is the ONE source of truth for the literal `.loom-quarantined-skills`, used by
+   both `doctrineGitExcludeEntries` and `quarantineUndeliverableDest` itself — so the exclude pattern and
+   the actual relocation target can never drift into two spellings.
+2. **Unbounded accumulation.** The round-3 shape appended `${name}-${Date.now()}-${crypto.randomBytes(4)
+   .toString("hex")}` per failure, so a repeatedly-undeliverable skill (e.g. a persistently locked
+   directory on Windows) grew a fresh quarantine dir on every single spawn, forever. Fixed by using ONE
+   FIXED name per skill (`quarantineDir/<name>`, no suffix) — every call best-effort-clears any prior
+   copy at that exact path (`fs.rmSync(aside, {recursive:true, force:true})`, errors swallowed) before the
+   rename, so a failed clear doesn't block the relocation attempt; `fs.renameSync` itself still fails
+   closed into fallback (ii)/(iii) if the target genuinely can't be cleared or replaced. A fixed name was
+   chosen over pruning the whole quarantine dir at the START of `injectSkills`: a start-of-call prune would
+   race a CONCURRENT session sharing the same `cwd` (manager/platform/setup/auditor all share
+   `repoPath`) — one session's prune could delete a sibling session's own just-written quarantine entry
+   before anyone ever inspected it. The fixed-name replace has no such cross-session hazard: each skill
+   name's own quarantine slot is independent, and two sessions racing to quarantine the SAME skill name at
+   the SAME cwd lose at most each other's forensic copy of THAT one name, never an unrelated one.
+3. **Fallbacks (ii) and (iii) were untested.** Only fallback (i) (rename aside) had ever been exercised —
+   round 3 itself named this gap but didn't close it. Two new tests
+   (`skills-inject-permission-strip.mjs` (n)/(o)) now force BOTH `fs.rmSync(dest, …)` AND
+   `fs.renameSync(dest, …)` to throw (forcing fallback (ii): `dest` stays in place, `dest/SKILL.md` is
+   overwritten in place with the neutral stub, and the stub has nothing left to detect), and separately
+   force rmSync + renameSync + the stub-overwrite `fs.writeFileSync` to ALL throw (forcing fallback (iii):
+   `dest` is left completely unmodified, still carrying the original unstripped hazard, with a loud
+   error-level `console.log` line actually captured and asserted). `skills-inject-worktree-exclude.mjs`
+   also gained a real-git assertion: a probe file written under the quarantine dir is confirmed ignored
+   via an actual `git check-ignore -v` call, not just a string match against the raw exclude file.
+
+Named residual (b) below is unchanged by this round — fallback (iii)'s "log loudly, nothing more Loom can
+do" ceiling was always the honest floor; round 4 only proves that ceiling is actually reached when every
+fallback above it fails, it doesn't raise it.
+
 ## Named residuals
 
 (a) **An unstamped human customization of a bundled skill is stripped.** If a human customized a bundled
@@ -223,3 +270,18 @@ recognizes Loom's own stripped delivery as unmodified-since-placement rather tha
   `null`-postcondition branch once the round-3 whole-run strip ships (see PART D' above) — test it via a
   deliberately injected (forced-always-dirty) detector instead, never by trying to outrun the bound with
   real content.
+- Do not gate the quarantine dir's git-exclude entry on `skillNames`, or on whether a quarantine has
+  actually happened yet this session (round 4) — `doctrineGitExcludeEntries` must append it
+  UNCONDITIONALLY, every call, exactly like the `settings.local.json` entry.
+- Do not hand-copy the quarantine dir's literal name into a second spot (round 4) — both
+  `doctrineGitExcludeEntries` and `quarantineUndeliverableDest` must import `QUARANTINED_SKILLS_DIRNAME`
+  from `pty/claude-doctrine.ts`, never re-spell `.loom-quarantined-skills` locally.
+- Do not go back to a timestamp+random quarantine name (round 4) — it accumulates without bound; use the
+  ONE FIXED name per skill, replacing any prior copy (best effort) on every call.
+- Do not prune the whole quarantine dir at the start of `injectSkills` as an alternative to the fixed name
+  above (round 4) — a shared `cwd` (manager/platform/setup/auditor) means a start-of-call prune can race
+  and delete a concurrent session's own just-written quarantine entry before anyone inspects it.
+- Do not treat fallback (ii) (stub overwrite) or (iii) (loud log) as implicitly covered by fallback (i)'s
+  own test (round 4) — each failure mode needs its OWN fault injection (force rmSync+renameSync to reach
+  (ii); force rmSync+renameSync+the stub write to reach (iii)), since a reviewer confirmed round 3 shipped
+  both untested.

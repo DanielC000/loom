@@ -71,6 +71,26 @@ try {
   const sharedExclude = fs.readFileSync(path.join(repoPath, ".git", "info", "exclude"), "utf8");
   check("the shared .git/info/exclude (main repo) carries the loom-c entry", sharedExclude.includes("/.claude/skills/loom-c"));
   check("worktree1 has NO private .git/info/exclude of its own (proves it wrote through to the shared common dir)", !fs.existsSync(path.join(worktree1, ".git", "info", "exclude")));
+
+  // =====================================================================================================
+  // The quarantine dir `quarantineUndeliverableDest` (inject.ts) relocates an undeliverable skill into
+  // must be git-excluded UNCONDITIONALLY — not merely as a side effect of some skill name happening to
+  // be delivered. Assert both the raw exclude-file entry AND, with real git, that `git check-ignore`
+  // actually treats a path under it as ignored.
+  // @decision 51a2462a
+  // =====================================================================================================
+  check("the shared .git/info/exclude carries the quarantine-dir entry unconditionally",
+    sharedExclude.includes("/.claude/.loom-quarantined-skills/"));
+  const quarantinedProbePath = path.join(worktree2, ".claude", ".loom-quarantined-skills", "some-skill", "SKILL.md");
+  fs.mkdirSync(path.dirname(quarantinedProbePath), { recursive: true });
+  fs.writeFileSync(quarantinedProbePath, "probe");
+  let ignoredOut = "";
+  try { ignoredOut = git(`check-ignore -v "${quarantinedProbePath.replace(/\\/g, "/")}"`, worktree2); } catch { /* non-zero exit = not ignored; leave ignoredOut empty so the check below fails loudly */ }
+  check("git check-ignore confirms a path under the quarantine dir is actually ignored",
+    ignoredOut.includes(".git/info/exclude") && /\.claude\/\.loom-quarantined-skills\//.test(ignoredOut));
+  const statusAfterProbe = git("status --porcelain -uall", worktree2);
+  check("the quarantine probe file does NOT show up as untracked in git status",
+    !/\?\? .*\.loom-quarantined-skills/.test(statusAfterProbe));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

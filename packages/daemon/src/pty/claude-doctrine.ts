@@ -31,6 +31,16 @@ export function claudeSkillsDir(cwd: string): string {
   return path.join(cwd, CLAUDE_DOCTRINE_DIR, "skills");
 }
 
+/** The quarantine subdir name under `.claude/` that `skills/inject.ts`'s `quarantineUndeliverableDest`
+ *  relocates an undeliverable skill into, OUTSIDE the `.claude/skills` discovery tree entirely. Shared
+ *  here so inject.ts's own usage and the git-exclude entry below can never drift into two spellings of
+ *  the same path.
+ *
+ *  @decision 51a2462a round 4 — this dir must stay git-excluded unconditionally (see
+ *  `doctrineGitExcludeEntries` below); an unstripped, agent-authored hazardous SKILL.md can otherwise be
+ *  committed into repo history by a worker's own `git add -A` or a manager/plain session. */
+export const QUARANTINED_SKILLS_DIRNAME = ".loom-quarantined-skills";
+
 /**
  * Whether `p` (a git-status-relative path, forward-slash form) is claude-doctrine noise that a worker's
  * own product never counts as — the injected skills subtree at ANY status, or an untracked path under
@@ -47,10 +57,16 @@ export function isDoctrineArtifactPath(p: string): boolean {
   return p.startsWith(`${CLAUDE_DOCTRINE_DIR}/`);
 }
 
-/** Git-exclude entries for one injected skill name, plus Claude's own permission-persistence file —
- *  exactly what `skills/inject.ts`'s `hideFromGit` appends to `info/exclude` per session. */
+/** Git-exclude entries for one injected skill name, plus Claude's own permission-persistence file, plus
+ *  (UNCONDITIONALLY — never gated on `skillNames` or on whether a quarantine has actually happened yet)
+ *  the quarantine dir `quarantineUndeliverableDest` relocates an undeliverable skill into — exactly what
+ *  `skills/inject.ts`'s `hideFromGit` appends to `info/exclude` per session. */
 export function doctrineGitExcludeEntries(skillNames: string[]): string[] {
-  return [...skillNames.map((n) => `/${CLAUDE_DOCTRINE_DIR}/skills/${n}`), `/${CLAUDE_DOCTRINE_DIR}/settings.local.json`];
+  return [
+    ...skillNames.map((n) => `/${CLAUDE_DOCTRINE_DIR}/skills/${n}`),
+    `/${CLAUDE_DOCTRINE_DIR}/settings.local.json`,
+    `/${CLAUDE_DOCTRINE_DIR}/${QUARANTINED_SKILLS_DIRNAME}/`,
+  ];
 }
 
 /** Windows-first: %USERPROFILE%\.claude\.credentials.json (the Claude Code OAuth token file). macOS

@@ -2,9 +2,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Hermetic unit test for `skills/permissionGuard.ts` (card 51a2462a, from investigate-first card
 // 28b2ca6f; decision record 87a51903 is why this logic lives in its own module rather than in
 // permissionWidening.ts): the refuse-at-write + strip-at-injection logic for an agent-written skill's
-// permission-widening content. Pure text in/out, no fs/LOOM_HOME needed — permissionWideningRefusalError
-// takes a string and returns a string/undefined; stripPermissionWidening takes a string and returns a
-// string, or null when it fails closed (see PART D' below).
+// permission-widening content. No LOOM_HOME needed — permissionWideningRefusalError takes a string and
+// returns a string/undefined; stripPermissionWidening takes a string and returns a string, or null when
+// it fails closed (see PART D' below). PART D' alone touches `fs`, to write/clean up a throwaway mutant
+// module pair under dist/skills/ — every other part stays pure text in/out.
 //
 // PART A — permissionWideningRefusalError: undefined for a clean skill; a named error for each vector
 //   alone and combined; BOM fail-closed (a BOM-led hazard is still caught, a BOM-led clean skill is not
@@ -21,16 +22,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (`!!!`cmd``, ` ```!!! `) trigger, which a single stripping pass MANUFACTURES back into the
 //   canonical single-`!` form instead of removing — stripPermissionWidening must loop to a fixpoint and
 //   return a result with nothing left to detect, never a partially-stripped string still carrying one.
-// PART D' — round 3 MAJOR fix: the fail-closed `null` postcondition was UNTESTED (a reviewer deleted
-//   `permissionGuard.ts`'s `return null` line in the compiled output and every existing test above stayed
-//   green). Round 3 also ships a WHOLE-RUN strip (see the decision record's "Round 3" section), so there
-//   is no longer a REAL combination of the four known vectors that can survive a single fixpoint pass —
-//   a crafted stress fixture (any number of stacked `!`s) would just strip clean and prove nothing about
-//   this branch. So this part uses a DELIBERATELY INJECTED (forced-always-dirty) detector instead: a
-//   throwaway copy of permissionGuard.js importing a throwaway permissionWidening.js whose
-//   detectPermissionWidening always reports non-empty, isolating "does the postcondition return null when
-//   detection-after-strip is non-empty" from "can real content ever make that true" (the latter is, by
-//   round 3's own design, no longer reachable through the four known vectors).
+// PART D' — the fail-closed `null` postcondition: a DELIBERATELY INJECTED (forced-always-dirty) detector
+//   — a throwaway copy of permissionGuard.js importing a throwaway permissionWidening.js whose
+//   detectPermissionWidening always reports non-empty — isolates "does the postcondition return null when
+//   detection-after-strip is non-empty" from "can real content ever make that true" (the latter is
+//   unreachable through the four known vectors once the whole-run strip in PART D ships).
+// @decision 51a2462a
 //
 // Run after build: node test/skill-permission-guard.mjs
 import fs from "node:fs";
@@ -258,7 +255,8 @@ try {
     try { fs.rmSync(mutantGuardPath, { force: true }); } catch { /* best effort */ }
   }
 } finally {
-  // pure-text module under test — nothing to clean up (no fs, no LOOM_HOME, no temp dirs)
+  // nothing left to clean up HERE — PART D' already removed its own throwaway mutant files in its own
+  // try/finally above; no LOOM_HOME or other temp dir is used anywhere in this file.
 }
 
 console.log(failures === 0
