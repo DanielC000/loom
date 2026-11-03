@@ -61,8 +61,7 @@ import { CompanionTrustWindow } from "../companion/trust-window.js";
 import { GitWriter } from "../git/writer.js";
 import type { FreshMintInfo, PendingOpView, CacheHitInfo } from "../orchestration/pending-ops.js";
 import { INTENT_MAX_LEAD_MS } from "../orchestration/gate-intent.js";
-import { claudeAdapter } from "../pty/claude-adapter.js";
-import { codexAdapter } from "../pty/codex-adapter.js";
+import { contextTelemetryFor } from "../pty/adapter.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -2973,14 +2972,6 @@ export class OrchestrationMcpRouter {
     // `0` means genuinely measured: this row's own worktreePath IS set and no other session row shares it.
     const worktreePathAliases = (worktreePath: string | null | undefined, selfId: string): number | null =>
       worktreePath ? db.listSessionsAtWorktreePath(worktreePath, selfId).length : null;
-
-    // Card 5a8a74e1: whether `ctxInputTokens`/`ctxTurns`/`model` are EVER measurable for this worker's
-    // harness — reuses the exact `HarnessCapabilities.contextTelemetry` name/flag codex-adapter.ts's own
-    // header note (card a1916267) already rules gates all three (same hook-gated capture chokepoint), so a
-    // manager can branch on "structurally unmeasurable on this harness" vs "not yet measured" (see
-    // `neverCompletedTurn`) instead of inferring it from `harness` + prose.
-    const contextTelemetryFor = (harness: Session["harness"]): boolean =>
-      (harness === "codex" ? codexAdapter : claudeAdapter).capabilities.contextTelemetry;
 
     // Card c8304714 fallout: guards the METHOD, not just `pty` itself — `pty?.` alone only protects
     // against `pty` being null/undefined, it does NOT protect against a present-but-PARTIAL pty stub

@@ -53,7 +53,12 @@ AFTER the Stop hook's write and silently overwrite the correct turn-end reading 
 - Do not assume a value derived from `ctxUpdatedAt` is safe to de-dup an action on per-READING just
   because an existing check already did that before this sampler shipped — the sampler makes
   `ctxUpdatedAt` advance far more often than once per turn now; any such check needs a per-TURN key
-  instead. See the audit table below.
+  instead. See the audit table below. ⚠️ QUALIFIED by round 4 (the next bullet): a per-TURN key is the
+  right fix ONLY for a check whose own fire is inert (never mutates `busy`/`lastActivity`/`turnSeq`
+  itself) — for a check whose fire mutates session state, a per-turn key is not merely insufficient, it
+  is actively unsafe (three rounds each proved a different per-turn key re-arms on the fire's own
+  wind-down); such a check needs the round-4 shape instead (fire at most once per session id, no re-arm
+  key at all).
 - ⛔ **Round 4: for a de-dup whose OWN fire can itself mutate `busy`/`lastActivity`/`turnSeq` (the
   emergency interrupt's Esc/settle/drain — see `docs/decisions/9f279c7b-contextwatcher-emergency-recycle-interrupt-trigger-a.md`'s
   round-4 section), do not reach for ANY per-turn key at all — three successive rounds each tried one
@@ -97,6 +102,16 @@ NEW engine session id, even though that id's transcript could live somewhere the
 Fixed by storing `{engineSessionId, missedAt}` and treating a miss recorded under a DIFFERENT
 engineSessionId as no cache hit at all — the TTL only ever suppresses a re-scan for the SAME engine
 session id that actually missed.
+
+## Accepted residuals of the once-per-session-id rule (card 85b66b46)
+
+Two residuals are accepted rather than reach for a fourth re-arm key after the three failed attempts
+above: (i) auto-compact rotating the engine session id within the same Loom session, letting occupancy
+re-climb from the compacted baseline with no re-fire (the owner's own install has auto-compact OFF; still
+live for any other install); (ii) a manager's own `recycle_me` failing after it acts on a fired
+interrupt, leaving the original (already-fired) session id working and never re-interrupted. Full
+reasoning: `docs/decisions/9f279c7b-contextwatcher-emergency-recycle-interrupt-trigger-a.md`'s own
+"Accepted residuals" section.
 
 ## Interaction with context-exhaustion detection (card 66ff7321)
 

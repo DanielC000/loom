@@ -1,4 +1,7 @@
+import type { Session } from "@loom/shared";
 import type { ContextStats, RunUsageStats } from "../sessions/context.js";
+import { claudeAdapter } from "./claude-adapter.js";
+import { codexAdapter } from "./codex-adapter.js";
 
 /**
  * The harness-AGNOSTIC transcript-turn shape every adapter's `readTranscript` returns (Code Review
@@ -105,6 +108,17 @@ export interface HarnessCapabilities {
   /** `readCachedVersion` is meaningful (spawn-recipe gating reads an installed CLI version). */
   versionGating: boolean;
 }
+
+/**
+ * Whether `harness`'s adapter populates `ctxInputTokens`/`ctxUpdatedAt` at all — i.e.
+ * {@link HarnessCapabilities.contextTelemetry}. The single source of truth every context-reading
+ * consumer (`ContextWatcher`, `mcp/orchestration.ts`'s fleet/worker display fields,
+ * `MidTurnContextSampler`) gates on before trusting those columns for a session of that harness.
+ * Card 85b66b46 (item 5): folded from three independent hand-copies (`orchestration/context-watcher.ts`,
+ * `mcp/orchestration.ts`, `sessions/mid-turn-context-sampler.ts`) into this one.
+ */
+export const contextTelemetryFor = (harness: Session["harness"]): boolean =>
+  (harness === "codex" ? codexAdapter : claudeAdapter).capabilities.contextTelemetry;
 
 /**
  * The claude-JSONL-format-specific half — see `pty/claude-transcript.ts` (the concrete implementation)

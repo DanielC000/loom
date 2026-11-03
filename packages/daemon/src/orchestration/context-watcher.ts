@@ -2,8 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig, contextWindowForModel } from "@loom/shared";
 import type { OrchestrationConfig, Session } from "@loom/shared";
 import type { Db } from "../db.js";
-import { claudeAdapter } from "../pty/claude-adapter.js";
-import { codexAdapter } from "../pty/codex-adapter.js";
+import { contextTelemetryFor } from "../pty/adapter.js";
 import { checkContextExhaustion } from "./context-exhaustion.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
@@ -130,9 +129,12 @@ export const WORKER_CONTEXT_WARN_PREFIX = "[loom:worker-context-high]";
  * emits the event exactly once). Both knobs resolve per-project via resolveConfig (mirroring the idle
  * watchdog's `idleNudgeMinutes` / `maxUnansweredNudges`).
  *
- * No reset-on-activity (unlike IdleWatcher): in-session context only grows, and a context nudge is
- * answered by RECYCLING — which makes the manager go not-live and its successor a FRESH row with default
- * 'watching' state, so the cycle re-arms naturally without a counter reset.
+ * No reset-on-activity (unlike IdleWatcher): a context nudge is answered by RECYCLING — which makes the
+ * manager go not-live and its successor a FRESH row with default 'watching' state, so the cycle re-arms
+ * naturally without a counter reset. (Occupancy is NOT guaranteed to only grow within one session —
+ * auto-compact can shrink it mid-session; see the accepted residual in
+ * `docs/decisions/9f279c7b-contextwatcher-emergency-recycle-interrupt-trigger-a.md`. The re-arm above
+ * doesn't rely on monotonic growth — it relies on a recycle minting a fresh row.)
  *
  * BLIND-TURN advisory (Trigger B, `checkBlindTurn` below) — a second, independent signal, checked every
  * tick regardless of `ctxInputTokens`; advisory-only, never a queued nudge (can't reach a stuck manager).
@@ -154,10 +156,6 @@ export const WORKER_CONTEXT_WARN_PREFIX = "[loom:worker-context-high]";
  * fire AT MOST ONCE EVER per worker session id, like Trigger A, for the identical reason (the interrupt's
  * own Esc→settle→drain mutates `busy`/`lastActivity`/`turnSeq`).
  */
-/** Whether a session's harness ever populates `ctxInputTokens` — the adapter capability, the same source `mcp/orchestration.ts`'s `contextTelemetryFor` reads. */
-const contextTelemetryFor = (harness: Session["harness"]): boolean =>
-  (harness === "codex" ? codexAdapter : claudeAdapter).capabilities.contextTelemetry;
-
 export class ContextWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   constructor(private deps: ContextWatcherDeps) {}

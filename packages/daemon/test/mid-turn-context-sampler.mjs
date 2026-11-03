@@ -18,6 +18,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     correctly-shaped transcript sitting at its own file — proven against a PARALLEL claude session in
 //     the SAME tick that DOES get sampled (positive control: the skip is the harness gate, not a missing
 //     file or a broken reader).
+//   • card 85b66b46, item 1: `resolvedPathCache`'s own rotation hole — a resolved path recorded for an
+//     OLD engine id, with no `cache` entry ever created (the race: the follow-up stat throws right after
+//     the path is cached), must NOT be served to a NEW engine id after rotation (section 1k).
 // Run: 1) build (turbo builds shared first), 2) node test/mid-turn-context-sampler.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -373,6 +376,70 @@ try {
         incNew && incNew.inputTokens === 444_000);
     } finally {
       fs.readdirSync = realReaddirSync;
+    }
+  }
+
+  // -- (k) RESOLVED-PATH-CACHE ROTATION HOLE (card 85b66b46, item 1 — the bug this card exists to fix):
+  //        resolveTranscriptFile finds the OLD engine id's transcript via the drift scan and
+  //        resolvedPathCache.set() records it — but the immediate follow-up stat on that resolved path
+  //        throws (simulating a genuine race: the file vanishes/is unreadable between the scan and the
+  //        stat), so read() returns null BEFORE a `cache` entry is ever created for this session. A later
+  //        engine-id rotation then finds NO `cache` entry to clear resolvedPathCache on — pre-fix, the OLD
+  //        engine id's resolved path (keyed by sessionId alone) would be served VERBATIM to the NEW
+  //        engine id's own read, silently sampling the abandoned transcript under the new id's
+  //        bookkeeping, exactly the shape missCache's own (i) rotation hole was fixed for in round 4. ---
+  {
+    const reader = new IncrementalContextStatsReader();
+    const sessionId = "sK";
+    const engOld = `engK-old-${Date.now()}-${process.pid}`;
+    const engNew = `engK-new-${Date.now()}-${process.pid}`;
+    const claudeProjectsRoot = path.join(process.env.HOME || process.env.USERPROFILE, ".claude", "projects");
+
+    // The OLD engine id's transcript lives at a DRIFTED path (the bare path misses; the scan finds it).
+    const oldDriftedDir = path.join(claudeProjectsRoot, "drifted-resolved-path-hole-old-dir");
+    fs.mkdirSync(oldDriftedDir, { recursive: true });
+    const oldDriftedFile = path.join(oldDriftedDir, `${engOld}.jsonl`);
+    fs.writeFileSync(oldDriftedFile, turnLine("k-old-m0", { in: 555_000, out: 10, cc: 0, cr: 0 }) + "\n");
+
+    // Force the stat call on the RESOLVED path (never the bare, already-missing one) to throw exactly
+    // once — call 1 is the bare path's own natural ENOENT miss, call 2 is the explicit follow-up stat
+    // right after resolveTranscriptFile succeeds and resolvedPathCache.set() has already run.
+    const realStat = fs.promises.stat;
+    let statCalls = 0;
+    let armRaceOnCall = null;
+    fs.promises.stat = async (...a) => {
+      statCalls++;
+      if (armRaceOnCall !== null && statCalls === armRaceOnCall) throw new Error("ESIMULATED-RESOLVE-RACE");
+      return realStat(...a);
+    };
+    try {
+      statCalls = 0;
+      armRaceOnCall = 2;
+      const incRace = await reader.read(sessionId, cwd1, engOld);
+      check("1k the simulated resolve-then-stat race ⇒ null (no `cache` entry created for this session)", incRace === null);
+      armRaceOnCall = null;
+
+      // ROTATION: a NEW engine id with its OWN real, independent transcript — never colliding with the
+      // OLD engine id's resolved path.
+      const newDriftedDir = path.join(claudeProjectsRoot, "drifted-resolved-path-hole-new-dir");
+      fs.mkdirSync(newDriftedDir, { recursive: true });
+      const newDriftedFile = path.join(newDriftedDir, `${engNew}.jsonl`);
+      fs.writeFileSync(newDriftedFile, turnLine("k-new-m0", { in: 666_000, out: 10, cc: 0, cr: 0 }) + "\n");
+
+      let openedPaths = [];
+      const realOpen = fs.promises.open;
+      fs.promises.open = async (p, ...rest) => { openedPaths.push(p); return realOpen(p, ...rest); };
+      try {
+        const incNew = await reader.read(sessionId, cwd1, engNew);
+        check("1k RED/GREEN: rotation to the NEW engine id reads the NEW transcript (in 666000), never the OLD abandoned one",
+          incNew && incNew.inputTokens === 666_000);
+        check("1k rotation opened the NEW drifted file, never the OLD (abandoned) one",
+          openedPaths.length === 1 && path.resolve(openedPaths[0]) === path.resolve(newDriftedFile));
+      } finally {
+        fs.promises.open = realOpen;
+      }
+    } finally {
+      fs.promises.stat = realStat;
     }
   }
 

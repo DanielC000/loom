@@ -175,8 +175,9 @@ const OVER_FLOOR_CTX = 900_000;
   cleanup(e);
 }
 
-// (c) A DIFFERENT (recycled) session id, also over the floor, fires its OWN first interrupt — a recycle
-// minting a fresh session id is the ONLY thing that re-arms this check now.
+// (c) CONTROL: a DIFFERENT (recycled) session id, also over the floor, fires its OWN first interrupt — a
+// recycle minting a fresh session id is the ONLY thing that re-arms this check now. Confirms (a)/(b)'s
+// "does not re-fire" above is the once-per-session RULE at work, not a broken/always-suppressing check.
 {
   const e = makeEnv({ projectConfig: { orchestration: { emergencyRecycleAtContextRatio: 0.85 } } });
   seedManager(e, "mgr-old", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date().toISOString() });
@@ -192,9 +193,9 @@ const OVER_FLOOR_CTX = 900_000;
   cleanup(e);
 }
 
-// (d) A PRE-EXISTING (legacy-shape, no turnSeqAtFire field) event for this session blocks any fire at
-// all — presence alone is the whole rule now, so a round-3-era event (or any older one) still correctly
-// suppresses a round-4 fire.
+// (d) PIN: a PRE-EXISTING (legacy-shape, no turnSeqAtFire field) event for this session blocks any fire
+// at all — presence alone is the whole rule now, so a round-3-era event (or any older one) still
+// correctly suppresses a round-4 fire. Pins this exact backward-compatible shape against regression.
 {
   const e = makeEnv({ projectConfig: { orchestration: { emergencyRecycleAtContextRatio: 0.85 } } });
   seedManager(e, "mgr-legacy", { busy: true, ctx: OVER_FLOOR_CTX, ctxUpdatedAt: new Date().toISOString() });

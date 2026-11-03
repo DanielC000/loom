@@ -473,14 +473,17 @@ export class IncrementalContextStatsReader {
   /**
    * Card c5b234aa, Code Review round 2: the ONE-TIME-resolved absolute path for a session whose bare
    * {@link engineTranscriptPath} missed and {@link resolveTranscriptFile}'s scan-fallback (card f10a6f40
-   * dir-encoding drift) found it elsewhere. Without this, a drifted session would either (a) silently
-   * never sample at all (if this reader only ever tried the bare path, the two-path asymmetry this fixes)
-   * or (b) re-pay a `resolveTranscriptFile` call — and, on a cold `resolvedPathCache` miss there, a real
-   * `readdirSync` of the whole transcript root — on EVERY tick forever. Keyed by sessionId (not
-   * engineSessionId): cleared alongside `cache` on rotation/drop/clear, so a stale resolved path from an
-   * ABANDONED engine id can never survive into the new one.
+   * dir-encoding drift) found it elsewhere — avoids re-paying that scan (a real `readdirSync` of the
+   * whole transcript root) on every tick forever.
+   *
+   * Card 85b66b46 (round-4 follow-up, item 1): also carries the `engineSessionId` the path was resolved
+   * under, same shape as {@link missCache} below — keying by sessionId alone let a stale path from an
+   * ABANDONED engine id survive a rotation: the rotation-clear in `read()` only fires when a `cache`
+   * entry already exists, but a resolved path can land here with NO `cache` entry yet (the stat right
+   * after `resolvedPathCache.set` can itself throw — see `read()`'s own comment at that site). `read()`
+   * below treats a path resolved under a different `engineSessionId` as no cache hit at all.
    */
-  private resolvedPathCache = new Map<string, string>();
+  private resolvedPathCache = new Map<string, { engineSessionId: string; path: string }>();
   /**
    * Negative cache for a session whose transcript could not be found at all (neither the bare path nor
    * `resolveTranscriptFile`'s scan) — see {@link TRANSCRIPT_MISS_NEGATIVE_CACHE_TTL_MS}'s own doc for
@@ -517,7 +520,12 @@ export class IncrementalContextStatsReader {
     }
 
     const bareFile = engineTranscriptPath(cwd, engineSessionId);
-    let file = this.resolvedPathCache.get(sessionId) ?? bareFile;
+    // Card 85b66b46 (item 1): a resolved path recorded under a DIFFERENT engineSessionId is no cache hit
+    // at all — same discipline as the missCache check below, and for the same reason: this map can carry
+    // a resolved path for a session with NO `cache` entry (see resolvedPathCache's own doc), so the
+    // rotation-clear above can't be relied on to have cleared a stale entry here either.
+    const resolvedCached = this.resolvedPathCache.get(sessionId);
+    let file = resolvedCached && resolvedCached.engineSessionId === engineSessionId ? resolvedCached.path : bareFile;
     let size: number;
     try {
       size = (await fs.promises.stat(file)).size;
@@ -540,7 +548,7 @@ export class IncrementalContextStatsReader {
         return null; // genuinely missing/unreadable — nothing to report
       }
       this.missCache.delete(sessionId);
-      this.resolvedPathCache.set(sessionId, resolved);
+      this.resolvedPathCache.set(sessionId, { engineSessionId, path: resolved });
       file = resolved;
       try { size = (await fs.promises.stat(file)).size; }
       catch { return null; }

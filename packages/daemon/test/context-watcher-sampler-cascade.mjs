@@ -6,19 +6,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // WHILE it's busy, and ContextWatcher's emergency-interrupt de-dup must survive that churn — as of round
 // 4, AT MOST ONE interrupt per SESSION, never once per turn or once per tick.
 //
-// Round 3 widened this file: the round-2 fix (de-dup keyed on `lastActivity`) was ITSELF broken by the
-// fire's OWN delivery mechanics — `redirectManagerForEmergencyRecycle` → `deliverRedirect` →
-// `interruptForRedirect`'s settle path runs `setBusy(false)` → `drainPending` → `setBusy(true)` to land
-// the redirect as the manager's next turn, and `Db.setBusy` stamps `last_activity` on BOTH edges — so the
-// wind-down turn's own `lastActivity` ends up LATER than the fire event's own `ts`, even though the Esc'd
-// turn never completes (no Stop, hence no `onTurnCompleted`/`turnSeq` bump). The `emergencyInterrupt` stub
-// below simulates that EXACT real side-effect sequence (not just a bare recorder), so this file
-// reproduces the mechanism directly rather than a hand-picked "new turn" shortcut.
-//
-// Round 4 (card c5b234aa) removes the re-arm key entirely — this interrupt now fires AT MOST ONCE PER
-// SESSION ID. Part (b) below used to assert that a genuinely completed wind-down turn, followed by a new
-// turn still over the floor, re-armed the interrupt (round 3's `turnSeq` key). It now asserts the
-// opposite: still no second fire, because this session already fired once.
+// Full round-by-round history (round 2's `lastActivity` key broken by the fire's own delivery mechanics;
+// round 4 removing the re-arm key entirely) is in `docs/decisions/9f279c7b-contextwatcher-emergency-recycle-interrupt-trigger-a.md`'s
+// own round-4 section — not restated here. The `emergencyInterrupt` stub below simulates the REAL
+// `redirectManagerForEmergencyRecycle` side-effect sequence (not just a bare recorder), so this file
+// reproduces the mechanism directly; part (b) asserts today's rule: a completed wind-down turn followed
+// by a new turn still over the floor still does NOT re-fire, because this session already fired once.
 //
 // HERMETIC, CLAUDE-FREE: real file IO for the transcript (mirrors mid-turn-context-sampler.mjs's own
 // sandboxed-HOME setup, since the sampler resolves paths via os.homedir()); a stub `pty`/`emergencyInterrupt`

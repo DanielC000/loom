@@ -89,6 +89,26 @@ number to justify cancelling a turn, and a real gen-235 specimen (a manager blin
 doing perfectly ordinary, safe orchestration) is exactly the case an unconditional interrupt on
 blind-turn-alone would wrongly cancel.
 
+## Accepted residuals of the once-per-session-id rule (card 85b66b46)
+
+Firing at most once per session id (no re-arm key) is a deliberate trade — see the three failed re-arm
+attempts above — and it accepts two known residuals rather than reach for a fourth:
+
+(i) Auto-compact can rotate the engine session id WITHIN the same Loom session (card 8a5bd0d0), and
+occupancy can re-climb from the compacted baseline afterward — but the interrupt is keyed on the LOOM
+session id, not the engine session id, so it never fires again for that Loom session even though a
+genuinely new occupancy climb is underway. The owner's own install runs with auto-compact OFF, so this
+residual is currently inert here, but it is live for any other install that leaves auto-compact on.
+
+(ii) If a manager acts on a fired interrupt but its own recycle (`recycle_me`) then fails, the ORIGINAL
+session id keeps working — already marked as having fired — and is never re-interrupted even as
+occupancy keeps climbing toward the same danger it was first interrupted for.
+
+Neither residual gets a re-arm key: a key narrow enough to re-arm on (i)/(ii) without also re-arming
+during this interrupt's own wind-down is exactly the heuristic the three rounds above already failed to
+find. Both are accepted costs of shrinking the heuristic's surface, not oversights. Cross-referenced in
+`docs/decisions/c5b234aa-mid-turn-sampler-race-guard.md`.
+
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts`, above the ContextWatcher emergency-recycle

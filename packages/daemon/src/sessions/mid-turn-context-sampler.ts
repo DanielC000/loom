@@ -1,15 +1,6 @@
-import type { Session } from "@loom/shared";
 import type { Db } from "../db.js";
-import { claudeAdapter } from "../pty/claude-adapter.js";
-import { codexAdapter } from "../pty/codex-adapter.js";
+import { contextTelemetryFor } from "../pty/adapter.js";
 import { IncrementalContextStatsReader } from "./context.js";
-
-/** Mirrors `contextTelemetryFor` in orchestration/context-watcher.ts and mcp/orchestration.ts — the SAME
- *  adapter capability flag, duplicated a third time rather than exported/imported (the existing two
- *  copies already duplicate it with no shared source; see codex-adapter.ts's own header for why it's
- *  `false` there). */
-const contextTelemetryFor = (harness: Session["harness"]): boolean =>
-  (harness === "codex" ? codexAdapter : claudeAdapter).capabilities.contextTelemetry;
 
 export interface MidTurnContextSamplerDeps {
   db: Db;
@@ -23,7 +14,8 @@ export interface MidTurnContextSamplerDeps {
  * ticker rather than folded into `ContextWatcher.tick()` — including the CORRECTION there that the
  * separation does NOT, by itself, make every existing `ctxUpdatedAt`/`ctxInputTokens` consumer safe
  * against a value that now advances far more often than once per turn (see `checkEmergencyOccupancy`'s
- * own per-turn de-dup fix, `orchestration/context-watcher.ts`, and the audit on card c5b234aa).
+ * own fires-at-most-once-per-session-id rule — round 4 removed its per-turn re-arm key entirely,
+ * `orchestration/context-watcher.ts`, and the audit on card c5b234aa).
  *
  * SCOPE: every LIVE session with `busy:true`, `engineSessionId` set, AND `contextTelemetryFor(harness)`
  * true (claude today — codex has no hook relay to ever populate these fields regardless, see
