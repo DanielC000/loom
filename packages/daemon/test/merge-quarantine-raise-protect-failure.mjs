@@ -4594,7 +4594,10 @@ try {
     warningsFBTF.length === 1 && warningsFBTF[0].includes("protect-repoint-dropped-tokens") && warningsFBTF[0].includes("dropped 1 in-memory-only token"));
   check("*** THE RESIDUAL, STILL LIVE *** the warning NEVER names the dropped token's own value",
     !warningsFBTF.some((w) => w.includes(dExtraTokenFBTF)));
-  check("*** ACCEPTED RESIDUAL, STILL LIVE *** the extra in-memory-only token IS genuinely dropped by the re-point -- this documents the residual, not a regression",
+  // @decision 8d80b736 (Round 2) — restores the ORIGINAL accepted-residual polarity: the Round-1 fix's
+  // own "SURVIVES" claim came from the split (merged vs. kept, two objects for one identity), not from
+  // the stranded-tmp tracking itself — see the decision record's Round-2 section.
+  check("*** THE RESIDUAL, STILL LIVE (f00e9de8-dropped-tokens-finalbasename-only-triple-fault) *** the extra in-memory-only token is genuinely dropped",
     !new Set(activeMergeQuarantineFor(s)?.tokens ?? []).has(dExtraTokenFBTF));
   check("(f00e9de8-dropped-tokens-finalbasename-only-triple-fault) X's own original token and R's own token both survive",
     (() => {

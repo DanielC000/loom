@@ -450,18 +450,17 @@ try {
     mod.clearMergeQuarantineByToken(T11, tC11); // the full lift — must sweep the now-correctly-referenced collision file
     check("*** NO RE-BLOCK (multi-eperm) *** T11 fully lifts in-process after all three clears", mod.assertRepoNotQuarantined(T11).ok === true);
     check("*** FIX, SWEPT (multi-eperm) *** the collision file is gone — correctly referenced and swept on the full lift, never left stale with an already-released token", !fs.existsSync(path.join(mod.MERGE_QUARANTINE_DIR, collisionBasename11)));
+    // @decision 8d80b736 — supersedes the "ACCEPTED RESIDUAL" shape this scenario used to assert below;
+    // the stranded tmp is now ALSO tracked in `orphanLatchFiles`, so this full-lift sweep already swept
+    // it too, same as the collision file. See the decision record.
+    check("*** FIX, 8d80b736, SWEPT (multi-eperm) *** the stranded tmp is ALSO gone — correctly tracked and swept on the full lift, never left for a reboot to resurrect from", strandedTmps11.every((f) => !fs.existsSync(path.join(mod.MERGE_QUARANTINE_DIR, f))));
 
-    // @decision 59e758e5 (B1) — the stranded tmp from the triple fault is NEVER touched by this
-    // scenario's own three clears (untracked foreign residue), so a reboot DOES re-arm T11 from its
-    // stale pre-clear snapshot — fail-closed (over-blocking), never a loss; an accepted residual.
+    // @decision 8d80b736 — formerly an ACCEPTED RESIDUAL (card 59e758e5, B1): a reboot used to re-arm
+    // T11 from the untracked stranded tmp. Now swept above, so a reboot finds nothing to re-arm. See
+    // the decision record.
     const freshT11 = await freshBootModule();
     freshT11.reenterMergeQuarantinesAtBoot([]);
-    const t11PostRebootStale = freshT11.activeMergeQuarantineFor(T11);
-    check("*** ACCEPTED RESIDUAL, B1 (multi-eperm, reboot) *** T11 IS re-armed from the triple-faulted raise's own stranded tmp — fail-closed duplicate, not a loss", !!t11PostRebootStale && [tA11, tB11, tC11].every((t) => t11PostRebootStale.tokens.includes(t)));
-    freshT11.clearMergeQuarantineByToken(T11, tA11);
-    freshT11.clearMergeQuarantineByToken(T11, tB11);
-    freshT11.clearMergeQuarantineByToken(T11, tC11);
-    check("*** ACCEPTED RESIDUAL, B1 (multi-eperm, reboot) *** clearing that duplicate's own tokens too fully lifts it — a recoverable duplicate, never a stuck one", freshT11.assertRepoNotQuarantined(T11).ok === true);
+    check("*** FIX, 8d80b736 (multi-eperm, reboot) *** T11 is genuinely, fully unblocked after the reboot — no stray duplicate re-arms from the (now-swept) stranded tmp", freshT11.assertRepoNotQuarantined(T11).ok === true);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════════════

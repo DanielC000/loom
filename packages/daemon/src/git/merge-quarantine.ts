@@ -3928,7 +3928,16 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
       // tmp is the ONLY copy holding the new token, so unlinking it here would durably lose it. A later
       // boot's own tmp-recovery pass arms it as a fail-closed duplicate instead — the accepted shape
       // this call had before 0a9fc7fc.
-      pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
+      // @decision 8d80b736 — ALSO track the stranded tmp in `orphanLatchFiles`, or an in-process clear
+      // only narrows/sweeps `base.sourceFile`, leaving the untracked tmp to resurrect the just-cleared
+      // token at the next boot. See the decision record.
+      // @decision 8d80b736 (Round 2) — re-point `merged` to `kept` everywhere, mirroring the double-fault
+      // `secured` branch's own call, or a dual-tracked twin splits into two same-identity objects.
+      const kept: MergeQuarantineEntry = written.strandedTmp
+        ? { ...merged, orphanLatchFiles: [...new Set([...(merged.orphanLatchFiles ?? []), path.basename(written.strandedTmp)])] }
+        : merged;
+      replaceEntryEverywhere(activeQuarantines, merged, kept);
+      pendingUnresolvedQuarantines.push({ entry: kept, sourceFile: base.sourceFile });
     }
   }
   return token;
@@ -4240,7 +4249,16 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
     // `toWrite` anywhere, so unlinking it here would durably lose the raise entirely. A later boot's
     // own tmp-recovery pass arms it as a fail-closed duplicate instead — the accepted shape this call
     // had before 0a9fc7fc.
-    pendingUnresolvedQuarantines.push({ entry: toWrite, sourceFile: filename });
+    // @decision 8d80b736 — ALSO track the stranded tmp in `orphanLatchFiles`, or an in-process clear
+    // only narrows/sweeps `filename` (never actually written), leaving the untracked tmp to resurrect
+    // the just-cleared token at the next boot. See the decision record.
+    // @decision 8d80b736 (Round 2) — re-point `toWrite` to `kept` everywhere, mirroring the double-fault
+    // `secured` branch's own call, or a dual-tracked twin splits into two same-identity objects.
+    const kept: MergeQuarantineEntry = written.strandedTmp
+      ? { ...toWrite, orphanLatchFiles: [...new Set([...(toWrite.orphanLatchFiles ?? []), path.basename(written.strandedTmp)])] }
+      : toWrite;
+    replaceEntryEverywhere(activeQuarantines, toWrite, kept);
+    pendingUnresolvedQuarantines.push({ entry: kept, sourceFile: filename });
   }
 }
 
@@ -4345,7 +4363,16 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
     // tmp is the ONLY copy holding the full merged union, so unlinking it here would durably lose
     // whatever token(s) it alone carries. A later boot's own tmp-recovery pass arms it as a fail-closed
     // duplicate instead — the accepted shape this call had before 0a9fc7fc.
-    pendingUnresolvedQuarantines.push({ entry: merged, sourceFile: base.sourceFile });
+    // @decision 8d80b736 — ALSO track the stranded tmp in `orphanLatchFiles`, or an in-process clear
+    // only narrows/sweeps `base.sourceFile`, leaving the untracked tmp to resurrect the just-cleared
+    // token at the next boot. See the decision record.
+    // @decision 8d80b736 (Round 2) — re-point `merged` to `kept` everywhere, mirroring the double-fault
+    // `secured` branch's own call, or a dual-tracked twin splits into two same-identity objects.
+    const kept: MergeQuarantineEntry = written.strandedTmp
+      ? { ...merged, orphanLatchFiles: [...new Set([...(merged.orphanLatchFiles ?? []), path.basename(written.strandedTmp)])] }
+      : merged;
+    replaceEntryEverywhere(activeQuarantines, merged, kept);
+    pendingUnresolvedQuarantines.push({ entry: kept, sourceFile: base.sourceFile });
   }
 }
 
