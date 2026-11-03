@@ -2,11 +2,10 @@
 
 ## Do not
 
-- Do not read a clean run of `platform-end-user-no-dogfood.mjs`'s section (e) as proof every OTHER
-  `DENY_PATTERNS` hit is gone from these routers — section (e) scans ONLY the "decision/card id citation"
-  pattern, never the full denylist. Other real hits (`packages/` paths, `daemon_restart` mentions,
-  "Loom's own" phrasing, `@loom/` scope) were found on the same routers and are tracked separately as
-  card `0018c8ab`, not fixed here.
+- Do not read a clean run of `platform-end-user-no-dogfood.mjs`'s section (e) id-citation ratchet alone
+  as proof every OTHER `DENY_PATTERNS` hit is gone from these routers — that ratchet scans ONLY the
+  "decision/card id citation" pattern. Card `0018c8ab` added a SEPARATE, independent ratchet
+  (`ROUTER_NON_ID_HIT_ALLOWLIST`, see Round 5 below) for every other pattern — both must be green.
 - Do not lower `ROUTER_ID_CITATION_ALLOWLIST`'s `expectedCount` for a surface/tool without a real landed
   cleanup backing it — the ratchet fails loud on BOTH an increase and a decrease (the stale-entry check),
   so a lowered number with no real strip just moves the failure to the next run.
@@ -30,15 +29,21 @@ manager — needs a resolved `orchestration.deployCommand`; `peer_message`/`peer
 `peer_message_status` on the manager — need a `project_links` row; `vault_write` on the task router —
 needs a `vaultWrite` session) rather than leaving them unregistered and unscanned.
 
-## Other denylist hits found but NOT fixed here
+## Other denylist hits found, then fixed by card 0018c8ab
 
 The same investigation surfaced OTHER real denylist hits on several of these routers, outside this
-card's approved id-only scope — filed as card `0018c8ab` rather than fixed here:
+card's approved id-only scope — filed as card `0018c8ab` and fixed there (see Round 5 below for the
+full disposition of each):
 - a literal `packages/` path on `worker_merge`/`merge_batch`/`gate_status`/`gate_queue`/`served_status`/
-  `memory_write`
-- a literal `daemon_restart` mention on `worker_list`/`worker_spawn`/`worker_stop`
-- a "Loom's own repo" hit on Operator's `vault_write`
-- an `@loom/` hit on UserAudit's `list_sessions`/`transcript_read`
+  `memory_write` — rewritten generically.
+- a literal `daemon_restart` mention on `worker_list`/`worker_spawn`/`worker_stop`/`served_status` (the
+  last one found by 0018c8ab's own fuller sweep, beyond what this card's investigation named) —
+  reworded to conditional phrasing, a small reasoned residual tracked in `ROUTER_NON_ID_HIT_ALLOWLIST`.
+- a "Loom's own home directory" hit on Operator's AND the core task router's `vault_write` — left AS-IS
+  (it's correct, per-install-generic text, not a leak); the `DENY_PATTERNS` pattern itself was narrowed
+  instead.
+- an `@loom/` hit on UserAudit's `list_sessions`/`transcript_read` — dropped (also lowering each tool's
+  id-citation baseline by one, since the dropped sentence carried one of those citations too).
 
 ## Follow-up ownership
 
@@ -165,3 +170,73 @@ cmp-identical, confirmed via `git status --porcelain` showing no diff):
   `FILE_LEVEL_COVERAGE_EXCLUSIONS` entry — the meta-check fails loud on either omission, by design; don't
   "fix" a failure here by widening the exclusion list for a tool that SHOULD actually be covered by a
   real render.
+
+## Round 5 (card 0018c8ab) — the non-id denylist hits this card's own investigation found, fixed
+
+Owner-approved disposition, per surface/tool/pattern (the full per-hit classification lives in the
+card's own `worker_report` history, not restated here):
+
+- **Illustrative examples hardcoding this repo's own path/package/command** (`worker_merge`'s
+  `pathLiteral`/`pathGlob` doc example, `merge_batch`'s scope-example, `memory_write`'s `triggerGlob`
+  example, `deploy`'s gate-command example) — rewritten to a generic placeholder; zero behavior lost,
+  the field/shape documentation is unchanged.
+- **Mechanism disclosure for a feature hardcoded to this repo's own package layout** (`gate_status`'s
+  `emitCompareReduced`/`retriedFile` docs, `merge_batch`'s own reduction-scope statement, `served_status`'s
+  backend/shared/web source-tree distinctions) — the DISCLOSED FACT survives (an end-user still learns
+  why a field reads `undefined`/stays inert for them); only the literal internal package-path tokens were
+  replaced with structural phrasing ("this daemon's own backend/shared-contract source", "the served web
+  UI bundle", etc).
+- **Actively wrong/inapplicable advice for an end-user install** — `gate_queue`'s recommendation to run
+  two `packages/daemon/scripts/*.mjs` dev-tree scripts (never shipped to an npm install) was replaced
+  with generic "a whole-box CPU check / a worktree-scoped attribution check, if your install has one";
+  `served_status`'s "`pnpm daemon:stable` relaunch" (a dev-only self-hosting command) became "a human
+  relaunch of the daemon".
+- **`daemon_restart` naming a tool the reader may not have** (`worker_list`/`worker_spawn`/`worker_stop`,
+  plus `served_status` — found by this card's own fuller, full-`DENY_PATTERNS` sweep, which the a2f2becc
+  investigation's narrower id-only pass never ran) — reworded to the SAME conditional phrasing
+  `SKILL_SURFACE_ALLOWLIST`'s `orchestrate/SKILL.md` entry above already uses and a Code Review already
+  approved: "via `daemon_restart` where your surface has it, or a human relaunch otherwise". The literal
+  token still appears (by design — a REAL, reasoned residual, not backlog) and is tracked, with its
+  one-line reason, in the new `ROUTER_NON_ID_HIT_ALLOWLIST` ratchet.
+- **Internal source-file pointers with no reader value outside this repo's dev workflow**
+  (`worker_list`/`worker_recycle`/`worker_merge_confirm`'s `git/worktrees.ts` citations,
+  `list_sessions`/`transcript_read`'s `@loom/shared` pointer) — dropped outright; none of these described
+  output shape or behavior, only an implementation location.
+- **`vault_write`'s "Loom's own [operational] home directory" text — a FALSE POSITIVE, left as-is.**
+  Verified against the real implementation (`companion/capabilities.ts`, `gateway/server.ts`) that this
+  means the per-install `LOOM_HOME` every install has (dev or end-user alike), never the reserved
+  dev-home PROJECT the sibling "dev reserved-home name in context" pattern already covers — accurate,
+  useful, generic text. Fixed the DENYLIST instead: removed "home" from the `"Loom's own" repo/dev-
+  process artifact` pattern's alternation (it had zero real-corpus backing, unlike every sibling noun,
+  which the self-check quotes verbatim from `CLAUDE.md`). Negative control: the real `vault_write` text
+  (both wordings) no longer trips the narrowed pattern. Positive control: the SEPARATE dev-reserved-home-
+  PROJECT pattern (`devHomeRe`, unaffected by this narrowing) still trips on a bare "Loom Platform"
+  (no role suffix).
+
+**The new `ROUTER_NON_ID_HIT_ALLOWLIST` ratchet** (same file) mirrors `ROUTER_ID_CITATION_ALLOWLIST`'s
+own posture — exact-count per (surface, tool, pattern), fails loud on increase AND decrease — but ADDS a
+REQUIRED one-line `reason` per entry (the id-citation ratchet has no such requirement, since every one of
+its entries is backlog by definition; every entry here is instead a deliberate, reasoned choice). Seeded
+at today's real post-fix counts: `worker_list`/`served_status` at 2 each, `worker_spawn` at 2,
+`worker_stop` at 1 — all four `daemon_restart tool name`, all four the SAME conditional-phrasing reason.
+Every other (surface, tool, pattern) combination is implicitly `expectedCount:0`.
+
+Proved RED (temporary in-file edits to the BUILT `dist/mcp/orchestration.js`, reverted before
+committing, `git status --porcelain` confirmed clean after): reverting `worker_list`'s conditional
+phrasing back to a bare `daemon_restart` mention with a DIFFERENT surrounding sentence (so the COUNT
+stays 2 but the specific match context changes) still passes (count-only ratchet, correct); dropping
+the baselined entry's `expectedCount` to 0 while the real text still carries 2 mentions goes RED on the
+live non-id ratchet check for `worker_list`; separately, restoring the pre-narrowing `DENY_PATTERNS`
+(re-adding `|home` to the alternation) makes the new negative-control self-check for `vault_write`'s
+real text go RED, confirming that self-check can actually fail.
+
+### Do not (round 5)
+
+- Do not fold `ROUTER_NON_ID_HIT_ALLOWLIST` into `ROUTER_ID_CITATION_ALLOWLIST` — they track different
+  kinds of drift and a merged table would lose the required-`reason` discipline the non-id one enforces.
+- Do not add a new `daemon_restart`-naming (or any other non-id DENY_PATTERNS) hit to a tool's
+  description without either rewriting it generically/conditionally or adding a REASONED entry here —
+  an unreasoned entry defeats the whole point of this ratchet being "small and deliberate", not backlog.
+- Do not re-add "home" to the `"Loom's own"` pattern's alternation without re-deriving a REAL corpus
+  example backing it first (same discipline every sibling noun in that alternation already has) — it was
+  removed for having none, and silently re-adding it reopens the exact false positive this round closed.

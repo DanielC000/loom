@@ -47,7 +47,7 @@ export function registerTranscriptReadTools(
         "tools — the Platform Lead's mcp/platform.ts and the setup operator's mcp/setup.ts — exactly): " +
         "\"live\" drops long-exited (finished-but-unarchived) sessions so the default feed stays bounded; " +
         "\"exited\"/\"all\" opt that history back in (this tool's returned session id is a bare `id` — the " +
-        "record's own primary key, Loom-namespaced; see `Session`'s session-id naming policy doc in `@loom/shared`, card 7fcb586a). " +
+        "record's own primary key, Loom-namespaced — NEVER the underlying engine's own session id). " +
         "ARCHIVED rows are the auditor's intended history and " +
         "are ALWAYS kept regardless of state. ⚠️ ONLY `state` mirrors — the SCOPE (archive-visibility) axis " +
         "does NOT: this tool defaults scope to \"all\" (archived included); the Lead's list_all_sessions " +
@@ -101,8 +101,7 @@ export function registerTranscriptReadTools(
     {
       description:
         "Read ONE session's transcript as clean, ordered turns (the untrusted audit input). `sessionId` here " +
-        "is the DAEMON's own Loom-namespaced session id (a bare `id` from list_sessions — see " +
-        "`Session`'s session-id naming policy doc in `@loom/shared`, card 7fcb586a), never the engine's own — resolving it server-side " +
+        "is the DAEMON's own Loom-namespaced session id (a bare `id` from list_sessions), never the engine's own — resolving it server-side " +
         "to the right engine transcript file is exactly this tool's job. For a LIVE " +
         "session pass archived:false (default) — its live engine transcript is read by (cwd, engineSessionId), " +
         "resolved server-side from the session row. For an ARCHIVED session pass archived:true — its captured " +

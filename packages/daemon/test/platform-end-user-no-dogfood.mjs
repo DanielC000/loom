@@ -15,12 +15,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       project-lookup-miss — on the NON-DEV surface.
 //   (e) card a2f2becc: EVERY OTHER shipped, end-user-reachable MCP router's rendered tool descriptions —
 //       OrchestrationMcpRouter (manager/worker/companion), TaskMcpRouter, SetupMcpRouter, OperatorMcpRouter,
-//       RunMcpRouter, WorkspaceAuditMcpRouter — scanned for the "decision/card id citation" pattern ONLY
-//       (a narrower scope than (d)'s full-denylist assertClean; see section (e)'s own header comment for
-//       why, and for the OTHER real denylist hits this investigation found but did NOT fix here — filed
-//       separately as card 0018c8ab).
-//       SetupMcpRouter/OperatorMcpRouter/RunMcpRouter are zero-tolerance; the other three carry a SIZED,
-//       exact-count ratchet (ROUTER_ID_CITATION_ALLOWLIST) tracking a named cleanup backlog. audit.ts
+//       RunMcpRouter, WorkspaceAuditMcpRouter — scanned by TWO independent ratchets: the "decision/card id
+//       citation" pattern alone (ROUTER_ID_CITATION_ALLOWLIST, from a2f2becc) and, since card 0018c8ab,
+//       every OTHER DENY_PATTERNS entry too (ROUTER_NON_ID_HIT_ALLOWLIST — see that const's own header for
+//       why it's a separate table, never merged with the id-citation one).
+//       SetupMcpRouter/OperatorMcpRouter/RunMcpRouter are zero-tolerance on BOTH ratchets; the other three
+//       carry a SIZED, exact-count backlog on the id-citation ratchet, and — after card 0018c8ab's cleanup
+//       — a small, FULLY REASONED (never backlog) set of entries on the non-id one. audit.ts
 //       (role==="auditor") is deliberately excluded — LOOM_DEV-only seed, unreachable on a real install.
 //
 // OUT OF SCOPE (deliberately, stated here so it's never mistaken for an oversight): the project-memory
@@ -94,11 +95,17 @@ const DENY_PATTERNS = [
   { name: "worktrees.ts", re: /worktrees\.ts/ },
   // Narrowed (see header): a repo/dev-process artifact noun, never a bare "Loom's own <anything>" —
   // the broad form false-positived on ordinary product-behavior prose in the real delivered corpus.
-  // The extra nouns (project/board/home/recommended/command/web UI) are the real dogfood shapes this
+  // The extra nouns (project/board/recommended/command/web UI) are the real dogfood shapes this
   // repo's own CLAUDE.md actually uses ("Loom's own recommended value", "Loom's own project until the
   // owner sets it", "Loom's own command", "Loom's own web UI") — measured zero false positives against
   // the real delivered skill corpus (see the pattern self-check below, drawn from that same CLAUDE.md text).
-  { name: "\"Loom's own\" repo/dev-process artifact", re: /Loom's own (?:repo(?:sitory)?|codebase|source(?: code)?|CLAUDE\.md|dev(?:elopment)? team|git history|commit history|project|board|home|recommended|command|web UI)\b/i },
+  // Card 0018c8ab: "home" was REMOVED from this alternation — it had no real CLAUDE.md/corpus example
+  // backing it (unlike every sibling noun above, which the self-check quotes verbatim from CLAUDE.md),
+  // and it false-positived on vault_write's own genuine, per-install-generic "Loom's own [operational]
+  // home directory" text (the daemon's own LOOM_HOME concept, present on every install — not the
+  // reserved dev-home PROJECT the sibling "dev reserved-home name in context" pattern below already
+  // covers). See the pattern self-check below for the negative control on that exact text.
+  { name: "\"Loom's own\" repo/dev-process artifact", re: /Loom's own (?:repo(?:sitory)?|codebase|source(?: code)?|CLAUDE\.md|dev(?:elopment)? team|git history|commit history|project|board|recommended|command|web UI)\b/i },
   { name: "\"Loom-product development\"", re: /Loom-product development/ },
   { name: "\"self-hosting Loom\"", re: /self-hosting Loom/i },
   { name: "\"orchestrating Loom with Loom\"", re: /orchestrating Loom with Loom/i },
@@ -220,8 +227,10 @@ const ROUTER_ID_CITATION_ALLOWLIST = [
   { surface: "TaskMcpRouter(manager)", tool: "memory_list", expectedCount: 1 },
   { surface: "TaskMcpRouter(manager)", tool: "memory_read", expectedCount: 1 },
   { surface: "TaskMcpRouter(manager)", tool: "decisions_for", expectedCount: 3 },
-  { surface: "WorkspaceAuditMcpRouter", tool: "list_sessions", expectedCount: 3 },
-  { surface: "WorkspaceAuditMcpRouter", tool: "transcript_read", expectedCount: 1 },
+  // Card 0018c8ab: both counts LOWERED by a real landed cleanup (the "@loom/shared" pointer that carried
+  // one of each tool's id citations was dropped alongside it) — list_sessions 3→2, transcript_read 1→0
+  // (dropped: "no entry ⇒ hard zero-tolerance" already covers 0 correctly).
+  { surface: "WorkspaceAuditMcpRouter", tool: "list_sessions", expectedCount: 2 },
 ];
 
 function idCitationCount(text) {
@@ -262,6 +271,77 @@ function assertAllowlistEntriesSeen(surfaceLabel, renderedToolNames) {
     check(`(ratchet coverage) ${surfaceLabel} :: ${entry.tool} is baselined in ROUTER_ID_CITATION_ALLOWLIST ` +
       `and was actually SEEN in this surface's own render (a vanished baselined tool must fail, not go ` +
       `silently unchecked)`, renderedToolNames.has(entry.tool));
+  }
+}
+
+// ===================== (e) infra — the ROUTER NON-ID DENYLIST RATCHET (card 0018c8ab) ===================
+// Card 0018c8ab — this ratchet covers EVERY DENY_PATTERNS entry EXCEPT "decision/card id citation"
+// (that one keeps its own separate ROUTER_ID_CITATION_ALLOWLIST ratchet above — the two are independent
+// and never merged: an id-citation count change and a non-id hit change are different kinds of drift).
+//
+// SAME POSTURE as ROUTER_ID_CITATION_ALLOWLIST: a SIZED, EXACT-count backlog per (surface, tool, pattern),
+// re-measured every run — an INCREASE fails loud (a new leak slipped in) and so does a DECREASE (the
+// stale-entry check below) until the baseline here is lowered to match a real landed cleanup. UNLIKE that
+// ratchet, every entry here is REQUIRED to carry a one-line `reason` — card 0018c8ab's own investigation
+// found these are the ONLY non-id hits surviving a full cleanup pass, and each one is a deliberate,
+// reasoned choice (conditional phrasing naming a tool the reader may not have), never backlog debt. A
+// NEW tool/surface with no entry below is implicitly expectedCount:0 for every non-id pattern — hard
+// zero-tolerance, matching the id-citation ratchet's own default.
+const ROUTER_NON_ID_HIT_ALLOWLIST = [
+  {
+    surface: "OrchestrationMcpRouter(manager)", tool: "worker_list", pattern: "daemon_restart tool name", expectedCount: 2,
+    reason: "conditional phrasing (\"via daemon_restart where your surface has it, or a human relaunch " +
+      "otherwise\") naming the tool for a reader who may not have it — the orchestrate/SKILL.md precedent " +
+      "(SKILL_SURFACE_ALLOWLIST above), never a flat claim the reader holds it.",
+  },
+  {
+    surface: "OrchestrationMcpRouter(manager)", tool: "worker_spawn", pattern: "daemon_restart tool name", expectedCount: 2,
+    reason: "same conditional-phrasing precedent as worker_list above.",
+  },
+  {
+    surface: "OrchestrationMcpRouter(manager)", tool: "worker_stop", pattern: "daemon_restart tool name", expectedCount: 1,
+    reason: "same conditional-phrasing precedent as worker_list above.",
+  },
+  {
+    surface: "OrchestrationMcpRouter(manager)", tool: "served_status", pattern: "daemon_restart tool name", expectedCount: 2,
+    reason: "same conditional-phrasing precedent as worker_list above.",
+  },
+];
+
+function nonIdHitCounts(text) {
+  const out = {};
+  for (const p of DENY_PATTERNS) {
+    if (p.name === "decision/card id citation") continue; // owned by the separate id-citation ratchet
+    const re = new RegExp(p.re.source, p.re.flags.includes("g") ? p.re.flags : p.re.flags + "g");
+    const n = [...text.matchAll(re)].length;
+    if (n > 0) out[p.name] = n;
+  }
+  return out;
+}
+function nonIdHitExpected(surface, tool, pattern) {
+  const entry = ROUTER_NON_ID_HIT_ALLOWLIST.find((e) => e.surface === surface && e.tool === tool && e.pattern === pattern);
+  return entry ? entry.expectedCount : 0; // no entry ⇒ hard zero-tolerance
+}
+// THE ONE predicate every non-id-ratchet consumer calls — same mutant-resistance shape as ratchetVerdict
+// above (card a2f2becc round 3 CR precedent): a live-loop-only wrapper bug and a control-only bug must
+// both be caught by the SAME function, never two independently-reimplemented comparisons.
+function nonIdRatchetVerdicts(surface, toolName, text) {
+  const real = nonIdHitCounts(text);
+  const names = new Set([...Object.keys(real), ...ROUTER_NON_ID_HIT_ALLOWLIST.filter((e) => e.surface === surface && e.tool === toolName).map((e) => e.pattern)]);
+  return [...names].map((pattern) => {
+    const r = real[pattern] ?? 0;
+    const expected = nonIdHitExpected(surface, toolName, pattern);
+    return { pattern, ok: r === expected, real: r, expected };
+  });
+}
+// Mirrors assertAllowlistEntriesSeen above: a baselined (surface, tool, pattern) triple that silently
+// stops rendering (tool renamed/removed/regated) must fail loud, not go unchecked — the live loop below
+// only iterates tools that DID render.
+function assertNonIdAllowlistEntriesSeen(surfaceLabel, renderedToolNames) {
+  for (const entry of ROUTER_NON_ID_HIT_ALLOWLIST) {
+    if (entry.surface !== surfaceLabel) continue;
+    check(`(non-id ratchet coverage) ${surfaceLabel} :: ${entry.tool} is baselined in ` +
+      `ROUTER_NON_ID_HIT_ALLOWLIST and was actually SEEN in this surface's own render`, renderedToolNames.has(entry.tool));
   }
 }
 
@@ -391,7 +471,7 @@ function scanSkillFile(relPath, text) {
     loomsOwnRe.test("per Loom's own CLAUDE.md"));
   // The following four are REAL excerpts (not invented strings built off this pattern's own alternation)
   // — lifted verbatim from this repo's own CLAUDE.md, which is exactly the kind of dogfood prose the
-  // widened alternation (project/board/home/recommended/command/web UI) exists to catch.
+  // widened alternation (project/board/recommended/command/web UI) exists to catch.
   check("(pattern self-check) REAL CLAUDE.md text \"Loom's own recommended value\" DOES trip it",
     loomsOwnRe.test("Loom's own recommended value** (measured on this host, card `bd9a483b`)"));
   check("(pattern self-check) REAL CLAUDE.md text \"Eyeballing Loom's own web UI\" DOES trip it",
@@ -400,6 +480,16 @@ function scanSkillFile(relPath, text) {
     loomsOwnRe.test("a GREEN proceeds exactly as an ordinary ungated landing did before this existed — Loom's own project until the owner sets it"));
   check("(pattern self-check) REAL CLAUDE.md text \"without naming Loom's own command\" DOES trip it",
     loomsOwnRe.test("shipped skills/docs describe it without naming Loom's own command"));
+  // Card 0018c8ab: "home" was removed from this pattern's alternation — negative control proves the
+  // REAL vault_write text (and its companion/capabilities.ts sibling wording) no longer trips it; the
+  // positive control for "the reserved dev-home PROJECT phrasing still matches" is the separate
+  // devHomeRe checks just above (386-387) — a DIFFERENT pattern, deliberately unaffected by this change.
+  check("(pattern self-check) the REAL vault_write text \"Loom's own home directory\" no longer trips the narrowed Loom's-own pattern",
+    !loomsOwnRe.test("'operational-dir' if this project's vault points at Loom's own home directory, 'error')"));
+  check("(pattern self-check) the REAL companion/capabilities.ts sibling wording \"Loom's own operational home directory\" also does not trip it",
+    !loomsOwnRe.test("this project's vault points at Loom's own operational home directory — refusing to commit or push it"));
+  check("(pattern self-check) the dev reserved-home PROJECT phrasing still trips its OWN separate pattern after this narrowing (devHomeRe, unaffected)",
+    devHomeRe.test("no reserved Loom Platform project exists"));
 }
 
 // --- Hermetic LOOM_HOME + a sandboxed HOME. LOOM_DEV deliberately LEFT UNSET — every surface here must
@@ -912,6 +1002,13 @@ for (const surface of SHIPPED_END_USER_MCP_SURFACES) {
   assertAllowlistEntriesSeen(surface.label, toolNames);
   for (const v of scanSurfaceRatchet(surface.label, tools)) {
     check(`(ratchet) ${surface.label} :: ${v.tool} carries EXACTLY its baselined ${v.expected} id citation(s) (measured ${v.real})`, v.ok);
+  }
+  assertNonIdAllowlistEntriesSeen(surface.label, toolNames);
+  for (const t of tools) {
+    for (const v of nonIdRatchetVerdicts(surface.label, t.name, t.description ?? "")) {
+      check(`(non-id ratchet) ${surface.label} :: ${t.name} carries EXACTLY its baselined ${v.expected} ` +
+        `"${v.pattern}" hit(s) (measured ${v.real})`, v.ok);
+    }
   }
   fx.db.close();
 }

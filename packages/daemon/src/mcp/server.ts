@@ -551,7 +551,7 @@ export class TaskMcpRouter {
           "leaves the trigger inert; the response's `triggerGateStatus` says which applies. Same PATCH " +
           "semantics as other optional fields: omit to leave the stored predicate unchanged, pass `\"\"` " +
           "explicitly to clear it back to unconditional pinning, or pass a glob (e.g. " +
-          "`\"packages/daemon/src/memory/**\"`) to set it — matched against path-like substrings found " +
+          "`\"src/memory/**\"`) to set it — matched against path-like substrings found " +
           "literally in the RECEIVING session's own kickoff/task text (the same text driving the RELATED " +
           "tier's own match), not against real touched files (unknowable this early). " +
           "Card b1f34988: on a BRAND-NEW key only, this response may carry a `nearDuplicateStatus` " +
