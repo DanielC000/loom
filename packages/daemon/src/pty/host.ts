@@ -28,7 +28,7 @@ export {
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, unlinkSessionSettings, mcpTokenRidesEnv, withSettingsDirDenyForSpawn, toCliPermissionMode, sessionSettingsPath, type CliPermissionMode } from "./claude-settings.js";
-import { ensureTrustedResilient } from "./claude-config.js";
+import { ensureTrustedResilient, isClaudeConfigDirEnvKey } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
@@ -4669,7 +4669,26 @@ export function buildSpawnEnv(
   env.LOOM_WORKTREE = spawnCwd;
   env.PYTHONIOENCODING = "utf-8";
   env.PYTHONUTF8 = "1";
-  Object.assign(env, sessionEnv);
+  // @decision fbb6e8ec — scrub EVERY sessionEnv-sourced key matching CLAUDE_CONFIG_DIR, never just the
+  // first (win32's case-insensitivity lets more than one spelling coexist in one sessionEnv object), via
+  // the SAME shared predicate the write-time validator (mcp/platform.ts) uses.
+  const sessionEnvClaudeConfigDirKeys = Object.keys(sessionEnv).filter((k) => isClaudeConfigDirEnvKey(k));
+  if (sessionEnvClaudeConfigDirKeys.length > 0) {
+    // The write-time validator (mcp/platform.ts) only closes the PATCH-shaped entry points (human REST
+    // PATCH + the elevated Platform Lead's project_configure) — it does NOT cover POST /api/projects or
+    // POST /api/setup/project-init (gateway/server.ts), which store a raw, unvalidated config straight
+    // from the request body. THIS scrub is the real backstop for every entry point, past or future, not
+    // just a belt-and-suspenders net for pre-existing rows. Name each dropped KEY, never the value, and
+    // once per spawn (this function runs once per fresh/resume/fork/recycle spawn).
+    const sanitizedSessionEnv = { ...sessionEnv };
+    for (const key of sessionEnvClaudeConfigDirKeys) {
+      console.warn(`[pty] cwd=${spawnCwd} dropping sessionEnv key "${key}" — a per-project CLAUDE_CONFIG_DIR override is refused; set it in the daemon's own environment instead`);
+      delete sanitizedSessionEnv[key];
+    }
+    Object.assign(env, sanitizedSessionEnv);
+  } else {
+    Object.assign(env, sessionEnv);
+  }
   // AFTER the sessionEnv merge on purpose (unlike the vars above): this APPENDS to whatever value won
   // (inherited or a deliberate override) rather than replacing it, so the user's own hosts survive.
   withLoopbackNoProxy(env);

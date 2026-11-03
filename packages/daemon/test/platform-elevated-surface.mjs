@@ -14,6 +14,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       collision refusal too, not just the sibling REST handler: a mutation test (delete the call site)
 //       left the whole suite green before this case existed, so the primitive alone (proven in
 //       project-config-patch-merge.mjs) was not sufficient coverage for this surface;
+//   (a3) card fbb6e8ec — this SAME MCP call site also refuses a sessionEnv.CLAUDE_CONFIG_DIR key, stored
+//       config unchanged, the elevated-route counterpart to the human REST PATCH proof in
+//       project-config-patch-merge.mjs (see test/sessionenv-claude-config-dir-guard.mjs for the shared
+//       validator's own function-level proof, incl. the win32/POSIX case split);
 //   (b) git_checkout/git_create_branch/git_commit against a real temp repo work, and git_push succeeds
 //       bounded + non-interactive against a LOCAL bare remote (reusing GitWriter verbatim);
 //   (c) vault_write writes under the project vault AND a path-escape is rejected ('traversal');
@@ -197,6 +201,16 @@ try {
   check("(a2) ★ the write landed and the unset of the OLD name landed too", renamedCfg.sessionEnv?.RENAMED === "fresh-secret" && renamedCfg.sessionEnv?.API_KEY === undefined);
   check("(a2) an unrelated sibling key in the same map is untouched", renamedCfg.sessionEnv?.OTHER === "keep-me");
 
+  // ===================== (a3) card fbb6e8ec — the ELEVATED route ALSO refuses a sessionEnv
+  // CLAUDE_CONFIG_DIR key, driven through the REAL registered tool over the REAL MCP transport (not the
+  // shared validator directly — see test/sessionenv-claude-config-dir-guard.mjs for that function-level
+  // proof). This elevated route is Lead-settable for raw sessionEnv generally (card 3ad2b286), so this
+  // specific name's refusal is NOT inherited for free from any broader human-only key check. =====
+  const beforeConfigureCCD = JSON.stringify(db.getProject("pOrd").config);
+  const ccdCfg = await call("project_configure", { projectId: "pOrd", config: { sessionEnv: { CLAUDE_CONFIG_DIR: "/some/other/root" } } });
+  check("(a3) ★ project_configure REFUSES a sessionEnv.CLAUDE_CONFIG_DIR key", ccdCfg.ok !== true && typeof ccdCfg.error === "string" && ccdCfg.error.includes("CLAUDE_CONFIG_DIR"));
+  check("(a3) ★ the refused configure left the stored config UNCHANGED", JSON.stringify(db.getProject("pOrd").config) === beforeConfigureCCD);
+
   // ===================== (b) GIT WRITES — reuse GitWriter verbatim, real temp repo + local bare remote =====================
   const mkBranch = await call("git_create_branch", { projectId: "pOrd", name: "feat" });
   check("(b) git_create_branch creates + switches to a new branch", mkBranch.ok === true && mkBranch.branch === "feat");
@@ -308,6 +322,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform P3 ELEVATED surface works for a platform session (gateCommand/alertWebhook via the FULL validator, bounded; a colliding write+unset of the same config path is REFUSED through THIS project_configure call site, not just the sibling REST handler; git checkout/create-branch/commit/push reusing GitWriter against a real repo + local bare remote; vault_write reusing writeVaultFile with the path-traversal guard), the agent/manager validator is unchanged (still rejects gateCommand/alertWebhook), and the role gate holds (manager/worker → no elevated surface) — claude-free, network-free."
+  ? "\n✅ ALL PASS — the platform P3 ELEVATED surface works for a platform session (gateCommand/alertWebhook via the FULL validator, bounded; a colliding write+unset of the same config path is REFUSED through THIS project_configure call site, not just the sibling REST handler; a sessionEnv.CLAUDE_CONFIG_DIR key is likewise REFUSED through this same call site, card fbb6e8ec; git checkout/create-branch/commit/push reusing GitWriter against a real repo + local bare remote; vault_write reusing writeVaultFile with the path-traversal guard), the agent/manager validator is unchanged (still rejects gateCommand/alertWebhook), and the role gate holds (manager/worker → no elevated surface) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

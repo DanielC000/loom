@@ -24,6 +24,20 @@ export function claudeConfigHome(): string {
 }
 
 /**
+ * Does `key` name `CLAUDE_CONFIG_DIR` under the given OS's env-var-name case rules? win32 env var names
+ * are case-insensitive, so any case-variant spelling matches; POSIX is case-sensitive, so only the exact
+ * case matches. `platform` defaults to the CURRENT process's `process.platform` — the daemon and the
+ * engine it spawns always share one host, so there is no cross-platform case to reconcile.
+ *
+ * @decision fbb6e8ec — the ONE shared predicate behind both the config-write validator
+ * (`claudeConfigDirSessionEnvKeyError`, `mcp/platform.ts`) and the spawn-time scrub (`buildSpawnEnv`,
+ * `pty/host.ts`) — never duplicate this match inline in either caller.
+ */
+export function isClaudeConfigDirEnvKey(key: string, platform: string = process.platform): boolean {
+  return platform === "win32" ? key.toUpperCase() === "CLAUDE_CONFIG_DIR" : key === "CLAUDE_CONFIG_DIR";
+}
+
+/**
  * Resolve Claude's main JSON config file — `<claudeConfigHome()>/.claude.json`. See
  * {@link claudeConfigHome} for the CLAUDE_CONFIG_DIR semantics (incl. the trust flags below).
  */

@@ -62,6 +62,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       validator's own output (not merely from some later step), on BOTH validators and across the keys
 //       reachable through each, while a POSITIVE control proves real sibling data in the same nested
 //       object is never eaten by the prune.
+//   (17) card fbb6e8ec: a sessionEnv.CLAUDE_CONFIG_DIR key is refused through the REAL REST route
+//       end-to-end (400, naming the key, stored config UNCHANGED) — proof of the actual route, not just
+//       the shared validateProjectConfigOverride function it calls (see test/sessionenv-claude-config-
+//       dir-guard.mjs for the function-level proof, incl. the win32/POSIX case split and rotation case).
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + the REAL Fastify gateway
 // (app.inject), every other dep STUBBED — mirrors mgmt-project-agent.mjs's minimal harness (this route
@@ -438,12 +442,27 @@ try {
     const merged = mergeConfigOverride({ orchestration: { gateCommand: "pnpm build", maxConcurrentManagers: 3 } }, vFull.value);
     check("(16) ★ merging the pruned patch onto an existing orchestration leaves it fully intact", merged.orchestration?.gateCommand === "pnpm build" && merged.orchestration?.maxConcurrentManagers === 3);
   }
+
+  // ===================== (17) card fbb6e8ec: the real REST PATCH route refuses a sessionEnv
+  // CLAUDE_CONFIG_DIR key end-to-end (400, naming the key, stored config UNCHANGED) — same shape as
+  // (15)'s __proto__ proof, driven through app.inject rather than the validator alone, so this is proof
+  // of the ACTUAL route, not just the shared function it calls. =====
+  db.insertProject({
+    id: "pL", name: "L", repoPath: TMP, vaultPath: TMP,
+    config: { orchestration: { gateCommand: "pnpm build" }, sessionEnv: { KEEP_ME: "1" } },
+    createdAt: now, archivedAt: null, reserved: false,
+  });
+  const beforePL = JSON.stringify(db.getProject("pL").config);
+  const rClaudeConfigDir = await patch("pL", { config: { sessionEnv: { CLAUDE_CONFIG_DIR: "/some/other/root" } } });
+  check("(17) ★ a sessionEnv.CLAUDE_CONFIG_DIR PATCH is refused through the REAL REST route → 400", rClaudeConfigDir.statusCode === 400);
+  check("(17) ★ the 400 body names the offending key", JSON.stringify(rClaudeConfigDir.json()).includes("CLAUDE_CONFIG_DIR"));
+  check("(17) ★ the stored config is left UNCHANGED", JSON.stringify(db.getProject("pL").config) === beforePL);
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS (card b5faa194) a write and an `unset` of the SAME dot-path in one payload is now REFUSED (400, named, stored config unchanged) rather than the unset silently winning, a non-colliding rename in the same map is unaffected, the sessionEnv editor's own two-pass payload lands its rotated value, and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives; PLUS (card e07daa96 / reviewer session 4275d929) a prototype-family name the patch never wrote is never a false-positive collision while a genuinely own key sharing that name still is, and a zero-segment unset path is never a collision — at both the primitive and the end-to-end REST layer; PLUS (card e4e854cc) a raw sessionEnv.__proto__ key is REFUSED at validation (400, stored config unchanged) instead of zod's z.record silently dropping it, with a positive control proving the same 10 prototype-family names from (13) still land as ordinary own keys through the real PATCH path; PLUS (card 3ad2b286) a __proto__ NESTED under a top-level key (e.g. orchestration/memory) is pruned entirely from BOTH validators' output rather than left as a stored {} husk, with a positive control proving real sibling data in the same nested object survives unpruned and a merge-level proof that the pruned patch leaves an existing stored orchestration fully intact."
+  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS (card b5faa194) a write and an `unset` of the SAME dot-path in one payload is now REFUSED (400, named, stored config unchanged) rather than the unset silently winning, a non-colliding rename in the same map is unaffected, the sessionEnv editor's own two-pass payload lands its rotated value, and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives; PLUS (card e07daa96 / reviewer session 4275d929) a prototype-family name the patch never wrote is never a false-positive collision while a genuinely own key sharing that name still is, and a zero-segment unset path is never a collision — at both the primitive and the end-to-end REST layer; PLUS (card e4e854cc) a raw sessionEnv.__proto__ key is REFUSED at validation (400, stored config unchanged) instead of zod's z.record silently dropping it, with a positive control proving the same 10 prototype-family names from (13) still land as ordinary own keys through the real PATCH path; PLUS (card 3ad2b286) a __proto__ NESTED under a top-level key (e.g. orchestration/memory) is pruned entirely from BOTH validators' output rather than left as a stored {} husk, with a positive control proving real sibling data in the same nested object survives unpruned and a merge-level proof that the pruned patch leaves an existing stored orchestration fully intact; PLUS (card fbb6e8ec) a sessionEnv.CLAUDE_CONFIG_DIR key is refused end-to-end through the real REST route (400, naming the key, stored config unchanged)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

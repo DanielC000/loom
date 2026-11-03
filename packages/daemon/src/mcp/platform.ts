@@ -12,6 +12,7 @@ import { MAX_EVENTS_SEARCH_PAGE, CommondirPinConflictError } from "../db.js";
 import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
+import { isClaudeConfigDirEnvKey } from "../pty/claude-config.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
@@ -504,6 +505,16 @@ function dottedSessionEnvKeyError(
   return `sessionEnv key "${dotted}" contains "." — a dotted name can never be removed via the config unset dot-path syntax; rename it without a "." (e.g. use "_")`;
 }
 
+// @decision fbb6e8ec — reject a `sessionEnv` key named CLAUDE_CONFIG_DIR outright, no rotate-the-value
+// carve-out. Never widen this to the whole `CLAUDE_` prefix — that's a separate, deliberately deferred
+// decision, not a rejected one. Uses the SAME shared predicate as the spawn-time scrub (`pty/host.ts`).
+function claudeConfigDirSessionEnvKeyError(sessionEnv: Record<string, string> | undefined): string | null {
+  if (!sessionEnv) return null;
+  const found = Object.keys(sessionEnv).find((k) => isClaudeConfigDirEnvKey(k));
+  if (found === undefined) return null;
+  return `sessionEnv key "${found}" may not be set to CLAUDE_CONFIG_DIR — a per-project override relocates where the engine writes transcripts while Loom's transcript reads and deny rules still resolve the daemon's own CLAUDE_CONFIG_DIR, opening a trust-boundary gap; set CLAUDE_CONFIG_DIR in the daemon's own process environment instead if you need it relocated for every project`;
+}
+
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: kanbanColumnsSchema.optional(),
   permission: permissionOverride.optional(),
@@ -649,6 +660,8 @@ export function validateProjectConfigOverride(
   const value = r.data as ProjectConfigOverride;
   const dottedSessionEnvError = dottedSessionEnvKeyError(value.sessionEnv, opts?.priorSessionEnvKeys);
   if (dottedSessionEnvError) return { ok: false, error: dottedSessionEnvError };
+  const claudeConfigDirError = claudeConfigDirSessionEnvKeyError(value.sessionEnv);
+  if (claudeConfigDirError) return { ok: false, error: claudeConfigDirError };
   if (value.obsidian?.path !== undefined) value.obsidian.path = expandTilde(value.obsidian.path);
   if (value.python?.interpreterPath !== undefined) value.python.interpreterPath = expandTilde(value.python.interpreterPath);
   return { ok: true, value: pruneEmptyNestedObjects(value as Record<string, unknown>) as ProjectConfigOverride };
