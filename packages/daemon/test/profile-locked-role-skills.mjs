@@ -34,13 +34,18 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-locked-skills-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
-// A SANDBOXED HOME too (set BEFORE any dist import — claude-transcript.ts computes CLAUDE_PROJECTS_ROOT
-// from os.homedir() at MODULE-LOAD time) so forkSession's/resume()'s engineTranscriptExists reads under
-// this temp dir, never the real ~/.claude — mirrors fork-allow-baseline.mjs's own setup.
+// A SANDBOXED HOME too (CLAUDE_CONFIG_DIR is unset here, so engineTranscriptExists falls back to
+// os.homedir() — card a92a0913: read fresh per call now, not cached at import, but set BEFORE any dist
+// import regardless, same as every other LOOM_HOME-derived constant below) so forkSession's/resume()'s
+// engineTranscriptExists reads under this temp dir, never the real ~/.claude — mirrors
+// fork-allow-baseline.mjs's own setup.
 const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();

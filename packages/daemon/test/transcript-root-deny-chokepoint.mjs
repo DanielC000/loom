@@ -63,10 +63,32 @@ process.env.USERPROFILE = tmpHome;
 // computes PROJECTS_WORK_ROOT at module load, mirroring pty-claude-spawn-env.mjs's same-shaped pin.
 delete process.env.LOOM_PROJECT_WORK_ROOT;
 
-const { PtyHost, withTranscriptRootDenyForSpawn, TRANSCRIPT_ROOT_DENY_ROLES, TRANSCRIPT_ROOT_DENY_RULES } =
+const { PtyHost, withTranscriptRootDenyForSpawn, TRANSCRIPT_ROOT_DENY_ROLES, transcriptRootDenyRules } =
   await import("../dist/pty/host.js");
-const { otherProjectTranscriptDenyRules } = await import("../dist/pty/claude-transcript.js");
-const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
+const { otherProjectTranscriptDenyRules, encodeProjectDir } = await import("../dist/pty/claude-transcript.js");
+const { claudeJsonPath, claudeConfigHome } = await import("../dist/pty/claude-config.js");
+const { toClaudeAbsoluteGlob } = await import("../dist/pty/loom-home-deny.js");
+
+// Card a92a0913: this file ALREADY sets CLAUDE_CONFIG_DIR above (for the ensureTrusted concern) — so
+// every transcript-root deny computed below now ALSO carries the absolute-path sibling rule, not just
+// ROLE_DENY. Computed via the real claudeConfigHome()/toClaudeAbsoluteGlob() rather than hand-building
+// the string, so this test can never drift from the production resolver independently.
+const PROJECTS_ROOT = path.join(claudeConfigHome(), "projects");
+const ABSOLUTE_PROJECTS_DENY = `Read(${toClaudeAbsoluteGlob(PROJECTS_ROOT)}/**)`;
+// Round 3 (card a92a0913): win32 ONLY gets a THIRD, plain forward-slashed sibling — see
+// claudeProjectsRootPlainSlashedGlob's own doc for why. WIN32 gates every expectation below so this
+// file stays correct on either platform without a separate code path per assertion.
+const WIN32 = process.platform === "win32";
+const PLAIN_SLASHED_PROJECTS_DENY = `Read(${PROJECTS_ROOT.replace(/\\/g, "/")}/**)`;
+const EXPECTED_TRANSCRIPT_ROOT_RULES = WIN32
+  ? [ROLE_DENY, ABSOLUTE_PROJECTS_DENY, PLAIN_SLASHED_PROJECTS_DENY]
+  : [ROLE_DENY, ABSOLUTE_PROJECTS_DENY];
+{
+  const resolvedConfigHome = path.resolve(claudeConfigHome());
+  const expectedConfigHome = path.resolve(claudeConfigDir);
+  check("claudeConfigHome() resolves under this test's own temp CLAUDE_CONFIG_DIR, never the real homedir",
+    resolvedConfigHome === expectedConfigHome);
+}
 
 // Assert the redirect actually took before PART 2's real spawns below can reach ensureTrusted. A
 // dropped/broken redirect fails HERE, by name, and this file ABORTS rather than falling through to a
@@ -87,21 +109,30 @@ const { claudeJsonPath } = await import("../dist/pty/claude-config.js");
 // =====================================================================================================
 check("TRANSCRIPT_ROOT_DENY_ROLES = exactly {assistant, auditor, workspace-auditor, manager, platform, setup} (the scope fence — d78f8217's approved BLANKET widening, worker EXCLUDED)",
   JSON.stringify([...TRANSCRIPT_ROOT_DENY_ROLES].sort()) === JSON.stringify(["assistant", "auditor", "manager", "platform", "setup", "workspace-auditor"]));
-check("TRANSCRIPT_ROOT_DENY_RULES = exactly the one transcript-root rule",
-  JSON.stringify(TRANSCRIPT_ROOT_DENY_RULES) === JSON.stringify([ROLE_DENY]));
+// Card a92a0913: transcriptRootDenyRules() is the FUNCTION form now (CLAUDE_CONFIG_DIR read fresh) —
+// this test's own env already sets CLAUDE_CONFIG_DIR above, so the real result carries the home-relative
+// rule (kept byte-identical) PLUS the absolute-path sibling(s) computed the same way the production
+// resolver does (a third, plain-slashed sibling on win32 — see EXPECTED_TRANSCRIPT_ROOT_RULES above).
+check("transcriptRootDenyRules() = the home-relative rule PLUS the absolute-path sibling(s) (CLAUDE_CONFIG_DIR is set in this test's env)",
+  JSON.stringify(transcriptRootDenyRules()) === JSON.stringify(EXPECTED_TRANSCRIPT_ROOT_RULES));
 
-// --- IN scope (BLANKET): assistant/auditor/workspace-auditor/manager/platform/setup get the rule unioned in ---
+const EXPECTED_ROLE_RULE_COUNT = EXPECTED_TRANSCRIPT_ROOT_RULES.length;
+
+// --- IN scope (BLANKET): assistant/auditor/workspace-auditor/manager/platform/setup get every rule unioned in ---
 for (const role of ["assistant", "auditor", "workspace-auditor", "manager", "platform", "setup"]) {
   const empty = withTranscriptRootDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [] }, role);
-  check(`role '${role}': empty deny → rule added`, empty.deny.length === 1 && empty.deny[0] === ROLE_DENY);
+  check(`role '${role}': empty deny → every transcript-root rule added`,
+    empty.deny.length === EXPECTED_ROLE_RULE_COUNT && EXPECTED_TRANSCRIPT_ROOT_RULES.every((r) => empty.deny.includes(r)));
 
   const withCustom = withTranscriptRootDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [CUSTOM_DENY] }, role);
   check(`role '${role}': a project's own custom deny survives (union, not replace)`, withCustom.deny.includes(CUSTOM_DENY));
-  check(`role '${role}': the rule is ALSO added alongside the custom entry`, withCustom.deny.includes(ROLE_DENY) && withCustom.deny.length === 2);
+  check(`role '${role}': every transcript-root rule is ALSO added alongside the custom entry`,
+    EXPECTED_TRANSCRIPT_ROOT_RULES.every((r) => withCustom.deny.includes(r)) && withCustom.deny.length === EXPECTED_ROLE_RULE_COUNT + 1);
 
-  const already = withTranscriptRootDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [ROLE_DENY] }, role);
-  check(`role '${role}': idempotent — no duplicate when already present`, already.deny.filter((t) => t === ROLE_DENY).length === 1 && already.deny.length === 1);
-  const alreadyPermission = { mode: "acceptEdits", allow: [], deny: [ROLE_DENY] };
+  const already = withTranscriptRootDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [...EXPECTED_TRANSCRIPT_ROOT_RULES] }, role);
+  check(`role '${role}': idempotent — no duplicate when already present`,
+    already.deny.filter((t) => EXPECTED_TRANSCRIPT_ROOT_RULES.includes(t)).length === EXPECTED_ROLE_RULE_COUNT && already.deny.length === EXPECTED_ROLE_RULE_COUNT);
+  const alreadyPermission = { mode: "acceptEdits", allow: [], deny: [...EXPECTED_TRANSCRIPT_ROOT_RULES] };
   check(`role '${role}': idempotent case returns the SAME object reference (byte-identical, no new allocation)`,
     withTranscriptRootDenyForSpawn(alreadyPermission, role) === alreadyPermission);
 }
@@ -114,7 +145,8 @@ for (const role of ["worker", "run", null, undefined]) {
   const permission = { mode: "acceptEdits", allow: [], deny: [CUSTOM_DENY] };
   const out = withTranscriptRootDenyForSpawn(permission, role);
   check(`role '${String(role)}': OUT of scope (blanket) — deny is the SAME object reference (byte-identical, no mutation)`, out === permission);
-  check(`role '${String(role)}': OUT of scope (blanket) — no rule leaked in`, !out.deny.includes(ROLE_DENY));
+  check(`role '${String(role)}': OUT of scope (blanket) — no rule leaked in`,
+    !EXPECTED_TRANSCRIPT_ROOT_RULES.some((r) => out.deny.includes(r)));
 }
 
 // =====================================================================================================
@@ -122,8 +154,23 @@ for (const role of ["worker", "run", null, undefined]) {
 // =====================================================================================================
 {
   const otherRules = otherProjectTranscriptDenyRules("proj-other", "/repos/other");
-  check("otherProjectTranscriptDenyRules returns exactly the two documented rule shapes",
-    otherRules.length === 2 && otherRules[0] === "Read(~/.claude/projects/*-proj-other-*/**)");
+  // Card a92a0913: CLAUDE_CONFIG_DIR is set in this test's env, so the function ALSO appends the two
+  // absolute-path siblings after the two home-relative ones (never replaces) — plus, on win32, two more
+  // plain-slashed siblings (round 3) — six total on win32, four elsewhere.
+  const expectedAbsoluteBase = toClaudeAbsoluteGlob(PROJECTS_ROOT);
+  const expectedPlainBase = PROJECTS_ROOT.replace(/\\/g, "/");
+  const expectedOtherRules = [
+    "Read(~/.claude/projects/*-proj-other-*/**)",
+    `Read(~/.claude/projects/${encodeProjectDir("/repos/other")}/**)`,
+    `Read(${expectedAbsoluteBase}/*-proj-other-*/**)`,
+    `Read(${expectedAbsoluteBase}/${encodeProjectDir("/repos/other")}/**)`,
+    ...(WIN32 ? [
+      `Read(${expectedPlainBase}/*-proj-other-*/**)`,
+      `Read(${expectedPlainBase}/${encodeProjectDir("/repos/other")}/**)`,
+    ] : []),
+  ];
+  check("otherProjectTranscriptDenyRules returns the two documented home-relative shapes, PLUS their absolute-path siblings (two more plain-slashed siblings on win32, CLAUDE_CONFIG_DIR is set)",
+    JSON.stringify(otherRules) === JSON.stringify(expectedOtherRules));
 
   // A NON-worker role ignores the third param entirely (inert — matches this function's "OUT of scope ⇒
   // byte-identical" contract for every role not in TRANSCRIPT_ROOT_DENY_ROLES).
@@ -142,8 +189,10 @@ for (const role of ["worker", "run", null, undefined]) {
   const workerWithRules = withTranscriptRootDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [CUSTOM_DENY] }, "worker", otherRules);
   check("role 'worker' + workerProjectDenyRules ⇒ both other-project rules ARE added", otherRules.every((r) => workerWithRules.deny.includes(r)));
   check("role 'worker' + workerProjectDenyRules ⇒ the project's OWN custom deny survives (union)", workerWithRules.deny.includes(CUSTOM_DENY));
-  check("role 'worker' + workerProjectDenyRules ⇒ the BLANKET root rule is NOT added (worker never gets the blanket)", !workerWithRules.deny.includes(ROLE_DENY));
-  check("role 'worker' + workerProjectDenyRules ⇒ exactly 3 entries (custom + 2 other-project rules, no more)", workerWithRules.deny.length === 3);
+  check("role 'worker' + workerProjectDenyRules ⇒ the BLANKET root rule is NOT added (worker never gets the blanket)",
+    !EXPECTED_TRANSCRIPT_ROOT_RULES.some((r) => workerWithRules.deny.includes(r)));
+  check("role 'worker' + workerProjectDenyRules ⇒ exactly custom + every other-project rule shape, no more",
+    workerWithRules.deny.length === otherRules.length + 1);
 
   // idempotent: calling again with the same already-present rules returns the SAME reference.
   const workerIdempotent = withTranscriptRootDenyForSpawn(workerWithRules, "worker", otherRules);
@@ -187,7 +236,10 @@ if (process.platform !== "win32") {
     host.spawn({ sessionId: sidAssistant, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "assistant" });
     spawned.push(sidAssistant);
     check("(real) host actually spawned a real process for the assistant session (exercised the REAL createPty, not a stub)", host.isAlive(sidAssistant));
-    check("(real) assistant spawn: WRITTEN settings.json permissions.deny INCLUDES the transcript-root rule", (readWrittenDeny(sidAssistant) ?? []).includes(ROLE_DENY));
+    const writtenAssistant = readWrittenDeny(sidAssistant) ?? [];
+    check("(real) assistant spawn: WRITTEN settings.json permissions.deny INCLUDES the transcript-root rule", writtenAssistant.includes(ROLE_DENY));
+    check("(real) assistant spawn: WRITTEN settings.json permissions.deny ALSO INCLUDES the absolute-path sibling (CLAUDE_CONFIG_DIR is set)", writtenAssistant.includes(ABSOLUTE_PROJECTS_DENY));
+    check("(real) assistant spawn: WRITTEN settings.json permissions.deny ALSO INCLUDES the win32 plain-slashed sibling (round 3, card a92a0913)", writtenAssistant.includes(PLAIN_SLASHED_PROJECTS_DENY));
 
     // (b) role="worker" — OUT of scope for the transcript-root rule. Card 37310431 (round 2): every real
     // spawn (worker included — that deny is role-UNCONDITIONAL, same posture as SETTINGS_DIR) now ALSO
@@ -213,18 +265,26 @@ if (process.platform !== "win32") {
     const customWritten = readWrittenDeny(sidCustom) ?? [];
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json KEEPS the project's own custom entry", customWritten.includes(CUSTOM_DENY));
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the role-scoped rule (union)", customWritten.includes(ROLE_DENY));
+    // Card a92a0913: CLAUDE_CONFIG_DIR is set in this test's env, so a real blanket-role spawn ALSO writes
+    // the absolute-path sibling — check it explicitly, and exclude it from the "every OTHER entry" filter
+    // below (same posture as ROLE_DENY/CUSTOM_DENY/SETTINGS_DIR_READ_DENY_RULE).
+    check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the absolute-path transcript-root sibling", customWritten.includes(ABSOLUTE_PROJECTS_DENY));
+    check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the win32 plain-slashed sibling (round 3, card a92a0913)", customWritten.includes(PLAIN_SLASHED_PROJECTS_DENY));
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", customWritten.includes(SETTINGS_DIR_READ_DENY_RULE));
     // Card 37310431 (round 2): same exact-comparison fix as (b) above — see that block's comment for why.
     const expectedLoomHomeCustom = loomHomeWriteDenyRules({ role: "assistant", sessionId: sidCustom });
     check("(real) assistant+custom-deny spawn: every OTHER entry is EXACTLY the LOOM_HOME write-deny's own computed rule set, never an unaccounted third source",
-      JSON.stringify(customWritten.filter((r) => r !== CUSTOM_DENY && r !== ROLE_DENY && r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeCustom].sort()));
+      JSON.stringify(customWritten.filter((r) => r !== CUSTOM_DENY && r !== ROLE_DENY && r !== ABSOLUTE_PROJECTS_DENY && r !== PLAIN_SLASHED_PROJECTS_DENY && r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeCustom].sort()));
     check("(real) assistant+custom-deny spawn: at least one LOOM_HOME write-deny rule was actually added (so the check above can fail)", expectedLoomHomeCustom.length > 0);
 
     // (d)-(f) card d78f8217: manager/platform/setup are now BLANKET-denied too.
     for (const [sid, role] of [["trdc-real-manager", "manager"], ["trdc-real-platform", "platform"], ["trdc-real-setup", "setup"]]) {
       host.spawn({ sessionId: sid, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role });
       spawned.push(sid);
-      check(`(real) ${role} spawn: WRITTEN settings.json permissions.deny INCLUDES the transcript-root rule (d78f8217 blanket)`, (readWrittenDeny(sid) ?? []).includes(ROLE_DENY));
+      const writtenBlanket = readWrittenDeny(sid) ?? [];
+      check(`(real) ${role} spawn: WRITTEN settings.json permissions.deny INCLUDES the transcript-root rule (d78f8217 blanket)`, writtenBlanket.includes(ROLE_DENY));
+      check(`(real) ${role} spawn: WRITTEN settings.json permissions.deny ALSO INCLUDES the absolute-path sibling (CLAUDE_CONFIG_DIR is set)`, writtenBlanket.includes(ABSOLUTE_PROJECTS_DENY));
+      check(`(real) ${role} spawn: WRITTEN settings.json permissions.deny ALSO INCLUDES the win32 plain-slashed sibling (round 3, card a92a0913)`, writtenBlanket.includes(PLAIN_SLASHED_PROJECTS_DENY));
     }
   } finally {
     for (const sid of spawned) { try { host.stop(sid, "hard"); } catch { /* best-effort cleanup */ } }
@@ -250,7 +310,8 @@ if (process.platform !== "win32") {
       !scopedDeny.some((r) => r.includes("proj-self")));
     check("(real, project-scoped) worker's deny INCLUDES both other projects' rules (negative half — DoD-2)",
       expectedOther.every((r) => scopedDeny.includes(r)));
-    check("(real, project-scoped) worker's deny does NOT include the blanket root rule (worker never gets the blanket)", !scopedDeny.includes(ROLE_DENY));
+    check("(real, project-scoped) worker's deny does NOT include the blanket root rule (worker never gets the blanket)",
+      !EXPECTED_TRANSCRIPT_ROOT_RULES.some((r) => scopedDeny.includes(r)));
     check("(real, project-scoped) worker's deny ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", scopedDeny.includes(SETTINGS_DIR_READ_DENY_RULE));
     // Card 37310431 (round 2): same exact-comparison fix as (b)/(c) above — see (b)'s comment for why.
     const expectedLoomHomeScoped = loomHomeWriteDenyRules({ role: "worker", sessionId: sidScopedWorker });

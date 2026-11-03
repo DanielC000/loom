@@ -8,14 +8,27 @@ import { normForCompare, containmentForms } from "../git/worktrees.js";
 import { WORKTREES_DIR } from "../paths.js";
 
 /**
- * Resolve Claude's main JSON config file. Honors CLAUDE_CONFIG_DIR (Claude relocates the
- * config — incl. the trust flags below — to <CLAUDE_CONFIG_DIR>/.claude.json when it is set),
- * falling back to ~/.claude.json. Read fresh each call so the env can be set per-process
- * (e.g. an isolated config dir for hermetic tests) without re-importing this module.
+ * Resolve the base `CLAUDE_CONFIG_DIR` relocates to when set, or `os.homedir()` when it's unset — the
+ * ONE place that env-read-and-fallback lives. `claudeJsonPath` below is a direct one-line consumer;
+ * `pty/claude-transcript.ts`'s transcript-root resolvers ALSO consume this (never duplicate the check)
+ * but are NOT a bare `path.join(claudeConfigHome(), "projects")` — see that file's own `claudeProjectsRoot`
+ * doc for why its UNSET fallback nests one level deeper than this function's own bare homedir fallback.
+ * Read fresh each call (never cached) so the env can be set per-process without re-importing.
+ *
+ * @decision a92a0913 — a RELATIVE (non-empty, non-absolute) CLAUDE_CONFIG_DIR is used as-is here, never
+ * via the CLI's own three-folder search fallback (cwd / launch dir / home) — only the EMPTY case (via
+ * `||`) is proven to match the CLI's own behavior.
+ */
+export function claudeConfigHome(): string {
+  return process.env.CLAUDE_CONFIG_DIR || os.homedir();
+}
+
+/**
+ * Resolve Claude's main JSON config file — `<claudeConfigHome()>/.claude.json`. See
+ * {@link claudeConfigHome} for the CLAUDE_CONFIG_DIR semantics (incl. the trust flags below).
  */
 export function claudeJsonPath(): string {
-  const dir = process.env.CLAUDE_CONFIG_DIR;
-  return dir ? path.join(dir, ".claude.json") : path.join(os.homedir(), ".claude.json");
+  return path.join(claudeConfigHome(), ".claude.json");
 }
 
 // Windows can transiently throw EPERM/EACCES/EBUSY (instead of succeeding, or EEXIST/ENOENT as

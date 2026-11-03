@@ -22,6 +22,9 @@ import { mkdtempManaged } from "./_tmp-fixture.mjs";
 const sandboxHome = mkdtempManaged("loom-ctxw-ctxexh-home-");
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const { Db } = await import("../dist/db.js");
 const { ContextWatcher } = await import("../dist/orchestration/context-watcher.js");

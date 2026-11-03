@@ -13,10 +13,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // does — directly through the SAME `fs` module object the compiled SUT calls through (a property call,
 // `fs.readdirSync(...)`, not a destructured binding).
 //
-// Isolation: HOME/USERPROFILE are sandboxed to a throwaway temp dir BEFORE importing dist — CLAUDE_PROJECTS_ROOT
-// (pty/claude-transcript.ts) is derived from os.homedir() once at module import, so this MUST happen before
-// the import, not merely before each call (see real-homedir-transcript-leak-isolation.mjs's identical
-// discipline for the sibling sessions/transcript.ts surface). This never touches the real ~/.claude/projects.
+// Isolation: HOME/USERPROFILE are sandboxed to a throwaway temp dir BEFORE importing dist. CLAUDE_CONFIG_DIR
+// is unset here, so the transcript root (pty/claude-transcript.ts) falls back to os.homedir() — read fresh
+// per call since card a92a0913, not cached at module import, but still set before the import for consistency
+// with every other sandboxed test in this corpus (see real-homedir-transcript-leak-isolation.mjs). This
+// never touches the real ~/.claude/projects.
 // Every engine session id minted below carries a globally-unique-shaped random suffix (card 7d70b27b's own
 // rule for any hermetic test exercising this fallback scan).
 //
@@ -32,6 +33,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const sandboxHome = mkdtempManaged("loom-claude-resolved-path-lru-home-");
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const { resolveTranscriptFile, RESOLVED_PATH_CACHE_MAX } = await import("../dist/pty/claude-transcript.js");
 

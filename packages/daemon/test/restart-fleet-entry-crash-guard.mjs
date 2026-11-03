@@ -50,8 +50,10 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rfecg-home-${Date.now()}-${
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // (H-real) below drives REAL resume() (no resumeOne stub) through a real PtyHost/SeamHost — it needs a
 // sandboxed HOME/USERPROFILE so engineTranscriptExists resolves against a fixture transcript rather than
-// the real user's ~/.claude/projects. Must be set BEFORE any dist import below: claude-transcript.ts's
-// CLAUDE_PROJECTS_ROOT is a module-load-time const (os.homedir() captured once at import).
+// the real user's ~/.claude/projects. CLAUDE_CONFIG_DIR is unset in this file, so engineTranscriptExists
+// falls back to os.homedir() (card a92a0913: the transcript root is read fresh per call, no longer
+// cached at import — but every other LOOM_HOME-derived paths.ts constant below still IS, so this is set
+// BEFORE any dist import regardless).
 const rfecgSandboxHome = path.join(process.env.LOOM_HOME, "home");
 fs.mkdirSync(rfecgSandboxHome, { recursive: true });
 process.env.USERPROFILE = rfecgSandboxHome; // Windows: os.homedir() reads USERPROFILE

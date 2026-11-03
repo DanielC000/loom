@@ -1,7 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { TranscriptTurn } from "./adapter.js";
+import { claudeConfigHome } from "./claude-config.js";
+import { toClaudeAbsoluteGlob } from "./loom-home-deny.js";
 
 /**
  * @decision 2b099e48 — this file OWNS every `~/.claude/projects/...` literal path and Claude Code
@@ -22,9 +23,11 @@ export function encodeProjectDir(cwd: string): string {
   return path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, "-");
 }
 
-/** Absolute path to a session's engine transcript JSONL on disk (the COMPUTED/expected path). */
+/** Absolute path to a session's engine transcript JSONL on disk (the COMPUTED/expected path).
+ * @decision a92a0913 — the base is `claudeConfigHome()` (claude-config.ts), never a raw `os.homedir()`
+ * call here — it honours CLAUDE_CONFIG_DIR exactly like the engine itself does; read fresh per call. */
 export function engineTranscriptPath(cwd: string, engineSessionId: string): string {
-  return path.join(os.homedir(), ".claude", "projects", encodeProjectDir(cwd), `${engineSessionId}.jsonl`);
+  return path.join(claudeProjectsRoot(), encodeProjectDir(cwd), `${engineSessionId}.jsonl`);
 }
 
 /**
@@ -39,18 +42,59 @@ export function engineTranscriptPath(cwd: string, engineSessionId: string): stri
  * bytes off disk with no such checks). Lives HERE (the adapter module), not at the host.ts call site,
  * per this file's own header: every `~/.claude/projects/...` literal is owned by the harness adapter alone.
  */
+// Kept EXACTLY as-is (byte-identical argv when CLAUDE_CONFIG_DIR is unset) — callers use
+// transcriptRootReadDenyRules() below instead of this bare constant directly.
 export const TRANSCRIPT_ROOT_READ_DENY_RULE = "Read(~/.claude/projects/**)";
+
+/**
+ * The transcript-root deny rule(s) for the CURRENT process env. Always includes
+ * {@link TRANSCRIPT_ROOT_READ_DENY_RULE} unconditionally (byte-identical to before this function
+ * existed when CLAUDE_CONFIG_DIR is unset) — PLUS, only when CLAUDE_CONFIG_DIR is set, an ADDITIONAL
+ * absolute-path rule pointed at the real relocated root — PLUS, only on win32, a THIRD sibling in the
+ * plain forward-slashed drive-letter form (see {@link claudeProjectsRootPlainSlashedGlob}'s own doc).
+ *
+ * @decision a92a0913 — all applicable rules apply once CLAUDE_CONFIG_DIR is set, never a replace:
+ * neither absolute-path FORM is proven to be the one the real `Read()` parser honours — see this
+ * file's own decision record (round 3) for the win32 sibling's rationale. Read fresh per call.
+ */
+export function transcriptRootReadDenyRules(): string[] {
+  const rules = [TRANSCRIPT_ROOT_READ_DENY_RULE];
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    rules.push(`Read(${claudeProjectsRootAbsoluteGlob()}/**)`);
+    if (process.platform === "win32") rules.push(`Read(${claudeProjectsRootPlainSlashedGlob()}/**)`);
+  }
+  return rules;
+}
 
 /**
  * @decision d78f8217 — worker-role per-other-project transcript deny (31613c1e's approved option (d)):
  * a DENY-LIST over a DB-derived set, so it FAILS OPEN on anything unenumerated — best-effort, NEVER a
  * structural guarantee. Carry that limit verbatim wherever cited (31613c1e's LEAD RULING).
+ *
+ * @decision a92a0913 — the two home-relative rules are kept EXACTLY as-is (byte-identical when
+ * CLAUDE_CONFIG_DIR is unset); when it IS set, two additional absolute-path siblings are appended, plus
+ * (win32 only) two more plain-slashed siblings — same reasoning as {@link transcriptRootReadDenyRules}.
  */
 export function otherProjectTranscriptDenyRules(otherProjectId: string, otherProjectRepoPath: string): string[] {
-  return [
+  const rules = [
     `Read(~/.claude/projects/*-${otherProjectId}-*/**)`,
     `Read(~/.claude/projects/${encodeProjectDir(otherProjectRepoPath)}/**)`,
   ];
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    const base = claudeProjectsRootAbsoluteGlob();
+    rules.push(
+      `Read(${base}/*-${otherProjectId}-*/**)`,
+      `Read(${base}/${encodeProjectDir(otherProjectRepoPath)}/**)`,
+    );
+    if (process.platform === "win32") {
+      const plainBase = claudeProjectsRootPlainSlashedGlob();
+      rules.push(
+        `Read(${plainBase}/*-${otherProjectId}-*/**)`,
+        `Read(${plainBase}/${encodeProjectDir(otherProjectRepoPath)}/**)`,
+      );
+    }
+  }
+  return rules;
 }
 
 /**
@@ -75,9 +119,39 @@ function rememberResolvedPath(engineSessionId: string, filePath: string): void {
   }
 }
 
-/** The real on-disk root every engine session's transcript lives under — the one place this literal is
- *  constructed (see this file's own header doc on why every `~/.claude/projects/...` path lives HERE). */
-const CLAUDE_PROJECTS_ROOT = path.join(os.homedir(), ".claude", "projects");
+/**
+ * The real on-disk root every engine session's transcript lives under — the one place this literal is
+ * constructed (see this file's own header doc on why every `~/.claude/projects/...` path lives HERE). A
+ * FUNCTION, read fresh per call (never a module-level const captured once at import).
+ *
+ * @decision a92a0913 — NOT simply `path.join(claudeConfigHome(), "projects")`: unlike `claudeJsonPath`,
+ * the UNSET fallback nests one level deeper, under `.claude/` — never drop that nesting to "simplify".
+ */
+function claudeProjectsRoot(): string {
+  return process.env.CLAUDE_CONFIG_DIR
+    ? path.join(claudeConfigHome(), "projects")
+    : path.join(claudeConfigHome(), ".claude", "projects");
+}
+
+/** {@link claudeProjectsRoot}, converted to the CLI's documented universal-absolute glob form (see
+ *  `pty/loom-home-deny.ts`'s `toClaudeAbsoluteGlob`) — the base every CLAUDE_CONFIG_DIR-set absolute
+ *  deny-rule sibling is built from. */
+function claudeProjectsRootAbsoluteGlob(): string {
+  return toClaudeAbsoluteGlob(claudeProjectsRoot());
+}
+
+/**
+ * {@link claudeProjectsRoot}, in the PLAIN forward-slashed drive-letter form (`C:/…`, same transform
+ * `SETTINGS_DIR_READ_DENY_RULE` already uses — `pty/claude-settings.ts`) — a SECOND, different absolute
+ * glob shape from {@link claudeProjectsRootAbsoluteGlob}'s `//c/…` universal-absolute form. win32 only;
+ * no POSIX sibling — `toClaudeAbsoluteGlob`'s POSIX output already IS the plain path, one slash deeper.
+ *
+ * @decision a92a0913 — see this file's own decision record (round 3) for why BOTH forms are emitted
+ * on win32 rather than picking one — neither is proven as the one the real `Read()` parser honours.
+ */
+function claudeProjectsRootPlainSlashedGlob(): string {
+  return claudeProjectsRoot().replace(/\\/g, "/");
+}
 
 export function resolveTranscriptFile(cwd: string, engineSessionId: string): string | null {
   const direct = engineTranscriptPath(cwd, engineSessionId);
@@ -100,8 +174,9 @@ export function resolveTranscriptFile(cwd: string, engineSessionId: string): str
   try {
     // @decision 7d70b27b — correct-by-design: real engine session ids are Claude-CLI-minted UUIDs, so
     // cross-session collision here is implausible; a hermetic test must mint UUID-shaped ids too.
-    for (const dir of fs.readdirSync(CLAUDE_PROJECTS_ROOT)) {
-      const f = path.join(CLAUDE_PROJECTS_ROOT, dir, `${engineSessionId}.jsonl`);
+    const projectsRoot = claudeProjectsRoot();
+    for (const dir of fs.readdirSync(projectsRoot)) {
+      const f = path.join(projectsRoot, dir, `${engineSessionId}.jsonl`);
       if (fs.existsSync(f)) { found = f; break; }
     }
   } catch { /* projects dir missing — nothing to find */ }
@@ -117,10 +192,11 @@ export function resolveTranscriptFile(cwd: string, engineSessionId: string): str
  * however many candidates there are. This instead reads the root's own dir listing once, then one more
  * `readdirSync` per project dir (measured sub-second at this repo's own dev-box scale, ~1,256 dirs) — a
  * fundamentally cheaper shape for "check membership for N ids" than "resolve 1 id" repeated N times.
- * `root` defaults to the real {@link CLAUDE_PROJECTS_ROOT}; a test passes a fixture dir instead. Returns an
- * empty set (never throws) if the root doesn't exist.
+ * `root` defaults to the real {@link claudeProjectsRoot} (read fresh — a default parameter is
+ * re-evaluated on every call, unlike a module-level const); a test passes a fixture dir instead. Returns
+ * an empty set (never throws) if the root doesn't exist.
  */
-export function listAllTranscriptIds(root: string = CLAUDE_PROJECTS_ROOT): Set<string> {
+export function listAllTranscriptIds(root: string = claudeProjectsRoot()): Set<string> {
   const ids = new Set<string>();
   let projectDirs: string[];
   try { projectDirs = fs.readdirSync(root); } catch { return ids; }

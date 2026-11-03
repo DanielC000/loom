@@ -35,7 +35,7 @@ import { injectSkills } from "../skills/inject.js";
 import { scanCwdSkillsForPermissionFrontmatter, CWD_SKILLS_SCAN_SCOPE, skillPermissionFindingPath, SKILL_PERMISSION_FIELD_LABEL } from "../skills/permission-scan.js";
 import { readContextStats, type ContextStats, isToolResultOnly, userTurnText } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
-import { TRANSCRIPT_ROOT_READ_DENY_RULE, otherProjectTranscriptDenyRules } from "./claude-transcript.js";
+import { transcriptRootReadDenyRules, otherProjectTranscriptDenyRules } from "./claude-transcript.js";
 import { withLoomHomeWriteDenyForSpawn } from "./loom-home-deny.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
@@ -4385,7 +4385,9 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
  * under the SAME name) — `profiles/validate.ts`'s codex-role hard-rejection needs the identical set, and a
  * second hand-copied literal is exactly the drift this file's own "point at a source of truth" rule bans. */
 export { TRANSCRIPT_ROOT_DENY_ROLES };
-export const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
+// @decision a92a0913 — a FUNCTION now (never a module-level const): transcriptRootReadDenyRules() reads
+// process.env.CLAUDE_CONFIG_DIR fresh, so a cached array here would miss a per-process override.
+export { transcriptRootReadDenyRules as transcriptRootDenyRules };
 export function withTranscriptRootDenyForSpawn(
   permission: PermissionPolicy,
   role?: SessionRole | null,
@@ -4401,7 +4403,7 @@ export function withTranscriptRootDenyForSpawn(
   workerProjectDenyRules?: readonly string[] | null,
 ): PermissionPolicy {
   const rules: string[] = [];
-  if (role && TRANSCRIPT_ROOT_DENY_ROLES.has(role)) rules.push(...TRANSCRIPT_ROOT_DENY_RULES);
+  if (role && TRANSCRIPT_ROOT_DENY_ROLES.has(role)) rules.push(...transcriptRootReadDenyRules());
   if (role === "worker" && workerProjectDenyRules?.length) rules.push(...workerProjectDenyRules);
   if (!rules.length) return permission;
   const missing = rules.filter((t) => !permission.deny.includes(t));
