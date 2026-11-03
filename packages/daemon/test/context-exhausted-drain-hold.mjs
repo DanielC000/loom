@@ -13,11 +13,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       live claude session — does NOT flush the held queue while contextExhausted is set (drainPending's
 //       own guard). The queue depth is UNCHANGED across a reconcile() call, and the fake pty's write()
 //       is never invoked with the held text.
-//   (5) DB-level clear (`Db.clearContextExhaustedOnResume`): stamped, then cleared on a call mirroring
-//       the rising-edge chokepoint (SessionService.handleBusyEdge busy=true), and the GUARD — a row that
-//       was NEVER exhausted keeps its own (unrelated) lastError completely untouched by the same call;
-//       round 2 adds a SECOND guard — a row re-exhausted-then-overwritten-by-something-else keeps that
-//       UNRELATED LATER lastError untouched too (the prefix match, not just the WHERE clause).
+//   (5) DB-level clear: stamped, then cleared via the REAL rising-edge chokepoint
+//       (`SessionService.handleBusyEdge(id, true)`, card 7b1b2b3f — previously a hand-copied direct
+//       `Db.clearContextExhaustedOnResume` call that only "mirrored" that chokepoint, so a revert of the
+//       production `if (busy) this.db.clearContextExhaustedOnResume(...)` line never failed this file),
+//       and the GUARD — a row that was NEVER exhausted keeps its own (unrelated) lastError completely
+//       untouched by the same call; round 2 adds a SECOND guard — a row re-exhausted-then-overwritten-by-
+//       something-else keeps that UNRELATED LATER lastError untouched too (the prefix match, not just the
+//       WHERE clause).
 //   (6) a fresh UserPromptSubmit rising edge clears the in-memory hold end-to-end.
 //   (7) round 2 (CR finding, mutant B2): an exhausted session with an EMPTY pending queue — the ONE
 //       shape (3) above can't exercise — still holds a new enqueue (no write, depth 1).
@@ -58,6 +61,8 @@ const { PtyHost, HUMAN_COMPOSER_SENDER_ID } = await import("../dist/pty/host.js"
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { Db } = await import("../dist/db.js");
 const { detectContextExhaustionInTail } = await import("../dist/pty/claude-transcript.js");
+const { SessionService } = await import("../dist/sessions/service.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
 const writes = [];
 class TestPtyHost extends createSeamHost(PtyHost) {
@@ -584,11 +589,18 @@ try {
   try { host.stop?.("wkr-two-composer-fifo"); } catch { /* best-effort */ }
 }
 
-// ===== (5) DB-level clear: stamped, then cleared on a rising-edge-shaped call; guarded against an
-// unrelated lastError on a row that was never exhausted. Pure Db-level, no PtyHost needed. =====
+// ===== (5) DB-level clear: stamped, then cleared via the REAL rising-edge chokepoint
+// (`SessionService.handleBusyEdge(id, true)`, card 7b1b2b3f) — never a hand-copied direct
+// `Db.clearContextExhaustedOnResume` call, so a revert of that production call's own
+// `if (busy) this.db.clearContextExhaustedOnResume(...)` line (sessions/service.ts) fails THIS file, not
+// just worker-context-warning-advisory.mjs's own (J). Guarded against an unrelated lastError on a row
+// that was never exhausted. None of these rows carry a `parentSessionId`, so `handleBusyEdge`'s own
+// `purgeStaleIdleNudgeForReengagedWorker` returns before ever touching `pty` — a bare `{}` stand-in for
+// the PtyHost argument is sufficient; no seam/fixture needed for this leg. =====
 {
   const dbFile = path.join(os.tmpdir(), `loom-ctxexh-drain-db-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
+  const sessions = new SessionService(db, {}, new OrchestrationControl());
   const now = "2026-11-02T21:30:00.000Z";
   const projId = "proj-ctxexh-drain";
   const agentId = "agent-ctxexh-drain";
@@ -602,15 +614,15 @@ try {
     let row = db.getSession("s-exh");
     check("(5) setContextExhausted stamps contextExhaustedAt + lastError", row.contextExhaustedAt === now && /test stamp/.test(row.lastError ?? ""));
 
-    db.clearContextExhaustedOnResume("s-exh");
+    sessions.handleBusyEdge("s-exh", true);
     row = db.getSession("s-exh");
-    check("(5) clearContextExhaustedOnResume clears contextExhaustedAt", row.contextExhaustedAt === null);
-    check("(5) clearContextExhaustedOnResume ALSO clears the exhaustion lastError (it was this call's own stamp)", row.lastError === null);
+    check("(5) handleBusyEdge(busy=true) clears contextExhaustedAt", row.contextExhaustedAt === null);
+    check("(5) handleBusyEdge(busy=true) ALSO clears the exhaustion lastError (it was this call's own stamp)", row.lastError === null);
 
     // Guard: a row that was NEVER exhausted — its own unrelated lastError must survive untouched.
-    db.clearContextExhaustedOnResume("s-clean");
+    sessions.handleBusyEdge("s-clean", true);
     const clean = db.getSession("s-clean");
-    check("(5) GUARD: calling clearContextExhaustedOnResume on a never-exhausted row leaves its unrelated lastError completely untouched",
+    check("(5) GUARD: calling handleBusyEdge(busy=true) on a never-exhausted row leaves its unrelated lastError completely untouched",
       clean.lastError === "an UNRELATED crash-loop banner" && clean.contextExhaustedAt === null);
 
     // Round 2 (CR finding #6): a row RE-marked exhausted, then OVERWRITTEN by something unrelated
@@ -624,16 +636,16 @@ try {
     check("(5) round-2 setup: contextExhaustedAt is still set after the overwrite (the mark itself wasn't touched)", overwritten.contextExhaustedAt === now);
     check("(5) round-2 setup: lastError now holds the LATER, unrelated banner, not the exhaustion text", overwritten.lastError === "an UNRELATED crash-loop banner landing AFTER the exhaustion stamp");
 
-    db.clearContextExhaustedOnResume("s-overwritten");
+    sessions.handleBusyEdge("s-overwritten", true);
     overwritten = db.getSession("s-overwritten");
-    check("(5) round-2: clearContextExhaustedOnResume still clears contextExhaustedAt", overwritten.contextExhaustedAt === null);
+    check("(5) round-2: handleBusyEdge(busy=true) still clears contextExhaustedAt", overwritten.contextExhaustedAt === null);
     check("(5) round-2: but it does NOT clobber the LATER unrelated lastError (prefix no longer matches)",
       overwritten.lastError === "an UNRELATED crash-loop banner landing AFTER the exhaustion stamp");
 
     // Positive counterpart: a row whose lastError STILL carries the exhaustion prefix clears exactly
     // as before (the fix narrows the clear, it does not disable it).
     db.setContextExhausted("s-overwritten", now, "Context exhausted — the engine rejected the next prompt as too long (Prompt is too long).");
-    db.clearContextExhaustedOnResume("s-overwritten");
+    sessions.handleBusyEdge("s-overwritten", true);
     overwritten = db.getSession("s-overwritten");
     check("(5) round-2: a lastError STILL carrying the exhaustion prefix DOES clear", overwritten.lastError === null && overwritten.contextExhaustedAt === null);
   } finally {
@@ -643,6 +655,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — once a session is marked context-exhausted, its held queue survives both the exhaustion-clearing-busy side effect AND the periodic reconcile() drain safety net (proven against a negative control: an ORDINARY session's queue DOES drain on an ordinary Stop, so the hold is specific to contextExhausted, not a general freeze); a fresh UserPromptSubmit rising edge (the real resume/next-turn chokepoint) clears the in-memory hold end-to-end (a message queued after it DOES drain on the next Stop); round 2's mutant-B2 catch proves the hold also fires on an EMPTY queue (not just a pre-populated one); the HUMAN_COMPOSER_SENDER_ID exemption lets a human's own composer entry deliver despite exhaustion while an ordinary agent entry on the identical setup stays held — round 3 proves that exemption ALSO fires with a PRE-HELD entry already queued ahead of it, with the pre-held entry staying held and draining normally once the composer's own turn completes; card 5f825506 item 2 (test 9) proves the STRAND FIX: a composer entry that's ALSO blocked by a DIFFERENT conjunct (isHumanSubmitHeld) when it arrives lands held exactly as before, then drains via the ordinary reconcile() safety net alone once that OTHER conjunct clears — no second composer message ever sent; round 2 (test 9b) proves the fix also reaches past a PRE-HELD, NON-COMPOSER entry sitting ahead of the composer's own recovery entry — the composer drains OUT OF ORDER once the other conjunct clears, leaving that agent entry queued and held, not drained or dropped; round 2 (test 10) is a REAL-PtyHost seam test proving the genuine `busySinceMs` stamp — not a fake/stub — correctly feeds detectContextExhaustionInTail's own stale-marker cutoff, rejecting an older-than-turn marker and still detecting a newer one; round 3 (test 11) proves drainPending ALWAYS takes the single-composer-entry path while exhausted, head or not — closing the gap where a composer entry that was ITSELF the head fell through to the ordinary coalescing branches, letting a `coalesceAgentMessages:true` route-keyed run fold a queued manager direction into the composer's own recovery turn (test 11a), with a toggle-OFF control (11b) showing that shape was never exposed there; round 3 (test 12) proves a give-up-HELD composer entry is correctly excluded from that same splice scan until its hold expires, and that the shared drain tail's giveUpGen archive loop (archiveAmbiguousDispatch + ambiguousDispatches.delete) runs for this composer-only splice too, not just the ordinary coalescing branches; round 3 (test 13) proves two queued composer entries drain FIFO, one at a time, never coalesced together even though they share sender/kind/route; and the DB-level clear (clearContextExhaustedOnResume) correctly resets the mark while leaving an unrelated session's own lastError completely untouched — both for a row never exhausted AND for one re-exhausted-then-overwritten by something unrelated."
+  ? "\n✅ ALL PASS — once a session is marked context-exhausted, its held queue survives both the exhaustion-clearing-busy side effect AND the periodic reconcile() drain safety net (proven against a negative control: an ORDINARY session's queue DOES drain on an ordinary Stop, so the hold is specific to contextExhausted, not a general freeze); a fresh UserPromptSubmit rising edge (the real resume/next-turn chokepoint) clears the in-memory hold end-to-end (a message queued after it DOES drain on the next Stop); round 2's mutant-B2 catch proves the hold also fires on an EMPTY queue (not just a pre-populated one); the HUMAN_COMPOSER_SENDER_ID exemption lets a human's own composer entry deliver despite exhaustion while an ordinary agent entry on the identical setup stays held — round 3 proves that exemption ALSO fires with a PRE-HELD entry already queued ahead of it, with the pre-held entry staying held and draining normally once the composer's own turn completes; card 5f825506 item 2 (test 9) proves the STRAND FIX: a composer entry that's ALSO blocked by a DIFFERENT conjunct (isHumanSubmitHeld) when it arrives lands held exactly as before, then drains via the ordinary reconcile() safety net alone once that OTHER conjunct clears — no second composer message ever sent; round 2 (test 9b) proves the fix also reaches past a PRE-HELD, NON-COMPOSER entry sitting ahead of the composer's own recovery entry — the composer drains OUT OF ORDER once the other conjunct clears, leaving that agent entry queued and held, not drained or dropped; round 2 (test 10) is a REAL-PtyHost seam test proving the genuine `busySinceMs` stamp — not a fake/stub — correctly feeds detectContextExhaustionInTail's own stale-marker cutoff, rejecting an older-than-turn marker and still detecting a newer one; round 3 (test 11) proves drainPending ALWAYS takes the single-composer-entry path while exhausted, head or not — closing the gap where a composer entry that was ITSELF the head fell through to the ordinary coalescing branches, letting a `coalesceAgentMessages:true` route-keyed run fold a queued manager direction into the composer's own recovery turn (test 11a), with a toggle-OFF control (11b) showing that shape was never exposed there; round 3 (test 12) proves a give-up-HELD composer entry is correctly excluded from that same splice scan until its hold expires, and that the shared drain tail's giveUpGen archive loop (archiveAmbiguousDispatch + ambiguousDispatches.delete) runs for this composer-only splice too, not just the ordinary coalescing branches; round 3 (test 13) proves two queued composer entries drain FIFO, one at a time, never coalesced together even though they share sender/kind/route; and the DB-level clear, driven through the REAL `SessionService.handleBusyEdge(id, true)` chokepoint (card 7b1b2b3f), correctly resets the mark while leaving an unrelated session's own lastError completely untouched — both for a row never exhausted AND for one re-exhausted-then-overwritten by something unrelated."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
