@@ -196,9 +196,11 @@ try {
 
     // RED PROOF: the SAME scenario, replayed from scratch against a dist COPY with the exclusion
     // stripped at this exact call site -- r SHOULD get wrongly resurrected from its own stray content.
+    // @decision f8e11853 — the real call site now carries a trailing `freedKey` (`key`) 7th argument;
+    // this mutation targets the 6th (`excludeIdentities`) argument only, leaving `freedKey` untouched.
     await withDistMutation(
-      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], new Set([clearIdentity]));",
-      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], undefined);",
+      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], new Set([clearIdentity]), key);",
+      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], undefined, key);",
       async (mutated) => {
         const r2 = makeRepo("exclb-r2");
         const key2 = canonicalRepoLockKey(r2);
