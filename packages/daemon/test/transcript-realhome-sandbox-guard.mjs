@@ -27,23 +27,30 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 //       This marks the WHOLE FILE safe, same posture as the real-engine-spawn guard's own
 //       `createSeamHost(` marker — a file using this helper is trusted not to ALSO leave some OTHER,
 //       untracked real-homedir write lying around; or
-//   (B) it is sandboxed: BOTH of the following hold —
+//   (B) it is sandboxed: ALL of the following hold —
 //       (1) it carries NO static `ImportDeclaration` whose module specifier contains "dist/" — a static
 //           import is HOISTED (it always executes before every other top-level statement in the module,
-//           regardless of where it sits in the source text), so if one exists, a HOME/USERPROFILE
-//           override written anywhere else in the file can never precede it. `CLAUDE_PROJECTS_ROOT`
-//           (`pty/claude-transcript.ts`) is captured at MODULE LOAD time, and
-//           `../dist/sessions/transcript.js` (the module every test imports this functionality from)
-//           unconditionally imports `../dist/pty/claude-transcript.js` at ITS OWN top — so ANY static
-//           import reaching dist, not only a direct import of claude-transcript.js, triggers the capture.
+//           regardless of where it sits in the source text), so if one exists, a HOME/USERPROFILE/
+//           CLAUDE_CONFIG_DIR override written anywhere else in the file can never be guaranteed to
+//           precede whatever the imported dist module graph does at its own load time. `claudeProjectsRoot()`
+//           (`pty/claude-transcript.ts`) is a FUNCTION, read fresh per call via `claudeConfigHome()` (card
+//           `a92a0913`) — it is NOT a module-level constant captured once at import — but this guard still
+//           refuses a static import rather than trust every transitively-imported dist module to be
+//           equally lazy; convert to a dynamic `await import()` placed after the sandbox instead.
 //       (2) it carries a `process.env.HOME = <non-empty>` assignment AND a `process.env.USERPROFILE =
 //           <non-empty>` assignment (real `=` syntax, never `==`/`===`/a comment/a string) that BOTH
 //           appear, in source order, strictly BEFORE the file's FIRST dynamic `import("...dist/...")`
-//           call — the only shape that can actually precede a dist import's module-load-time read. A
-//           file with a transcript-fn hit but no dist import of EITHER kind in its own text is an
+//           call — the only shape that can actually precede a dist import's own load time.
+//       (3) it ALSO carries a `delete process.env.CLAUDE_CONFIG_DIR;` or a non-empty
+//           `process.env.CLAUDE_CONFIG_DIR = <redirect>;` assignment, strictly before that SAME first
+//           dynamic dist import — `claudeConfigHome()` (`pty/claude-config.ts`) reads `CLAUDE_CONFIG_DIR`
+//           ahead of `os.homedir()` (card `a92a0913`), so a sandboxed HOME/USERPROFILE alone is not
+//           enough: an ambient `CLAUDE_CONFIG_DIR` would still redirect every transcript-path read to the
+//           real config dir.
+//       A file with a transcript-fn hit but no dist import of EITHER kind in its own text is an
 //           unrecognized shape and fails closed, same posture as `real-home-scope-guard.mjs`'s own
 //           fail-closed branch.
-// A hit failing either condition, and not itself in `NON_SANDBOXED_ALLOWLIST` below, FAILS. A separate
+// A hit failing any condition, and not itself in `NON_SANDBOXED_ALLOWLIST` below, FAILS. A separate
 // STALE-ENTRY assertion fails loud if any allowlist entry does NOT itself carry a genuine, currently-
 // unsafe hit — the same posture `real-engine-spawn-opt-in-guard.mjs`'s own stale-entry check and
 // `role-surface-tools-named-in-doctrine.mjs`'s own ALLOWLIST check use: a stale entry is a silent future
@@ -95,35 +102,6 @@ const NON_SANDBOXED_ALLOWLIST = {
   // a per-scenario pattern — see card a92a0913's own decision record and that file's own header comment.
   "claude-config-dir-shared-resolver.mjs": "sandboxes HOME/USERPROFILE/CLAUDE_CONFIG_DIR per-scenario (deliberately — it tests the CLAUDE_CONFIG_DIR override itself), always before that scenario's own use, never once before the module's top-level dist import.",
 };
-
-// Card a92a0913 round 2: this card's own assigned scope widened this guard's required-override check to
-// ALSO demand a CLAUDE_CONFIG_DIR delete/redirect (claudeConfigHome() reads it ahead of os.homedir(), so
-// a sandboxed HOME/USERPROFILE alone is not enough). That widening discovered a REAL, pre-existing gap in
-// every file below — each already sandboxes HOME/USERPROFILE correctly (confirmed structurally by this
-// guard's own classify(), not guesswork) but was written before this card and never needed to also handle
-// CLAUDE_CONFIG_DIR. Fixing 50 files is out of THIS card's assigned scope (its own body named only the 4
-// 668bc52c/dacc6d9e already touched) — reported up via worker_report on card a92a0913 for a follow-up
-// card; this is the guard's OWN discovery-exemption mechanism (same shape as NON_SANDBOXED_ALLOWLIST's own
-// "found by this guard" entries above), never a silent debt-baseline.
-const CONFIGDIR_NOT_HANDLED_ALLOWLIST = new Set([
-  "agent-runs-hardening.mjs", "agent-runs-spend.mjs", "assistant-mode-pin.mjs", "audit-surface.mjs",
-  "browser-testing-spawn.mjs", "codescape-lifecycle-hooks.mjs", "codex-fleet-switch-guard.mjs",
-  "companion-codex-restricted-tools-refusal.mjs", "companion-live-upgrade.mjs", "companion-memory-recall.mjs",
-  "companion-transcript-read.mjs", "companion-upgrade-carry-opposite-sites.mjs", "context-watcher-sampler-cascade.mjs",
-  "document-conversion-spawn.mjs", "forced-plain-persisted.mjs", "fork-allow-baseline.mjs", "fork-cwd-missing-guard.mjs",
-  "kickoff-confirm-boot-rearm.mjs", "kickoff-giveup-exhausted.mjs", "manager-kickoff-giveup-dropped.mjs",
-  "merge-spawn-ownership-attach.mjs", "mid-turn-context-sampler.mjs", "platform-transcript.mjs",
-  "platform-ungated-minting.mjs", "project-memory-cross-session.mjs", "project-memory-resume-pool-dedup.mjs",
-  "pty-giveup-transcript-corroboration.mjs", "recycle-harness-reresolve.mjs", "recycle-refuses-fleet-writes.mjs",
-  "respawn-profile-attrs.mjs", "restricted-tools-spawn.mjs", "resume-already-live-guard.mjs",
-  "resume-fork-plain-role-not-widened.mjs", "resume-mode-cycles.mjs", "resume-permission-pin-agent-missing.mjs",
-  "session-resume-prespawn-throw-marks-exited.mjs", "session-resume-prespawn-throw-preserves-recycled-from.mjs",
-  "session-resume-prespawn-throw-restores-archive-state.mjs", "skills-subset-spawn.mjs",
-  "transcript-fallback-cache-coherence.mjs", "transcript-root-deny-spawn-paths.mjs", "transcript-turns-spill.mjs",
-  "usage-sampler.mjs", "user-audit-surface.mjs", "worker-idle-mid-first-turn.mjs",
-  "worker-idle-spawn-broken-contradiction.mjs", "worker-mode-default.mjs", "worker-report-recovery.mjs",
-  "worker-revive.mjs", "worker-transcript-paging.mjs",
-]);
 
 /** Parse `text` into a TS SourceFile. */
 function parseSource(text) {
@@ -517,6 +495,44 @@ check(
   check("GREEN: HOME/USERPROFILE sandboxed + CLAUDE_CONFIG_DIR redirected into the sandbox, all before the dynamic import, is NOT flagged", classify(SAFE_SANDBOXED_CONFIGDIR_REDIRECTED).isSafe === true);
   check("GREEN: a file with no transcript-fn call at all is NOT flagged", classify(SAFE_NO_HIT).isSafe === true && classify(SAFE_NO_HIT).hasHit === false);
   check("GREEN: marker A (the shared fixture helper) is safe even with a static dist import present (it overrides the ordering check entirely)", classify(SAFE_VIA_FIXTURE_HELPER).isSafe === true);
+
+  // POSITIVE CONTROL (card b777dccc, manager-requested): the exact `.code` discriminant, on the REAL,
+  // unmutated classify() — the same function the `violations` filter further below calls, never a
+  // re-implemented predicate — plus its inverse. `isSafe` alone (checked above) doesn't prove the SPECIFIC
+  // reason is "configdir-missing" rather than some other unsafe code.
+  check("POSITIVE CONTROL: the REAL classify() codes a HOME/USERPROFILE-sandboxed, CLAUDE_CONFIG_DIR-unhandled fixture as configdir-missing",
+    classify(UNSAFE_NO_CONFIGDIR_HANDLING).code === "configdir-missing");
+  check("INVERSE: the REAL classify() codes the SAME fixture plus a CLAUDE_CONFIG_DIR delete as safe",
+    classify(SAFE_SANDBOXED_CONFIGDIR_DELETED).code === "safe");
+
+  // MUTATION TEST (lesson 303: a check that can only ever pass is indistinguishable from a broken one).
+  // Textually disables classify()'s OWN configdir-missing branch — never a re-implemented copy of its
+  // logic — by mutating classify.toString()'s real source text and reconstructing it via `new Function`,
+  // wired to the SAME helper closures classify() itself calls. Proves the positive control above is
+  // load-bearing: if classify() regressed to never flag configdir-missing, this fixture would silently
+  // stop being a violation.
+  const CONFIGDIR_BRANCH_CONDITION = "if (!configDirHandling.some((h) => h.line < firstDynamicDistLine)) {";
+  const classifySource = classify.toString();
+  check("sanity: the CLAUDE_CONFIG_DIR branch condition text is present in classify()'s own source (so the mutation below targets something real, not a stale string)",
+    classifySource.includes(CONFIGDIR_BRANCH_CONDITION));
+  const mutatedSource = classifySource.replace(CONFIGDIR_BRANCH_CONDITION, "if (false) {");
+  check("sanity: the mutation actually changed classify()'s source text", mutatedSource !== classifySource);
+  const classifyMutant = new Function(
+    "parseSource", "findTranscriptFnHits", "importsSharedFixtureHelper", "findStaticDistImports",
+    "findDynamicDistImports", "findHomeOverrideAssignments", "findConfigDirHandling",
+    `return (${mutatedSource});`,
+  )(parseSource, findTranscriptFnHits, importsSharedFixtureHelper, findStaticDistImports, findDynamicDistImports, findHomeOverrideAssignments, findConfigDirHandling);
+
+  const mutantResult = classifyMutant(UNSAFE_NO_CONFIGDIR_HANDLING);
+  check("RED PROOF: the mutant (configdir-missing branch disabled) no longer codes the bad fixture as configdir-missing — proves the mutation actually took",
+    mutantResult.code !== "configdir-missing" && mutantResult.isSafe === true);
+
+  const realClassification = classify(UNSAFE_NO_CONFIGDIR_HANDLING);
+  const realWouldFlagAsViolation = realClassification.hasHit && !realClassification.isSafe;
+  const mutantWouldFlagAsViolation = mutantResult.hasHit && !mutantResult.isSafe;
+  check("RED PROOF: the REAL classify() flags this fixture as a violation (hasHit && !isSafe)", realWouldFlagAsViolation === true);
+  check("RED PROOF: the guard goes RED under the mutation — the mutant wrongly calls the SAME fixture safe, where the real classify() flags it as a violation",
+    mutantWouldFlagAsViolation === false);
 }
 
 // --- Population sanity + the real corpus ---
@@ -533,21 +549,16 @@ for (const [f, text] of Object.entries(basenameToText)) realClassifications[f] =
 const hitCount = Object.values(realClassifications).filter((c) => c.hasHit).length;
 check(`sanity: at least one real file carries a transcript-fn hit (found ${hitCount})`, hitCount > 0);
 
-// Card a92a0913 round 3 (MAJOR CR fix): CONFIGDIR_NOT_HANDLED_ALLOWLIST exempts a file ONLY when its
-// CURRENT failure code is EXACTLY "configdir-missing" — the one, specific reason every entry's own
-// comment above documents it for. A bare `!CONFIGDIR_NOT_HANDLED_ALLOWLIST.has(f)` (the pre-fix shape)
-// exempted a listed file from EVERY classify() failure, of any code, which let a REGRESSION in an
-// allowlisted file (e.g. a HOME/USERPROFILE sandbox that stopped preceding the dist import) pass
-// silently as long as the filename matched — proven by the reviewer: prepending a static dist import to
-// an allowlisted file (flipping its code to "static-import") left this guard green pre-fix. Gating on
-// the code means the allowlist can ONLY ever suppress the one narrow, already-reasoned defect class;
-// any OTHER regression in that same file still surfaces as a violation below.
+// Card b777dccc: CONFIGDIR_NOT_HANDLED_ALLOWLIST (card a92a0913 round 2's discovery-exemption for the
+// ~50 pre-existing fixtures this guard's CLAUDE_CONFIG_DIR widening surfaced) is GONE — every one of
+// those files now carries the delete/redirect, so `classify()` itself (not an allowlist) is the only
+// thing deciding safety. This also removes the round-3 CR-fixed defect class by construction: a
+// code-gated exemption can't go stale or get bypassed if there's no exemption left to gate.
 const violations = Object.entries(realClassifications)
   .filter(([f, c]) => c.hasHit && !c.isSafe
-    && !Object.prototype.hasOwnProperty.call(NON_SANDBOXED_ALLOWLIST, f)
-    && !(CONFIGDIR_NOT_HANDLED_ALLOWLIST.has(f) && c.code === "configdir-missing"));
+    && !Object.prototype.hasOwnProperty.call(NON_SANDBOXED_ALLOWLIST, f));
 check(
-  `every test file with a transcript-fn hit is sandboxed before its first dist import, or carries a reasoned NON_SANDBOXED_ALLOWLIST entry, or fails with EXACTLY the configdir-missing code a CONFIGDIR_NOT_HANDLED_ALLOWLIST entry names (found ${violations.length} violation(s))`,
+  `every test file with a transcript-fn hit is sandboxed before its first dist import, or carries a reasoned NON_SANDBOXED_ALLOWLIST entry (found ${violations.length} violation(s))`,
   violations.length === 0,
 );
 for (const [f, c] of violations) console.log(`  VIOLATION  ${f} — ${c.reason}`);
@@ -562,56 +573,9 @@ check(
   staleEntries.length === 0,
 );
 
-// STALE-ENTRY (CONFIGDIR_NOT_HANDLED_ALLOWLIST): same posture — an entry that's since been fixed (or
-// renamed/removed) is a silent future exemption for whatever else lands under that basename next. Also
-// stale (round 3 widening) if the file's CURRENT failure code is no longer "configdir-missing" — e.g. it
-// regressed to a DIFFERENT, unreasoned defect class, which this allowlist must never silently cover.
-const staleConfigDirEntries = [...CONFIGDIR_NOT_HANDLED_ALLOWLIST].filter((f) => {
-  const c = realClassifications[f];
-  return c === undefined || !c.hasHit || c.isSafe || c.code !== "configdir-missing";
-});
-check(
-  `every CONFIGDIR_NOT_HANDLED_ALLOWLIST entry currently fails with EXACTLY the configdir-missing code and nothing else (found ${staleConfigDirEntries.length} stale: ${JSON.stringify(staleConfigDirEntries)})`,
-  staleConfigDirEntries.length === 0,
-);
-
-// --- RED PROOF (round 3, card a92a0913 item 1): the reviewer's own mutant, replayed against the REAL
-// corpus text — a HOME/USERPROFILE regression in a CONFIGDIR_NOT_HANDLED_ALLOWLIST-listed file must now
-// fail the violations filter, where the pre-fix (bare `!ALLOWLIST.has(f)`) exemption let it through. This
-// never touches the real file on disk — it mutates the TEXT this guard already read into memory.
-{
-  const MUTANT_TARGET = "usage-sampler.mjs";
-  check(`sanity: ${MUTANT_TARGET} is actually in CONFIGDIR_NOT_HANDLED_ALLOWLIST (so this proof targets a real exemption, not a made-up name)`,
-    CONFIGDIR_NOT_HANDLED_ALLOWLIST.has(MUTANT_TARGET));
-  const originalText = basenameToText[MUTANT_TARGET];
-  check(`sanity: ${MUTANT_TARGET} exists in the real corpus and currently classifies configdir-missing`,
-    typeof originalText === "string" && classify(originalText).code === "configdir-missing");
-
-  // The reviewer's exact mutant: prepend a hoisted static dist import, which freezes CLAUDE_PROJECTS_ROOT
-  // before ANY override in the file can run — a genuine, different-in-kind regression from "configdir
-  // not handled", flipping the code to "static-import".
-  const mutatedText = 'import "../dist/sessions/transcript.js";\n' + originalText;
-  const mutatedClassification = classify(mutatedText);
-  check(`RED PROOF: the mutant flips ${MUTANT_TARGET}'s code away from configdir-missing (found ${JSON.stringify(mutatedClassification.code)})`,
-    mutatedClassification.hasHit && !mutatedClassification.isSafe && mutatedClassification.code !== "configdir-missing");
-
-  // Replay both the OLD (pre-fix, bare) and NEW (fixed, code-gated) violations-filter predicates against
-  // this one mutated entry, to show the fix is what changes the outcome — not an unrelated difference.
-  const oldExemptionWouldPass = CONFIGDIR_NOT_HANDLED_ALLOWLIST.has(MUTANT_TARGET); // bare !ALLOWLIST.has(f) ⇒ exempted whenever this is true, regardless of code
-  const c = mutatedClassification;
-  const newViolationPredicate = c.hasHit && !c.isSafe
-    && !Object.prototype.hasOwnProperty.call(NON_SANDBOXED_ALLOWLIST, MUTANT_TARGET)
-    && !(CONFIGDIR_NOT_HANDLED_ALLOWLIST.has(MUTANT_TARGET) && c.code === "configdir-missing");
-  check("RED PROOF: the PRE-FIX exemption shape would have silently passed this mutant (reproduces the reviewer's rc=0 finding)",
-    oldExemptionWouldPass === true);
-  check("RED PROOF: the FIXED (code-gated) violations predicate now flags this mutant as a real violation",
-    newViolationPredicate === true);
-}
-
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every test/*.mjs file calling a transcript-path function either sandboxes HOME and " +
-    "USERPROFILE before its first dynamic dist import (never behind a hoisted static one), or carries a " +
-    "reasoned, non-stale NON_SANDBOXED_ALLOWLIST entry, or fails with exactly the one specific reason code " +
-    "a CONFIGDIR_NOT_HANDLED_ALLOWLIST entry names."
+  ? "\n✅ ALL PASS — every test/*.mjs file calling a transcript-path function either sandboxes HOME, " +
+    "USERPROFILE, AND CLAUDE_CONFIG_DIR before its first dynamic dist import (never behind a hoisted " +
+    "static one), or carries a reasoned, non-stale NON_SANDBOXED_ALLOWLIST entry."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

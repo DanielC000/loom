@@ -42,6 +42,9 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, buildSpawnArgs, playwrightMcpServer, scratchDirEnv, disallowedToolsForSpawn, PLAYWRIGHT_DISALLOWED_TOOLS, ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS } = await import("../dist/pty/host.js");

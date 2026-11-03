@@ -84,6 +84,9 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 
 // Env-shorten every settle bound BEFORE importing dist/** (mirrors recycle-reattempt.mjs). We never wait
 // out the full settle in this file (every assertion runs INSIDE the window, before the hard-stop), but a

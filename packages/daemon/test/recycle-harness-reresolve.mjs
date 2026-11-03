@@ -44,6 +44,9 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 // Card be9cb999 round 2, item 2: this test calls startPlatformLead/recyclePlatformLead with an
 // arbitrary agent id (no sanctioned marker/profile) — it's about generic harness-reresolve mechanics,
 // not f437d4e9 Decision 5/6's end-user-Lead restriction, which applies only on a non-dev install. Pin

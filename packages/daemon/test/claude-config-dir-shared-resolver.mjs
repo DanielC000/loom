@@ -13,9 +13,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //
 // Every check below is written so a mutant that KEEPS the fixed API but silently reverts its LOGIC to
 // the pre-fix shape (raw os.homedir(), ignoring CLAUDE_CONFIG_DIR) would fail it — never a check whose
-// only failure mode is "the export doesn't exist" (lesson 298). Concretely: every CLAUDE_CONFIG_DIR-set
-// assertion below computes the OLD (pre-fix) expected value too and asserts the REAL result differs from
-// it, not merely that it equals the new expected value.
+// only failure mode is "the export doesn't exist" (lesson 298). Concretely: the claudeJsonPath()/
+// engineTranscriptPath() CLAUDE_CONFIG_DIR-set assertions each compute the OLD (pre-fix) expected value
+// too and assert the REAL result differs from it, not merely that it equals the new expected value. The
+// deny-rule assertions discriminate differently (exact equality, never a differential-vs-old check): they
+// assert the pre-fix home-relative rule(s) are kept UNCONDITIONALLY and exactly, and that the NEW
+// CLAUDE_CONFIG_DIR-built absolute sibling(s) are ALSO present — a mutant that silently dropped the
+// absolute siblings (the pre-fix shape, since they didn't exist yet) fails that inclusion check directly.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/claude-config-dir-shared-resolver.mjs
 import fs from "node:fs";

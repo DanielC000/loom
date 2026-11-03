@@ -174,10 +174,15 @@ plain one — not the `//c/…` one — is the one with actual `Read()`-specific
 Emitting BOTH (deny rules only ever add, never narrow) covers whichever one the real `Read()` permission
 parser actually honours for this specific root, without having to resolve the still-open residual above.
 `claudeProjectsRootPlainSlashedGlob()` (`claude-transcript.ts`) is the new helper; no POSIX sibling is
-added — `toClaudeAbsoluteGlob`'s own POSIX output already IS the plain absolute path (one extra leading
-slash), so there is no second "plain" form to add there. The unset-`CLAUDE_CONFIG_DIR` shape is
-unaffected (both new-sibling pushes are gated on `CLAUDE_CONFIG_DIR` being set, same as the `//c/…`
-sibling already was).
+added — POSIX has no second, unambiguous absolute form to add. `toClaudeAbsoluteGlob`'s POSIX branch
+prepends ONE extra leading slash to the already-absolute path (`/home/…` → `//home/…`), the same
+double-slash disambiguation win32's `//c/…` form uses; a BARE single-leading-slash POSIX path (`/home/…`,
+unchanged) is, by that same convention, SETTINGS-RELATIVE, not absolute — so it is the POSIX analogue of
+win32's plain `C:/…` form only in shape, not in effect: emitting it would add a rule that never matches
+as absolute, not a genuine second candidate. `toClaudeAbsoluteGlob`'s own (double-slash) output stays the
+only absolute-glob form this guard emits on POSIX. The unset-`CLAUDE_CONFIG_DIR` shape is unaffected
+(both new-sibling pushes are gated on `CLAUDE_CONFIG_DIR` being set, same as the `//c/…` sibling already
+was).
 
 ## Source
 

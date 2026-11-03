@@ -34,6 +34,9 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 process.env.LOOM_CODEX_BIN = path.join(tmpHome, "no-such-codex-binary");
 delete process.env.CODEX_HOME; // never let an ambient real ~/.codex leak into a spawn under test
 

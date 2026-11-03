@@ -92,6 +92,9 @@ const mft1SandboxHome = path.join(mft1TmpHome, "home");
 fs.mkdirSync(mft1SandboxHome, { recursive: true });
 process.env.USERPROFILE = mft1SandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = mft1SandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
 
 /** Writes a real transcript JSONL to the (sandboxed) ~/.claude/projects/... path readTranscript
  *  resolves — mirrors worker-idle-spawn-broken-contradiction.mjs's own writeLiveTranscript fixture. */
