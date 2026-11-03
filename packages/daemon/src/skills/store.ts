@@ -316,6 +316,25 @@ function customizationState(name: string, storeContent: string): { customized: b
   return { customized: nMine !== nBase, updateAvailable: nBase !== nShipped };
 }
 
+/**
+ * True when `name` is a bundled skill AND `storeContent` is unchanged (normalizeForCompare-tolerant —
+ * the same line-ending/whitespace tolerance every other asset-vs-store comparison in this file uses)
+ * from the CURRENT shipped asset — i.e. genuinely pristine relative to what Loom ships TODAY, not merely
+ * relative to the last-synced `base` snapshot (`customizationState`'s own `customized` flag above, which
+ * can itself be stale, or bypassed entirely by an out-of-band store write that never touched `base`).
+ *
+ * @decision 51a2462a round 2 — the permission-strip bundled-name exemption (`skills/inject.ts`'s
+ * `needsPermissionStrip`) needs THIS comparison, never `customized`, to stay closed against a direct
+ * filesystem write to a bundled name's store directory that never went through the Skills UI.
+ *
+ * False when `name` isn't actually a bundled skill, or its shipped asset can't be read.
+ */
+export function isPristineBundledContent(name: string, storeContent: string): boolean {
+  const shipped = readFileOrNull(assetMd(name));
+  if (shipped == null) return false;
+  return normalizeForCompare(storeContent) === normalizeForCompare(shipped);
+}
+
 export function listSkills(): SkillSummary[] {
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }); } catch { return []; }

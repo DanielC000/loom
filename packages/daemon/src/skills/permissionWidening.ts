@@ -6,9 +6,9 @@ import type { SkillPermissionVector } from "@loom/shared";
  * What each vector DOES is documented on `SkillPermissionVector` in `@loom/shared`; the measurements
  * behind it are card 28b2ca6f's probe report.
  *
- * @decision 87a51903 — disclose, never strip: nothing here may reject or rewrite a skill, and no
- * second copy of these patterns may exist. A human-written skill legitimately carries these; a
- * divergent hand-copied regex set would silently disagree about which skills are flagged.
+ * @decision 87a51903 — disclose, never strip: nothing HERE may reject or rewrite a skill, and no
+ * second copy of these patterns may exist. `skills/permissionGuard.ts` (card 51a2462a) does the
+ * agent-skill refuse/strip, importing the patterns exported below — this module still only detects.
  */
 
 /**
@@ -16,8 +16,17 @@ import type { SkillPermissionVector } from "@loom/shared";
  * — the same bound `skills/store.ts`'s own `descriptionOf()` uses, so "frontmatter" means exactly the
  * same bytes to both. A later `---` in the body (an ordinary markdown horizontal rule) is never
  * mistaken for a second frontmatter block.
+ *
+ * Exported (card 51a2462a) so `skills/permissionGuard.ts` can locate the SAME block to strip a key out
+ * of it, without a second hand-rolled fence pattern.
  */
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+export const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+
+/** A single frontmatter line naming its top-level (column-0, unindented) YAML mapping key — see
+ *  `topLevelFrontmatterKeys`'s own doc for why no leading whitespace is required. Exported (card
+ *  51a2462a) so `skills/permissionGuard.ts` can walk the SAME block to find where a flagged key's lines
+ *  start and end, using the identical key boundary this module's own detector uses. */
+export const FRONTMATTER_KEY_LINE_RE = /^([A-Za-z0-9_-]+):/;
 
 /**
  * Top-level (column-0, unindented) YAML mapping keys of a frontmatter block, lowercased. A bounded
@@ -37,7 +46,7 @@ function topLevelFrontmatterKeys(content: string): string[] {
   if (block == null) return [];
   const keys: string[] = [];
   for (const line of block.split(/\r?\n/)) {
-    const key = line.match(/^([A-Za-z0-9_-]+):/)?.[1];
+    const key = line.match(FRONTMATTER_KEY_LINE_RE)?.[1];
     if (key != null) keys.push(key.toLowerCase());
   }
   return keys;
@@ -70,11 +79,15 @@ export function frontmatterReadIncomplete(content: string): boolean {
  * SECOND, unrelated code span satisfies the rest of a naive pattern. Requiring the "!" itself NOT be
  * preceded by a backtick rules this out: in genuine `` !`cmd` `` syntax the "!" sits OUTSIDE any code
  * span, immediately before the one it opens — never immediately after one that just closed.
+ *
+ * Exported (card 51a2462a) so `skills/permissionGuard.ts` can strip the SAME construct it detects,
+ * without a second hand-rolled pattern.
  */
-const INLINE_SHELL_RE = /(?<!`)!`[^`\n]+`/;
+export const INLINE_SHELL_RE = /(?<!`)!`[^`\n]+`/;
 
-/** A fenced code block whose info string is a bare `!` (up to 3 leading spaces, per CommonMark). */
-const FENCED_SHELL_RE = /^[ \t]{0,3}```!/m;
+/** A fenced code block whose info string is a bare `!` (up to 3 leading spaces, per CommonMark).
+ *  Exported (card 51a2462a) — see `INLINE_SHELL_RE`'s own export note just above. */
+export const FENCED_SHELL_RE = /^[ \t]{0,3}```!/m;
 
 /**
  * Every permission-widening vector `content` carries, in a stable order (frontmatter keys first, then

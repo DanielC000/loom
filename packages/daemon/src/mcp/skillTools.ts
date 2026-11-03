@@ -8,6 +8,7 @@ import {
   publishSkillToBundled,
   clearSkillProvenance,
 } from "../skills/store.js";
+import { permissionWideningRefusalError } from "../skills/permissionGuard.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 /**
@@ -119,6 +120,11 @@ export function skillWriteData(
   if (!isValidSkillName(name)) {
     return { error: "invalid skill name (kebab-case: a-z, 0-9, -, ≤64 chars)" };
   }
+  // @decision 51a2462a — refused BEFORE the bundled/user branch split, so it covers BOTH: every
+  // skillWriteData call is agent-authored (see this function's own doc below), on either branch, on
+  // either surface — there is no human-REST path through this function to carve an exception for.
+  const widening = permissionWideningRefusalError(content);
+  if (widening) return { error: widening };
   // loom-setup BOUND (load-bearing) / non-dev loom-platform (card 2179a923): USER skills ONLY — a
   // bundled name can never create a divergent store copy of, or otherwise touch, the bundled/dev skill
   // set, on EITHER surface when allowBundledAsset is false.

@@ -4,7 +4,8 @@ import crypto from "node:crypto";
 import type { SessionRole } from "@loom/shared";
 import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT, WORKTREES_DIR } from "../paths.js";
 import { claudeSkillsDir, doctrineGitExcludeEntries } from "../pty/claude-doctrine.js";
-import { isValidSkillName, isBundledSkill, skillProvenance } from "./store.js";
+import { isValidSkillName, isBundledSkill, skillProvenance, isPristineBundledContent } from "./store.js";
+import { stripPermissionWidening } from "./permissionGuard.js";
 import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
 
@@ -346,6 +347,115 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
   console.log(`[skills] failed to append obsidian preflight to ${skillMd} after 3 attempts: ${(lastErr as Error)?.message}`);
 }
 
+// A bundled name is exempt from the strip only while its store copy is still content-equal
+// (normalizeForCompare-tolerant) to the shipped asset (`isPristineBundledContent`, never `customized`,
+// which compares against a possibly-stale `base` snapshot a direct out-of-band store write never touches).
+//
+// @decision 51a2462a round 2 — a bare `isBundledSkill(name)` check is NOT enough on its own; this
+// content-equality check is what actually gates the exemption.
+/**
+ *  Strip a skill's delivered copy unless it's human-provenance-stamped, or it's a bundled name whose
+ *  store copy passes that check; agent-stamped AND unstamped (fail closed, same posture as decision
+ *  509176c8) both get stripped, regardless of how the name reached `want` (deliver-all or an explicit
+ *  profile subset). `skillDir` is the just-copied delivered dir — read here (never the store directly)
+ *  since the caller is about to re-read this same file anyway for the strip itself; an unreadable file
+ *  fails CLOSED by returning `true` here — the caller's own `stripPermissionWideningFile` then WITHHOLDS
+ *  the skill entirely on that same non-ENOENT read failure, it does not silently no-op. */
+function needsPermissionStrip(name: string, skillDir: string): boolean {
+  if (skillProvenance(name) === "human") return false;
+  if (!isBundledSkill(name)) return true;
+  let mine: string;
+  try { mine = fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf8"); }
+  catch { return true; } // can't verify pristine — fail closed
+  return !isPristineBundledContent(name, mine);
+}
+
+/**
+ * @decision 51a2462a round 2 — returns `false` on any strip failure; the caller MUST then treat this
+ * skill as undeliverable (remove `dest`, record it failed) rather than deliver an unstripped hazard
+ * fingerprinted as Loom's own trusted placement, which every failure shape here used to do (only logged).
+ *
+ * Rewrite a JUST-copied skill's SKILL.md in place to remove any permission-widening construct
+ * (`skills/permissionGuard.ts`'s `stripPermissionWidening`) — defense in depth for an agent-provenance
+ * store skill that predates the write-time refuse in `skillWriteData`, or that reached the store out of
+ * band. Same atomic tmp+swap discipline as `appendObsidianFragment`. Runs BEFORE that fragment append
+ * and BEFORE fingerprinting (see the call site), so a fragment-target skill's fragment is appended to
+ * the already-stripped base, and the RECORDED fingerprint always covers the bytes actually delivered.
+ * A no-op write (`stripPermissionWidening` returns its input unchanged) is skipped entirely — a clean
+ * skill's delivered file is never touched, not even its mtime.
+ */
+function stripPermissionWideningFile(skillDir: string): boolean {
+  const skillMd = path.join(skillDir, "SKILL.md");
+  let body: string;
+  try { body = fs.readFileSync(skillMd, "utf8"); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // no SKILL.md — nothing to strip
+    console.log(`[skills] failed to read ${skillMd} to check for permission-widening content: ${(e as Error).message}`);
+    return false; // can't verify clean — fail closed
+  }
+  const stripped = stripPermissionWidening(body);
+  if (stripped === body) return true; // clean — never touch the file for a no-op
+  if (stripped === null) {
+    console.log(`[skills] refusing to deliver ${skillMd}: permission-widening content could not be stripped to a verified-clean result`);
+    return false;
+  }
+  const tmp = `${skillMd}.loom-permstrip-tmp`;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      fs.writeFileSync(tmp, stripped);
+      fs.renameSync(tmp, skillMd); // atomic swap over the fresh base copy (rename replaces on win32 + posix)
+      return true;
+    } catch (e) { lastErr = e; }
+  }
+  try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+  console.log(`[skills] failed to strip permission-widening content from ${skillMd} after 3 attempts: ${(lastErr as Error)?.message}`);
+  return false;
+}
+
+// `fs.rmSync` alone is not fail-safe: an EBUSY on the rm (correlated with the SAME rename/write failure
+// that got us here — an AV/handle lock on Windows) can leave the unstripped hazard sitting at `dest`,
+// where Claude Code's own discovery still finds and loads it. Three ordered fallbacks, each tried only if
+// the one before it didn't actually make `dest` disappear.
+//
+// @decision 51a2462a round 3 — a bare `try { fs.rmSync(dest, …) } catch {}` is not enough; this is the
+// fail-safe replacement every "undeliverable skill" call site below must use instead.
+/**
+ * (1) rename `dest` ASIDE, OUTSIDE the `.claude/skills` discovery tree entirely (a sibling under
+ *     `.claude` named `.loom-quarantined-skills/<name>-<random>` — never a renamed/dotted sibling still
+ *     INSIDE `skills/`, which Claude Code's own discovery walk would still find as a skill directory);
+ * (2) else overwrite `<dest>/SKILL.md` in place with a neutral, frontmatter-free stub naming the
+ *     withheld skill — the hazardous construct is gone even though the directory itself couldn't move;
+ * (3) else log loudly at error level — nothing more Loom can do from here (see the decision record's
+ *     residual (b): the hazard can still be sitting at `dest`, unmodified, if every fallback failed).
+ *
+ * Returns true once `dest` is confirmed gone or neutralized; false only in that last, logged case.
+ */
+function quarantineUndeliverableDest(dest: string, name: string, claudeDir: string): boolean {
+  try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* fall through */ }
+  if (!fs.existsSync(dest)) return true;
+
+  try {
+    const quarantineDir = path.join(claudeDir, ".loom-quarantined-skills");
+    fs.mkdirSync(quarantineDir, { recursive: true });
+    const aside = path.join(quarantineDir, `${name}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`);
+    fs.renameSync(dest, aside);
+    console.log(`[skills] quarantine: could not remove ${dest}; relocated it to ${aside} (outside the skill-discovery tree)`);
+    return true;
+  } catch { /* fall through */ }
+
+  try {
+    const stub = `Loom withheld "${name}"'s real content: a permission-widening construct could not be ` +
+      "safely stripped, and the delivered copy could not be removed or relocated. See the daemon log.\n";
+    fs.writeFileSync(path.join(dest, "SKILL.md"), stub);
+    console.log(`[skills] quarantine: could not remove or relocate ${dest}; overwrote its SKILL.md with a neutral stub instead`);
+    return true;
+  } catch (e) {
+    console.log(`[skills] quarantine FAILED for ${dest}: could not remove, relocate, or neutralize it — an unstripped hazard may still be present (${(e as Error).message})`);
+    return false;
+  }
+}
+
 /**
  * Deliver Loom's managed skills to a session by mirroring ~/.loom/skills/<name> into
  * <cwd>/.claude/skills/<name>. Claude discovers these as PROJECT-LOCAL skills (bare names) —
@@ -646,6 +756,14 @@ export function injectSkills(
     // A copy that ultimately fails is recorded (`failed`) and surfaced below — NOT silently skipped, which
     // would let the session run WITHOUT its pinned doctrine skill.
     if (copySkillAtomic(src, dest)) {
+      // @decision 51a2462a round 2 — a strip failure is now treated exactly like a copy failure (remove
+      // dest, record failed, never fingerprint), never the old fail-open shape. Round 3: the removal
+      // itself is fail-safe (see `quarantineUndeliverableDest`'s own doc), not a bare best-effort rm.
+      if (needsPermissionStrip(name, dest) && !stripPermissionWideningFile(dest)) {
+        quarantineUndeliverableDest(dest, name, claudeDir);
+        failed.push(name);
+        continue;
+      }
       placed.push(name);
       // ONLY the fragment-target skills, and ONLY when enabled + the fragment loaded. Runs after the fresh
       // base copy (copySkillAtomic re-copies the fragment-free store base first), so the append lands once.
