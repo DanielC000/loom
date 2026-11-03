@@ -78,6 +78,7 @@ import {
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
+import { validateProjectCreateInput } from "../projects/create-input.js";
 import { gateCommandFieldWarnings } from "../orchestration/gate-runner.js";
 import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
@@ -4314,74 +4315,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/setup/project-init", async (req, reply) => {
     const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown; denyGlobs?: unknown; repos?: unknown };
     if (!b.name || !b.name.trim()) return reply.code(400).send({ error: "name required" });
-    // referenceRepos: HUMAN-only on this REST create path, same validation + trust class as POST
-    // /api/projects — each entry MUST be an absolute path to an existing git repo (validateReferenceRepos).
-    // Validate BEFORE bootstrapping the new dir so a bad ref path fails fast without leaving a stray folder.
-    let referenceRepos: string[] = [];
-    if (b.referenceRepos !== undefined) {
-      const check = await validateReferenceRepos(b.referenceRepos);
-      if (!check.ok) return reply.code(400).send({ error: check.error });
-      referenceRepos = check.value;
-    }
-    // noGateByDesign (card 58b0bb60): HUMAN-only, same trust class as referenceRepos/repoPath — a plain
-    // boolean, no separate validator needed. Most relevant to kind:"vault" (no buildable code).
-    const noGateByDesign = b.noGateByDesign === true;
-    // denyGlobs (card d5d3bdc9): HUMAN-only, same trust class as above. Defaults to the mockups/-catching
-    // default (like POST /api/projects below), not [] — an omitted value still gets the warning.
-    let denyGlobs: string[] = ["mockups/**"];
-    if (b.denyGlobs !== undefined) {
-      const check = validateDenyGlobs(b.denyGlobs);
-      if (!check.ok) return reply.code(400).send({ error: check.error });
-      denyGlobs = check.value;
-    }
     const isGit = (b.kind ?? "git") === "git";
     // Card 5ba4412d review follow-up (round 3, finding 3): resolve the WOULD-BE target BEFORE bootstrapping
     // (resolveProjectInitTarget — the SAME pure leaf/confinement logic bootstrapProjectDir uses internally,
-    // so there's nothing to drift out of sync), so repos/containment validation can run — and refuse —
+    // so there's nothing to drift out of sync), so the shared validation below can run — and refuse —
     // BEFORE anything is created on disk. A refused init must never leave a stray directory behind.
     const targetCheck = resolveProjectInitTarget({ name: b.name, dirName: b.dirName });
     if (!targetCheck.ok) return reply.code(400).send({ error: targetCheck.error });
     const vaultPath = isGit ? "" : targetCheck.target;
-    // repos (multi-repo epic 49136451): HUMAN-only on this REST create path, same trust class as above —
-    // validated against the PREDICTED repoPath/vaultPath (not yet created) to check path-aliasing.
-    let repos: RepoRegistryEntry[] = [];
-    let repoGateWarning: string | undefined;
-    if (b.repos !== undefined) {
-      const check = await validateRepoRegistry(b.repos, { repoPath: targetCheck.target, vaultPath });
-      if (!check.ok) return reply.code(400).send({ error: check.error });
-      repos = check.value;
-      if (check.warnings.length) repoGateWarning = check.warnings.join(" | ");
-    }
-    // config (card afda2a26): HUMAN-only on this REST create path, same trust class as referenceRepos/
-    // noGateByDesign/denyGlobs/repos above — runs the SAME validator (and error shape) PATCH
-    // /api/projects/:id/config already uses. Validated BEFORE bootstrapProjectDir touches disk below —
-    // a refused config must never leave a stray directory behind, same invariant repos/triple-containment
-    // already honor on this route. No `priorSessionEnvKeys` opt: nothing pre-exists yet, so every dotted
-    // sessionEnv key is correctly rejected (never a rotation). A missing `b.config` stays valid — the
-    // validator itself defaults `raw ?? {}` — and the stored value is the VALIDATED result (tilde-
-    // expanded + pruned), never the raw body.
-    const configCheck = validateProjectConfigOverride(b.config);
-    if (!configCheck.ok) return reply.code(400).send({ error: `invalid config: ${configCheck.error}` });
-    // This route was the one CREATE surface accepting `repos` that never ran the shared containment
-    // check — validateRepoRegistry above only catches an EXACT alias, not containment. `pairingIsIntentional:
-    // !isGit` matches the vault-only CREATE branches elsewhere: kind "vault" makes the created dir BOTH
-    // repoPath and vaultPath by construction, never a user-supplied alias.
-    const tripleCheck = await checkVaultRepoTripleContainment({ repoPath: targetCheck.target, vaultPath, repos }, { pairingIsIntentional: !isGit });
-    if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
-    // @decision 3a5c5d4a (round 6, S-2) — pin-conflict check over the PREDICTED paths, BEFORE
-    // bootstrapProjectDir creates (and `git init`s) anything — a refusal must never leave a stray dir
-    // behind, same invariant the triple-containment check above already honors.
+    // Card 793010d9 — referenceRepos/noGateByDesign/denyGlobs/repos/config/triple-containment/pin
+    // pre-flight all run through the ONE shared create-input validator (projects/create-input.ts); see
+    // that module's own doc for the chain and why it exists. `pairingIsIntentional: !isGit` matches the
+    // vault-only create branch elsewhere: kind "vault" makes the created dir BOTH repoPath and vaultPath
+    // by construction, never a user-supplied alias.
     const projectId = randomUUID();
-    const pinCandidates = [{ repoKey: "primary", repoPath: targetCheck.target }, ...repos.map((r) => ({ repoKey: r.key, repoPath: r.path }))];
-    const pinCheck = deps.db.checkCommondirPinConflicts(projectId, pinCandidates);
-    if (!pinCheck.ok) return reply.code(409).send({ error: pinCheck.error });
+    const createCheck = await validateProjectCreateInput(deps.db, b, { projectId, repoPath: targetCheck.target, vaultPath, pairingIsIntentional: !isGit });
+    if (!createCheck.ok) return reply.code(createCheck.status).send({ error: createCheck.error });
+    const { referenceRepos, noGateByDesign, denyGlobs, repos, repoGateWarning, config } = createCheck.value;
     const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
     if (!boot.ok) return reply.code(400).send({ error: boot.error });
     const project: Project = {
       // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the vault
       // auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir IS the vault.
       id: projectId, name: b.name, repoPath: boot.dir, vaultPath,
-      config: configCheck.value, createdAt: new Date().toISOString(), archivedAt: null,
+      config, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
       referenceRepos,
       noGateByDesign,
@@ -5213,65 +5170,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       finalRepoPath = vaultPath!;
       finalVaultPath = vaultPath!;
     }
-    // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST create path —
-    // each entry MUST be an absolute path to an existing git repo (validateReferenceRepos), never a
-    // relative one (meaningless to a worker whose cwd is a worktree elsewhere on disk).
-    let referenceRepos: string[] = [];
-    if (b.referenceRepos !== undefined) {
-      const check = await validateReferenceRepos(b.referenceRepos);
-      if (!check.ok) return reply.code(400).send({ error: check.error });
-      referenceRepos = check.value;
-    }
-    // noGateByDesign (card 58b0bb60): HUMAN-only on this REST create path, same trust class as
-    // referenceRepos/repoPath — suppresses the per-merge "unverified: no gateCommand" warning.
-    const noGateByDesign = b.noGateByDesign === true;
-    // denyGlobs (card d5d3bdc9): HUMAN-only on this REST create path, same trust class as above. Defaults
-    // to the mockups/-catching default (NOT [] like referenceRepos) — an omitted value still warns.
-    let denyGlobs: string[] = ["mockups/**"];
-    if (b.denyGlobs !== undefined) {
-      const check = validateDenyGlobs(b.denyGlobs);
-      if (!check.ok) return reply.code(400).send({ error: check.error });
-      denyGlobs = check.value;
-    }
-    // repos (multi-repo epic 49136451): HUMAN-only on this REST create path, same trust class as above —
-    // each entry carries its own gateCommand (host-RCE), validated by validateRepoRegistry (unique key,
-    // reserved "primary", absolute + isGitRepo path, no aliasing repoPath/vaultPath/another entry).
-    let repos: RepoRegistryEntry[] = [];
-    let repoGateWarning: string | undefined;
-    if (b.repos !== undefined) {
-      const check = await validateRepoRegistry(b.repos, { repoPath: finalRepoPath, vaultPath: finalVaultPath });
-      if (!check.ok) return reply.code(400).send({ error: check.error });
-      repos = check.value;
-      if (check.warnings.length) repoGateWarning = check.warnings.join(" | ");
-    }
-    // config (card afda2a26): HUMAN-only on this REST create path, same trust class as referenceRepos/
-    // noGateByDesign/denyGlobs/repos above — runs the SAME validator (and error shape) PATCH
-    // /api/projects/:id/config already uses, so a create-time config can never bypass the sessionEnv/
-    // CLAUDE_CONFIG_DIR/dotted-key/unknown-key rules that path enforces. No `priorSessionEnvKeys` opt:
-    // nothing pre-exists yet, so every dotted sessionEnv key is correctly rejected (never a rotation).
-    // A missing `b.config` stays valid — the validator itself defaults `raw ?? {}` — and the stored value
-    // is the VALIDATED result (tilde-expanded + pruned), never the raw body.
-    const configCheck = validateProjectConfigOverride(b.config);
-    if (!configCheck.ok) return reply.code(400).send({ error: `invalid config: ${configCheck.error}` });
-    // Card 5ba4412d (+ review follow-up): the SHARED containment check on the FULL {repoPath, vaultPath,
-    // repos} triple, run UNCONDITIONALLY for every create — including the vault-only branch, where
-    // `finalRepoPath === finalVaultPath` by construction (never a user-supplied alias, so it's the
-    // INTENTIONAL pairing — `!repoPath` is exactly "we're in the vault-only branch") but a `repos` entry
-    // could still be one that nests the vault or gets nested by it. See checkVaultRepoTripleContainment's
-    // own doc for why this can't be inferred from the triple's values alone.
-    const tripleCheck = await checkVaultRepoTripleContainment(
-      { repoPath: finalRepoPath, vaultPath: finalVaultPath, repos },
-      { pairingIsIntentional: !repoPath },
-    );
-    if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
+    // Card 793010d9 — referenceRepos/noGateByDesign/denyGlobs/repos/config/triple-containment/pin
+    // pre-flight all run through the ONE shared create-input validator (projects/create-input.ts); see
+    // that module's own doc for the chain and why it exists. `pairingIsIntentional: !repoPath` matches
+    // the vault-only create branch above — no separate repo was ever given there, so an equal vaultPath/
+    // repoPath is the INTENTIONAL pairing, not a user-supplied alias.
     const projectId = randomUUID();
-    // @decision 3a5c5d4a (round 6, S-2/S-3) — pin-conflict pre-flight before anything is written; the
-    // insertProject catch below is the backstop (a race between the two, never the common case).
-    const pinCheck = deps.db.checkCommondirPinConflicts(projectId, [{ repoKey: "primary", repoPath: finalRepoPath }, ...repos.map((r) => ({ repoKey: r.key, repoPath: r.path }))]);
-    if (!pinCheck.ok) return reply.code(409).send({ error: pinCheck.error });
+    const createCheck = await validateProjectCreateInput(deps.db, b, { projectId, repoPath: finalRepoPath, vaultPath: finalVaultPath, pairingIsIntentional: !repoPath });
+    if (!createCheck.ok) return reply.code(createCheck.status).send({ error: createCheck.error });
+    const { referenceRepos, noGateByDesign, denyGlobs, repos, repoGateWarning, config } = createCheck.value;
     const project: Project = {
       id: projectId, name: b.name, repoPath: finalRepoPath, vaultPath: finalVaultPath,
-      config: configCheck.value, createdAt: new Date().toISOString(), archivedAt: null,
+      config, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
       referenceRepos,
       noGateByDesign,

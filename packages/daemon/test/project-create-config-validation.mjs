@@ -1,11 +1,7 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Card afda2a26: `POST /api/projects` and `POST /api/setup/project-init` (gateway/server.ts) used to
-// store a caller-supplied `config` RAW (`config: b.config ?? {}`), skipping `validateProjectConfigOverride`
-// entirely — every rule the human REST `PATCH /api/projects/:id/config` enforces (sessionEnv shape,
-// dotted keys, the CLAUDE_CONFIG_DIR rejection (card fbb6e8ec), unknown top-level keys, ...) was reachable
-// at PATCH time but bypassed at CREATE time. Both routes now call the SAME `validateProjectConfigOverride`
-// (mcp/platform.ts) BEFORE any disk/DB side effect, with the SAME `invalid config: ...` error shape PATCH
-// already uses, and store the VALIDATED (tilde-expanded + pruned) result instead of the raw body.
+// Card afda2a26 closed the create-vs-PATCH config-validation gap this proves stays closed — see
+// docs/decisions/fbb6e8ec-sessionenv-claude-config-dir-rejected.md for why the CLAUDE_CONFIG_DIR rule
+// in particular exists.
 //
 // Proves, per route (POST /api/projects via its vault-only branch — no repoPath, so no real git repo is
 // needed; POST /api/setup/project-init via kind:"vault" — no git init, mirroring
@@ -82,7 +78,7 @@ try {
     check("(projects/2) CLAUDE_CONFIG_DIR sessionEnv key → 400", r.statusCode === 400);
     const body = r.json();
     check("(projects/2) PATCH-shaped error prefix", typeof body.error === "string" && body.error.startsWith("invalid config: "));
-    check("(projects/2) names the offending key", body.error.includes("CLAUDE_CONFIG_DIR"));
+    check("(projects/2) names the offending key", typeof body.error === "string" && body.error.includes("CLAUDE_CONFIG_DIR"));
     check("(projects/2) ★ NOTHING created — project count unchanged", db.listAllProjects().length === before);
   }
 
@@ -93,7 +89,7 @@ try {
     check("(projects/3) unknown config key → 400", r.statusCode === 400);
     const body = r.json();
     check("(projects/3) PATCH-shaped error prefix", typeof body.error === "string" && body.error.startsWith("invalid config: "));
-    check("(projects/3) names the offending key", body.error.includes("bogusField"));
+    check("(projects/3) names the offending key", typeof body.error === "string" && body.error.includes("bogusField"));
     check("(projects/3) ★ NOTHING created — project count unchanged", db.listAllProjects().length === before);
   }
 
@@ -150,7 +146,7 @@ try {
     check("(init/7) CLAUDE_CONFIG_DIR sessionEnv key → 400", r.statusCode === 400);
     const body = r.json();
     check("(init/7) PATCH-shaped error prefix", typeof body.error === "string" && body.error.startsWith("invalid config: "));
-    check("(init/7) names the offending key", body.error.includes("CLAUDE_CONFIG_DIR"));
+    check("(init/7) names the offending key", typeof body.error === "string" && body.error.includes("CLAUDE_CONFIG_DIR"));
     check("(init/7) ★ NOTHING created — project count unchanged", db.listAllProjects().length === before);
     check("(init/7) ★ the predicted target directory was NEVER created", !fs.existsSync(target));
   }
@@ -163,7 +159,7 @@ try {
     check("(init/8) unknown config key → 400", r.statusCode === 400);
     const body = r.json();
     check("(init/8) PATCH-shaped error prefix", typeof body.error === "string" && body.error.startsWith("invalid config: "));
-    check("(init/8) names the offending key", body.error.includes("bogusField"));
+    check("(init/8) names the offending key", typeof body.error === "string" && body.error.includes("bogusField"));
     check("(init/8) ★ NOTHING created — project count unchanged", db.listAllProjects().length === before);
     check("(init/8) ★ the predicted target directory was NEVER created", !fs.existsSync(target));
   }
