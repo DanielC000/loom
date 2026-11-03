@@ -1,7 +1,7 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Board card 9f387d7e — see docs/decisions/9f387d7e-orphan-sweep-unions-per-identity-before-arming.md
-// for what the test pins and why (the token-set/snapshot shape below is deliberate — see that record's
-// "Do not" section before changing it).
+// Board card 9f387d7e — see docs/decisions/9f387d7e-orphan-sweep-unions-per-identity-before-arming.md's
+// §Verification ("Round 2 (Code Review) hardening") for the token-set/leg/snapshot rationale this file's
+// own shape follows; not restated here.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -121,22 +121,15 @@ function restoreQuarantineDirFromSnapshot(snapshot) {
   for (const [f, content] of snapshot) fs.writeFileSync(path.join(dir, f), content);
 }
 
-// After the clearer's own clear has armed T from both O1 and O2 (the caller's responsibility, before
-// calling this), prove the union survives either possible single-token clear — in-process AND across an
-// independent reboot derivation from the SAME pre-clear orphan files.
+// @decision 9f387d7e — read the pure `stillBlockedEntryFor` before the mutating
+// `assertRepoNotQuarantined` (which self-heals as a side effect); snapshot `MERGE_QUARANTINE_DIR` right
+// after the clearer's own clear, before a leg touches it, or a leg's own mutation contaminates it.
 //
-// (a) Asserts T's in-process token SET (via the pure `stillBlockedEntryFor`, never the mutating
-//     `resolveQuarantineFor`/`activeMergeQuarantineFor`) carries BOTH tk1 and tk2 right after the
-//     clearer's own clear — a last-wins mutant (`bucket.record = decision.armable` instead of the union)
-//     fails exactly here, regardless of file-processing order, because only ONE of the two tokens ever
-//     survives into the armed record.
-// (b) Clears tk1 and tk2 as two SYMMETRIC, independent legs (each restored from the same pre-clear
-//     snapshot) — each leg asserts the SURVIVING token set, not merely a boolean `.ok`, so a mutant that
-//     happens to leave the SAME token set a correct union minus tk1 would leave (coincidentally matching
-//     `.ok`) is still caught by the other leg.
-// (c) Snapshots MERGE_QUARANTINE_DIR BEFORE either leg touches it, and restores from that snapshot before
-//     booting the reboot leg — so the reboot leg is a genuinely independent derivation from the same
-//     orphan files, never a boot from state the in-process leg already mutated.
+// Leg tk2 is REBOOT-ONLY, never in-process — a genuine 2nd in-process arm was tried (replaying the root
+// clear on a fresh module instance from a pre-clear snapshot) and found VACUOUS by negative-control: that
+// fresh instance's own `reenterMergeQuarantinesAtBoot` call reads O1/O2's content directly and arms T
+// correctly via boot's own always-correct union logic BEFORE the clear's in-process (buggy, pre-fix)
+// logic ever runs — so the check passed even against the pre-fix sha. See the record's §Verification.
 async function assertUnionSurvivesEitherClear(booted, { T, tk1, tk2 }, registeredForReboot, label) {
   const armed = booted.stillBlockedEntryFor(T);
   check(`(${label}) T's in-process token set carries both tk1 and tk2 right after the clearer's own clear`,
@@ -144,10 +137,12 @@ async function assertUnionSurvivesEitherClear(booted, { T, tk1, tk2 }, registere
 
   const diskSnapshot = snapshotQuarantineDir();
 
-  // Leg tk1: clear tk1 in-process — tk2 alone must still block T.
+  // Leg tk1: clear tk1 in-process on `booted` (already armed via the original root clear) — tk2 alone
+  // must still block T. Read the pure `stillBlockedEntryFor` BEFORE the mutating
+  // `assertRepoNotQuarantined` (which self-heals as a side effect — never let it run first).
   booted.clearMergeQuarantineByToken(T, tk1);
-  const leg1InProcessOk = booted.assertRepoNotQuarantined(T).ok;
   const leg1InProcessEntry = booted.stillBlockedEntryFor(T);
+  const leg1InProcessOk = booted.assertRepoNotQuarantined(T).ok;
   check(`(${label}, leg tk1) in-process: clearing tk1 alone leaves exactly tk2 outstanding`,
     leg1InProcessOk === false && !!leg1InProcessEntry
       && leg1InProcessEntry.tokens.length === 1 && leg1InProcessEntry.tokens[0] === tk2);
@@ -157,22 +152,25 @@ async function assertUnionSurvivesEitherClear(booted, { T, tk1, tk2 }, registere
   const rebooted1 = await freshBootModule();
   rebooted1.reenterMergeQuarantinesAtBoot(registeredForReboot);
   rebooted1.clearMergeQuarantineByToken(T, tk1);
-  const leg1PostRebootOk = rebooted1.assertRepoNotQuarantined(T).ok;
   const leg1PostRebootEntry = rebooted1.stillBlockedEntryFor(T);
-  check(`*** THE FIX *** (${label}, leg tk1) in-process ok === post-reboot ok after clearing T by tk1`,
+  const leg1PostRebootOk = rebooted1.assertRepoNotQuarantined(T).ok;
+  check(`(${label}, leg tk1) in-process ok === post-reboot ok after clearing T by tk1`,
     leg1InProcessOk === leg1PostRebootOk);
   check(`(${label}, leg tk1) ...and the post-reboot token set also leaves exactly tk2`,
     !!leg1PostRebootEntry && leg1PostRebootEntry.tokens.length === 1 && leg1PostRebootEntry.tokens[0] === tk2);
 
-  // Leg tk2 (symmetric): restore the SAME pre-clear snapshot and clear tk2 instead — tk1 alone must still
-  // block T. Run post-reboot only (in-process `booted` is already consumed by leg tk1 above).
+  // Leg tk2 (REBOOT-ONLY symmetry/durability check — see this function's own header comment for why it
+  // cannot be made in-process): restore the SAME pre-clear snapshot and clear tk2 instead — tk1 alone
+  // must still block T. This proves the union SURVIVES a reboot-derived clear symmetrically for either
+  // token; it does NOT independently re-exercise the in-process arm-time bug this card fixes (check (a)
+  // above is what catches that, order-independently, for both tokens at once).
   restoreQuarantineDirFromSnapshot(diskSnapshot);
   const rebooted2 = await freshBootModule();
   rebooted2.reenterMergeQuarantinesAtBoot(registeredForReboot);
   rebooted2.clearMergeQuarantineByToken(T, tk2);
-  const leg2PostRebootOk = rebooted2.assertRepoNotQuarantined(T).ok;
   const leg2PostRebootEntry = rebooted2.stillBlockedEntryFor(T);
-  check(`*** THE FIX *** (${label}, leg tk2, symmetric) clearing tk2 alone leaves exactly tk1 outstanding`,
+  const leg2PostRebootOk = rebooted2.assertRepoNotQuarantined(T).ok;
+  check(`(${label}, leg tk2, reboot-only symmetry) clearing tk2 alone leaves exactly tk1 outstanding`,
     leg2PostRebootOk === false && !!leg2PostRebootEntry
       && leg2PostRebootEntry.tokens.length === 1 && leg2PostRebootEntry.tokens[0] === tk1);
 

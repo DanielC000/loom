@@ -252,11 +252,15 @@ try {
     check("*** THE FIX (readfailed-neg) *** no latchKept/unattributed disclosure from an unreadable, UNRELATED cross-hash file", !clearResult.latchKept && !clearResult.unattributed);
     check("(readfailed-neg) the EISDIR directory survives, left COMPLETELY UNTOUCHED (never unlinked, never marked)", fs.existsSync(eisdirPath) && fs.statSync(eisdirPath).isDirectory());
 
-    // R's own same-hash loop, afterward, must be UNAFFECTED by Y's earlier cross-hash attempt against R's
-    // own hash -- verified via a differential: an identical, never-touched CONTROL repo (rCtl), carrying
-    // the IDENTICAL EISDIR shape at ITS OWN hash, cleared the same way, must reach the IDENTICAL
-    // disposition. If Y's earlier cross-hash touch had left a sticky in-process mark on R's basename, r's
-    // own clear would diverge from rCtl's.
+    // R's own same-hash loop, afterward, reaches the SAME disposition as an identical, never-touched
+    // CONTROL repo (rCtl) carrying the IDENTICAL EISDIR shape at ITS OWN hash -- a same-shape PARITY
+    // check, not a sticky-contamination proof (downgraded, card `503c8114`): r's own basename is
+    // genuinely re-exposed to the SAME EISDIR read failure during r's own clear regardless of whether
+    // Y's earlier cross-hash touch marked it, since a marked basename's own re-read
+    // (`reconcileClearedEntryIfPlaceholder`) also throws EISDIR and converges on the identical
+    // `anyUnattributed`/untouched outcome a fresh, unmarked read-failure reaches -- so this differential
+    // cannot diverge for this shape regardless of whether the bug is present. See the decision record's
+    // "CR Round 2" section for why, and what a genuinely diverging construction would need.
     const eisdirCtlPath = path.join(mod.MERGE_QUARANTINE_DIR, `${hashRCtl}.json.tmp-80022-deadbeef2`);
     fs.mkdirSync(eisdirCtlPath, { recursive: true });
 
@@ -265,7 +269,7 @@ try {
 
     const rClear = mod.clearMergeQuarantine(r);
     const rCtlClear = mod.clearMergeQuarantine(rCtl);
-    check("*** R's OWN SWEEP UNAFFECTED (readfailed-neg) *** r's clear reaches the IDENTICAL disposition as an untouched control", !!rClear.latchKept === !!rCtlClear.latchKept && !!rClear.unattributed === !!rCtlClear.unattributed);
+    check("(readfailed-neg, parity check -- not a sticky-contamination proof for this shape) r's clear reaches the IDENTICAL disposition as an untouched control", !!rClear.latchKept === !!rCtlClear.latchKept && !!rClear.unattributed === !!rCtlClear.unattributed);
     check("(readfailed-neg) ...and both directories survive, untouched, the same way", fs.existsSync(eisdirPath) === fs.existsSync(eisdirCtlPath));
 
     // Clean up both EISDIR directories -- a later scenario's own snapshotDir()/restoreDirSnapshot() calls
@@ -466,7 +470,7 @@ try {
     const rebootX = fresh.assertRepoNotQuarantined(x);
     const rebootEntry = fresh.stillBlockedEntryFor(x);
     check("(unarm-neg) in-process === post-reboot for the genuinely-unarmable shape too (no NEW split introduced)", inProcessX.ok === rebootX.ok);
-    check("*** THE GOVERNING INVARIANT (unarm-neg) *** in-process stillBlockedEntryFor === post-reboot (both undefined -- no split)", (inProcessEntry === undefined) === (rebootEntry === undefined));
+    check("*** THE GOVERNING INVARIANT (unarm-neg) *** in-process stillBlockedEntryFor undefined-ness matches post-reboot (an absence match -- both sides are unarmed, so there is no real token set to compare)", (inProcessEntry === undefined) === (rebootEntry === undefined));
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════

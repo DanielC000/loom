@@ -72,20 +72,36 @@ tk1+tk2" from "T holds only tk2", so a last-wins mutant (`bucket.record = decisi
 union) passed the round-1 assertions. Each site-specific check now: (a) asserts T's in-process token SET
 immediately after the clearer's own clear, via the pure `stillBlockedEntryFor` — never the mutating
 `resolveQuarantineFor`/`activeMergeQuarantineFor` — carries BOTH tk1 and tk2 (this is the check the
-last-wins mutant actually fails); (b) runs two symmetric legs, clearing tk1 and tk2 independently, each
-asserting the SURVIVING token set rather than a bare boolean; (c) snapshots `MERGE_QUARANTINE_DIR`'s own
-files right after the clearer's clear (before either leg touches T) and restores from that snapshot before
-each reboot leg boots, so the reboot leg is a genuinely independent derivation of the same orphan files
-rather than a boot from whatever the in-process leg already mutated. `assertRepoNotQuarantined` is still
-used alongside the token-set checks (it mirrors real enforcement), but no assertion relies on it alone.
+last-wins mutant actually fails, order-independently, at all four call sites); (b) clears tk1 IN-PROCESS
+and tk2 across an INDEPENDENT REBOOT derivation (not symmetric — see "Round 3" below for why tk2 stayed
+reboot-only), each leg asserting the SURVIVING token set rather than a bare boolean; (c) snapshots
+`MERGE_QUARANTINE_DIR`'s own files right after the clearer's clear (before either leg touches T) and
+restores from that snapshot before each reboot leg boots, so the reboot leg is a genuinely independent
+derivation of the same orphan files rather than a boot from whatever the in-process leg already mutated.
+`assertRepoNotQuarantined` is still used alongside the token-set checks (it mirrors real enforcement) —
+its own `.ok`-to-`.ok` comparisons (in-process vs. post-reboot) rely on `.ok` directly, but every claim
+about WHICH tokens survive is independently pinned via the pure `stillBlockedEntryFor`, never derived
+from `.ok` alone.
+
+**Round 3 (card `503c8114`) — leg tk2 relabeled honest, never made genuinely in-process.** A real second
+in-process arm was attempted: restore the snapshot taken BEFORE the clearer's own root clear ever ran,
+boot a FRESH module instance, and replay that same root clear on it (to re-exercise the in-process
+arm-time bug a second time, independently of leg tk1's own `booted`). Negative-control against `a9848641`
+proved this VACUOUS — the fresh instance's own `reenterMergeQuarantinesAtBoot` call reads O1/O2's content
+directly off disk and arms T correctly via boot's own always-correct union logic BEFORE the replayed
+clear's in-process (buggy, pre-fix) logic ever runs, so the check passed even against the pre-fix sha.
+Leg tk2 is relabeled from "`*** THE FIX ***`" to a plain, honest reboot-only symmetry/durability check —
+it proves the union survives a reboot-derived clear for tk2 too, but does NOT independently re-exercise
+the in-process bug (check (a) above already catches that, for both tokens at once, order-independently).
 
 Negative-control (`pnpm --filter @loom/daemon negative-control --file
 packages/daemon/src/git/merge-quarantine.ts --test
 packages/daemon/test/merge-quarantine-9f387d7e-orphan-union-per-identity.mjs --ref a9848641`) against the
 sha immediately before this fix: RED — 12 real assertion failures (build ok, not a build error), covering
 all four call sites' token-set and leg checks; the different-identity negative control still passes
-pre-fix too, confirming it is correctly scoped to the union behavior alone. GREEN — all 30 checks pass
-after restoring the fix. Byte-identical restore confirmed.
+pre-fix too, confirming it is correctly scoped to the union behavior alone. GREEN — all 29 checks (MEASURED
+by counting `PASS` lines in a direct run; not restated as a round number) pass after restoring the fix.
+Byte-identical restore confirmed.
 
 **Last-wins mutant** (`bucket.record = decision.armable` in place of `unionQuarantineEntries(bucket.record,
 decision.armable)`, `sweepOrphanLatchFilesUnioned`): applied as a temporary src edit, rebuilt, run directly
@@ -94,4 +110,5 @@ check at all four call sites, regardless of file-processing order. Restored byte
 `git diff`), rebuilt, re-ran green.
 
 Also run directly (not via negative-control) under both `env -u LOOM_DEV -u LOOM_SUPERVISED` and
-`LOOM_DEV=1 LOOM_SUPERVISED=1` — green in both, ~3.2s solo (no `TEST_TIMEOUT_OVERRIDES` entry needed).
+`LOOM_DEV=1 LOOM_SUPERVISED=1` — green in both (29 checks each), ~2.4-3.1s solo (no
+`TEST_TIMEOUT_OVERRIDES` entry needed).

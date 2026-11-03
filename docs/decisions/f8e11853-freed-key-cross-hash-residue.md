@@ -126,7 +126,19 @@ Fix: on a cross-hash read failure, log and `continue` — no mark, no flag, no d
 matching every OTHER unclassifiable cross-hash shape (malformed JSON, non-string `repoPath`) already
 documented above under "Deletion discipline" and "UNRESOLVABLE-NEG". Pinned by (READFAILED-NEG) below,
 including a same-hash differential (an untouched control repo with the identical EISDIR shape at its own
-hash) proving R's own later clear reaches the identical disposition either way.
+hash).
+
+⚠️ **Downgraded (card `503c8114`): that differential does NOT prove the absence of sticky contamination.**
+Both the marked (pre-fix) and unmarked (fixed) paths converge on the IDENTICAL observable disposition for
+this specific EISDIR shape — a marked basename's own re-read (`reconcileClearedEntryIfPlaceholder`, the
+`keptUnreadableLatchFiles.has(f)` branch) also throws EISDIR and falls through to the same
+`anyUnattributed = true` / left-untouched outcome a fresh, unmarked read-failure reaches — so the
+differential cannot diverge regardless of whether the bug is present. It is a same-shape PARITY check (r's
+later clear behaves the same as an untouched control, for THIS EISDIR shape), never a proof that an
+earlier cross-hash touch leaves no sticky state. A genuinely diverging construction would need a basename
+whose content becomes READABLE between the cross-hash touch and the later same-hash clear (so the marked
+path's re-ingest succeeds while a fresh read would reach a different disposition) — not attempted here;
+see `test/merge-quarantine-f8e11853-freed-key-cross-hash-residue.mjs`'s own (READFAILED-NEG) comment.
 
 This round also added REGRESSION coverage for two things the original test corpus asserted correct but
 never independently pinned: the Round-2 ordering fix itself (ownership after relevance — ORDER-NEG, with
@@ -172,8 +184,9 @@ already-correct behavior.
   unchanged after Y's clear arms X.
 - (READFAILED-NEG, CR Round 2) an EISDIR directory planted at an unrelated repo's own hash is left
   completely untouched (no mark, no `latchKept`/`unattributed`); a differential against an untouched
-  control repo proves the earlier cross-hash attempt leaves no sticky contamination on that repo's own
-  later same-hash clear.
+  control repo confirms r's own later same-hash clear reaches the SAME disposition as the control's —
+  a same-shape PARITY check, not a sticky-contamination proof (downgraded, card `503c8114` — see the
+  "CR Round 2" section above for why this specific shape cannot diverge either way).
 - (ORDER-NEG, CR Round 2) a surviving entry's own cross-hash file that is irrelevant to `freedKey` is
   never named by the clear — pinned via mutant `ownerfirst` (ownership checked before relevance).
 - (OWNED-NEG, CR Round 2) a relevant cross-hash file already owned by a surviving entry is reported via
