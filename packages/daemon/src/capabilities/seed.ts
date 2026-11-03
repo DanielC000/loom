@@ -38,6 +38,32 @@
  * Its own output-dir confinement is an ENV VAR (`NANO_BANANA_OUTPUT_DIR`), not a CLI flag like
  * Playwright's `--output-dir` — see `outputDirEnvVar` on `registry.ts`'s "npm-pinned" provision kind for
  * the generic env-var-based scratch-dir injection that requires.
+ *
+ * "shadcn" (card c3f9ce1f, kind "npm-pinned", direct bin — NEVER bare `npx`, per card 5b1c19c0's measured
+ * cold-start: a cold `npx` median was 18.0s against an ~25-27s effective MCP-connect cutoff, little
+ * headroom, while the direct `node <bin> mcp` invocation this kind gives measured ~3.1s): the official
+ * `shadcn` CLI/MCP (npm, MIT, "Copyright (c) 2023 shadcn", github.com/shadcn-ui/ui at commit
+ * 4aaea19d9cff3e0908e12a8c1d504b8c5ec34610 — verified byte-identical, after CRLF normalization, against
+ * the npm tarball's own LICENSE.md). Read-only MCP tools only (search/view/list/examples against a
+ * registry) — no tool installs anything; component CODE enters a repo only via the agent's own
+ * `shadcn add` in its shell, which Loom's ordinary worker-branch merge gate reviews like any other commit.
+ * It is useful ONLY in a React+Tailwind project. `args: ["mcp"]` is required (card c3f9ce1f's own
+ * extension to the npm-pinned kind, see registry.ts's `CapabilityProvision` doc) — the installed bin is
+ * a multi-command entry point (`init`/`add`/`mcp`/…), not a single-purpose MCP server like mcp-imagenate's.
+ * SEEDED with an empty `passEnv`: card 5b1c19c0 measured that shadcn's own registry client expands
+ * `${VAR}` from its process env into registry URLs/headers named by a repo-controlled `components.json`,
+ * which makes ANY env key reaching this row's child a potential exfiltration target. At seed time it gets
+ * ONLY the shared launcher's base allowlist (env-isolated-launch.mjs) and nothing row-specific — including
+ * no proxy vars, by design (card 188d6a8c scopes proxy credentials out of the base; card 3faaab0d does the
+ * same for `npm_config_registry`, which can carry registry userinfo/auth and is NOT needed by this row's
+ * runtime — its one-time install is a SEPARATE process that builds its own env directly, see
+ * npm-pinned.ts's `ensureNpmPinnedAsync`). This row therefore reaches registries with no proxy configured
+ * out of the box — intentional, not an oversight; see the row's own description. THE TRUE INVARIANT: this
+ * is a seed-time default, not a permanent lock — a human may widen it later via `PATCH
+ * /api/capabilities/:id` (the owner-only `passEnv` escape hatch every capability row has), and every key
+ * they add becomes reachable to a repo-controlled `components.json` through the exact same `${VAR}`
+ * expansion path. Widening this row's `passEnv` is a deliberate, informed trade a human makes with that
+ * exposure in view, not a property this seed guarantees stays empty forever.
  */
 import type { Db } from "../db.js";
 import type { CapabilityDefRow } from "./registry.js";
@@ -53,6 +79,19 @@ import { GITHUB_MCP_SERVER_VERSION } from "./github-binary.js";
  * Bumping this constant is a deliberate, reviewed act (mirrors GITHUB_MCP_SERVER_VERSION's own pin).
  */
 const MCP_IMAGENATE_VERSION = "0.2.1";
+
+/**
+ * The exact `shadcn` (npm) release the "shadcn" seed row is pinned to — the version card 5b1c19c0 actually
+ * measured (cold-start timing, the `dist/index.js mcp` entry point, the licence hash). PINNED, not bare
+ * `npx -y shadcn@latest`, for the same reason as {@link MCP_IMAGENATE_VERSION}: an unpinned re-resolve
+ * would silently run whatever is CURRENTLY "latest" at every spawn. Bumping this constant is a deliberate,
+ * reviewed act — and card c3f9ce1f's dotenv-exfil mitigation (see
+ * docs/decisions/c3f9ce1f-shadcn-mcp-dotenv-exfil-mitigation.md) depends on THIS version's bundle still
+ * importing the literal specifier `@dotenvx/dotenvx`; a bump REQUIRES re-running
+ * `test/shadcn-dotenv-exfil-real-spawn.mjs` by hand first (`LOOM_NETWORK_SMOKE=1`) — the hermetic tests
+ * cannot catch a future shadcn release changing that import shape.
+ */
+const SHADCN_VERSION = "4.23.0";
 
 /** The shipped definition for every bundled capability. */
 export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt">[] {
@@ -95,6 +134,31 @@ export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt"
       requiresConnection: true,
       secretEnvVar: "GEMINI_API_KEY",
       // Card fafae623: see the "github" row's identical comment above.
+      passEnv: [],
+    },
+    {
+      slug: "shadcn",
+      name: "shadcn/ui components",
+      description:
+        "Inject a per-session, read-only shadcn/ui MCP (search/view/list/examples against a component registry) so a bound rig can look up shadcn/ui components before writing UI code. Useful ONLY in a React + Tailwind project — it works against the project's own components.json when present, or the public @shadcn registry otherwise. NETWORK DEPENDENCY: every call fetches from a registry (the one-time install also fetches from npm) — it does not work offline, and it deliberately fetches WITHOUT any proxy configured (no proxy env var reaches this row's child; its own registry client can be made, by a repo-controlled components.json, to forward an env var's value to an attacker-chosen URL, so this row gets nothing beyond the shared launcher's base allowlist). The MCP tools never write to the repo; component CODE enters the repo only when the agent runs the CLI's own `shadcn add` in its own shell (a tool here only ever returns that command, never executes it) — Loom's ordinary worker-branch merge gate is the real backstop for that third-party source landing in the repo.",
+      transport: "stdio",
+      kind: "npm-pinned",
+      provisionJson: JSON.stringify({
+        kind: "npm-pinned",
+        package: "shadcn",
+        version: SHADCN_VERSION,
+        binRelativeToPackageJson: "dist/index.js",
+        args: ["mcp"],
+      }),
+      toolAllowlistJson: JSON.stringify(["mcp__shadcn"]),
+      wantsScratchDir: false,
+      requiresConnection: false,
+      secretEnvVar: null,
+      // Card c3f9ce1f: seeded empty — see the module doc comment's "shadcn" paragraph for why (its own
+      // registry client can turn any reachable env key into an exfiltration target via a repo-controlled
+      // components.json). A human MAY widen it later via PATCH /api/capabilities/:id; every key they add
+      // becomes reachable the same way, so widening this row's passEnv is a deliberate, informed trade,
+      // not a default to assume stays empty forever.
       passEnv: [],
     },
   ];

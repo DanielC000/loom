@@ -401,6 +401,17 @@ export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lin
  */
 export const ENV_ISOLATED_LAUNCH_SCRIPT = path.join(__dirname, "..", "assets", "env-isolated-launch.mjs");
 /**
+ * shadcn-no-dotenv-preload.mjs (card c3f9ce1f) ships as an asset too — a `node --import` preload that
+ * redirects `@dotenvx/dotenvx` resolution to a Loom-owned no-op stub (the sibling asset
+ * `shadcn-no-dotenv-stub.mjs`, referenced only via the preload's own relative `import.meta.url`
+ * resolution, never imported directly by daemon code), so the shadcn npm-pinned row's own
+ * `loadEnvFiles` call never reads `.env*` files out of the MCP server's cwd into `process.env` — see
+ * docs/decisions/c3f9ce1f-shadcn-mcp-dotenv-exfil-mitigation.md. `registry.ts` prepends
+ * `["--import", pathToFileURL(this).href]` to the shadcn row's own resolved args; no other stdio mount is
+ * affected.
+ */
+export const SHADCN_NO_DOTENV_PRELOAD_SCRIPT = path.join(__dirname, "..", "assets", "shadcn-no-dotenv-preload.mjs");
+/**
  * decision-records.mjs (card 661b7d46) — the PostToolUse `Read` hook that appends complete, out-of-band
  * decision records to a `Read` result when the range actually returned intersects a `// @decision <id>`
  * source anchor. Ships as an asset, read live from the package dir like the other hooks here — no

@@ -33,7 +33,9 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import { SHADCN_NO_DOTENV_PRELOAD_SCRIPT } from "../paths.js";
 import type { CapabilityProvisionKind, CapabilitySummary } from "@loom/shared";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -98,7 +100,14 @@ export type CapabilityProvision =
   // hardcoded at seed-authoring time (never read from the installed package.json at runtime).
   // `outputDirEnvVar` mirrors bundled/command's field (card e7d6e43b migrates "image-gen" onto this kind
   // and it needs its existing NANO_BANANA_OUTPUT_DIR scratch-dir injection to keep working).
-  | { kind: "npm-pinned"; package: string; version: string; binRelativeToPackageJson: string; outputDirEnvVar?: string };
+  // `args` (card c3f9ce1f): mirrors bundled/command's own optional `args` field — appended AFTER the
+  // resolved bin path (`[bin, ...(provision.args ?? [])]`), for a CLI whose bin is a multi-command
+  // entry point needing a fixed subcommand (e.g. the "shadcn" row's `["mcp"]`, since `shadcn`'s bin
+  // dispatches `init`/`add`/`mcp`/… from one entry point). Optional + additive: omitted ⇒ byte-identical
+  // to before this field existed (image-gen sets no `args`, so its mount shape stays exactly `[bin]`).
+  // SEED-ONLY, same as the rest of this provision kind — `validateCapabilityDefInput` never accepts
+  // "npm-pinned" from an owner (see its `kind` allowlist below), so `args` is never owner-reachable either.
+  | { kind: "npm-pinned"; package: string; version: string; binRelativeToPackageJson: string; outputDirEnvVar?: string; args?: string[] };
 
 const NAME_MAX = 200;
 const DESCRIPTION_MAX = 2000;
@@ -628,8 +637,17 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
     // Mounted like node-package (node + an absolute bin script) — but WITHOUT that branch's hardcoded
     // `--output-dir` CLI flag (Playwright's own convention, not generic); an npm-pinned row's scratch dir
     // (if any) rides the shared outputDirEnvVar env-injection below instead, same as bundled/command.
+    // Card c3f9ce1f: an optional seed-authored `args` (e.g. "shadcn"'s `["mcp"]`) rides AFTER the resolved
+    // bin path — additive: a row with no `args` set (image-gen) keeps the exact pre-existing `[bin]` shape.
     const bin = resolveNpmPinned(row.slug, provision);
-    if (bin) server = { command: process.execPath, args: [bin] };
+    if (bin) {
+      const args = [bin, ...(provision.args ?? [])];
+      // @decision c3f9ce1f — key this on provision.package, never row.slug/row.name (both owner-collidable
+      // per decision fafae623) — "npm-pinned" is seed-only (never owner-typeable), so this value can never
+      // be owner-forged. image-gen (the only sibling npm-pinned row) stays byte-identical: package !== "shadcn".
+      if (provision.package === "shadcn") args.unshift("--import", pathToFileURL(SHADCN_NO_DOTENV_PRELOAD_SCRIPT).href);
+      server = { command: process.execPath, args };
+    }
   }
   if (!server) return null;
   const env: Record<string, string> = {};

@@ -117,3 +117,12 @@ drift existed under npx too (npx's own install has the same no-lockfile resoluti
 either way. A future, stricter pin (committing a lockfile per package/version, or `npm install
 --package-lock-only` + `npm ci`) is a real option if transitive drift ever becomes a concrete problem,
 but is out of scope for this card.
+
+## Optional `args` (card c3f9ce1f)
+
+An optional `args?: string[]` was added to this kind's `CapabilityProvision` variant, appended after the
+resolved bin path (`[bin, ...(provision.args ?? [])]`) — for a CLI whose bin dispatches a subcommand
+(the "shadcn" row needs `["mcp"]`, since `shadcn`'s single bin entry point serves `init`/`add`/`mcp`/…).
+Additive and seed-only, same posture as the rest of this kind: omitted ⇒ byte-identical to the pre-existing
+`[bin]` shape (image-gen sets no `args`), and never owner-reachable (`validateCapabilityDefInput` still
+never accepts the "npm-pinned" kind at all).
