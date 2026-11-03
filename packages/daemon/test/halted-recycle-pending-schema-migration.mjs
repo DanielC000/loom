@@ -74,11 +74,17 @@ let requiredCols;
     .filter((c) => c.notnull === 1 && c.dflt_value === null).map((c) => c.name);
   refRaw.close();
   check("(setup) the real schema DOES have the column before we strip it", realSql.includes("halted_recycle_pending_for"));
-  // Strip ONLY the one column-definition line — never a comment line that merely mentions the column
-  // (this card's own comment above that column deliberately never spells its name, so this is unambiguous).
-  legacySql = realSql.replace(/[^\n]*halted_recycle_pending_for[^\n]*\n/, "");
+  // Strip ONLY the one column-definition line — anchored to the START of the line (ignoring leading
+  // whitespace) so a comment elsewhere that merely NAMES the column in prose can never be mis-stripped
+  // and can never defeat this check either. Card f881fe75 added exactly such a cross-reference, in a
+  // DIFFERENT column's (rate_limit_bailed_at) own comment ("...never referenced by a base-schema
+  // index/trigger/view ... see halted_recycle_pending_for's own comment above for the precedent") — a
+  // plain substring strip/assert broke on that second, purely textual mention even though it has zero
+  // effect on the actual CREATE TABLE statement SQLite would execute.
+  legacySql = realSql.replace(/^[ \t]*halted_recycle_pending_for\b[^\n]*\n/m, "");
   check("(setup) the strip actually removed something", legacySql.length < realSql.length);
-  check("(setup) the stripped SQL no longer mentions the column at all", !legacySql.includes("halted_recycle_pending_for"));
+  check("(setup) the stripped SQL no longer DEFINES the column (a comment elsewhere naming it is fine)",
+    !legacySql.split("\n").some((line) => /^[ \t]*halted_recycle_pending_for\b/.test(line)));
   check("(setup) sanity: required (notnull, no-default) columns were found", requiredCols.length > 0);
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(refFile + ext, { force: true }); } catch { /* ignore */ } }
 }
