@@ -25,6 +25,7 @@ import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, Enqueue
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, giveUpHoldExtraMs, withinKickoffConfirmWindow, kickoffConfirmWindowMs, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
 import { removeClaudeConfigEntryForWorktree } from "../pty/claude-config.js";
+import { contextTelemetryFor } from "../pty/adapter.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
@@ -11232,9 +11233,11 @@ export class SessionService {
    * `workerContextWarnRatio` (the ONE shared key, card dacc6d9e — read via `resolveConfig`, never
    * hard-coded), return a short advisory string naming the live percentage; otherwise `undefined`.
    * Advisory only — the caller never refuses on this. `undefined` (never a measured warning) when:
-   * `ctxInputTokens` is null (unmeasured — a codex worker has no ctx telemetry at all, and a claude
-   * worker pre-first-sample reads the same way; null is NEVER treated as 0), the project is
-   * unresolvable, or the ratio resolves to `<= 0` (explicitly disabled). Mirrors `ContextWatcher`'s own
+   * `contextTelemetryFor(worker.harness)` is false (codex has no ctx telemetry at all — gated
+   * structurally here too, card c10f9ea1, not just by codex never writing `ctxInputTokens`),
+   * `ctxInputTokens` is null (unmeasured — a claude worker pre-first-sample reads the same way; null is
+   * NEVER treated as 0), the project is unresolvable, or the ratio resolves to `<= 0` (explicitly
+   * disabled). Mirrors `ContextWatcher`'s own
    * `r = ctxInputTokens / contextWindowForModel(model)` comparison style (card dacc6d9e's
    * `checkWorkerContextWarn`) so "at or above" means the identical thing on both the dispatch path and
    * the ticking watcher's manager-facing notice.
@@ -11249,6 +11252,7 @@ export class SessionService {
     if (worker.contextExhaustedAt != null) {
       return "worker is context-exhausted and cannot take another turn: worker_recycle it (keeps the worktree/branch/task) instead of messaging or redirecting it";
     }
+    if (!contextTelemetryFor(worker.harness)) return undefined;
     if (worker.ctxInputTokens == null) return undefined;
     const project = this.db.getProject(worker.projectId);
     if (!project) return undefined;

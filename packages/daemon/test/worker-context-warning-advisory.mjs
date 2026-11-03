@@ -26,6 +26,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //       worker's own live occupancy (had it still existed) would otherwise have fired.
 //   (J) `SessionService.handleBusyEdge(id, true)` — the real rising-edge chokepoint, not a hand-copied
 //       mirror of it — clears a prior `contextExhaustedAt` mark on that row.
+//   (K) CODEX HARNESS (card c10f9ea1): a codex-harness worker with a non-null `ctxInputTokens` above the
+//       ratio gets NO `contextWarning` — gated structurally on `contextTelemetryFor(worker.harness)`, not
+//       merely on codex convention never writing the field. Positive control: the EXHAUSTED signal is
+//       harness-independent and still fires for that same codex worker.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/worker-context-warning-advisory.mjs
 import fs from "node:fs";
@@ -49,7 +53,7 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 // Mirrors redirect-worker.mjs / worker-message-advisories.mjs's PtyStub, plus an `exhausted` set so
 // case (H) below can exercise the REAL contract: the production `enqueueStdin` never idle-delivers to a
 // contextExhausted session even when `busy` is false (decision 66ff7321) — without that, a hermetic stub
-// that only gates on `busy` can't reach the `deliverRedirect` branch this card's exhausted/interrupt
+// that only gates on `busy` can't reach the `deliverRedirect` branch card 66ff7321's exhausted/interrupt
 // guard actually protects.
 class PtyStub {
   constructor() { this.q = new Map(); this.live = new Set(); this.busy = new Set(); this.busyForMs = new Map(); this.exhausted = new Set(); this.interrupts = []; this.delivered = []; }
@@ -79,7 +83,7 @@ const db = new Db();
 
 // One project per case so each can set its own `workerContextWarnRatio` override without interference.
 let caseIdx = 0;
-function makeCase({ ratio, ctxInputTokens }) {
+function makeCase({ ratio, ctxInputTokens, harness }) {
   caseIdx += 1;
   const proj = `wcwa-proj-${sfx}-${caseIdx}`, agent = `wcwa-ag-${sfx}-${caseIdx}`;
   db.insertProject({
@@ -94,9 +98,10 @@ function makeCase({ ratio, ctxInputTokens }) {
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: o.role ?? null, parentSessionId: o.parentSessionId ?? null, taskId: null,
     worktreePath: null, branch: null, ctxInputTokens: o.ctxInputTokens ?? null, model: null,
+    harness: o.harness ?? undefined,
   });
   mk(mgr, { role: "manager" });
-  mk(wkr, { role: "worker", parentSessionId: mgr, ctxInputTokens });
+  mk(wkr, { role: "worker", parentSessionId: mgr, ctxInputTokens, harness });
   const pty = new PtyStub();
   pty.setLive(mgr); pty.setLive(wkr);
   const sessions = new SessionService(db, pty, new OrchestrationControl());
@@ -207,13 +212,30 @@ try {
 
   // ===================== (J) handleBusyEdge rising edge clears a prior exhaustion mark =====================
   // @decision 66ff7321 — a resume's first turn (busy false→true) must clear contextExhaustedAt on THIS
-  // row; this is the exact regression a prior round silently reintroduced by dropping the call.
+  // row.
   {
     const { wkr, sessions } = makeCase({ ratio: 0.6, ctxInputTokens: 100_000 });
     db.setContextExhausted(wkr, new Date().toISOString(), "Context exhausted");
     check("(J) setup: contextExhaustedAt is set", db.getSession(wkr).contextExhaustedAt != null);
     sessions.handleBusyEdge(wkr, true); // the real rising-edge chokepoint, not a hand-copied mirror of it
     check("(J) handleBusyEdge(busy=true) clears contextExhaustedAt", db.getSession(wkr).contextExhaustedAt === null);
+  }
+
+  // ===================== (K) CODEX HARNESS: no ctx telemetry → no contextWarning even above ratio =====================
+  // card c10f9ea1: workerContextWarningFor must gate on contextTelemetryFor(worker.harness), same as every
+  // other context-reading consumer — a codex worker must never get a ratio-based contextWarning,
+  // structurally, not merely because codex never writes ctxInputTokens.
+  {
+    const { mgr, wkr, sessions } = makeCase({ ratio: 0.6, ctxInputTokens: 150_000, harness: "codex" }); // r=0.75 — would fire for claude
+    const r1 = sessions.messageWorker(mgr, wkr, "ordinary note");
+    check("(K) codex harness, ctx above ratio: NO contextWarning", r1.contextWarning === undefined);
+    const r2 = sessions.redirectWorker(mgr, wkr, "ordinary redirect");
+    check("(K) same for redirectWorker", r2.contextWarning === undefined);
+    // Positive control: the EXHAUSTED signal is harness-independent and must still fire for this SAME
+    // codex worker — proves (K) above is the ratio gate specifically, not "nothing ever fires for codex".
+    db.setContextExhausted(wkr, new Date().toISOString(), "Context exhausted");
+    const r3 = sessions.messageWorker(mgr, wkr, "ordinary note");
+    check("(K) control: exhausted still fires for a codex worker (harness-independent)", typeof r3.contextWarning === "string" && /exhaust/i.test(r3.contextWarning));
   }
 
   db.close();
