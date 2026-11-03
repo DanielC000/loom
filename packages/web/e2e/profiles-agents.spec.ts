@@ -180,13 +180,13 @@ test.describe("profiles & agents", () => {
     // documentConversion is on) is absent.
     await expect(browserToggle).not.toBeChecked();
     await expect(docConvToggle).not.toBeChecked();
-    await expect(page.getByTestId("markitdown-provisioning")).toHaveCount(0);
+    await expect(page.getByTestId("capability-provisioning-document-conversion")).toHaveCount(0);
 
     // ACT + AFTER (observable #1 — interactive reveal): turning documentConversion on mounts the shared-venv
     // provisioning status panel. This is driven off the toggle's local state, so it needs no Save.
     await docConvToggle.check();
     await expect(docConvToggle).toBeChecked();
-    await expect(page.getByTestId("markitdown-provisioning")).toBeVisible();
+    await expect(page.getByTestId("capability-provisioning-document-conversion")).toBeVisible();
 
     // ACT + AFTER (observable #2 — persistence): turn browserTesting on and Save; the store the UI shares now
     // carries the flag (read straight back over REST).

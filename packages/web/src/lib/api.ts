@@ -3,6 +3,9 @@ import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, Session
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
 import type { HarnessDrainStatus } from "./harnessFields";
+// Type-only — the one per-slug capability provisioning wire shape (card cd9a78bc), mirrored in the
+// JSX-free lib module that also owns this feature's reason phrasings and kind-derived predicates.
+import type { CapabilityProvisioning } from "./capabilityProvisioning";
 // Type-only — the merge-gate cadence wire contract (card 6f13746c), mirrored in the JSX-free lib module
 // that also owns this feature's state vocabulary and validation copy.
 import type { MergeGateStatus } from "./mergeGate";
@@ -150,14 +153,13 @@ export interface UpdateStatus {
 // classified `reason` + the captured ~4KB `errorTail` (the real proxy/SSL/resolver cause). Human-only
 // loopback REST — the retry POST re-kicks provisioning off the daemon's event loop. See pty/host.ts +
 // python/venv.ts in the daemon.
-export type PythonProvisioningReason = "no-base-python" | "venv-create-failed" | "pip-failed" | "timeout" | "disabled";
-export interface PythonProvisioning {
-  state: "idle" | "installing" | "ready" | "failed";
-  reason?: PythonProvisioningReason;
-  errorTail?: string;
-  binary?: string;
-  lastAttemptAt?: number;
-}
+//
+// Card cd9a78bc: the per-slug `/api/capabilities/:slug/provisioning` pair below serves this SAME shape
+// (both are the daemon's one `CapabilityProvisionStatus`), so `CapabilityProvisioning`
+// (lib/capabilityProvisioning.ts) is now the single type both readers share. The old local
+// `PythonProvisioning`/`PythonProvisioningReason` pair is gone with the markitdown-only widget that was
+// its only consumer — a separate narrow `reason` union here would wrongly imply the python-venv subset is
+// all this shape can carry, when the generic route serves github-binary and npm-pinned codes too.
 
 // Guided-onboarding workflow templates (onboarding C3 REST — GET /api/setup/templates). The human-only
 // mirror of the agent-facing template_list tool: each bundled preset's name + one-line purpose + its
@@ -1070,8 +1072,18 @@ export const api = {
   // launches a host process (venv create + pip install), same trust posture as the git/vault writers, so
   // there is NO agent MCP path. `pythonProvisioning` reads the live status (poll while `installing`);
   // `retryPythonProvisioning` re-kicks it off the daemon's event loop and returns the same status shape. ---
-  pythonProvisioning: () => get<PythonProvisioning>("/api/python/provisioning"),
-  retryPythonProvisioning: () => post<PythonProvisioning>("/api/python/provisioning/retry"),
+  pythonProvisioning: () => get<CapabilityProvisioning>("/api/python/provisioning"),
+  retryPythonProvisioning: () => post<CapabilityProvisioning>("/api/python/provisioning/retry"),
+
+  // --- GENERIC per-slug capability provisioning (card e7d6e43b's REST pair; card cd9a78bc's reader).
+  // Same trust posture and same status shape as the python pair above, for ANY catalog capability whose
+  // kind the daemon's per-slug tracker populates (lib/capabilityProvisioning.ts owns that predicate — an
+  // untracked kind answers a hardcoded `idle` here forever, so don't read one). The retry POST clears a
+  // TERMINAL `failed` status first, so it is never suppressed by npm-pinned's own backoff. ---
+  capabilityProvisioning: (slug: string) =>
+    get<CapabilityProvisioning>(`/api/capabilities/${encodeURIComponent(slug)}/provisioning`),
+  retryCapabilityProvisioning: (slug: string) =>
+    post<CapabilityProvisioning>(`/api/capabilities/${encodeURIComponent(slug)}/provisioning/retry`),
 
   // --- Schedules (phase-2 Pillar B): cron triggers that boot a manager in `agentId` on each due
   // boundary. HUMAN-managed (this page + REST) — there is no agent-writable MCP surface. createSchedule
