@@ -6,6 +6,8 @@ import {
   FRONTMATTER_KEY_LINE_RE,
   INLINE_SHELL_RE,
   FENCED_SHELL_RE,
+  splitLeadingBom,
+  BOM,
 } from "./permissionWidening.js";
 
 /**
@@ -28,19 +30,6 @@ import {
  *    record 509176c8 uses for locked-role delivery) and that is not a bundled asset. Defense in depth
  *    for content that predates the refuse above, or that reached the store out of band.
  */
-
-const BOM = "﻿";
-
-/** Splits off a leading UTF-8 BOM (U+FEFF), if present. `detectPermissionWidening`'s own
- *  `FRONTMATTER_RE`/`frontmatterReadIncomplete` are anchored at the literal start of the string, so a
- *  BOM ahead of a real `---` block hides it from both — a KNOWN blind spot (card 22813c50 investigates
- *  whether Claude Code's own loader honours a BOM-led frontmatter at all). Both callers below fail
- *  CLOSED regardless of that open question: a BOM-led block is scanned as if it were ordinary
- *  frontmatter, by scanning the returned `body` rather than the literal start of `content`. */
-function splitLeadingBom(content: string): { body: string; hasBom: boolean } {
-  const hasBom = content.startsWith(BOM);
-  return { body: hasBom ? content.slice(BOM.length) : content, hasBom };
-}
 
 /** Human-readable label for each vector, for the refuse error text below. Keyed by the SAME
  *  `SkillPermissionVector` union `detectPermissionWidening` returns — a missing case is a compile error,

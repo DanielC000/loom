@@ -290,6 +290,66 @@ try {
   }
 
   // ===================================================================================================
+  // PART 1c — card 9d01b4c1: a BOM-prefixed SKILL.md must still produce a scan finding. Before the fix,
+  // scanCwdSkillsForPermissionFrontmatter called detectPermissionWidening/frontmatterReadIncomplete on
+  // the RAW head.content — a leading U+FEFF hid `---` from FRONTMATTER_OPEN_RE's start anchor, so these
+  // two skills scanned as "clean" even though skill-permission-guard.mjs's refuse path already caught
+  // the identical content.
+  // ===================================================================================================
+  {
+    const cwd = path.join(scratchRoot, `p1c-${sfx}`);
+    fs.mkdirSync(cwd, { recursive: true });
+    const BOM = "﻿";
+
+    function writeBomSkill(name, frontmatterBody, bodyText = "hello") {
+      const dir = path.join(cwd, ".claude", "skills", name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), `${BOM}---\n${frontmatterBody}---\n${bodyText}\n`);
+    }
+
+    writeBomSkill("bom-hooks-skill", "name: bom-hooks-skill\nhooks:\n  Stop:\n");
+    // An explicit YAML key (`? ... : ...`) — unrecognized syntax, no allowed-tools/hooks label.
+    writeBomSkill("bom-unrecognized-skill", "name: bom-unrecognized-skill\n? weird-key\n: value\n");
+
+    const { findings: findings1c, truncated: truncated1c, incomplete: incomplete1c } =
+      scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    const byName1c = (n) => findings1c.find((f) => f.name === n);
+    check("PART1c-1: a BOM-prefixed hooks skill IS flagged with exactly that field",
+      byName1c("bom-hooks-skill")?.fields?.length === 1 && byName1c("bom-hooks-skill").fields[0] === "hooks");
+    check("PART1c-2: a BOM-prefixed unrecognized-syntax skill IS flagged as frontmatter-unrecognized",
+      byName1c("bom-unrecognized-skill")?.fields?.includes("frontmatter-unrecognized"));
+    check("PART1c-3: neither BOM fixture trips a truncation or marks the scan incomplete",
+      truncated1c.length === 0 && incomplete1c === false);
+
+    // Negative control: the SAME fixtures WITHOUT the BOM must still be flagged — proves the BOM is what
+    // was defeating detection, not that these fixtures are unconditionally undetectable for some other
+    // reason (e.g. a typo in the frontmatter shape).
+    writeSkill(cwd, "nobom-hooks-skill", "name: nobom-hooks-skill\nhooks:\n  Stop:\n");
+    writeSkill(cwd, "nobom-unrecognized-skill", "name: nobom-unrecognized-skill\n? weird-key\n: value\n");
+    const { findings: findingsNoBom } = scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    check("PART1c-4 (negative control): the identical non-BOM hooks fixture is ALSO flagged",
+      findingsNoBom.find((f) => f.name === "nobom-hooks-skill")?.fields?.includes("hooks"));
+    check("PART1c-5 (negative control): the identical non-BOM unrecognized fixture is ALSO flagged",
+      findingsNoBom.find((f) => f.name === "nobom-unrecognized-skill")?.fields?.includes("frontmatter-unrecognized"));
+
+    // Card 9d01b4c1 round 2, MINOR: PART1c-1/2 above only ever exercise detectPermissionWidening's own
+    // BOM split (both fixtures' frontmatter closes well within the read cap). frontmatterReadIncomplete's
+    // OWN BOM split (the `head.truncated && frontmatterReadIncomplete(body)` branch in
+    // scanCwdSkillsForPermissionFrontmatter) was never exercised with a BOM present — a BOM-led
+    // frontmatter block whose closing fence sits past PERMISSION_SCAN_MAX_READ_BYTES must still surface as
+    // a readBytes truncation, exactly like the non-BOM "huge-frontmatter-skill" fixture above (PART1-9b/9c).
+    const bomHugeFmDir = path.join(cwd, ".claude", "skills", "bom-huge-frontmatter-skill");
+    fs.mkdirSync(bomHugeFmDir, { recursive: true });
+    const bomPaddingKeys = Array.from({ length: 400 }, (_, i) => `padding-key-${i}: some filler value here\n`).join("");
+    fs.writeFileSync(path.join(bomHugeFmDir, "SKILL.md"), `${BOM}---\nname: bom-huge-frontmatter-skill\n${bomPaddingKeys}allowed-tools: Bash(*)\n---\nbody\n`);
+    const { findings: findingsBomHugeFm, truncated: truncatedBomHugeFm } = scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    check("PART1c-6: a BOM-led frontmatter block whose own closing fence sits past the read cap still isn't DETECTED (detectPermissionWidening's own bound, unchanged)",
+      !findingsBomHugeFm.some((f) => f.name === "bom-huge-frontmatter-skill"));
+    check("PART1c-7: ...but IS reported as a readBytes truncation naming the skill — proves frontmatterReadIncomplete's own BOM split actually fires on this path too, not just detectPermissionWidening's",
+      truncatedBomHugeFm.some((t) => t.cap === "readBytes" && t.names.includes("bom-huge-frontmatter-skill")));
+  }
+
+  // ===================================================================================================
   // PART 2 — SessionService.handleSkillPermissionFrontmatterWarning: the durable event write
   // ===================================================================================================
   {

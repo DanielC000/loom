@@ -202,6 +202,16 @@ try {
   check("frontmatterReadIncomplete: a block that never closes anywhere in content IS incomplete",
     frontmatterReadIncomplete('---\nname: x\nallowed-tools: Bash(*)\n') === true);
 
+  // --- card 9d01b4c1 round 2: frontmatterReadIncomplete's OWN internal BOM split, exercised DIRECTLY
+  // with NO caller pre-split — `scanCwdSkillsForPermissionFrontmatter` (the only real caller) already
+  // splits the BOM itself before calling this, so a fixture routed through the scan can never tell this
+  // function's own internal split apart from the caller's; this must be proven at the unit level instead.
+  check("[9d01b4c1 r2] frontmatterReadIncomplete splits a leading BOM internally — a BOM-prefixed, "
+      + "truncated-open frontmatter (raw, un-split) is still reported incomplete",
+    frontmatterReadIncomplete("﻿---  \nname: x\nallowed-tools: Bash(*\n") === true);
+  check("[9d01b4c1 r2] ...negative control, same BOM prefix: a frontmatter block that DOES close is NOT incomplete",
+    frontmatterReadIncomplete("﻿---\nname: x\n---\nbody\n") === false);
+
   // --- negative traps: the scanner must NOT over-match ordinary doctrine prose ---------------------
   // THE trap this detector's lookbehind exists for: two unrelated code spans with a bare "!" between
   // them contain the literal substring "!`" followed by non-backticks and then another backtick.
@@ -260,6 +270,20 @@ try {
   check("[B] editing the vector back out removes the key again",
     !("permissionWidening" in listSkills().find((s) => s.name === "pw-tools")));
 
+  // --- card 9d01b4c1 round 2: listSkills()'s own `permissionWideningField(content)` call reads the RAW
+  // file content — a leading UTF-8 BOM (U+FEFF) ahead of the real `---` fence used to hide the frontmatter
+  // from `detectPermissionWidening` entirely, so a BOM-prefixed hooks/unrecognized-syntax skill showed NO
+  // badge even though the refuse/strip path (permissionGuard.ts) already caught identical content. The fix
+  // pushed the BOM split INTO detectPermissionWidening itself, so this call site needed no change. --------
+  const BOM = "﻿";
+  writeSkill("pw-bom-hooks", BOM + skillMd("pw-bom-hooks", "hooks:\n  Stop:\n    - type: command\n      command: node x.js\n", "Ordinary body."), "human");
+  writeSkill("pw-bom-unrecognized", BOM + skillMd("pw-bom-unrecognized", "? weird-key\n: value\n", "Ordinary body."), "human");
+  const byNameBom = Object.fromEntries(listSkills().map((s) => [s.name, s]));
+  check("[B][9d01b4c1 r2] a BOM-prefixed hooks skill carries ['hooks'] via listSkills — before the fix this key was silently absent",
+    same(byNameBom["pw-bom-hooks"]?.permissionWidening, ["hooks"]));
+  check("[B][9d01b4c1 r2] a BOM-prefixed unrecognized-syntax skill carries ['frontmatter-unrecognized'] via listSkills",
+    same(byNameBom["pw-bom-unrecognized"]?.permissionWidening, ["frontmatter-unrecognized"]));
+
   // ===================================================================================================
   // PART C — REST, via the real buildServer + app.inject
   // ===================================================================================================
@@ -270,8 +294,10 @@ try {
 
   const list = await app.inject({ method: "GET", url: "/api/skills" });
   const rows = list.json();
-  check("[C] GET /api/skills 200 and still returns the five fixtures (identity, not just shape)",
-    list.statusCode === 200 && same(rows.map((r) => r.name).sort(), ["pw-clean", "pw-fenced", "pw-hooks", "pw-shell", "pw-tools"]));
+  check("[C] GET /api/skills 200 and still returns the seven fixtures (identity, not just shape) — the "
+      + "original five plus the two BOM fixtures PART B added above",
+    list.statusCode === 200 && same(rows.map((r) => r.name).sort(),
+      ["pw-bom-hooks", "pw-bom-unrecognized", "pw-clean", "pw-fenced", "pw-hooks", "pw-shell", "pw-tools"]));
   check("[C] GET /api/skills carries permissionWidening on the hooks fixture",
     same(rows.find((r) => r.name === "pw-hooks").permissionWidening, ["hooks"]));
   check("[C] GET /api/skills omits the key on the clean fixture",
@@ -287,6 +313,15 @@ try {
     oneClean.statusCode === 200 && !("permissionWidening" in oneClean.json()));
   check("[C] GET /api/skills/:name still 404s for an unknown name",
     (await app.inject({ method: "GET", url: "/api/skills/pw-nope" })).statusCode === 404);
+
+  // --- card 9d01b4c1 round 2: the same BOM-prefixed fixture, over the REST field (GET /api/skills/:name
+  // reads `s.content` raw — the THIRD raw-content path this round closes, alongside listSkills above). ---
+  const listBom = await app.inject({ method: "GET", url: "/api/skills" });
+  check("[C][9d01b4c1 r2] GET /api/skills carries permissionWidening for the BOM-prefixed hooks fixture",
+    same(listBom.json().find((r) => r.name === "pw-bom-hooks")?.permissionWidening, ["hooks"]));
+  const oneBom = await app.inject({ method: "GET", url: "/api/skills/pw-bom-hooks" });
+  check("[C][9d01b4c1 r2] GET /api/skills/:name carries permissionWidening for the BOM-prefixed hooks fixture",
+    oneBom.statusCode === 200 && same(oneBom.json().permissionWidening, ["hooks"]));
 
   await app.close();
   db.close(); // before cleanup: an open sqlite handle makes the temp-dir removal EBUSY on Windows

@@ -261,11 +261,14 @@ try {
   const mutantWideningPath = path.join(distSkillsDir, `permissionWidening.mutant-nullpath-${suffix}.js`);
   const mutantGuardPath = path.join(distSkillsDir, `permissionGuard.mutant-nullpath-${suffix}.js`);
   try {
-    // Re-exports every REAL shared pattern (so stripFrontmatterKeys/stripShellTriggers still run their
+    // Re-exports every REAL shared export (so stripFrontmatterKeys/stripShellTriggers still run their
     // genuine logic) but FORCES detectPermissionWidening to always report non-empty — the "deliberately
-    // injected detector".
+    // injected detector". `export *` plus a same-named local override (Node ESM: the local declaration
+    // wins over the star-export, no conflict) rather than a hand-maintained named re-export list, which
+    // would silently go stale the moment permissionWidening.ts gains an export this mutant needs but the
+    // list here was never updated for.
     fs.writeFileSync(mutantWideningPath,
-      'export { FRONTMATTER_RE, FRONTMATTER_KEY_LINE_RE, INLINE_SHELL_RE, FENCED_SHELL_RE, frontmatterUnrecognizedSyntax } from "./permissionWidening.js";\n' +
+      'export * from "./permissionWidening.js";\n' +
       'export function detectPermissionWidening(_content) { return ["allowed-tools"]; }\n');
 
     const realGuardSrc = fs.readFileSync(path.join(distSkillsDir, "permissionGuard.js"), "utf8");

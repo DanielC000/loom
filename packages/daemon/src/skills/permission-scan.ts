@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import type { SkillPermissionVector } from "@loom/shared";
 import { claudeSkillsDir } from "../pty/claude-doctrine.js";
 import { CLAUDE_DOCTRINE_DIR, CWD_SKILLS_SCAN_SCOPE } from "../pty/claude-dirname.js";
-import { detectPermissionWidening, frontmatterReadIncomplete } from "./permissionWidening.js";
+import { detectPermissionWidening, frontmatterReadIncomplete, splitLeadingBom } from "./permissionWidening.js";
 import { fingerprintSkillDir } from "./inject.js";
 
 /** Card 015fdb23 — bounds for the spawn-time cwd-skills permission-frontmatter scan, so a pathological
@@ -139,6 +139,9 @@ export interface SkillPermissionScanResult {
  * now surfaces via `truncated` (cap `"readBytes"`) instead of vanishing — see the decision record. CR
  * round 4, item 1: a FILE larger than the cap, whose frontmatter closed well within it, is NOT this case
  * — `frontmatterReadIncomplete` (`permissionWidening.ts`) is what tells the two apart.
+ *
+ * @decision 9d01b4c1 — split off a leading BOM (`splitLeadingBom`, `permissionWidening.ts`) before every
+ * detector call below, or a BOM-prefixed SKILL.md's `---` silently misses `FRONTMATTER_OPEN_RE`.
  */
 export function scanCwdSkillsForPermissionFrontmatter(
   cwd: string,
@@ -182,13 +185,18 @@ export function scanCwdSkillsForPermissionFrontmatter(
       if (head.reason === "error") incomplete = true;
       continue;
     }
+    // Card 9d01b4c1 — split off a leading BOM FIRST: every pattern `frontmatterReadIncomplete`/
+    // `detectPermissionWidening` use is anchored at the literal start of the string, so a BOM-prefixed
+    // SKILL.md would otherwise never match `---` at all. Same shared helper `permissionGuard.ts`'s
+    // refuse/strip path already uses — never a second hand-rolled split.
+    const { body } = splitLeadingBom(head.content);
     // CR round 4, item 1: only a frontmatter block that itself didn't close within what was read is a
     // real missed-detection risk — a big BODY past the cap, with the frontmatter closed well within it,
     // is not. See `frontmatterReadIncomplete`'s own doc.
-    if (head.truncated && frontmatterReadIncomplete(head.content)) {
+    if (head.truncated && frontmatterReadIncomplete(body)) {
       truncated.push({ cap: "readBytes", names: [name], size: head.size, mtimeMs: head.mtimeMs });
     }
-    const fields = detectPermissionWidening(head.content).filter(isScannedPermissionField);
+    const fields = detectPermissionWidening(body).filter(isScannedPermissionField);
     if (fields.length) findings.push({ name, fields, contentHash: createHash("sha256").update(head.content, "utf8").digest("hex") });
   }
   return { findings, truncated, incomplete };

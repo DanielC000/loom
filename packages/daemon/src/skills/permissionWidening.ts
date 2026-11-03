@@ -149,7 +149,8 @@ export const FRONTMATTER_VALUE_START_FORBIDDEN_RE = /^[&*!]/;
  * file rather than attempt to strip just the one non-allowlisted line (see that function's own doc).
  */
 export function frontmatterUnrecognizedSyntax(content: string): boolean {
-  const block = content.match(FRONTMATTER_RE)?.[1];
+  const { body } = splitLeadingBom(content);
+  const block = body.match(FRONTMATTER_RE)?.[1];
   if (block == null) return false;
   let prevTopLevelKeyEmpty = false;
   let seenTopLevelKey = false;
@@ -179,7 +180,8 @@ export function frontmatterUnrecognizedSyntax(content: string): boolean {
 }
 
 /**
- * True when `content` OPENS a frontmatter block (`---` at the very start) but its own CLOSING fence is
+ * True when `content` OPENS a frontmatter block (`---` at the very start, after a leading BOM is split
+ * off — see `splitLeadingBom`, called internally, card 9d01b4c1 round 2) but its own CLOSING fence is
  * not found anywhere in `content` — i.e. a reader that only has `content` (e.g. a byte-capped read)
  * cannot be sure it saw the whole block. False for a file with no frontmatter at all (nothing to miss)
  * AND for a file whose frontmatter closes well within `content` even if the file continues on with an
@@ -192,7 +194,31 @@ export function frontmatterUnrecognizedSyntax(content: string): boolean {
  * than the cap; only a frontmatter block that itself didn't close within what was read carries risk.
  */
 export function frontmatterReadIncomplete(content: string): boolean {
-  return FRONTMATTER_OPEN_RE.test(content) && !FRONTMATTER_RE.test(content);
+  const { body } = splitLeadingBom(content);
+  return FRONTMATTER_OPEN_RE.test(body) && !FRONTMATTER_RE.test(body);
+}
+
+/** A leading UTF-8 BOM (U+FEFF). */
+export const BOM = "﻿";
+
+/**
+ * Splits off a leading UTF-8 BOM (U+FEFF), if present. Every pattern in this module is anchored at the
+ * literal start of the string (`FRONTMATTER_OPEN_RE`'s `^---`), so a BOM ahead of a real `---` block
+ * would otherwise hide it from every detector here — a KNOWN blind spot (card 22813c50 investigates
+ * whether Claude Code's own loader honours a BOM-led frontmatter at all).
+ *
+ * `detectPermissionWidening`, `frontmatterReadIncomplete`, and `frontmatterUnrecognizedSyntax` each call
+ * this INTERNALLY before scanning (card 9d01b4c1 round 2) — the invariant lives in the shared detector
+ * itself, so no call site (present or future) can forget to split first and silently read a BOM-prefixed
+ * file as clean. Splitting twice is harmless: a body with no BOM round-trips unchanged. Still exported
+ * for a caller that needs the body AND whether a BOM was present, to do something with that fact —
+ * `permissionGuard.ts`'s strip path strips from the body, then re-prepends the BOM onto the result.
+ *
+ * @decision 9d01b4c1 — THE one shared BOM-split helper; do not hand-roll a second copy at a call site.
+ */
+export function splitLeadingBom(content: string): { body: string; hasBom: boolean } {
+  const hasBom = content.startsWith(BOM);
+  return { body: hasBom ? content.slice(BOM.length) : content, hasBom };
 }
 
 /**
@@ -225,13 +251,14 @@ export const FENCED_SHELL_RE = /```!/;
  * is clean — the scan ran and found nothing.
  */
 export function detectPermissionWidening(content: string): SkillPermissionVector[] {
+  const { body } = splitLeadingBom(content);
   const found: SkillPermissionVector[] = [];
-  const keys = [...topLevelFrontmatterKeys(content), ...flowMappingFrontmatterKeys(content)];
+  const keys = [...topLevelFrontmatterKeys(body), ...flowMappingFrontmatterKeys(body)];
   if (keys.includes("allowed-tools")) found.push("allowed-tools");
   if (keys.includes("hooks")) found.push("hooks");
-  if (frontmatterUnrecognizedSyntax(content)) found.push("frontmatter-unrecognized");
-  if (INLINE_SHELL_RE.test(content)) found.push("shell-inline");
-  if (FENCED_SHELL_RE.test(content)) found.push("shell-fenced");
+  if (frontmatterUnrecognizedSyntax(body)) found.push("frontmatter-unrecognized");
+  if (INLINE_SHELL_RE.test(body)) found.push("shell-inline");
+  if (FENCED_SHELL_RE.test(body)) found.push("shell-fenced");
   return found;
 }
 
