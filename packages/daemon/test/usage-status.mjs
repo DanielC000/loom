@@ -22,13 +22,29 @@ const tmp = mkdtempManaged("loom-usage-test-");
 const credPath = (name, obj) => { const p = path.join(tmp, name); fs.writeFileSync(p, typeof obj === "string" ? obj : JSON.stringify(obj)); return p; };
 
 // A representative live payload (captured from the real endpoint): per-model can be null, a window can
-// have utilization with a null resets_at, extra_usage.utilization can be null.
+// have utilization with a null resets_at, extra_usage.utilization can be null. LEGACY shape — top-level
+// five_hour/seven_day/extra_usage, pre-CLI-2.1.317.
 const LIVE = {
   five_hour: { utilization: 48, resets_at: "2026-06-04T03:09:59+00:00" },
   seven_day: { utilization: 33, resets_at: "2026-06-09T15:00:00+00:00" },
   seven_day_opus: null,
   seven_day_sonnet: { utilization: 0, resets_at: null },
   extra_usage: { is_enabled: true, monthly_limit: 3500, used_credits: 0, utilization: null },
+};
+
+// The CLI 2.1.317 shape (card 9db2ad8d — see docs/decisions/9db2ad8d-usage-endpoint-schema-change.md):
+// windows + extra_usage move under `rate_limits`, gated by `rate_limits_available`. Reconstructed from
+// that CLI version's own embedded zod schema (binary strings, never executed), not a captured live body.
+const LIVE_NESTED = {
+  subscription_type: "max",
+  rate_limits_available: true,
+  rate_limits: {
+    five_hour: { utilization: 48, resets_at: "2026-06-04T03:09:59+00:00" },
+    seven_day: { utilization: 33, resets_at: "2026-06-09T15:00:00+00:00" },
+    seven_day_opus: null,
+    seven_day_sonnet: { utilization: 0, resets_at: null },
+    extra_usage: { is_enabled: true, monthly_limit: 3500, used_credits: 0, utilization: null },
+  },
 };
 
 // ── readOAuthToken: every failure path + the happy path ─────────────────────────
@@ -67,6 +83,24 @@ const LIVE = {
     parseUsagePayload({ seven_day: { utilization: 1, resets_at: null } }, at).available === false);
   const drift = parseUsagePayload({ five_hour: { utilization: "nope" }, seven_day: { utilization: 1, resets_at: null } }, at);
   check("parse: non-numeric utilization → unavailable", drift.available === false);
+
+  // ── nested (CLI 2.1.317) shape ──
+  const n = parseUsagePayload(LIVE_NESTED, at);
+  check("parse: nested rate_limits shape → available:true", n.available === true);
+  check("parse: nested fiveHour utilization carried", n.available && n.fiveHour.utilization === 48);
+  check("parse: nested sevenDay resets_at → resetsAt (camel)", n.available && n.sevenDay.resetsAt === "2026-06-09T15:00:00+00:00");
+  check("parse: nested null per-model stays null", n.available && n.sevenDayOpus === null);
+  check("parse: nested extra_usage (lives inside rate_limits) mapped", n.available && n.extraUsage && n.extraUsage.isEnabled === true && n.extraUsage.monthlyLimit === 3500);
+
+  // ── rate_limits_available:false / rate_limits:null → DISTINCT reason, never "schema changed" ──
+  const unavail1 = parseUsagePayload({ subscription_type: "api_key", rate_limits_available: false, rate_limits: null }, at);
+  check("parse: rate_limits_available:false → distinct reason", unavail1.available === false && unavail1.reason === "plan rate limits not available for this account");
+  const unavail2 = parseUsagePayload({ rate_limits: null }, at);
+  check("parse: rate_limits:null (no rate_limits_available key) → same distinct reason", unavail2.available === false && unavail2.reason === "plan rate limits not available for this account");
+
+  // ── genuinely unrecognized shape (neither flat nor nested windows present) → "schema changed" ──
+  const unknown = parseUsagePayload({ totally_unknown_field: 1, another_one: "x" }, at);
+  check("parse: unrecognized shape → unavailable, reason \"usage endpoint schema changed\"", unknown.available === false && unknown.reason === "usage endpoint schema changed");
 }
 
 // ── poller graceful failure: no token / 401 / network throw / 200-success ───────
@@ -110,6 +144,50 @@ const LIVE = {
   check("poll: Authorization Bearer header sent", sentHeaders && sentHeaders.Authorization === "Bearer tok");
   check("poll: anthropic-beta header sent", sentHeaders && sentHeaders["anthropic-beta"] === "oauth-2025-04-20");
   check("poll: LOAD-BEARING User-Agent claude-code/<version> sent", sentHeaders && sentHeaders["User-Agent"] === "claude-code/1.2.3");
+}
+
+// ── schema-changed warn: throttled, key names only, never values (card 9db2ad8d) ──────────────────
+{
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (msg) => { warnings.push(msg); };
+  try {
+    const warnCred = credPath("warn-ok.json", { claudeAiOauth: { accessToken: "tok", expiresAt: Date.now() + 3_600_000 } });
+
+    // Unrecognized top-level shape — no rate_limits object at all.
+    const badShape = { mystery_key_1: 1, mystery_key_2: { secret_value: "should-not-appear" } };
+    const pWarn = new UsageStatusPoller({ credentialsPath: warnCred, userAgentVersion: "9.9.9", fetchImpl: async () => new Response(JSON.stringify(badShape), { status: 200 }) });
+    await pWarn.pollOnce();
+    check("warn: schema-changed response → exactly one console.warn", warnings.length === 1);
+    check("warn: message names the top-level key names", warnings[0] && warnings[0].includes("mystery_key_1") && warnings[0].includes("mystery_key_2"));
+    check("warn: message never leaks a nested VALUE", warnings[0] && !warnings[0].includes("secret_value") && !warnings[0].includes("should-not-appear"));
+
+    await pWarn.pollOnce(); // second schema-changed poll, same instance, same throttle window
+    check("warn: throttled — a second schema-changed poll within the window logs nothing new", warnings.length === 1);
+
+    // Nested rate_limits present but itself missing the windows → also names ITS key names.
+    warnings.length = 0;
+    const badNested = { rate_limits_available: true, rate_limits: { some_new_key: 1 } };
+    const pWarnNested = new UsageStatusPoller({ credentialsPath: warnCred, userAgentVersion: "9.9.9", fetchImpl: async () => new Response(JSON.stringify(badNested), { status: 200 }) });
+    await pWarnNested.pollOnce();
+    check("warn: nested-shape schema-changed → message names rate_limits' own key names", warnings.length === 1 && warnings[0].includes("rate_limits keys") && warnings[0].includes("some_new_key"));
+
+    // A DIFFERENT failure (token rejected) must never trigger this warn — only "schema changed" does.
+    warnings.length = 0;
+    const p401Warn = new UsageStatusPoller({ credentialsPath: warnCred, userAgentVersion: "9.9.9", fetchImpl: async () => new Response(JSON.stringify({}), { status: 401 }) });
+    await p401Warn.pollOnce();
+    check("warn: a 401 (not schema drift) never fires the schema-changed warn", warnings.length === 0);
+
+    // A 200 response that's unavailable for a DIFFERENT reason (rate_limits_available:false) must also
+    // never fire this warn — distinguishes "schema changed" from every other unavailable reason, not
+    // just from a non-200 status (which never reaches warnSchemaChanged's call site at all).
+    warnings.length = 0;
+    const pUnavailWarn = new UsageStatusPoller({ credentialsPath: warnCred, userAgentVersion: "9.9.9", fetchImpl: async () => new Response(JSON.stringify({ rate_limits_available: false, rate_limits: null }), { status: 200 }) });
+    await pUnavailWarn.pollOnce();
+    check("warn: rate_limits_available:false (200, unavailable, NOT schema drift) never fires the warn", warnings.length === 0);
+  } finally {
+    console.warn = originalWarn;
+  }
 }
 
 // ── start-on-login seam: poller installs the loop with NO creds, recovers on a post-boot login ──
@@ -159,6 +237,6 @@ const LIVE = {
 // process exit — this bare call previously sat unguarded at file scope (card 995be21f).
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — token read (missing/malformed/expired/valid), payload parse (valid/optional-null/schema-drift), and the poller's graceful failure modes (no-token / 401 / network) all hold, with the load-bearing headers (incl. User-Agent: claude-code/<version>) sent on success."
+  ? "\n✅ ALL PASS — token read (missing/malformed/expired/valid), payload parse (legacy flat + CLI 2.1.317 nested rate_limits shapes, rate_limits_available:false, optional-null, schema-drift), the throttled key-names-only schema-changed warn, and the poller's graceful failure modes (no-token / 401 / network) all hold, with the load-bearing headers (incl. User-Agent: claude-code/<version>) sent on success."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

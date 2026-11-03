@@ -39,6 +39,10 @@ const USAGE_FETCH_MAX_BYTES = 65_536;
 const DEFAULT_CREDENTIALS_PATH = claudeCredentialsPath();
 // Sane pinned fallback when `claude --version` can't be read — the UA just needs the claude-code/ prefix.
 const PINNED_VERSION_FALLBACK = "2.1.162";
+// @decision 9db2ad8d — the schema-changed warn (UsageStatusPoller.warnSchemaChanged) logs KEY NAMES only,
+// throttled to at most once per this window, so a sustained upstream break self-confirms in the daemon
+// log (once) rather than spamming it every poll tick forever.
+const SCHEMA_WARN_THROTTLE_MS = 6 * 60 * 60_000; // 6h
 
 export interface UsageStatusDeps {
   /** Poll cadence; defaults to 60s. NEVER poll per-request. */
@@ -180,24 +184,42 @@ function parseExtra(raw: unknown): UsageExtra | null {
 }
 
 /**
- * Parse the raw endpoint payload into a typed status. `five_hour` and `seven_day` are required (their
- * absence/shape-drift → `available:false`); the per-model + extra fields are optional (null when absent).
+ * Parse the windows + extra-usage out of a flat source object — `five_hour`/`seven_day` are required
+ * (their absence/shape-drift → `available:false`); the per-model + extra fields are optional (null when
+ * absent). Shared by both wire shapes {@link parseUsagePayload} accepts: the legacy top-level object, and
+ * CLI 2.1.317's `rate_limits` sub-object (where `extra_usage` also lives, per that schema).
  */
-export function parseUsagePayload(raw: unknown, fetchedAt: string): UsageLimitsStatus {
-  if (!raw || typeof raw !== "object") return unavailable("unexpected response shape", fetchedAt);
-  const o = raw as Record<string, unknown>;
-  const fiveHour = parseWindow(o.five_hour);
-  const sevenDay = parseWindow(o.seven_day);
+function parseWindowsFrom(src: Record<string, unknown>, fetchedAt: string): UsageLimitsStatus {
+  const fiveHour = parseWindow(src.five_hour);
+  const sevenDay = parseWindow(src.seven_day);
   if (!fiveHour || !sevenDay) return unavailable("usage endpoint schema changed", fetchedAt);
   return {
     available: true,
     fetchedAt,
     fiveHour,
     sevenDay,
-    sevenDayOpus: parseWindow(o.seven_day_opus),
-    sevenDaySonnet: parseWindow(o.seven_day_sonnet),
-    extraUsage: parseExtra(o.extra_usage),
+    sevenDayOpus: parseWindow(src.seven_day_opus),
+    sevenDaySonnet: parseWindow(src.seven_day_sonnet),
+    extraUsage: parseExtra(src.extra_usage),
   };
+}
+
+/**
+ * Parse the raw endpoint payload — SHAPE-TOLERANT across two wire shapes (legacy top-level, CLI 2.1.317's
+ * nested `rate_limits`). `rate_limits_available:false`/`rate_limits:null` is honoured FIRST, with its own
+ * reason distinct from "schema changed".
+ * @decision 9db2ad8d — never read a legitimately-unavailable account (`rate_limits_available:false`) as
+ * "schema changed"; that reason is reserved for a genuinely unrecognized shape.
+ */
+export function parseUsagePayload(raw: unknown, fetchedAt: string): UsageLimitsStatus {
+  if (!raw || typeof raw !== "object") return unavailable("unexpected response shape", fetchedAt);
+  const o = raw as Record<string, unknown>;
+  if (o.rate_limits_available === false || o.rate_limits === null) {
+    return unavailable("plan rate limits not available for this account", fetchedAt);
+  }
+  const nested = o.rate_limits;
+  if (nested && typeof nested === "object") return parseWindowsFrom(nested as Record<string, unknown>, fetchedAt);
+  return parseWindowsFrom(o, fetchedAt);
 }
 
 export class UsageStatusPoller {
@@ -210,6 +232,7 @@ export class UsageStatusPoller {
   private readonly versionOverride?: string;
   private readonly fetchTimeoutMs: number;
   private readonly fetchMaxResponseBytes: number;
+  private lastSchemaWarnAt: number | null = null;
 
   constructor(deps: UsageStatusDeps = {}) {
     this.intervalMs = deps.intervalMs ?? 60_000;
@@ -262,9 +285,34 @@ export class UsageStatusPoller {
       }
       const json = JSON.parse(result.text) as unknown;
       this.cache = parseUsagePayload(json, fetchedAt);
+      if (!this.cache.available && this.cache.reason === "usage endpoint schema changed") {
+        this.warnSchemaChanged(json);
+      }
     } catch (err) {
       this.cache = unavailable(`usage fetch failed: ${(err as Error).message}`, fetchedAt);
     }
+  }
+
+  /**
+   * Throttled, content-free diagnostic: logs the response's top-level key names (and, if present, the
+   * nested `rate_limits` object's own key names) — never values — so a real upstream shape change
+   * self-confirms in the daemon log after this ships, with no manual authenticated call needed.
+   *
+   * @decision 9db2ad8d — never log response VALUES here, key names only (the response is the user's own
+   * account data); why this exists instead of patching the parser against one captured body is recorded
+   * out-of-band.
+   */
+  private warnSchemaChanged(raw: unknown): void {
+    const now = Date.now();
+    if (this.lastSchemaWarnAt !== null && now - this.lastSchemaWarnAt < SCHEMA_WARN_THROTTLE_MS) return;
+    this.lastSchemaWarnAt = now;
+    const topKeys = raw && typeof raw === "object" ? Object.keys(raw as object) : [];
+    const nested = raw && typeof raw === "object" ? (raw as Record<string, unknown>).rate_limits : undefined;
+    const nestedKeys = nested && typeof nested === "object" ? Object.keys(nested as object) : null;
+    console.warn(
+      `[usage-status] usage endpoint schema changed — top-level keys: [${topKeys.join(", ")}]` +
+      (nestedKeys ? `, rate_limits keys: [${nestedKeys.join(", ")}]` : ""),
+    );
   }
 
   /**
