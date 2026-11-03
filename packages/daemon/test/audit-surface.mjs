@@ -462,6 +462,35 @@ try {
     grepGlob.matches.length > 0 && grepGlob.matches.every((m) => m.file.startsWith("packages/")));
   const badRe = await call("repo_grep", { pattern: "(" });
   check("(f) repo_grep: a bad regex → {error}, not a crash", typeof badRe.error === "string" && /invalid regex/.test(badRe.error));
+
+  // BOUNDS (card d452f3e3): a file over the OLD 512 KiB cap now scans/reads fully — the hard ceiling moved
+  // to MAX_SCAN_FILE_BYTES (~25 MiB). repo_grep finds a token inside it (never silently skipped), and
+  // repo_read_file WINDOWS it via offset/limit instead of refusing the whole file.
+  const fillerLine = "x".repeat(200) + "\n";
+  const fillerLineCount = Math.ceil((600 * 1024) / fillerLine.length);
+  fs.writeFileSync(path.join(fixtureRoot, "huge.ts"), fillerLine.repeat(fillerLineCount) + "NEEDLE_IN_HUGE_FILE\n");
+  const hugeStat = fs.statSync(path.join(fixtureRoot, "huge.ts"));
+  check("(f) BOUNDS fixture: huge.ts is genuinely over the OLD 512 KiB cap", hugeStat.size > 512 * 1024);
+
+  const hugeGrep = await call("repo_grep", { pattern: "NEEDLE_IN_HUGE_FILE" });
+  check("(f) repo_grep: finds a token INSIDE a >512 KiB file (no longer silently skipped)",
+    hugeGrep.matches?.some((m) => m.file === "huge.ts" && m.line === fillerLineCount + 1 && /NEEDLE_IN_HUGE_FILE/.test(m.text)));
+  check("(f) repo_grep: the >512 KiB file is NOT reported in `skipped` (it was fully, successfully searched)",
+    !hugeGrep.skipped?.some((s) => s.file === "huge.ts"));
+
+  const hugeReadWindow = await call("repo_read_file", { path: "huge.ts", offset: fillerLineCount, limit: 2 });
+  check("(f) repo_read_file: WINDOWS an oversized (>512 KiB) file via offset/limit instead of refusing it",
+    Array.isArray(hugeReadWindow.lines) && !hugeReadWindow.error && /NEEDLE_IN_HUGE_FILE/.test(hugeReadWindow.lines[0] ?? ""));
+
+  // BINARY: a file containing a NUL byte can never be grepped as text — it's SKIPPED (not matched, not
+  // crashed) and reported in `skipped` with a stable reason, never silently absorbed with zero signal.
+  fs.writeFileSync(path.join(fixtureRoot, "binary.dat"), Buffer.from([0x42, 0x49, 0x4e, 0x00, 0x41, 0x52, 0x59]));
+  const binaryGrep = await call("repo_grep", { pattern: "BIN" });
+  check("(f) repo_grep: a binary file is reported in `skipped` with reason 'binary'",
+    binaryGrep.skipped?.some((s) => s.file === "binary.dat" && s.reason === "binary"));
+  check("(f) repo_grep: skippedCount is a number >= the returned sample length",
+    typeof binaryGrep.skippedCount === "number" && binaryGrep.skippedCount >= binaryGrep.skipped.length);
+
   delete process.env.LOOM_REPO_ROOT;
   try { fs.rmSync(fixtureRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(outsideSecret, { force: true }); } catch { /* best-effort */ }

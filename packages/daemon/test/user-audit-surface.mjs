@@ -204,11 +204,14 @@ try {
   const redosMs = performance.now() - redosT0;
   check(`(b3) repo_grep: a catastrophic-backtracking pattern returns QUICKLY (${Math.round(redosMs)}ms), not a hang`, redosMs < 5000);
   check("(b3) repo_grep: the pathological (non-matching) line correctly reports NO match", !redosRes.matches?.some((m) => m.file === "src/pathological.ts"));
-  // A SINGLE file's per-file timeout is an absorbed, silent trade-off (same posture as clampLine's own
+  // A SINGLE file's per-file timeout is an absorbed trade-off (same posture as clampLine's own
   // truncation) — it does NOT itself flip the top-level timedOut flag; only the TOTAL grep budget being
   // exceeded (chaining many such files) does. One pathological file finishing inside the total budget is
-  // the expected, correct outcome here.
+  // the expected, correct outcome here. It is NO LONGER silent, though (card d452f3e3): the file is
+  // reported in `skipped` with reason "scan-timeout" so a partially-scanned file never looks fully searched.
   check("(b3) repo_grep: one absorbed per-file timeout does NOT itself flip timedOut (total budget wasn't exceeded)", redosRes.timedOut === false);
+  check("(b3) repo_grep: the per-file-timed-out pathological file IS reported in `skipped` (reason 'scan-timeout')",
+    redosRes.skipped?.some((s) => s.file === "src/pathological.ts" && s.reason === "scan-timeout"));
   fs.rmSync(path.join(repo, "src", "pathological.ts"), { force: true });
 
   // PERF SANITY (CR finding): the vm boundary must be crossed once per FILE, not once per line — a per-line
@@ -308,10 +311,37 @@ try {
   const noRepo = await call("repo_read_file", { projectId: "pNoRepo", path: "src/widget.ts" });
   check("(b3) repo_read_file: a project with NO repoPath → clean {error}, not a crash", typeof noRepo.error === "string" && !noRepo.lines);
 
-  // BOUNDS: an oversized file (>512 KiB) is refused, not partially read.
-  fs.writeFileSync(path.join(repo, "src", "huge.ts"), "x".repeat(600 * 1024));
-  const hugeRead = await call("repo_read_file", { projectId: "pOrd", path: "src/huge.ts" });
-  check("(b3) repo_read_file: an oversized (>512 KiB) file is REFUSED with {error}", typeof hugeRead.error === "string" && /too large/.test(hugeRead.error));
+  // BOUNDS (card d452f3e3): a file over the OLD 512 KiB cap now scans/reads fully — the hard ceiling moved
+  // to MAX_SCAN_FILE_BYTES (~25 MiB). repo_grep finds a token inside it (never silently skipped), and
+  // repo_read_file WINDOWS it via offset/limit instead of refusing the whole file.
+  const fillerLine = "x".repeat(200) + "\n";
+  const fillerLineCount = Math.ceil((600 * 1024) / fillerLine.length);
+  fs.writeFileSync(path.join(repo, "src", "huge.ts"), fillerLine.repeat(fillerLineCount) + "NEEDLE_IN_HUGE_FILE\n");
+  const hugeStat = fs.statSync(path.join(repo, "src", "huge.ts"));
+  check("(b3) BOUNDS fixture: huge.ts is genuinely over the OLD 512 KiB cap", hugeStat.size > 512 * 1024);
+
+  const hugeGrep = await call("repo_grep", { projectId: "pOrd", pattern: "NEEDLE_IN_HUGE_FILE" });
+  check("(b3) repo_grep: finds a token INSIDE a >512 KiB file (no longer silently skipped)",
+    hugeGrep.matches?.some((m) => m.file === "src/huge.ts" && m.line === fillerLineCount + 1 && /NEEDLE_IN_HUGE_FILE/.test(m.text)));
+  check("(b3) repo_grep: the >512 KiB file is NOT reported in `skipped` (it was fully, successfully searched)",
+    !hugeGrep.skipped?.some((s) => s.file === "src/huge.ts"));
+
+  const hugeReadWindow = await call("repo_read_file", { projectId: "pOrd", path: "src/huge.ts", offset: fillerLineCount, limit: 2 });
+  check("(b3) repo_read_file: WINDOWS an oversized (>512 KiB) file via offset/limit instead of refusing it",
+    Array.isArray(hugeReadWindow.lines) && !hugeReadWindow.error && /NEEDLE_IN_HUGE_FILE/.test(hugeReadWindow.lines[0] ?? ""));
+  check("(b3) repo_read_file: totalLines reflects the WHOLE file, not just the window",
+    hugeReadWindow.totalLines === fillerLineCount + 2);
+
+  // BINARY: a file containing a NUL byte can never be grepped as text — it's SKIPPED (not matched, not
+  // crashed) and reported in `skipped` with a stable reason, never silently absorbed with zero signal.
+  fs.writeFileSync(path.join(repo, "src", "binary.dat"), Buffer.from([0x42, 0x49, 0x4e, 0x00, 0x41, 0x52, 0x59]));
+  const binaryGrep = await call("repo_grep", { projectId: "pOrd", pattern: "BIN" });
+  check("(b3) repo_grep: a binary file is reported in `skipped` with reason 'binary'",
+    binaryGrep.skipped?.some((s) => s.file === "src/binary.dat" && s.reason === "binary"));
+  check("(b3) repo_grep: skippedCount is a number >= the returned sample length",
+    typeof binaryGrep.skippedCount === "number" && binaryGrep.skippedCount >= binaryGrep.skipped.length);
+
+  fs.rmSync(path.join(repo, "src", "binary.dat"), { force: true });
   fs.rmSync(path.join(repo, "src", "huge.ts"), { force: true });
 
   // NO WRITE path: the surface has no repo_write_file / repo_edit / anything mutating — only the three
