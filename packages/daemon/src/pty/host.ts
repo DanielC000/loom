@@ -2880,6 +2880,9 @@ export type EnqueueStdinTail = {
   /** @decision 844ca34e (round 3) — ONE-SHOT: lets this exact write skip the ownership-mismatch gate
    *  despite an already-marked `logicalId`. Options-object only (card 3f09f9ce); stripped on requeue. */
   bypassOwnershipGateOnce?: boolean;
+  /** @decision dacc6d9e — places this HELD entry at the FRONT of `live.pending` so it drains before any
+   *  manager direction already queued behind it, without flushing/superseding that direction. */
+  headInsert?: boolean;
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
@@ -10760,6 +10763,9 @@ export class PtyHost {
     const ownerTextSeqOverride = isTailObject ? tailOrGiveUpHeldUntil.ownerTextSeq : undefined;
     // `bypassOwnershipGateOnce` has NO positional legacy form (card 844ca34e round 3, same convention).
     const bypassOwnershipGateOnce = isTailObject ? tailOrGiveUpHeldUntil.bypassOwnershipGateOnce === true : false;
+    // `headInsert` has NO positional legacy form (options-object only, card dacc6d9e) — see
+    // EnqueueStdinTail's own doc.
+    const headInsert = isTailObject ? tailOrGiveUpHeldUntil.headInsert === true : false;
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #3(c)/#5: dispatch to codex's OWN,
     // simpler push+drain path BEFORE any of the claude-specific machinery below runs (`this.live.get`
     // would return undefined for a codex sessionId anyway — WITHOUT this branch that would silently
@@ -10915,7 +10921,9 @@ export class PtyHost {
     // — only the boot restart-replay seam passes it, to restore a give-up hold onto the freshly re-enqueued
     // entry (card 9e27f4d2). Stamped whenever the caller supplied it (even an already-expired deadline —
     // harmless: `isGiveUpHeld` just reads false immediately, same as never having been stamped).
-    let insertAt = live.pending.length;
+    // @decision dacc6d9e — `headInsert` wins outright over the default FIFO tail; the coalescing reorder
+    // below is skipped for it too (guarded by `!headInsert` just below), never consulted to override it.
+    let insertAt = headInsert ? 0 : live.pending.length;
     const id = randomUUID();
     // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
     // (`joinSubmittedText`, called from `drainPending`), never baked in here.
@@ -10937,7 +10945,7 @@ export class PtyHost {
       // drainPending's own senderKey !== null guard) — identity can't be established from an absent
       // id, so this whole reorder is skipped for a message with no genuine sender.
       const senderKey = senderId ?? null;
-      if (kind === "agent" && senderKey !== null) {
+      if (kind === "agent" && senderKey !== null && !headInsert) {
         const lookbackStart = Math.max(0, live.pending.length - AGENT_COALESCE_MAX_COUNT);
         for (let i = live.pending.length - 1; i >= lookbackStart; i--) {
           const candidate = live.pending[i]!;

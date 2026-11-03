@@ -69,6 +69,57 @@ const orch = (o) => ({ orchestration: o });
     defaults.orchestration.emergencyRecycleAtContextRatio === 0.90 && defaults.orchestration.recycleAtContextRatio === 0.80);
 }
 
+// --- workerContextWarnRatio / workerContextInterruptRatio (card dacc6d9e, part B of epic 8c7dfc65) ----
+// Same [0,1]-bounded shape as the manager pair above, mirrored exactly.
+{
+  const bad = validateProjectConfigOverride(orch({ workerContextWarnRatio: 5 }));
+  check("workerContextWarnRatio:5 (>1) rejected", bad.ok === false);
+  check("workerContextWarnRatio:5 reason names the field", bad.ok === false && /workerContextWarnRatio/.test(bad.error));
+  check("workerContextWarnRatio:-0.1 (<0) rejected", validateProjectConfigOverride(orch({ workerContextWarnRatio: -0.1 })).ok === false);
+  check("workerContextWarnRatio:0 (disable) accepted", validateProjectConfigOverride(orch({ workerContextWarnRatio: 0 })).ok === true);
+  check("workerContextWarnRatio:1 accepted", validateProjectConfigOverride(orch({ workerContextWarnRatio: 1 })).ok === true);
+  check("workerContextWarnRatio:0.60 (default) accepted", validateProjectConfigOverride(orch({ workerContextWarnRatio: 0.60 })).ok === true);
+  // Benign per-project tuning (no host-exec/exfil capability) — stays on the agent path.
+  check("agent path also accepts a valid workerContextWarnRatio", validateAgentProjectConfigOverride(orch({ workerContextWarnRatio: 0.5 })).ok === true);
+
+  const badI = validateProjectConfigOverride(orch({ workerContextInterruptRatio: 5 }));
+  check("workerContextInterruptRatio:5 (>1) rejected", badI.ok === false);
+  check("workerContextInterruptRatio:5 reason names the field", badI.ok === false && /workerContextInterruptRatio/.test(badI.error));
+  check("workerContextInterruptRatio:-0.1 (<0) rejected", validateProjectConfigOverride(orch({ workerContextInterruptRatio: -0.1 })).ok === false);
+  check("workerContextInterruptRatio:0 (disable) accepted", validateProjectConfigOverride(orch({ workerContextInterruptRatio: 0 })).ok === true);
+  check("workerContextInterruptRatio:0.85 (default) accepted", validateProjectConfigOverride(orch({ workerContextInterruptRatio: 0.85 })).ok === true);
+  check("agent path also accepts a valid workerContextInterruptRatio", validateAgentProjectConfigOverride(orch({ workerContextInterruptRatio: 0.9 })).ok === true);
+}
+
+// --- workerContextInterruptRatio ORDERING (card dacc6d9e): resolveConfig CLAMPS an interrupt floor
+// configured BELOW the project's own warn ratio, mirroring the manager pair's own clamp exactly.
+{
+  const clamped = resolveConfig({ orchestration: { workerContextWarnRatio: 0.70, workerContextInterruptRatio: 0.5 } });
+  check("an interrupt floor BELOW the warn ratio is clamped UP to the warn ratio, never left inverted",
+    clamped.orchestration.workerContextInterruptRatio === 0.70);
+
+  const unclamped = resolveConfig({ orchestration: { workerContextWarnRatio: 0.5, workerContextInterruptRatio: 0.85 } });
+  check("an interrupt floor already ABOVE the warn ratio passes through unchanged",
+    unclamped.orchestration.workerContextInterruptRatio === 0.85);
+
+  const disabledStaysDisabled = resolveConfig({ orchestration: { workerContextWarnRatio: 0.70, workerContextInterruptRatio: 0 } });
+  check("workerContextInterruptRatio:0 (disabled) is never clamped into an active floor",
+    disabledStaysDisabled.orchestration.workerContextInterruptRatio === 0);
+
+  const warnDisabled = resolveConfig({ orchestration: { workerContextWarnRatio: 0, workerContextInterruptRatio: 0.3 } });
+  check("a disabled warn ratio (0) does not clamp an active interrupt floor",
+    warnDisabled.orchestration.workerContextInterruptRatio === 0.3);
+
+  // Platform defaults alone (no project override) already satisfy the invariant (0.85 >= 0.60).
+  const defaults = resolveConfig(undefined);
+  check("platform defaults already satisfy worker interrupt >= warn with no clamp needed",
+    defaults.orchestration.workerContextInterruptRatio === 0.85 && defaults.orchestration.workerContextWarnRatio === 0.60);
+
+  // No env layer for either (per-project safety knobs only, mirrors emergencyRecycleAtContextRatio).
+  check("per-project override survives with no env force for either key",
+    resolveConfig({ orchestration: { workerContextWarnRatio: 0.55, workerContextInterruptRatio: 0.75 } }).orchestration.workerContextWarnRatio === 0.55);
+}
+
 // --- concurrency caps: whole-number, >=1, <=100 ----------------------------------------------------
 for (const key of ["maxConcurrentWorkers", "maxConcurrentManagers"]) {
   check(`${key}:0 rejected (a zero cap deadlocks spawning)`, validateProjectConfigOverride(orch({ [key]: 0 })).ok === false);

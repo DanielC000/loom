@@ -632,6 +632,24 @@ export interface OrchestrationConfig {
    */
   emergencyRecycleAtContextRatio: number;
   /**
+   * WORKER context-warning floor (card dacc6d9e, part B of epic 8c7dfc65) — the worker-scoped analogue of
+   * `recycleAtContextRatio`; pushes an informational `[loom:worker-context-high]` notice to the OWNING
+   * MANAGER once a worker's occupancy crosses this ratio of its MODEL window. Default 0.60; 0 disables.
+   * @decision dacc6d9e — fires at most once ever per worker session id, no per-turn re-arm key. Card
+   *   17576ca3 (part D, parked pending this card) PLANS to read this same key for its own dispatch-time
+   *   guard — not yet wired; never rename this key without checking that card first.
+   */
+  workerContextWarnRatio: number;
+  /**
+   * WORKER context-INTERRUPT floor (card dacc6d9e) — the worker-scoped analogue of
+   * `emergencyRecycleAtContextRatio`; Esc-interrupts a BUSY worker directly once its occupancy crosses
+   * this ratio. Default 0.85; 0 disables. VALIDATED at resolve time to never sit below
+   * `workerContextWarnRatio` when both are active (mirrors the manager pair's own clamp).
+   * @decision dacc6d9e — refuses (no event, retries next tick) while idle, rate-limited, gate-in-flight,
+   *   or the reading isn't fresh this turn; fires at most once ever per worker session id otherwise.
+   */
+  workerContextInterruptRatio: number;
+  /**
    * Context-recycle re-nudge cadence: minutes between successive ContextWatcher recycle nudges to a
    * manager that's over `recycleAtContextRatio` but hasn't handed off yet. The context analogue of the
    * idle watchdog's `idleNudgeMinutes` — a fired nudge isn't repeated for another full window. The whole
@@ -1694,7 +1712,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "", commitTrailers: "on", commitLogBody: "on" },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, workerContextWarnRatio: 0.60, workerContextInterruptRatio: 0.85, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "", commitTrailers: "on", commitLogBody: "on" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -2223,6 +2241,14 @@ export function resolveConfig(
   if (resolvedEmergencyRecycleAtContextRatio > 0 && resolvedRecycleAtContextRatio > 0 && resolvedEmergencyRecycleAtContextRatio < resolvedRecycleAtContextRatio) {
     resolvedEmergencyRecycleAtContextRatio = resolvedRecycleAtContextRatio;
   }
+  // Card dacc6d9e: the WORKER-scoped pair mirrors the manager pair's own resolve-time clamp above —
+  // same reasoning (an interrupt floor sitting below the warn floor is incoherent), same skip-when-
+  // disabled exception.
+  const resolvedWorkerContextWarnRatio = override.orchestration?.workerContextWarnRatio ?? d.orchestration.workerContextWarnRatio;
+  let resolvedWorkerContextInterruptRatio = override.orchestration?.workerContextInterruptRatio ?? d.orchestration.workerContextInterruptRatio;
+  if (resolvedWorkerContextInterruptRatio > 0 && resolvedWorkerContextWarnRatio > 0 && resolvedWorkerContextInterruptRatio < resolvedWorkerContextWarnRatio) {
+    resolvedWorkerContextInterruptRatio = resolvedWorkerContextWarnRatio;
+  }
   return {
     kanbanColumns: override.kanbanColumns ?? structuredClone(d.kanbanColumns),
     permission: {
@@ -2292,6 +2318,10 @@ export function resolveConfig(
       // Emergency floor (card 9f279c7b) — resolved + clamped above, alongside recycleAtContextRatio, so
       // the ordering invariant (emergency ≥ ordinary, when both active) holds for every reader.
       emergencyRecycleAtContextRatio: resolvedEmergencyRecycleAtContextRatio,
+      // Worker-scoped pair (card dacc6d9e) — resolved + clamped above, same ordering invariant as the
+      // manager pair just above (interrupt ≥ warn, when both active).
+      workerContextWarnRatio: resolvedWorkerContextWarnRatio,
+      workerContextInterruptRatio: resolvedWorkerContextInterruptRatio,
       // Context-recycle re-nudge cadence + escalation cap (per-project, no env layer). `??` so an explicit
       // value (incl. 0) survives the merge — mirrors maxUnansweredNudges below.
       recycleNudgeIntervalMinutes: override.orchestration?.recycleNudgeIntervalMinutes ?? d.orchestration.recycleNudgeIntervalMinutes,

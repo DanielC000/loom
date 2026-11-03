@@ -45,6 +45,14 @@ export interface ContextWatcherDeps {
    * permanently no-op — never throws, mirrors every other optional callback in this watcher family.
    */
   emergencyInterrupt?: (managerSessionId: string, text: string) => EmergencyInterruptOutcome;
+  /**
+   * Daemon-internal WORKER context-interrupt hook (card dacc6d9e, Trigger D — see
+   * `checkWorkerContextInterrupt`'s own doc). Wraps `SessionService.redirectWorkerForContextInterrupt` —
+   * injected for the SAME SessionService-free reason as `emergencyInterrupt` above. Takes the WORKER's own
+   * session id only (the method derives its owning manager internally). Optional, same no-op-when-omitted
+   * contract as `emergencyInterrupt`.
+   */
+  workerContextInterrupt?: (workerSessionId: string, text: string) => EmergencyInterruptOutcome;
 }
 
 /**
@@ -89,6 +97,23 @@ export const RECYCLE_WIND_DOWN_INSTRUCTIONS =
 export const CONTEXT_EMERGENCY_REDIRECT_TAG = "loom:context-emergency:redirect";
 
 /**
+ * The worker context-interrupt (Trigger D) wire tag — the worker-scoped twin of
+ * `CONTEXT_EMERGENCY_REDIRECT_TAG` above, same bespoke-tag reasoning (the target IS the worker; this is a
+ * Loom-originated interrupt, not a real manager redirect, so it never rides `frameFromManager`'s
+ * `[loom:from-manager]` shape). Exported for `SessionService.redirectWorkerForContextInterrupt`'s own
+ * frame builder to share this one literal.
+ */
+export const WORKER_CONTEXT_INTERRUPT_TAG = "loom:worker-context-interrupt:redirect";
+
+/**
+ * The manager-facing notice prefix for the soft worker-context warning (Trigger C) — distinct from the
+ * manager-facing notice `checkWorkerContextInterrupt` pushes after Trigger D fires (that one uses the
+ * literal `[loom:worker-context-interrupt]`, never this constant, so the two are never confused by a
+ * reader grepping for either).
+ */
+export const WORKER_CONTEXT_WARN_PREFIX = "[loom:worker-context-high]";
+
+/**
  * Context-recycle watcher (manager-recycle-by-context). Each tick, for every LIVE manager whose
  * measured context occupancy (`ctxInputTokens`, refreshed at each Stop) crosses `ratio` of its
  * MODEL window (`contextWindowForModel` — 1M for Opus/Sonnet 4.x, 200k otherwise, so the trigger
@@ -116,6 +141,18 @@ export const CONTEXT_EMERGENCY_REDIRECT_TAG = "loom:context-emergency:redirect";
  * EMERGENCY INTERRUPT (Trigger A, `checkEmergencyOccupancy` below) — a third signal that BYPASSES the
  * queue once a second, harder floor is crossed; Trigger B deliberately never escalates into it.
  * @decision 9f279c7b — reuses `worker_redirect`'s deliverRedirect primitive; refuses during merge-danger.
+ *
+ * WORKER CONTEXT WARN (Trigger C, `checkWorkerContextWarn` below) + WORKER CONTEXT INTERRUPT (Trigger D,
+ * `checkWorkerContextInterrupt` below) — card dacc6d9e, part B of epic 8c7dfc65, the worker-scoped twins
+ * of Triggers A/B/the ordinary ratio nudge, over a THIRD loop (`db.listLiveWorkers()`). Trigger C pushes
+ * an informational `[loom:worker-context-high]` notice to the OWNING MANAGER once `workerContextWarnRatio`
+ * is crossed — never a nudge to the worker itself (a worker has no wind-down/recycle doctrine of its own).
+ * Trigger D Esc-interrupts the worker directly once `workerContextInterruptRatio` is crossed WHILE the
+ * worker is busy (an idle worker, including one `awaitingReview`, isn't burning context and must not be
+ * forced to re-report) and no gate (merge-confirm or the worker's own run_gate self-check) is live for its
+ * session id (`SessionService.hasLiveGateForSession`) — see `checkWorkerContextInterrupt`'s own doc. Both
+ * fire AT MOST ONCE EVER per worker session id, like Trigger A, for the identical reason (the interrupt's
+ * own Esc→settle→drain mutates `busy`/`lastActivity`/`turnSeq`).
  */
 /** Whether a session's harness ever populates `ctxInputTokens` — the adapter capability, the same source `mcp/orchestration.ts`'s `contextTelemetryFor` reads. */
 const contextTelemetryFor = (harness: Session["harness"]): boolean =>
@@ -252,6 +289,33 @@ export class ContextWatcher {
       const cfg = resolveConfig(project.config).orchestration;
       this.checkTurnCountRecycle(db, pty, lead, cfg, envOverride, nowMs, nowIso);
     }
+
+    // WORKER CONTEXT (Triggers C/D, card dacc6d9e) — a third, separate loop (workers are a structurally
+    // different session kind from managers/leads, with a different owning-manager-notify shape; same
+    // reasoning BusyWorkerWatcher is its own class rather than a worker branch bolted onto this one).
+    for (const w of db.listLiveWorkers()) {
+      // Card 66ff7321 / dacc6d9e round 3 (CR round 2 finding) — this loop must stay READ-ONLY for
+      // exhaustion: `BusyWorkerWatcher` owns marking (`pty.markContextExhausted`) and filing/notifying
+      // (`worker_context_exhausted`) for a WORKER session, on its own identical, same-cadence detection.
+      // Calling this class's OWN marking method (`checkContextExhaustion` below) here raced that —
+      // ContextWatcher starts before BusyWorkerWatcher and Node fires equal-interval timers in creation
+      // order, so this loop deterministically won the race, permanently stealing the mark: it filed
+      // `manager_context_exhausted` under the WORKER's own session id and starved
+      // `BusyWorkerWatcher`'s own `worker_context_exhausted` event/notice (whose loser-side `if (marked)`
+      // guard then always no-ops) — the event the companion's attention-push classifier and any
+      // `worker_context_exhausted`-gated event trigger depend on. See docs/decisions/dacc6d9e-*.md round 3.
+      if (this.isAlreadyContextExhausted(w)) continue;
+      if (this.isWorkerContextExhaustedUnmarked(w)) continue;
+      if (!contextTelemetryFor(w.harness)) continue; // codex: no ctx telemetry, never measured
+      if (w.ctxInputTokens == null) continue; // claude, pre-first-Stop/pre-first-mid-turn-sample
+      const project = db.getProject(w.projectId);
+      if (!project) continue;
+      const cfg = resolveConfig(project.config).orchestration;
+      const window = contextWindowForModel(w.model);
+      const r = w.ctxInputTokens / window;
+      this.checkWorkerContextWarn(db, pty, w, cfg, r, window, nowIso);
+      this.checkWorkerContextInterrupt(db, w, cfg, r, window, nowIso);
+    }
   }
 
   /**
@@ -351,6 +415,17 @@ export class ContextWatcher {
   }
 
   /**
+   * Card dacc6d9e round 3 — the WORKER loop's own exhaustion detect-and-skip, deliberately NEVER
+   * marking or filing anything (see the worker loop's own comment for why: `BusyWorkerWatcher` is the
+   * sole marker/notifier for a worker session). Mirrors `checkContextExhaustion`'s own guard + pure
+   * tail-read, minus the `pty.markContextExhausted`/`db.setContextExhausted`/event-append side effects.
+   */
+  private isWorkerContextExhaustedUnmarked(w: Session): boolean {
+    if (!w.busy || w.harness === "codex" || !w.engineSessionId) return false;
+    return checkContextExhaustion(w.cwd, w.engineSessionId, w.harness) != null;
+  }
+
+  /**
    * EMERGENCY INTERRUPT (Trigger A) — needs a REAL `ctxInputTokens` reading; the null gap is
    * `checkBlindTurn`'s (Trigger B's) job, deliberately not this method's.
    * @decision 9f279c7b — fires AT MOST ONCE PER SESSION ID; a refusal never advances that state.
@@ -392,6 +467,113 @@ export class ContextWatcher {
     });
     // eslint-disable-next-line no-console
     console.log(`[context-watcher] EMERGENCY interrupt FIRED for manager ${m.id} (~${pct}% of ${kw}k window; delivered=${outcome.delivered}, interrupting=${outcome.interrupting})`);
+  }
+
+  /**
+   * WORKER CONTEXT WARN (Trigger C, card dacc6d9e) — see the class doc's own section. Pushes an
+   * informational `[loom:worker-context-high]` notice to the OWNING MANAGER once `workerContextWarnRatio`
+   * is crossed; never a nudge/interrupt to the worker itself. Fires AT MOST ONCE EVER per worker session
+   * id (`listEventsForWorkerKinds` presence check, no re-arm key) — safe because `ctxInputTokens` only
+   * grows while a session is live (auto-compact is owner-disabled; a manual human `/compact` is an
+   * accepted gap here, same posture as the manager's own once-per-session checks) and this notice never
+   * touches the worker's own `busy`/`lastActivity`/`turnSeq`, so — unlike Trigger D below — it cannot
+   * re-arm itself. Re-arms only via `worker_recycle` (a fresh session id).
+   */
+  private checkWorkerContextWarn(db: Db, pty: ContextPty, w: Session, cfg: OrchestrationConfig, r: number, window: number, nowIso: string): void {
+    if (cfg.workerContextWarnRatio <= 0) return; // disabled for this project
+    if (r < cfg.workerContextWarnRatio) return; // under the warn floor
+
+    const managerId = w.parentSessionId;
+    if (!managerId) return; // no owner to notify (shouldn't happen for a worker)
+    const manager = db.getSession(managerId);
+    if (!manager || manager.processState !== "live") return; // orphaned → boot-reconcile's concern, not ours
+
+    if (db.listEventsForWorkerKinds(w.id, ["worker_context_high"]).length > 0) return; // already fired, ever
+
+    const pct = Math.round(r * 100);
+    const kw = Math.round(window / 1000);
+    const msg =
+      `${WORKER_CONTEXT_WARN_PREFIX} worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
+      `is at ~${pct}% of its ${kw}k window — approaching exhaustion (auto-compact is OFF). Consider ` +
+      `worker_recycle before it runs out, or nudge it to commit and report now.`;
+    let result: { delivered: boolean; queued?: boolean };
+    let threw = false;
+    try { result = pty.enqueueStdin(managerId, msg); } catch { threw = true; result = { delivered: false, queued: false }; }
+    if (!result.delivered && !result.queued) {
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] worker-context-high notice to manager ${managerId} for worker ${w.id} was NOT accepted (${threw ? "enqueueStdin threw" : "enqueueStdin reported neither delivered nor queued"}) — not recording a fire`);
+      return;
+    }
+    db.appendEvent({
+      id: randomUUID(), ts: nowIso, managerSessionId: managerId, workerSessionId: w.id,
+      taskId: w.taskId ?? null, kind: "worker_context_high",
+      detail: { pct },
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] worker ${w.id} context-high (~${pct}% of ${kw}k window) → notice to manager ${managerId}`);
+  }
+
+  /**
+   * WORKER CONTEXT INTERRUPT (Trigger D, card dacc6d9e) — see the class doc's own section. Needs a REAL
+   * `ctxInputTokens` reading AND the worker to be currently BUSY: an idle worker (including one already
+   * `awaitingReview` — it reported done/blocked) isn't burning context, and forcing a fresh "commit and
+   * report" turn onto it would make it RE-report and clear the review state its manager is actively
+   * acting on — manager review correction 1, card dacc6d9e. Also skipped while the worker is parked on a
+   * rate limit (`rateLimitedUntil` in the future): it isn't taking a turn right now either, so there is
+   * nothing to interrupt and nothing burning context. Neither refusal records an event, so the interrupt
+   * can still fire later once the worker actually goes busy above the floor — same shape as the
+   * gate-in-flight refusal `SessionService.redirectWorkerForContextInterrupt` returns.
+   * @decision dacc6d9e — never add a per-turn re-arm key here (per-reading/lastActivity/turnSeq all
+   *   broke the manager's identical Trigger A in three successive rounds, since this interrupt's own
+   *   Esc→settle→drain mutates those same fields): fire AT MOST ONCE EVER per worker session id instead.
+   * @decision dacc6d9e — fires ONLY on a reading measured DURING THE CURRENT TURN (`w.ctxUpdatedAt`
+   *   strictly later than `w.lastActivity`) — never on a stale pre-turn reading carried into a recovery
+   *   turn by a busy rising edge that clears exhaustion but not `ctxInputTokens`/`ctxUpdatedAt`.
+   */
+  private checkWorkerContextInterrupt(db: Db, w: Session, cfg: OrchestrationConfig, r: number, window: number, nowIso: string): void {
+    if (cfg.workerContextInterruptRatio <= 0) return; // disabled for this project
+    if (r < cfg.workerContextInterruptRatio) return; // under the interrupt floor
+    if (!w.busy) return; // idle (incl. awaitingReview) → nothing to interrupt, no turn burning context
+    if (!w.ctxUpdatedAt || Date.parse(w.ctxUpdatedAt) <= Date.parse(w.lastActivity)) return; // stale pre-turn reading
+    if (w.rateLimitedUntil && Date.parse(w.rateLimitedUntil) > Date.parse(nowIso)) return; // parked, not taking a turn
+    if (!this.deps.pty.isAlive(w.id)) return;
+    if (!this.deps.workerContextInterrupt) return; // no daemon-internal hook wired (e.g. a narrower test harness)
+
+    const managerId = w.parentSessionId;
+    if (!managerId) return; // no owner to notify (shouldn't happen for a worker)
+
+    // Any prior fire for this session id, ever, blocks a second one — see this method's own doc.
+    if (db.listEventsForWorkerKinds(w.id, ["worker_context_interrupt"]).length > 0) return;
+
+    const pct = Math.round(r * 100);
+    const kw = Math.round(window / 1000);
+    const msg =
+      `Your context is at ~${pct}%, near exhaustion (auto-compact is OFF). This interrupt may have landed ` +
+      `mid-edit or mid-tool-call: first finish or safely abandon the current edit (reconcile your working ` +
+      `tree if you were mid-edit; do not start anything new). Then commit your work as a NEW commit (never ` +
+      `amend), worker_report status progress with where you are, then STOP and wait for your manager.`;
+
+    const outcome = this.deps.workerContextInterrupt(w.id, msg);
+    if (!outcome.fired) {
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] worker-context interrupt for worker ${w.id} (~${pct}% of ${kw}k window) NOT fired (${outcome.reason ?? "unknown"}) — will retry next tick`);
+      return; // no event recorded — retrying next tick is exactly the point, same shape as Trigger A
+    }
+    db.appendEvent({
+      id: randomUUID(), ts: nowIso, managerSessionId: managerId, workerSessionId: w.id,
+      taskId: w.taskId ?? null, kind: "worker_context_interrupt",
+      detail: { pct, delivered: outcome.delivered ?? null, interrupting: outcome.interrupting ?? null },
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] worker-context interrupt FIRED for worker ${w.id} (~${pct}% of ${kw}k window; delivered=${outcome.delivered}, interrupting=${outcome.interrupting})`);
+
+    // Manager review correction 3, card dacc6d9e: tell the owning manager directly that this fired —
+    // it must not learn about it only from the worker's own next report. Best-effort: the durable event
+    // above already stands regardless of whether this notice is accepted.
+    const noticeMsg =
+      `[loom:worker-context-interrupt] worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
+      `is at ~${pct}% context — Loom told it to commit and report. Recycle it once it reports.`;
+    try { this.deps.pty.enqueueStdin(managerId, noticeMsg); } catch { /* manager not live — the durable event stands */ }
   }
 
   /**

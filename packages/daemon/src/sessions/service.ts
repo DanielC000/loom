@@ -80,7 +80,7 @@ import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatica
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, checkCanonicalIndexLockNotPresent, literalRepoPathKey } from "../git/repo-lock.js";
-import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS } from "../orchestration/context-watcher.js";
+import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS, WORKER_CONTEXT_INTERRUPT_TAG } from "../orchestration/context-watcher.js";
 import { isSupersededByRecycle, currentHaltedSuccessor, isSanctionedHaltedPartner, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
@@ -5768,6 +5768,23 @@ export class SessionService {
   }
 
   /**
+   * Card dacc6d9e: is ANY gate (queued, running, mid-squash, repo-guard-only-held/queued, or a still
+   * in-flight confirm CALL that hasn't yet reached gate admission) currently live for THIS session? The
+   * worktree-scoped twin of {@link hasLiveGateForProject} immediately above.
+   * @decision dacc6d9e — never use `listActiveMergeDangerWindows` here (a different hazard, see the
+   *   record); never read this as "one check covers both hazards" — it is four reads, none of them
+   *   closer to either hazard than the others.
+   */
+  hasLiveGateForSession(sessionId: string): boolean {
+    return (
+      this.gateSemaphore.snapshot().entries.some((e) => e.sessionId === sessionId) ||
+      this.gateSemaphore.squashOnlySnapshot().some((e) => e.sessionId === sessionId) ||
+      this.gateSemaphore.repoGuardOnlySnapshot().some((e) => e.sessionId === sessionId) ||
+      this.peekPendingMerge(sessionId)?.state === "running"
+    );
+  }
+
+  /**
    * Card a1c86452 — the ACTIVE half of the Gates page. Reads the live {@link GateSemaphore} registry and
    * enriches each in-flight run with its project name, a human worker label ("<agent> · <short task
    * title>"), and the task's priority. Bounded by the number of concurrent + queued gates (single digits
@@ -11366,6 +11383,25 @@ export class SessionService {
   }
 
   /**
+   * @decision dacc6d9e — refuse while a merge-gate/run_gate self-check is live for this worker
+   *  (hasLiveGateForSession), never supersedeQueue (a worker's queue holds its OWN MANAGER's direction),
+   *  and `headInsert:true` so the interrupt drains AHEAD of that surviving queued direction.
+   */
+  redirectWorkerForContextInterrupt(sessionId: string, text: string): EmergencyRedirectOutcome {
+    const target = this.db.getSession(sessionId);
+    if (!target) throw new Error("session not found");
+    if (this.hasLiveGateForSession(sessionId)) return { fired: false, reason: "gate-in-flight" };
+    const result = this.deliverRedirect(target, text, {
+      supersedeQueue: false,
+      headInsert: true,
+      frame: (t) => `[${WORKER_CONTEXT_INTERRUPT_TAG}]\n${t}`,
+      enqueueSender: "system",
+      eventManagerId: target.parentSessionId ?? "",
+    });
+    return { fired: true, result };
+  }
+
+  /**
    * @decision aa4e24ff — deliverRedirect is the shared enqueue-then-interrupt core for redirectWorker and
    *  redirectSessionAsCompanion; it must never re-derive/re-check scope (callers pre-resolve it), and a
    *  HELD result must not collapse into a plain next-turn-boundary hold — override its `landsAt`.
@@ -11387,6 +11423,9 @@ export class SessionService {
        * `pty.interruptForRedirect` primitive below, it just never touches whatever else was already queued.
        */
       supersedeQueue?: boolean;
+      /** @decision dacc6d9e — threads to `enqueueDurableMessage`'s `headInsert`: places this redirect at
+       *  the queue FRONT, not the FIFO tail. Default omitted/false — byte-identical for every caller. */
+      headInsert?: boolean;
     },
   ): RedirectResult {
     // (a) FLUSH + SUPERSEDE the target's queued direction before the authoritative redirect lands — SKIPPED
@@ -11402,7 +11441,7 @@ export class SessionService {
     // `mintedAtWallClock` doc (this covers BOTH worker_redirect and the companion session-redirect, the
     // two `:redirect` variants sharing this core).
     const mintedAtWallClock = Date.now();
-    const r0 = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null, mintedAtWallClock });
+    const r0 = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null, mintedAtWallClock, headInsert: opts.headInsert });
     // (c) Interrupt ONLY when the redirect was HELD (the target was busy). For an idle target the redirect
     // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
     // cancel that very turn.
@@ -11613,6 +11652,10 @@ export class SessionService {
       /** @decision a5987cf3 — true only once this chain joined onto an ALREADY-parked root; OR'd forward
        *  across a re-mint, unlike the one-shot `bypassOwnershipGateOnce` below. Every other caller omits it. */
       joinedOntoParkedRoot?: boolean;
+      /** @decision dacc6d9e — threaded straight through to `enqueueStdin`'s own `EnqueueStdinTail.headInsert`
+       *  (pty/host.ts) — see that field's doc. Only `deliverRedirect`'s `redirectWorkerForContextInterrupt`
+       *  caller passes `true`; every other caller omits it, byte-identical to before this field existed. */
+      headInsert?: boolean;
     },
   ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
@@ -11686,6 +11729,7 @@ export class SessionService {
         logicalId: rootMsgId, // card 4a0af485 — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
         mintedAtWallClock: ctx.mintedAtWallClock,
         reportEventId: ctx.reportEventId,
+        headInsert: ctx.headInsert, // card dacc6d9e — see EnqueueStdinTail.headInsert's own doc (pty/host.ts)
         bypassOwnershipGateOnce, // card 844ca34e round 4 — see this variable's own doc above (never joinedOntoParkedRoot)
         // Card 21a281b6 merge-gate fix: EXPLICIT opt-in, only when THIS call actually carries a fresh mint
         // (never for a carry/re-mint call that omits `ctx.mintedAtWallClock`) — see EnqueueStdinTail

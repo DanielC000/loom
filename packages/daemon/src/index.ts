@@ -1535,6 +1535,14 @@ async function main(): Promise<void> {
       if (!r.fired) return { fired: false, reason: r.reason };
       return { fired: true, delivered: r.result.delivered, interrupting: r.result.interrupting };
     },
+    // Card dacc6d9e Trigger D: the daemon-internal WORKER context-interrupt hook, wrapping
+    // SessionService.redirectWorkerForContextInterrupt for the SAME SessionService-free reason as
+    // emergencyInterrupt above.
+    workerContextInterrupt: (workerId, text) => {
+      const r = sessions.redirectWorkerForContextInterrupt(workerId, text);
+      if (!r.fired) return { fired: false, reason: r.reason };
+      return { fired: true, delivered: r.result.delivered, interrupting: r.result.interrupting };
+    },
   });
   contextWatcher.start();
   console.log(`[boot] context-recycle watcher on (${recycleRatio > 0 ? `env-forced ratio ${recycleRatio}` : `per-project ratio, platform default ${resolved.orchestration.recycleAtContextRatio}`}, tick ${ctxWatchMs}ms)`);

@@ -296,6 +296,11 @@ const orchestrationOverride = z.object({
   // Same shape/bounds as it — ordering (emergency ≥ ordinary, when both active) is enforced at resolve
   // time (config.ts's resolveConfig clamp), not here; this schema only bounds the raw value to [0,1].
   emergencyRecycleAtContextRatio: z.number().min(0).max(1).optional(),
+  // Card dacc6d9e: the WORKER-scoped pair, same [0,1]-bounded shape as the manager pair just above —
+  // benign tuning numbers (no host-launch/exfil capability), so both stay on the agent path too.
+  // Ordering (interrupt ≥ warn, when both active) is enforced at resolve time, not here, same as above.
+  workerContextWarnRatio: z.number().min(0).max(1).optional(),
+  workerContextInterruptRatio: z.number().min(0).max(1).optional(),
   // ContextWatcher re-nudge cadence (whole minutes) + escalation cap (whole count). Both ≥0; benign
   // tuning numbers (no host-launch / exfil capability), so they stay on the agent path too. A generous
   // ceiling on the cap guards a fat-fingered value from authorizing an endless nudge loop.

@@ -1293,6 +1293,31 @@ export type OrchestrationEventKind =
   // is inside an active merge-danger window) never appends this event at all — see
   // `redirectManagerForEmergencyRecycle`'s own doc for the retry-next-tick policy that follows from that.
   | "context_emergency_interrupt"
+  // WORKER context-warning notice (ContextWatcher, card dacc6d9e, part B of epic 8c7dfc65): a LIVE
+  // worker's `ctxInputTokens` reading crossed `workerContextWarnRatio`. Loom pushes
+  // `[loom:worker-context-high]` to the OWNING MANAGER — informational only, never a nudge/interrupt to
+  // the worker itself. Filed under the OWNING MANAGER (managerSessionId) with workerSessionId/taskId
+  // set; `detail` carries { pct }. Emitted AT MOST ONCE EVER per worker session id — de-duped via
+  // `listEventsForWorkerKinds` (any prior fire blocks forever for this session id, no per-turn re-arm
+  // key); a `worker_recycle` re-arms naturally (fresh session id). Safe because `ctxInputTokens` only
+  // grows while a session is live (auto-compact is owner-disabled) and this notice never touches the
+  // worker's own busy/lastActivity/turnSeq — see `ContextWatcher.checkWorkerContextWarn`'s own doc.
+  | "worker_context_high"
+  // WORKER context-INTERRUPT (ContextWatcher, card dacc6d9e): a LIVE, BUSY worker's `ctxInputTokens`
+  // reading crossed `workerContextInterruptRatio` (the harder floor above `workerContextWarnRatio`), and
+  // ContextWatcher bypassed the busy-gated nudge queue entirely — `SessionService.
+  // redirectWorkerForContextInterrupt` enqueued an authoritative "commit now and report progress"
+  // directive WITHOUT flushing the worker's own queue (its queue holds its MANAGER's direction, which a
+  // Loom-originated interrupt must never silently discard) and, since the worker was busy, sent a single
+  // Esc to interrupt its current turn. `detail` carries { pct, delivered, interrupting } — same honest
+  // `EnqueueResult` shape as `context_emergency_interrupt`, never collapsed to a bare "sent" bit. Filed
+  // under the OWNING MANAGER (managerSessionId) with workerSessionId/taskId set — the manager is told
+  // about this interrupt directly, never only via the worker's own next report. Emitted AT MOST ONCE
+  // EVER per worker session id (no re-arm key — mirrors `context_emergency_interrupt`'s own round-4 fix,
+  // see c5b234aa/9f279c7b). A REFUSAL (the worker is idle, rate-limited, or a merge-gate/run_gate
+  // self-check is live for it) never appends this event at all — see
+  // `redirectWorkerForContextInterrupt`'s own doc for the retry-next-tick policy that follows from that.
+  | "worker_context_interrupt"
   // @decision c00231e2 — never count a WORKER's give-ups toward this, never re-arm the one-per-episode
   // latch on the alarm callback's own delivery outcome, and never put message text into `detail`.
   | "give_up_recovery_escalated"
@@ -2234,6 +2259,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   schedule_fire_missed: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true,
+  worker_context_high: true, worker_context_interrupt: true,
   give_up_recovery_escalated: true, worker_stuck: true, mcp_silence_detected: true,
   worker_context_exhausted: true, manager_context_exhausted: true,
   worktree_vanished: true,
@@ -3813,6 +3839,7 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "question_asked", "question_amended", "request_escalated",
   "idle_escalated", "idle_report",
   "context_escalated", "context_blind_turn", "context_emergency_interrupt",
+  "worker_context_high", "worker_context_interrupt",
   "worker_context_exhausted", "manager_context_exhausted",
   "platform_escalate",
   "session_rate_limited", "rate_limit_bailed",
