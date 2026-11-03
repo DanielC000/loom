@@ -19,6 +19,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       case).
 //   (3) getTaskMergedInfo (the board `merged` field) shares the SAME fix: refuses the forged commit,
 //       accepts the genuine one.
+//   (4) card f9ada472: a genuine `orchestration.commitTrailers:"off"` landing (mergeBranch with the
+//       config, branch still LIVE, no deps.workerTipLedger — the bare-mergeBranch shape, not a
+//       SessionService confirm) makes findLandedSquashCommit resolve null, SAFE — never the landed sha
+//       and never a throw — proven against scenario (2)'s own IDENTICAL reader + branch as its polarity
+//       control (trailers on there resolves the real sha).
 // Run: 1) build daemon (pnpm build), 2) node test/merge-content-reachability.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -90,6 +95,16 @@ try {
   // Card 52e978ad: branch A is still LIVE at this point (never deleted in this test) — the strongest
   // verification mode, a byte-for-byte diff against the live branch tip.
   check("(2) getTaskMergedInfo reports verification:\"content\" for a still-live branch", genuineBoardResult?.verification === "content");
+
+  // ── (4) card f9ada472: a genuine commitTrailers:"off" landing, branch still LIVE, no ledger deps ──────
+  const taskIdD = `mcr-task-d-${sfx}`;
+  const branchD = `loom/${taskKey(taskIdD)}`;
+  makeWorktree(branchD, "file-d.txt", "trailers-off content\n");
+  const trailersOff = await mergeBranch(repo, branchD, "Card D title", { commitTrailers: "off" });
+  check("(4) precondition: the trailers-off landing succeeded", trailersOff.ok === true && typeof trailersOff.sha === "string");
+  check("(4) precondition: the landed commit carries NO Loom-Worker-Branch trailer", !git(repo, `log -1 --format=%B ${trailersOff.sha}`).includes("Loom-Worker-Branch:"));
+  const trailersOffResult = await findLandedSquashCommit(repo, branchD);
+  check("(4) findLandedSquashCommit resolves null for a trailers-off landing (never the real sha, never a throw)", trailersOffResult === null);
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }

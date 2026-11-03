@@ -1,30 +1,37 @@
-# e8d4fdc3 — detect an already-landed branch via a ledger fallback when trailers are off, in a table the mainline trust walk never reads
+# e8d4fdc3 — detect an already-landed branch via a ledger fallback whenever its trailer walk finds no candidate for this branch, in a table the mainline trust walk never reads
 
-From 9a5d040c's Code Review (reviewer `2cff9dec`, 2026-11-02). With `orchestration.commitTrailers:"off"`,
-`findLandedSquashCommit` (`git/worktrees.ts`) is purely a `git log --grep=Loom-Worker-Branch:` walk — no
-trailer was ever written, so it always returns `null`. That broke the solo re-confirm path
-(`confirmWorkerMerge`'s `preLanded` lookup, `sessions/service.ts`), boot-reconcile Pass A
-(`findLandedSquashCommitViaMap` falling back to `findLandedSquashCommit`), and the batch path
-(`landBranchCommitsIndividually`'s own `mergeBase === branchTip` branch, `git/batch-merge.ts`) — all three
+From 9a5d040c's Code Review (reviewer `2cff9dec`, 2026-11-02). The motivating symptom was
+`orchestration.commitTrailers:"off"`: with no trailer ever written, `findLandedSquashCommit`
+(`git/worktrees.ts`) — a pure `git log --grep=Loom-Worker-Branch:` walk — always returned `null`, which
+broke the solo re-confirm path (`confirmWorkerMerge`'s `preLanded` lookup, `sessions/service.ts`) and
+boot-reconcile Pass A (`findLandedSquashCommitViaMap` falling back to `findLandedSquashCommit`): both
 misclassified a genuinely-already-landed branch as `STAGE_EMPTY_RETRY`, which (decision `1550eb87`) is a
 HARD, cached `orphaned_zero_ahead` refusal with wrong cherry-pick advice for a worker that reported done.
 
+**The real scope is wider than "trailers off," per round 2's own correction below: the fallback is
+reached whenever the trailer walk finds no candidate FOR THIS BRANCH — which happens with trailers ON
+too (a review fork that was never itself landed carries no trailer of its own, trailers config
+notwithstanding). See round 2's "Honesty correction" and "Correcting …" sections further down for the
+full detail; what follows here states the fix at its correct, wider scope.**
+
 ## The fix
 
-`findLandedSquashCommit` now falls back to a ledger lookup whenever its own trailer walk finds nothing:
-resolve the branch's own LIVE tip (`git rev-parse --verify refs/heads/<branch>`; a gone branch has nothing
-to look up, so this fails closed exactly as before), consult `deps.workerTipLedger.lookupByWorkerTip`, and
-— on a hit — re-verify the returned sha is still an ancestor of `base` via a plain `merge-base` compare
-(never `--is-ancestor`; see decision `0eaaa693`'s own "Do not": simple-git's `raw()` reads that
-subcommand's non-zero exit as success with empty output). `findLandedSquashCommitViaMap`'s own
-`scanComplete` shortcut (a confirmed-empty trailer scan) gets the identical fallback, so it is never
-silently narrower than the function it wraps.
+`findLandedSquashCommit` now falls back to a ledger lookup whenever its own trailer walk finds no
+candidate for this branch (not only when trailers are off): resolve the branch's own LIVE tip (`git
+rev-parse --verify refs/heads/<branch>`; a gone branch has nothing to look up, so this fails closed
+exactly as before), consult `deps.workerTipLedger.lookupByWorkerTip`, and — on a hit — re-verify the
+returned sha is still an ancestor of `base` via a plain `merge-base` compare (never `--is-ancestor`; see
+decision `0eaaa693`'s own "Do not": simple-git's `raw()` reads that subcommand's non-zero exit as success
+with empty output). `findLandedSquashCommitViaMap`'s own `scanComplete` shortcut (a confirmed-empty
+trailer scan) gets the identical fallback, so it is never silently narrower than the function it wraps.
 
-Fixing it inside `findLandedSquashCommit`/`findLandedSquashCommitViaMap` themselves means solo,
-boot-reconcile Pass A, and the batch path's own call (`landBranchCommitsIndividually` already threads its
-`deps` straight through) all share ONE fallback — "one helper, not two," per the card's own instruction —
-with each caller only needing to thread a new `workerTipLedger` facts object alongside the existing
-`goneBranchLedger` one.
+Fixing it inside `findLandedSquashCommit`/`findLandedSquashCommitViaMap` themselves means solo and
+boot-reconcile Pass A share ONE fallback — "one helper, not two," per the card's own instruction — with
+each caller only needing to thread a new `workerTipLedger` facts object alongside the existing
+`goneBranchLedger` one. The batch path's own call site (`landBranchCommitsIndividually`, `git/batch-
+merge.ts`) threads the same `deps` through for call-site consistency only — its own `mergeBase ===
+branchTip` arm is structurally UNREACHABLE by a real landing (see round 2's "Honesty correction" below)
+and never actually exercises this fallback in production.
 
 ## The trust-ledger constraint — a SEPARATE table, never `mainline_landed_commits`
 

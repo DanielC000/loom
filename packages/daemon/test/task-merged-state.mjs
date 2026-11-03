@@ -21,6 +21,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       this test, proving the mechanism keys off the trailer, not toConventionalSubject/title text.
 //   (5) a project whose repoPath isn't a real git repo (vault-only project shape) fails safe to
 //       merged:null, never throws.
+//   (6) card f9ada472 (d9332365's trailers-off degrade, analysis §2c): a task whose branch's content
+//       genuinely landed on main, via a commit carrying NO `Loom-Worker-Branch:` trailer at all (exactly
+//       what an `orchestration.commitTrailers:"off"` landing produces) resolves merged:null — the
+//       documented, visible "shipped work looking unshipped" degrade, never a throw and never a false
+//       merged:true. Scenario (1) above is this test's own polarity proof: the IDENTICAL reader resolves
+//       a real sha for a trailer-carrying commit, so (6)'s null is the trailer's absence, not a broken
+//       reader.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/task-merged-state.mjs
 import fs from "node:fs";
@@ -100,6 +107,23 @@ try {
   const noRepoTask = createProjectTask(db, "pNoRepo", { title: "no repo project task" });
   const got5 = await getProjectTask(db, "pNoRepo", noRepoTask.id);
   check("(5) a project with no real repoPath fails safe to merged:null (no throw)", got5.merged === null);
+
+  // (6) card f9ada472: content genuinely lands, but the commit carries NO Loom-Worker-Branch trailer at
+  // all — exactly the shape a commitTrailers:"off" landing produces. Deliberately the SAME file-write +
+  // commit shape as (1)'s genuine landing above, minus the trailer, so the only variable is the trailer's
+  // presence.
+  const noTrailer = createProjectTask(db, "pRepo", { title: "feat(x): trailers-off landing" });
+  const branch6 = `loom/${taskKey(noTrailer.id)}`;
+  fs.writeFileSync(path.join(repo, "notrailer.txt"), "trailers-off content\n");
+  git("add -A");
+  git(`-c user.email=x@loom -c user.name=x commit -q -m "feat(x): trailers-off landing"`); // no Loom-Worker-Branch trailer
+  const noTrailerSha = git("log -1 --format=%H").trim();
+  check("(6) setup control: the landed commit carries NO Loom-Worker-Branch trailer", !git(`log -1 --format=%B ${noTrailerSha}`).includes("Loom-Worker-Branch:"));
+  const got6 = await getProjectTask(db, "pRepo", noTrailer.id);
+  check("(6) a genuinely-landed but trailer-less task resolves merged:null, never a throw", got6.merged === null);
+  const row6 = (await listProjectTasks(db, "pRepo", { includeBody: true })).find((t) => t.id === noTrailer.id);
+  check("(6) listProjectTasks ALSO resolves merged:null for the trailer-less landing (never a false merged:true)", row6?.merged === null);
+  check("(6) polarity check: the SAME branch (`loom/<taskKey>`) WOULD have resolved if the trailer had been written — proven by scenario (1)'s own identical reader finding a real sha there", typeof got1.merged?.sha === "string");
 } finally {
   db.close();
   fs.rmSync(file, { force: true });

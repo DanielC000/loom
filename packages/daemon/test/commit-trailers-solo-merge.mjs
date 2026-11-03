@@ -331,8 +331,16 @@ function seedReportedDone(ctx, w) {
   const result = await ctx.sessions.reconcileOrchestrationOnBoot();
   check(`(D) THE CRITICAL FIX: boot-reconcile Pass A did NOT finish the review fork (got mergesFinished=${result.mergesFinished})`, result.mergesFinished === 0);
   check("(D) the review fork's task is STILL in_progress — never finished", ctx.db.getTask(reviewTaskId)?.columnKey === "in_progress");
-  check("(D) the review fork's worktree is STILL present — never deleted", fs.existsSync(reviewWt));
-  check("(D) the review fork's branch is STILL present — never deleted", git(repo, "branch", "--list", reviewBranch).includes(reviewBranch));
+  // NON-DISCRIMINATING against round 2's own branch-keyed fix (e8d4fdc3 CR round 2, minor 4): verified via
+  // a --ref 587af85d negative control that these two pass even under the PRE-round-2 (tip-only-match) bug
+  // — Pass A still wrongly finishes the review fork there (mergesFinished=1, task leaves in_progress), yet
+  // the worktree/branch survive regardless, because `finalizeMerge`'s own checked-out-worktree guard
+  // (decision cc9bce38: "skips the delete only while git still lists the branch") independently refuses to
+  // delete a branch still checked out in a live worktree — a SEPARATE defense-in-depth layer, not evidence
+  // of the branch-keying fix. Kept as a secondary assertion (no data loss either way), not as proof of the
+  // critical fix; the two checks above are what actually prove it.
+  check("(D) secondary defense-in-depth: the review fork's worktree is STILL present (never deleted — cc9bce38's own checked-out guard, independent of this fix)", fs.existsSync(reviewWt));
+  check("(D) secondary defense-in-depth: the review fork's branch is STILL present (never deleted — cc9bce38's own checked-out guard, independent of this fix)", git(repo, "branch", "--list", reviewBranch).includes(reviewBranch));
   ctx.db.close();
 }
 
@@ -361,8 +369,11 @@ function seedReportedDone(ctx, w) {
   const result = await ctx.sessions.reconcileOrchestrationOnBoot();
   check(`(E) THE CRITICAL FIX: boot-reconcile Pass A did NOT finish the force-repointed branch (got mergesFinished=${result.mergesFinished})`, result.mergesFinished === 0);
   check("(E) Z's task is STILL in_progress — never finished", ctx.db.getTask(z.taskId)?.columnKey === "in_progress");
-  check("(E) Z's worktree is STILL present — never deleted", fs.existsSync(z.worktreePath));
-  check("(E) Z's branch is STILL present — never deleted", git(repo, "branch", "--list", z.branch).includes(z.branch));
+  // NON-DISCRIMINATING against round 2's own branch-keyed fix — same reason as (D)'s own note above:
+  // `finalizeMerge`'s checked-out-worktree guard (decision cc9bce38) independently refuses to delete a
+  // branch still checked out in a live worktree, regardless of whether Pass A's classification is right.
+  check("(E) secondary defense-in-depth: Z's worktree is STILL present (never deleted — cc9bce38's own checked-out guard, independent of this fix)", fs.existsSync(z.worktreePath));
+  check("(E) secondary defense-in-depth: Z's branch is STILL present (never deleted — cc9bce38's own checked-out guard, independent of this fix)", git(repo, "branch", "--list", z.branch).includes(z.branch));
   ctx.db.close();
 }
 
