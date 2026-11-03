@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import { resolveConfig, contextPercentFor } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import { checkContextExhaustion } from "./context-exhaustion.js";
+import { boundedSimpleGit, withTimeout } from "../git/bounded.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface BusyWorkerPty {
@@ -15,24 +15,42 @@ export interface BusyWorkerPty {
   markContextExhausted(sessionId: string): boolean;
 }
 
+/** Total-elapsed bound for {@link tryReadLastCommitSummary} — see that function's own doc. */
+const LAST_COMMIT_SUMMARY_TIMEOUT_MS = 3000;
+
 /**
  * Card 66ff7321 — best-effort "what did it last land" for the context-exhausted notice. Bounded
  * (short timeout), NEVER THROWS and never rejects — a worktree that's mid-GC, or a git hiccup, must
  * never block anything. `cwd` is the worker's own worktree path (git/worktrees.ts), never the shared
  * canonical repo, so this is an ordinary, uncontended, read-only local git call — no canonicalGit/
- * lock involved.
+ * lock involved; that's why it goes through {@link boundedSimpleGit} (the sanctioned non-canonical
+ * helper — see `canonical-git-helper-guard.mjs`'s own allowlist), not `canonicalGit`.
  * @decision 66ff7321 — round 2 (CR finding): this was `execFileSync`, up to a 3s SYNCHRONOUS block
- * on the daemon's event loop per tick — async `execFile` instead, per CLAUDE.md's event-loop
- * discipline (the same class of hazard `createWorktree`'s own async-spawn split already guards).
+ * on the daemon's event loop per tick — async, per CLAUDE.md's event-loop discipline (the same class
+ * of hazard `createWorktree`'s own async-spawn split already guards).
+ *
+ * Round 3 (card cb42134a): a raw child-process `execFile("git", [...])` bypasses the shared resolver
+ * chokepoint `canonical-git-helper-guard.mjs` requires every src/** git call to go through — routed
+ * through `boundedSimpleGit` instead, same as `git/reader.ts`/`sessions/service.ts`/`orchestration/
+ * restart.ts`'s own non-canonical read-only calls. `block` is an IDLE timeout, not total-elapsed (see
+ * `boundedSimpleGit`'s own doc) — wrapped in `withTimeout` to keep the real 3s total-elapsed bound.
  */
 function tryReadLastCommitSummary(cwd: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile("git", ["-C", cwd, "log", "-1", "--format=%h %s"], { timeout: 3000, encoding: "utf8" }, (err, stdout) => {
-      if (err) { resolve(null); return; }
-      const line = (stdout ?? "").trim();
-      resolve(line || null);
-    });
-  });
+  try {
+    // boundedSimpleGit/simple-git construction is SYNCHRONOUS and throws (GitConstructError) when `cwd`
+    // doesn't exist on disk right now — a real case (a worktree mid-GC/removal) the old execFile("git",
+    // ["-C", cwd, …]) shape never hit this way (a bad `-C` target failed INSIDE the async callback, not
+    // at call time) — so this must stay inside the same try as the construction, not just the .catch below.
+    const git = boundedSimpleGit(cwd, LAST_COMMIT_SUMMARY_TIMEOUT_MS);
+    return withTimeout(git.raw(["log", "-1", "--format=%h %s"]), LAST_COMMIT_SUMMARY_TIMEOUT_MS, "git log -1 (last commit summary)")
+      .then((stdout) => {
+        const line = (stdout ?? "").trim();
+        return line || null;
+      })
+      .catch(() => null);
+  } catch {
+    return Promise.resolve(null);
+  }
 }
 
 export interface BusyWorkerWatcherDeps {
