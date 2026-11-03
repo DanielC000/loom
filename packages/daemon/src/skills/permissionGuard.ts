@@ -1,6 +1,7 @@
 import type { SkillPermissionVector } from "@loom/shared";
 import {
   detectPermissionWidening,
+  frontmatterUnrecognizedSyntax,
   FRONTMATTER_RE,
   FRONTMATTER_KEY_LINE_RE,
   INLINE_SHELL_RE,
@@ -47,6 +48,8 @@ function splitLeadingBom(content: string): { body: string; hasBom: boolean } {
 const VECTOR_LABEL: Record<SkillPermissionVector, string> = {
   "allowed-tools": "a frontmatter `allowed-tools:` grant",
   hooks: "a frontmatter `hooks:` registration",
+  "frontmatter-unrecognized": "frontmatter syntax this detector cannot confidently parse (e.g. a quoted "
+    + "key, a flow mapping, an anchor/alias/tag value, an explicit/tagged/merge key)",
   "shell-inline": "an inline `` !`cmd` `` shell injection",
   "shell-fenced": "a fenced ` ```! ` shell block",
 };
@@ -167,10 +170,14 @@ const STRIP_FIXPOINT_MAX_PASSES = 16;
  * Idempotent, and `detectPermissionWidening(stripPermissionWidening(x))` is always `[]` OR the result is
  * `null` — both follow from sharing ONE pattern set with the detector, never a second copy that could
  * disagree afterward.
+ *
+ * @decision 712148f1 (round 2) — never move the allowlist check below `stripFrontmatterKeys`: that
+ * function's quote-tolerant key match would DELETE a quoted hazard line instead of withholding it whole.
  */
 export function stripPermissionWidening(content: string): string | null {
   const { body, hasBom } = splitLeadingBom(content);
   if (detectPermissionWidening(body).length === 0) return content;
+  if (frontmatterUnrecognizedSyntax(body)) return null;
   let current = body;
   for (let i = 0; i < STRIP_FIXPOINT_MAX_PASSES; i++) {
     const next = stripShellTriggers(stripFrontmatterKeys(current));

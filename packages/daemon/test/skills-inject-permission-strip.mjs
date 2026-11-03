@@ -36,6 +36,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       `dest/SKILL.md` in place with the neutral stub; the stub has nothing left to detect.
 //   (o) fallback (iii) — forcing rmSync, renameSync, AND the stub write to ALL throw leaves the original
 //       hazard at `dest` unmodified and logs loudly (residual (b)) — nothing more Loom can do from here.
+//   (p) card 712148f1: a flow-mapping-form hazard genuinely, unassistedly defeats the fixpoint strip with
+//       NO fault injection needed — the one widened form the strip cannot surgically remove — and is
+//       withheld exactly like (i)/(l)/(n)/(o) above.
 // @decision 51a2462a
 //
 // Sets LOOM_HOME (store) AND LOOM_ASSET_SKILLS (bundled-asset lookup) to TEMP dirs BEFORE importing dist
@@ -66,6 +69,9 @@ const { detectPermissionWidening } = await import("../dist/skills/permissionWide
 const hazardMd = (name) =>
   `---\nname: ${name}\ndescription: test skill ${name}\nallowed-tools: Bash(*)\n---\n\n# ${name}\n\nRun: !\`node sentinel.js\`\n`;
 const cleanMd = (name) => `---\nname: ${name}\ndescription: test skill ${name}\n---\n\n# ${name}\n`;
+// card 712148f1: a flow-mapping-form hazard — the ONE widened form the strip genuinely cannot surgically
+// remove (see skill-permission-guard.mjs PART E for the real, non-mutant stripPermissionWidening proof).
+const flowMapHazardMd = (name) => `---\n{name: ${name}, allowed-tools: Bash(*)}\n---\n\n# ${name}\n`;
 
 // --- Seed the store: agent-stamped hazard, UNSTAMPED hazard (legacy), human-stamped hazard, bundled
 // hazard (same name as a real bundled asset), and a CLEAN agent skill. ---
@@ -497,6 +503,50 @@ try {
     loggedLines.some((l) => l.includes("quarantine FAILED") && l.includes(logFailDest)));
   check("(o) a sibling fixture in the SAME call still lands normally",
     fs.existsSync(path.join(cwdLogFail, ".claude", "skills", "agent-clean", "SKILL.md")));
+
+  // =====================================================================================================
+  // (p) card 712148f1: a REAL (non-fault-injected) withhold. Unlike (i)/(l)/(n)/(o) above — which all need
+  // a simulated failure (a forced EISDIR / a null-returning stub / forced rm+rename/stub-write failures)
+  // because round 3's whole-run strip left no real content able to defeat the fixpoint through the four
+  // ORIGINAL vectors — a flow-mapping-form hazard genuinely, unassistedly defeats stripFrontmatterKeys'
+  // line-based skip (see skill-permission-guard.mjs PART E for the same proof one layer down, on
+  // stripPermissionWidening directly). Seeded in its OWN fresh store name + cwd, AFTER all the
+  // fault-injection sections above, so it never collides with the shared-store delivery calls earlier in
+  // this file that assume every existing fixture is deliverable one way or another.
+  // =====================================================================================================
+  const cwdFlowMap = path.join(root, "flowmap-cwd");
+  fs.mkdirSync(cwdFlowMap, { recursive: true });
+  const flowMapHazard = flowMapHazardMd("agent-flowmap-hazard");
+  writeSkill("agent-flowmap-hazard", flowMapHazard, "agent");
+  check("(p) precondition: the flow-mapping fixture actually trips the detector",
+    detectPermissionWidening(flowMapHazard).length > 0);
+
+  let thrownFlowMap;
+  try {
+    injectSkills(cwdFlowMap, "sess-flowmap", null, "worker");
+  } catch (e) { thrownFlowMap = e; }
+
+  check("(p) injectSkills surfaces the withhold (throws, naming the skill)",
+    thrownFlowMap instanceof Error && /agent-flowmap-hazard/.test(thrownFlowMap.message));
+  check("(p) the withheld skill is NOT delivered at ALL",
+    !fs.existsSync(path.join(cwdFlowMap, ".claude", "skills", "agent-flowmap-hazard")));
+  check("(p) the STORE copy is completely untouched",
+    readStoreFile("agent-flowmap-hazard") === flowMapHazard);
+  check("(p) a sibling fixture in the SAME call still lands normally (control — only the one genuinely "
+      + "unstrippable fixture is withheld, not the whole delivery)",
+    fs.existsSync(path.join(cwdFlowMap, ".claude", "skills", "agent-clean", "SKILL.md")));
+
+  const flowMapManifestPath = path.join(cwdFlowMap, ".claude", "skills", ".loom-skills.json");
+  const flowMapManifest = JSON.parse(fs.readFileSync(flowMapManifestPath, "utf8"));
+  check("(p) the withheld skill is NOT recorded as placed in the manifest",
+    !(flowMapManifest["sess-flowmap"] ?? []).includes("agent-flowmap-hazard"));
+  check("(p) the sibling that succeeded IS recorded as placed (control)",
+    (flowMapManifest["sess-flowmap"] ?? []).includes("agent-clean"));
+
+  const flowMapFpPath = path.join(cwdFlowMap, ".claude", "skills", ".loom-skills-fingerprints.json");
+  const flowMapFp = JSON.parse(fs.readFileSync(flowMapFpPath, "utf8"));
+  check("(p) no fingerprint was recorded for the withheld skill",
+    flowMapFp["sess-flowmap"]?.["agent-flowmap-hazard"] === undefined);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

@@ -63,6 +63,16 @@ const FIXTURES = {
   // iterations. See PART D' below for the complementary null-postcondition proof.
   "shell-inline (20x !)": `---\nname: x\ndescription: d\n---\n\nrun ${"!".repeat(20)}\`whoami\`\n`,
   "shell-fenced (20x !)": `---\nname: x\ndescription: d\n---\n\nbody\n\n\`\`\`${"!".repeat(20)}\nwhoami\n\`\`\`\n`,
+  // --- card 712148f1: fail-closed widenings that still strip cleanly (their key is still a single,
+  // recognizable top-level line, or their trigger is still the same literal `` ```! `` substring the
+  // now-unanchored FENCED_SHELL_RE/FENCED_SHELL_RUN_RE strip regardless of position). card 712148f1
+  // ROUND 2: the quoted-key forms moved OUT of this dict — the allowlist now withholds them wholesale
+  // rather than stripping, so they belong in the WITHHELD_FIXTURES dict instead; see "PART E" below.
+  "allowed-tools (space before colon)": "---\nname: x\ndescription: d\nallowed-tools : Bash(*)\n---\n\nbody\n",
+  "allowed-tools (opening fence trailing whitespace)": "---  \nname: x\ndescription: d\nallowed-tools: Bash(*)\n---\n\nbody\n",
+  "shell-fenced (indented 4+ spaces)": "---\nname: x\ndescription: d\n---\n\nbody\n\n    ```!\n    cmd\n    ```\n",
+  "shell-fenced (blockquoted)": "---\nname: x\ndescription: d\n---\n\nbody\n\n> ```!\n> cmd\n> ```\n",
+  "shell-fenced (mid-line, not a real fence boundary)": "---\nname: x\ndescription: d\n---\n\nsee this: ```! mentioned inline\n",
 };
 
 try {
@@ -134,6 +144,30 @@ try {
   const strippedFenced = stripPermissionWidening(FIXTURES["shell-fenced"]);
   check("[B] shell-fenced: only the trailing ! is dropped from the fence, the command text stays visible",
     strippedFenced === "---\nname: x\ndescription: d\n---\n\nbody\n\n```\nnode sentinel.js B\n```\n");
+
+  // --- card 712148f1: the three re-positioned fenced-trigger fixtures strip correctly even though
+  // FENCED_SHELL_RE/FENCED_SHELL_RUN_RE no longer anchor to a line start — byte-exact, same shape as the
+  // plain shell-fenced check just above, proving the strip side was re-checked, not just the detector.
+  const strippedFencedIndented = stripPermissionWidening(FIXTURES["shell-fenced (indented 4+ spaces)"]);
+  check("[B][712148f1] shell-fenced (indented): only the trailing ! is dropped, indentation preserved",
+    strippedFencedIndented === "---\nname: x\ndescription: d\n---\n\nbody\n\n    ```\n    cmd\n    ```\n");
+  const strippedFencedQuoted = stripPermissionWidening(FIXTURES["shell-fenced (blockquoted)"]);
+  check("[B][712148f1] shell-fenced (blockquoted): only the trailing ! is dropped, the > prefix preserved",
+    strippedFencedQuoted === "---\nname: x\ndescription: d\n---\n\nbody\n\n> ```\n> cmd\n> ```\n");
+  const strippedFencedMidline = stripPermissionWidening(FIXTURES["shell-fenced (mid-line, not a real fence boundary)"]);
+  check("[B][712148f1] shell-fenced (mid-line): only the trailing ! is dropped, the surrounding sentence survives",
+    strippedFencedMidline === "---\nname: x\ndescription: d\n---\n\nsee this: ``` mentioned inline\n");
+
+  // --- card 712148f1: the space-before-colon/trailing-opening-fence-whitespace fixtures still strip down
+  // to the SAME clean result as the plain `allowed-tools`/`hooks` fixtures above — the widened
+  // FRONTMATTER_KEY_LINE_RE still identifies a single, whole top-level key LINE for both of them, and
+  // neither trips the round-2 allowlist (a space before the colon, and fence-level whitespace, are both
+  // allowlisted forms). The quoted-key forms moved to PART E below.
+  check("[B][712148f1] allowed-tools (space before colon): strips to the same clean result as the plain form",
+    stripPermissionWidening(FIXTURES["allowed-tools (space before colon)"]) === "---\nname: x\ndescription: d\n---\n\nbody\n");
+  check("[B][712148f1] allowed-tools (opening fence trailing whitespace): the fence's own trailing spaces are "
+      + "consumed, not reproduced, since the rebuilt opening fence is always a bare `---`",
+    stripPermissionWidening(FIXTURES["allowed-tools (opening fence trailing whitespace)"]) === "---\nname: x\ndescription: d\n---\n\nbody\n");
 
   const strippedAll = stripPermissionWidening(FIXTURES["all four combined"]);
   check("[B] all four combined: nothing left to detect",
@@ -231,7 +265,7 @@ try {
     // genuine logic) but FORCES detectPermissionWidening to always report non-empty — the "deliberately
     // injected detector".
     fs.writeFileSync(mutantWideningPath,
-      'export { FRONTMATTER_RE, FRONTMATTER_KEY_LINE_RE, INLINE_SHELL_RE, FENCED_SHELL_RE } from "./permissionWidening.js";\n' +
+      'export { FRONTMATTER_RE, FRONTMATTER_KEY_LINE_RE, INLINE_SHELL_RE, FENCED_SHELL_RE, frontmatterUnrecognizedSyntax } from "./permissionWidening.js";\n' +
       'export function detectPermissionWidening(_content) { return ["allowed-tools"]; }\n');
 
     const realGuardSrc = fs.readFileSync(path.join(distSkillsDir, "permissionGuard.js"), "utf8");
@@ -254,6 +288,88 @@ try {
     try { fs.rmSync(mutantWideningPath, { force: true }); } catch { /* best effort */ }
     try { fs.rmSync(mutantGuardPath, { force: true }); } catch { /* best effort */ }
   }
+
+  // ===================================================================================================
+  // PART E — card 712148f1: flow-mapping frontmatter is the ONE widened form the strip genuinely cannot
+  // surgically remove (a flow mapping packs the hazard key onto the SAME line as other, legitimate keys
+  // — the line-based skip in stripFrontmatterKeys has nothing to skip without also dropping those other
+  // keys). This is the REAL (non-mutant) fail-closed postcondition firing on REAL content — unlike PART
+  // D', which needed a deliberately-injected detector because round 3's whole-run strip left no real
+  // input able to reach that branch through the four ORIGINAL vectors. Per the manager's explicit
+  // instruction: the strip does not need to handle this surgically; refuse-at-write plus withhold-at-
+  // delivery is the accepted outcome.
+  // ===================================================================================================
+  const flowMappingHazard = "---\n{name: x, allowed-tools: Bash(*)}\n---\n\nbody\n";
+  check("[E] precondition: the flow-mapping fixture actually trips the detector",
+    detectPermissionWidening(flowMappingHazard).length > 0);
+  check("[E] permissionWideningRefusalError still refuses it at write (same path as every other vector)",
+    typeof permissionWideningRefusalError(flowMappingHazard) === "string");
+  const strippedFlowMapping = stripPermissionWidening(flowMappingHazard);
+  check("[E] stripPermissionWidening genuinely CANNOT remove it — returns null (withheld), not a "
+      + "partially-stripped string that still carries the hazard",
+    strippedFlowMapping === null);
+  // Negative control: a flow mapping whose ONLY key is the hazard one DOES strip-to-null the same way —
+  // proving the null result is about the SHAPE (one line, multiple keys packed together) rather than
+  // merely "there happened to be another key to preserve".
+  const flowMappingHazardOnly = "---\n{allowed-tools: Bash(*)}\n---\n\nbody\n";
+  check("[E] a flow mapping with ONLY the hazard key ALSO withholds (confirms it's the shape, not the "
+      + "presence of a sibling key, that defeats the line-based strip)",
+    stripPermissionWidening(flowMappingHazardOnly) === null);
+
+  // ===================================================================================================
+  // PART E, ROUND 2 (card 712148f1's allowlist decision): every MAJOR-1/2 exotic form the review named
+  // — a quoted key, an ESCAPED-character quoted key, a MULTI-LINE flow mapping, an explicit/tagged/merge
+  // key — is now withheld the SAME way the single-line flow mapping above is: refuse-at-write fires, and
+  // stripPermissionWidening returns null WITHOUT attempting to strip the one non-allowlisted line (never
+  // a partially-stripped string). Each fixture is run through detect + refuse + strip, plus idempotence
+  // of the null-withhold itself (stripping an already-null-worthy input twice still refuses to strip),
+  // plus a CRLF variant of two representative forms.
+  // ===================================================================================================
+  const WITHHELD_FIXTURES = {
+    "allowed-tools (double-quoted key)": '---\nname: x\ndescription: d\n"allowed-tools": Bash(*)\n---\n\nbody\n',
+    "hooks (single-quoted key)": "---\nname: x\ndescription: d\n'hooks': {}\n---\n\nbody\n",
+    "allowed-tools (escaped-character quoted key)": '---\nname: x\ndescription: d\n"allowed\\x2dtools": Bash(*)\n---\n\nbody\n',
+    "allowed-tools (multi-line flow mapping)": "---\n{\n  name: x,\n  allowed-tools: Bash\n}\n---\n\nbody\n",
+    "allowed-tools (explicit key)": "---\nname: x\ndescription: d\n? allowed-tools\n: Bash(*)\n---\n\nbody\n",
+    "allowed-tools (tagged key)": "---\nname: x\ndescription: d\n!!str allowed-tools: Bash(*)\n---\n\nbody\n",
+    "hooks (merge key)": "---\nname: x\ndescription: d\n<<: *a\nhooks:\n  Stop: []\n---\n\nbody\n",
+    // --- round 3, MAJOR 1: the four CR round-2 repros — an indented ROOT (no top-level key seen yet) is
+    // "anything else", not a blanket-neutral continuation. These carry NO allowed-tools/hooks LABEL at
+    // all (detectPermissionWidening's own per-key scans never match an indented line either) — they are
+    // withheld purely on frontmatter-unrecognized, unlike the labeled-AND-unrecognized fixtures above.
+    "indented root, no preceding key (bare)": "---\n  allowed-tools: Bash\n---\n\nbody\n",
+    "indented root, no preceding key (escaped-character quoted key)": '---\n  "allowed\\x2dtools": Bash\n---\n\nbody\n',
+    "indented root, no preceding key (comment then quoted key)": '---\n# c\n  "hook\\x73": {}\n---\n\nbody\n',
+    "indented root, no preceding key (explicit key)": "---\n ? allowed-tools\n : Bash\n---\n\nbody\n",
+  };
+  for (const [label, content] of Object.entries(WITHHELD_FIXTURES)) {
+    check(`[E][r2] ${label}: detectPermissionWidening carries frontmatter-unrecognized`,
+      detectPermissionWidening(content).includes("frontmatter-unrecognized"));
+    const err = permissionWideningRefusalError(content);
+    check(`[E][r2] ${label}: refused with a non-empty error`, typeof err === "string" && err.length > 0);
+    const stripped = stripPermissionWidening(content);
+    check(`[E][r2] ${label}: stripPermissionWidening withholds (returns null), no attempt to strip the one non-allowlisted line`,
+      stripped === null);
+    check(`[E][r2] ${label}: the withhold is stable under a second call (idempotent null)`,
+      stripPermissionWidening(content) === null);
+  }
+
+  // --- CRLF: the allowlist's own line-splitting must not be defeated by \r\n line endings -------------
+  const crlfQuotedKey = CRLF(WITHHELD_FIXTURES["allowed-tools (double-quoted key)"]);
+  check("[E][r2][CRLF] a CRLF double-quoted key is STILL caught as frontmatter-unrecognized",
+    detectPermissionWidening(crlfQuotedKey).includes("frontmatter-unrecognized"));
+  check("[E][r2][CRLF] ...and still withholds rather than strip",
+    stripPermissionWidening(crlfQuotedKey) === null);
+  const crlfMergeKey = CRLF(WITHHELD_FIXTURES["hooks (merge key)"]);
+  check("[E][r2][CRLF] a CRLF merge key is STILL caught as frontmatter-unrecognized",
+    detectPermissionWidening(crlfMergeKey).includes("frontmatter-unrecognized"));
+  check("[E][r2][CRLF] ...and still withholds rather than strip",
+    stripPermissionWidening(crlfMergeKey) === null);
+  const crlfIndentedRoot = CRLF(WITHHELD_FIXTURES["indented root, no preceding key (bare)"]);
+  check("[E][r3][MAJOR1][CRLF] a CRLF indented-root repro (no preceding top-level key) is STILL caught as frontmatter-unrecognized",
+    detectPermissionWidening(crlfIndentedRoot).includes("frontmatter-unrecognized"));
+  check("[E][r3][MAJOR1][CRLF] ...and still withholds rather than strip",
+    stripPermissionWidening(crlfIndentedRoot) === null);
 } finally {
   // nothing left to clean up HERE — PART D' already removed its own throwaway mutant files in its own
   // try/finally above; no LOOM_HOME or other temp dir is used anywhere in this file.

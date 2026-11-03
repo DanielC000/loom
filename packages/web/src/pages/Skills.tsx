@@ -186,6 +186,11 @@ const PERMISSION_VECTORS: Record<SkillPermissionVector, { code: string; where: s
     where: "in the frontmatter",
     does: "registers shell hooks that keep running for the rest of the session, on later turns too — denying tools does not stop them",
   },
+  "frontmatter-unrecognized": {
+    code: "(unrecognized syntax)",
+    where: "in the frontmatter",
+    does: "uses a YAML form this scan can't confidently read (a quoted key, a flow mapping, an anchor/alias/tag, …), so it can't rule out a hidden grant",
+  },
   "shell-inline": {
     code: "!`cmd`",
     where: "in the body",

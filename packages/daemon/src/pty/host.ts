@@ -32,7 +32,7 @@ import { ensureTrustedResilient } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
-import { scanCwdSkillsForPermissionFrontmatter, CWD_SKILLS_SCAN_SCOPE, skillPermissionFindingPath } from "../skills/permission-scan.js";
+import { scanCwdSkillsForPermissionFrontmatter, CWD_SKILLS_SCAN_SCOPE, skillPermissionFindingPath, SKILL_PERMISSION_FIELD_LABEL } from "../skills/permission-scan.js";
 import { readContextStats, type ContextStats, isToolResultOnly, userTurnText } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { TRANSCRIPT_ROOT_READ_DENY_RULE, otherProjectTranscriptDenyRules } from "./claude-transcript.js";
@@ -8787,7 +8787,7 @@ export class PtyHost {
         // Card 979f29b9 requirement (a): a loud, explicit daemon line naming the repo-relative path(s)
         // and vector(s) — independent of the durable event/owner-push below, never gated on role.
         for (const f of scan.findings) {
-          console.error(`[pty][skill-permission-widening] ${opts.sessionId}: ${skillPermissionFindingPath(f.name)} carries ${f.fields.join(", ")} — Loom does not own this file, never stripped, see card 979f29b9`);
+          console.error(`[pty][skill-permission-widening] ${opts.sessionId}: ${skillPermissionFindingPath(f.name)} carries ${f.fields.map((v) => SKILL_PERMISSION_FIELD_LABEL[v]).join(", ")} — Loom does not own this file, never stripped, see card 979f29b9`);
         }
         for (const t of scan.truncated) {
           console.error(`[pty][skill-permission-widening] ${opts.sessionId}: scan truncated at the ${t.cap} cap (${CWD_SKILLS_SCAN_SCOPE}) — ${t.names.join(", ") || "none named"}${t.skippedCount ? ` (${t.skippedCount} total skipped)` : ""} may hide an undetected finding, see card 015fdb23`);

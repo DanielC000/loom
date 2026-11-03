@@ -4380,11 +4380,21 @@ export interface SkillSummary {
  *  - `hooks`          frontmatter key — registers shell hooks that keep firing for the REST OF THE
  *                     SESSION. Hooks are not tools, so `--disallowedTools` / a `restrictedTools` deny
  *                     list cannot contain them.
+ *  - `frontmatter-unrecognized` — the frontmatter block contains a line card 712148f1's (round 2)
+ *                     allowlist does not recognize (a quoted key, a flow mapping, an explicit/tagged/
+ *                     merge key, an anchor/alias/tag value, …) — any of these COULD hide a grant from
+ *                     this module's own per-key scan, so it is reported, refused, and withheld fail
+ *                     closed regardless of whether a specific hazardous key was also matched.
  *  - `shell-inline`   a body inline `` !`cmd` `` — runs a shell command when the skill renders,
  *                     before any model turn.
  *  - `shell-fenced`   a body fenced ` ```! ` block — the block form of the same render-time execution.
  */
-export type SkillPermissionVector = "allowed-tools" | "hooks" | "shell-inline" | "shell-fenced";
+export type SkillPermissionVector =
+  | "allowed-tools"
+  | "hooks"
+  | "frontmatter-unrecognized"
+  | "shell-inline"
+  | "shell-fenced";
 
 // --- Context-window sizing -------------------------------------------------------------------
 /** Fallback window for an unknown / not-yet-measured model — the classic Claude context size. */

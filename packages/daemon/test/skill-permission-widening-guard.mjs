@@ -36,7 +36,11 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // Frontmatter block: only the FIRST `---`-delimited block, anchored at the very start of the file — the
 // same bound `skills/store.ts`'s own `descriptionOf()` uses. A later `---` in the body (an ordinary
 // markdown horizontal rule) is never mistaken for a second frontmatter block, and never scanned as one.
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+//
+// @decision 712148f1 — this file deliberately keeps its OWN copy of these patterns (no build step);
+// widen it IN LOCKSTEP with skills/permissionWidening.ts's own patterns, or this lint silently stops
+// catching what the real detector would catch. The `[ \t]*` below mirrors that module's own widening.
+const FRONTMATTER_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 /** Returns the frontmatter block's raw text, or null if `raw` has none (e.g. an ordinary references/**
  *  reference doc, which carries no frontmatter at all). */
@@ -52,17 +56,70 @@ function frontmatterBlockOf(raw) {
  *  whitespace, so an indented/nested key (`foo:\n  hooks: bar`) correctly does NOT count as top-level.
  *  Every bundled SKILL.md today is flat (`name:`/`description:` only — verified by hand, 2026-11-02), so
  *  nothing fancier is needed; a future skill with real nested structure still gets correct
- *  top-level-only matching. */
+ *  top-level-only matching.
+ *
+ *  @decision 712148f1 — tolerates an optional wrapping quote and optional whitespace before the colon
+ *  (fail-closed widening, mirroring skills/permissionWidening.ts's own FRONTMATTER_KEY_LINE_RE). */
 function topLevelKeysOf(block) {
   const keys = [];
   for (const line of block.split(/\r?\n/)) {
-    const m = line.match(/^([A-Za-z0-9_-]+):/);
+    const m = line.match(/^["']?([A-Za-z0-9_-]+)["']?[ \t]*:/);
     if (m) keys.push(m[1].toLowerCase());
   }
   return keys;
 }
 
+/** A key named inside a flow-mapping context (e.g. `{name: x, allowed-tools: Bash}`) — see
+ *  skills/permissionWidening.ts's FLOW_MAPPING_KEY_RE, mirrored here (card 712148f1). Gated on the block
+ *  containing a literal `{` (mirrors that module's own gate) — without it, an ordinary line whose plain
+ *  value merely contains a comma (`name: x, hooks: not a key`) would false-positive with no `{` anywhere. */
+const FLOW_MAPPING_KEY_RE = /[{,][ \t]*["']?([A-Za-z0-9_-]+)["']?[ \t]*:/;
+function flowMappingKeysOf(block) {
+  if (!block.includes("{")) return [];
+  const keys = [];
+  const re = new RegExp(FLOW_MAPPING_KEY_RE.source, "g");
+  let m;
+  while ((m = re.exec(block))) keys.push(m[1].toLowerCase());
+  return keys;
+}
+
 const FORBIDDEN_FRONTMATTER_KEYS = new Set(["allowed-tools", "hooks"]);
+
+// card 712148f1 round 2: the fail-closed ALLOWLIST, mirrored here IN LOCKSTEP with
+// skills/permissionWidening.ts's own PLAIN_TOP_LEVEL_KEY_LINE_RE/SEQUENCE_ITEM_RE/
+// FRONTMATTER_VALUE_START_FORBIDDEN_RE/frontmatterUnrecognizedSyntax — widen both together, or this lint
+// silently stops catching what the real detector would catch. See that module's own doc for why this is
+// an allowlist (boring shapes pass) rather than a denylist (named dangerous shapes) — a denylist of YAML
+// key syntax can't converge.
+const PLAIN_TOP_LEVEL_KEY_LINE_RE = /^([A-Za-z0-9_-]+)[ \t]*:(.*)$/;
+const SEQUENCE_ITEM_RE = /^-(?:[ \t]|$)/;
+const FRONTMATTER_VALUE_START_FORBIDDEN_RE = /^[&*!]/;
+// card 712148f1 round 3, MAJOR 1: an indented line is neutral ONLY after a top-level key has already
+// been seen — mirrors skills/permissionWidening.ts's own fix IN LOCKSTEP. A root block may itself be
+// indented in real YAML, so indentation with no preceding top-level key is "anything else", not a
+// blanket continuation exemption.
+function frontmatterUnrecognizedSyntax(block) {
+  let prevTopLevelKeyEmpty = false;
+  let seenTopLevelKey = false;
+  for (const line of block.split(/\r?\n/)) {
+    if (line.trim() === "" || line.startsWith("#")) continue;
+    if (/^[ \t]/.test(line)) {
+      if (seenTopLevelKey) continue;
+      return true;
+    }
+    if (SEQUENCE_ITEM_RE.test(line)) {
+      if (prevTopLevelKeyEmpty) continue;
+      return true;
+    }
+    const m = line.match(PLAIN_TOP_LEVEL_KEY_LINE_RE);
+    if (!m) return true;
+    seenTopLevelKey = true;
+    const value = (m[2] ?? "").trim();
+    prevTopLevelKeyEmpty = value === "";
+    if (value !== "" && FRONTMATTER_VALUE_START_FORBIDDEN_RE.test(value)) return true;
+  }
+  return false;
+}
 
 // Body injection forms, per card 28b2ca6f's probes (P1/P2, P8/P9) and the Claude Code skills docs it
 // quotes: an inline `!` immediately followed by a backtick-delimited command, or a fenced code block
@@ -76,16 +133,22 @@ const FORBIDDEN_FRONTMATTER_KEYS = new Set(["allowed-tools", "hooks"]);
 // preceded by a backtick rules this out: in genuine `` !`cmd` `` syntax the "!" sits OUTSIDE any code
 // span, immediately before the one it opens — never immediately after one that just closed.
 const INLINE_SHELL_RE = /(?<!`)!`[^`\n]+`/;
-const FENCED_SHELL_RE = /^[ \t]{0,3}```!/m;
+// @decision 712148f1 — NOT anchored to a line start (mirrors skills/permissionWidening.ts's own widening).
+const FENCED_SHELL_RE = /```!/;
 
 /** Scans one file's raw text; returns a list of violation labels (empty array = clean). */
 function scanContent(raw) {
   const violations = [];
   const block = frontmatterBlockOf(raw);
   if (block) {
-    for (const key of topLevelKeysOf(block)) {
+    const keys = [...topLevelKeysOf(block), ...flowMappingKeysOf(block)];
+    for (const key of keys) {
       if (FORBIDDEN_FRONTMATTER_KEYS.has(key)) violations.push(`frontmatter '${key}:'`);
     }
+    // card 712148f1 round 2: apply the SAME allowlist the real detector folds into the
+    // `frontmatter-unrecognized` vector — a bundled skill's frontmatter must use only the boring,
+    // recognized YAML shapes too, regardless of whether a specific hazardous key is also matched.
+    if (frontmatterUnrecognizedSyntax(block)) violations.push("frontmatter (unrecognized YAML syntax)");
   }
   if (INLINE_SHELL_RE.test(raw)) violations.push("inline shell injection (!`cmd`)");
   if (FENCED_SHELL_RE.test(raw)) violations.push("fenced shell injection (```!)");
@@ -121,6 +184,24 @@ check("(self) a clean, realistic SKILL.md-shaped fixture is NOT flagged",
       + "# Example\n\nFollow the repo's `CLAUDE.md` and run `pnpm build` before you report done. "
       + "Never use `!` to mean \"not\" in a shell conditional without quoting it.\n",
   ).length === 0);
+
+// card 712148f1 round 2: the allowlist self-test — a quoted key is caught, a plain column-0 block
+// sequence under an empty-valued key is NOT.
+check("(self) a double-quoted frontmatter key is flagged as unrecognized YAML syntax",
+  scanContent('---\nname: x\n"allowed-tools": Bash(*)\n---\nbody\n').includes("frontmatter (unrecognized YAML syntax)"));
+check("(self) a column-0 block sequence under an empty-valued key is NOT flagged (allowlisted form)",
+  scanContent("---\nname: x\ntags:\n- a\n- b\n---\nbody\n").length === 0);
+
+// card 712148f1 round 3, MAJOR 1: the four CR round-2 repros — an indented ROOT (no top-level key seen
+// yet) is now unrecognized syntax, not a blanket-neutral continuation.
+check("(self) [MAJOR1] an indented allowed-tools: line with NO preceding top-level key is flagged unrecognized",
+  scanContent('---\n  allowed-tools: Bash\n---').includes("frontmatter (unrecognized YAML syntax)"));
+check("(self) [MAJOR1] an indented escaped-character quoted key with NO preceding top-level key is flagged unrecognized",
+  scanContent('---\n  "allowed\\x2dtools": Bash\n---').includes("frontmatter (unrecognized YAML syntax)"));
+check("(self) [MAJOR1] a comment then an indented quoted key with NO preceding top-level key is flagged unrecognized",
+  scanContent('---\n# c\n  "hook\\x73": {}\n---').includes("frontmatter (unrecognized YAML syntax)"));
+check("(self) [MAJOR1] an indented explicit-key pair with NO preceding top-level key is flagged unrecognized",
+  scanContent('---\n ? allowed-tools\n : Bash\n---').includes("frontmatter (unrecognized YAML syntax)"));
 
 // ── The real scan: every packages/daemon/assets/skills/<name>/SKILL.md + references/** file ──────────
 

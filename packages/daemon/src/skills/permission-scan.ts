@@ -29,9 +29,32 @@ export { CWD_SKILLS_SCAN_SCOPE };
  *  `shell-fenced` are excluded on purpose — `disableSkillShellExecution` (this same card) already
  *  neutralizes both for every `LOOM_DRIVEN_ROLES` session (`assistant` included), so flagging them here
  *  too would warn about a vector that no longer executes for the role this scan's escalation path cares
- *  about. See the decision record ("already neutralized" note, card 979f29b9). */
-export type SkillPermissionField = Extract<SkillPermissionVector, "allowed-tools" | "hooks">;
-const SCAN_FIELDS: readonly SkillPermissionField[] = ["allowed-tools", "hooks"];
+ *  about. See the decision record ("already neutralized" note, card 979f29b9).
+ *
+ * @decision 712148f1 (round 3, MAJOR 2) — every vector other than those two is in scope BY DEFAULT now;
+ * never go back to an INCLUDE allowlist of named vectors here — that shape silently drops any vector it
+ * doesn't already enumerate, `frontmatter-unrecognized` among them. */
+export type SkillPermissionField = Exclude<SkillPermissionVector, "shell-inline" | "shell-fenced">;
+const EXCLUDED_SCAN_VECTORS: ReadonlySet<SkillPermissionVector> = new Set(["shell-inline", "shell-fenced"]);
+
+/** `v` is within this scan's own vocabulary (see {@link SkillPermissionField}'s own doc) — EXCLUDE-shaped
+ *  on purpose, so a brand-new `SkillPermissionVector` added later is scanned with no change here. Exported
+ *  so a test can prove the shape directly, including against a synthetic vector id that doesn't exist in
+ *  today's union yet (card 712148f1 round 3, MAJOR 2's own "future vector" proof). */
+export function isScannedPermissionField(v: SkillPermissionVector): v is SkillPermissionField {
+  return !EXCLUDED_SCAN_VECTORS.has(v);
+}
+
+/** Short, human-readable label for every field this scan can surface, for the `pty/host.ts` console
+ *  line (the one place `findings[].fields` is rendered/logged). Keyed by `SkillPermissionField` itself
+ *  — a future vector this scan newly includes (every one but the two shell forms, per
+ *  `isScannedPermissionField`'s own EXCLUDE shape) is a compile error here until it's given a label,
+ *  never a silent bare-id fallback. */
+export const SKILL_PERMISSION_FIELD_LABEL: Record<SkillPermissionField, string> = {
+  "allowed-tools": "allowed-tools:",
+  hooks: "hooks:",
+  "frontmatter-unrecognized": "unrecognized frontmatter syntax",
+};
 
 export interface SkillPermissionFinding {
   name: string;
@@ -87,9 +110,10 @@ export interface SkillPermissionScanResult {
  * not own this file). See the decision record (folds in card 979f29b9's "warn only" ruling) for the
  * scope limit and why a Loom-owned name is excluded.
  *
- * Flags a non-Loom-owned skill carrying `allowed-tools:`/`hooks:` frontmatter via the ONE shared
- * detector (`detectPermissionWidening`, card 87a51903 — never a second hand-rolled pattern set),
- * filtered to {@link SCAN_FIELDS}.
+ * Flags a non-Loom-owned skill carrying a permission-widening construct via the ONE shared detector
+ * (`detectPermissionWidening`, card 87a51903 — never a second hand-rolled pattern set), filtered to
+ * {@link isScannedPermissionField} (every vector but the two `disableSkillShellExecution` already
+ * neutralizes — see that function's own doc).
  *
  * `claimedFingerprints` (CR round 3, finding 3) — `InjectSkillsResult.claimedFingerprints` from the SAME
  * `injectSkills` call this scan runs right after. A `claimedByLoom` name is excluded from the scan ONLY
@@ -164,7 +188,7 @@ export function scanCwdSkillsForPermissionFrontmatter(
     if (head.truncated && frontmatterReadIncomplete(head.content)) {
       truncated.push({ cap: "readBytes", names: [name], size: head.size, mtimeMs: head.mtimeMs });
     }
-    const fields = detectPermissionWidening(head.content).filter((v): v is SkillPermissionField => (SCAN_FIELDS as readonly string[]).includes(v));
+    const fields = detectPermissionWidening(head.content).filter(isScannedPermissionField);
     if (fields.length) findings.push({ name, fields, contentHash: createHash("sha256").update(head.content, "utf8").digest("hex") });
   }
   return { findings, truncated, incomplete };

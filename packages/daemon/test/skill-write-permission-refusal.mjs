@@ -97,6 +97,29 @@ try {
     check(`(a) skill_write [${vector}]: wrote NOTHING to the store`, !fs.existsSync(storeSkillMd(skillName)));
   }
 
+  // ============ (a') card 712148f1: refuse-at-write for the fail-closed widened forms, including the
+  // ONE exotic form (flow-mapping) the strip side cannot surgically remove — refuse-at-write is unaware
+  // of, and unaffected by, whatever the strip side can or cannot do; detectPermissionWidening is the
+  // ONLY thing either path reads. ============
+  const WIDENED_FIXTURES = [
+    { label: "allowed-tools (double-quoted key)", vectorId: "allowed-tools",
+      content: "---\nname: hazard-quoted\ndescription: d\n\"allowed-tools\": Bash(*)\n---\n\nbody\n" },
+    { label: "hooks (space before colon)", vectorId: "hooks",
+      content: "---\nname: hazard-spacecolon\ndescription: d\nhooks : {}\n---\n\nbody\n" },
+    { label: "allowed-tools (flow-mapping frontmatter)", vectorId: "allowed-tools",
+      content: "---\n{name: hazard-flowmap, allowed-tools: Bash(*)}\n---\n\nbody\n" },
+    { label: "shell-fenced (blockquoted)", vectorId: "shell-fenced",
+      content: "---\nname: hazard-fencedquote\ndescription: d\n---\n\n> ```!\n> cmd\n> ```\n" },
+  ];
+  for (const { label, vectorId, content } of WIDENED_FIXTURES) {
+    const skillName = `hazard-${label.replace(/[^a-z]/gi, "").toLowerCase()}`;
+    const res = await platformCall("skill_write", { name: skillName, content, confirm: true });
+    check(`(a') skill_write [${label}]: refused`, typeof res.error === "string" && !res.ok);
+    check(`(a') skill_write [${label}]: error names the vector id (${vectorId})`,
+      typeof res.error === "string" && res.error.includes(vectorId));
+    check(`(a') skill_write [${label}]: wrote NOTHING to the store`, !fs.existsSync(storeSkillMd(skillName)));
+  }
+
   // ============ (b) skill_edit refuses too (delegates to skillWriteData) ============================
   // Seed a clean skill first, then try to edit it INTO a hazard — skill_edit must refuse the resulting
   // merged content and leave the original untouched.

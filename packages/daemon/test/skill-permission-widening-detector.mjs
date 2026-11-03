@@ -7,6 +7,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // PART A — the detector (dist/skills/permissionWidening.js; pure text, no fs/LOOM_HOME):
 //   • one positive control per vector, in isolation, plus all four at once and the reported ORDER;
+//   • card 712148f1 round 2's ALLOWLIST (frontmatterUnrecognizedSyntax, folded into the
+//     `frontmatter-unrecognized` vector): every exotic YAML form the round-1 denylist could not
+//     converge on (multi-line flow mapping, an escaped-character quoted key, an explicit/tagged/merge
+//     key, an anchor/alias/tag value) now fails closed via ONE generic rule, plus the three allowlisted
+//     shapes (a column-0 block sequence, an indented continuation, a column-0 comment) that must NOT
+//     be flagged, plus frontmatterReadIncomplete's own truncated-open-fence coverage (MINOR 3);
 //   • the negative traps: the two-code-span prose false positive the `(?<!`)` lookbehind exists for,
 //     an indented/nested `hooks:` that is a DIFFERENT field, the field names mentioned in body prose,
 //     a body `---` horizontal rule that is not a second frontmatter block, and a realistic clean skill;
@@ -44,7 +50,8 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;    // Windows
 process.env.HOME = sandboxHome;           // POSIX
 
-const { detectPermissionWidening, permissionWideningField } = await import("../dist/skills/permissionWidening.js");
+const { detectPermissionWidening, permissionWideningField, frontmatterReadIncomplete } =
+  await import("../dist/skills/permissionWidening.js");
 const { listSkills, writeSkill } = await import("../dist/skills/store.js");
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
@@ -78,6 +85,122 @@ try {
       ["allowed-tools", "shell-inline", "shell-fenced"]));
   check("[A] an UPPERCASE frontmatter key still matches (keys are compared case-insensitively)",
     same(detectPermissionWidening('---\nname: x\nAllowed-Tools: Bash(*)\n---\nbody\n'), ["allowed-tools"]));
+
+  // --- card 712148f1: fail-closed widenings for forms the installed CLI binary was confirmed (or could
+  // not be ruled out) to accept — see docs/decisions/712148f1-*.md for the evidence per form -----------
+  check("[712148f1] opening fence with trailing whitespace (confirmed accepted by the real loader)",
+    same(detectPermissionWidening('---  \nname: x\nallowed-tools: Bash(*)\n---\nbody\n'), ["allowed-tools"]));
+  check("[712148f1] opening fence with a trailing tab",
+    same(detectPermissionWidening('---\t\nname: x\nhooks: {}\n---\nbody\n'), ["hooks"]));
+  // --- card 712148f1 ROUND 2: the allowlist now adds the generic `frontmatter-unrecognized` vector
+  // alongside any specific key it still happens to label — a quoted key / flow mapping is no longer
+  // treated as a cleanly-identified single vector; it is BOTH labeled (where the existing quote-tolerant
+  // key regex can still name it) AND reported as unrecognized syntax (fail closed either way). ---------
+  check("[712148f1][r2] a double-quoted frontmatter key is labeled AND flagged unrecognized",
+    same(detectPermissionWidening('---\nname: x\n"allowed-tools": Bash(*)\n---\nbody\n'), ["allowed-tools", "frontmatter-unrecognized"]));
+  check("[712148f1][r2] a single-quoted frontmatter key is labeled AND flagged unrecognized",
+    same(detectPermissionWidening("---\nname: x\n'hooks': {}\n---\nbody\n"), ["hooks", "frontmatter-unrecognized"]));
+  check("[712148f1] whitespace before the colon (still an allowlisted plain top-level line)",
+    same(detectPermissionWidening('---\nname: x\nallowed-tools : Bash(*)\n---\nbody\n'), ["allowed-tools"]));
+  check("[712148f1][r2] flow-mapping frontmatter: the hazard key is the FIRST key, right after { — labeled AND unrecognized",
+    same(detectPermissionWidening('---\n{allowed-tools: Bash(*), name: x}\n---\nbody\n'), ["allowed-tools", "frontmatter-unrecognized"]));
+  check("[712148f1][r2] flow-mapping frontmatter: the hazard key is a LATER key, after a comma — labeled AND unrecognized",
+    same(detectPermissionWidening('---\n{name: x, hooks: {}}\n---\nbody\n'), ["hooks", "frontmatter-unrecognized"]));
+  check("[712148f1][r2] flow-mapping frontmatter with a quoted key — labeled AND unrecognized",
+    same(detectPermissionWidening("---\n{name: x, 'allowed-tools': Bash}\n---\nbody\n"), ["allowed-tools", "frontmatter-unrecognized"]));
+  check("[712148f1][trap] a comma in an ORDINARY (non-flow-mapping) line's plain value is NOT flagged — "
+      + "no `{` anywhere in the block means nothing here LOOKS like a flow mapping",
+    same(detectPermissionWidening('---\nname: x, hooks: not a key\ndescription: d\n---\nbody\n'), []));
+  check("[712148f1] fenced trigger indented 4+ spaces (CommonMark would read this as a literal/indented "
+      + "code block, but the real loader's regex has no indentation check at all)",
+    same(detectPermissionWidening(FM + 'body\n\n    ```!\n    cmd\n    ```\n'), ["shell-fenced"]));
+  check("[712148f1] fenced trigger inside a blockquote",
+    same(detectPermissionWidening(FM + 'body\n\n> ```!\n> cmd\n> ```\n'), ["shell-fenced"]));
+  check("[712148f1] fenced trigger occurring mid-line (not a real fence boundary at all)",
+    same(detectPermissionWidening(FM + 'see this: ```! mentioned inline\n'), ["shell-fenced"]));
+  check("[712148f1] the triage-note case `` `!`x` `` is RESOLVED as NOT a bypass — the real loader's own "
+      + "inline-trigger regex requires the `!` be preceded by whitespace/start, a strict SUBSET of this "
+      + "detector's own (?<!`) exclusion, so a backtick-preceded `!` is inert on BOTH sides",
+    same(detectPermissionWidening(FM + 'see `!`x`` here\n'), []));
+  check("[712148f1][trap] a flow-mapping's own QUOTED STRING VALUE containing a `, hooks:`-shaped "
+      + "substring is a KNOWN, ACCEPTED over-match once a real `{` is present elsewhere in the block — "
+      + "documented here so it is never mistaken for a regression (and the { itself is independently "
+      + "unrecognized syntax, round 2)",
+    same(detectPermissionWidening('---\n{name: x, note: "a, hooks: looking substring"}\n---\nbody\n'), ["hooks", "frontmatter-unrecognized"]));
+  check("[712148f1] `...` as a closing fence is confirmed NOT accepted by the real loader, so it is "
+      + "correctly NOT treated as frontmatter here either (the whole file reads as ordinary body)",
+    same(detectPermissionWidening('---\nname: x\nallowed-tools: Bash(*)\n...\nbody\n'), []));
+  check("[712148f1] a tilde fence (~~~!) is confirmed NOT recognized by the real loader, so it correctly "
+      + "stays unflagged here too",
+    same(detectPermissionWidening(FM + 'body\n\n~~~!\ncmd\n~~~\n'), []));
+
+  // --- card 712148f1 ROUND 2: the ALLOWLIST — every MAJOR-1/2 form the review named, each flagged via
+  // the ONE generic `frontmatter-unrecognized` vector rather than a denylist branch per shape ----------
+  check("[712148f1][r2] MULTI-LINE flow mapping (the brace sits on its OWN line) is now caught",
+    same(detectPermissionWidening('---\n{\n  name: x,\n  allowed-tools: Bash\n}\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] MULTI-LINE flow mapping naming hooks: is now caught",
+    same(detectPermissionWidening('---\n{name: x,\n  hooks: {}}\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] an ESCAPED-character double-quoted key (the literal bytes never spell "
+      + "allowed-tools, only a YAML string-escape would) is caught as unrecognized syntax",
+    same(detectPermissionWidening('---\nname: x\n"allowed\\x2dtools": Bash(*)\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] an explicit YAML key (`? k` / `: v` on separate lines) is caught",
+    same(detectPermissionWidening('---\nname: x\n? allowed-tools\n: Bash(*)\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] a TAGGED key (`!!str allowed-tools: Bash`) is caught",
+    same(detectPermissionWidening('---\nname: x\n!!str allowed-tools: Bash(*)\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] a MERGE key (`<<: *a`) is caught",
+    same(detectPermissionWidening('---\nname: x\n<<: *a\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] a plain top-level value starting with an ANCHOR (&) is caught",
+    same(detectPermissionWidening('---\nname: x\nbase: &anchor\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] a plain top-level value starting with an ALIAS (*) is caught",
+    same(detectPermissionWidening('---\nname: x\nref: *anchor\n---\nbody\n'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r2] a plain top-level value starting with a TAG (!) is caught",
+    same(detectPermissionWidening('---\nname: x\nkind: !!str plain\n---\nbody\n'), ["frontmatter-unrecognized"]));
+
+  // --- card 712148f1 ROUND 2: the allowlist's own POSITIVE forms must NOT be flagged ------------------
+  check("[712148f1][r2][allow] a column-0 block sequence directly under an empty-valued key is ALLOWED",
+    same(detectPermissionWidening('---\nname: x\ntags:\n- a\n- b\ndescription: d\n---\nbody\n'), []));
+  check("[712148f1][r2][allow] a column-0 comment line between frontmatter keys is ALLOWED",
+    same(detectPermissionWidening('---\nname: x\n# just a comment\ndescription: d\n---\nbody\n'), []));
+  check("[712148f1][r2][allow] a blank line inside the frontmatter block is ALLOWED",
+    same(detectPermissionWidening('---\nname: x\n\ndescription: d\n---\nbody\n'), []));
+  check("[712148f1][r2][allow][trap] a column-0 `-` sequence item with NO preceding empty-valued key is "
+      + "NOT allowlisted (it isn't continuing anything) — proves (iii) isn't a blanket dash exemption",
+    same(detectPermissionWidening('---\n- a\nname: x\n---\nbody\n'), ["frontmatter-unrecognized"]));
+
+  // --- card 712148f1 ROUND 3, MAJOR 1: the four CR round-2 repros — an indented ROOT (no top-level key
+  // seen yet) used to be treated as a blanket-neutral continuation; it is now "anything else", same as a
+  // quoted/flow/explicit/tagged/merge-key line. ------------------------------------------------------
+  check("[712148f1][r3][MAJOR1] an indented allowed-tools: line with no preceding top-level key is caught",
+    same(detectPermissionWidening('---\n  allowed-tools: Bash\n---'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r3][MAJOR1] an indented escaped-character quoted key with no preceding top-level key is caught",
+    same(detectPermissionWidening('---\n  "allowed\\x2dtools": Bash\n---'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r3][MAJOR1] a comment then an indented quoted key with no preceding top-level key is caught",
+    same(detectPermissionWidening('---\n# c\n  "hook\\x73": {}\n---'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r3][MAJOR1] an indented explicit-key pair with no preceding top-level key is caught",
+    same(detectPermissionWidening('---\n ? allowed-tools\n : Bash\n---'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r3][MAJOR1][CRLF] the same indented-root repro under CRLF line endings is still caught",
+    same(detectPermissionWidening('---\r\n  allowed-tools: Bash\r\n---'), ["frontmatter-unrecognized"]));
+  check("[712148f1][r3][MAJOR1] a REGRESSION control: the SAME key, NOT indented (a genuine top-level "
+      + "key), stays the ordinary recognized/labeled-only form — this round's fix is about indentation "
+      + "with NO preceding top-level key, not about a bare top-level key becoming unrecognized",
+    same(detectPermissionWidening('---\nallowed-tools: Bash\n---'), ["allowed-tools"]));
+  check("[712148f1][r3][MAJOR1] the accepted residual is UNCHANGED: a nested key AFTER a real top-level key "
+      + "is still a neutral continuation (this round's fix is about the ROOT having no key yet, not about "
+      + "nested keys under one that already exists)",
+    same(detectPermissionWidening('---\nname: x\ncapabilities:\n  hooks: not-the-same-field\n---\nbody\n'), []));
+
+  // --- frontmatterReadIncomplete: MINOR 3 — a truncated read whose OPEN fence itself carries the
+  // confirmed-accepted trailing-whitespace widening must still be recognized as "opened" -------------
+  check("[712148f1][r2][MINOR3] a read truncated mid-frontmatter, opening fence with trailing whitespace",
+    frontmatterReadIncomplete('---  \nname: x\nallowed-tools: Bash(*\n') === true);
+  check("[712148f1][r2][MINOR3] same truncated read, opening fence with a trailing tab",
+    frontmatterReadIncomplete('---\t\nname: x\nhooks: {}\n') === true);
+  check("frontmatterReadIncomplete: no frontmatter at all is NOT incomplete (nothing to miss)",
+    frontmatterReadIncomplete('# just a markdown file\n\nbody\n') === false);
+  check("frontmatterReadIncomplete: a block that closes well within content is NOT incomplete",
+    frontmatterReadIncomplete('---\nname: x\n---\nbody\n') === false);
+  check("frontmatterReadIncomplete: a block that never closes anywhere in content IS incomplete",
+    frontmatterReadIncomplete('---\nname: x\nallowed-tools: Bash(*)\n') === true);
 
   // --- negative traps: the scanner must NOT over-match ordinary doctrine prose ---------------------
   // THE trap this detector's lookbehind exists for: two unrelated code spans with a bare "!" between

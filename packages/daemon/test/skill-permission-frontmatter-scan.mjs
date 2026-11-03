@@ -31,7 +31,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-skperm-${Date.now()}-${process.pid}
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { scanCwdSkillsForPermissionFrontmatter, PERMISSION_SCAN_MAX_ENTRIES, PERMISSION_SCAN_MAX_READ_BYTES, TRUNCATION_NAMES_MAX } =
+const { scanCwdSkillsForPermissionFrontmatter, PERMISSION_SCAN_MAX_ENTRIES, PERMISSION_SCAN_MAX_READ_BYTES, TRUNCATION_NAMES_MAX, isScannedPermissionField } =
   await import("../dist/skills/permission-scan.js");
 const { fingerprintSkillDir, injectSkills } = await import("../dist/skills/inject.js");
 const { Db } = await import("../dist/db.js");
@@ -238,6 +238,55 @@ try {
         const evilTrunc = r.truncated.find((t) => t.cap === "entries");
         return !r.findings.some((f) => f.name === "zzz-evil") && !!evilTrunc && evilTrunc.names.includes("zzz-evil");
       })());
+  }
+
+  // ===================================================================================================
+  // PART 1b — card 712148f1 round 3, MAJOR 2: the scan's own vocabulary is now EXCLUDE-shaped (every
+  // vector but the two shell forms disableSkillShellExecution already neutralizes), not an INCLUDE
+  // allowlist of exactly "allowed-tools"/"hooks" — so a skill whose frontmatter trips ONLY
+  // frontmatter-unrecognized (no allowed-tools/hooks key also independently labeled) must now surface a
+  // real finding, where the OLD allowlist-shaped SCAN_FIELDS would have silently dropped it entirely
+  // (zero findings for a skill the shared detector genuinely flagged).
+  // ===================================================================================================
+  {
+    const cwd = path.join(scratchRoot, `p1b-${sfx}`);
+    fs.mkdirSync(cwd, { recursive: true });
+
+    // An explicit YAML key (`? ... : ...`) — unrelated to allowed-tools/hooks by NAME, so the old
+    // allowlist-shaped SCAN_FIELDS reported NOTHING for this skill at all; it is now surfaced via the
+    // frontmatter-unrecognized field.
+    writeSkill(cwd, "unrecognized-fm-only", 'name: unrecognized-fm-only\n? weird-key\n: value\n');
+    // A quoted allowed-tools key — BOTH a specific key label AND frontmatter-unrecognized, proving the
+    // new field is additive alongside an already-caught one, not a replacement for it.
+    writeSkill(cwd, "unrecognized-fm-plus-tools", 'name: unrecognized-fm-plus-tools\n"allowed-tools": Bash(*)\n');
+
+    const { findings, truncated, incomplete } = scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    const byName = (n) => findings.find((f) => f.name === n);
+    check("PART1b-1: a skill whose ONLY hazard is unrecognized frontmatter syntax is now a real finding "
+        + "(the old allowlist-shaped SCAN_FIELDS would have reported ZERO findings here)",
+      byName("unrecognized-fm-only")?.fields?.includes("frontmatter-unrecognized"));
+    check("PART1b-1b: ...and carries NO allowed-tools/hooks label (it genuinely has neither)",
+      !byName("unrecognized-fm-only")?.fields?.includes("allowed-tools") && !byName("unrecognized-fm-only")?.fields?.includes("hooks"));
+    check("PART1b-2: a skill with BOTH a specific key AND unrecognized syntax reports both fields",
+      byName("unrecognized-fm-plus-tools")?.fields?.includes("allowed-tools")
+        && byName("unrecognized-fm-plus-tools")?.fields?.includes("frontmatter-unrecognized"));
+    check("PART1b-3: nothing else about the scan broke — no truncation, not incomplete",
+      truncated.length === 0 && incomplete === false);
+
+    // isScannedPermissionField itself: the EXCLUDE-shaped predicate the scan's own filter now uses —
+    // today's real vectors are all included, the two shell forms stay excluded (disableSkillShellExecution
+    // already neutralizes them), and — the actual "future vector" proof — a SYNTHETIC vector id that
+    // does not exist in today's SkillPermissionVector union at all is ALSO included by default. This is
+    // what a runtime fixture for a real not-yet-invented vector cannot otherwise prove: the design is
+    // EXCLUDE-shaped, so nothing here needs updating when SkillPermissionVector grows a new member.
+    check("PART1b-4: today's real non-shell vectors are all included by isScannedPermissionField",
+      isScannedPermissionField("allowed-tools") && isScannedPermissionField("hooks") && isScannedPermissionField("frontmatter-unrecognized"));
+    check("PART1b-5: the two shell forms stay excluded",
+      !isScannedPermissionField("shell-inline") && !isScannedPermissionField("shell-fenced"));
+    check("PART1b-6: a SYNTHETIC vector id that does not exist in today's SkillPermissionVector union is "
+        + "ALSO included by default — proves the filter is EXCLUDE-shaped, not an allowlist that would "
+        + "silently drop a real future vector the way the old SCAN_FIELDS array did for frontmatter-unrecognized",
+      isScannedPermissionField("some-future-vector-id"));
   }
 
   // ===================================================================================================
