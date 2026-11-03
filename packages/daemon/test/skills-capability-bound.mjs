@@ -47,8 +47,9 @@ fs.mkdirSync(skillsDir, { recursive: true });
 
 const skillMd = (name) => `---\nname: ${name}\ndescription: test skill ${name}\n---\n\n# ${name}\n`;
 
-// Store: a plain unbound control skill + a skill we'll bind via the test-injected override (NOT the real
-// shipped CAPABILITY_BOUND_SKILLS map, which stays empty in this card — see inject.ts).
+// Store: a plain unbound control skill + a skill we'll bind via the test-injected override (NOT the
+// real shipped CAPABILITY_BOUND_SKILLS map — see case (20) below for that one, against the real
+// shipped `loom-shadcn` skill and its real `shadcn` binding).
 for (const n of ["plain-skill", "bound-skill"]) {
   fs.mkdirSync(path.join(skillsDir, n), { recursive: true });
   fs.writeFileSync(path.join(skillsDir, n, "SKILL.md"), skillMd(n));
@@ -382,6 +383,31 @@ try {
     };
     check("(19a) manifest key order [A,B]: current content (matches B's fp) is still cleaned", runOrder("case19-orderAB", ["A", "B"]));
     check("(19b) manifest key order [B,A]: current content (matches B's fp) is still cleaned", runOrder("case19-orderBA", ["B", "A"]));
+  }
+
+  // --- (20) card 00a7d511: the REAL shipped CAPABILITY_BOUND_SKILLS map + the REAL bundled
+  //     `loom-shadcn` skill — end-to-end proof of the actual production binding, not just the generic
+  //     mechanism (cases 1-19 already prove that with fictional test names). Copies the real bundled
+  //     asset into the test's own store (mirroring what seedGlobalSkills does at boot), then calls
+  //     injectSkills with the capabilityBindings param OMITTED — the real default map decides. -----------
+  {
+    const realSkillSrc = path.join(__dirname, "..", "assets", "skills", "loom-shadcn");
+    fs.cpSync(realSkillSrc, path.join(skillsDir, "loom-shadcn"), { recursive: true });
+
+    const cwdGranted = isolatedCwd("case20-real-shadcn-granted");
+    injectSkills(cwdGranted, "sess20a", null, "worker", false, undefined, ["shadcn"]);
+    check("(20a) granted shadcn capability + isolated worktree cwd: real loom-shadcn skill delivered via the REAL map",
+      readDelivered(cwdGranted).includes("loom-shadcn"));
+
+    const cwdUngranted = isolatedCwd("case20-real-shadcn-ungranted");
+    injectSkills(cwdUngranted, "sess20b", null, "worker", false, undefined, []);
+    check("(20b) no shadcn capability + isolated worktree cwd: real loom-shadcn skill withheld via the REAL map",
+      !readDelivered(cwdUngranted).includes("loom-shadcn"));
+
+    const cwdGrantedShared = sharedCwd("case20-real-shadcn-granted-shared");
+    injectSkills(cwdGrantedShared, "sess20c", null, "manager", false, undefined, ["shadcn"]);
+    check("(20c) granted shadcn capability + SHARED cwd: still withheld (isolation required even for the real binding)",
+      !readDelivered(cwdGrantedShared).includes("loom-shadcn"));
   }
 } catch (e) {
   console.log(`FAIL  unexpected throw: ${e.stack}`);

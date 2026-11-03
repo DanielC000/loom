@@ -181,15 +181,19 @@ const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "loom-session-end"]);
 /** Generic slug→skill-name binding (agent-tooling P4 phase 2): a bound skill is withheld from the
  *  deliver-all default unless (a) `cwd` is a worktree-isolated cwd (see `isWorktreeCwd` below) AND (b)
  *  the session's resolved capabilities include the named slug — see `injectSkills`'s own doc comment for
- *  the full mechanism and residuals. Ships EMPTY here — this card adds only the mechanism; a real binding
- *  (e.g. a `shadcn` skill bound to the `shadcn` capability) lands in a later card. `Object.create(null)`,
- *  not `{}` (mirrors `store.ts`'s `emptyProvenanceMap`), paired with `passesCapabilityGate`'s own
- *  `Object.hasOwn` read: neither a lookup here nor a caller-supplied override can resolve a prototype
- *  property name ("constructor" and friends) as if it were a real binding.
+ *  the full mechanism and residuals. `Object.create(null)`, not `{}` (mirrors `store.ts`'s
+ *  `emptyProvenanceMap`), paired with `passesCapabilityGate`'s own `Object.hasOwn` read: neither a lookup
+ *  here nor a caller-supplied override can resolve a prototype property name ("constructor" and friends)
+ *  as if it were a real binding.
+ *
+ *  Card 00a7d511: `loom-shadcn` is the first real entry — a generic doctrine skill delivered only to a
+ *  session granted the `shadcn` capability (`capabilities/seed.ts`'s "shadcn" row).
  *
  *  @decision 31f997e7 — this gate is delivery hygiene, NOT a security boundary; never the only thing
  *  standing between an agent and a capability. See the decision record for the full mechanism. */
-const CAPABILITY_BOUND_SKILLS: Record<string, string> = Object.create(null);
+const CAPABILITY_BOUND_SKILLS: Record<string, string> = Object.assign(Object.create(null), {
+  "loom-shadcn": "shadcn",
+});
 
 /** Whether `cwd` is a worktree-isolated session home — i.e. genuinely exclusive to ONE session, never
  *  shared with another live session the way `project.repoPath` is (manager/platform/setup/auditor/plain/
