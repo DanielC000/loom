@@ -1118,12 +1118,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // worker_spawn is unblocked. ADDITIVE: detection re-arms the latch on the next real cap.
   //
   // CASCADE + AUTO-NUDGE (owner requirement): clearing the global hold ALSO clears every session still
-  // parked with a rate-limit AND resumes the LIVE ones — per-session this is exactly the proven
-  // /api/sessions/:id/rate-limit/clear path (setRateLimitedUntil(null) + clearRateLimitDeadline +
-  // resumeAfterRateLimit). So the user never has to retry each parked session by hand. The CLEAR
-  // applies to every parked row (live or stale); the RESUME is scoped to LIVE (an exited session can't
-  // resume — resumeAfterRateLimit also no-ops on a dead pty as a backstop). The global latch is dropped
-  // ONCE up front (not per session). Returns how many live sessions were resumed.
+  // parked with a rate-limit OR durably bailed (card dfef375f round 3 item 1: `db.listRateLimited()` now
+  // matches `rate_limited_until IS NOT NULL OR rate_limit_bailed_at IS NOT NULL` — a bail nulls
+  // rate_limited_until, so without the bailed half a bailed LIVE session would be silently skipped here)
+  // AND resumes the LIVE ones — per-session this is exactly the proven /api/sessions/:id/rate-limit/clear
+  // path (setRateLimitedUntil(null) + clearRateLimitDeadline + setRateLimitBailedAt(null) +
+  // resumeAfterRateLimit). So the user never has to retry each parked/bailed session by hand. The CLEAR
+  // applies to every parked-or-bailed row (live or stale); the RESUME is scoped to LIVE (an exited session
+  // can't resume — resumeAfterRateLimit also no-ops on a dead pty as a backstop). The global latch is
+  // dropped ONCE up front (not per session). Returns how many live sessions were resumed.
   app.post("/api/usage/clear-hold", async () => {
     // card 33d5aef1: was there actually a latch/park to clear? — a no-op clear-hold (nothing armed, no
     // rows parked) must not fabricate an episode-end event (DoD item 5's positive control, applied here too).
@@ -1134,8 +1137,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     for (const s of rows) {
       deps.db.setRateLimitedUntil(s.id, null, null);
       deps.db.clearRateLimitDeadline(s.id);
+      deps.db.clearRateLimitLoopBreakerState(s.id); // card dfef375f item 3 — a cleared episode must not carry a stale re-cap count forward
+      deps.db.setRateLimitBailedAt(s.id, null); // card dfef375f round 3 item 1 — a human clear also lifts the durable bailed marker
       if (s.processState === "live" && deps.pty.resumeAfterRateLimit(s.id)) {
         resumed++;
+        // Card dfef375f round 2 item 2: stamp the ACTUAL resume instant (AFTER the loop-breaker clear
+        // above, so a re-cap on the fresh episode this clear starts is measured against THIS resume).
+        deps.db.recordRateLimitResume(s.id, new Date().toISOString());
         // card 902d089f: a resumed MANAGER may have a cap-queue entry that maybeDrainCapQueue requeued
         // on the very UsageLimitError this clear resolves — drain it now instead of waiting for an
         // unrelated worker to exit. Fire-and-forget + idempotent, like every other drain call site.
@@ -6447,12 +6455,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // INDEPENDENT: `clearClaudeRateLimit()` below drops the latch unconditionally regardless of whether
     // THIS session was parked, so a human clearing an unparked session while some OTHER session's cap
     // armed the latch still genuinely clears it — that must not go unrecorded (mgr #82 review finding).
-    const wasParked = session.rateLimitedUntil != null || session.rateLimitDeadline != null;
+    // Card dfef375f round 3 item 1: a bail NULLs both rateLimitedUntil and rateLimitDeadline, so without
+    // the rateLimitBailedAt check a manual clear of a bailed (never auto-resumed) session would wrongly
+    // report "nothing was parked" and emit zero episode events for a session that genuinely was.
+    const wasParked = session.rateLimitedUntil != null || session.rateLimitDeadline != null || session.rateLimitBailedAt != null;
     const hadLatch = readClaudeUsageState().lastRateLimitAt != null;
     deps.db.setRateLimitedUntil(id, null, null);
     deps.db.clearRateLimitDeadline(id);
+    deps.db.clearRateLimitLoopBreakerState(id); // card dfef375f item 3 — a cleared episode must not carry a stale re-cap count forward
+    deps.db.setRateLimitBailedAt(id, null); // card dfef375f round 3 item 1 — a human clear also lifts the durable bailed marker
     clearClaudeRateLimit();
     const resumed = deps.pty.resumeAfterRateLimit(id); // re-submits the held turn; false (no-op) if not live
+    // Card dfef375f round 2 item 2: stamp the ACTUAL resume instant (AFTER the loop-breaker clear
+    // above, so a re-cap on the fresh episode this clear starts is measured against THIS resume).
+    if (resumed) deps.db.recordRateLimitResume(id, new Date().toISOString());
     // card 902d089f: mirrors the /api/usage/clear-hold cascade above — drain a resumed manager's own
     // cap-queue rather than leaving a usage-limit-requeued entry to wait for an unrelated worker exit.
     if (resumed && session.role === "manager") void deps.sessions.maybeDrainCapQueue(id);

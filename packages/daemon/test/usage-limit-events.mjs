@@ -56,19 +56,24 @@ requireHermeticEnv();
     db.insertProject({ id: "p", name: "P", repoPath: "p", vaultPath: "p", config: {}, createdAt: now, archivedAt: null });
     db.insertAgent({ id: "t", projectId: "p", name: "t", startupPrompt: "x", position: 0 });
     const alive = new Set();
-    const pty = { isAlive: (id) => alive.has(id), resumeAfterRateLimit: () => true };
-    return { dbFile, db, alive, watcher: new RateLimitWatcher({ db, pty }) };
+    const nudges = []; // card dfef375f round 2 item 5 — spies on bailRateLimitEpisode's owner nudge
+    const pty = {
+      isAlive: (id) => alive.has(id), resumeAfterRateLimit: () => true,
+      enqueueStdin: (id, text) => nudges.push({ id, text }),
+    };
+    return { dbFile, db, alive, nudges, watcher: new RateLimitWatcher({ db, pty }) };
   }
   function cleanupEnv(e) {
     try { e.db.close(); } catch { /* ignore */ }
     for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
   }
   function seed(e, id, o = {}) {
-    const { state = "live", until = null, deadline = null, busy = false } = o;
+    const { state = "live", until = null, deadline = null, busy = false, parentSessionId = null } = o;
     const now = new Date().toISOString();
     e.db.insertSession({
       id, projectId: "p", agentId: "t", engineSessionId: null, title: null, cwd: "/x",
       processState: state, resumability: "unknown", busy, createdAt: now, lastActivity: now, lastError: null,
+      parentSessionId,
     });
     if (until !== null) e.db.setRateLimitedUntil(id, until, null);
     if (deadline !== null) e.db.armRateLimitDeadline(id, deadline);
@@ -103,6 +108,10 @@ requireHermeticEnv();
     const recovered = eventsFor(e, "recovered", "rate_limit_recovered");
     check("T2 succeed: rate_limit_recovered recorded exactly once, attributed to the watcher",
       recovered.total === 1 && recovered.items[0]?.detail?.actor === "watcher");
+    // Card dfef375f item 3: a resolved episode must not leave a stale, already-elevated re-cap count
+    // for the NEXT, unrelated episode to inherit.
+    check("T2 succeed: loop-breaker counters cleared alongside the deadline",
+      JSON.stringify(e.db.getRateLimitLoopBreakerState("recovered")) === JSON.stringify({ lastCapAt: null, recapCount: 0, lastResumedAt: null }));
     cleanupEnv(e);
   }
 
@@ -112,13 +121,26 @@ requireHermeticEnv();
     const e = makeEnv();
     const now = new Date();
     const deadline = new Date(now.getTime() - 1000).toISOString();
-    seed(e, "bail", { until: new Date(now.getTime() - 1000).toISOString(), deadline });
+    seed(e, "bail", { until: new Date(now.getTime() - 1000).toISOString(), deadline, parentSessionId: "mgr-t3" });
     e.watcher.tick(now);
     const s = e.db.getSession("bail");
     check("T3 bail: park + deadline actually cleared before we read the trail", s.rateLimitedUntil === null && s.rateLimitDeadline === null);
     const bailed = eventsFor(e, "bail", "rate_limit_bailed");
     check("T3 bail: rate_limit_bailed recorded exactly once", bailed.total === 1);
     check("T3 bail: detail carries the exceeded deadline", bailed.items[0]?.detail?.deadline === deadline);
+    check("T3 bail: loop-breaker counters (all three) cleared alongside the deadline",
+      JSON.stringify(e.db.getRateLimitLoopBreakerState("bail")) === JSON.stringify({ lastCapAt: null, recapCount: 0, lastResumedAt: null }));
+    // Card dfef375f round 2 item 5: the shared bail helper nudges the owning parent, worded "session"
+    // (item 10), never "worker". A mutant that drops the nudge call flips ONLY this assertion red.
+    check("T3 bail: the owning parent gets a best-effort nudge, worded 'session' not 'worker'",
+      e.nudges.some((n) => n.id === "mgr-t3" && n.text.includes("session") && !n.text.includes("worker")));
+    // CRITICAL (round 2 item 1): bail must NOT clear PtyHost's in-memory `live.rateLimited` flag —
+    // round 1 did exactly that (via a now-removed clearRateLimitedFlag), which let the ~10s reconcile
+    // timer drain the held queue into the still-capped account. This hermetic stub can't observe
+    // `live.rateLimited` directly (it has no real PtyHost); the REAL-host-path proof lives in
+    // rate-limit-bail-reconcile-drain.mjs. What IS provable here: `bailRateLimitEpisode` calls only
+    // `enqueueStdin` on the pty (never any OTHER pty method) — confirmed by the stub only ever
+    // recording a nudge above, never throwing on an unexpected call.
     cleanupEnv(e);
   }
 
@@ -127,11 +149,24 @@ requireHermeticEnv();
     const e = makeEnv();
     const now = new Date();
     const deadline = new Date(now.getTime() - 1000).toISOString();
-    seed(e, "hung", { until: null, deadline, busy: true });
+    seed(e, "hung", { until: null, deadline, busy: true }); // no parent — proves the nudge is conditional, not unconditional
     e.watcher.tick(now);
     const bailed = eventsFor(e, "hung", "rate_limit_bailed");
     check("T4 hung-bail: rate_limit_bailed recorded exactly once, after the deadline column cleared",
       e.db.getSession("hung").rateLimitDeadline === null && bailed.total === 1 && bailed.items[0]?.detail?.deadline === deadline);
+    check("T4 hung-bail: NO nudge fired (this session has no parent)", !e.nudges.some((n) => n.id === "hung"));
+    cleanupEnv(e);
+  }
+
+  // T4b — NEGATIVE CONTROL: no nudge fires on paths that don't bail (resume/succeed) — proves T3's
+  // nudge check discriminates bail specifically, not every tick.
+  {
+    const e = makeEnv();
+    const now = new Date();
+    const deadline = new Date(now.getTime() + 60 * 60_000).toISOString();
+    seed(e, "due2", { until: new Date(now.getTime() - 1000).toISOString(), deadline, parentSessionId: "mgr-due2" });
+    e.watcher.tick(now);
+    check("T4b NEGATIVE CONTROL: no nudge fires on a plain resume", e.nudges.length === 0);
     cleanupEnv(e);
   }
 }

@@ -211,6 +211,32 @@ clearWatcherEnvs();
   check("(8) companionVoiceEnabled non-boolean rejected", validatePlatformConfigOverride({ companionVoiceEnabled: "yes" }).ok === false);
 }
 
+// ============================ (8b) card dfef375f round 2 item 7: the loop breaker's cross-field invariant ============================
+// loopBreakerBackoffBaseMs must never exceed loopBreakerBackoffCeilingMs. Each field is individually
+// valid per (8)'s own per-field bounds, so validatePlatformConfigOverride (zod, per-field only) accepts
+// a bad COMBINATION — the invariant is enforced by CLAMPING at resolve time (resolvePlatform), not by
+// rejecting the write. See shared/config.ts's resolvePlatform for why clamp was chosen over a zod
+// .refine() (a human adjusting one field at a time should never get a 400 for a transient combination).
+clearWatcherEnvs();
+{
+  const bad = validatePlatformConfigOverride({ rateLimit: { loopBreakerBackoffBaseMs: 300000, loopBreakerBackoffCeilingMs: 120000 } });
+  check("(8b) a base > ceiling COMBINATION is individually valid per-field, so the schema itself accepts it",
+    bad.ok === true);
+  const resolved = resolveConfig(undefined, { rateLimit: { loopBreakerBackoffBaseMs: 300000, loopBreakerBackoffCeilingMs: 120000 } });
+  check("(8b) resolvePlatform CLAMPS the base down to the ceiling instead of letting it exceed it",
+    resolved.platform.rateLimit.loopBreakerBackoffBaseMs === 120000);
+  check("(8b) the ceiling itself passes through unchanged",
+    resolved.platform.rateLimit.loopBreakerBackoffCeilingMs === 120000);
+  // NEGATIVE CONTROL: an ORDINARY (base <= ceiling) combination is never touched by the clamp.
+  const ok = resolveConfig(undefined, { rateLimit: { loopBreakerBackoffBaseMs: 60000, loopBreakerBackoffCeilingMs: 240000 } });
+  check("(8b) NEGATIVE CONTROL: base <= ceiling is NOT clamped — passes through exactly as configured",
+    ok.platform.rateLimit.loopBreakerBackoffBaseMs === 60000 && ok.platform.rateLimit.loopBreakerBackoffCeilingMs === 240000);
+  // The clamp must also apply when only the CEILING is lowered below the (inherited default) base.
+  const ceilingOnly = resolveConfig(undefined, { rateLimit: { loopBreakerBackoffCeilingMs: 60000 } }); // default base is 1800000
+  check("(8b) lowering ONLY the ceiling below the inherited default base still clamps the base",
+    ceilingOnly.platform.rateLimit.loopBreakerBackoffBaseMs === 60000 && ceilingOnly.platform.rateLimit.loopBreakerBackoffCeilingMs === 60000);
+}
+
 // ============================ (9) SQLite store: round-trip + singleton upsert + bad-JSON→{} ============================
 const dbFile = path.join(TMP, "loom.db");
 {

@@ -33,9 +33,12 @@ export function SessionActions({
   const canResume = canResumeSession(s);
   const live = s.processState === "live";
   const rateLimited = !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
+  // Card dfef375f round 3 item 1: a bail nulls rateLimitedUntil, so without this a bailed (auto-resume
+  // abandoned) session's Clear/retry action is unreachable from the UI — the exact blocker this item closes.
+  const bailed = !!s.rateLimitBailedAt;
   return (
     <>
-      {rateLimited && <Button disabled={clearingRateLimit} title="Clear the rate-limit hold + the global usage latch and re-submit the held turn now (mirrors the auto-resume path)"
+      {(rateLimited || bailed) && <Button disabled={clearingRateLimit} title="Clear the rate-limit hold + the global usage latch and re-submit the held turn now (mirrors the auto-resume path)"
         onClick={(ev) => { ev.stopPropagation(); onClearRateLimit(); }}>Clear rate limit &amp; retry now</Button>}
       {/* End Session — one-click graceful wrap-up (card f55bd338): injects a /loom-session-end + end_me turn.
           Sits LEFT of Fork. NON-worker only — a human must never end a worker out from under its manager

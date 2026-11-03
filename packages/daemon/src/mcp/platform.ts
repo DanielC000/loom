@@ -927,6 +927,12 @@ const rateLimitOverride = z.object({
   // Unitless (a whole percentage), so it is deliberately NOT in PLATFORM_MS_BOUNDS — there is no unit to
   // translate its rejection into, and its own message already reads in the unit the field is entered in.
   exhaustedThresholdPct: z.number().int().min(50).max(100).optional(),
+  // Card dfef375f item 3 (the loop breaker). loopBreakerMaxRecaps is a plain count, same reasoning as
+  // exhaustedThresholdPct above — deliberately not in PLATFORM_MS_BOUNDS.
+  loopBreakerMaxRecaps: z.number().int().min(1).max(20).optional(),
+  loopBreakerQuickGapMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.loopBreakerQuickGapMs),
+  loopBreakerBackoffBaseMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.loopBreakerBackoffBaseMs),
+  loopBreakerBackoffCeilingMs: msBounded(PLATFORM_MS_BOUNDS.rateLimit.loopBreakerBackoffCeilingMs),
 }).strict();
 // Every watcher cadence shares one range (5s floor guards against busy-looping) — stated once in
 // PLATFORM_MS_BOUNDS.watchers, which is why each key below names itself rather than reusing one schema.

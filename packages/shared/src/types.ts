@@ -859,6 +859,16 @@ export interface Session {
    */
   rateLimitDeadline?: string | null;
   /**
+   * Card dfef375f round 3 item 1: the ISO instant the loop breaker (or the independent watcher deadline)
+   * abandoned auto-resume for this session's usage-limit episode — null = never bailed, or a bail was
+   * since cleared by a human. A bail NULLs `rateLimitedUntil` (decision sha:c6338ae1's "do not clear
+   * `live.rateLimited` on a bail" applies to the in-memory flag, not this durable column), so this field
+   * is the ONLY durable signal that a LIVE session's auto-resume has been abandoned and genuinely needs a
+   * human to clear it — stays set until an explicit human clear (the per-session REST route or the global
+   * clear-hold cascade), never auto-clears on its own.
+   */
+  rateLimitBailedAt?: string | null;
+  /**
    * ISO instant this session's transcript last showed the terminal context-exhaustion api-error
    * record. null = not exhausted. busy is cleared to false the moment this is set; Loom holds its
    * pending queue rather than draining into the dead turn. Clears on the next busy(true) rising

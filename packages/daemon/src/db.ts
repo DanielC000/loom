@@ -540,6 +540,23 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT,
   rate_limited_until TEXT,
   rate_limit_deadline TEXT,
+  -- Card dfef375f item 3 (the loop breaker): rolling re-cap counter, raw bookkeeping never projected
+  -- onto Session (mirrors forcedPlain's own exclusion). Cleared alongside rate_limit_deadline on
+  -- succeed/bail so a fresh episode starts a clean count.
+  rate_limit_loop_last_cap_at TEXT,
+  rate_limit_loop_recap_count INTEGER NOT NULL DEFAULT 0,
+  -- Card dfef375f round 2 item 2: when the SAME session was last actually resumed (set by every real
+  -- resume call site — RateLimitWatcher.resume(), the two REST clear routes — never by onRateLimited
+  -- itself). stepLoopBreaker compares the NEXT cap's timestamp against this to decide whether that cap
+  -- arrived "quick" (within loopBreakerQuickGapMs of its own resume), the signature of a resume that
+  -- landed back in a still-capped account. Cleared alongside the other two loop-breaker columns above.
+  rate_limit_loop_last_resumed_at TEXT,
+  -- Card dfef375f round 3 item 1: durable "bailed, needs a human" marker — set by bailRateLimitEpisode,
+  -- cleared by resumeAfterRateLimit's callers (the two REST clear routes) and onExit. Never referenced by
+  -- a base-schema index/trigger/view (the exact P0 class this card avoids — see halted_recycle_pending_for's
+  -- own comment above for the precedent). A bail nulls rate_limited_until, so this is the ONLY durable
+  -- signal that a LIVE session's auto-resume has been abandoned and needs a human clear.
+  rate_limit_bailed_at TEXT,
   -- Asleep-at-the-Wheel idle watchdog per-manager state (foundation; nothing reads it yet). Added to
   -- existing DBs via the idempotent migration below; mirrors the rate-limit columns above.
   idle_nudge_policy TEXT NOT NULL DEFAULT 'watching', -- 'watching' | 'snoozed' | 'suppressed'
@@ -2116,6 +2133,16 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   model: "TEXT",
   rate_limited_until: "TEXT",
   rate_limit_deadline: "TEXT",
+  // Card dfef375f item 3 (the loop breaker) — see the CREATE TABLE comment above. Legacy rows backfill
+  // to NULL/0 = "no re-caps counted yet".
+  rate_limit_loop_last_cap_at: "TEXT",
+  rate_limit_loop_recap_count: "INTEGER NOT NULL DEFAULT 0",
+  // Card dfef375f round 2 item 2 — see the CREATE TABLE comment above. Nullable, no DEFAULT needed:
+  // legacy rows backfill to NULL = "no resume recorded yet".
+  rate_limit_loop_last_resumed_at: "TEXT",
+  // Card dfef375f round 3 item 1 — see the CREATE TABLE comment above. Nullable, no DEFAULT needed:
+  // legacy rows backfill to NULL = "never bailed".
+  rate_limit_bailed_at: "TEXT",
   // Asleep-at-the-Wheel idle watchdog state (foundation). NOT NULL + constant DEFAULT is legal on
   // ALTER TABLE ADD COLUMN, so legacy rows backfill to 'watching' / 0.
   idle_nudge_policy: "TEXT NOT NULL DEFAULT 'watching'",
@@ -7502,16 +7529,61 @@ export class Db {
     this.db.prepare("UPDATE sessions SET rate_limit_deadline = NULL WHERE id = ?").run(id);
     this.notifySessionChanged(id);
   }
+  /**
+   * Card dfef375f item 3 (the loop breaker) — raw bookkeeping, never projected onto Session (mirrors
+   * forcedPlain's own exclusion from agent-facing projections). Read by usage-limit.ts's
+   * stepLoopBreaker so it compares against the SAME counters across a daemon restart.
+   */
+  getRateLimitLoopBreakerState(id: string): { lastCapAt: string | null; recapCount: number; lastResumedAt: string | null } | null {
+    const r = this.db.prepare("SELECT rate_limit_loop_last_cap_at, rate_limit_loop_recap_count, rate_limit_loop_last_resumed_at FROM sessions WHERE id = ?")
+      .get(id) as { rate_limit_loop_last_cap_at: string | null; rate_limit_loop_recap_count: number; rate_limit_loop_last_resumed_at: string | null } | undefined;
+    if (!r) return null;
+    return { lastCapAt: r.rate_limit_loop_last_cap_at, recapCount: r.rate_limit_loop_recap_count, lastResumedAt: r.rate_limit_loop_last_resumed_at };
+  }
+  /** Persist the loop breaker's next state (see {@link getRateLimitLoopBreakerState}). */
+  setRateLimitLoopBreakerState(id: string, lastCapAt: string | null, recapCount: number): void {
+    this.db.prepare("UPDATE sessions SET rate_limit_loop_last_cap_at = ?, rate_limit_loop_recap_count = ? WHERE id = ?")
+      .run(lastCapAt, recapCount, id);
+  }
+  /** Card dfef375f round 2 item 2: stamp when a session was actually resumed — called by every real
+   *  resume call site (RateLimitWatcher.resume(), the two REST clear routes), never by onRateLimited
+   *  itself. Deliberately NARROW (touches only this one column): lastCapAt/recapCount are the loop
+   *  breaker's own bookkeeping and must not be disturbed by a resume. */
+  recordRateLimitResume(id: string, at: string): void {
+    this.db.prepare("UPDATE sessions SET rate_limit_loop_last_resumed_at = ? WHERE id = ?").run(at, id);
+  }
+  /** Reset the loop breaker's counters — called alongside every clearRateLimitDeadline so a NEW episode
+   *  never inherits a stale, already-elevated re-cap count from the one that just ended. */
+  clearRateLimitLoopBreakerState(id: string): void {
+    this.db.prepare("UPDATE sessions SET rate_limit_loop_last_cap_at = NULL, rate_limit_loop_recap_count = 0, rate_limit_loop_last_resumed_at = NULL WHERE id = ?").run(id);
+  }
+  /**
+   * Card dfef375f round 3 item 1 — stamp/clear the durable "bailed, needs a human" marker. Set once by
+   * {@link bailRateLimitEpisode} (orchestration/rate-limit-bail.ts); cleared by the two REST clear routes
+   * and onExit. Deliberately its own tiny setter (mirrors setRateLimitedUntil's/clearRateLimitDeadline's
+   * shape) rather than folded into either of those — a bail clears rate_limited_until/deadline but must
+   * NOT clear this; a human clear clears this but leaves nothing else to touch that isn't already cleared
+   * by the same call.
+   */
+  setRateLimitBailedAt(id: string, at: string | null): void {
+    this.db.prepare("UPDATE sessions SET rate_limit_bailed_at = ? WHERE id = ?").run(at, id);
+    this.notifySessionChanged(id);
+  }
   /** Live sessions in an active usage-limit episode (deadline armed) — the resume watcher's work set. */
   listRateLimitEpisodes(): Session[] {
     return (this.db.prepare("SELECT * FROM sessions WHERE rate_limit_deadline IS NOT NULL AND process_state = 'live'")
       .all() as Row[]).map(toSession);
   }
-  /** EVERY session currently parked with a rate-limit (rate_limited_until set), live or not — the
-   *  clear-usage-hold CASCADE's work set. (Distinct from listRateLimitEpisodes, which is LIVE +
-   *  deadline-armed: a session can carry a park with no episode deadline, and a dead row may linger.) */
+  /**
+   * EVERY session currently parked with a rate-limit (rate_limited_until set) OR durably bailed
+   * (rate_limit_bailed_at set — card dfef375f round 3 item 1: a bail NULLs rate_limited_until, so without
+   * this OR a bailed LIVE session would be silently skipped by the clear-usage-hold CASCADE, the exact
+   * blocker this card closes), live or not — the clear-usage-hold CASCADE's work set. (Distinct from
+   * listRateLimitEpisodes, which is LIVE + deadline-armed: a session can carry a park with no episode
+   * deadline, and a dead row may linger.)
+   */
   listRateLimited(): Session[] {
-    return (this.db.prepare("SELECT * FROM sessions WHERE rate_limited_until IS NOT NULL")
+    return (this.db.prepare("SELECT * FROM sessions WHERE rate_limited_until IS NOT NULL OR rate_limit_bailed_at IS NOT NULL")
       .all() as Row[]).map(toSession);
   }
   /**
@@ -11423,6 +11495,7 @@ function toSession(r0: unknown): Session {
     model: (r.model as string) ?? null,
     rateLimitedUntil: (r.rate_limited_until as string) ?? null,
     rateLimitDeadline: (r.rate_limit_deadline as string) ?? null,
+    rateLimitBailedAt: (r.rate_limit_bailed_at as string) ?? null,
     contextExhaustedAt: (r.context_exhausted_at as string) ?? null,
     archivedAt: (r.archived_at as string) ?? null,
     // @decision 963462f5 — genuine TRI-STATE: NULL must stay null (legacy/unknown), never collapse to

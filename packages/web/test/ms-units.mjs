@@ -171,6 +171,13 @@ const EXPECTED_PLATFORM_MS_BOUNDS = {
     deadlineAfterResetMs: { min: 60_000, max: 86_400_000 },
     deadlineNoResetMs: { min: 600_000, max: 172_800_000 },
     recencyWindowMs: { min: 0, max: 86_400_000 },
+    // Card dfef375f item 3 (the loop breaker) — loopBreakerMaxRecaps is a plain count, deliberately
+    // absent (mirrors exhaustedThresholdPct, unitless and also absent from this table).
+    // Round 2: loopBreakerQuickGapMs replaces loopBreakerWindowMs — a SHORT gap by design ("a few
+    // minutes"), so its floor is seconds, not the shared 60s floor every other rateLimit field uses.
+    loopBreakerQuickGapMs: { min: 1_000, max: 3_600_000 },
+    loopBreakerBackoffBaseMs: { min: 60_000, max: 86_400_000 },
+    loopBreakerBackoffCeilingMs: { min: 60_000, max: 86_400_000 },
   },
   watchers: {
     contextWatchMs: WATCHER,
@@ -221,14 +228,16 @@ check("every PLATFORM_MS_BOUNDS entry is a well-formed, non-degenerate ms range"
     return Object.entries(node).reduce((n, [k, v]) => n + walk(v, `${path}.${k}`), 0);
   };
   const leaves = walk(PLATFORM_MS_BOUNDS, "PLATFORM_MS_BOUNDS");
-  // 5 rateLimit + 10 watchers + 6 timeouts + 2 connections + 2 top-level.
-  assert.equal(leaves, 25);
+  // 8 rateLimit (card dfef375f item 3 added 3: loopBreakerQuickGapMs/BackoffBaseMs/BackoffCeilingMs) +
+  // 10 watchers + 6 timeouts + 2 connections + 2 top-level.
+  assert.equal(leaves, 28);
 });
 
 check("a unitless platform field is deliberately ABSENT from the ms table", () => {
   // Listing one would imply a unit translation that does not exist. Guards against a well-meaning future
   // edit folding the plain counts in alongside the ms fields.
   assert.equal("exhaustedThresholdPct" in PLATFORM_MS_BOUNDS.rateLimit, false);
+  assert.equal("loopBreakerMaxRecaps" in PLATFORM_MS_BOUNDS.rateLimit, false);
   assert.equal("maxResponseBytes" in PLATFORM_MS_BOUNDS.connections, false);
   assert.equal("rateLimitMax" in PLATFORM_MS_BOUNDS.connections, false);
   assert.equal("usageSampleRetentionDays" in PLATFORM_MS_BOUNDS, false);

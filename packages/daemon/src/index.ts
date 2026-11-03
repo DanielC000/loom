@@ -64,8 +64,7 @@ import { CrashRecoveryWatcher, recordUnexpectedExit, listCrashRecoveryEligibleSe
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { MemoryDedupWatcher } from "./orchestration/memory-dedup-watcher.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
-import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
-import { rateLimitDeadline, rateLimitedUntil, resumeResetFromUsageStatus } from "./orchestration/usage-limit.js";
+import { handleRateLimitedCap } from "./orchestration/rate-limit-cap.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent, supervisorIterationAtBoot } from "./orchestration/restart.js";
 import { startVaultVersioners, logVaultPushStatus, VaultPushStatusWatcher, setCodeRepoGuardProvider, type VaultVersioner, type CodeRepoGuardEntry } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
@@ -554,47 +553,29 @@ async function main(): Promise<void> {
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).
+    //
+    // Card dfef375f: the 2026-11-03 incident — 5 sessions cycling resume→StopFailure→park→resume on a
+    // ~61-minute period for ~7.5h because a short hook-reported reset was trusted every time.
+    // `handleRateLimitedCap` (orchestration/rate-limit-cap.ts) is the extracted, exported core — composes
+    // the hook/poller cross-check, the loop breaker (CONSECUTIVE "quick" re-caps — those landing shortly
+    // after this session's own last resume — escalate backoff and eventually bail, regardless of what
+    // reset any source reports), the tripped-backoff-never-shortens-a-known-reset clamp, and GLOBAL
+    // awareness. See docs/decisions/dfef375f-rate-limit-loop-breaker.md (round 2 for the current
+    // mechanism; round 3 item 3 for why this is an exported function rather than an inline closure).
     onRateLimited: (sessionId, _until, detail) => {
       // RESOLVE-LIVE: re-derive the authoritative park (resume-at) + episode give-up deadline from the
       // daemon-global rate-limit knobs HERE, where db is in scope — so a PATCH to platform.rateLimit
       // takes effect with no restart. PtyHost is db-unaware by design (layering boundary); the `_until`
       // it passes is a module-default fallback we deliberately re-derive with the resolved config.
       const rl = resolveConfig(undefined, db.getPlatformConfig()).platform.rateLimit;
-      const now = new Date();
-      // The interactive StopFailure hook usually carries NO resetsAtSeconds — the common case. Rather
-      // than fall straight to the flat default backoff (which can resume BACK INTO a still-active
-      // weekly cap and re-loop), fall back to the ALREADY-POLLED plan-usage status: if a window is
-      // known-exhausted with a future reset, resume at THAT reset instead of guessing. Unavailable /
-      // nothing-exhausted status ⇒ undefined ⇒ byte-identical to today's default-backoff behavior.
-      const resetsAtSeconds = detail.resetsAtSeconds ?? resumeResetFromUsageStatus(usageStatus.getStatus(), now, rl);
-      const until = rateLimitedUntil(resetsAtSeconds, now, rl);
-      const deadline = rateLimitDeadline(resetsAtSeconds, now, rl);
-      db.setRateLimitedUntil(sessionId, until, `usage limit — resumes ${until}`);
-      db.armRateLimitDeadline(sessionId, deadline);
-      // Event-emit twin (attention-push signal source, Lead fork 2b) — additive, no existing consumer
-      // (alert-webhook's events[] allowlist, web attention) lists this new kind, so this is inert for them.
-      // `detector` (card 33d5aef1) is PtyHost's own attribution of which park site fired — passed straight
-      // through, never re-derived here.
-      db.appendEvent({
-        id: randomUUID(), ts: now.toISOString(), managerSessionId: sessionId,
-        kind: "session_rate_limited", detail: { until, deadline, detector: detail.detector },
-      });
-      // Feed the SAME derived reset into GLOBAL awareness (not just this session's park) — otherwise
-      // the Scheduler/worker_spawn gate (isLikelyNearClaudeUsageLimit) falls back to its own ~6h
-      // recency heuristic and can fire fresh work into a still-capped account hours before a real
-      // (e.g. weekly) reset actually clears (card 2110726d, a fleet-level follow-up to 6df15380's
-      // per-session fix). Guarded so the derived reset can only EXTEND the awareness hold, never
-      // shorten it below what the recency heuristic alone would already give.
-      const recencyFloorSeconds = now.getTime() / 1000 + rl.recencyWindowMs / 1000;
-      const globalResetsAtSeconds =
-        typeof resetsAtSeconds === "number" && resetsAtSeconds >= recencyFloorSeconds ? resetsAtSeconds : undefined;
-      recordClaudeRateLimit(globalResetsAtSeconds);
-      // card 33d5aef1: the durable twin of the (re)arm itself — the file above is overwritten silently on
-      // every hit, so without this event nothing records that the global cross-session latch was touched.
-      db.appendEvent({
-        id: randomUUID(), ts: now.toISOString(), managerSessionId: sessionId,
-        kind: "usage_latch_armed", detail: { resetsAtSeconds: globalResetsAtSeconds },
-      });
+      handleRateLimitedCap({ db, pty, usageStatus }, sessionId, detail, rl);
+    },
+    // Card dfef375f round 4 item 2: fires once, synchronously, for EVERY fresh claude Live (spawn/resume/
+    // fork/recycle) — see PtyHostEvents.onFreshLive's own doc for why this must clear the durable
+    // "needs a human" bail marker here rather than relying on onExit's own clear (below) alone: a daemon
+    // restart means the predecessor pty's onExit never ran at all.
+    onFreshLive: (sessionId) => {
+      db.setRateLimitBailedAt(sessionId, null);
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
     onExit: (sessionId, code, info) => {
@@ -659,6 +640,14 @@ async function main(): Promise<void> {
       // the Attention queue for hours after the session is gone. Clears ONLY the two park columns
       // (lastError is preserved — a crash-loop banner etc. must survive). Idempotent + cheap.
       db.clearRateLimit(sessionId);
+      // Card dfef375f round 2: also clear the loop-breaker's own counters on exit — a RESUME on this
+      // SAME session id (a crash-recovery resume, or `resume()` on an exited row) must start a fresh
+      // episode, never inherit a stale, already-elevated re-cap streak from the episode that just ended.
+      db.clearRateLimitLoopBreakerState(sessionId);
+      // Card dfef375f round 3 item 1: also clear the durable bailed marker on exit — mirrors the
+      // rate_limited_until rationale above: an exited session can never auto-resume, so a lingering
+      // rate_limit_bailed_at would keep this (now-dead) row's Clear-and-retry affordance showing forever.
+      db.setRateLimitBailedAt(sessionId, null);
       // Crash-recovery trigger: record a durable `session_died` event IFF this was an UNEXPECTED death
       // (`intended === false` — no pty.stop() was issued) of a resumable coordination/work session, so the
       // CrashRecoveryWatcher can bounded-auto-resume it. An intended stop records nothing (untouched); a

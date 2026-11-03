@@ -96,7 +96,7 @@ const SESSION_LIST_FIELDS: Record<Exclude<keyof SessionListItem, "reachedReadyAt
   resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
   parentSessionId: 1, taskId: 1, worktreePath: 1, branch: 1, reviewBaseSha: 1, repoKey: 1,
   gen: 1, recycledFrom: 1, ctxInputTokens: 1, ctxTurns: 1, turnSeq: 1, ctxUpdatedAt: 1,
-  model: 1, rateLimitedUntil: 1, rateLimitDeadline: 1, contextExhaustedAt: 1, browserTesting: 1, documentConversion: 1,
+  model: 1, rateLimitedUntil: 1, rateLimitDeadline: 1, rateLimitBailedAt: 1, contextExhaustedAt: 1, browserTesting: 1, documentConversion: 1,
   restrictedTools: 1, noCommit: 1, skills: 1, connections: 1, vaultWrite: 1, companionLeadMode: 1,
   capabilities: 1, archivedAt: 1, pendingMerge: 1, scheduledSpawn: 1, harness: 1,
   projectName: 1, agentName: 1,

@@ -4091,7 +4091,22 @@ export interface PtyHostEvents {
    * TEXT sentinel fallback, which never carries a `resetsAtSeconds`) — so the durable `session_rate_limited`
    * event can distinguish them; ⛔ don't back-infer one from the other's absence downstream of this call.
    */
-  onRateLimited(sessionId: string, until: string, detail: { resetsAtSeconds?: number; message: string; detector: "stop_failure" | "weekly_text_sentinel" }): void;
+  onRateLimited(sessionId: string, until: string, detail: { resetsAtSeconds?: number; message: string; detector: "stop_failure" | "weekly_text_sentinel"; type?: string }): void;
+  /**
+   * Card dfef375f round 4 item 2: fires once, synchronously, from `spawn()`'s claude branch right after a
+   * fresh `Live` is registered — the ONE chokepoint every spawn/resume/fork/recycle passes through (a new
+   * pty is never suppressed, so `rateLimited` always starts `false` there). PtyHost has no DB (same
+   * layering boundary as `onRateLimited` above); the implementer (index.ts) clears the durable
+   * `rate_limit_bailed_at` "needs a human" marker (if any) — otherwise a crash-then-resume (no `onExit`
+   * ever fires for the dead predecessor pty, so `onExit`'s own clear never runs) leaves a stale AUTO-RESUME
+   * ABANDONED row whose Clear-and-retry would replay `lastPrompt` into what is now an ordinary, healthy
+   * session (decision `81f9c887`'s hazard — the busy guard there can't catch this, since a fresh resume is
+   * idle). Never fired for a codex spawn (`spawnCodexProcess` returns before this point) or for a shell/
+   * canned pty (`spawnShell`/`seedCanned`) — neither of those session kinds can ever carry this marker.
+   * OPTIONAL, same rationale as its siblings: every existing `PtyHostEvents` test double is unaffected
+   * until it opts in.
+   */
+  onFreshLive?(sessionId: string): void;
   /**
    * Card b68d1f5b DoD-1/DoD-2: `detectPastePlaceholderLengthLoss` (paste-tripwire.ts) found a `[Pasted
    * text #N +M lines]` placeholder in a turn's recorded text that no known Loom write explains — a
@@ -6677,6 +6692,9 @@ export class PtyHost {
       role: opts.role ?? null,
     };
     this.live.set(opts.sessionId, live);
+    // Card dfef375f round 4 item 2 — see onFreshLive's own doc above for why this fires HERE, at the ONE
+    // chokepoint every spawn/resume/fork/recycle passes through.
+    this.events.onFreshLive?.(opts.sessionId);
     armLinuxStartTicks(live);
     this.armRootCreationTime(live);
     // Card 019d2e7a — carry any attached viewer across the respawn. `findAnyLive` rather than `outgoing`
@@ -10661,7 +10679,7 @@ export class PtyHost {
               // drain here is not enough since the ~10s reconcile timer would otherwise drain pending into
               // the capped account and CLOBBER lastPrompt, losing the killed turn we must replay.
               live.rateLimited = true;
-              this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}`, detector: "stop_failure" });
+              this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}`, detector: "stop_failure", type: det.type });
               break;
             }
           }

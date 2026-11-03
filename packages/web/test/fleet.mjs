@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
+  isBailed, isRateLimited, showsAsRateLimited, rateLimitBailedDismissKey,
   activeBootStuckAlerts, activeKickoffDroppedAlerts, activeContextExhaustedAlerts, deriveContextExhaustedAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
   activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts,
   resolveAttentionProjectId, attentionItemInProject,
@@ -31,6 +32,7 @@ const s = (o = {}) => ({
   processState: o.processState ?? "live",
   busy: o.busy ?? false,
   rateLimitedUntil: o.rateLimitedUntil ?? null,
+  rateLimitBailedAt: o.rateLimitBailedAt ?? null,
 });
 const running = (o) => s({ processState: "live", ...o });
 const archivedSess = (o) => s({ processState: "exited", ...o }); // ArchivedSessionListItem is exited on the wire
@@ -79,6 +81,53 @@ check("fleetRollup(running) reads live state — a live manager with idle worker
 check("fleetRollup escalates to busy on any live busy session, and red on a live rate-limit", () => {
   assert.equal(fleetRollup([running({ role: "manager" }), running({ busy: true })]).label, "busy");
   assert.equal(fleetRollup([running({ role: "manager", rateLimitedUntil: future() })]).label, "rate-limited");
+});
+
+// Card dfef375f round 3 item 1: a BAILED session (auto-resume abandoned — rateLimitedUntil already
+// nulled by the bail) must be just as visible as an ordinary rate-limited one, not invisible to isBailed
+// or the roll-up/bucket helpers that key on isRateLimited alone.
+check("isBailed is true only once rateLimitBailedAt is set, independent of rateLimitedUntil", () => {
+  assert.equal(isBailed(running()), false, "negative control: an ordinary session is not bailed");
+  assert.equal(isBailed(running({ rateLimitedUntil: future() })), false, "a plain park is not a bail");
+  assert.equal(isBailed(running({ rateLimitBailedAt: new Date().toISOString() })), true);
+});
+
+// Card dfef375f round 4 item 4: a session can carry BOTH a future rateLimitedUntil AND a (stale,
+// not-yet-cleared) rateLimitBailedAt at once — a re-cap landing after a bail, before the next resume's
+// onFreshLive clears the marker (see pty/host.ts's own doc). attention.ts's RATE-LIMITED loop filters on
+// `showsAsRateLimited` (THIS exact function, not a re-derived copy) so the AUTO-RESUME ABANDONED row
+// (which filters on isBailed alone) is the only one that renders for such a session — never both.
+check("showsAsRateLimited is false once a session is ALSO bailed — only the bailed row renders", () => {
+  const bothSet = running({ rateLimitedUntil: future(), rateLimitBailedAt: new Date().toISOString() });
+  assert.equal(isRateLimited(bothSet), true, "setup: the park itself is still genuinely in the future");
+  assert.equal(isBailed(bothSet), true, "setup: the stale bail marker is still set");
+  assert.equal(showsAsRateLimited(bothSet), false, "the RATE-LIMITED row's own guard must exclude it");
+  // Negative control: an ordinary park (never bailed) is NOT excluded — the guard only fires on the
+  // overlap, not on every rate-limited session.
+  const parkOnly = running({ rateLimitedUntil: future() });
+  assert.equal(showsAsRateLimited(parkOnly), true, "negative control: a plain park still shows its own row");
+});
+
+check("fleetRollup is red on a live BAIL too, even though rateLimitedUntil is null (the bail nulled it)", () => {
+  const bailedAt = new Date().toISOString();
+  const rolled = fleetRollup([running({ role: "manager", rateLimitBailedAt: bailedAt, rateLimitedUntil: null })]);
+  assert.equal(rolled.tone, "red");
+  assert.equal(rolled.label, "auto-resume abandoned");
+});
+
+check("workerBuckets counts a bailed worker into `rl`, same bucket as an ordinary rate-limited one", () => {
+  const bailedAt = new Date().toISOString();
+  const buckets = workerBuckets([running({ rateLimitBailedAt: bailedAt }), running({ busy: false })]);
+  assert.deepEqual(buckets, { busy: 0, idle: 1, rl: 1, offline: 0, total: 2 });
+});
+
+check("rateLimitBailedDismissKey is stable within one bailed episode and differs across two", () => {
+  const sess = running({ rateLimitBailedAt: "2026-11-03T20:00:00.000Z" });
+  const k1 = rateLimitBailedDismissKey(sess);
+  const k2 = rateLimitBailedDismissKey({ ...sess, rateLimitBailedAt: "2026-11-03T20:00:00.000Z" });
+  const k3 = rateLimitBailedDismissKey({ ...sess, rateLimitBailedAt: "2026-11-03T21:00:00.000Z" });
+  assert.equal(k1, k2, "same episode (same stamp) -> same key");
+  assert.notEqual(k1, k3, "a new bail episode (a different stamp) -> a different key");
 });
 
 check("an archived-only project (no live manager) rolls up to 'no live manager', not a stale live status", () => {

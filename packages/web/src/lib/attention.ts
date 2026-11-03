@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, deriveContextExhaustedAlerts, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, deriveContextExhaustedAlerts, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isBailed, isRateLimited, isStuckBusy, rateLimitBailedDismissKey, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey, showsAsRateLimited } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -763,7 +763,9 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // Defense-in-depth: only a LIVE session is actionably rate-limited. The durable fix clears
   // rate_limited_until on session EXIT, but an exited row that pre-dates that fix (or races a tick)
   // could still carry a future timestamp — it can never resume, so it must not linger here.
-  for (const s of all.filter((s) => isRateLimited(s) && s.processState === "live")) {
+  // Card dfef375f round 4 item 4: `showsAsRateLimited` excludes a session that is ALSO bailed — the
+  // AUTO-RESUME ABANDONED loop below already covers it. Render the bailed row only, never both.
+  for (const s of all.filter((s) => showsAsRateLimited(s) && s.processState === "live")) {
     items.push({
       key: `r-${s.id}`, tone: "red", notify: "rate-limited", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
       // Card 611e76ba — the park's own end timestamp is frozen for this park and differs for the next one,
@@ -777,6 +779,22 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       // the project board too.
       projectId: s.projectId,
       text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — resumes ${s.rateLimitedUntil ? new Date(s.rateLimitedUntil).toLocaleTimeString() : "?"}`,
+    });
+  }
+  // Card dfef375f round 3 item 1: a LIVE session whose usage-limit auto-resume was ABANDONED (the loop
+  // breaker, or the independent watcher deadline, bailed it) and genuinely needs a human to clear it —
+  // without this, a bailed session (rateLimitedUntil null) is invisible to the RATE-LIMITED block above
+  // and a parentless top-level manager/lead could wedge silently. Same defense-in-depth LIVE scope as
+  // RATE-LIMITED above (an exited session can never resume either way).
+  for (const s of all.filter((s) => isBailed(s) && s.processState === "live")) {
+    items.push({
+      key: `rb-${s.id}`, tone: "red", notify: "rate-limited", kind: "AUTO-RESUME ABANDONED", rateLimitSessionId: s.id,
+      // The bail's own stamp instant is frozen for this episode and differs for the next one, so it is
+      // the state token — same shape as RATE-LIMITED's own dismissKey above.
+      dismissKey: rateLimitBailedDismissKey(s),
+      dismissHint: "Hide this alert — it returns if auto-resume abandons this session again. The session stays suppressed until you clear it.",
+      projectId: s.projectId,
+      text: `${s.projectName} · ${s.role ?? "session"} ${s.id.slice(0, 8)} — auto-resume abandoned, needs you to clear it`,
     });
   }
   // STUCK-BUSY exclusions (board card a1f06bcc): a manager parked mid-orchestration between worker turns

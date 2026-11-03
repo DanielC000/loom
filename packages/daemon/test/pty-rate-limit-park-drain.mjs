@@ -103,10 +103,14 @@ try {
   const pasteAfterSetup = countOf(PASTE_START); // baseline: KILLED's single submit
 
   // ═══════════════ THE PARK: a StopFailure rate_limit hook parks the session ═══════════════
-  host.deliverHook(SID, { hook_event_name: "StopFailure", error: "rate_limit" });
+  // error_details carries a short enum-shaped "cooldown" token (card dfef375f item 1) — also proves
+  // detail.type threads all the way from the hook payload to onRateLimited's event, not just that
+  // detectUsageLimit itself extracts it (usage-limit-loop-breaker.mjs covers that in isolation).
+  host.deliverHook(SID, { hook_event_name: "StopFailure", error: "rate_limit", error_details: "cooldown" });
 
   check("PARK: onRateLimited fired exactly once for this session", rateLimitedLog.length === 1 && rateLimitedLog[0].id === SID);
   check("PARK: detector attributed as 'stop_failure' (card 33d5aef1)", rateLimitedLog[0].detail?.detector === "stop_failure");
+  check("PARK: detail.type threaded through from the hook's error_details (card dfef375f item 1)", rateLimitedLog[0].detail?.type === "cooldown");
   check("PARK: busy fell to false (the killed turn ended)", lastBusy() === false);
   check("PARK: the held queue was NOT drained (pending still [MSG1, MSG2])",
     JSON.stringify(host.getPending(SID)) === JSON.stringify([MSG1, MSG2]));

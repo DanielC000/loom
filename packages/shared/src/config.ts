@@ -314,6 +314,13 @@ export const PLATFORM_MS_BOUNDS = {
     deadlineAfterResetMs: { min: 60_000, max: 86_400_000 },
     deadlineNoResetMs: { min: 600_000, max: 172_800_000 },
     recencyWindowMs: { min: 0, max: 86_400_000 },
+    // Card dfef375f item 3 (the loop breaker) — `loopBreakerMaxRecaps` is a plain count, deliberately
+    // absent here (see this table's own doc). `loopBreakerQuickGapMs` (round 2) replaces the old
+    // `loopBreakerWindowMs` — a SHORT gap by design ("a few minutes"), so its floor is seconds, not
+    // the shared 60s floor every other rateLimit field below uses.
+    loopBreakerQuickGapMs: { min: 1_000, max: 3_600_000 },
+    loopBreakerBackoffBaseMs: { min: 60_000, max: 86_400_000 },
+    loopBreakerBackoffCeilingMs: { min: 60_000, max: 86_400_000 },
   },
   watchers: {
     contextWatchMs: WATCHER_MS_BOUNDS,
@@ -892,6 +899,29 @@ export interface RateLimitConfig {
    * resumeResetFromUsageStatus). Default 95.
    */
   exhaustedThresholdPct: number;
+  /** Card dfef375f (the loop breaker): CONSECUTIVE "quick" re-caps (within `loopBreakerQuickGapMs` of
+   *  the session's own last resume) before the episode bails outright. Default 3 (a plain count, no
+   *  unit). Round 2 (see usage-limit.ts's stepLoopBreaker doc): no escalation ladder to climb first —
+   *  each consecutive quick re-cap short of this count trips an escalating backoff instead. */
+  loopBreakerMaxRecaps: number;
+  /** How soon (ms) after a resume a cap counts as "quick" (the signature of a resume that landed back
+   *  in a still-capped account) — round 2's replacement for the old cap-to-cap `loopBreakerWindowMs`.
+   *  Default 180000 (3m). */
+  loopBreakerQuickGapMs: number;
+  /** First escalated backoff (ms) once the breaker trips; doubles on each further consecutive quick
+   *  re-cap up to the ceiling. Default 1800000 (30m). Clamped to never exceed
+   *  `loopBreakerBackoffCeilingMs` at resolve time (resolvePlatform) — a base above the ceiling is
+   *  nonsensical even though `stepLoopBreaker`'s own `Math.min` already tolerates it silently. */
+  loopBreakerBackoffBaseMs: number;
+  /**
+   * Backoff ceiling (ms) — caps how large the escalating `loopBreakerBackoffBaseMs` doubling can grow.
+   * Default 14400000 (4h). Card dfef375f round 3 item 5: this does NOT itself trigger a bail — reaching
+   * the ceiling only means the NEXT escalated backoff is clamped to this value, same as any step before
+   * it. The bail is COUNT-based (`loopBreakerMaxRecaps`, a plain count of CONSECUTIVE quick re-caps —
+   * see `stepLoopBreaker`'s own doc in usage-limit.ts), entirely independent of whether backoff has
+   * reached this ceiling; a prior version of this doc wrongly described a ceiling-triggered bail.
+   */
+  loopBreakerBackoffCeilingMs: number;
 }
 
 /**
@@ -1719,7 +1749,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // mirror the hardcoded module consts at each call-site; the global override (resolveConfig's 2nd arg)
   // + LOOM_* watcher env layer beneath. See RateLimitConfig/WatcherConfig/TimeoutConfig for unit docs.
   platform: {
-    rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000, exhaustedThresholdPct: 95 },
+    rateLimit: { defaultBackoffMs: 18000000, resetBufferMs: 10000, deadlineAfterResetMs: 1800000, deadlineNoResetMs: 21600000, recencyWindowMs: 21600000, exhaustedThresholdPct: 95, loopBreakerMaxRecaps: 3, loopBreakerQuickGapMs: 180000, loopBreakerBackoffBaseMs: 1800000, loopBreakerBackoffCeilingMs: 14400000 },
     watchers: { contextWatchMs: 60000, idleWatchMs: 60000, rateLimitWatchMs: 60000, usagePollMs: 60000, wakeMs: 60000, schedulerMs: 60000, reconcileMs: 10000, snapshotMs: 420000, crashRecoveryWatchMs: 60000, pollMs: 60000 },
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
     // P2 authenticated-request bounds: 20s timeout, 1MB response cap, 30 req/5min per connection.
@@ -2034,6 +2064,17 @@ function envWatcherIntervalMs(name: string): number | undefined {
  */
 function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig {
   const d = PLATFORM_DEFAULTS.platform;
+  // Card dfef375f round 2 item 7: the loop breaker's own CROSS-FIELD invariant — a backoff BASE above
+  // its own CEILING is nonsensical config, even though stepLoopBreaker's `Math.min` already tolerates it
+  // silently (every escalation step would just read as the ceiling). Clamp here rather than reject at
+  // the zod layer (mcp/platform.ts) — base and ceiling are independently valid single-field values; only
+  // their COMBINATION can be wrong, and a human adjusting one field at a time should never get a 400 for
+  // a transient combination that a save of the OTHER field a moment later would have resolved anyway.
+  const loopBreakerBackoffCeilingMs = po?.rateLimit?.loopBreakerBackoffCeilingMs ?? d.rateLimit.loopBreakerBackoffCeilingMs;
+  const loopBreakerBackoffBaseMs = Math.min(
+    po?.rateLimit?.loopBreakerBackoffBaseMs ?? d.rateLimit.loopBreakerBackoffBaseMs,
+    loopBreakerBackoffCeilingMs,
+  );
   return {
     rateLimit: {
       defaultBackoffMs: po?.rateLimit?.defaultBackoffMs ?? d.rateLimit.defaultBackoffMs,
@@ -2042,6 +2083,10 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       deadlineNoResetMs: po?.rateLimit?.deadlineNoResetMs ?? d.rateLimit.deadlineNoResetMs,
       recencyWindowMs: po?.rateLimit?.recencyWindowMs ?? d.rateLimit.recencyWindowMs,
       exhaustedThresholdPct: po?.rateLimit?.exhaustedThresholdPct ?? d.rateLimit.exhaustedThresholdPct,
+      loopBreakerMaxRecaps: po?.rateLimit?.loopBreakerMaxRecaps ?? d.rateLimit.loopBreakerMaxRecaps,
+      loopBreakerQuickGapMs: po?.rateLimit?.loopBreakerQuickGapMs ?? d.rateLimit.loopBreakerQuickGapMs,
+      loopBreakerBackoffBaseMs,
+      loopBreakerBackoffCeilingMs,
     },
     watchers: {
       contextWatchMs: po?.watchers?.contextWatchMs ?? envWatcherIntervalMs("LOOM_CONTEXT_WATCH_INTERVAL_MS") ?? d.watchers.contextWatchMs,

@@ -12,6 +12,22 @@ export function isRateLimited(s: SessionListItem): boolean {
   return !!s.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > Date.now();
 }
 
+// Card dfef375f round 3 item 1: a session whose usage-limit auto-resume was ABANDONED (the loop breaker
+// or the independent watcher deadline bailed it) and genuinely needs a human to clear it — distinct from
+// `isRateLimited`, which is false the moment a bail nulls `rateLimitedUntil`. `rateLimitBailedAt` stays
+// set until an explicit human clear, so (unlike `isRateLimited`) there is no expiry to check.
+export function isBailed(s: SessionListItem): boolean {
+  return !!s.rateLimitBailedAt;
+}
+
+// Card dfef375f round 4 item 4: the RATE-LIMITED attention row's own guard — true only for an ordinary
+// park, never for a session that is ALSO bailed (a re-cap can land after a bail, before the next resume's
+// onFreshLive clears the stale marker; see pty/host.ts). A doubly-set session renders its AUTO-RESUME
+// ABANDONED row (isBailed alone) instead — never both.
+export function showsAsRateLimited(s: SessionListItem): boolean {
+  return isRateLimited(s) && !isBailed(s);
+}
+
 // ── STUCK-BUSY heuristic (Mission Control attention queue) ─────────────────────────────────────────────
 // A session that's been `busy` with a stale `lastActivity` this long is FLAGGED — UNLESS it's legitimately
 // parked: a manager supervising ≥1 live/pending worker between turns, or a session that told Loom it's
@@ -113,6 +129,15 @@ export function rateLimitDismissKey(s: Pick<SessionListItem, "id" | "rateLimited
   return `r:${s.id}:${s.rateLimitedUntil}`;
 }
 
+/**
+ * BAILED's dismiss key (card dfef375f round 3 item 1). The marker's own stamp instant is the state
+ * token: frozen for this bailed episode, different for the next one. Dismissing does NOT lift the
+ * marker — that is the Clear/retry action.
+ */
+export function rateLimitBailedDismissKey(s: Pick<SessionListItem, "id" | "rateLimitBailedAt">): string {
+  return `rb:${s.id}:${s.rateLimitBailedAt}`;
+}
+
 // QUEUE DRAINED episode derivation (card 611e76ba) — moved to @loom/shared (card 3d5fcd00) so the
 // companion attention-push chat twin (packages/daemon/src/companion/attention-push.ts) can derive the
 // SAME episode boundary instead of growing its own, independently-drifting copy. Re-exported here
@@ -137,6 +162,7 @@ export function capArchived<T>(archived: readonly T[], cap = ARCHIVED_FOLD_CAP):
 // paint the card red). Archived history surfaces in the buckets/header instead.
 export function fleetRollup(sessions: SessionListItem[]): { tone: Tone; label: string; glow?: boolean } {
   if (sessions.some(isRateLimited)) return { tone: "red", label: "rate-limited" };
+  if (sessions.some(isBailed)) return { tone: "red", label: "auto-resume abandoned" };
   if (sessions.some((s) => s.processState === "live" && s.busy)) return { tone: "amber", label: "busy", glow: true };
   if (sessions.some((s) => s.role === "manager" && s.processState === "live")) return { tone: "phosphor", label: "idle" };
   return { tone: "muted", label: "no live manager" };
@@ -147,7 +173,7 @@ export function fleetRollup(sessions: SessionListItem[]): { tone: Tone; label: s
 export function workerBuckets(workers: SessionListItem[]) {
   let busy = 0, idle = 0, rl = 0, offline = 0;
   for (const w of workers) {
-    if (isRateLimited(w)) rl++;
+    if (isRateLimited(w) || isBailed(w)) rl++;
     else if (w.processState !== "live") offline++;
     else if (w.busy) busy++;
     else idle++;

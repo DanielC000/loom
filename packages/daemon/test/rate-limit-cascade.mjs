@@ -93,20 +93,29 @@ try {
   // ════════ B. CLEAR-ON-EXIT: an exited session never appears rate-limited; lastError survives ════════
   // A LIVE parked session carrying a meaningful lastError (e.g. a banner the attention surface keys off).
   seedParked("exiter", "live", "[loom:crash-loop] died repeatedly");
+  // Card dfef375f round 2: an in-progress loop-breaker streak, exactly as a mid-episode cap would leave it.
+  db.setRateLimitLoopBreakerState("exiter", now, 2);
   const before = db.getSession("exiter");
   check("B: pre-exit — parked with a FUTURE rate_limited_until (would read RATE-LIMITED)",
     before.rateLimitedUntil !== null && new Date(before.rateLimitedUntil).getTime() > Date.now());
 
-  // Mirror index.ts onExit's rate-limit-relevant sequence EXACTLY (setProcessState → setBusy → clearRateLimit).
+  // Mirror index.ts onExit's rate-limit-relevant sequence EXACTLY (setProcessState → setBusy →
+  // clearRateLimit → clearRateLimitLoopBreakerState — card dfef375f round 2).
   db.setProcessState("exiter", "exited");
   db.setBusy("exiter", false);
   db.clearRateLimit("exiter");
+  db.clearRateLimitLoopBreakerState("exiter");
 
   const after = db.getSession("exiter");
   check("B: post-exit — rate_limited_until cleared (never reads RATE-LIMITED again)", after.rateLimitedUntil === null);
   check("B: post-exit — rate_limit_deadline cleared too", after.rateLimitDeadline === null);
   check("B: post-exit — processState is exited", after.processState === "exited");
   check("B: clear-on-exit PRESERVES lastError (only the two park columns are touched)", after.lastError === "[loom:crash-loop] died repeatedly");
+  // Card dfef375f round 2 ("clear the breaker counters on stop/exit"): a RESUME on this SAME session id
+  // (e.g. a crash-recovery resume) must start a fresh episode, never inherit the streak that was in
+  // progress when it exited.
+  check("B: post-exit — loop-breaker counters (all three) cleared too — a later resume starts a fresh episode",
+    JSON.stringify(db.getRateLimitLoopBreakerState("exiter")) === JSON.stringify({ lastCapAt: null, recapCount: 0, lastResumedAt: null }));
 } finally {
   try { await app.close(); } catch { /* ignore */ }
   try { db.close(); } catch { /* ignore */ }
