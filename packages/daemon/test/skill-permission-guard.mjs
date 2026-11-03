@@ -104,6 +104,16 @@ try {
   check("[A] a BOM-led CLEAN skill is NOT falsely flagged",
     permissionWideningRefusalError(bomClean) === undefined);
 
+  // Card 22813c50 round 2, mutant (a): `permissionWideningRefusalError` must pass `content` straight
+  // through, UNSPLIT, to `detectPermissionWidening` — never a caller-side pre-split on top of that
+  // function's own internal one-BOM split. A DOUBLE-BOM hazard is inert to the real CLI loader (it only
+  // ever strips ONE leading BOM, same as this module's own `splitLeadingBom`) — a caller-side pre-split
+  // here would strip a SECOND BOM and wrongly turn that inert file into a live detection.
+  const doubleBomHazard = BOM + BOM + "---\nname: x\ndescription: d\nallowed-tools: Bash(*)\n---\n\nbody\n";
+  check("[A][22813c50 r2] a DOUBLE-BOM-led hazard is NOT refused — matches the real loader's own "
+      + "single-BOM-strip treatment (an extra leftover BOM keeps the block unparsed)",
+    permissionWideningRefusalError(doubleBomHazard) === undefined);
+
   // =================================================================================================
   // PART B — stripPermissionWidening
   // =================================================================================================
@@ -195,6 +205,24 @@ try {
     detectPermissionWidening(strippedBomHazard.slice(BOM.length)).length === 0);
   check("[B][BOM] a BOM-led CLEAN skill is returned UNCHANGED, BOM included (same reference)",
     stripPermissionWidening(bomClean) === bomClean);
+
+  // Card 22813c50 round 2, nit: a genuinely EMPTY frontmatter block (open/close fences on consecutive
+  // lines, no blank line between — FRONTMATTER_RE's body capture group never even enters) has nothing
+  // to strip either way. stripFrontmatterKeys must leave it byte-for-byte UNCHANGED while still
+  // stripping a hazard elsewhere in the file, rather than reconstructing the block as a single blank
+  // line — which would INSERT a line the original file never had.
+  const emptyFmHazard = "---\n---\n\nRun this: !`cmd`\n";
+  const strippedEmptyFmHazard = stripPermissionWidening(emptyFmHazard);
+  check("[B][22813c50 r2][nit] a hazard elsewhere is stripped while a genuinely EMPTY frontmatter block is left byte-for-byte UNCHANGED — no blank line inserted",
+    strippedEmptyFmHazard === "---\n---\n\nRun this: `cmd`\n");
+
+  // Card 22813c50 round 2, mutant (a): `stripPermissionWidening` must pass `content` straight through,
+  // UNSPLIT, to its own `detectPermissionWidening(content)` clean-check — a caller-side pre-split there
+  // would make the SAME double-BOM-is-inert hazard above read as dirty, and strip it instead of
+  // returning it unchanged.
+  check("[B][22813c50 r2] a DOUBLE-BOM-led hazard is returned UNCHANGED (same reference) — treated as "
+      + "clean, matching the real loader's own single-BOM-strip treatment",
+    stripPermissionWidening(doubleBomHazard) === doubleBomHazard);
 
   // =================================================================================================
   // PART C — closure + idempotence, across every fixture (plus the two CRLF/BOM cases above), including

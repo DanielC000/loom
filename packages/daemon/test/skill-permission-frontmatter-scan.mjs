@@ -129,6 +129,9 @@ try {
       Array.isArray(resultNotDir.findings) && resultNotDir.findings.length === 0 && Array.isArray(resultNotDir.truncated) && resultNotDir.truncated.length === 0);
     check("PART1-11a: ...and IS reported incomplete:true — the exact 'never treat a scan error as clean' gap item 2 closes",
       resultNotDir.incomplete === true);
+    check("PART1-11b: card 22813c50 (M2) — incompleteEntries names the whole-dir failure (name:null) with a real errno",
+      resultNotDir.incompleteEntries.length === 1 && resultNotDir.incompleteEntries[0].name === null
+        && typeof resultNotDir.incompleteEntries[0].errno === "string" && resultNotDir.incompleteEntries[0].errno.length > 0);
 
     // CR round 4, item 2, shape 2: a SKILL.md that EXISTS but can't be READ — here, SKILL.md is itself a
     // DIRECTORY (a real EISDIR on read, not an ENOENT "no such file"). Must mark the scan incomplete,
@@ -141,6 +144,9 @@ try {
       !resultUnreadable.findings.some((f) => f.name === "unreadable-skill"));
     check("PART1-12a: ...and marks the scan incomplete:true — never silently folded into 'no SKILL.md there'",
       resultUnreadable.incomplete === true);
+    check("PART1-12b: card 22813c50 (M2) — incompleteEntries names the one failing skill with a real errno",
+      resultUnreadable.incompleteEntries.length === 1 && resultUnreadable.incompleteEntries[0].name === "unreadable-skill"
+        && typeof resultUnreadable.incompleteEntries[0].errno === "string" && resultUnreadable.incompleteEntries[0].errno.length > 0);
 
     // Symlinked skill dir is never followed, even though its REAL target carries allowed-tools.
     const cwdLink = path.join(scratchRoot, `p1-link-${sfx}`);
@@ -208,6 +214,21 @@ try {
       !findingsHugeFm.some((f) => f.name === "huge-frontmatter-skill"));
     check("PART1-9c: NO LONGER SILENT — that exact miss is now reported as a readBytes truncation naming the skill, replacing the old accepted-gap silence",
       truncatedHugeFm.some((t) => t.cap === "readBytes" && t.names.includes("huge-frontmatter-skill")));
+
+    // Card 22813c50 (N1): an EMPTY frontmatter block (opening and closing fence on CONSECUTIVE lines, no
+    // blank line between) whose file then runs well past the read cap used to be misreported as a
+    // readBytes truncation — FRONTMATTER_RE could never match the empty block at all, of any size, so
+    // frontmatterReadIncomplete always said "never closed" even though the (empty) block closed
+    // immediately. Fixed; this proves the scan-level symptom the CR named is gone.
+    const cwdEmptyFm = path.join(scratchRoot, `p1-emptyfm-${sfx}`);
+    const emptyFmDir = path.join(cwdEmptyFm, ".claude", "skills", "empty-frontmatter-skill");
+    fs.mkdirSync(emptyFmDir, { recursive: true });
+    fs.writeFileSync(path.join(emptyFmDir, "SKILL.md"), `---\n---\n${"x".repeat(5000)}\n`);
+    const { findings: findingsEmptyFm, truncated: truncatedEmptyFm, incomplete: incompleteEmptyFm } = scanCwdSkillsForPermissionFrontmatter(cwdEmptyFm, []);
+    check("PART1-9d: card 22813c50 (N1) — an empty frontmatter block with a long body is NOT reported as a readBytes truncation",
+      !truncatedEmptyFm.some((t) => t.names.includes("empty-frontmatter-skill")));
+    check("PART1-9e: ...no finding either (an empty block has nothing to detect) and the scan is not incomplete",
+      !findingsEmptyFm.some((f) => f.name === "empty-frontmatter-skill") && incompleteEmptyFm === false);
 
     // Entry-count cap: more directory entries than PERMISSION_SCAN_MAX_ENTRIES — the scan must not throw
     // and must not scan an unbounded number of them. Every entry here carries allowed-tools, so a HIGHER
@@ -332,6 +353,23 @@ try {
     check("PART1c-5 (negative control): the identical non-BOM unrecognized fixture is ALSO flagged",
       findingsNoBom.find((f) => f.name === "nobom-unrecognized-skill")?.fields?.includes("frontmatter-unrecognized"));
 
+    // Card 9d01b4c1 round 3 / card 22813c50 — a DOUBLE-BOM hooks skill is NOT flagged: the static-scan
+    // finding is that the real loader strips exactly ONE leading BOM, so a double-BOM file's frontmatter
+    // is INERT there too (a leftover BOM still blocks its own `^---` test). Before dropping this scan's
+    // own redundant caller-side pre-split, this fixture WOULD have been flagged (two strips total — the
+    // caller's one plus the detector's own — reaching a clean `---` the real loader never reaches).
+    function writeDoubleBomSkill(name, frontmatterBody, bodyText = "hello") {
+      const dir = path.join(cwd, ".claude", "skills", name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), `${BOM}${BOM}---\n${frontmatterBody}---\n${bodyText}\n`);
+    }
+    writeDoubleBomSkill("double-bom-hooks-skill", "name: double-bom-hooks-skill\nhooks:\n  Stop:\n");
+    const { findings: findingsDoubleBom, incomplete: incompleteDoubleBom } = scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    check("PART1c-5a: a DOUBLE-BOM-prefixed hooks skill is NOT flagged — matches the real loader's own inert treatment",
+      !findingsDoubleBom.some((f) => f.name === "double-bom-hooks-skill"));
+    check("PART1c-5b: ...and the scan is not incomplete either (a double BOM is a clean miss, not an I/O error)",
+      incompleteDoubleBom === false);
+
     // Card 9d01b4c1 round 2, MINOR: PART1c-1/2 above only ever exercise detectPermissionWidening's own
     // BOM split (both fixtures' frontmatter closes well within the read cap). frontmatterReadIncomplete's
     // OWN BOM split (the `head.truncated && frontmatterReadIncomplete(body)` branch in
@@ -347,6 +385,23 @@ try {
       !findingsBomHugeFm.some((f) => f.name === "bom-huge-frontmatter-skill"));
     check("PART1c-7: ...but IS reported as a readBytes truncation naming the skill — proves frontmatterReadIncomplete's own BOM split actually fires on this path too, not just detectPermissionWidening's",
       truncatedBomHugeFm.some((t) => t.cap === "readBytes" && t.names.includes("bom-huge-frontmatter-skill")));
+
+    // Card 22813c50 round 2, mutant (c): `scanCwdSkillsForPermissionFrontmatter` must pass `head.content`
+    // UNSPLIT to `frontmatterReadIncomplete` — never a caller-side pre-split on top of that function's
+    // own internal one-BOM split. A DOUBLE-BOM frontmatter block past the read cap is inert to the real
+    // loader (same reasoning as PART1c-5a/5b above) — a caller-side pre-split here would double-strip it
+    // and wrongly report it as a readBytes truncation.
+    const doubleBomHugeFmDir = path.join(cwd, ".claude", "skills", "double-bom-huge-frontmatter-skill");
+    fs.mkdirSync(doubleBomHugeFmDir, { recursive: true });
+    fs.writeFileSync(path.join(doubleBomHugeFmDir, "SKILL.md"), `${BOM}${BOM}---\nname: double-bom-huge-frontmatter-skill\n${bomPaddingKeys}allowed-tools: Bash(*)\n---\nbody\n`);
+    const { findings: findingsDoubleBomHugeFm, truncated: truncatedDoubleBomHugeFm, incomplete: incompleteDoubleBomHugeFm } =
+      scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    check("PART1c-8: a DOUBLE-BOM-led frontmatter block past the read cap is not DETECTED (matches the single-BOM case's own bound)",
+      !findingsDoubleBomHugeFm.some((f) => f.name === "double-bom-huge-frontmatter-skill"));
+    check("PART1c-9: ...and is NOT reported as a readBytes truncation either — matches the real loader's inert treatment of a double BOM, unlike the single-BOM PART1c-7 case above",
+      !truncatedDoubleBomHugeFm.some((t) => t.cap === "readBytes" && t.names.includes("double-bom-huge-frontmatter-skill")));
+    check("PART1c-10: ...and the scan is not incomplete either",
+      incompleteDoubleBomHugeFm === false);
   }
 
   // ===================================================================================================
@@ -613,6 +668,116 @@ try {
     sessions.handleSkillPermissionFrontmatterWarning(i4, { role: "assistant", scope: "<cwd>/.claude/skills", findings: contentAChanged });
     check("PART3-I4: genuinely CHANGED real content right after that ⇒ isRepeat:false — ordinary dedupe still correctly discriminates a real change, undisturbed by the incomplete scan that passed through in between",
       db.listEventsForWorker(i4).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    // Card 22813c50 (M2): an incomplete scan now dedupes on ITS OWN key (`skill-perm-incomplete-last:*`),
+    // separate from the findings-baseline key above — a STABLE I/O condition must stop re-pushing on every
+    // resume, but a CHANGED one, or a later recurrence after a genuinely complete scan, must still re-alert.
+    const inc2Cwd = path.join(scratchRoot, `p3-inc2-${sfx}`);
+    const entriesV1 = [{ name: "flaky-skill", errno: "EACCES" }];
+    const entriesV2 = [{ name: "flaky-skill", errno: "EBUSY" }]; // same name, DIFFERENT errno
+
+    const j1 = `skdd-j1-${sfx}`;
+    mkSessionAt(j1, inc2Cwd);
+    sessions.handleSkillPermissionFrontmatterWarning(j1, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesV1 });
+    check("PART3-J1: first sighting of this incomplete condition ⇒ isRepeat:false",
+      db.listEventsForWorker(j1).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    const j2 = `skdd-j2-${sfx}`;
+    mkSessionAt(j2, inc2Cwd);
+    sessions.handleSkillPermissionFrontmatterWarning(j2, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesV1 });
+    check("PART3-J2: the IDENTICAL incomplete condition again ⇒ isRepeat:true — the M2 fix: a stable I/O error no longer re-pushes every resume",
+      db.listEventsForWorker(j2).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === true);
+
+    const j3 = `skdd-j3-${sfx}`;
+    mkSessionAt(j3, inc2Cwd);
+    sessions.handleSkillPermissionFrontmatterWarning(j3, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesV2 });
+    check("PART3-J3: the errno CHANGED (same name) ⇒ isRepeat:false — a genuinely different failure still re-alerts",
+      db.listEventsForWorker(j3).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    const j4 = `skdd-j4-${sfx}`;
+    mkSessionAt(j4, inc2Cwd);
+    sessions.handleSkillPermissionFrontmatterWarning(j4, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [] });
+    check("PART3-J4: a genuinely CLEAN+COMPLETE scan right after ⇒ no event (and clears the incomplete baseline)",
+      db.listEventsForWorker(j4).filter((e) => e.kind === "skill_permission_frontmatter_warning").length === 0);
+
+    const j5 = `skdd-j5-${sfx}`;
+    mkSessionAt(j5, inc2Cwd);
+    sessions.handleSkillPermissionFrontmatterWarning(j5, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesV2 });
+    check("PART3-J5: the SAME incomplete condition (entriesV2) recurring AFTER a clean scan ⇒ isRepeat:false — 'clear it on the next complete scan' means it must NOT stay deduped against j3's old baseline",
+      db.listEventsForWorker(j5).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    const j6 = `skdd-j6-${sfx}`;
+    mkSessionAt(j6, inc2Cwd);
+    sessions.handleSkillPermissionFrontmatterWarning(j6, { role: "assistant", scope: "<cwd>/.claude/skills", findings: contentA });
+    check("PART3-J6: a REAL finding right after an incomplete scan is reported with its own isRepeat, undisturbed by the incomplete-only key (proves the two keys never cross-contaminate)",
+      db.listEventsForWorker(j6).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    // Card 22813c50 round 2, mutant (e): j6 above (incomplete:false, WITH a real finding) must go
+    // through the "complete" branch's own `this.db.deleteMeta(incompleteKey)` — the SAME unconditional
+    // clear a clean scan gets — not just through the all-clean early-return. If that clear were ever
+    // dropped from the complete-WITH-findings branch specifically, j5's stale entriesV2 baseline would
+    // still be sitting in `incompleteKey`, and the SAME incomplete condition recurring right after j6
+    // would wrongly dedupe against it instead of surfacing as a fresh sighting.
+    const j7 = `skdd-j7-${sfx}`;
+    mkSessionAt(j7, inc2Cwd);
+    sessions.handleSkillPermissionFrontmatterWarning(j7, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesV2 });
+    check("PART3-J7: the SAME incomplete condition (entriesV2) recurring right after j6's complete-WITH-findings scan ⇒ isRepeat:false — j6 must have cleared the incomplete baseline too, not just a genuinely clean scan",
+      db.listEventsForWorker(j7).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+  }
+
+  // ===================================================================================================
+  // PART 3b — card 22813c50 round 2 (the blocking MAJOR, owner decision f635bad6 "warn loudly"): an
+  // INCOMPLETE scan that ALSO carries a NEW real finding or truncation must NEVER be suppressed as a
+  // repeat merely because the incomplete condition itself repeated. Before this fix, `isRepeat` for the
+  // `incomplete` branch was computed from the incomplete-entries key alone — a stale baseline match
+  // would silently swallow a genuinely new, real finding arriving in the SAME call.
+  // ===================================================================================================
+  {
+    const db = new Db();
+    const proj = `skmj-proj-${sfx}`, agent = `skmj-ag-${sfx}`;
+    const now = new Date().toISOString();
+    db.insertProject({ id: proj, name: proj, repoPath: os.tmpdir(), vaultPath: os.tmpdir(), config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agent, projectId: proj, name: "t", startupPrompt: "", position: 0 });
+    const majorCwd = path.join(scratchRoot, `p3b-major-${sfx}`);
+    const mkSessionAt = (id) => db.insertSession({
+      id, projectId: proj, agentId: agent, engineSessionId: `eng-${id}`, title: null, cwd: majorCwd,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "assistant", parentSessionId: null, taskId: null, worktreePath: null, branch: null,
+    });
+    const sessions = new SessionService(db, {}, new OrchestrationControl());
+    const entriesM = [{ name: "flaky-skill", errno: "EACCES" }];
+    const contentA = [{ name: "hooked-skill", fields: ["hooks"], contentHash: "sha-AAA" }];
+    const truncM = [{ cap: "readBytes", names: ["huge-skill"] }];
+
+    const m1 = `skmj-m1-${sfx}`;
+    mkSessionAt(m1);
+    sessions.handleSkillPermissionFrontmatterWarning(m1, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesM });
+    check("PART3-M1: first sighting of this incomplete condition ⇒ isRepeat:false",
+      db.listEventsForWorker(m1).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    const m2 = `skmj-m2-${sfx}`;
+    mkSessionAt(m2);
+    sessions.handleSkillPermissionFrontmatterWarning(m2, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesM });
+    check("PART3-M2: (precondition) the IDENTICAL incomplete condition alone, no findings/truncation ⇒ isRepeat:true — confirms the baseline genuinely matches before testing the interaction below",
+      db.listEventsForWorker(m2).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === true);
+
+    const m3 = `skmj-m3-${sfx}`;
+    mkSessionAt(m3);
+    sessions.handleSkillPermissionFrontmatterWarning(m3, { role: "assistant", scope: "<cwd>/.claude/skills", findings: contentA, incomplete: true, incompleteEntries: entriesM });
+    check("PART3-M3 (THE MAJOR FIX): the SAME incomplete condition, but this call ALSO carries a NEW real finding ⇒ isRepeat:false — must be pushed loudly, never deduped just because the incomplete-entries key alone still matches",
+      db.listEventsForWorker(m3).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    const m4 = `skmj-m4-${sfx}`;
+    mkSessionAt(m4);
+    sessions.handleSkillPermissionFrontmatterWarning(m4, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesM, truncated: truncM });
+    check("PART3-M4: same shape, but with a NEW truncation instead of a finding ⇒ isRepeat:false — truncated must defeat the dedupe exactly like findings does",
+      db.listEventsForWorker(m4).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === false);
+
+    const m5 = `skmj-m5-${sfx}`;
+    mkSessionAt(m5);
+    sessions.handleSkillPermissionFrontmatterWarning(m5, { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true, incompleteEntries: entriesM });
+    check("PART3-M5: back to the bare incomplete condition alone (no findings/truncation) ⇒ isRepeat:true — the incomplete-entries baseline itself was never overwritten by m3/m4's own findings/truncated, proving `metaKey` (and the dedupe write) stayed untouched by the comparison-only read",
+      db.listEventsForWorker(m5).filter((e) => e.kind === "skill_permission_frontmatter_warning")[0]?.detail?.isRepeat === true);
   }
 
   // ===================================================================================================

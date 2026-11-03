@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import type { SkillPermissionVector } from "@loom/shared";
 import { claudeSkillsDir } from "../pty/claude-doctrine.js";
 import { CLAUDE_DOCTRINE_DIR, CWD_SKILLS_SCAN_SCOPE } from "../pty/claude-dirname.js";
-import { detectPermissionWidening, frontmatterReadIncomplete, splitLeadingBom } from "./permissionWidening.js";
+import { detectPermissionWidening, frontmatterReadIncomplete } from "./permissionWidening.js";
 import { fingerprintSkillDir } from "./inject.js";
 
 /** Card 015fdb23 — bounds for the spawn-time cwd-skills permission-frontmatter scan, so a pathological
@@ -91,6 +91,16 @@ export interface SkillPermissionScanTruncation {
   mtimeMs?: number;
 }
 
+/** One entry (or the whole-directory `readdir` call) that made a scan `incomplete` — card 22813c50 (M2),
+ *  so a caller can dedupe a STABLE I/O condition on its own shape instead of re-alerting every spawn.
+ *  `name:null` is the directory-level `readdir` failure (nothing could be enumerated at all); otherwise
+ *  the one entry whose SKILL.md could not be read. `errno` is the OS error code (e.g. `"EACCES"`), or
+ *  `null` if the thrown error carried none. */
+export interface SkillPermissionScanIncompleteEntry {
+  name: string | null;
+  errno: string | null;
+}
+
 export interface SkillPermissionScanResult {
   findings: SkillPermissionFinding[];
   truncated: SkillPermissionScanTruncation[];
@@ -103,6 +113,9 @@ export interface SkillPermissionScanResult {
    * produced no findings.
    */
   incomplete: boolean;
+  /** card 22813c50 (M2) — WHICH entries made `incomplete` true, plus each one's errno. Always `[]` when
+   *  `incomplete` is `false`. */
+  incompleteEntries: SkillPermissionScanIncompleteEntry[];
 }
 
 /**
@@ -140,8 +153,11 @@ export interface SkillPermissionScanResult {
  * round 4, item 1: a FILE larger than the cap, whose frontmatter closed well within it, is NOT this case
  * — `frontmatterReadIncomplete` (`permissionWidening.ts`) is what tells the two apart.
  *
- * @decision 9d01b4c1 — split off a leading BOM (`splitLeadingBom`, `permissionWidening.ts`) before every
- * detector call below, or a BOM-prefixed SKILL.md's `---` silently misses `FRONTMATTER_OPEN_RE`.
+ * Every detector call below passes `head.content` straight through, UNSPLIT — both self-split one
+ * leading BOM internally now.
+ *
+ * @decision 9d01b4c1 (round 2) — a caller-side pre-split on top would strip a SECOND BOM for a
+ * double-BOM input, inert to the real CLI loader, and wrongly flag it as live.
  */
 export function scanCwdSkillsForPermissionFrontmatter(
   cwd: string,
@@ -157,12 +173,13 @@ export function scanCwdSkillsForPermissionFrontmatter(
     // ENOENT (no .claude/skills dir at all) is the normal, legitimate "nothing to scan" case. Any other
     // error (EACCES/EBUSY/EMFILE/…) means the scan genuinely could not run and must never be reported the
     // same way as a verified-clean directory (CR round 4, item 2).
-    const incomplete = (e as NodeJS.ErrnoException)?.code !== "ENOENT";
-    return { findings: [], truncated: [], incomplete };
+    const errno = (e as NodeJS.ErrnoException)?.code ?? null;
+    const incomplete = errno !== "ENOENT";
+    return { findings: [], truncated: [], incomplete, incompleteEntries: incomplete ? [{ name: null, errno }] : [] };
   }
   const findings: SkillPermissionFinding[] = [];
   const truncated: SkillPermissionScanTruncation[] = [];
-  let incomplete = false;
+  const incompleteEntries: SkillPermissionScanIncompleteEntry[] = [];
   if (entries.length > PERMISSION_SCAN_MAX_ENTRIES) {
     const skipped = entries.slice(PERMISSION_SCAN_MAX_ENTRIES);
     truncated.push({ cap: "entries", names: skipped.slice(0, TRUNCATION_NAMES_MAX).map((e) => e.name), skippedCount: skipped.length });
@@ -182,24 +199,19 @@ export function scanCwdSkillsForPermissionFrontmatter(
     if (!head.ok) {
       // "missing" (no SKILL.md under this entry) is normal — nothing to flag. "error" (exists but could
       // not be read — EACCES/EBUSY/…) is a real scan gap, never silently folded into a clean result.
-      if (head.reason === "error") incomplete = true;
+      if (head.reason === "error") incompleteEntries.push({ name, errno: head.errno });
       continue;
     }
-    // Card 9d01b4c1 — split off a leading BOM FIRST: every pattern `frontmatterReadIncomplete`/
-    // `detectPermissionWidening` use is anchored at the literal start of the string, so a BOM-prefixed
-    // SKILL.md would otherwise never match `---` at all. Same shared helper `permissionGuard.ts`'s
-    // refuse/strip path already uses — never a second hand-rolled split.
-    const { body } = splitLeadingBom(head.content);
     // CR round 4, item 1: only a frontmatter block that itself didn't close within what was read is a
     // real missed-detection risk — a big BODY past the cap, with the frontmatter closed well within it,
     // is not. See `frontmatterReadIncomplete`'s own doc.
-    if (head.truncated && frontmatterReadIncomplete(body)) {
+    if (head.truncated && frontmatterReadIncomplete(head.content)) {
       truncated.push({ cap: "readBytes", names: [name], size: head.size, mtimeMs: head.mtimeMs });
     }
-    const fields = detectPermissionWidening(body).filter(isScannedPermissionField);
+    const fields = detectPermissionWidening(head.content).filter(isScannedPermissionField);
     if (fields.length) findings.push({ name, fields, contentHash: createHash("sha256").update(head.content, "utf8").digest("hex") });
   }
-  return { findings, truncated, incomplete };
+  return { findings, truncated, incomplete: incompleteEntries.length > 0, incompleteEntries };
 }
 
 /** The repo-relative `SKILL.md` path for a flagged skill, for a loud log line naming exactly where the
@@ -218,24 +230,26 @@ export function skillPermissionFindingPath(name: string): string {
  *  `ok:false` distinguishes two cases the caller must NOT conflate (CR round 4, item 2): `"missing"` —
  *  no SKILL.md under this entry, the ordinary case, nothing to flag — vs. `"error"` — the file EXISTS but
  *  couldn't be opened/read/stat'd (EACCES/EBUSY/an I/O error mid-read/…), a real scan gap the caller must
- *  report as `incomplete`, never silently fold into a clean result. */
+ *  report as `incomplete`, never silently fold into a clean result. `errno` (card 22813c50, M2) is the
+ *  thrown error's own OS code, for the caller's dedupe — `null` when the error carried none. */
 function readHead(
   file: string,
   maxBytes: number,
-): { ok: true; content: string; truncated: boolean; size: number; mtimeMs: number } | { ok: false; reason: "missing" | "error" } {
+): { ok: true; content: string; truncated: boolean; size: number; mtimeMs: number } | { ok: false; reason: "missing" | "error"; errno: string | null } {
   let fd: number;
   try {
     fd = fs.openSync(file, "r");
   } catch (e) {
-    return { ok: false, reason: (e as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : "error" };
+    const errno = (e as NodeJS.ErrnoException)?.code ?? null;
+    return { ok: false, reason: errno === "ENOENT" ? "missing" : "error", errno };
   }
   try {
     const buf = Buffer.alloc(maxBytes);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     const st = fs.fstatSync(fd);
     return { ok: true, content: buf.toString("utf8", 0, n), truncated: st.size > maxBytes, size: st.size, mtimeMs: st.mtimeMs };
-  } catch {
-    return { ok: false, reason: "error" }; // opened fine, but read/stat failed mid-flight — a real error, not "missing"
+  } catch (e) {
+    return { ok: false, reason: "error", errno: (e as NodeJS.ErrnoException)?.code ?? null }; // opened fine, but read/stat failed mid-flight — a real error, not "missing"
   } finally {
     try { fs.closeSync(fd); } catch { /* best effort */ }
   }

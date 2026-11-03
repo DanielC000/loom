@@ -34,8 +34,14 @@ export const FRONTMATTER_OPEN_RE = /^---[ \t]*\r?\n/;
  *
  * Exported (card 51a2462a) so `skills/permissionGuard.ts` can locate the SAME block to strip a key out
  * of it, without a second hand-rolled fence pattern.
+ *
+ * The body+newline is wrapped as one OPTIONAL group (card 22813c50, N1): the opening fence's own `\r?\n`
+ * already consumes the one newline separating adjacent `---`/`---` lines, so an EMPTY frontmatter block
+ * (open and close on consecutive lines, no blank line between) has no second newline left for a
+ * mandatory `\r?\n---` to match — without this, `FRONTMATTER_RE` could never match a genuinely empty
+ * block, of any size, and `frontmatterReadIncomplete` would misreport it as never having closed.
  */
-export const FRONTMATTER_RE = new RegExp(`${FRONTMATTER_OPEN_RE.source}([\\s\\S]*?)\\r?\\n---`);
+export const FRONTMATTER_RE = new RegExp(`${FRONTMATTER_OPEN_RE.source}(?:([\\s\\S]*?)\\r?\\n)?---`);
 
 /** A single frontmatter line naming its top-level (column-0, unindented) YAML mapping key — see
  *  `topLevelFrontmatterKeys`'s own doc for why no leading whitespace is required.
@@ -132,6 +138,30 @@ export const SEQUENCE_ITEM_RE = /^-(?:[ \t]|$)/;
  *  checked only once a line has already matched `PLAIN_TOP_LEVEL_KEY_LINE_RE`'s own key/colon shape. */
 export const FRONTMATTER_VALUE_START_FORBIDDEN_RE = /^[&*!]/;
 
+/** A leading UTF-8 BOM (U+FEFF). */
+export const BOM = "﻿";
+
+/**
+ * Splits off a leading UTF-8 BOM (U+FEFF), if present. Every pattern in this module is anchored at the
+ * literal start of the string (`FRONTMATTER_OPEN_RE`'s `^---`), so a BOM ahead of a real `---` block
+ * would otherwise hide it from every detector here. A SINGLE BOM is confirmed honoured by the real CLI
+ * loader too (card 22813c50's static scan, card 9d01b4c1's decision record) — a SECOND (or further)
+ * leading BOM is NOT honoured by that same real path, so this function deliberately strips only one.
+ *
+ * `detectPermissionWidening`, `frontmatterReadIncomplete`, and `frontmatterUnrecognizedSyntax` each call
+ * this INTERNALLY before scanning (card 9d01b4c1 round 2) — the invariant lives in the shared detector
+ * itself, so no call site (present or future) can forget to split first and silently read a BOM-prefixed
+ * file as clean. Splitting twice is harmless: a body with no BOM round-trips unchanged. Still exported
+ * for a caller that needs the body AND whether a BOM was present, to do something with that fact —
+ * `permissionGuard.ts`'s strip path strips from the body, then re-prepends the BOM onto the result.
+ *
+ * @decision 9d01b4c1 — THE one shared BOM-split helper; do not hand-roll a second copy at a call site.
+ */
+export function splitLeadingBom(content: string): { body: string; hasBom: boolean } {
+  const hasBom = content.startsWith(BOM);
+  return { body: hasBom ? content.slice(BOM.length) : content, hasBom };
+}
+
 /**
  * True when `content`'s frontmatter block contains a line whose YAML syntax this module's own allowlist
  * does not recognize — i.e. anything other than: (i) a plain top-level `key: value` line (bare key,
@@ -198,29 +228,6 @@ export function frontmatterReadIncomplete(content: string): boolean {
   return FRONTMATTER_OPEN_RE.test(body) && !FRONTMATTER_RE.test(body);
 }
 
-/** A leading UTF-8 BOM (U+FEFF). */
-export const BOM = "﻿";
-
-/**
- * Splits off a leading UTF-8 BOM (U+FEFF), if present. Every pattern in this module is anchored at the
- * literal start of the string (`FRONTMATTER_OPEN_RE`'s `^---`), so a BOM ahead of a real `---` block
- * would otherwise hide it from every detector here — a KNOWN blind spot (card 22813c50 investigates
- * whether Claude Code's own loader honours a BOM-led frontmatter at all).
- *
- * `detectPermissionWidening`, `frontmatterReadIncomplete`, and `frontmatterUnrecognizedSyntax` each call
- * this INTERNALLY before scanning (card 9d01b4c1 round 2) — the invariant lives in the shared detector
- * itself, so no call site (present or future) can forget to split first and silently read a BOM-prefixed
- * file as clean. Splitting twice is harmless: a body with no BOM round-trips unchanged. Still exported
- * for a caller that needs the body AND whether a BOM was present, to do something with that fact —
- * `permissionGuard.ts`'s strip path strips from the body, then re-prepends the BOM onto the result.
- *
- * @decision 9d01b4c1 — THE one shared BOM-split helper; do not hand-roll a second copy at a call site.
- */
-export function splitLeadingBom(content: string): { body: string; hasBom: boolean } {
-  const hasBom = content.startsWith(BOM);
-  return { body: hasBom ? content.slice(BOM.length) : content, hasBom };
-}
-
 /**
  * An inline `` !`cmd` `` shell injection in the body.
  *
@@ -256,7 +263,11 @@ export function detectPermissionWidening(content: string): SkillPermissionVector
   const keys = [...topLevelFrontmatterKeys(body), ...flowMappingFrontmatterKeys(body)];
   if (keys.includes("allowed-tools")) found.push("allowed-tools");
   if (keys.includes("hooks")) found.push("hooks");
-  if (frontmatterUnrecognizedSyntax(body)) found.push("frontmatter-unrecognized");
+  // card 9d01b4c1 round 2 / card 22813c50 — pass the ORIGINAL `content`, not the already-split `body`:
+  // frontmatterUnrecognizedSyntax self-splits internally too, so feeding it `body` here double-strips a
+  // double-BOM input, disagreeing with the `topLevelFrontmatterKeys`/`flowMappingFrontmatterKeys` checks
+  // just above (which never self-split and so only ever see the ONE strip done here).
+  if (frontmatterUnrecognizedSyntax(content)) found.push("frontmatter-unrecognized");
   if (INLINE_SHELL_RE.test(body)) found.push("shell-inline");
   if (FENCED_SHELL_RE.test(body)) found.push("shell-fenced");
   return found;

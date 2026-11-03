@@ -13033,8 +13033,12 @@ export class SessionService {
    *
    * @decision 015fdb23 — appends the durable event only when there's something to report; the owner
    * push is suppressed on a repeat via `detail.isRepeat`.
+   *
+   * @decision 22813c50 (M2) — an incomplete scan dedupes on its OWN meta key (`skill-perm-incomplete-last:*`),
+   * never the findings-baseline key (`skill-perm-warn-last:*`) above, which a stable I/O error must never
+   * touch either way. See that key's own comment below.
    */
-  handleSkillPermissionFrontmatterWarning(sessionId: string, info: { role: SessionRole | null; scope: string; findings: { name: string; fields: string[]; contentHash: string }[]; truncated?: { cap: string; names: string[]; skippedCount?: number; size?: number; mtimeMs?: number }[]; incomplete?: boolean }): void {
+  handleSkillPermissionFrontmatterWarning(sessionId: string, info: { role: SessionRole | null; scope: string; findings: { name: string; fields: string[]; contentHash: string }[]; truncated?: { cap: string; names: string[]; skippedCount?: number; size?: number; mtimeMs?: number }[]; incomplete?: boolean; incompleteEntries?: { name: string | null; errno: string | null }[] }): void {
     try {
       const s = this.db.getSession(sessionId);
       const truncated = info.truncated ?? [];
@@ -13049,19 +13053,39 @@ export class SessionService {
       let isRepeat = false;
       if (info.role === "assistant" && s?.cwd) {
         const metaKey = `skill-perm-warn-last:${comparisonKey(s.cwd)}`;
+        // Card 22813c50 (M2) — a SEPARATE key for the incomplete-scan condition itself, so a persistently
+        // unreadable SKILL.md can dedupe its OWN re-push without ever reading, writing, or clearing the
+        // findings-baseline key above (that key must stay untouched by an incomplete scan — round 4).
+        const incompleteKey = `skill-perm-incomplete-last:${comparisonKey(s.cwd)}`;
         if (!hasSomething) {
           // CR round 3, finding 5: a CLEAN scan clears the stale dedupe key — a later re-appearance of
           // the SAME content that was already alerted on once must re-alert, not stay deduped forever
           // against a sighting from before the repo went clean.
           this.db.deleteMeta(metaKey);
+          this.db.deleteMeta(incompleteKey); // card 22813c50 (M2) — a genuinely clean+complete scan clears any stale incomplete baseline too
           return; // nothing to report — no durable event for a clean spawn
         }
         if (incomplete) {
-          // CR round 4, item 2: an incomplete scan never clears, and never UPDATES, the stored dedupe
-          // key — it didn't genuinely re-verify the repo, so it must neither erase a real prior sighting
-          // nor be trusted as a new baseline to compare future scans against. Always surfaces
-          // (isRepeat:false) rather than risk silently deduping away a real I/O-error warning.
+          // Card 22813c50 (M2) — dedupe on the INCOMPLETE entries' own shape (name+errno), never the
+          // findings-baseline key: a stable I/O condition (the same unreadable SKILL.md every spawn) must
+          // not re-push every time, but a NEW or CHANGED failing entry must still re-alert.
+          const currentIncompleteKey = JSON.stringify(
+            [...(info.incompleteEntries ?? [])]
+              .map((e) => ({ name: e.name, errno: e.errno }))
+              .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "") || (a.errno ?? "").localeCompare(b.errno ?? "")),
+          );
+          const incompleteConditionRepeat = this.db.getMeta(incompleteKey) === currentIncompleteKey;
+          if (!incompleteConditionRepeat) this.db.setMeta(incompleteKey, currentIncompleteKey);
+          // Card 22813c50 round 2 (MAJOR) — an incomplete scan that ALSO carries a NEW real finding or
+          // truncation must NEVER be suppressed as a repeat merely because the incomplete condition
+          // itself repeated (owner decision f635bad6: "warn loudly"). `info.findings`/`truncated` are
+          // read here ONLY for this comparison — never written or cleared into `metaKey` (the findings
+          // baseline) below, which stays untouched for the whole `incomplete` branch either way.
+          isRepeat = incompleteConditionRepeat && info.findings.length === 0 && truncated.length === 0;
+          // Never touch `metaKey` (the findings baseline) here — it didn't genuinely re-verify the repo,
+          // so it must neither erase a real prior sighting nor be trusted as a new comparison baseline.
         } else {
+          this.db.deleteMeta(incompleteKey); // card 22813c50 (M2) — "clear it on the next complete scan"
           // CR round 4, item 4: skippedCount/size/mtimeMs make the key content-aware for a truncation
           // too — a hooked skill whose file keeps changing while still past the readBytes cap (or whose
           // "entries" skip count changes) must keep re-alerting, never dedupe against stale metadata.
@@ -13086,7 +13110,7 @@ export class SessionService {
           // contentHash is the dedupe key's own internal input — never persisted on the durable event.
           findings: info.findings.map((f) => ({ name: f.name, fields: f.fields })),
           ...(truncated.length ? { truncated } : {}),
-          ...(incomplete ? { incomplete: true } : {}),
+          ...(incomplete ? { incomplete: true, incompleteEntries: info.incompleteEntries ?? [] } : {}),
           ...(info.role === "assistant" ? { isRepeat } : {}),
         },
       });

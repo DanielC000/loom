@@ -50,7 +50,7 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;    // Windows
 process.env.HOME = sandboxHome;           // POSIX
 
-const { detectPermissionWidening, permissionWideningField, frontmatterReadIncomplete } =
+const { detectPermissionWidening, permissionWideningField, frontmatterReadIncomplete, frontmatterUnrecognizedSyntax } =
   await import("../dist/skills/permissionWidening.js");
 const { listSkills, writeSkill } = await import("../dist/skills/store.js");
 const { Db } = await import("../dist/db.js");
@@ -211,6 +211,30 @@ try {
     frontmatterReadIncomplete("﻿---  \nname: x\nallowed-tools: Bash(*\n") === true);
   check("[9d01b4c1 r2] ...negative control, same BOM prefix: a frontmatter block that DOES close is NOT incomplete",
     frontmatterReadIncomplete("﻿---\nname: x\n---\nbody\n") === false);
+
+  // Card 22813c50 CR round-2 triage item 4: no test pinned frontmatterUnrecognizedSyntax's OWN internal
+  // BOM split before this — same rationale as frontmatterReadIncomplete above, exercised DIRECTLY with no
+  // caller pre-split.
+  check("[9d01b4c1 r2][22813c50] frontmatterUnrecognizedSyntax splits a leading BOM internally — a "
+      + "BOM-prefixed, quoted-key frontmatter (raw, un-split) is still reported as unrecognized syntax",
+    frontmatterUnrecognizedSyntax('﻿---\n"allowed-tools": Bash(*)\n---\nbody\n') === true);
+  check("[9d01b4c1 r2][22813c50] ...negative control, same BOM prefix: an ordinary bare-key line is NOT unrecognized",
+    frontmatterUnrecognizedSyntax("﻿---\nname: x\n---\nbody\n") === false);
+
+  // Card 22813c50 round 2, mutant (b): `detectPermissionWidening` must pass the ORIGINAL, unsplit
+  // `content` to `frontmatterUnrecognizedSyntax` — never the already-split `body` — or a DOUBLE-BOM
+  // input gets double-stripped by the two splits combined (one here, a second inside
+  // frontmatterUnrecognizedSyntax's own internal split), landing exactly on the real frontmatter block
+  // that the real CLI loader's own single-BOM-strip treats as INERT (one leftover BOM still blocks its
+  // own `^---` test either way).
+  const doubleBomUnrecognized = "﻿﻿---\n? weird-key\n: value\n---\nbody\n";
+  const singleBomUnrecognized = "﻿---\n? weird-key\n: value\n---\nbody\n";
+  check("[22813c50][r2] a DOUBLE-BOM-prefixed unrecognized-syntax frontmatter is NOT flagged by "
+      + "detectPermissionWidening — matches the real loader's own single-BOM-strip treatment",
+    same(detectPermissionWidening(doubleBomUnrecognized), []));
+  check("[22813c50][r2] ...negative control, the SAME shape with only ONE leading BOM IS flagged — "
+      + "proves the pattern fires at all, so the double-BOM result above isn't just a broken fixture",
+    same(detectPermissionWidening(singleBomUnrecognized), ["frontmatter-unrecognized"]));
 
   // --- negative traps: the scanner must NOT over-match ordinary doctrine prose ---------------------
   // THE trap this detector's lookbehind exists for: two unrelated code spans with a bare "!" between

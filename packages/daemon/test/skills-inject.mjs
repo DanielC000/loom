@@ -51,6 +51,73 @@ try {
   check("stale Loom skill removed when deleted from the store", !fs.existsSync(path.join(tdir, "loom-b")));
   check("loom-a still present after stale sweep", has("loom-a"));
   check("repo-own STILL untouched after stale sweep", fs.existsSync(path.join(tdir, "repo-own", "SKILL.md")));
+
+  // =================================================================================================
+  // card 22813c50 round 2, mutant (d)(i): `recordLoomPlacedFingerprint` REPLACES a name's recorded
+  // fingerprint on every placement rather than accumulating one per content version ever placed — by
+  // the time a scan reads this, the dir's on-disk content is always whatever the LATEST placement
+  // wrote, so an older fingerprint can never legitimately match again and is pure dead weight.
+  // =================================================================================================
+  {
+    const cwdReplace = path.join(root, "replace-cwd");
+    fs.mkdirSync(cwdReplace, { recursive: true });
+    const sidReplace = "sess-replace";
+    const r1 = injectSkills(cwdReplace, sidReplace, ["loom-a"], null, false, () => true);
+    const fpSet1 = r1.claimedFingerprints.get("loom-a");
+    check("[REPLACE] a fresh placement records exactly ONE fingerprint for the name", fpSet1?.size === 1);
+    const fp1 = [...(fpSet1 ?? [])][0];
+
+    // Change the STORE skill's content — a DIFFERENT fingerprint for the SAME name on the next placement.
+    fs.writeFileSync(path.join(skillsDir, "loom-a", "SKILL.md"), "---\nname: loom-a\ndescription: A v2\n---\nA v2");
+    const r2 = injectSkills(cwdReplace, sidReplace, ["loom-a"], null, false, () => true);
+    const fpSet2 = r2.claimedFingerprints.get("loom-a");
+    check("[REPLACE] a SECOND placement with CHANGED content still records exactly ONE fingerprint — REPLACE, never accumulate",
+      fpSet2?.size === 1);
+    const fp2 = [...(fpSet2 ?? [])][0];
+    check("[REPLACE] ...and it's the NEW fingerprint, not a stale leftover of the old one",
+      fp2 !== undefined && fp2 !== fp1);
+
+    fs.writeFileSync(path.join(skillsDir, "loom-a", "SKILL.md"), "---\nname: loom-a\ndescription: A\n---\nA"); // restore for the rest of this file
+  }
+
+  // =================================================================================================
+  // card 22813c50 round 2, mutant (d)(ii): the registry's outer map is capped at a bounded number of
+  // distinct cwds, LRU-evicted — bounding the OTHER growth axis (one entry per cwd this process has
+  // ever injected into, which never shrinks on its own). LOOM_PLACED_FINGERPRINTS_MAX_CWDS below
+  // mirrors inject.ts's own same-named constant (not exported for test import) — CLAUDE.md's "Do not
+  // raise it casually" note is why this isn't expected to drift silently out from under this test.
+  // =================================================================================================
+  {
+    const LOOM_PLACED_FINGERPRINTS_MAX_CWDS = 300;
+    const cwdLru = path.join(root, "lru-cwd-0");
+    fs.mkdirSync(cwdLru, { recursive: true });
+    injectSkills(cwdLru, "sess-lru-0", ["loom-a"], null, false, () => true);
+
+    // Precondition: a DIFFERENT (but live) session sharing cwdLru, claiming "loom-a" only through the
+    // on-disk manifest (want:[] ⇒ places nothing of its own), sees the registry's fingerprint for it
+    // right after placement — proves the lookup path itself works before testing eviction below.
+    // NOTE: `["__probe-none__"]`, not `[]` — injectSkills treats an EMPTY subset array as falsy and
+    // falls back to "deliver all store skills" (`subset && subset.length ? … : storeNames.filter(…)`),
+    // which would make the probe place loom-a itself and defeat this whole test. A subset naming a
+    // name that matches nothing in the store genuinely intersects to empty (`want = []`) instead.
+    const probeBefore = injectSkills(cwdLru, "sess-lru-probe-before", ["__probe-none__"], null, false, () => true);
+    check("[LRU] (precondition) a sibling session sharing cwdLru sees loom-a's fingerprint via the registry, before any eviction",
+      (probeBefore.claimedFingerprints.get("loom-a")?.size ?? 0) === 1);
+
+    // Push LOOM_PLACED_FINGERPRINTS_MAX_CWDS brand-new, distinct cwds through the registry — regardless
+    // of how many OTHER cwds this process's registry already held before this test ran, cwdLru's
+    // recency distance from the most-recently-touched entry is now >= the cap, so it MUST be the one
+    // evicted (only the `cap` most-recently-placed-into cwds can ever survive).
+    for (let i = 0; i < LOOM_PLACED_FINGERPRINTS_MAX_CWDS; i++) {
+      const cwdFiller = path.join(root, `lru-filler-${i}`);
+      fs.mkdirSync(cwdFiller, { recursive: true });
+      injectSkills(cwdFiller, `sess-lru-filler-${i}`, ["loom-a"], null, false, () => true);
+    }
+
+    const probeAfter = injectSkills(cwdLru, "sess-lru-probe-after", ["__probe-none__"], null, false, () => true);
+    check(`[LRU] after ${LOOM_PLACED_FINGERPRINTS_MAX_CWDS} newer cwds, cwdLru's own registry entry is EVICTED — a sibling session sharing it with NO placement of its own now sees no fingerprint (never unboundedly retained)`,
+      (probeAfter.claimedFingerprints.get("loom-a")?.size ?? 0) === 0);
+  }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

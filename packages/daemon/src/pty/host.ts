@@ -4164,10 +4164,13 @@ export interface PtyHostEvents {
    *  ("what instruction content did this session load") doesn't need them. Optional so every existing
    *  PtyHostEvents implementer (test doubles included) stays byte-identical without providing it. */
   onInstructionsLoaded?(sessionId: string, info: { filePath: string; memoryType: string; loadReason: string; globs?: string[]; triggerFilePath?: string; parentFilePath?: string; agentId?: string; agentType?: string }): void;
-  /** @decision 015fdb23 — fires even on a clean scan for role `"assistant"`, and always on `incomplete`
+  /** `incompleteEntries` (card 22813c50, M2) is which entr(y/ies) made `incomplete` true, for the
+   *  handler's own dedupe.
+   *
+   *  @decision 015fdb23 — fires even on a clean scan for role `"assistant"`, and always on `incomplete`
    *  (round 4); see the decision record's "Round 3"/"Round 4" sections for why. `contentHash` (card
    *  979f29b9) is the dedupe-key component — never written onto the durable event. */
-  onSkillPermissionFrontmatterWarning?(sessionId: string, info: { role: SessionRole | null; scope: string; findings: { name: string; fields: string[]; contentHash: string }[]; truncated: { cap: string; names: string[]; skippedCount?: number; size?: number; mtimeMs?: number }[]; incomplete: boolean }): void;
+  onSkillPermissionFrontmatterWarning?(sessionId: string, info: { role: SessionRole | null; scope: string; findings: { name: string; fields: string[]; contentHash: string }[]; truncated: { cap: string; names: string[]; skippedCount?: number; size?: number; mtimeMs?: number }[]; incomplete: boolean; incompleteEntries: { name: string | null; errno: string | null }[] }): void;
   /** @decision b987f086 — onCodexUnsupportedCapability: two independent reasons (a stdio-only MCP server;
    *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended — and never relied
    *  on alone, since profiles/validate.ts's save-time rejection can't catch a profile that predates it. */
@@ -8826,7 +8829,7 @@ export class PtyHost {
         // `assistant` always fires (even on a clean scan) so the handler can clear a stale dedupe key —
         // every other in-scope role only fires when there's something to report (see the decision record).
         if (scan.findings.length || scan.truncated.length || scan.incomplete || opts.role === "assistant") {
-          this.events.onSkillPermissionFrontmatterWarning?.(opts.sessionId, { role: opts.role ?? null, scope: CWD_SKILLS_SCAN_SCOPE, findings: scan.findings, truncated: scan.truncated, incomplete: scan.incomplete });
+          this.events.onSkillPermissionFrontmatterWarning?.(opts.sessionId, { role: opts.role ?? null, scope: CWD_SKILLS_SCAN_SCOPE, findings: scan.findings, truncated: scan.truncated, incomplete: scan.incomplete, incompleteEntries: scan.incompleteEntries });
         }
       } catch (e) { console.log(`[pty] skill permission-frontmatter scan failed (non-fatal): ${(e as Error).message}`); }
     }

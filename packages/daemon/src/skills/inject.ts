@@ -9,6 +9,7 @@ import { stripPermissionWidening } from "./permissionGuard.js";
 import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
 import { canonicalGit, withTimeout } from "../git/bounded.js";
+import { comparisonKey } from "../projects/repos.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
 // CR round 3 (card 31f997e7): a SEPARATE sidecar file, never merged into MANIFEST's own shape — keeps
@@ -32,15 +33,36 @@ const FINGERPRINTS_FILE = ".loom-skills-fingerprints.json";
  *
  * @decision 015fdb23 — CR round 4, item 3: the cwd sidecar is never trusted for the scan's own exclusion
  * decision; only this daemon-side registry is.
+ *
+ * Bounded two ways (card 22813c50, M1): (1) `recordLoomPlacedFingerprint` REPLACES a name's recorded
+ * fingerprint on every placement rather than accumulating one per content version ever placed — by the
+ * time a scan reads this, the dir's on-disk content is always whatever the LATEST placement wrote, so an
+ * older fingerprint can never legitimately match again and is pure dead weight. (2) the outer map is
+ * capped at {@link LOOM_PLACED_FINGERPRINTS_MAX_CWDS} distinct cwds, LRU-evicted — bounding the OTHER
+ * growth axis (one entry per cwd this daemon process has ever injected into, which never shrinks on its
+ * own: nothing here is told when a worktree is removed). Named residual: a removed worktree's entry
+ * lingers, harmlessly (it only ever makes the scan MORE conservative — see `scanCwdSkillsForPermissionFrontmatter`'s
+ * own doc, "fail toward scanning"), until the LRU cap evicts it or the daemon restarts.
  */
 const loomPlacedFingerprintsByCwd = new Map<string, Map<string, Set<string>>>();
 
+/** Card 22813c50 (M1) — a defensive cap on distinct cwds tracked, same posture as this file's own
+ *  `UNTRACKED_CACHE_MAX_ENTRIES`/`PENDING_RECLAIM_MAX_PER_CWD`. LRU: `recordLoomPlacedFingerprint` moves a
+ *  cwd to the back of the map on every write (insertion order = recency), so the entry evicted here is
+ *  always the least-recently-placed-into one. */
+const LOOM_PLACED_FINGERPRINTS_MAX_CWDS = 300;
+
 function recordLoomPlacedFingerprint(cwd: string, name: string, fingerprint: string): void {
-  let byName = loomPlacedFingerprintsByCwd.get(cwd);
-  if (!byName) { byName = new Map(); loomPlacedFingerprintsByCwd.set(cwd, byName); }
-  let set = byName.get(name);
-  if (!set) { set = new Set(); byName.set(name, set); }
-  set.add(fingerprint);
+  const key = comparisonKey(cwd); // card 22813c50 (M1) — consistent with sessions/service.ts's push-dedupe key for the same cwd
+  let byName = loomPlacedFingerprintsByCwd.get(key);
+  if (!byName) byName = new Map();
+  byName.set(name, new Set([fingerprint])); // REPLACE — the latest placement supersedes; never accumulate
+  loomPlacedFingerprintsByCwd.delete(key); // move-to-end (Map preserves insertion order) — LRU touch
+  loomPlacedFingerprintsByCwd.set(key, byName);
+  if (loomPlacedFingerprintsByCwd.size > LOOM_PLACED_FINGERPRINTS_MAX_CWDS) {
+    const oldestKey = loomPlacedFingerprintsByCwd.keys().next().value;
+    if (oldestKey !== undefined) loomPlacedFingerprintsByCwd.delete(oldestKey);
+  }
 }
 
 // The shared-cwd dead-claim RECLAIM: ASYNC COMPUTES THE FACT, SYNC ACTS ON IT — injectSkills runs
@@ -723,22 +745,15 @@ function quarantineUndeliverableDest(dest: string, name: string, claudeDir: stri
  * @decision 31f997e7 — delivery hygiene, not a security boundary; never the only thing standing between
  * an agent and a capability.
  */
-/** Card 015fdb23: every skill name `injectSkills` placed for THIS call, or any other session sharing
- *  this cwd (per the shared manifest) — i.e. everything in the target dir that IS Loom's own doing.
- *  Returned so `createPty`'s own cwd-skill permission scan can treat anything else in that directory as
- *  the repo's own, un-Loom-owned content, without re-parsing the manifest file a second time.
+/** Every skill name `injectSkills` placed for THIS call, or any other session sharing this cwd (per the
+ *  shared manifest) — i.e. everything in the target dir that IS Loom's own doing. `claimedFingerprints`:
+ *  for each claimed name, every content fingerprint Loom itself actually recorded placing there (from
+ *  {@link loomPlacedFingerprintsByCwd}, never the on-disk {@link FINGERPRINTS_FILE} sidecar). A caller
+ *  must verify a claimed name's CURRENT on-disk content still matches an entry here, never trust bare
+ *  `claimedNames` membership alone.
  *
- *  `claimedFingerprints` (CR round 3, card 015fdb23; round 4 moved its SOURCE — see below): for each
- *  claimed name, every content fingerprint Loom itself actually recorded placing there — from THIS call's
- *  own placement, or from any OTHER live session sharing this cwd THIS SAME DAEMON PROCESS has placed for
- *  (read from the in-memory {@link loomPlacedFingerprintsByCwd} registry, never the on-disk
- *  {@link FINGERPRINTS_FILE} sidecar the dead-claim cleanup above still trusts for ITS OWN, different
- *  purpose). A caller must use this to verify a claimed name's CURRENT on-disk content still matches what
- *  Loom actually placed, rather than trusting bare manifest membership — a claimed name whose SKILL.md
- *  was edited AFTER placement, OR whose manifest/sidecar entry was forged by anything that can write
- *  `.claude/skills` (CR round 4, item 3), has no matching entry in this registry and so a caller that
- *  blindly trusted `claimedNames` alone would wrongly treat edited/forged (possibly hostile) content as
- *  Loom's own trusted copy. */
+ *  @decision 015fdb23 — the one place this is consumed; see the decision record's "Round 3"/"Round 4"
+ *  sections for the forged-sidecar/edited-after-placement attacks this registry closes. */
 export interface InjectSkillsResult {
   claimedNames: readonly string[];
   claimedFingerprints: ReadonlyMap<string, ReadonlySet<string>>;
@@ -1100,7 +1115,7 @@ export function injectSkills(
   // THIS process's own placements (see `recordLoomPlacedFingerprint`), so a forged on-disk entry for a
   // name this process never actually placed here has no matching set and so is NOT excluded from the scan.
   const claimedNames = [...new Set([...placed, ...otherClaimed])];
-  const registry = loomPlacedFingerprintsByCwd.get(cwd);
+  const registry = loomPlacedFingerprintsByCwd.get(comparisonKey(cwd)); // card 22813c50 (M1) — same key shape as the write side
   const claimedFingerprints = new Map<string, Set<string>>();
   if (registry) {
     for (const name of claimedNames) {

@@ -47,9 +47,14 @@ const VECTOR_LABEL: Record<SkillPermissionVector, string> = {
  * `undefined` when `content` is clean; otherwise a ready-to-return error string naming every detected
  * vector in both plain words and by its `SkillPermissionVector` id. Call this BEFORE any write in
  * `skillWriteData` — it never mutates anything itself.
+ *
+ * Passes `content` straight through, unsplit (card 9d01b4c1 round 2, card 22813c50 triage): `detectPermissionWidening`
+ * already splits off exactly one leading BOM internally — pre-splitting here too would strip a SECOND
+ * BOM for a double-BOM input, which the real CLI loader does not honour either (card 22813c50's static
+ * finding) and would wrongly turn an inert double-BOM'd file into a live detection.
  */
 export function permissionWideningRefusalError(content: string): string | undefined {
-  const vectors = detectPermissionWidening(splitLeadingBom(content).body);
+  const vectors = detectPermissionWidening(content);
   if (vectors.length === 0) return undefined;
   const named = vectors.map((v) => VECTOR_LABEL[v]).join(", ");
   return (
@@ -81,7 +86,13 @@ function stripFrontmatterKeys(content: string): string {
   const match = FRONTMATTER_RE.exec(content);
   if (!match) return content;
   const whole = match[0];
-  const block = match[1] ?? ""; // the capture group always matches when the whole regex does
+  const block = match[1];
+  // Card 22813c50 round 2, nit — N1 made the body capture group OPTIONAL (a genuinely empty frontmatter
+  // block, open and close fence on consecutive lines with no blank line between, never enters it at
+  // all), so it no longer "always matches when the whole regex does". An empty block has no key to
+  // strip either way — treat an unentered group as a no-op rather than reconstructing it as a single
+  // empty line, which would INSERT a blank line the original file never had.
+  if (block == null) return content;
   const eol = whole.includes("\r\n") ? "\r\n" : "\n";
   const kept: string[] = [];
   let skipping = false;
@@ -162,11 +173,20 @@ const STRIP_FIXPOINT_MAX_PASSES = 16;
  *
  * @decision 712148f1 (round 2) — never move the allowlist check below `stripFrontmatterKeys`: that
  * function's quote-tolerant key match would DELETE a quoted hazard line instead of withholding it whole.
+ *
+ * The two checks below detect against the ORIGINAL, unsplit `content` (each self-splits exactly one
+ * leading BOM internally); only `stripFrontmatterKeys`/`stripShellTriggers`, which do NOT self-split,
+ * run on the already-split `body` — see `splitLeadingBom`'s own doc for why passing either split or
+ * unsplit content to a self-splitting function must never be mixed with a SECOND, caller-side split.
+ *
+ * @decision 9d01b4c1 (round 2) — a caller-side pre-split here, on top of the self-split, would strip a
+ * SECOND BOM for a double-BOM input — inert to the real loader (that round's static-scan finding) —
+ * and wrongly flag it as live.
  */
 export function stripPermissionWidening(content: string): string | null {
   const { body, hasBom } = splitLeadingBom(content);
-  if (detectPermissionWidening(body).length === 0) return content;
-  if (frontmatterUnrecognizedSyntax(body)) return null;
+  if (detectPermissionWidening(content).length === 0) return content;
+  if (frontmatterUnrecognizedSyntax(content)) return null;
   let current = body;
   for (let i = 0; i < STRIP_FIXPOINT_MAX_PASSES; i++) {
     const next = stripShellTriggers(stripFrontmatterKeys(current));

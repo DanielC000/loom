@@ -37,10 +37,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // same bound `skills/store.ts`'s own `descriptionOf()` uses. A later `---` in the body (an ordinary
 // markdown horizontal rule) is never mistaken for a second frontmatter block, and never scanned as one.
 //
+// The `(?:...)?` wrapping the body+newline (card 22813c50, N1) mirrors permissionWidening.ts's own fix
+// so an EMPTY frontmatter block (adjacent `---`/`---` lines, no blank line between) still matches.
+//
 // @decision 712148f1 — this file deliberately keeps its OWN copy of these patterns (no build step);
 // widen it IN LOCKSTEP with skills/permissionWidening.ts's own patterns, or this lint silently stops
-// catching what the real detector would catch. The `[ \t]*` below mirrors that module's own widening.
-const FRONTMATTER_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+// catching what the real detector would catch.
+const FRONTMATTER_RE = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---\r?\n?/;
 
 /** Returns the frontmatter block's raw text, or null if `raw` has none (e.g. an ordinary references/**
  *  reference doc, which carries no frontmatter at all). */
