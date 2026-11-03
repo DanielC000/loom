@@ -4352,6 +4352,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       repos = check.value;
       if (check.warnings.length) repoGateWarning = check.warnings.join(" | ");
     }
+    // config (card afda2a26): HUMAN-only on this REST create path, same trust class as referenceRepos/
+    // noGateByDesign/denyGlobs/repos above — runs the SAME validator (and error shape) PATCH
+    // /api/projects/:id/config already uses. Validated BEFORE bootstrapProjectDir touches disk below —
+    // a refused config must never leave a stray directory behind, same invariant repos/triple-containment
+    // already honor on this route. No `priorSessionEnvKeys` opt: nothing pre-exists yet, so every dotted
+    // sessionEnv key is correctly rejected (never a rotation). A missing `b.config` stays valid — the
+    // validator itself defaults `raw ?? {}` — and the stored value is the VALIDATED result (tilde-
+    // expanded + pruned), never the raw body.
+    const configCheck = validateProjectConfigOverride(b.config);
+    if (!configCheck.ok) return reply.code(400).send({ error: `invalid config: ${configCheck.error}` });
     // This route was the one CREATE surface accepting `repos` that never ran the shared containment
     // check — validateRepoRegistry above only catches an EXACT alias, not containment. `pairingIsIntentional:
     // !isGit` matches the vault-only CREATE branches elsewhere: kind "vault" makes the created dir BOTH
@@ -4371,7 +4381,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the vault
       // auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir IS the vault.
       id: projectId, name: b.name, repoPath: boot.dir, vaultPath,
-      config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
+      config: configCheck.value, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
       referenceRepos,
       noGateByDesign,
@@ -5234,6 +5244,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       repos = check.value;
       if (check.warnings.length) repoGateWarning = check.warnings.join(" | ");
     }
+    // config (card afda2a26): HUMAN-only on this REST create path, same trust class as referenceRepos/
+    // noGateByDesign/denyGlobs/repos above — runs the SAME validator (and error shape) PATCH
+    // /api/projects/:id/config already uses, so a create-time config can never bypass the sessionEnv/
+    // CLAUDE_CONFIG_DIR/dotted-key/unknown-key rules that path enforces. No `priorSessionEnvKeys` opt:
+    // nothing pre-exists yet, so every dotted sessionEnv key is correctly rejected (never a rotation).
+    // A missing `b.config` stays valid — the validator itself defaults `raw ?? {}` — and the stored value
+    // is the VALIDATED result (tilde-expanded + pruned), never the raw body.
+    const configCheck = validateProjectConfigOverride(b.config);
+    if (!configCheck.ok) return reply.code(400).send({ error: `invalid config: ${configCheck.error}` });
     // Card 5ba4412d (+ review follow-up): the SHARED containment check on the FULL {repoPath, vaultPath,
     // repos} triple, run UNCONDITIONALLY for every create — including the vault-only branch, where
     // `finalRepoPath === finalVaultPath` by construction (never a user-supplied alias, so it's the
@@ -5252,7 +5271,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!pinCheck.ok) return reply.code(409).send({ error: pinCheck.error });
     const project: Project = {
       id: projectId, name: b.name, repoPath: finalRepoPath, vaultPath: finalVaultPath,
-      config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
+      config: configCheck.value, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
       referenceRepos,
       noGateByDesign,

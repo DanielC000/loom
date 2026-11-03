@@ -12,11 +12,12 @@
 // test/sessionenv-dotted-key-guard.mjs's style for this exact sibling check.
 //
 // SCOPE (not completeness): this pins `validateProjectConfigOverride` only — it covers the human REST
-// PATCH and the elevated Platform Lead's project_configure, both of which route through it. It does NOT
-// cover POST /api/projects or POST /api/setup/project-init (gateway/server.ts), which store a raw,
-// unvalidated `config` (sessionEnv included) with no call to this validator at all — the real backstop
-// against THOSE two routes is the spawn-time scrub pinned by claude-config-dir-sessionenv-spawn-scrub.mjs,
-// not this file.
+// PATCH, the elevated Platform Lead's project_configure, and (card afda2a26) the two REST CREATE routes,
+// POST /api/projects and POST /api/setup/project-init (gateway/server.ts), which now ALSO call this same
+// validator before any disk/DB side effect — see project-create-config-validation.mjs for the real-route,
+// end-to-end proof of that. The spawn-time scrub pinned by claude-config-dir-sessionenv-spawn-scrub.mjs
+// remains the backstop for any entry point that writes a `sessionEnv` outside this validator, past or
+// future — not a statement that one currently exists.
 //
 // Proves:
 //   (1) POSITIVE CONTROL — a plain, unrelated sessionEnv key is still accepted, so the rejection below is

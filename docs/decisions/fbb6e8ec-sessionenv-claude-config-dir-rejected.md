@@ -36,13 +36,16 @@ recovery). High risk for what is meant to be the SAFE fix.
 (b) is one shared validator call plus one scrub: `validateProjectConfigOverride` (`mcp/platform.ts`) is
 the SAME function the human REST **PATCH** (`gateway/server.ts`) and the elevated Platform Lead's
 `project_configure` (`mcp/platform.ts`, `@decision 3ad2b286`'s route) both call — one check closes both of
-those PATCH-shaped entry points. It does NOT cover the two REST **create** routes, `POST /api/projects`
-(`gateway/server.ts` ~:5165, storing `config: b.config ?? {}` at ~:5255) and `POST /api/setup/project-init`
-(~:4314, storing the same shape at ~:4374) — both store a raw, unvalidated `config` straight from the
-request body, `sessionEnv` included, with no call to `validateProjectConfigOverride` at all. The spawn-time
-scrub in `buildSpawnEnv` (`pty/host.ts`) is the REAL backstop that closes the gap those two routes leave
-open; the validator alone does not. Fixing the two create routes is deliberately out of scope here — filed
-as its own, separate card. No legitimate use of a per-project `CLAUDE_CONFIG_DIR` override was found: `sessionEnv` is a
+those PATCH-shaped entry points. At the time this card landed it did NOT cover the two REST **create**
+routes, `POST /api/projects` (`gateway/server.ts` ~:5165, storing `config: b.config ?? {}` at ~:5255) and
+`POST /api/setup/project-init` (~:4314, storing the same shape at ~:4374) — both stored a raw, unvalidated
+`config` straight from the request body, `sessionEnv` included, with no call to
+`validateProjectConfigOverride` at all. **Closed by card `afda2a26`**: both create routes now call
+`validateProjectConfigOverride` before any disk/DB side effect and store the validated result — see
+`test/project-create-config-validation.mjs` for the real-route, end-to-end proof (rejection + the
+"nothing created" invariant, on both routes). The spawn-time scrub in `buildSpawnEnv` (`pty/host.ts`)
+remains the backstop for any entry point that writes `sessionEnv` outside this validator, past or
+future — not a statement that one currently exists. No legitimate use of a per-project `CLAUDE_CONFIG_DIR` override was found: `sessionEnv` is a
 generic raw env passthrough (no UI, docs, or feature treats this name as a supported per-project knob —
 grepped `packages/web`, `docs/`, and the test corpus for zero hits of `sessionEnv`+`CLAUDE_CONFIG_DIR`
 together), and there is direct precedent for refusing it: `keys/credentialSessionEnv.ts`'s
@@ -81,9 +84,9 @@ No evidence any project ever stored this (zero hits in the test corpus; no featu
 than a DB migration script, `buildSpawnEnv` (`pty/host.ts`) unconditionally drops every `sessionEnv`-sourced
 `CLAUDE_CONFIG_DIR`-matching key at spawn time — this neutralizes any already-stored legacy value
 transparently, with no DB write needed, the moment this fix is live. The validator rejection stops a NEW
-PATCH-shaped write going forward (see the "Two options considered" section above for the two REST create
-routes it does NOT cover); the spawn-time scrub is what actually closes the gap for every entry point,
-PATCH or create, past or future. A dropped legacy value is logged once per spawn (`console.warn`, `[pty]` prefix, matching
+PATCH- or create-shaped write going forward (the create routes were closed by card `afda2a26` — see the
+"Two options considered" section above); the spawn-time scrub remains the backstop for every entry point,
+past or future, that could ever write a `sessionEnv` outside this validator. A dropped legacy value is logged once per spawn (`console.warn`, `[pty]` prefix, matching
 this file's existing diagnostic style) naming the KEY only, never the value — so the project owner can see
 why their setting is being ignored without the log line itself becoming a disclosure vector. Checked
 against `log-message-content-gate.mjs`'s `redactedExcerpt(` call-site census: this line does not call
@@ -115,4 +118,5 @@ the daemon's own environment to relocate it for every project.
 
 Validator: `claudeConfigDirSessionEnvKeyError` / `validateProjectConfigOverride` (`packages/daemon/src/mcp/platform.ts`).
 Spawn-time backstop: `buildSpawnEnv` (`packages/daemon/src/pty/host.ts`).
-Tests: `packages/daemon/test/sessionenv-claude-config-dir-guard.mjs`, `packages/daemon/test/claude-config-dir-sessionenv-spawn-scrub.mjs`.
+Create-route callers (card `afda2a26`): `POST /api/projects` / `POST /api/setup/project-init` (`packages/daemon/src/gateway/server.ts`).
+Tests: `packages/daemon/test/sessionenv-claude-config-dir-guard.mjs`, `packages/daemon/test/claude-config-dir-sessionenv-spawn-scrub.mjs`, `packages/daemon/test/project-create-config-validation.mjs`.
