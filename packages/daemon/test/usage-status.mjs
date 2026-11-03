@@ -154,13 +154,27 @@ const LIVE_NESTED = {
   try {
     const warnCred = credPath("warn-ok.json", { claudeAiOauth: { accessToken: "tok", expiresAt: Date.now() + 3_600_000 } });
 
-    // Unrecognized top-level shape — no rate_limits object at all.
-    const badShape = { mystery_key_1: 1, mystery_key_2: { secret_value: "should-not-appear" } };
+    // Unrecognized top-level shape — no rate_limits object at all. Shaped like the REAL wire response
+    // seen post-9db2ad8d-deploy (card 26b3977f): five_hour/seven_day still top-level but RENAMED
+    // (`percent` instead of `utilization` — the real failure's best-evidenced hypothesis), plus a
+    // top-level `limits` array (the CLI's own row-array schema: {kind,group,percent,resets_at,...}).
+    const badShape = {
+      mystery_key_1: 1,
+      mystery_key_2: { secret_value: "should-not-appear" },
+      five_hour: { percent: 48, resets_at: "2026-06-04T03:09:59+00:00" },
+      limits: [{ kind: "five_hour", percent: 48, resets_at: null, severity: "normal" }],
+    };
     const pWarn = new UsageStatusPoller({ credentialsPath: warnCred, userAgentVersion: "9.9.9", fetchImpl: async () => new Response(JSON.stringify(badShape), { status: 200 }) });
     await pWarn.pollOnce();
     check("warn: schema-changed response → exactly one console.warn", warnings.length === 1);
     check("warn: message names the top-level key names", warnings[0] && warnings[0].includes("mystery_key_1") && warnings[0].includes("mystery_key_2"));
     check("warn: message never leaks a nested VALUE", warnings[0] && !warnings[0].includes("secret_value") && !warnings[0].includes("should-not-appear"));
+    // card 26b3977f: structural shape of five_hour/seven_day/limits — key names + typeof, never values.
+    check("warn: names five_hour's own field names (percent, resets_at)", warnings[0] && warnings[0].includes("five_hour: object{percent:number,resets_at:string}"));
+    check("warn: seven_day absent from the payload → describes as undefined, not a crash", warnings[0] && warnings[0].includes("seven_day: undefined"));
+    check("warn: limits (a top-level array) → length + first item's own field names", warnings[0] && warnings[0].includes("limits: array(len=1) item0=object{kind:string,percent:number,resets_at:object,severity:string}"));
+    // The real values (48, the ISO string, "five_hour", "normal") must never appear — shape only.
+    check("warn: five_hour/limits shape never leaks the actual numbers/strings inside them", warnings[0] && !warnings[0].includes("48") && !warnings[0].includes("2026-06-04") && !warnings[0].includes("\"five_hour\"") && !warnings[0].includes("normal"));
 
     await pWarn.pollOnce(); // second schema-changed poll, same instance, same throttle window
     check("warn: throttled — a second schema-changed poll within the window logs nothing new", warnings.length === 1);

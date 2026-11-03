@@ -134,6 +134,27 @@ function unavailable(reason: string, fetchedAt: string | null = null): UsageLimi
 }
 
 /**
+ * Content-free shape description for the schema-changed warn — TYPES and KEY NAMES only, never values.
+ * An object → its own key names + each field's typeof; an array → its length + the first item's shape
+ * (reveals a row's own field names/types without walking every row); anything else → a bare typeof.
+ * @decision 26b3977f — never return a VALUE here, only structural facts (keys/typeof/length).
+ */
+function describeShape(v: unknown): string {
+  if (v === null) return "null";
+  if (v === undefined) return "undefined";
+  if (Array.isArray(v)) {
+    const item0 = v.length > 0 ? ` item0=${describeShape(v[0])}` : "";
+    return `array(len=${v.length})${item0}`;
+  }
+  if (typeof v === "object") {
+    const obj = v as Record<string, unknown>;
+    const fields = Object.keys(obj).map((k) => `${k}:${typeof obj[k]}`);
+    return `object{${fields.join(",")}}`;
+  }
+  return typeof v;
+}
+
+/**
  * Read the OAuth access token from the credentials JSON. Returns the token, or a reason it's
  * unusable (file missing, unreadable/malformed, no token, or expired). Never throws.
  */
@@ -294,24 +315,30 @@ export class UsageStatusPoller {
   }
 
   /**
-   * Throttled, content-free diagnostic: logs the response's top-level key names (and, if present, the
-   * nested `rate_limits` object's own key names) — never values — so a real upstream shape change
-   * self-confirms in the daemon log after this ships, with no manual authenticated call needed.
+   * Throttled, content-free diagnostic: logs the response's top-level key names, the nested `rate_limits`
+   * object's own key names (if present), and — card 26b3977f — the full structural SHAPE (typeof + own
+   * key names + each field's typeof; an array's length + its first item's shape) of `five_hour`,
+   * `seven_day`, and `limits` — never values — so a real upstream shape change self-confirms in the
+   * daemon log after this ships, with no manual authenticated call needed.
    *
-   * @decision 9db2ad8d — never log response VALUES here, key names only (the response is the user's own
-   * account data); why this exists instead of patching the parser against one captured body is recorded
-   * out-of-band.
+   * @decision 9db2ad8d — never log response VALUES here, structural facts only (the response is the
+   * user's own account data); why this exists instead of patching the parser against one captured body
+   * is recorded out-of-band.
    */
   private warnSchemaChanged(raw: unknown): void {
     const now = Date.now();
     if (this.lastSchemaWarnAt !== null && now - this.lastSchemaWarnAt < SCHEMA_WARN_THROTTLE_MS) return;
     this.lastSchemaWarnAt = now;
-    const topKeys = raw && typeof raw === "object" ? Object.keys(raw as object) : [];
-    const nested = raw && typeof raw === "object" ? (raw as Record<string, unknown>).rate_limits : undefined;
+    const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const topKeys = Object.keys(o);
+    const nested = o.rate_limits;
     const nestedKeys = nested && typeof nested === "object" ? Object.keys(nested as object) : null;
     console.warn(
       `[usage-status] usage endpoint schema changed — top-level keys: [${topKeys.join(", ")}]` +
-      (nestedKeys ? `, rate_limits keys: [${nestedKeys.join(", ")}]` : ""),
+      (nestedKeys ? `, rate_limits keys: [${nestedKeys.join(", ")}]` : "") +
+      `, five_hour: ${describeShape(o.five_hour)}` +
+      `, seven_day: ${describeShape(o.seven_day)}` +
+      `, limits: ${describeShape(o.limits)}`,
     );
   }
 
