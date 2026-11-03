@@ -686,7 +686,7 @@ const DECISIONS_RELAY: CompanionCapability = {
           "changed entry ALWAYS returns in full regardless of `since`. Omit `since` to always get every " +
           "field for every entry (today's default behavior). NEVER includes a `type:\"notice\"` row — a " +
           "notice needs no answer, so it is not a decision; it reaches a companion ONLY through the " +
-          "attention-push 'notice' alert class, which needs its own explicit opt-in (card 68f27faf). " +
+          "attention-push 'notice' alert class, which needs its own explicit opt-in. " +
           "Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
           "the `decisions` rows spill to a scratch file instead of inlining, and the response becomes a " +
           "{decisionsFile, decisionsChars, rowCount, note, asOf} pointer at that same NDJSON text (one " +

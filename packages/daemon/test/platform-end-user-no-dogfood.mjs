@@ -13,6 +13,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (d) the PlatformMcpRouter's own rendered tool `description` strings (tools/list) + representative
 //       runtime error strings — including a DEEPER validation error per tool family, not only a
 //       project-lookup-miss — on the NON-DEV surface.
+//   (e) card a2f2becc: EVERY OTHER shipped, end-user-reachable MCP router's rendered tool descriptions —
+//       OrchestrationMcpRouter (manager/worker/companion), TaskMcpRouter, SetupMcpRouter, OperatorMcpRouter,
+//       RunMcpRouter, WorkspaceAuditMcpRouter — scanned for the "decision/card id citation" pattern ONLY
+//       (a narrower scope than (d)'s full-denylist assertClean; see section (e)'s own header comment for
+//       why, and for the OTHER real denylist hits this investigation found but did NOT fix here — filed
+//       separately as card 0018c8ab).
+//       SetupMcpRouter/OperatorMcpRouter/RunMcpRouter are zero-tolerance; the other three carry a SIZED,
+//       exact-count ratchet (ROUTER_ID_CITATION_ALLOWLIST) tracking a named cleanup backlog. audit.ts
+//       (role==="auditor") is deliberately excluded — LOOM_DEV-only seed, unreachable on a real install.
 //
 // OUT OF SCOPE (deliberately, stated here so it's never mistaken for an oversight): the project-memory
 // digest injected at kickoff is USER-AUTHORED content on a real end-user install (notes THEIR workers/
@@ -50,8 +59,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE: real seeders + a real Db + SessionService against a fake
 // pty (the shared `_seam-host-fixture.mjs` seam, same pattern as platform-lead-recycle.mjs), a real
-// injectSkills() call against a curated skill store, and a real PlatformMcpRouter read back over an
-// in-memory MCP client for surface (d).
+// injectSkills() call against a curated skill store, and a real PlatformMcpRouter (surface (d)) / every
+// other router in SHIPPED_END_USER_MCP_SURFACES (surface (e)) read back over an in-memory MCP client.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-end-user-no-dogfood.mjs
 import fs from "node:fs";
@@ -66,12 +75,17 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS_DIR = path.resolve(__dirname, "..", "assets");
 
+// Single source of truth for an id-citation shape — `@decision <id>`, `card <id>`, `decision <id>`,
+// `record <id>`, or a bare backtick-wrapped 8-hex id — all equally unresolvable off an npm install.
+// Shared by DENY_PATTERNS's own entry below, idCitationCount, and every positive control that plants or
+// strips one, so widening this ONE source widens every consumer at once (card a2f2becc round 2 CR).
+const ID_CITATION_RE_SOURCE = "@decision\\s+[0-9a-f]{8}\\b|\\b(?:card|decision|record)\\s+[0-9a-f]{8}\\b|`[0-9a-f]{8}`";
+
 // ===================== THE DENYLIST — re-derived against real shipped content, not copied verbatim =====
 const DENY_PATTERNS = [
   // §3e structural rule: zero @decision/card-id citations of the 8-hex shape, full stop — the id-space is
-  // never resolvable off an npm install (no docs/decisions/ ships). Matches `@decision <id>`, `card <id>`,
-  // and a bare backtick-wrapped 8-hex id (the third citation shape this repo's own doctrine uses).
-  { name: "decision/card id citation", re: /@decision\s+[0-9a-f]{8}\b|\bcard\s+[0-9a-f]{8}\b|`[0-9a-f]{8}`/i },
+  // never resolvable off an npm install (no docs/decisions/ ships).
+  { name: "decision/card id citation", re: new RegExp(ID_CITATION_RE_SOURCE, "i") },
   { name: "packages/ path", re: /packages\// },
   { name: "@loom/ package scope", re: /@loom\// },
   { name: "pnpm --filter", re: /pnpm --filter/ },
@@ -127,6 +141,217 @@ const SKILL_SURFACE_ALLOWLIST = [
       "for every manager, mcp/orchestration.ts — no isLoomDev() gate) and the Platform Lead (whose OWN copy " +
       "IS isLoomDev()-gated, mcp/platform.ts) — the wording is conditional (\"where your surface has it\"), " +
       "never a flat claim the reader definitely holds the tool. Code Review ruling on C6.",
+  },
+];
+
+// ===================== (e) infra — the ROUTER id-citation RATCHET =======================================
+// @decision a2f2becc — this ratchet covers id-citations ONLY; never treat it as proof the OTHER denylist
+// hits found on these routers are gone (a separate, unfixed finding), and never lower an allowlist entry
+// below without a real landed cleanup backing it.
+//
+// SCOPE: this ratchet covers ONLY the "decision/card id citation" pattern — NOT the full DENY_PATTERNS
+// set surface (d)'s assertClean uses for PlatformMcpRouter. A clean run of section (e) below is NOT proof
+// every other denylist pattern is clean on these routers — section (e) never scans for them.
+//
+// A SIZED CLEANUP BACKLOG, not a permanent exemption (same posture as SKILL_SURFACE_ALLOWLIST above) —
+// EXACT-count per (surface, tool), re-measured every run: an INCREASE fails loud (a new citation slipped
+// in), and so does a DECREASE (the stale-entry check — see positive control (ii) below) until the number
+// here is lowered to match a real landed cleanup.
+//
+// SetupMcpRouter, OperatorMcpRouter, RunMcpRouter and PlatformMcpRouter carry NO entries below — all four
+// are fully clean; any citation appearing on any of them now is a REAL regression, not backlog, and fails
+// against an implicit expectedCount of 0.
+const ROUTER_ID_CITATION_ALLOWLIST = [
+  { surface: "OrchestrationMcpRouter(manager)", tool: "my_context", expectedCount: 5 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_list", expectedCount: 41 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_status", expectedCount: 13 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_transcript", expectedCount: 1 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_report_get", expectedCount: 4 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_spawn", expectedCount: 4 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_stop", expectedCount: 3 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_flush", expectedCount: 4 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_message", expectedCount: 2 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_redirect", expectedCount: 1 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "requests_list", expectedCount: 2 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_recycle", expectedCount: 2 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_merge", expectedCount: 8 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_merge_confirm", expectedCount: 34 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "merge_batch", expectedCount: 31 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_status", expectedCount: 57 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_queue", expectedCount: 21 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "project_checkout_branch", expectedCount: 1 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_history", expectedCount: 30 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "events_search", expectedCount: 4 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_cancel", expectedCount: 3 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "resume_doc_check", expectedCount: 7 },
+  // `deploy` is CONFIG-GATED (registers only when the project has a resolved orchestration.deployCommand)
+  // — see the fixture setup right above SHIPPED_END_USER_MCP_SURFACES below, which configures one so this
+  // tool is actually rendered and scanned rather than silently skipped (card a2f2becc round 2 CR).
+  { surface: "OrchestrationMcpRouter(manager)", tool: "deploy", expectedCount: 2 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "served_status", expectedCount: 22 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "idle_report", expectedCount: 1 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "profile_delete", expectedCount: 1 },
+  { surface: "OrchestrationMcpRouter(manager)", tool: "platform_escalate", expectedCount: 1 },
+  { surface: "OrchestrationMcpRouter(worker)", tool: "my_context", expectedCount: 5 },
+  { surface: "OrchestrationMcpRouter(worker)", tool: "run_gate", expectedCount: 5 },
+  { surface: "OrchestrationMcpRouter(worker)", tool: "gate_status", expectedCount: 9 },
+  { surface: "OrchestrationMcpRouter(worker)", tool: "gate_queue", expectedCount: 21 },
+  { surface: "OrchestrationMcpRouter(worker)", tool: "directive_status", expectedCount: 1 },
+  { surface: "OrchestrationMcpRouter(assistant)", tool: "my_context", expectedCount: 5 },
+  { surface: "TaskMcpRouter(worker)", tool: "tasks_list", expectedCount: 6 },
+  { surface: "TaskMcpRouter(worker)", tool: "tasks_get", expectedCount: 6 },
+  { surface: "TaskMcpRouter(worker)", tool: "tasks_create", expectedCount: 4 },
+  { surface: "TaskMcpRouter(worker)", tool: "tasks_update", expectedCount: 17 },
+  { surface: "TaskMcpRouter(worker)", tool: "tasks_defer_item", expectedCount: 1 },
+  { surface: "TaskMcpRouter(worker)", tool: "tasks_defer_item_ack", expectedCount: 1 },
+  { surface: "TaskMcpRouter(worker)", tool: "memory_write", expectedCount: 4 },
+  { surface: "TaskMcpRouter(worker)", tool: "memory_forget", expectedCount: 2 },
+  { surface: "TaskMcpRouter(worker)", tool: "memory_list", expectedCount: 1 },
+  { surface: "TaskMcpRouter(worker)", tool: "memory_read", expectedCount: 1 },
+  { surface: "TaskMcpRouter(worker)", tool: "decisions_for", expectedCount: 3 },
+  { surface: "TaskMcpRouter(manager)", tool: "tasks_list", expectedCount: 6 },
+  { surface: "TaskMcpRouter(manager)", tool: "tasks_get", expectedCount: 6 },
+  { surface: "TaskMcpRouter(manager)", tool: "tasks_create", expectedCount: 4 },
+  { surface: "TaskMcpRouter(manager)", tool: "tasks_update", expectedCount: 17 },
+  { surface: "TaskMcpRouter(manager)", tool: "tasks_defer_item", expectedCount: 1 },
+  { surface: "TaskMcpRouter(manager)", tool: "tasks_defer_item_ack", expectedCount: 1 },
+  { surface: "TaskMcpRouter(manager)", tool: "memory_write", expectedCount: 4 },
+  { surface: "TaskMcpRouter(manager)", tool: "memory_forget", expectedCount: 2 },
+  { surface: "TaskMcpRouter(manager)", tool: "memory_list", expectedCount: 1 },
+  { surface: "TaskMcpRouter(manager)", tool: "memory_read", expectedCount: 1 },
+  { surface: "TaskMcpRouter(manager)", tool: "decisions_for", expectedCount: 3 },
+  { surface: "WorkspaceAuditMcpRouter", tool: "list_sessions", expectedCount: 3 },
+  { surface: "WorkspaceAuditMcpRouter", tool: "transcript_read", expectedCount: 1 },
+];
+
+function idCitationCount(text) {
+  return [...text.matchAll(new RegExp(ID_CITATION_RE_SOURCE, "gi"))].length;
+}
+function idCitationExpected(surface, tool) {
+  const entry = ROUTER_ID_CITATION_ALLOWLIST.find((e) => e.surface === surface && e.tool === tool);
+  return entry ? entry.expectedCount : 0; // no entry ⇒ hard zero-tolerance (Setup/Operator/Run/Platform)
+}
+// The ONE pure predicate the live check AND every positive control below call — never a second,
+// independently-reimplemented comparison. A mutant that weakens this function's own `ok` logic (e.g.
+// "real <= expected", or an unconditional `true`) must turn EVERY caller red, live check and controls
+// alike; before this extraction, the controls recomputed `real > expected` / `real < expected` inline
+// and so proved nothing about the live check's actual comparison (card a2f2becc round 2 CR).
+function ratchetVerdict(surface, toolName, text) {
+  const real = idCitationCount(text);
+  const expected = idCitationExpected(surface, toolName);
+  return { ok: real === expected, real, expected };
+}
+// THE ONE function every ratchet consumer calls — the live loop below AND every positive control (i)/(ii)/
+// (iii). A mutant that corrupts this function's own verdict (e.g. a wrapper that always reports `ok:true`)
+// must turn every caller red identically, live check and controls alike (card a2f2becc round 3 CR, mutant
+// m3) — before this extraction, each control called `ratchetVerdict` directly itself, so a mutation scoped
+// to the LIVE LOOP's own wrapper could silently stop catching regressions while a control (on its own
+// separately-computed verdict) kept passing, masking exactly the kind of drift this exists to catch.
+function scanSurfaceRatchet(surfaceLabel, tools) {
+  return tools.map((t) => ({ tool: t.name, ...ratchetVerdict(surfaceLabel, t.name, t.description ?? "") }));
+}
+
+// Card a2f2becc round 3, task 3: every BASELINED (surface, tool) pair in ROUTER_ID_CITATION_ALLOWLIST must
+// have been actually SEEN in that surface's own render. The live loop below only iterates the tools that
+// DID render, so a baselined tool that silently stops rendering (its gating config dropped, it was
+// renamed, or removed outright) would otherwise never get checked at all, rather than failing loud. Call
+// ONCE per surface, right after that surface's own render.
+function assertAllowlistEntriesSeen(surfaceLabel, renderedToolNames) {
+  for (const entry of ROUTER_ID_CITATION_ALLOWLIST) {
+    if (entry.surface !== surfaceLabel) continue;
+    check(`(ratchet coverage) ${surfaceLabel} :: ${entry.tool} is baselined in ROUTER_ID_CITATION_ALLOWLIST ` +
+      `and was actually SEEN in this surface's own render (a vanished baselined tool must fail, not go ` +
+      `silently unchecked)`, renderedToolNames.has(entry.tool));
+  }
+}
+
+// ===================== (e) infra — STRUCTURAL COVERAGE (card a2f2becc round 3) ==========================
+// Never trust a hand-maintained "every router/surface I remembered to add" render list; the EXPECTED tool
+// set for each shipped router is instead DERIVED from its own SOURCE (every literal
+// `.registerTool("<name>"` call in that router's file(s)) — so a NEW conditional tool nobody renders FAILS
+// this check, instead of silently escaping the scan the way it did for two prior rounds of this ratchet
+// (each one patched a hand-maintained render list only after a Code Review caught the hole by hand).
+//
+// EXTRACTION METHOD: a plain source-TEXT regex scan for `.registerTool(` followed (across whitespace/
+// newlines) by a double-quoted literal name — never an AST parse. Every call site across every file this
+// scan reads passes a literal first arg today (verified directly, see the sanity check below) — a FUTURE
+// non-literal registration (a computed/templated name) must fail THIS run LOUD, not silently escape the
+// scan: every extraction call first asserts the file's own `.registerTool(` call COUNT matches the
+// literal-name match count, and fails if they ever diverge.
+const REGISTER_TOOL_CALL_RE = /\.registerTool\(/g;
+const REGISTER_TOOL_LITERAL_RE = /\.registerTool\(\s*"([a-zA-Z_][a-zA-Z0-9_]*)"/g;
+
+function expectedToolNamesFromSource(relSrcPaths) {
+  const names = new Set();
+  for (const relPath of relSrcPaths) {
+    const text = fs.readFileSync(path.join(__dirname, "..", "src", relPath), "utf8");
+    const callCount = [...text.matchAll(REGISTER_TOOL_CALL_RE)].length;
+    const literalMatches = [...text.matchAll(REGISTER_TOOL_LITERAL_RE)];
+    check(`(coverage) sanity: every .registerTool( call site in ${relPath} resolves to a literal name ` +
+      `(calls=${callCount}, literal-matches=${literalMatches.length}) — a non-literal registration must ` +
+      `fail this run loudly, never silently escape the source scan`, callCount === literalMatches.length);
+    for (const m of literalMatches) names.add(m[1]);
+  }
+  return names;
+}
+
+// Which shipped-router SOURCE FILE(S) back each SURFACE LABEL in SHIPPED_END_USER_MCP_SURFACES below —
+// several surfaces (the manager/worker/assistant role-variants of one router, or worker/manager of
+// another) share ONE file group, since a role-gated tool only appears in SOME role's render: the expected-
+// vs-actual comparison is a UNION across every surface sharing a group, never one surface's render alone.
+const ROUTER_SOURCE_FILE_GROUPS = {
+  OrchestrationMcpRouter: ["mcp/orchestration.ts", "companion/capabilities.ts"],
+  TaskMcpRouter: ["mcp/server.ts", "mcp/decisions.ts"],
+  SetupMcpRouter: ["mcp/setup.ts"],
+  OperatorMcpRouter: ["mcp/operator.ts"],
+  RunMcpRouter: ["mcp/run.ts"],
+  // repo-read.ts's literal registerTool() names are shared by its DEV (mcp/audit.ts, excluded below) and
+  // END-USER (mcp/user-audit.ts) call sites under the SAME three names (repo_read_file/repo_grep/
+  // repo_glob) — the structural-coverage scan can't tell the two variants apart by name alone; see task
+  // (d)'s own gate_cancel check below for why that matters and how both call sites are still verified.
+  WorkspaceAuditMcpRouter: ["mcp/user-audit.ts", "mcp/transcript-read.ts", "mcp/repo-read.ts"],
+  // Card a2f2becc round 4: PlatformMcpRouter was the one shipped, end-user-reachable router with NO
+  // structural-coverage group at all — fed by section (d)'s existing non-dev render, never a new render
+  // scenario here (PlatformMcpRouter is not, and does not need to be, in SHIPPED_END_USER_MCP_SURFACES).
+  PlatformMcpRouter: ["mcp/platform.ts"],
+};
+function fileGroupForSurfaceLabel(label) {
+  const key = Object.keys(ROUTER_SOURCE_FILE_GROUPS).find((k) => label.startsWith(k));
+  if (!key) throw new Error(`no ROUTER_SOURCE_FILE_GROUPS entry for surface label "${label}" — add one`);
+  return key;
+}
+
+// A literal registerTool() name that can NEVER appear in ANY of this file's own renders, with a REASON —
+// never used to wave off a genuine coverage gap (a tool that SHOULD render belongs in a new render
+// scenario among SHIPPED_END_USER_MCP_SURFACES below, not an exclusion here).
+const ROUTER_COVERAGE_EXCLUSIONS = [
+  {
+    fileGroup: "OrchestrationMcpRouter",
+    tool: "daemon_restart",
+    reason: "isSupervised()-gated (mcp/orchestration.ts) — never registers on a non-supervised, non-dev " +
+      "npm end-user install, which is this whole test file's premise (LOOM_SUPERVISED is deliberately " +
+      "deleted above); CLAUDE.md: \"the end-user daemon runs NO supervisor\".",
+  },
+  {
+    fileGroup: "PlatformMcpRouter",
+    tool: "daemon_restart",
+    reason: "isLoomDev()-gated (mcp/platform.ts) — never registers on a non-dev npm end-user install, " +
+      "which is this whole test file's premise (LOOM_DEV is deliberately deleted above) — the Lead-surface " +
+      "twin of the manager's own daemon_restart exclusion directly above.",
+  },
+];
+
+// A plain source-TEXT scan (never an AST parse, same posture as REGISTER_TOOL_CALL_RE above): every file
+// under packages/daemon/src/**/*.ts containing a literal `.registerTool(` call must be named in SOME
+// ROUTER_SOURCE_FILE_GROUPS entry above, or carry a reasoned entry here — so a brand-new router file, or a
+// new registerTool call landing in a file nobody added to a group, fails this run loudly instead of
+// silently escaping both the structural-coverage scan and this meta-check (card a2f2becc round 4, task b).
+const FILE_LEVEL_COVERAGE_EXCLUSIONS = [
+  {
+    file: "mcp/audit.ts",
+    reason: "AuditMcpRouter (role===\"auditor\") — LOOM_DEV-only seed (the Platform Auditor); structurally " +
+      "unreachable on a real end-user install, same posture as this file's own header note on why audit.ts " +
+      "is absent from SHIPPED_END_USER_MCP_SURFACES.",
   },
 ];
 
@@ -187,6 +412,14 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 delete process.env.LOOM_DEV;
+// Card a2f2becc / section (e): isSupervised() (orchestration/restart.ts) reads LOOM_SUPERVISED LIVE, with
+// no caching, from `process.env` — and THIS test's own process can inherit `LOOM_SUPERVISED=1` from the
+// supervised daemon it happens to be running under (CLAUDE.md's own documented ambient-env trap). Left
+// set, OrchestrationMcpRouter's manager daemon_restart tool would wrongly register here, which a real
+// non-dev, non-supervised npm end-user install never does (CLAUDE.md: "the end-user daemon runs NO
+// supervisor"). Confirmed by direct measurement: deleting this is what makes the manager-role render below
+// match a genuine end-user reading.
+delete process.env.LOOM_SUPERVISED;
 
 // ===================== CURATE THE SKILL STORE LIKE A REAL NON-DEV `loomctl` INSTALL ====================
 // seedGlobalSkills() seeds straight from the dev checkout's assets/skills/** — which, on a REAL end-user
@@ -224,6 +457,13 @@ const { injectSkills } = await import("../dist/skills/inject.js");
 const { claudeSkillsDir } = await import("../dist/pty/claude-doctrine.js");
 const { resolvePlatformLeadResumeDocPath, platformLeadBaseResumeDocPath } = await import("../dist/sessions/platform-lead-prompt.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { TaskMcpRouter } = await import("../dist/mcp/server.js");
+const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
+const { OperatorMcpRouter } = await import("../dist/mcp/operator.js");
+const { RunMcpRouter } = await import("../dist/mcp/run.js");
+const { WorkspaceAuditMcpRouter } = await import("../dist/mcp/user-audit.js");
+const { WakeService } = await import("../dist/orchestration/wake.js");
 const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -241,12 +481,17 @@ class SeamHost extends createSeamHost(PtyHost) {
 }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 
+// Every dir THIS run creates, captured so the cleanup at the bottom of the file removes exactly these
+// paths — never a sweep of os.tmpdir() by name pattern, which could delete a sibling session's own
+// concurrently-running fixture (card a2f2becc round 2 CR).
+const createdRepoDirs = [];
 function freshRepo(tag) {
   const dir = path.join(os.tmpdir(), `loom-eu-nodogfood-repo-${tag}-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}`);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "README.md"), "# no-dogfood test repo\n");
   execSync("git init -q", { cwd: dir });
   commitAll(dir, "init", "-c user.email=nodogfood@loom -c user.name=nodogfood");
+  createdRepoDirs.push(dir);
   return dir;
 }
 
@@ -403,6 +648,13 @@ main.db.close();
   check(`(b positive control) planting in the real store copy + re-injecting trips the denylist (fired: ${hitsB.length}/${DENY_PATTERNS.length} patterns)`, hitsB.length === DENY_PATTERNS.length);
 }
 
+// fileGroup -> Set<toolName>, accumulated across every surface/render sharing a group — declared here
+// (rather than down in section (e)) because section (d)'s render below is what feeds PlatformMcpRouter's
+// own entry (card a2f2becc round 4): PlatformMcpRouter has no render scenario of its own among
+// SHIPPED_END_USER_MCP_SURFACES, so its structural coverage rides on the ordinary non-dev render (d)
+// already does for the full-denylist scan.
+const renderedNamesByFileGroup = new Map();
+
 // ===================== (d) PlatformMcpRouter rendered tool descriptions + representative error strings,
 // =====================     on the NON-DEV surface (LOOM_DEV unset throughout this whole file). ==========
 {
@@ -421,6 +673,9 @@ main.db.close();
   await client.connect(clientT);
   const tools = (await client.listTools()).tools;
   check("(d) sanity: a non-trivial non-dev tool surface was actually scanned", tools.length > 10);
+  // Card a2f2becc round 4: feed this render's own tool names into PlatformMcpRouter's structural-coverage
+  // entry — this IS the "fed by section (d)'s existing render" the decision record names, not a new render.
+  renderedNamesByFileGroup.set("PlatformMcpRouter", new Set(tools.map((t) => t.name)));
 
   const allDescriptions = tools.map((t) => t.description ?? "").join("\n---\n");
   assertClean("(d) every registered (non-dev) PlatformMcpRouter tool description, concatenated", allDescriptions);
@@ -502,9 +757,325 @@ main.db.close();
   d2.db.close();
 }
 
+// ===================== (e) EVERY OTHER SHIPPED, END-USER-REACHABLE MCP ROUTER — id-citation ratchet =====
+// Card a2f2becc. audit.ts (AuditMcpRouter, role==="auditor") is DELIBERATELY ABSENT from this list — its
+// surface is seeded ONLY under LOOM_DEV (the dev-only Platform Auditor; CLAUDE.md's LOOM_DEV section), so
+// it is structurally unreachable on a real end-user install, not an oversight.
+// `extra` merges onto the inserted session row — used below to render a CONFIG-GATED tool's MAXIMAL
+// surface (e.g. `vaultWrite: true` so TaskMcpRouter's vault_write tool actually registers) rather than
+// leaving it permanently unregistered, and so unscanned (card a2f2becc round 2 CR).
+function insertFakeSessionForRole(fx, role, extra = {}) {
+  const sessionId = `fake-${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const now = new Date().toISOString();
+  fx.db.insertSession({
+    id: sessionId, projectId: fx.home.id, agentId: fx.agent.id, engineSessionId: null, title: null,
+    cwd: fx.repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role, parentSessionId: null, ...extra,
+  });
+  return sessionId;
+}
+async function renderToolsViaRealClient(server) {
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverT);
+  const client = new Client({ name: "eu-no-dogfood-router-test", version: "0" });
+  await client.connect(clientT);
+  const tools = (await client.listTools()).tools;
+  await client.close();
+  await server.close();
+  return tools;
+}
+
+const SHIPPED_END_USER_MCP_SURFACES = [
+  {
+    label: "OrchestrationMcpRouter(manager)",
+    render: async (fx) => {
+      // MAXIMAL render (card a2f2becc round 2 CR): `deploy` and `peer_message`/`peer_list`/
+      // `peer_message_status` are CONFIG-GATED (a resolved orchestration.deployCommand / a project_links
+      // row, mcp/orchestration.ts) — without these, they never register and the ratchet below silently
+      // never scans them. The peer project lives in the SAME db as fx (project_links is a foreign-key'd
+      // pair of project ids) and is never otherwise used.
+      const peerProjectId = `peer-${fx.home.id}`;
+      fx.db.insertProject({
+        id: peerProjectId, name: "Peer", repoPath: fx.repo, vaultPath: fx.repo, config: {},
+        createdAt: new Date().toISOString(), archivedAt: null, reserved: false,
+      });
+      fx.db.setProjectConfig(fx.home.id, { orchestration: { deployCommand: "echo shipping" } });
+      fx.db.createProjectLink(fx.home.id, peerProjectId);
+      const sid = insertFakeSessionForRole(fx, "manager");
+      const router = new OrchestrationMcpRouter(fx.db, fx.svc, {});
+      return renderToolsViaRealClient(router.buildServer(sid, "manager"));
+    },
+  },
+  {
+    label: "OrchestrationMcpRouter(worker)",
+    render: async (fx) => {
+      const sid = insertFakeSessionForRole(fx, "worker");
+      const router = new OrchestrationMcpRouter(fx.db, fx.svc, {});
+      return renderToolsViaRealClient(router.buildServer(sid, "worker"));
+    },
+  },
+  {
+    label: "OrchestrationMcpRouter(assistant)",
+    render: async (fx) => {
+      // MAXIMAL render (card a2f2becc round 3): a companion session in BOTH companionSessionIds (the
+      // chat_reply/skill_*/memory_*/reminder_* gate) AND companionLeadMode true — the latter synthesizes a
+      // full ACT-mode ResolvedGrantScope for EVERY companion/capabilities.ts lever at once
+      // (synthesizeLeadModeScope, gated on db.listAllProjects() being non-empty, which fx's own home
+      // project satisfies) — the simplest way to render every companion-gated tool this router can ever
+      // show an end user, without hand-granting each of the nine COMPANION_CAPABILITY_SLUGS levers one at
+      // a time via db.upsertCompanionCapabilityGrant.
+      const sid = insertFakeSessionForRole(fx, "assistant");
+      fx.db.setCompanionLeadMode(sid, true);
+      const router = new OrchestrationMcpRouter(fx.db, fx.svc, { companionSessionIds: new Set([sid]) });
+      return renderToolsViaRealClient(router.buildServer(sid, "assistant"));
+    },
+  },
+  {
+    label: "TaskMcpRouter(worker)",
+    render: async (fx) => {
+      // MAXIMAL render: vault_write is CONFIG-GATED (session.vaultWrite, mcp/server.ts) — without it,
+      // the tool never registers and the ratchet below silently never scans it.
+      const sid = insertFakeSessionForRole(fx, "worker", { vaultWrite: true });
+      const router = new TaskMcpRouter(fx.db, new WakeService({ db: fx.db, pty: {}, resume: () => {} }));
+      return renderToolsViaRealClient(router.buildServer(fx.home.id, sid));
+    },
+  },
+  {
+    label: "TaskMcpRouter(manager)",
+    render: async (fx) => {
+      // MAXIMAL render: authenticated_request is ALSO config-gated (session.connections non-empty,
+      // mcp/server.ts) — without a pinned connection, the tool never registers and the structural coverage
+      // scan below would silently never see it (card a2f2becc round 3).
+      const sid = insertFakeSessionForRole(fx, "manager", { vaultWrite: true, connections: ["fake-connection-id"] });
+      const router = new TaskMcpRouter(fx.db, new WakeService({ db: fx.db, pty: {}, resume: () => {} }));
+      return renderToolsViaRealClient(router.buildServer(fx.home.id, sid));
+    },
+  },
+  {
+    label: "SetupMcpRouter",
+    render: async (fx) => {
+      const sid = insertFakeSessionForRole(fx, "setup");
+      const router = new SetupMcpRouter(fx.db, fx.svc);
+      return renderToolsViaRealClient(router.buildServer(sid));
+    },
+  },
+  {
+    label: "OperatorMcpRouter",
+    render: async (fx) => {
+      const sid = insertFakeSessionForRole(fx, "operator");
+      const router = new OperatorMcpRouter(fx.db, fx.svc);
+      return renderToolsViaRealClient(router.buildServer(sid));
+    },
+  },
+  {
+    label: "RunMcpRouter",
+    render: async (fx) => {
+      // RunMcpRouter.buildServer(runSessionId) never reads the DB at render time (only submit_result's
+      // handler does, at CALL time) — no fake session row needed for this one.
+      const router = new RunMcpRouter(fx.db, fx.svc);
+      return renderToolsViaRealClient(router.buildServer("fake-run-session"));
+    },
+  },
+  {
+    label: "WorkspaceAuditMcpRouter",
+    render: async (fx) => {
+      const sid = insertFakeSessionForRole(fx, "workspace-auditor");
+      const router = new WorkspaceAuditMcpRouter(fx.db, fx.svc);
+      return renderToolsViaRealClient(router.buildServer(sid));
+    },
+  },
+];
+
+// renderedNamesByFileGroup is declared earlier (fed first by section (d)'s PlatformMcpRouter render).
+// renderedNamesBySurface keeps each surface's OWN render separate — needed below (task d) because two
+// DISTINCT literal registerTool("gate_cancel") call sites in mcp/orchestration.ts (manager + worker)
+// collapse to one name in the UNION the structural-coverage check above uses, so "covered by the union"
+// alone can't prove both call sites actually rendered.
+const renderedNamesBySurface = new Map();
+for (const surface of SHIPPED_END_USER_MCP_SURFACES) {
+  const fx = freshNonDevLeadFixture(`e-${surface.label.replace(/[^a-zA-Z0-9]/g, "")}`);
+  const tools = await surface.render(fx);
+  check(`(e) sanity: ${surface.label} rendered a non-trivial tool surface`, tools.length > 0);
+  if (surface.label === "OrchestrationMcpRouter(manager)") {
+    // Pins the NON-SUPERVISED surface this whole file is measuring (LOOM_SUPERVISED deliberately unset
+    // above) — daemon_restart registers only under isSupervised(), so its absence here is what makes the
+    // MAXIMAL render above (deploy+peer configured) still a genuine non-dev, non-supervised reading.
+    check("(e) sanity: daemon_restart is ABSENT from the manager render (non-supervised, non-dev surface)",
+      !tools.some((t) => t.name === "daemon_restart"));
+  }
+  const toolNames = new Set(tools.map((t) => t.name));
+  renderedNamesBySurface.set(surface.label, toolNames);
+  const fileGroup = fileGroupForSurfaceLabel(surface.label);
+  const acc = renderedNamesByFileGroup.get(fileGroup) ?? new Set();
+  for (const n of toolNames) acc.add(n);
+  renderedNamesByFileGroup.set(fileGroup, acc);
+  assertAllowlistEntriesSeen(surface.label, toolNames);
+  for (const v of scanSurfaceRatchet(surface.label, tools)) {
+    check(`(ratchet) ${surface.label} :: ${v.tool} carries EXACTLY its baselined ${v.expected} id citation(s) (measured ${v.real})`, v.ok);
+  }
+  fx.db.close();
+}
+
+// Card a2f2becc round 4, task (d): gate_cancel's two literal registerTool() call sites in
+// mcp/orchestration.ts (manager ~5193, worker ~2462) must each be independently confirmed rendered —
+// not merely covered once by the cross-surface union the structural-coverage check above uses.
+check("(coverage) sanity (task d): gate_cancel's manager AND worker call sites are BOTH independently " +
+  "rendered (not merely covered once by the union)",
+  !!renderedNamesBySurface.get("OrchestrationMcpRouter(manager)")?.has("gate_cancel") &&
+  !!renderedNamesBySurface.get("OrchestrationMcpRouter(worker)")?.has("gate_cancel"));
+
+// ===================== (e) STRUCTURAL COVERAGE — the union of every surface's render above must cover
+// =====================     EVERY literal registerTool() name found in that router's own source, minus a
+// =====================     reasoned ROUTER_COVERAGE_EXCLUSIONS entry (card a2f2becc round 3). ============
+for (const [fileGroup, srcFiles] of Object.entries(ROUTER_SOURCE_FILE_GROUPS)) {
+  const expected = expectedToolNamesFromSource(srcFiles);
+  const actual = renderedNamesByFileGroup.get(fileGroup) ?? new Set();
+  const exclusions = ROUTER_COVERAGE_EXCLUSIONS.filter((e) => e.fileGroup === fileGroup);
+  const exclusionNames = new Set(exclusions.map((e) => e.tool));
+  const missing = [...expected].filter((n) => !actual.has(n) && !exclusionNames.has(n));
+  check(`(coverage) ${fileGroup}: the union of this file's own renders covers EVERY literal registerTool() ` +
+    `name found in ${srcFiles.join(", ")}, minus its reasoned exclusions (missing: ${missing.join(", ") || "none"})`,
+    missing.length === 0);
+  for (const excl of exclusions) {
+    check(`(coverage) sanity: exclusion ${fileGroup}::${excl.tool} still names a real literal in source (else it is stale)`,
+      expected.has(excl.tool));
+  }
+}
+
+// ===================== (e) META-CHECK — the GROUP LIST itself cannot silently rot (card a2f2becc round 4,
+// =====================     task b). A plain source-TEXT scan (never an AST parse): walk every .ts file
+// =====================     under packages/daemon/src/**, and assert every file containing a literal
+// =====================     `.registerTool(` call is named in SOME ROUTER_SOURCE_FILE_GROUPS entry above,
+// =====================     or carries a reasoned FILE_LEVEL_COVERAGE_EXCLUSIONS entry — so a brand-new
+// =====================     router file nobody added to a group fails THIS run loudly, instead of silently
+// =====================     escaping both the structural-coverage scan above and this meta-check. ==========
+function walkTsFiles(dir) {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkTsFiles(p));
+    else if (e.name.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}
+{
+  const srcRoot = path.join(__dirname, "..", "src");
+  const groupedFiles = new Set(Object.values(ROUTER_SOURCE_FILE_GROUPS).flat());
+  const excludedFiles = new Set(FILE_LEVEL_COVERAGE_EXCLUSIONS.map((e) => e.file));
+  const unaccountedFiles = [];
+  for (const absFile of walkTsFiles(srcRoot)) {
+    const relPath = path.relative(srcRoot, absFile).split(path.sep).join("/");
+    if (!fs.readFileSync(absFile, "utf8").includes(".registerTool(")) continue;
+    if (groupedFiles.has(relPath) || excludedFiles.has(relPath)) continue;
+    unaccountedFiles.push(relPath);
+  }
+  check(`(meta-check) every packages/daemon/src/**/*.ts file containing a literal .registerTool( call is ` +
+    `named in a ROUTER_SOURCE_FILE_GROUPS entry or a reasoned FILE_LEVEL_COVERAGE_EXCLUSIONS entry — a ` +
+    `plain source-text scan (unaccounted: ${unaccountedFiles.join(", ") || "none"})`,
+    unaccountedFiles.length === 0);
+  for (const excl of FILE_LEVEL_COVERAGE_EXCLUSIONS) {
+    const fullPath = path.join(srcRoot, excl.file);
+    const text = fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : "";
+    check(`(meta-check) sanity: FILE_LEVEL_COVERAGE_EXCLUSIONS entry ${excl.file} still contains a real ` +
+      `.registerTool( call (else it is stale)`, text.includes(".registerTool("));
+  }
+}
+
+// ===================== (e) POSITIVE CONTROL (i) — a planted EXTRA id citation on a LOW-count manager tool
+// =====================     trips the ratchet. Plant via a wrapped REAL registerTool call (same discipline
+// =====================     as every other positive control in this file), re-render through the real
+// =====================     client, confirm the per-tool count no longer matches its baseline. ============
+{
+  const fx = freshNonDevLeadFixture("e-plant-extra");
+  const sid = insertFakeSessionForRole(fx, "manager");
+  const origRegisterTool = McpServer.prototype.registerTool;
+  McpServer.prototype.registerTool = function (name, config, handler) {
+    if (name === "idle_report") config = { ...config, description: (config.description ?? "") + "\ncard 00000000" };
+    return origRegisterTool.call(this, name, config, handler);
+  };
+  let tools;
+  try {
+    const router = new OrchestrationMcpRouter(fx.db, fx.svc, {});
+    tools = await renderToolsViaRealClient(router.buildServer(sid, "manager"));
+  } finally {
+    McpServer.prototype.registerTool = origRegisterTool; // restore unconditionally, even on throw
+  }
+  const idleReport = tools.find((t) => t.name === "idle_report");
+  check("(e positive control i) sanity: the plant landed on the real idle_report description", idleReport?.description?.includes("card 00000000"));
+  // Goes through the SAME scanSurfaceRatchet function the live check uses — never a separately
+  // reimplemented comparison (card a2f2becc round 2 CR, sharpened round 3: a mutant that corrupts
+  // scanSurfaceRatchet's own verdict must turn THIS control red too, not just the live loop).
+  const verdict = scanSurfaceRatchet("OrchestrationMcpRouter(manager)", tools).find((v) => v.tool === "idle_report");
+  check(`(e positive control i) a planted EXTRA id citation on a low-count manager tool trips the ratchet — RED (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && !verdict.ok);
+  fx.db.close();
+}
+
+// ===================== (e) POSITIVE CONTROL (ii) — the STALE-ENTRY check: a tool's REAL count DROPS below
+// =====================     its baselined expectedCount without the baseline being lowered to match — this
+// =====================     must ALSO trip the ratchet, not silently pass through a too-generous stale
+// =====================     baseline. Plant by wrapping registerTool to strip ONE real citation out of the
+// =====================     REAL gate_cancel description (a genuine decrease at the source, re-rendered
+// =====================     through the real client — never a hand-built string copy). ====================
+{
+  const fx = freshNonDevLeadFixture("e-plant-stale");
+  const sid = insertFakeSessionForRole(fx, "manager");
+  const origRegisterTool = McpServer.prototype.registerTool;
+  let strippedOne = false;
+  McpServer.prototype.registerTool = function (name, config, handler) {
+    if (name === "gate_cancel" && config?.description) {
+      const stripped = config.description.replace(new RegExp(ID_CITATION_RE_SOURCE, "i"), "");
+      if (stripped !== config.description) { strippedOne = true; config = { ...config, description: stripped }; }
+    }
+    return origRegisterTool.call(this, name, config, handler);
+  };
+  let tools;
+  try {
+    const router = new OrchestrationMcpRouter(fx.db, fx.svc, {});
+    tools = await renderToolsViaRealClient(router.buildServer(sid, "manager"));
+  } finally {
+    McpServer.prototype.registerTool = origRegisterTool;
+  }
+  check("(e positive control ii) sanity: the plant actually stripped a real citation out of gate_cancel", strippedOne);
+  // Goes through the SAME scanSurfaceRatchet function the live check uses (see control (i)'s own note).
+  const verdict = scanSurfaceRatchet("OrchestrationMcpRouter(manager)", tools).find((v) => v.tool === "gate_cancel");
+  check(`(e positive control ii) sanity: the real count genuinely dropped below the stale baseline (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && verdict.real < verdict.expected);
+  check(`(e positive control ii) the stale-entry check trips the ratchet on a DECREASE too — RED (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && !verdict.ok);
+  fx.db.close();
+}
+
+// ===================== (e) POSITIVE CONTROL (iii) — a RE-INTRODUCED id citation on SetupMcpRouter (now
+// =====================     fully clean, zero allowlist entries) must ALSO trip the ratchet — proving
+// =====================     Setup is a genuine zero-tolerance surface, not merely clean by accident. ======
+{
+  const fx = freshNonDevLeadFixture("e-plant-setup");
+  const sid = insertFakeSessionForRole(fx, "setup");
+  const origRegisterTool = McpServer.prototype.registerTool;
+  McpServer.prototype.registerTool = function (name, config, handler) {
+    if (name === "list_all_sessions") config = { ...config, description: (config.description ?? "") + "\ncard 00000000" };
+    return origRegisterTool.call(this, name, config, handler);
+  };
+  let tools;
+  try {
+    const router = new SetupMcpRouter(fx.db, fx.svc);
+    tools = await renderToolsViaRealClient(router.buildServer(sid));
+  } finally {
+    McpServer.prototype.registerTool = origRegisterTool;
+  }
+  const listAllSessions = tools.find((t) => t.name === "list_all_sessions");
+  check("(e positive control iii) sanity: the plant landed on the real list_all_sessions description", listAllSessions?.description?.includes("card 00000000"));
+  // Goes through the SAME scanSurfaceRatchet function the live check uses (see control (i)'s own note).
+  const verdict = scanSurfaceRatchet("SetupMcpRouter", tools).find((v) => v.tool === "list_all_sessions");
+  check(`(e positive control iii) a re-introduced id citation on the now-clean SetupMcpRouter trips the ratchet — RED (baseline is a hard ${verdict?.expected}, measured ${verdict?.real})`, !!verdict && !verdict.ok && verdict.expected === 0);
+  fx.db.close();
+}
+
 fs.rmSync(tmpHome, { recursive: true, force: true });
+// Remove ONLY the repo dirs this run itself created (captured in createdRepoDirs as each one was made) —
+// never a pattern sweep of os.tmpdir(), which risks deleting a concurrently-running sibling session's
+// own fixture (card a2f2becc round 2 CR).
+for (const dir of createdRepoDirs) fs.rmSync(dir, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the end-user Platform Lead's seeded prompt, the REAL composed fresh-spawn AND recycle startupPrompt text, EVERY skill its own injectSkills resolution actually delivers (derived, not hand-picked — SKILL.md + references/** + scripts/**, minus the dev-only three), and the non-dev PlatformMcpRouter's rendered tool descriptions + representative (lookup-miss AND deeper-validation) error strings all carry ZERO Loom-dogfood/card-id/internal-package tokens — each surface positive-controlled by PLANTING at its real source (a db row, the recycle handoff argument, the real skill store, a wrapped real McpServer.registerTool call) and re-running that surface's own real capture path, never a bare string-concatenation copy."
+  ? "\n✅ ALL PASS — the end-user Platform Lead's seeded prompt, the REAL composed fresh-spawn AND recycle startupPrompt text, EVERY skill its own injectSkills resolution actually delivers (derived, not hand-picked — SKILL.md + references/** + scripts/**, minus the dev-only three), the non-dev PlatformMcpRouter's rendered tool descriptions + representative (lookup-miss AND deeper-validation) error strings all carry ZERO Loom-dogfood/card-id/internal-package tokens (each surface positive-controlled by PLANTING at its real source and re-running that surface's own real capture path, never a bare string-concatenation copy) — AND (card a2f2becc, section (e)) every OTHER shipped end-user-reachable MCP router's rendered tool descriptions carry EXACTLY their ratcheted, baselined count of id citations, no more and no less, proven both ways by three real plants (an extra citation, a stale decrease, a Setup re-introduction)."
   : `\n🛑 ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
