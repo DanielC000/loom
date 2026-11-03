@@ -1,4 +1,7 @@
-// Regression guard for card f432cbb8, EXTENDED by card 9878e520 — HERMETIC, no daemon, no real claude,
+// Regression guard for card f432cbb8, EXTENDED by card 9878e520, then by card 668bc52c (adding
+// context-watcher-context-exhausted.mjs, busy-worker-watcher-context-exhausted.mjs, and
+// engine-session-rotation.mjs — see docs/decisions/668bc52c-*.md for why no new env-var/DI seam was
+// needed, just this same sandbox convention) — HERMETIC, no daemon, no real claude,
 // no build-dist import (this spawns OTHER test files as child processes; it never imports dist/ itself).
 //
 // companion-memory-recall.mjs, resume-already-live-guard.mjs, periodic-snapshot.mjs and
@@ -47,6 +50,10 @@ const TARGETS = [
   { file: "resume-already-live-guard.mjs", leakPrefix: "loom-ralg-cwd-" },
   { file: "periodic-snapshot.mjs", leakPrefix: "loom-periodic-snap-cwd-" },
   { file: "shutdown-snapshot.mjs", leakPrefix: "loom-shutdown-snap-cwd-" },
+  // Card 668bc52c.
+  { file: "context-watcher-context-exhausted.mjs", leakPrefix: "loom-ctxw-ctxexh-" },
+  { file: "busy-worker-watcher-context-exhausted.mjs", leakPrefix: "loom-busy-ctxexh-" },
+  { file: "engine-session-rotation.mjs", leakPrefix: "loom-rotate-" },
 ];
 
 /** Run `targetFile` as a child process with HOME/USERPROFILE pointed at `fakeRealHome`; LOOM_HOME is
@@ -111,8 +118,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — companion-memory-recall.mjs, resume-already-live-guard.mjs, periodic-snapshot.mjs " +
-    "and shutdown-snapshot.mjs all sandbox HOME/USERPROFILE before touching engineTranscriptPath, so none " +
-    "of them leaks a directory into the real user's ~/.claude/projects on any run."
+  ? "\n✅ ALL PASS — every TARGETS entry sandboxes HOME/USERPROFILE before touching engineTranscriptPath, " +
+    "so none of them leaks a directory into the real user's ~/.claude/projects on any run."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

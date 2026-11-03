@@ -56,6 +56,14 @@ const tmpHome = path.join(os.tmpdir(), `loom-rotate-${RUN_SUFFIX}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
+// @decision 668bc52c — sandbox HOME/USERPROFILE to a managed temp dir BEFORE importing dist; never
+// write a transcript fixture under the real os.homedir(), and never import dist after the sandbox is
+// set but let a module-load-time os.homedir() read slip in before it.
+const sandboxHome = path.join(os.tmpdir(), `loom-rotate-home-${RUN_SUFFIX}`);
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -239,18 +247,12 @@ try {
   try { host.stop(SID, "hard"); } catch { /* ignore */ }
   try { db.close(); } catch { /* ignore */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
-  // Also clean up the transcript fixtures written under the REAL ~/.claude/projects (engineTranscriptPath
-  // resolves there, not under tmpHome — mirrors context-stats.mjs's / paste-placeholder-tripwire.mjs's
-  // own cleanup of the same real-home fixture pattern).
-  {
-    const dir = path.dirname(engineTranscriptPath(tmpHome, ENGINE_1));
-    // Retry (Windows can transiently EBUSY/EPERM a just-closed file handle) — mirrors the same retry
-    // shape agent-runs-hardening.mjs/companion-transcript-read.mjs already use for their own tmpHome
-    // removal. A silently-swallowed single-shot failure here is exactly how a leftover survives to
-    // poison a later run (see the RUN_SUFFIX comment above) — best-effort, but not zero-effort.
-    for (let i = 0; i < 5; i++) {
-      try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await sleep(50); }
-    }
+  // Transcript fixtures now land under sandboxHome (card 668bc52c), never the real ~/.claude/projects —
+  // clean up the whole sandbox, with the same Windows-EBUSY/EPERM retry agent-runs-hardening.mjs/
+  // companion-transcript-read.mjs use for their own tmpHome removal. A silently-swallowed single-shot
+  // failure here is exactly how a leftover survives to poison a later run (see RUN_SUFFIX above).
+  for (let i = 0; i < 5; i++) {
+    try { fs.rmSync(sandboxHome, { recursive: true, force: true }); break; } catch { await sleep(50); }
   }
 }
 

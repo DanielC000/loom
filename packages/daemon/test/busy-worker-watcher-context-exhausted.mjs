@@ -4,18 +4,27 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // distinct detection mechanism with its own fixture shape, not a growth of that file).
 //
 // Drives the REAL BusyWorkerWatcher.tick() + a RECORDING pty/db stub pair, same shape as
-// busy-worker-watcher.mjs, PLUS a REAL transcript fixture file written at the exact path
-// resolveTranscriptFile/engineTranscriptPath resolve to (engine-session-rotation.mjs's own established
-// real-homedir pattern — never a hand-constructed path) carrying the real terminal record's shape.
+// busy-worker-watcher.mjs, PLUS a transcript fixture file written at the exact path
+// resolveTranscriptFile/engineTranscriptPath resolve to (never a hand-constructed path), under a
+// sandboxed home (see the @decision anchor below) carrying the real terminal record's shape.
 //
 // Run: 1) build (turbo builds shared first), 2) node packages/daemon/test/busy-worker-watcher-context-exhausted.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Db } from "../dist/db.js";
-import { BusyWorkerWatcher } from "../dist/orchestration/busy-worker-watcher.js";
-import { OrchestrationControl } from "../dist/orchestration/control.js";
-import { engineTranscriptPath } from "../dist/sessions/transcript.js";
+import { mkdtempManaged } from "./_tmp-fixture.mjs";
+
+// @decision 668bc52c — sandbox HOME/USERPROFILE to a managed temp dir BEFORE importing dist; never
+// write a transcript fixture under the real os.homedir(), and never import dist after the sandbox is
+// set but let a module-load-time os.homedir() read slip in before it.
+const sandboxHome = mkdtempManaged("loom-busy-ctxexh-home-");
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+
+const { Db } = await import("../dist/db.js");
+const { BusyWorkerWatcher } = await import("../dist/orchestration/busy-worker-watcher.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

@@ -2,9 +2,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Card 66ff7321 (part C of 8c7dfc65) — ContextWatcher's CONTEXT-EXHAUSTION detection, the
 // manager/platform twin of busy-worker-watcher-context-exhausted.mjs's own worker-side test. NO
 // claude — the watcher takes an injected pty-slice, so the tick tests use a RECORDING STUB and drive
-// tick() directly. Hermetic: each env gets its OWN temp .db + a REAL transcript fixture written at the
-// real-homedir path resolveTranscriptFile/engineTranscriptPath resolve to (never a hand-constructed
-// path), cleaned up in a `finally`-equivalent per case.
+// tick() directly. Hermetic: each env gets its OWN temp .db + a transcript fixture written at the
+// path resolveTranscriptFile/engineTranscriptPath resolve to (never a hand-constructed path), under a
+// sandboxed home (see the @decision anchor below), cleaned up in a `finally`-equivalent per case.
 //
 // Also proves the human-attention routing: companion/attention-push.ts's classify() maps
 // manager_context_exhausted to the SAME "context-overflow" class its context_escalated/
@@ -14,10 +14,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Db } from "../dist/db.js";
-import { ContextWatcher } from "../dist/orchestration/context-watcher.js";
-import { classify } from "../dist/companion/attention-push.js";
-import { engineTranscriptPath } from "../dist/sessions/transcript.js";
+import { mkdtempManaged } from "./_tmp-fixture.mjs";
+
+// @decision 668bc52c — sandbox HOME/USERPROFILE to a managed temp dir BEFORE importing dist; never
+// write a transcript fixture under the real os.homedir(), and never import dist after the sandbox is
+// set but let a module-load-time os.homedir() read slip in before it.
+const sandboxHome = mkdtempManaged("loom-ctxw-ctxexh-home-");
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+
+const { Db } = await import("../dist/db.js");
+const { ContextWatcher } = await import("../dist/orchestration/context-watcher.js");
+const { classify } = await import("../dist/companion/attention-push.js");
+const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

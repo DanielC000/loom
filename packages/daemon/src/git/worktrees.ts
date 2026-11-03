@@ -5725,6 +5725,12 @@ export const STATIC_GUARD_REPO_PATHS = [
   // @decision 4b559feb — kept as a reviewer-chosen OVER-INCLUSION on the trust-boundary ground (never
   // weakens the reduced gate; runs in ~1s) — never "owner-directed" (no owner request verified).
   "packages/daemon/test/trailer-derived-value-git-argv-guard.mjs",
+  // Card 668bc52c: an AST scan of packages/daemon/test/*.mjs asserting every file calling a transcript-path
+  // function (engineTranscriptPath/resolveTranscriptFile/engineTranscriptExists/listAllTranscriptIds)
+  // sandboxes HOME/USERPROFILE before its first dist import, or carries a reasoned allowlist entry — same
+  // ground as real-home-scope-guard.mjs above: a NEW test file is a source-TEXT property neither the
+  // reduced gate nor the emit-compare transpile-identity check can see.
+  "packages/daemon/test/transcript-realhome-sandbox-guard.mjs",
   // Card dd6e713d: a corpus-wide reverse sweep (plus a forward check over a curated basename list) that a
   // test/*.mjs file capable of launching a real claude/codex engine carries the structural opt-in refusal
   // (test/_real-engine-opt-in.mjs). Belongs here on the SAME ground as fixed-wait-witness-guard.mjs above:
