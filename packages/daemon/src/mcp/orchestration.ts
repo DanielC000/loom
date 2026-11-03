@@ -2848,6 +2848,62 @@ export class OrchestrationMcpRouter {
       return { ...w, parentSessionId: managerSessionId };
     };
 
+    // Card b4b246dd defect 2: a per-worker read tool used to collapse "no session row exists for this id
+    // at all" and "a session row exists but belongs to someone else's lineage" into the SAME "not your
+    // worker" message. `workerNotFoundHint` draws candidates ONLY from this manager's OWN scope — every
+    // source below is already scoped to `managerSessionId`, so a match can never name another manager's
+    // worker/op. Candidates: a live worker's own session id, its taskId, its in-flight merge opId, a
+    // pending spawn's opId/taskId, a cap-queued entry's opId/taskId. An exact match always wins over a
+    // prefix match; more than one DISTINCT hint of the same kind is ambiguous and refuses to guess
+    // (`null`), mirroring `resolveIdPrefix`'s exact-wins/ambiguous-refuses semantics (id-prefix.ts) —
+    // this can't reuse that helper directly since it scans several differently-shaped candidate pools
+    // rather than one uniform list.
+    const workerNotFoundHint = (ref: string): string | null => {
+      if (ref.length < MIN_ID_PREFIX_LEN) return null;
+      const hits: { exact: boolean; hint: string }[] = [];
+      const add = (candidate: string | null | undefined, hint: string) => {
+        if (!candidate) return;
+        if (candidate === ref) hits.push({ exact: true, hint });
+        else if (candidate.startsWith(ref)) hits.push({ exact: false, hint });
+      };
+      for (const w of db.listWorkers(managerSessionId)) {
+        add(w.id, `did you mean worker session '${w.id}'?`);
+        add(w.taskId, `did you mean worker '${w.id}', the session working on task '${w.taskId}'?`);
+        const merge = sessions.peekPendingMerge(w);
+        if (merge) add(merge.opId, `did you mean worker '${w.id}', which has an in-flight merge op '${merge.opId}'?`);
+      }
+      for (const op of sessions.listPendingSpawns(managerSessionId)) {
+        const hint = op.taskId
+          ? `task '${op.taskId}' has a spawn still in flight (op '${op.opId}') — poll worker_list for its workerSessionId once it's ready, there is no worker session id yet.`
+          : `a taskless spawn is still in flight (op '${op.opId}') — poll worker_list for its workerSessionId once it's ready, there is no worker session id yet.`;
+        add(op.opId, hint);
+        add(op.taskId, hint);
+      }
+      for (const e of sessions.listCapQueuedSpawns(managerSessionId)) {
+        const hint = e.taskId
+          ? `task '${e.taskId}' is cap-queued (op '${e.opId}'), not spawned yet — there is no worker session id to use.`
+          : `a taskless entry is cap-queued (op '${e.opId}'), not spawned yet — there is no worker session id to use.`;
+        add(e.opId, hint);
+        add(e.taskId, hint);
+      }
+      const exactHints = [...new Set(hits.filter((h) => h.exact).map((h) => h.hint))];
+      if (exactHints.length === 1) return exactHints[0] ?? null;
+      if (exactHints.length > 1) return null; // a genuine cross-pool collision — ambiguous, never guess
+      const prefixHints = [...new Set(hits.map((h) => h.hint))]; // exactHints is empty here, so these are all prefix matches
+      return prefixHints.length === 1 ? prefixHints[0] ?? null : null;
+    };
+
+    // Shared by worker_status/worker_transcript/worker_report_get (card b4b246dd defect 2) — the SAME
+    // split in one place so the wording/logic can't drift across the 3 call sites. `w` is
+    // `selfHealWorkerLink`'s result: `undefined` means no session row exists for `workerSessionId` at
+    // all (genuinely unknown id); a defined-but-unreadable `w` means the row exists but belongs to a
+    // different lineage (a REAL ownership mismatch) — these are DIFFERENT facts and must read differently.
+    const workerLookupError = (workerSessionId: string, w: Session | undefined): { error: string } => {
+      if (w) return { error: "not your worker" };
+      const hint = workerNotFoundHint(workerSessionId);
+      return { error: `no such worker session '${workerSessionId}'${hint ? ` — ${hint}` : ""}` };
+    };
+
     // The fleet view — the manager's direct children as a compact list. Shared by worker_list and the
     // no-arg worker_status call (a manager's reflexive `worker_status({})` aliases to this rather than
     // throwing a schema-validation error).
@@ -3351,7 +3407,7 @@ export class OrchestrationMcpRouter {
         // No id → fleet view (alias worker_list), so worker_status({}) never throws a schema error.
         if (!workerSessionId) return ok(await fleetView());
         const w = selfHealWorkerLink(workerSessionId, "worker_status");
-        if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
+        if (!w || !workerReadableByManager(w)) return ok(workerLookupError(workerSessionId, w));
         const pendingMerge = withGatePhase(sessions.peekPendingMerge(w) ?? null);
         const mismatch = deriveLastMismatch(w.id);
         const directiveProjection = staleDirectiveProjection(w.id, w.turnSeq ?? 0);
@@ -3444,7 +3500,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, lastN, offset, limit, turnRange }) => {
         const w = selfHealWorkerLink(workerSessionId, "worker_transcript");
-        if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
+        if (!w || !workerReadableByManager(w)) return ok(workerLookupError(workerSessionId, w));
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId, w.harness) : [];
         if (typeof lastN === "number" && lastN > 0) {
           return ok(spillableTurnsResponse(lastNTurns(turns, lastN), null));
@@ -3485,10 +3541,12 @@ export class OrchestrationMcpRouter {
           "managerTurnSeqAtReport} (any field the report didn't set is simply absent, never null/empty) — " +
           "or pass `eventId` (the full id, or an unambiguous 8-char id-prefix) to read a SPECIFIC earlier " +
           "report (accepted or refused) instead of the latest one. `error` (a string) means nothing to " +
-          "read — 'not your worker' " +
-          "(scoped the same way every other per-worker tool is — your own lineage only), 'no worker_report " +
-          "recorded for this worker', an ambiguous-prefix message naming the matching ids, or 'no " +
-          "worker_report event matching id …' — never a partial/best-effort result. Also carries " +
+          "read — 'not your worker' (a session row exists for `workerSessionId` but belongs to a " +
+          "different manager's lineage — scoped the same way every other per-worker tool is: your own " +
+          "lineage only), 'no such worker session ...' (no session row exists for that id at all — " +
+          "carries a did-you-mean when the id matches a taskId/opId already known in YOUR OWN scope), " +
+          "'no worker_report recorded for this worker', an ambiguous-prefix message naming the matching " +
+          "ids, or 'no worker_report event matching id …' — never a partial/best-effort result. Also carries " +
           "`subagentAttribution` ({agentId, agentType}) when card 8d158088's correlation POSITIVELY " +
           "CONFIRMED this report was filed by a sub-agent call rather than the worker's own top-level turn " +
           "— advisory only (never refused), absent means either a genuine main-turn call or an honest " +
@@ -3502,7 +3560,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, eventId }) => {
         const w = selfHealWorkerLink(workerSessionId, "worker_report_get");
-        if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
+        if (!w || !workerReadableByManager(w)) return ok(workerLookupError(workerSessionId, w));
         // Card 36e43a98: also match `worker_report_rejected` — the pending-direction guard's refusal
         // persists the worker's report content on that event (not a `worker_report` one, since the guard
         // returns BEFORE the genuine-report append below ever runs), so without this a refused report was

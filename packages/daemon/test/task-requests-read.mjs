@@ -300,6 +300,55 @@ try {
   check("(J) requests.items reflects the notice row's real state", taskWithNotice.requests.items.find((it) => it.id === noticeOnCard.questionId)?.state === "notice");
   void pendingOnNoticeCard;
 
+  // ============================ (K) card b4b246dd: task_request_get's `id` resolves full-id-or-prefix ===
+  // Defect: `id` used to be an EXACT db.getQuestion lookup while the sibling `taskId` param (section G/H
+  // above) already resolved an unambiguous 8-char prefix — one function, two id policies. `id` must now
+  // resolve the SAME way. Craft two question rows with a shared 8-char id prefix (randomUUID-generated
+  // ids from a real question_ask can't be made to collide on demand) to prove ambiguity is rejected too.
+  const fullIdPrefixed = await tCall("task_request_get", { id: askResult.questionId.slice(0, 8) });
+  check("(K) an unambiguous 8-char `id` PREFIX resolves to the full request", fullIdPrefixed.id === askResult.questionId && fullIdPrefixed.state === "consumed");
+
+  const ambigQA = "11111111-0000-4000-8000-000000000011";
+  const ambigQB = "11111111-0000-4000-8000-000000000012";
+  db.insertQuestion({ id: ambigQA, sessionId: mgrId, projectId: projId, type: "decision", title: "ambiguous request A", body: "b", taskId: null, state: "pending", createdAt: now });
+  db.insertQuestion({ id: ambigQB, sessionId: mgrId, projectId: projId, type: "decision", title: "ambiguous request B", body: "b", taskId: null, state: "pending", createdAt: now });
+  const ambigIdPrefix = ambigQA.slice(0, 8);
+  const ambigIdRead = await tCall("task_request_get", { id: ambigIdPrefix });
+  check("(K) an AMBIGUOUS `id` prefix errors naming BOTH candidate ids, not a silent pick", typeof ambigIdRead.error === "string" && ambigIdRead.error.includes("ambiguous") && ambigIdRead.error.includes(ambigQA) && ambigIdRead.error.includes(ambigQB));
+
+  // A too-short ref (< 8 chars, not an exact full-id match) must read the plain not-found, never ambiguous
+  // or a silent pick, and must NOT be confused with the cross-project "exists elsewhere" wording.
+  const tooShortIdRead = await tCall("task_request_get", { id: "1111111" });
+  check("(K) a too-short `id` ref reads not-found, never ambiguous or 'exists elsewhere'", typeof tooShortIdRead.error === "string" && !tooShortIdRead.error.includes("ambiguous") && !tooShortIdRead.error.includes("exists on another project's board"));
+
+  // Prefix resolution must stay PROJECT-SCOPED first: a prefix of the OTHER project's request must still
+  // read the disambiguated "exists on another project's board" wording, never resolve across the boundary.
+  const otherAskPrefix = otherAsk.questionId.slice(0, 8);
+  const crossProjectPrefixRead = await tCall("task_request_get", { id: otherAskPrefix });
+  check("(K) a prefix of a request belonging to ANOTHER project still reads the disambiguated 'exists elsewhere' wording, never resolves it", typeof crossProjectPrefixRead.error === "string" && crossProjectPrefixRead.error.includes("exists on another project's board"));
+
+  // ============================ (L) card b4b246dd round 2: the common full-id call skips the list scan ===
+  // `resolveProjectQuestionId` now tries an exact `db.getQuestion(id)` first — the common full-id call
+  // (the shape tasks_get/task_requests_list actually hand back) must never fall through to
+  // `listQuestionsForAudit`'s whole-project scan at all. A PREFIX call still needs that scan (there's no
+  // exact row to find), and a genuinely unknown id pays for the scan too (same as before this fix).
+  let auditScans = 0;
+  const realListQuestionsForAudit = db.listQuestionsForAudit.bind(db);
+  db.listQuestionsForAudit = (...args) => { auditScans++; return realListQuestionsForAudit(...args); };
+  try {
+    auditScans = 0;
+    const fullIdAgain = await tCall("task_request_get", { id: askResult.questionId });
+    check("(L) a full-id lookup succeeds", fullIdAgain.id === askResult.questionId);
+    check("(L) a full-id lookup never scans the project's whole request list", auditScans === 0);
+
+    auditScans = 0;
+    const prefixAgain = await tCall("task_request_get", { id: askResult.questionId.slice(0, 8) });
+    check("(L) a PREFIX lookup still succeeds", prefixAgain.id === askResult.questionId);
+    check("(L) a prefix lookup still falls through to the list scan (no exact row to short-circuit on)", auditScans === 1);
+  } finally {
+    db.listQuestionsForAudit = realListQuestionsForAudit;
+  }
+
   await tClient.close();
 } finally {
   try { db.close(); } catch { /* ignore */ }
@@ -309,5 +358,7 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — a REAL question_ask call stamps task_id end-to-end; tasks_get's connected-requests summary ({total,answered,pending,cancelled,items}) is correct before/after an answer (real-agent MCP tool calls, not just unit tests); task_requests_list/task_request_get are NON-CONSUMING (re-readable across repeated calls AND after the asking agent's own question_pull has drained+consumed the row, whose own semantics stay unchanged); task_request_get never returns secret_blob/secret for a credential request (only a non-secret ack, null while pending); a pending permission reads approved:null rather than a misleading false; project/task scoping rejects a mismatched taskId and a cross-project request id — INCLUDING a foreign-project question_ask carrying another project's task id, now REJECTED OUTRIGHT at write time (card 9be9784a: taskId resolution is scoped to the caller's own project); task_requests_list resolves an unambiguous 8-char taskId prefix; question_ask itself resolves an 8-char taskId PREFIX to the full id and stores THAT — so the soft-link actually connects — while an ambiguous or unknown prefix is cleanly rejected instead of silently stored as a dead link; AND a CANCELLED connected request (question_cancel/dismiss) is counted in its OWN `cancelled` bucket, never folded into `answered` (the pending-as-proxy bug `total - pending` used to cause)."
   + " A card 59fa6403 round 2 (b13df292) regression: a `type:\"notice\"` connected request is counted in its OWN `notices` bucket, never folded into `answered` — the same defect shape as the cancelled-row fix above, caught by Code Review for the new self-terminal 'notice' state."
+  + " A card b4b246dd regression: task_request_get's `id` now resolves full-id-or-unambiguous-8-char-prefix (mirroring its own `taskId` param) — an ambiguous prefix names both candidates, a too-short ref reads a plain not-found (never ambiguous or 'exists elsewhere'), and prefix resolution stays project-scoped (a prefix of another project's request still reads the disambiguated cross-project wording, never resolves across the boundary)."
+  + " A card b4b246dd round-2 fix: a full-id task_request_get call now resolves via an exact `db.getQuestion` lookup and never scans the project's whole request list, while a prefix call still correctly falls through to that scan."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

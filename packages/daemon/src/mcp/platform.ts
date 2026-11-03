@@ -3575,12 +3575,12 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_update",
       {
-        description: "Update a schedule's name, cron, enabled flag, kind (\"manager\"|\"auditor\"|\"workspace-auditor\"), and/or custom prompt by id. A changed cron recomputes next_fire_at (rejected if invalid), evaluated in the DAEMON's LOCAL timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable cross-check; enabled toggles the Scheduler for this row; kind changes what a fire spawns; prompt is appended to the agent's own startupPrompt on fire (pass an empty string to clear it). Omitted fields are left as-is; a blank `name` is ignored (a schedule always keeps a name). 404 if the schedule is unknown.",
+        description: "Update a schedule's name, cron, enabled flag, kind (\"manager\"|\"auditor\"|\"workspace-auditor\"), and/or custom prompt by id. `scheduleId` accepts the full id OR an unambiguous 8-char id-prefix (platform-wide — this surface is cross-project), same resolution as agent_get/project_get. A changed cron recomputes next_fire_at (rejected if invalid), evaluated in the DAEMON's LOCAL timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable cross-check; enabled toggles the Scheduler for this row; kind changes what a fire spawns; prompt is appended to the agent's own startupPrompt on fire (pass an empty string to clear it). Omitted fields are left as-is; a blank `name` is ignored (a schedule always keeps a name). An ambiguous prefix errors naming the candidate ids; an unknown id is a distinctly-worded 404.",
         inputSchema: strictShape({ scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ scheduleId, cron, enabled, kind, prompt, name }) => {
-        const existing = db.getSchedule(scheduleId);
-        if (!existing) return ok({ error: "schedule not found", ...nowEcho() });
+        const existing = getByIdPrefix(scheduleId, (id) => db.getSchedule(id), () => db.listSchedules(), "schedule");
+        if ("error" in existing) return ok({ ...existing, ...nowEcho() });
         const patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null; createdBy?: "human" | "agent" } = {};
         if (typeof name === "string") patch.name = name;
         if (typeof enabled === "boolean") {
@@ -3599,33 +3599,35 @@ export class PlatformMcpRouter {
           try { patch.nextFireAt = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression", ...nowEcho() }); }
           patch.cron = cron;
         }
-        db.updateSchedule(scheduleId, patch);
-        return ok(withScheduleTimeEcho(db.getSchedule(scheduleId)!));
+        // Use the RESOLVED full id (scheduleId may have been a prefix) for the write/re-read.
+        db.updateSchedule(existing.id, patch);
+        return ok(withScheduleTimeEcho(db.getSchedule(existing.id)!));
       },
     );
 
     server.registerTool(
       "schedule_get",
       {
-        description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, nextFireAtLocal, lastFiredAt, lastDeferredAt, lastDeferredReason, kind, prompt}). `cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT UTC — `nextFireAtLocal` is the reliable human-readable cross-check. Read-only. Error if the id is unknown.",
+        description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, nextFireAtLocal, lastFiredAt, lastDeferredAt, lastDeferredReason, kind, prompt}). `scheduleId` accepts the full id OR an unambiguous 8-char id-prefix (platform-wide — this surface is cross-project), same resolution as agent_get/project_get. `cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT UTC — `nextFireAtLocal` is the reliable human-readable cross-check. Read-only. An ambiguous prefix errors naming the candidate ids; an unknown id is a distinctly-worded error.",
         inputSchema: strictShape({ scheduleId: z.string() }),
       },
       async ({ scheduleId }) => {
-        const schedule = db.getSchedule(scheduleId);
-        return ok(schedule ? withScheduleTimeEcho(schedule) : { error: "schedule not found", ...nowEcho() });
+        const schedule = getByIdPrefix(scheduleId, (id) => db.getSchedule(id), () => db.listSchedules(), "schedule");
+        return ok("error" in schedule ? { ...schedule, ...nowEcho() } : withScheduleTimeEcho(schedule));
       },
     );
 
     server.registerTool(
       "schedule_delete",
       {
-        description: "Permanently delete a schedule by id (retire it so it never fires again). Mirrors the human DELETE /api/schedules/:id. 404 if the schedule is unknown (no-op write avoided). Returns { deleted:true, scheduleId }.",
+        description: "Permanently delete a schedule by id (retire it so it never fires again). `scheduleId` accepts the full id OR an unambiguous 8-char id-prefix (platform-wide — this surface is cross-project), same resolution as agent_get/project_get. Mirrors the human DELETE /api/schedules/:id. An ambiguous prefix errors naming the candidate ids; an unknown id is a distinctly-worded 404 (no-op write avoided). Returns { deleted:true, scheduleId } (the RESOLVED full id).",
         inputSchema: strictShape({ scheduleId: z.string() }),
       },
       async ({ scheduleId }) => {
-        if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found" });
-        db.deleteSchedule(scheduleId);
-        return ok({ deleted: true, scheduleId });
+        const resolved = getByIdPrefix(scheduleId, (id) => db.getSchedule(id), () => db.listSchedules(), "schedule");
+        if ("error" in resolved) return ok(resolved);
+        db.deleteSchedule(resolved.id);
+        return ok({ deleted: true, scheduleId: resolved.id });
       },
     );
 

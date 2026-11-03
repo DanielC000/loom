@@ -303,7 +303,8 @@ export class TaskMcpRouter {
           "`fulfillmentTarget` — see that tool's own doc. `ack` " +
           "ONLY (never the secret) for \"credential\" (null until provided). NON-CONSUMING: unlike " +
           "question_pull, reading this never flips the request's state — re-readable across turns/agents. " +
-          "`id` is the request id (from tasks_get's `requests.items`/task_requests_list). Optional `taskId` " +
+          "`id` is the REQUEST id — full id or an unambiguous 8-char id-prefix (from tasks_get's " +
+          "`requests.items`/task_requests_list) — never a task/card id. Optional `taskId` " +
           "(full id or an unambiguous 8-char id-prefix) further scopes the lookup — if given, the request " +
           "must be connected to THAT task or this errors. An optional `projectId` is tolerated but ignored " +
           "— this tool is already scoped to the caller's own project (mirrors tasks_get). A request that " +

@@ -1106,24 +1106,51 @@ export function listProjectTaskRequests(db: Db, projectId: string, taskId: strin
 }
 
 /**
+ * Resolve a Request `id` (full id or an unambiguous {@link MIN_ID_PREFIX_LEN}-char prefix) against THIS
+ * project's own requests first — mirrors {@link resolveProjectTaskId}'s id/prefix policy, closing card
+ * b4b246dd's defect 1 (the `id` branch used to be an exact-only `db.getQuestion` lookup while the sibling
+ * `taskId` branch already resolved prefixes). An exact `db.getQuestion(id)` lookup runs first (round 2,
+ * mirrors {@link getByIdPrefix}'s `getExact` fast path) so the common full-id call skips loading/scanning
+ * every project request; a hit from another project falls through unchanged to the scan below, whose
+ * candidates come from {@link Db.listQuestionsForAudit} scoped to `projectId` (every state,
+ * non-consuming). On a project-local miss, mirror resolveProjectTaskId's "elsewhere" disambiguation: a
+ * second prefix pass over every OTHER project's requests distinguishes "no such request anywhere" from
+ * "exists on another project's board (out of scope for this session)".
+ */
+function resolveProjectQuestionId(db: Db, projectId: string, id: string): Question | { error: string } {
+  const exact = db.getQuestion(id);
+  if (exact && exact.projectId === projectId) return exact;
+  const own = resolveIdPrefix(db.listQuestionsForAudit({ projectId }), id);
+  if (own.kind === "found") return own.record;
+  if (own.kind === "ambiguous") {
+    return { error: `ambiguous request id-prefix '${id}' — it matches ${own.ids.join(", ")}; pass more characters or the full id` };
+  }
+  const elsewhere = resolveIdPrefix(
+    db.listQuestionsForAudit({}).filter((q) => q.projectId !== projectId),
+    id,
+  );
+  if (elsewhere.kind !== "none") {
+    return { error: `request '${id}' not found in this project — it exists on another project's board (out of scope for this session)` };
+  }
+  return { error: "request not found in this project" };
+}
+
+/**
  * Read ONE connected request in full (body/options/recommendation/state + its answer-by-type),
  * project-scoped — the get-side sibling of {@link listProjectTaskRequests}. NON-CONSUMING: never flips
  * `state`, unlike `question_pull`. NEVER returns `secret_blob` for a "credential" request — see
- * {@link taskRequestGetItem} (mirrors `questionPullItem`'s credential branch exactly). An optional
- * `taskId` further scopes the lookup — if given (full id or an unambiguous prefix), the request must be
- * connected to THAT task or this errors instead of silently returning a request tied to a different one.
+ * {@link taskRequestGetItem} (mirrors `questionPullItem`'s credential branch exactly). `id` accepts the
+ * full id OR an unambiguous {@link MIN_ID_PREFIX_LEN}-char prefix (card b4b246dd) — see
+ * {@link resolveProjectQuestionId}. An optional `taskId` further scopes the lookup — if given (full id or
+ * an unambiguous prefix), the request must be connected to THAT task or this errors instead of silently
+ * returning a request tied to a different one.
  */
 export function getProjectTaskRequest(
   db: Db, projectId: string, id: string, taskId?: string,
 ): Record<string, unknown> | { error: string } {
-  const q = db.getQuestion(id);
-  if (!q) return { error: "request not found in this project" };
-  // Disambiguate "no such request anywhere" from "exists on another project's board" (mirrors
-  // resolveProjectTaskId's identical split above, card 3588e74e part ②) — collapsing the two into one
-  // message reads a genuine, answered request as pure non-existence to a caller verifying it by id.
-  if (q.projectId !== projectId) {
-    return { error: `request '${id}' not found in this project — it exists on another project's board (out of scope for this session)` };
-  }
+  const resolved = resolveProjectQuestionId(db, projectId, id);
+  if ("error" in resolved) return resolved;
+  const q = resolved;
   if (taskId) {
     const owned = resolveProjectTaskId(db, projectId, taskId);
     if ("error" in owned) return owned;

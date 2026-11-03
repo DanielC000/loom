@@ -489,6 +489,40 @@ try {
   check("schedule_update: invalid cron rejected", (await call("schedule_update", { scheduleId: sc.id, cron: "bogus" })).error === "invalid cron expression");
   check("schedule_update: 404 on an unknown schedule", (await call("schedule_update", { scheduleId: "ghost", enabled: true })).error === "schedule not found");
 
+  // ===================== card b4b246dd defect 3: scheduleId resolves full-id-or-unambiguous-8-char-prefix
+  // on the Lead's own (cross-project) schedule_get/update/delete — these used to be exact-db.getSchedule-
+  // only, unlike the manager surface's OWN schedule_update/schedule_get (card 52b812c6, mgmt-surface.mjs),
+  // so a live, enabled schedule read "schedule not found" for anything but the full id. =====================
+  const suPrefix = await call("schedule_update", { scheduleId: sc.id.slice(0, 8), prompt: "via prefix" });
+  check("schedule_update: resolves the SAME schedule by an 8-char id-prefix", suPrefix.id === sc.id && suPrefix.prompt === "via prefix" && !suPrefix.error);
+
+  const sgFull = await call("schedule_get", { scheduleId: sc.id });
+  check("schedule_get: returns the full record by full id", sgFull.id === sc.id && !sgFull.error);
+  const sgPrefix = await call("schedule_get", { scheduleId: sc.id.slice(0, 8) });
+  check("schedule_get: resolves the SAME record by an 8-char id-prefix", sgPrefix.id === sc.id && !sgPrefix.error);
+  check("schedule_get: 404 on an unknown schedule", (await call("schedule_get", { scheduleId: "ghost" })).error === "schedule not found");
+
+  // Two schedules sharing an 8-char id prefix (crafted ids — a real schedule_create's randomUUID can't be
+  // made to collide on demand) — an ambiguous prefix must name BOTH candidates, never silently pick one.
+  const ambigSchedA = "99999999-0000-4000-8000-000000000001";
+  const ambigSchedB = "99999999-0000-4000-8000-000000000002";
+  const futureIso = new Date(Date.now() + 86400000).toISOString();
+  db.insertSchedule({ id: ambigSchedA, agentId: "agentMgr", cron: "0 9 * * *", enabled: true, nextFireAt: futureIso, lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "agent" });
+  db.insertSchedule({ id: ambigSchedB, agentId: "agentMgr", cron: "0 9 * * *", enabled: true, nextFireAt: futureIso, lastFiredAt: null, createdAt: new Date().toISOString(), kind: "manager", prompt: null, createdBy: "agent" });
+  const ambigPrefix = ambigSchedA.slice(0, 8);
+  const ambigGet = await call("schedule_get", { scheduleId: ambigPrefix });
+  check("schedule_get: an AMBIGUOUS prefix errors naming BOTH candidate ids, not a silent pick", typeof ambigGet.error === "string" && ambigGet.error.includes("ambiguous") && ambigGet.error.includes(ambigSchedA) && ambigGet.error.includes(ambigSchedB));
+  const ambigUpdate = await call("schedule_update", { scheduleId: ambigPrefix, enabled: false });
+  check("schedule_update: the SAME ambiguous-prefix rejection applies, never silently updates one of them", typeof ambigUpdate.error === "string" && ambigUpdate.error.includes("ambiguous"));
+  check("schedule_update: neither ambiguous candidate was actually touched", db.getSchedule(ambigSchedA)?.enabled === true && db.getSchedule(ambigSchedB)?.enabled === true);
+
+  // schedule_delete: resolves the same way, and returns the RESOLVED full id (never the raw prefix).
+  const toDelete = await call("schedule_create", { agentId: "agentMgr", cron: "0 11 * * *" });
+  const delResult = await call("schedule_delete", { scheduleId: toDelete.id.slice(0, 8) });
+  check("schedule_delete: resolves an 8-char id-prefix and deletes it", delResult.deleted === true && delResult.scheduleId === toDelete.id);
+  check("schedule_delete: the schedule is actually gone from the Db", !db.getSchedule(toDelete.id));
+  check("schedule_delete: 404 on an unknown schedule (no-op, nothing to delete)", (await call("schedule_delete", { scheduleId: "ghost" })).error === "schedule not found");
+
   // ===================== card acd3c688 round 2: an agent-originated `kind` change on a HUMAN-created
   // schedule resets createdBy to "agent" (fail-closed) — the Lead's own schedule_update is the one tool
   // that can change `kind` at all; a human-created row must not go on firing under the human bypass for
