@@ -8,6 +8,7 @@ import { isValidSkillName, isBundledSkill, skillProvenance, isPristineBundledCon
 import { stripPermissionWidening } from "./permissionGuard.js";
 import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
+import { canonicalGit, withTimeout } from "../git/bounded.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
 // CR round 3 (card 31f997e7): a SEPARATE sidecar file, never merged into MANIFEST's own shape — keeps
@@ -40,6 +41,115 @@ function recordLoomPlacedFingerprint(cwd: string, name: string, fingerprint: str
   let set = byName.get(name);
   if (!set) { set = new Set(); byName.set(name, set); }
   set.add(fingerprint);
+}
+
+// The shared-cwd dead-claim RECLAIM: ASYNC COMPUTES THE FACT, SYNC ACTS ON IT — injectSkills runs
+// synchronously on the spawn hot path and must never run a git subprocess itself. See the decision
+// record for the full mechanism, why a synchronous git call was rejected, and the named residuals.
+//
+// @decision f4e93dbf — never run git synchronously here; the fire-and-forget check below (and its
+// consumption at the NEXT injectSkills call for this cwd) is the only sanctioned way to verify this.
+
+/** Pure fs walk, no subprocess, no git call: the nearest ancestor of `dir` (inclusive) containing a
+ *  `.git` entry — the INNERMOST real git repository root containing `dir`, or null if none exists before
+ *  the filesystem root. Mirrors `git/repo-lock.ts`'s own `resolveGitToplevelSync` walk — cheap enough to
+ *  call synchronously even on the hot path (the same cost class as `fingerprintSkillDir`, already called
+ *  synchronously elsewhere in this file). Callers must walk from the TARGET SKILL DIR, never from `cwd` —
+ *  see the decision record for why a nested repo below `cwd` needs this and the named `GIT_DIR`/
+ *  `GIT_WORK_TREE` residual.
+ *
+ *  @decision f4e93dbf — never pass `cwd` here; the target skill dir is the only correct starting point. */
+function innermostGitRepoRoot(dir: string): string | null {
+  let cur = dir;
+  for (;;) {
+    try { if (fs.existsSync(path.join(cur, ".git"))) return cur; } catch { /* treat as absent */ }
+    const parent = path.dirname(cur);
+    if (parent === cur) return null; // reached the filesystem root — no repo anywhere up-tree
+    cur = parent;
+  }
+}
+const UNTRACKED_CHECK_TIMEOUT_MS = 10_000; // matches this codebase's own convention for one quick, bounded git read (sessions/service.ts's mainlineGitMs)
+const UNTRACKED_CACHE_TTL_MS = 60_000; // bounds the one named residual: a commit landing AFTER the check but BEFORE a later call consumes it
+const UNTRACKED_CACHE_MAX_ENTRIES = 500; // defensive cap — this only ever grows on a genuine dead-claim reclaim event, which is rare
+
+interface UntrackedCheckEntry { readonly fingerprint: string; readonly expiresAt: number; }
+/** `${cwd}\u0000${name}` -> the fingerprint that was confirmed untracked, plus when that confirmation
+ *  expires. NUL-separated so neither half can ever be ambiguous about where it ends (a skill name is
+ *  already a validated kebab slug with no NUL byte; `cwd` is a filesystem path, same reasoning). This
+ *  cache holds ONLY the verified-untracked FACT, with its own short TTL — it is deliberately NOT where a
+ *  caller remembers "this name is an orphan worth re-checking"; that is the separate, disk-persisted
+ *  {@link PendingReclaimMap} below, which has no TTL and survives across this cache's own expiry.
+ *
+ *  @decision f4e93dbf round 2 — the 60s TTL applies ONLY to this verified fact, never to the fact that an
+ *  orphan exists at all; see the decision record for the gap this split closes. */
+const verifiedUntrackedCache = new Map<string, UntrackedCheckEntry>();
+/** Dedupes concurrent kicks for the exact same (cwd, name) — same key shape as the cache above. Also the
+ *  TEST-ONLY await surface ({@link __awaitPendingSkillTrackChecks}): production never awaits an entry
+ *  here (that would defeat the whole point of firing it fire-and-forget off the hot path). */
+const inFlightTrackChecks = new Map<string, Promise<void>>();
+
+function untrackedCacheKey(cwd: string, name: string): string { return `${cwd}\u0000${name}`; }
+
+/** Bounded (10s), fire-and-forget, deduped: is `target` (the session's doctrine skills dir for `name`)
+ *  git-tracked right now, in the INNERMOST repo that actually contains it (`repoRoot`, from {@link
+ *  innermostGitRepoRoot} — never assumed to be `cwd`)? Never throws — every failure (no repo, git error,
+ *  timeout) is swallowed and logged once, and caches NOTHING, which is exactly the fail-closed "never
+ *  reclaim" default a later sync call reads. `name` must already be a validated skill name (every caller
+ *  here draws it from the manifest, which `sanitizeManifestEntries` already restricted to a safe kebab
+ *  slug) — built into a POSIX-style git pathspec (forward slashes, never a win32 `path.join` separator)
+ *  relative to `repoRoot`, never a hardcoded `.claude/skills` literal of this function's own. Reads the
+ *  wall clock via a bare `Date.now()` (this codebase's own convention for a test-overridable clock —
+ *  several other test files reassign `Date.now` directly, e.g. `temp-path-collision-guard.mjs` — rather
+ *  than threading an injectable clock parameter through every caller). */
+function kickUntrackedCheck(cwd: string, name: string, fingerprint: string, repoRoot: string, target: string): void {
+  const key = untrackedCacheKey(cwd, name);
+  if (inFlightTrackChecks.has(key)) return; // already checking this exact (cwd, name) — don't pile on another
+  const pathspec = path.relative(repoRoot, target).split(path.sep).join("/");
+  const run = (async () => {
+    try {
+      const git = canonicalGit(repoRoot, UNTRACKED_CHECK_TIMEOUT_MS);
+      const out = await withTimeout(git.raw(["ls-files", "--", pathspec]), UNTRACKED_CHECK_TIMEOUT_MS, "git ls-files (skill dead-claim reclaim check)");
+      if (out.trim() === "") {
+        if (verifiedUntrackedCache.size >= UNTRACKED_CACHE_MAX_ENTRIES) {
+          const oldestKey = verifiedUntrackedCache.keys().next().value;
+          if (oldestKey !== undefined) verifiedUntrackedCache.delete(oldestKey); // defensive eviction; practically never hit
+        }
+        verifiedUntrackedCache.set(key, { fingerprint, expiresAt: Date.now() + UNTRACKED_CACHE_TTL_MS });
+      }
+      // non-empty output => at least one file under it is git-tracked — cache nothing, same as an error below
+    } catch (e) {
+      console.log(`[skills] dead-claim reclaim: git-tracked check failed for '${name}' at ${cwd} (treating as tracked — not reclaiming): ${(e as Error)?.message ?? e}`);
+    } finally {
+      inFlightTrackChecks.delete(key);
+    }
+  })();
+  inFlightTrackChecks.set(key, run);
+}
+
+const PENDING_RECLAIM_KEY = "__pendingReclaim"; // reserved top-level key in FINGERPRINTS_FILE; never a real session id
+const PENDING_RECLAIM_MAX_PER_CWD = 200; // defensive cap — practically never hit (mirrors UNTRACKED_CACHE_MAX_ENTRIES's own framing)
+const PENDING_RECLAIM_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days — generous; bounds disk growth for an orphan nobody ever asks for again, not a safety mechanism
+
+/** One persisted, disk-durable record of a shared-cwd dead-claim orphan still awaiting reclaim — the
+ *  "remember the orphan" half of the split {@link verifiedUntrackedCache} documents. `deadFingerprints`
+ *  is every content fingerprint any dead claimant has ever recorded placing under this name (unioned
+ *  across discoveries); `firstSeenAt` is when this name was FIRST recorded pending (never refreshed by a
+ *  later call that merely re-confirms it — see the decision record's age-bound rationale). Lives until it
+ *  RESOLVES: reclaimed, edited (content no longer matches any recorded fingerprint), claimed by a live
+ *  session, or the dir is gone — see `injectSkills`'s shared-cwd block for where each resolution fires.
+ *
+ *  @decision f4e93dbf round 2 — persisted here, in the EXISTING fingerprints sidecar, under this one
+ *  reserved key; never a third sidecar file, and never merged into a real session's own fingerprint map. */
+interface PendingReclaimRecord { readonly deadFingerprints: readonly string[]; readonly firstSeenAt: number; }
+type PendingReclaimMap = Record<string, PendingReclaimRecord>; // skill name -> record
+
+/** TEST-ONLY. Awaits every currently in-flight {@link kickUntrackedCheck} call. Production code never
+ *  calls this — every real caller fires the check and walks away; awaiting it here would reintroduce the
+ *  exact spawn-hot-path block this whole mechanism exists to avoid. Named with the double-underscore
+ *  prefix + a full descriptive name specifically so it reads as what it is at every call site, including
+ *  an accidental one. */
+export async function __awaitPendingSkillTrackChecks(): Promise<void> {
+  await Promise.all([...inFlightTrackChecks.values()]);
 }
 
 /** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
@@ -206,22 +316,66 @@ function readManifest(manifestPath: string, sessionId: string): Manifest {
   return {};
 }
 
-/** Read the {@link FINGERPRINTS_FILE} sidecar: `{ sid: { skillName: fingerprint } }`. Brand new as of
- *  card 31f997e7 round 3 — there is no legacy format to migrate, so ABSENT (an old worktree, or any
- *  worktree this version hasn't written to yet) and CORRUPT both simply read as `{}` (no fingerprint for
- *  anything), the same fail-toward-keeping outcome the dead-claim cleanup already gives a missing entry.
- *  Every sid's inner map is validated the same way: a skill-name key must pass `isSafeManifestEntry`
- *  (mirrors the main manifest's own entry validation) and its value `sanitizeFingerprint`. */
-function readFingerprintsFile(fingerprintsPath: string): FingerprintMap {
+/** One cwd's full parse of the {@link FINGERPRINTS_FILE} sidecar: every real session's own fingerprint
+ *  record, PLUS the reserved {@link PENDING_RECLAIM_KEY} entry (never a real session id) parsed
+ *  separately as a {@link PendingReclaimMap}. */
+interface FingerprintsFileData { bySession: FingerprintMap; pending: PendingReclaimMap; }
+/** A FRESH object every call — never a shared constant. `injectSkills` mutates the returned `bySession`
+ *  in place (`delete fingerprints[sid]`, `fingerprints[sessionId] = …`); a shared singleton here would
+ *  let one call's write leak into every OTHER call whose fingerprints file happens to be missing/corrupt
+ *  (a real regression this fixed — card f4e93dbf round 2, caught by `skills-capability-bound.mjs` case
+ *  17 only after several EARLIER worktree cases had already written through the same stale reference). */
+function emptyFingerprintsFile(): FingerprintsFileData { return { bySession: {}, pending: {} }; }
+
+/** Validate+bound one untrusted pending-reclaim record read from the {@link PENDING_RECLAIM_KEY} entry.
+ *  `deadFingerprints` must be a non-empty array of valid fingerprints (bounded the same way a session's
+ *  own fingerprint record is — see `sanitizeFingerprint`), `firstSeenAt` a finite, non-negative number.
+ *  Anything else reads as "no usable record" (caller drops the name entirely) — the same fail-toward-
+ *  forgetting-the-bookkeeping, never fail-toward-trusting-garbage, posture the rest of this file's
+ *  manifest/fingerprint parsing already uses. */
+function sanitizePendingReclaimRecord(raw: unknown): PendingReclaimRecord | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as { deadFingerprints?: unknown; firstSeenAt?: unknown };
+  if (!Array.isArray(r.deadFingerprints)) return null;
+  const deadFingerprints = r.deadFingerprints.map(sanitizeFingerprint).filter((fp): fp is string => fp !== null);
+  if (deadFingerprints.length === 0) return null;
+  if (typeof r.firstSeenAt !== "number" || !Number.isFinite(r.firstSeenAt) || r.firstSeenAt < 0) return null;
+  return { deadFingerprints, firstSeenAt: r.firstSeenAt };
+}
+
+function sanitizePendingReclaimMap(raw: unknown): PendingReclaimMap {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: PendingReclaimMap = {};
+  for (const [name, rec] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isSafeManifestEntry(name)) continue;
+    const sanitized = sanitizePendingReclaimRecord(rec);
+    if (sanitized) out[name] = sanitized;
+  }
+  return out;
+}
+
+/** Read the {@link FINGERPRINTS_FILE} sidecar: `{ sid: { skillName: fingerprint }, [PENDING_RECLAIM_KEY]:
+ *  PendingReclaimMap }`. Brand new as of card 31f997e7 round 3 — there is no legacy format to migrate, so
+ *  ABSENT (an old worktree, or any worktree this version hasn't written to yet) and CORRUPT both simply
+ *  read as the empty {@link FingerprintsFileData} (no fingerprint, no pending record, for anything), the
+ *  same fail-toward-keeping outcome the dead-claim cleanup already gives a missing entry. Every sid's
+ *  inner map is validated the same way: a skill-name key must pass `isSafeManifestEntry` (mirrors the
+ *  main manifest's own entry validation) and its value `sanitizeFingerprint`.
+ *
+ *  @decision f4e93dbf — {@link PENDING_RECLAIM_KEY} is never iterated as a session id here; a real
+ *  session id is minted by the orchestration DB and never equals this reserved literal. */
+function readFingerprintsFile(fingerprintsPath: string): FingerprintsFileData {
   let text: string;
   try { text = fs.readFileSync(fingerprintsPath, "utf8"); }
-  catch { return {}; }
+  catch { return emptyFingerprintsFile(); }
   let raw: unknown;
   try { raw = JSON.parse(text); }
-  catch (e) { console.log(`[skills] ignoring corrupt fingerprints file at ${fingerprintsPath}: ${(e as Error).message}`); return {}; }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: FingerprintMap = {};
+  catch (e) { console.log(`[skills] ignoring corrupt fingerprints file at ${fingerprintsPath}: ${(e as Error).message}`); return emptyFingerprintsFile(); }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return emptyFingerprintsFile();
+  const bySession: FingerprintMap = {};
+  let pending: PendingReclaimMap = {};
   for (const [sid, m] of Object.entries(raw as Record<string, unknown>)) {
+    if (sid === PENDING_RECLAIM_KEY) { pending = sanitizePendingReclaimMap(m); continue; }
     if (!m || typeof m !== "object" || Array.isArray(m)) continue;
     const inner: Record<string, string> = {};
     for (const [name, fp] of Object.entries(m as Record<string, unknown>)) {
@@ -229,18 +383,35 @@ function readFingerprintsFile(fingerprintsPath: string): FingerprintMap {
       const sanitized = sanitizeFingerprint(fp);
       if (sanitized) inner[name] = sanitized;
     }
-    out[sid] = inner;
+    bySession[sid] = inner;
   }
+  return { bySession, pending };
+}
+
+/** Serialize `bySession` + `pending` back to the {@link FINGERPRINTS_FILE} on-disk shape — the exact
+ *  inverse of `readFingerprintsFile`'s parse. `pending` is omitted entirely when empty, so an ordinary
+ *  cwd with nothing ever orphaned never carries the reserved key at all. */
+function serializeFingerprintsFile(bySession: FingerprintMap, pending: PendingReclaimMap): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...bySession };
+  if (Object.keys(pending).length > 0) out[PENDING_RECLAIM_KEY] = pending;
   return out;
 }
 
 /**
- * Atomically deliver one store skill dir into the session's .claude/skills, mirroring the tmp+rename
- * pattern store.ts uses for SKILL.md — but for a DIRECTORY: copy into a sibling tmp dir first, then swap
- * it into place. Two correctness wins over a bare cpSync into `dest`:
- *  - ATOMIC: `dest` is only ever the FULLY-copied tmp renamed in. A copy interrupted partway never leaves a
- *    half-written skill at `dest`, and the existing `dest` (the session's live doctrine) is removed ONLY
- *    after the new copy is ready — so a failed copy leaves the old skill intact instead of nuking it.
+ * Deliver one store skill dir into the session's .claude/skills, mirroring the tmp+rename pattern
+ * store.ts uses for SKILL.md — but for a DIRECTORY: copy into a sibling tmp dir first, build the new
+ * copy fully there, THEN remove the old `dest` and rename the tmp into its place. NOT a single atomic
+ * replace-over-an-existing-dir (`rename()` can't do that for a non-empty directory on this codebase's
+ * target platforms) — it is rm-then-rename, so there IS a brief window, between the `rmSync` and the
+ * `renameSync`, where `dest` does not exist at all.
+ *
+ * @decision f4e93dbf — never describe this as an atomic replace with no delete step; it rm's `dest` then
+ * renames, with a real (if brief) window where `dest` is simply missing.
+ *
+ * Two correctness wins this sequencing still gives over a bare cpSync into `dest`:
+ *  - A copy interrupted partway never leaves a half-written skill at `dest`: the new copy is built
+ *    entirely off to the side first, and the existing `dest` is removed ONLY once that copy is ready — so
+ *    a FAILED copy leaves the old skill fully intact instead of nuking it.
  *  - RETRIED + SURFACED: transient FS errors (AV/lock/EBUSY on Windows) get a few attempts; a persistent
  *    failure is logged and reported back (false) so the caller can surface it — never silently swallowed,
  *    which would let a session run WITHOUT its pinned doctrine skill.
@@ -650,7 +821,8 @@ export function injectSkills(
   const manifestPath = path.join(targetDir, MANIFEST);
   const manifest = readManifest(manifestPath, sessionId);
   const fingerprintsPath = path.join(targetDir, FINGERPRINTS_FILE);
-  const fingerprints = readFingerprintsFile(fingerprintsPath);
+  const fingerprintsFile = readFingerprintsFile(fingerprintsPath);
+  const fingerprints = fingerprintsFile.bySession; // mutated in place below (dead-sid prune, own entry) — same discipline as pre-round-2
   // Prune a manifest key for any OTHER session the caller-injected predicate says is not CURRENTLY
   // live/starting (card 9d73e537; see this function's own doc comment for why "live", not "resumable").
   // Never asked about our own key — this call IS that session, live, right now. A throw for one id is
@@ -718,6 +890,15 @@ export function injectSkills(
   // @decision 31f997e7 — never a shared cwd (card f4e93dbf's scope); never a dir outside a dead session's
   // own recorded claim; never a dir whose current content fingerprint matches none of that claim's
   // recorded fingerprints.
+  //
+  // @decision f4e93dbf — widens the above to a shared (non-worktree) cwd too, but NEVER by deleting; see
+  // the decision record for the full two-pass mechanism and residuals.
+  const reclaimableNow = new Set<string>();
+  // The persisted "remember the orphan" half of round 2 (never populated for a worktree cwd — see the
+  // "Do not" list: that path stays a single-call unconditional delete, exactly as 31f997e7 shipped it).
+  // Keyed by skill name; `deadFingerprints` as a live `Set` while this call computes, converted back to
+  // a plain array only at the write-back below.
+  const pendingWorking = new Map<string, { deadFingerprints: Set<string>; firstSeenAt: number }>();
   if (isWorktreeCwd(cwd)) {
     for (const stale of deadClaimed) {
       if (otherClaimed.has(stale)) continue; // a still-live session (e.g. a sibling fork) legitimately needs it
@@ -728,6 +909,84 @@ export function injectSkills(
       if (!currentFp || !recordedFps.has(currentFp)) { console.log(`[skills] keeping dead-session claim '${stale}': on-disk content doesn't match any recorded Loom placement (edited, or files added) — not deleting`); continue; }
       if (path.dirname(target) !== targetDir) { console.log(`[skills] refusing to remove out-of-scope dead-session manifest entry: ${stale}`); continue; }
       try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  } else {
+    // Seed this call's working set from whatever the sidecar already had pending, then merge in anything
+    // THIS call's own prune just discovered (`deadClaimed`/`deadFingerprints` — typically gone again by
+    // the time a later call runs, which is exactly why the persisted record below exists at all).
+    for (const [name, rec] of Object.entries(fingerprintsFile.pending)) {
+      pendingWorking.set(name, { deadFingerprints: new Set(rec.deadFingerprints), firstSeenAt: rec.firstSeenAt });
+    }
+    for (const stale of deadClaimed) {
+      const recordedFps = deadFingerprints.get(stale);
+      if (!recordedFps || recordedFps.size === 0) {
+        if (!pendingWorking.has(stale)) console.log(`[skills] keeping dead-session claim '${stale}' (shared cwd): no recorded content fingerprint (a legacy claim) — cannot verify it's still Loom's own, so not reclaiming`);
+        continue; // never trusted, with or without a pending record — same posture as before round 2
+      }
+      const existing = pendingWorking.get(stale);
+      if (existing) for (const fp of recordedFps) existing.deadFingerprints.add(fp);
+      else pendingWorking.set(stale, { deadFingerprints: new Set(recordedFps), firstSeenAt: Date.now() });
+    }
+
+    // Resolve (or carry forward) every candidate this call knows about — freshly discovered above, or
+    // already pending from a prior call. `nowMs` is read ONCE per call (not per candidate) via a bare
+    // `Date.now()` — a test overrides the global the same way `temp-path-collision-guard.mjs` does.
+    const nowMs = Date.now();
+    for (const [name, rec] of [...pendingWorking]) {
+      if (otherClaimed.has(name)) { pendingWorking.delete(name); continue; } // resolved: a live session claims it
+      const target = path.join(targetDir, name);
+      if (path.dirname(target) !== targetDir) { console.log(`[skills] refusing to reclaim out-of-scope dead-session manifest entry (shared cwd): ${name}`); pendingWorking.delete(name); continue; }
+      if (!fs.existsSync(target)) { pendingWorking.delete(name); continue; } // resolved: the dir is gone
+      const currentFp = fingerprintSkillDir(target);
+      if (!currentFp || !rec.deadFingerprints.has(currentFp)) {
+        console.log(`[skills] keeping dead-session claim '${name}' (shared cwd): on-disk content doesn't match any recorded Loom placement (edited, or files added) — not reclaiming`);
+        pendingWorking.delete(name); // resolved: edited — drop the record and never touch it again
+        continue;
+      }
+      if (nowMs - rec.firstSeenAt > PENDING_RECLAIM_MAX_AGE_MS) {
+        console.log(`[skills] giving up on dead-session claim '${name}' (shared cwd): still unresolved after the ${PENDING_RECLAIM_MAX_AGE_MS}ms age bound — dropping the pending-reclaim record, never acting on it again`);
+        pendingWorking.delete(name);
+        continue;
+      }
+
+      // @decision f4e93dbf — consume/reclaim ONLY when `want` includes `name`; a session that doesn't
+      // want this name leaves the cache entry / pending record untouched for a later caller that does.
+      const innermostRoot = innermostGitRepoRoot(target);
+      if (!innermostRoot) {
+        // No repo anywhere up-tree from the skill dir itself ⇒ no tracked-file risk to check at all.
+        if (want.includes(name)) { reclaimableNow.add(name); pendingWorking.delete(name); }
+        continue;
+      }
+      const key = untrackedCacheKey(cwd, name);
+      const cacheEntry = verifiedUntrackedCache.get(key);
+      if (cacheEntry) {
+        if (cacheEntry.expiresAt <= nowMs || cacheEntry.fingerprint !== currentFp) {
+          verifiedUntrackedCache.delete(key); // stale or invalidated by an edit since it was kicked — a wrong fact is never worth keeping, for anyone
+        } else if (want.includes(name)) {
+          verifiedUntrackedCache.delete(key); // consume exactly once
+          reclaimableNow.add(name);
+          pendingWorking.delete(name); // resolved
+          continue;
+        } else {
+          continue; // valid + unconsumed — leave both the cache entry and the pending record for a later caller
+        }
+      }
+      // No fresh verified-untracked fact available (never existed, just expired, or just invalidated
+      // above) — kick a check, regardless of `want`, so a future caller's cache is warm by the time it
+      // asks. `kickUntrackedCheck` dedupes its own in-flight calls; never touches `target` this call.
+      kickUntrackedCheck(cwd, name, currentFp, innermostRoot, target);
+    }
+
+    // Bound the per-cwd bookkeeping: drop the OLDEST entries beyond the cap, deterministically
+    // (firstSeenAt ascending, name tiebreak) — defensive, practically never hit in a real project.
+    if (pendingWorking.size > PENDING_RECLAIM_MAX_PER_CWD) {
+      const overflow = [...pendingWorking.keys()]
+        .sort((a, b) => (pendingWorking.get(a)!.firstSeenAt - pendingWorking.get(b)!.firstSeenAt) || a.localeCompare(b))
+        .slice(0, pendingWorking.size - PENDING_RECLAIM_MAX_PER_CWD);
+      for (const name of overflow) {
+        console.log(`[skills] dropping pending-reclaim record for '${name}' (shared cwd): over the per-cwd cap of ${PENDING_RECLAIM_MAX_PER_CWD} — never acting on it`);
+        pendingWorking.delete(name);
+      }
     }
   }
 
@@ -753,8 +1012,10 @@ export function injectSkills(
     const exists = fs.existsSync(dest);
     // A pre-existing dir that NO loom session claims (not mine, not another session's) is the repo's OWN
     // project-local skill — never clobber it. A dir another session injected IS loom's: re-copying the
-    // same store content is idempotent and harmless.
-    if (exists && !myPrev.includes(name) && !otherClaimed.has(name)) continue;
+    // same store content is idempotent and harmless. `reclaimableNow` (card f4e93dbf): a verified
+    // dead-claim orphan, already confirmed untracked — treat it as claimed too, so this same copy path
+    // performs its own atomic replace over it (never a separate delete first).
+    if (exists && !myPrev.includes(name) && !otherClaimed.has(name) && !reclaimableNow.has(name)) continue;
     const src = path.join(SKILLS_DIR, name);
     // COPY (atomic tmp+swap), never junction: a junction here lets worktree removal's recursive rm follow
     // it into the store and delete the store's SKILL.md (see header). An independent copy is self-contained.
@@ -812,9 +1073,15 @@ export function injectSkills(
   // CR round 3: the fingerprints sidecar (separate file, separate atomic write — see FINGERPRINTS_FILE's
   // own doc for why it's never merged into MANIFEST's shape). Same tmp+rename discipline.
   fingerprints[sessionId] = placedFingerprints; // full replace, same as `placed` above
+  // @decision f4e93dbf — `pendingWorking` (resolved entries removed, unresolved/carried-forward ones
+  // kept, as computed above) is what gets persisted here; a worktree cwd never populated it, so it
+  // serializes to nothing and the reserved key is omitted entirely, same as before this card.
+  const pendingOut: PendingReclaimMap = {};
+  for (const [name, rec] of pendingWorking) pendingOut[name] = { deadFingerprints: [...rec.deadFingerprints], firstSeenAt: rec.firstSeenAt };
+  const fingerprintsOut = serializeFingerprintsFile(fingerprints, pendingOut);
   const fingerprintsTmp = `${fingerprintsPath}.tmp`;
   try {
-    fs.writeFileSync(fingerprintsTmp, JSON.stringify(fingerprints));
+    fs.writeFileSync(fingerprintsTmp, JSON.stringify(fingerprintsOut));
     fs.renameSync(fingerprintsTmp, fingerprintsPath);
   } catch (e) {
     console.log(`[skills] failed to write fingerprints file ${fingerprintsPath}: ${(e as Error).message}`);
