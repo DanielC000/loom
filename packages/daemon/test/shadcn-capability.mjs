@@ -201,20 +201,33 @@ const { stdout } = await execFileAsync(process.execPath, [
 ], { env: plantedParentEnv });
 const echoed = JSON.parse(stdout);
 
+// Card 3def5ccf: `plantedParentEnv` spreads the REAL ambient `process.env` (unlike the sibling
+// echo-env tests, which build an explicit, hardcoded-key env object), so on a Windows host where the
+// parent process's own env block carries the Windows-normal key casing "Path" (e.g. a daemon launched
+// from PowerShell), buildIsolatedEnv's case-insensitive-but-casing-preserving match hands the fixture
+// back a "Path" key, not "PATH" — a case-SENSITIVE JS property read then misses it. Read every env-name
+// assertion below case-insensitively so this test is correct under either key casing.
+const envKeyCI = (env, name) => {
+  const upper = name.toUpperCase();
+  const key = Object.keys(env).find((k) => k.toUpperCase() === upper);
+  return key === undefined ? undefined : env[key];
+};
+
 check("(d) the fixture actually ran under the launcher (received SOME env)", echoed && typeof echoed.env === "object");
 // CR NIT: the check above passes trivially on an empty {} — PATH is in BASE_ALLOWLIST (every mount gets
 // it), so asserting it's actually present and non-empty proves the fixture received a REAL, non-empty
 // isolated env rather than an empty object that happened to satisfy the typeof check.
 check("(d) PATH is PRESENT and non-empty (proves a real, non-empty isolated env reached the fixture, not just {})",
-  typeof echoed.env.PATH === "string" && echoed.env.PATH.length > 0);
-check("(d) HTTP_PROXY is ABSENT from shadcn's child env", echoed.env.HTTP_PROXY === undefined);
-check("(d) HTTPS_PROXY is ABSENT from shadcn's child env", echoed.env.HTTPS_PROXY === undefined);
+  typeof envKeyCI(echoed.env, "PATH") === "string" && envKeyCI(echoed.env, "PATH").length > 0);
+check("(d) HTTP_PROXY is ABSENT from shadcn's child env", envKeyCI(echoed.env, "HTTP_PROXY") === undefined);
+check("(d) HTTPS_PROXY is ABSENT from shadcn's child env", envKeyCI(echoed.env, "HTTPS_PROXY") === undefined);
 // Either case form may carry the planted value through to the launcher's own inherited env (Windows env
 // vars are case-insensitive — which literal case name wins is an OS implementation detail, not something
-// to assume) — check both case keys the output could possibly carry it under.
-check("(d) ALL_PROXY/all_proxy (either case) is ABSENT from shadcn's child env", echoed.env.ALL_PROXY === undefined && echoed.env.all_proxy === undefined);
-check("(d) a userinfo-shaped npm_config_registry is ABSENT from shadcn's child env", echoed.env.npm_config_registry === undefined);
-check("(d) an un-allowlisted generic var is ABSENT from shadcn's child env", echoed.env.SHADCN_PROBE_GENERIC_VAR === undefined);
+// to assume) — the case-insensitive lookup above already covers both case keys the output could possibly
+// carry it under.
+check("(d) ALL_PROXY/all_proxy (either case) is ABSENT from shadcn's child env", envKeyCI(echoed.env, "ALL_PROXY") === undefined);
+check("(d) a userinfo-shaped npm_config_registry is ABSENT from shadcn's child env", envKeyCI(echoed.env, "npm_config_registry") === undefined);
+check("(d) an un-allowlisted generic var is ABSENT from shadcn's child env", envKeyCI(echoed.env, "SHADCN_PROBE_GENERIC_VAR") === undefined);
 check("(d) no sentinel VALUE leaked under any OTHER key name either (defense in depth on the name-based checks above)",
   !JSON.stringify(echoed.env).includes("SENTINEL"));
 
