@@ -11362,6 +11362,8 @@ export class SessionService {
    * @decision 9f279c7b — ContextWatcher's emergency-recycle interrupt (Trigger A) reuses deliverRedirect
    *  but must SKIP the queue flush (a manager's queue holds OTHER parties' inbound content) and must
    *  refuse while the target repo sits inside an active merge-danger window.
+   * @decision 3dee1d51 — `headInsert:true`, never omitted: without it this enqueues at the FIFO tail,
+   *  so already-queued worker reports drain as their own turns BEFORE the emergency text ever does.
    */
   redirectManagerForEmergencyRecycle(sessionId: string, text: string): EmergencyRedirectOutcome {
     const target = this.db.getSession(sessionId);
@@ -11375,6 +11377,7 @@ export class SessionService {
     }
     const result = this.deliverRedirect(target, text, {
       supersedeQueue: false,
+      headInsert: true,
       frame: (t) => `[${CONTEXT_EMERGENCY_REDIRECT_TAG}]\n${t}`,
       enqueueSender: "system",
       eventManagerId: sessionId,

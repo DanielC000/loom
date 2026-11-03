@@ -21,6 +21,11 @@
 //      turn, exactly as docs/decisions/dacc6d9e-*.md's round-3 correction explains (drainPending's
 //      same-sender extension loop is gated on `senderKey !== null`, so a null-sender head can never
 //      extend into a run regardless of kind).
+//   F. card 3dee1d51 — a give-up-held entry ALREADY sitting at the queue head (ineligible to drain —
+//      `isGiveUpHeld`) is NOT dropped, and NOT reordered relative to what's queued behind it, when a
+//      headInsert:true arrival lands: the new entry becomes the new front, the held entry and everything
+//      after it are merely shifted back by one, in their original relative order. Nothing queued is ever
+//      LOST by a head-insert — it only ever changes who's first.
 //
 // Sibling to pty-agent-sender-coalesce.mjs (the same-sender reorder this is independent of) and
 // pty-route-coalesce.mjs (the route-keyed coalescing this does not interact with — headInsert entries in
@@ -147,12 +152,28 @@ try {
       turn2.includes("MANAGER_DIRECTION_ONE") && turn2.includes("MANAGER_DIRECTION_TWO"));
     check("E: the queue is now fully drained", host.getPending(sid).length === 0);
   }
+
+  // ===== F. A give-up-held entry already at the head is NOT dropped or reordered by a headInsert arrival =====
+  {
+    const sid = newSession("F");
+    host.enqueueStdin(sid, "PRIMER");
+    // A held entry (held until far in the future — never expires within this test): positional arg 11 is
+    // `giveUpHeldUntil` on this overload. `isGiveUpHeld` keeps it ineligible to drain, but it still
+    // occupies a real slot in `live.pending`.
+    host.enqueueStdin(sid, "HELD_ENTRY", "system", undefined, undefined, "warning", undefined, undefined, undefined, "mgr-f", Date.now() + 60_000);
+    host.enqueueStdin(sid, "ordinary-f", "system", undefined, undefined, "warning", undefined, undefined, undefined, "mgr-f2");
+    check("F: setup — the held entry sits at the head, the ordinary entry behind it", eq(host.getPending(sid), ["HELD_ENTRY", "ordinary-f"]));
+
+    host.enqueueStdin(sid, "EMERGENCY_F", "system", undefined, undefined, "agent", undefined, undefined, false, "system", { headInsert: true });
+    check("F: the headInsert entry becomes the new front — nothing queued is dropped, and the held/ordinary entries keep their original relative order, just shifted back by one",
+      eq(host.getPending(sid), ["EMERGENCY_F", "HELD_ENTRY", "ordinary-f"]));
+  }
 } finally {
-  for (const sid of ["sess-hi-A", "sess-hi-B", "sess-hi-C", "sess-hi-D", "sess-hi-E"]) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
+  for (const sid of ["sess-hi-A", "sess-hi-B", "sess-hi-C", "sess-hi-D", "sess-hi-E", "sess-hi-F"]) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — enqueueStdin's headInsert option places a HELD arrival at the FRONT of live.pending (ahead of any pre-existing entry, including a prior headInsert one), is a one-shot per-call option that never retroactively reorders anything, and a plain arrival stays FIFO byte-identical to before this option existed."
+  ? "\n✅ ALL PASS — enqueueStdin's headInsert option places a HELD arrival at the FRONT of live.pending (ahead of any pre-existing entry, including a prior headInsert one or a give-up-held one), is a one-shot per-call option that never retroactively reorders anything or drops anything queued, and a plain arrival stays FIFO byte-identical to before this option existed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
