@@ -704,7 +704,12 @@ what you checked. Found none? Treat it as live.
      exactly like a solo merge; that is the expected result, not an anomaly to go hunting a bug for.
      `"trailer-only"` remains the right answer for history that landed before that stamping existed —
      but on a **fresh** batch it now means the stamp itself didn't land (it is best-effort, and its
-     failure is logged), so treat it as worth a look rather than a shrug. And measure savings in gate
+     failure is logged), so treat it as worth a look rather than a shrug. **All of that assumes your
+     platform is writing those machine markers at all** — if the project has turned them off (some
+     platforms expose that as a human-only setting, to keep commit messages clean), then the ship state
+     a card reports is derived from something else or not at all: expect an unknown/empty verification
+     tier, and possibly an unknown merged state, on work that genuinely shipped. Check your project's
+     own docs for whether that is on before reading an empty tier as a failure. And measure savings in gate
      **wall-clock**, never gate-run count — a "reduced" gate is a fraction the length of a full one, so
      counting runs can show a saving exactly where batching cost more time than it saved.
    - **A batch reporting `settled` does NOT mean every fallback merge has finished.** `settled` means the

@@ -93,7 +93,9 @@ is corrected to say so plainly rather than promise a soft no-op this fix cannot 
   own test-authoring history (scenario (5), `commit-trailers-batch-merge.mjs`), caught before merge by
   comparing the printed `got:` value against the assertion rather than trusting a clean exit code alone.
 
-Related: `docs/decisions/5958c149-read-the-landed-tip-pin-from-the-producer-ledger-first.md`,
+Related: `docs/decisions/d9332365-optional-merge-commit-trailers.md` (the toggle this fix's motivating
+symptom came from — read its "Do not" for which already-landed lookups this fallback still does NOT
+cover), `docs/decisions/5958c149-read-the-landed-tip-pin-from-the-producer-ledger-first.md`,
 `docs/decisions/2a6a292a-mainline-watermark-branch-change-only-on-a-trusted-signal.md` (rounds 19-21),
 `docs/decisions/0eaaa693-fork-point-ancestry-check.md`.
 
