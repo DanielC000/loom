@@ -10885,24 +10885,29 @@ export class PtyHost {
     // !live.busy branch above would make an immediate-delivery write straight into the dead turn.
     // Round 2: EXEMPT the human composer (senderId === HUMAN_COMPOSER_SENDER_ID, POST
     // /api/sessions/:id/input) — a human acting IS the recovery (e.g. /compact), and its submit's own
-    // setBusy(true) rising edge is what clears the mark (line ~13817) for everything queued behind it.
-    // An agent/Loom entry's senderId is never this sentinel, so the hold stays in force for them.
-    const contextExhaustedHold = live.contextExhausted && senderId !== HUMAN_COMPOSER_SENDER_ID;
+    // setBusy(true) rising edge is what clears the mark (see setBusy's own rising-edge branch) for
+    // everything queued behind it. An agent/Loom entry's senderId is never this sentinel, so the hold
+    // stays in force for them.
+    //
+    // @decision 5f825506 — `exhaustionHoldAppliesTo` is the shared predicate `drainPending`'s own bail
+    // now also consults, so the two gates can't drift apart.
+    const contextExhaustedHold = live.contextExhausted && this.exhaustionHoldAppliesTo(senderId);
     const idleEligible = live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !contextExhaustedHold && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live) && !this.isBlockedOnUnresolvedBootDialog(live) && !live.startupCycleInFlight;
     // @decision b5ab3aa4 — do not drop the `live.pending.length === 0` conjunct: without it, a new arrival
     // can jump an older entry that just became eligible in this same call, breaking FIFO delivery order.
     //
-    // Card 66ff7321 (CR round 3, Major 1): while `live.contextExhausted` holds, EVERY entry already in
-    // `live.pending` is itself undeliverable — `drainPending`'s own unconditional early return on
-    // `live.contextExhausted` (above this call entirely) means nothing ahead of the composer entry could
-    // ever drain anyway, so there is no real FIFO order left to protect by making the composer wait
-    // behind it. Without this, the round-2 exemption above only ever fired on an EMPTY queue: the
-    // realistic case (a held worker report, an idle nudge, queued manager direction already sitting in
-    // `live.pending` when exhaustion hit) still queued the composer's own `/compact` FIFO-behind them,
-    // and since nothing can drain a held queue while `contextExhausted` is set, the composer message —
-    // the one write that can actually clear the mark — never ran either. Scoped tightly to
-    // `live.contextExhausted`: outside that state the conjunct above still applies byte-identically.
-    const composerRecoveryBypassesQueue = live.contextExhausted && senderId === HUMAN_COMPOSER_SENDER_ID;
+    // Card 66ff7321 (CR round 3, Major 1): while `live.contextExhausted` holds, EVERY OTHER entry
+    // already in `live.pending` is itself undeliverable — `drainPending`'s own exhaustion bail still
+    // applies to any entry that isn't itself the composer's own (its shared predicate is
+    // `exhaustionHoldAppliesTo`, just below) — so there is no real FIFO order left to protect by
+    // making the composer wait behind them. Without this, the round-2 exemption above only ever fired
+    // on an EMPTY queue: the realistic case (a held worker report, an idle nudge, queued manager
+    // direction already sitting in `live.pending` when exhaustion hit) still queued the composer's own
+    // `/compact` FIFO-behind them, and nothing could then ever drain that queue while `contextExhausted`
+    // stayed set, so the composer message — the one write that can actually clear the mark — never ran
+    // either. Scoped tightly to `live.contextExhausted`: outside that state the conjunct above still
+    // applies byte-identically.
+    const composerRecoveryBypassesQueue = live.contextExhausted && !this.exhaustionHoldAppliesTo(senderId);
     if (idleEligible && (live.pending.length === 0 || composerRecoveryBypassesQueue)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
@@ -11891,11 +11896,7 @@ export class PtyHost {
    */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
-    // Card 66ff7321 — `live.contextExhausted`: `busy` reads false the instant exhaustion is marked
-    // (markContextExhausted's own setBusy(false)), so without this the ordinary `live.busy` check
-    // alone would drain a queued message straight into the dead turn. Hold it for the recycle
-    // successor (or a human) instead — see Session.contextExhaustedAt's own doc for the clear path.
-    if (!live?.alive || !live.ready || live.busy || live.contextExhausted || live.pending.length === 0) return;
+    if (!live?.alive || !live.ready || live.busy || live.pending.length === 0) return;
     // A Stop is in flight → do NOT submit a queued turn. The interrupt lowers busy and fires a Stop
     // hook; draining here would re-arm busy and defeat the stop (the queued turn "fights" the stop —
     // each Ctrl-C just interrupts the freshly-drained turn, so it takes N escalating clicks to land).
@@ -11932,8 +11933,19 @@ export class PtyHost {
     const startIdx = live.pending.findIndex((m) => !this.isGiveUpHeld(m));
     if (startIdx === -1) return; // every pending entry is held — nothing eligible to drain yet
     const head = live.pending[startIdx]!;
+    // Card 66ff7321 — `live.contextExhausted`: `busy` reads false the instant exhaustion is marked, so
+    // without this the ordinary `!live.busy` check above would drain a queued message straight into
+    // the dead turn.
+    //
+    // @decision 5f825506 (round 3) — ALWAYS take this single-composer-entry path while exhausted,
+    // head or not; never bail on the HEAD's own senderId alone. Falls through to the SHARED drain tail
+    // below, never a parallel copy of it. See the decision record's "Round 3" section for why.
     let drained: QueuedMessage[];
-    if (!this.coalesceAgentMessages && head.kind === "agent") {
+    if (live.contextExhausted) {
+      const composerIdx = live.pending.findIndex((m) => !this.isGiveUpHeld(m) && !this.exhaustionHoldAppliesTo(m.senderId));
+      if (composerIdx === -1) return; // no eligible composer entry anywhere in the queue — nothing can drain
+      drained = live.pending.splice(composerIdx, 1);
+    } else if (!this.coalesceAgentMessages && head.kind === "agent") {
       // @decision eac3464d — same-sender coalescing deliberately drops the WITHIN-sender one-per-turn
       // guarantee for a same-sender run; the CROSS-sender guarantee it protects stays intact below.
       //
@@ -13383,6 +13395,14 @@ export class PtyHost {
   }
 
   /**
+   * @decision 5f825506 (item 2) — SHARED by both exhaustion-hold gates (`enqueueStdin`'s immediate
+   * path AND `drainPending`'s bail), the same sibling-pair shape as `isHumanSubmitHeld` just above.
+   */
+  private exhaustionHoldAppliesTo(senderId: string | null | undefined): boolean {
+    return senderId !== HUMAN_COMPOSER_SENDER_ID;
+  }
+
+  /**
    * @decision 441499ee — a false-negative give-up can requeue a duplicate of a turn whose original already
    * landed; `UserPromptSubmit` and `Stop`/`StopFailure` — the two hooks that prove a turn ran — both call
    * this the instant they fire, so a late confirmation can still catch and purge the requeued duplicate.
@@ -13935,6 +13955,14 @@ export class PtyHost {
     live.contextExhausted = true;
     this.setBusy(sessionId, false, "context-exhausted");
     return true;
+  }
+
+  /**
+   * @decision 5f825506 — the dedicated, EXCLUSIVE turn-start stamp (unlike `Session.lastActivity`,
+   * which several OTHER writers can bump mid-turn) backing the context-exhaustion stale-marker cutoff.
+   */
+  busySinceMs(sessionId: string): number | null {
+    return this.live.get(sessionId)?.busySince ?? null;
   }
 
   /** Read the current permission mode off the tail of a session's output ring (the repainted footer). */

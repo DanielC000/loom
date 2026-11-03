@@ -21,6 +21,9 @@ export interface ContextPty {
   /** Card 66ff7321 — mark a session context-exhausted (holds delivery, clears busy). See
    *  PtyHost.markContextExhausted's own doc. Returns false when there's no live claude session to mark. */
   markContextExhausted(sessionId: string): boolean;
+  /** @decision 5f825506 — REQUIRED (round 2) so a `PtyHost.busySinceMs` rename fails to compile
+   *  rather than silently failing open; still called as `pty.busySinceMs?.(id) ?? null`. */
+  busySinceMs(sessionId: string): number | null;
 }
 
 export interface ContextWatcherDeps {
@@ -303,7 +306,7 @@ export class ContextWatcher {
       // guard then always no-ops) — the event the companion's attention-push classifier and any
       // `worker_context_exhausted`-gated event trigger depend on. See docs/decisions/dacc6d9e-*.md round 3.
       if (this.isAlreadyContextExhausted(w)) continue;
-      if (this.isWorkerContextExhaustedUnmarked(w)) continue;
+      if (this.isWorkerContextExhaustedUnmarked(pty, w)) continue;
       if (!contextTelemetryFor(w.harness)) continue; // codex: no ctx telemetry, never measured
       if (w.ctxInputTokens == null) continue; // claude, pre-first-Stop/pre-first-mid-turn-sample
       const project = db.getProject(w.projectId);
@@ -384,7 +387,7 @@ export class ContextWatcher {
    */
   private checkContextExhaustion(db: Db, pty: ContextPty, m: Session, nowIso: string): boolean {
     if (!m.busy || m.harness === "codex" || !m.engineSessionId) return false;
-    const exhaustion = checkContextExhaustion(m.cwd, m.engineSessionId, m.harness);
+    const exhaustion = checkContextExhaustion(m.cwd, m.engineSessionId, m.harness, pty.busySinceMs?.(m.id) ?? null);
     if (!exhaustion) return false;
     const marked = pty.markContextExhausted(m.id);
     if (marked) {
@@ -418,9 +421,9 @@ export class ContextWatcher {
    * sole marker/notifier for a worker session). Mirrors `checkContextExhaustion`'s own guard + pure
    * tail-read, minus the `pty.markContextExhausted`/`db.setContextExhausted`/event-append side effects.
    */
-  private isWorkerContextExhaustedUnmarked(w: Session): boolean {
+  private isWorkerContextExhaustedUnmarked(pty: ContextPty, w: Session): boolean {
     if (!w.busy || w.harness === "codex" || !w.engineSessionId) return false;
-    return checkContextExhaustion(w.cwd, w.engineSessionId, w.harness) != null;
+    return checkContextExhaustion(w.cwd, w.engineSessionId, w.harness, pty.busySinceMs?.(w.id) ?? null) != null;
   }
 
   /**

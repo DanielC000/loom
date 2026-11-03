@@ -53,6 +53,11 @@ const REAL_EXHAUSTION_RECORD = {
   error: "invalid_request", isApiErrorMessage: true,
 };
 
+// card 5f825506 (item 1) — the SAME shape, but carrying an explicit `timestamp` so a test can place it
+// relative to a `busySinceMs` cutoff. REAL_EXHAUSTION_RECORD above stays untouched (no timestamp) so
+// every pre-existing test here keeps implicitly exercising the "no timestamp ⇒ never rejected" path.
+const exhaustionRecordAt = (isoTimestamp) => ({ ...REAL_EXHAUSTION_RECORD, timestamp: isoTimestamp });
+
 function makeEnv() {
   const dbFile = path.join(os.tmpdir(), `loom-busy-ctxexh-${RUN_SUFFIX}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
@@ -64,6 +69,9 @@ function makeEnv() {
   const alive = new Set();
   const enqueued = [];
   const markedExhausted = [];
+  // card 5f825506 (item 1) — per-session turn-start stamp, settable per test; defaults to `null` (no
+  // cutoff) for every test that doesn't set one, which must stay byte-identical to the pre-card behaviour.
+  const busySinceMsById = new Map();
   const pty = {
     isAlive: (id) => alive.has(id),
     enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; },
@@ -77,11 +85,12 @@ function makeEnv() {
       db.setBusy(id, false);
       return true;
     },
+    busySinceMs: (id) => busySinceMsById.get(id) ?? null,
   };
   const control = new OrchestrationControl();
   const watcher = new BusyWorkerWatcher({ db, pty, control });
   const transcriptFiles = [];
-  return { dbFile, db, projId, agentId, alive, enqueued, markedExhausted, control, watcher, transcriptFiles };
+  return { dbFile, db, projId, agentId, alive, enqueued, markedExhausted, busySinceMsById, control, watcher, transcriptFiles };
 }
 
 function seedManager(e, id) {
@@ -109,10 +118,10 @@ function seedWorker(e, id, parentId, { harness } = {}) {
   return { cwd, engineSessionId };
 }
 
-function writeExhaustionFixture(e, cwd, engineSessionId) {
+function writeExhaustionFixture(e, cwd, engineSessionId, record = REAL_EXHAUSTION_RECORD) {
   const file = engineTranscriptPath(cwd, engineSessionId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(REAL_EXHAUSTION_RECORD)}\n`);
+  fs.writeFileSync(file, `${JSON.stringify(record)}\n`);
   e.transcriptFiles.push(file);
   return file;
 }
@@ -278,7 +287,49 @@ const exhaustedEvents = (e, workerId) => e.db.listEventsForWorker(workerId).filt
   }
 }
 
+// ============================ (7) card 5f825506 item 1 — a STALE marker (timestamped BEFORE the
+// current turn's own busySinceMs cutoff) is NOT re-marked for a WORKER either — same race as the
+// manager/platform path, same fix. ============================
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-7");
+  const w = seedWorker(e, "wkr-stale-ignored", "mgr-7");
+  const staleTs = "2026-11-02T20:50:00.000Z"; // well before NOW (21:00:00) and before the cutoff below
+  writeExhaustionFixture(e, w.cwd, w.engineSessionId, exhaustionRecordAt(staleTs));
+  e.busySinceMsById.set("wkr-stale-ignored", Date.parse("2026-11-02T20:55:00.000Z"));
+
+  e.watcher.tick(NOW);
+
+  check("(7) a stale pre-turn marker is NOT re-marked exhausted for a worker", !e.markedExhausted.includes("wkr-stale-ignored"));
+  check("(7) the worker's busy stays true (never cleared)", e.db.getSession("wkr-stale-ignored").busy === true);
+  check("(7) contextExhaustedAt stays null", e.db.getSession("wkr-stale-ignored").contextExhaustedAt === null);
+  check("(7) no worker_context_exhausted event is filed", exhaustedEvents(e, "wkr-stale-ignored").length === 0);
+  check("(7) no notice is enqueued", e.enqueued.length === 0);
+
+  cleanup(e);
+}
+
+// ============================ (8) POSITIVE CONTROL for (7) — a marker timestamped INSIDE the current
+// turn (AFTER busySinceMs) is still detected and marked for a worker, proving (7) isn't vacuous. ====
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-8");
+  const w = seedWorker(e, "wkr-current-turn", "mgr-8");
+  const currentTs = "2026-11-02T20:59:00.000Z"; // after the cutoff below, inside the current turn
+  writeExhaustionFixture(e, w.cwd, w.engineSessionId, exhaustionRecordAt(currentTs));
+  e.busySinceMsById.set("wkr-current-turn", Date.parse("2026-11-02T20:55:00.000Z"));
+
+  e.watcher.tick(NOW);
+
+  check("(8) a genuinely current-turn marker IS still marked exhausted for a worker despite a cutoff being supplied",
+    e.markedExhausted.includes("wkr-current-turn"));
+  check("(8) the worker's busy is now false", e.db.getSession("wkr-current-turn").busy === false);
+  check("(8) exactly ONE worker_context_exhausted event is filed", exhaustedEvents(e, "wkr-current-turn").length === 1);
+
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — BusyWorkerWatcher detects the terminal context-exhaustion marker in a busy worker's transcript (tick-based, never a hook), marks it (busy cleared, contextExhaustedAt+lastError stamped), files ONE worker_context_exhausted event + ONE [loom:worker-context-exhausted] notice naming worker_recycle, never re-fires on a later tick, leaves an ordinary busy worker's detection untouched, skips a codex-harness worker even against a matching claude-path fixture, and still marks (without crashing on the missing notify target) a worker whose manager isn't live. Round 2: a PATH-shadowed slow fake git proves tick() returns well before the subprocess settles (never blocking the event loop) and that the notice still lands correctly once the async read completes."
+  ? "\n✅ ALL PASS — BusyWorkerWatcher detects the terminal context-exhaustion marker in a busy worker's transcript (tick-based, never a hook), marks it (busy cleared, contextExhaustedAt+lastError stamped), files ONE worker_context_exhausted event + ONE [loom:worker-context-exhausted] notice naming worker_recycle, never re-fires on a later tick, leaves an ordinary busy worker's detection untouched, skips a codex-harness worker even against a matching claude-path fixture, and still marks (without crashing on the missing notify target) a worker whose manager isn't live. Round 2: a PATH-shadowed slow fake git proves tick() returns well before the subprocess settles (never blocking the event loop) and that the notice still lands correctly once the async read completes. Card 5f825506: a marker timestamped BEFORE the supplied busySinceMs cutoff is NOT re-marked for a worker either (7), proven non-vacuous against a positive control where an IDENTICAL setup with the marker inside the current turn still marks exhausted (8)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

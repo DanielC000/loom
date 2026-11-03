@@ -399,6 +399,21 @@ export function activeContextExhaustedAlerts(
   return out;
 }
 
+/**
+ * @decision 5f825506 (item 3) — `allLiveSessions` must be role-INCLUSIVE (never a role:"manager"-only
+ * subset); the liveness predicate below is deliberately role-agnostic, by construction.
+ */
+export function deriveContextExhaustedAlerts(
+  events: readonly OrchestrationEvent[],
+  allLiveSessions: readonly SessionListItem[],
+): ContextExhaustedAlert[] {
+  const isStillExhausted = (sessionId: string): boolean => {
+    const s = allLiveSessions.find((x) => x.id === sessionId);
+    return !!s && s.processState === "live" && s.contextExhaustedAt != null;
+  };
+  return activeContextExhaustedAlerts(events, isStillExhausted);
+}
+
 // ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) ──────────────────────────────────────────
 // Extracted out of lib/attention.ts's useAttention, same reason as activeBootStuckAlerts above: given a
 // combined, unsorted merge_request/merge_done/merge_rejected stream, keeps the LATEST per (taskId ||

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeContextExhaustedAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, deriveContextExhaustedAlerts, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isRateLimited, isStuckBusy, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey } from "./fleet";
 import { decisionAttentionText, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -417,19 +417,17 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // Unlike context_escalated/idle_escalated above (one-shot episodes with no "cleared" event),
   // exhaustion is a SESSION STATE (`Session.contextExhaustedAt`, cleared in place by a human /compact or
   // a fresh resume turn's busy(true) rising edge — see `pty/host.ts`'s `setBusy`). So instead of a bare
-  // "latest event per session" map, `activeContextExhaustedAlerts` (lib/fleet.ts, extracted the same way
+  // "latest event per session" map, `deriveContextExhaustedAlerts` (lib/fleet.ts, extracted the same way
   // activeBootStuckAlerts/activeKickoffDroppedAlerts were, for the same unit-testable-without-React
-  // reason) takes a predicate that re-checks that LIVE row on every render — so a session that recovered
-  // in place, or is no longer live, drops its item without needing a dismiss. `all` already carries
-  // `contextExhaustedAt` on every row (`/api/sessions` spreads the full session row, db.ts's own row
-  // mapping) — a fresh read each render, never a stale snapshot. This predicate also restores the
-  // liveness drop the old managers-scoped fetch gave for free: the dedicated query above is NOT
-  // liveness-scoped at the fetch level the way `eventQueries` was.
-  const isStillContextExhausted = (sessionId: string): boolean => {
-    const s = all.find((x) => x.id === sessionId);
-    return !!s && s.processState === "live" && s.contextExhaustedAt != null;
-  };
-  const activeContextExhausted = activeContextExhaustedAlerts(contextExhaustedEventsQuery.data ?? [], isStillContextExhausted);
+  // reason) re-checks that LIVE row on every render — so a session that recovered in place, or is no
+  // longer live, drops its item without needing a dismiss. `all` already carries `contextExhaustedAt`
+  // on every row (`/api/sessions` spreads the full session row, db.ts's own row mapping) — a fresh read
+  // each render, never a stale snapshot. Passing `all` (role-INCLUSIVE, never the role:"manager"-only
+  // `managers` above) is what restores the liveness drop the old managers-scoped fetch gave for free.
+  //
+  // @decision 5f825506 (item 3) — the role-agnostic liveness lookup lives INSIDE
+  // `deriveContextExhaustedAlerts` itself now, not duplicated here.
+  const activeContextExhausted = deriveContextExhaustedAlerts(contextExhaustedEventsQuery.data ?? [], all);
 
   // Give-up-recovery alarm (card c00231e2, PtyHost's own per-session episode counter): a manager/
   // platform-lead's submit GIVE-UP RECOVERY fired repeatedly inside a rolling window. Same shape as

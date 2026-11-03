@@ -37,14 +37,18 @@ function readTailBytes(file: string, maxBytes: number): string {
  * for a claude-harness session; a codex session's transcript is a different wire format entirely
  * (out of scope for this card) and simply never matches, so callers don't need a separate guard here,
  * though they should still skip calling this for a codex worker to avoid a wasted read.
+ *
+ * @decision 5f825506 — `notBeforeMs`, OPTIONAL: threaded straight through to
+ * `detectContextExhaustionInTail` (see that function's own doc) — this module carries no wire-format
+ * knowledge of its own and never inspects `notBeforeMs` itself.
  */
 export function checkContextExhaustion(
-  cwd: string, engineSessionId: string | null | undefined, harness?: TranscriptHarness,
+  cwd: string, engineSessionId: string | null | undefined, harness?: TranscriptHarness, notBeforeMs?: number | null,
 ): ContextExhaustionMatch | null {
   if (!engineSessionId) return null;
   const file = resolveTranscriptFile(cwd, engineSessionId, harness);
   if (!file) return null;
   const tail = readTailBytes(file, CONTEXT_EXHAUSTION_TAIL_BYTES);
   if (!tail) return null;
-  return detectContextExhaustionInTail(tail);
+  return detectContextExhaustionInTail(tail, notBeforeMs);
 }

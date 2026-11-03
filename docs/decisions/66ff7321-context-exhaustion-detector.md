@@ -150,3 +150,62 @@ once real activity actually lands) and matches `isGenuineUserTurn`'s own "human-
   ever be `type:"user"`" — the claim is scoped to the `<local-command-stdout>`/`<local-command-stderr>`
   wrapper (`vb`) specifically; a different, not-yet-audited producer could still emit `type:"user"`
   output elsewhere in the CLI.
+
+## 5f825506 — does a raw-terminal `/compact` fire `UserPromptSubmit`?
+
+Investigated as item 4 of card `5f825506` (a follow-up to this card's own round 3). The worry: the DB
+mark/hold only clears on a busy RISING edge (`PtyHost.setBusy`'s `if (busy) live.contextExhausted =
+false`, mirrored by `SessionService.handleBusyEdge`'s `db.clearContextExhaustedOnResume`), and that
+rising edge is driven by the `UserPromptSubmit` hook (`deliverHook`'s `case "UserPromptSubmit":`,
+`setBusy(sessionId, true, "user-prompt-submit-hook")`, `pty/host.ts`). If a human typing `/compact`
+directly into the raw terminal (`writeStdin`) never fired that hook, a successful manual compaction
+would leave the hold and DB mark in place with no rising edge to ever clear them.
+
+Resolved by the SAME forensic method rounds 2/3 above used: reading the installed `claude.exe`'s own
+embedded minified bundle (PE VersionInfo `FileVersion: 2.1.317.0`, read via PowerShell
+`(Get-Item claude.exe).VersionInfo` — never executed; string contents read via `grep -a`, also never
+executing the binary; no real transcript, no spawn).
+
+`/compact`'s own local-command registration:
+
+```
+var pCo={type:"local",name:"compact",description:"Free up context by summarizing the conversation so
+far",isEnabled:()=>!Oe(process.env.DISABLE_COMPACT),supportsNonInteractive:!0,argumentHint:"<optional
+custom summarization instructions>",thinClientDispatch:"post-text",load:()=>import("...")}
+```
+
+`thinClientDispatch:"post-text"` is the SAME dispatch value a bare, unrecognized prompt resolves to —
+confirmed by the client's own dispatch-resolver function:
+
+```
+function VJs(e,n){if(e.type==="prompt")return"post-text";switch(e.thinClientDispatch){
+  case"post-text":return"post-text";
+  case"control-request":case"local-then-rpc":return e.type==="local"&&!n?"unavailable":"local";
+  case"twin":return"post-text";...}}
+```
+
+So `/compact`'s raw text is submitted through the IDENTICAL "post-text" pipeline as an ordinary prompt
+turn — unlike a `thinClientDispatch:"control-request"` command (e.g. `/cost`, `/model`), which resolves
+to `"local"`/`"unavailable"` and is handled client-side without ever entering the prompt-submission
+pipeline at all. "post-text" submission is what fires `UserPromptSubmit` (the hook-dispatch generator
+functions keyed on `hook_event_name:"UserPromptSubmit"` fire unconditionally for a submitted `prompt`,
+regardless of whether the client later recognizes that text as a local command). On the daemon side,
+`deliverHook`'s `case "UserPromptSubmit":` handling is itself generic — it does not care whether the
+submitted text was a "real" prompt or a recognized local command.
+
+**Conclusion: YES, a raw-terminal `/compact` fires `UserPromptSubmit`**, so it already gets the
+ordinary rising-edge clear — this path was never structurally blocked. It is, however, exposed to the
+SAME stale-marker race Part 1 of card `5f825506` fixes (any busy rising edge races the CLI's own
+superseding transcript write identically, regardless of what triggered the edge) — closed by that same
+fix, since its cutoff (`Live.busySince`) is a property of ANY rising edge, not specific to the composer
+bypass. No separate code change was needed for this path. Full fix:
+`docs/decisions/5f825506-stale-exhaustion-marker-cutoff-and-composer-strand.md`.
+
+## Do not (5f825506 addendum)
+
+- Do not re-derive whether `/compact` fires `UserPromptSubmit` by spawning claude or reading a real
+  transcript — read the installed binary's own `thinClientDispatch`/`VJs` dispatch-resolver shape
+  instead, per this card's own investigate-first constraint (and 66ff7321's own established method).
+- Do not conflate `thinClientDispatch:"post-text"` (submitted through the ordinary prompt pipeline) with
+  `"control-request"`/`"local-then-rpc"` (client-side only, never enters that pipeline) — only the
+  former fires `UserPromptSubmit`; this record did not verify the latter class separately.

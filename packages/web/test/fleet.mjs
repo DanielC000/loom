@@ -9,10 +9,13 @@
 // wired into @loom/web's `build` script (which CI runs via `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/fleet.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
-  activeBootStuckAlerts, activeKickoffDroppedAlerts, activeContextExhaustedAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
+  activeBootStuckAlerts, activeKickoffDroppedAlerts, activeContextExhaustedAlerts, deriveContextExhaustedAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
   activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts,
   resolveAttentionProjectId, attentionItemInProject,
 } from "../src/lib/fleet.ts";
@@ -368,6 +371,59 @@ check("activeContextExhaustedAlerts: an unrelated event kind is ignored entirely
   const unrelated = { ...cxEv({ managerSessionId: "sess-g" }), kind: "context_escalated" };
   const alerts = activeContextExhaustedAlerts([unrelated], alwaysExhausted);
   assert.equal(alerts.length, 0, "only manager_context_exhausted rows are considered");
+});
+
+// ── deriveContextExhaustedAlerts (card 5f825506, item 3) — the event-SOURCE choice + the liveness
+// lookup as ONE testable unit, so a regression that narrows `allLiveSessions` to a role:"manager"-only
+// list (reintroducing the round-3 bug this card's own test above could never have caught, since it
+// calls activeContextExhaustedAlerts directly with a hand-supplied predicate) would fail THIS test.
+check("deriveContextExhaustedAlerts: a PLATFORM Lead's event surfaces when sessions includes non-manager roles (role-agnostic source)", () => {
+  const ev = cxEv({ managerSessionId: "lead-b" });
+  // Deliberately NO role:"manager" session anywhere in this list — only a worker (irrelevant, proves
+  // the mix is non-vacuous) and the Lead itself (role:"platform"). If `allLiveSessions` were ever
+  // narrowed to role==="manager" before reaching this function, `lead-b` would not be found and the
+  // alert would silently drop — exactly the round-3 bug this card's item 3 closes.
+  const sessions = [
+    { id: "wkr-irrelevant", role: "worker", processState: "live", contextExhaustedAt: null },
+    { id: "lead-b", role: "platform", processState: "live", contextExhaustedAt: "2026-11-02T21:00:00.000Z" },
+  ];
+  const alerts = deriveContextExhaustedAlerts([ev], sessions);
+  assert.equal(alerts.length, 1, "the Lead's own exhaustion surfaces despite no manager-role row existing");
+  assert.equal(alerts[0].sessionId, "lead-b");
+});
+
+check("deriveContextExhaustedAlerts: a session recovered in place (contextExhaustedAt cleared) drops the item — the liveness lookup is live, not a frozen snapshot", () => {
+  const ev = cxEv({ managerSessionId: "mgr-recovered" });
+  const sessions = [{ id: "mgr-recovered", role: "manager", processState: "live", contextExhaustedAt: null }];
+  const alerts = deriveContextExhaustedAlerts([ev], sessions);
+  assert.equal(alerts.length, 0, "contextExhaustedAt null ⇒ recovered ⇒ no alert, even with the event still present");
+});
+
+check("deriveContextExhaustedAlerts: a session with no matching row at all (not in allLiveSessions) is NOT exhausted — fails closed, not open", () => {
+  const ev = cxEv({ managerSessionId: "sess-missing" });
+  const alerts = deriveContextExhaustedAlerts([ev], []);
+  assert.equal(alerts.length, 0, "no row found ⇒ isStillExhausted returns false ⇒ no alert");
+});
+
+// ── card 5f825506 round 2, item 4 — the CALLER's own list choice, source-scanned ─────────────────────
+// `deriveContextExhaustedAlerts` itself is role-agnostic by construction (proven directly above), but
+// nothing in its own signature stops a CALLER from narrowing the list it's handed back down to a
+// role:"manager"-only subset (e.g. attention.ts's own `managers` variable, line ~271) — that would
+// reintroduce the exact round-3 bug this card's item 3 closed, invisibly to every test above, since
+// none of them touch attention.ts's own call site at all. Can't be removed as a type-level choice (both
+// `all` and `managers` are the SAME `SessionListItem[]` shape to the compiler) — so per this card's own
+// fallback instruction, this is a source-scan pinning the call site's actual second argument.
+check("attention.ts's own deriveContextExhaustedAlerts(...) call site passes the role-INCLUSIVE `all` list, never the role:\"manager\"-only `managers` subset", () => {
+  const attentionPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "attention.ts");
+  const src = readFileSync(attentionPath, "utf8");
+  // Card 5f825506 round 3 (nit): a comment-only line is never a candidate for the REAL call site — a
+  // future doc comment mentioning this call in parenthesized form (e.g. illustrating the exact bug this
+  // scan guards against) would otherwise silently shadow the actual call a few lines below it, since a
+  // plain (non-global) `.match` always returns the FIRST hit in the whole file regardless of context.
+  const codeOnly = src.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+  const m = codeOnly.match(/deriveContextExhaustedAlerts\(\s*[^,]+,\s*([A-Za-z0-9_]+)\s*\)/);
+  assert.ok(m, "deriveContextExhaustedAlerts(...) call site not found in attention.ts (comment-only lines excluded) — update this scan's regex if the call shape changed");
+  assert.equal(m[1], "all", `expected the second argument to be the role-inclusive 'all' list, found '${m[1]}' instead — this would silently drop a non-manager session's (e.g. the platform Lead's) exhaustion alert, exactly the round-3 bug item 3 closed`);
 });
 
 // ── MERGE latest-wins pairing (card e5458ccd round 2, item 2) — extracted out of lib/attention.ts ──────

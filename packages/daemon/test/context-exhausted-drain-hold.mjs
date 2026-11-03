@@ -27,6 +27,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       queue — with a PRE-HELD agent entry already queued, a composer entry still delivers immediately
 //       (bypassing FIFO, since nothing ahead of it could ever drain while exhausted anyway), and the
 //       pre-held entry stays held — then drains normally once the composer's own turn completes.
+//   (9b) card 5f825506 ROUND 2 (CR MAJOR): a variant of (9) with a pre-held AGENT entry sitting AHEAD of
+//       the composer's own recovery entry — drainPending's own head-only bail used to check ONLY the
+//       head's senderId, so it never looked past that agent entry; the composer entry now drains OUT OF
+//       ORDER once the OTHER conjunct clears, leaving the agent entry queued and held.
+//   (10) card 5f825506 ROUND 2 (item 2): a REAL-PtyHost seam test proving the actual `busySinceMs` stamp
+//       (never a fake/stub) is correctly accepted/rejected as `detectContextExhaustionInTail`'s own
+//       stale-marker cutoff — the real stamp is read off `PtyHost.busySinceMs` and fed DIRECTLY to that
+//       function; this does not itself exercise the full watcher-tick → checkContextExhaustion wiring.
 //
 // Run: 1) build (turbo builds shared first), 2) node packages/daemon/test/context-exhausted-drain-hold.mjs
 import fs from "node:fs";
@@ -40,10 +48,16 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-ctxexh-drain-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// card 5f825506 (item 2) — pin the humanSubmitHeldUntil bound SHORT so test (9) below doesn't wait the
+// real 20s default. Read once, at module-top-level, by host.ts's own HUMAN_SUBMIT_CONFIRM_HOLD_MS —
+// must be set BEFORE that module is imported.
+const HUMAN_SUBMIT_HOLD_TEST_MS = 80;
+process.env.LOOM_HUMAN_SUBMIT_CONFIRM_HOLD_MS = String(HUMAN_SUBMIT_HOLD_TEST_MS);
 
 const { PtyHost, HUMAN_COMPOSER_SENDER_ID } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { Db } = await import("../dist/db.js");
+const { detectContextExhaustionInTail } = await import("../dist/pty/claude-transcript.js");
 
 const writes = [];
 class TestPtyHost extends createSeamHost(PtyHost) {
@@ -60,14 +74,15 @@ const events = {
 };
 
 const host = new TestPtyHost(events);
-function spawnReady(sessionId) {
-  host.spawn({
+function spawnHostReady(targetHost, sessionId) {
+  targetHost.spawn({
     sessionId, cwd: tmpHome,
     permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
     geometry: { cols: 120, rows: 40 }, sessionEnv: {},
   });
-  host.deliverHook(sessionId, { hook_event_name: "SessionStart" });
+  targetHost.deliverHook(sessionId, { hook_event_name: "SessionStart" });
 }
+function spawnReady(sessionId) { spawnHostReady(host, sessionId); }
 
 try {
   const SID = "wkr-drain-hold";
@@ -224,6 +239,335 @@ try {
     check("(8c) the pre-held agent entry's text WAS eventually written, proving it drained normally rather than vanishing",
       writes.some((w) => w.sessionId === SID6 && typeof w.data === "string" && w.data.includes("PRE_HELD_AGENT_ENTRY")));
   }
+
+  // ===== (9) card 5f825506 item 2 — STRAND FIX: a composer entry that's exhausted AND ALSO blocked by
+  // a DIFFERENT idleEligible conjunct (isHumanSubmitHeld) when it arrives lands HELD (never immediate —
+  // every OTHER conjunct still gates it exactly as before). It must then drain once that OTHER conjunct
+  // clears, via the ordinary periodic reconcile() safety net, with NO second composer message ever
+  // sent — pre-fix, drainPending's own unconditional contextExhausted bail left this held FOREVER,
+  // regardless of how many reconcile() ticks ran, because nothing re-checked whether the OTHER hold
+  // had cleared. =====
+  {
+    const SID9 = "wkr-composer-strand-fix";
+    spawnReady(SID9);
+    host.enqueueStdin(SID9, "T9_FIRST_TURN"); // delivers immediately; busy=true, pending empty
+    check("(9) setup: markContextExhausted succeeds", host.markContextExhausted(SID9) === true);
+    check("(9) setup: pending queue is empty right after marking", host.getPendingQueueDepth(SID9) === 0);
+
+    // Arm isHumanSubmitHeld via the raw-terminal path — an UNRELATED human Enter-submit, racing the
+    // composer's own recovery message below (the same race 2521bf51 names, just a different conjunct).
+    host.writeStdin(SID9, "unrelated raw keystrokes\r");
+
+    const r9 = host.enqueueStdin(SID9, "COMPOSER_STRAND_RECOVERY", "human", undefined, undefined, "agent", undefined, "COMPOSER_STRAND_RECOVERY", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(9) the composer entry is HELD (not delivered immediately) while a DIFFERENT conjunct also blocks it — every other conjunct still gates it",
+      r9.delivered === false);
+    check("(9) pendingQueueDepth is 1 (held, not dropped)", host.getPendingQueueDepth(SID9) === 1);
+    check("(9) not written yet", !writes.some((w) => w.sessionId === SID9 && typeof w.data === "string" && w.data.includes("COMPOSER_STRAND_RECOVERY")));
+
+    // Poll the OBSERVABLE precondition (queue depth reaching 0) via repeated reconcile() calls, rather
+    // than a single fixed sleep then a snapshot check — the poll's own outcome (drained within the
+    // bound, or not) is itself the falsifiable result: a real regression that never clears the hold
+    // times out and correctly reports false, instead of a fixed-duration sleep that could pass or fail
+    // for the wrong reason depending on host speed. The periodic safety net alone — no second composer
+    // message is ever sent during this loop.
+    const deadline = Date.now() + HUMAN_SUBMIT_HOLD_TEST_MS * 10;
+    let drainedToZero = false;
+    while (Date.now() < deadline) {
+      host.reconcile();
+      if (host.getPendingQueueDepth(SID9) === 0) { drainedToZero = true; break; }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    check("(9) MAJOR FIX: reconcile() alone drains the composer entry once the OTHER conjunct clears (depth reaches 0), confirmed via polling, with exactly ONE composer enqueue call made in total",
+      drainedToZero);
+    check("(9) its own submit's rising edge cleared contextExhausted (busy flips true)", busyLog[SID9]?.at(-1) === true);
+    check("(9) the composer text WAS handed to write() — a real delivery, not a silent drop",
+      writes.some((w) => w.sessionId === SID9 && typeof w.data === "string" && w.data.includes("COMPOSER_STRAND_RECOVERY")));
+  }
+
+  // ===== (9b) card 5f825506 ROUND 2, item 1 (CR MAJOR) — a variant of (9) with a PRE-HELD AGENT entry
+  // sitting AHEAD of the composer's own recovery entry in `live.pending` when the OTHER conjunct
+  // (isHumanSubmitHeld) clears. Pre-fix, drainPending's own head-only bail checked ONLY the head's
+  // senderId — with a non-composer entry at the head, it bailed unconditionally and never looked
+  // further into the queue, so the composer entry (sitting BEHIND the agent entry) could never drain
+  // either, regardless of how many reconcile() ticks ran. Proves: once the OTHER conjunct clears, the
+  // composer entry drains OUT OF ORDER (pulled from behind the agent entry), and the agent entry stays
+  // queued and held — not drained, not dropped — until the composer's own turn completes. =====
+  {
+    const SID9b = "wkr-composer-strand-fix-preheld";
+    spawnReady(SID9b);
+    host.enqueueStdin(SID9b, "T9B_FIRST_TURN"); // delivers immediately; busy=true, pending empty
+    check("(9b) setup: markContextExhausted succeeds", host.markContextExhausted(SID9b) === true);
+    check("(9b) setup: pending queue is empty right after marking", host.getPendingQueueDepth(SID9b) === 0);
+
+    // A pre-held AGENT entry lands first (ahead of the composer's own recovery entry below) — the
+    // realistic shape a head-only check can't see past.
+    const heldAgent9b = host.enqueueStdin(SID9b, "PREHELD_AGENT_AHEAD_OF_COMPOSER", "system", undefined, undefined, "agent", undefined, undefined, undefined, "sender-9b");
+    check("(9b) setup: the pre-held agent entry is held, not delivered", heldAgent9b.delivered === false);
+    check("(9b) setup: pendingQueueDepth is 1 before the composer arrives", host.getPendingQueueDepth(SID9b) === 1);
+
+    // Arm isHumanSubmitHeld (same mechanism as (9)) so the composer entry ALSO can't take the
+    // immediate-submit path — it must land in `live.pending`, BEHIND the agent entry.
+    host.writeStdin(SID9b, "unrelated raw keystrokes\r");
+    const composer9b = host.enqueueStdin(SID9b, "COMPOSER_BEHIND_PREHELD_AGENT", "human", undefined, undefined, "agent", undefined, "COMPOSER_BEHIND_PREHELD_AGENT", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(9b) the composer entry is ALSO HELD (isHumanSubmitHeld blocks the immediate path) — queued behind the agent entry", composer9b.delivered === false);
+    check("(9b) pendingQueueDepth is 2 (both entries queued, composer BEHIND the agent entry)", host.getPendingQueueDepth(SID9b) === 2);
+    check("(9b) neither entry's text has been written yet",
+      !writes.some((w) => w.sessionId === SID9b && typeof w.data === "string"
+        && (w.data.includes("PREHELD_AGENT_AHEAD_OF_COMPOSER") || w.data.includes("COMPOSER_BEHIND_PREHELD_AGENT"))));
+
+    // Poll via reconcile() alone (no second composer message) until isHumanSubmitHeld's own bound
+    // expires and the composer entry — pulled OUT OF ORDER, from behind the agent entry — drains.
+    const deadline9b = Date.now() + HUMAN_SUBMIT_HOLD_TEST_MS * 10;
+    let composerDrained9b = false;
+    while (Date.now() < deadline9b) {
+      host.reconcile();
+      if (writes.some((w) => w.sessionId === SID9b && typeof w.data === "string" && w.data.includes("COMPOSER_BEHIND_PREHELD_AGENT"))) { composerDrained9b = true; break; }
+      // TIMING-GUARD-SAFE: poll-observes-prior-step — this loop's own condition is the composer's write
+      // being recorded; the "depth still 1" check a few lines below asserts a DIFFERENT fact (the
+      // pre-held agent entry's own queue position) that is already true, by synchronous necessity, the
+      // instant that write lands — drainPending's splice-out-the-composer-entry-alone step (this round's
+      // own fix) runs strictly BEFORE the write it causes, inside the SAME synchronous call, so no
+      // additional wall-clock wait could ever change what the agent entry's depth reads at that moment.
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    check("(9b) MAJOR FIX: the composer entry drains OUT OF ORDER once the OTHER conjunct clears, even though a non-composer entry sat ahead of it at the head", composerDrained9b);
+    check("(9b) its own submit's rising edge cleared contextExhausted (busy flips true)", busyLog[SID9b]?.at(-1) === true);
+    check("(9b) the pre-held agent entry REMAINS QUEUED AND HELD — not drained as a side effect, not dropped (depth still 1)", host.getPendingQueueDepth(SID9b) === 1);
+    check("(9b) the pre-held agent entry's text was NOT written (still held, drained OUT OF ORDER means the composer alone left, not a coalesced run)",
+      !writes.some((w) => w.sessionId === SID9b && typeof w.data === "string" && w.data.includes("PREHELD_AGENT_AHEAD_OF_COMPOSER")));
+
+    // Once the composer's own turn ends (Stop), contextExhausted is already cleared and busy falls —
+    // the pre-held agent entry should now drain NORMALLY (ordinary busy-queue behaviour), proving it
+    // wasn't dropped or orphaned, just held until it was its turn — same closing shape as (8c).
+    host.deliverHook(SID9b, { hook_event_name: "Stop" });
+    check("(9b) the pre-held agent entry DRAINS normally once the composer's turn completes (depth back to 0)", host.getPendingQueueDepth(SID9b) === 0);
+    check("(9b) the pre-held agent entry's text WAS eventually written, proving it drained normally rather than vanishing",
+      writes.some((w) => w.sessionId === SID9b && typeof w.data === "string" && w.data.includes("PREHELD_AGENT_AHEAD_OF_COMPOSER")));
+  }
+
+  // ===== (10) card 5f825506 ROUND 2, item 2 — REAL-PtyHost seam test for `busySinceMs`: reads the
+  // ACTUAL `Live.busySince` stamp (never a fake/stub) off a genuine rising edge, then feeds it DIRECTLY
+  // to `detectContextExhaustionInTail` and proves it is correctly accepted/rejected as that function's
+  // own stale-marker cutoff — NOT a full watcher-tick → checkContextExhaustion integration (that wiring
+  // is covered by context-watcher-worker-ratios.mjs's own scenarios (20)/(21) instead). RED via the dist
+  // mutant `busySinceMs → return null`: with a `null` cutoff, `detectContextExhaustionInTail`'s own
+  // `isStale` is unconditionally false (see that function's own doc), so the OLDER-than-turn marker
+  // below would be wrongly read as still-current instead of correctly rejected. =====
+  {
+    const SID10 = "wkr-busysincems-seam";
+    spawnReady(SID10);
+    const beforeSubmitMs10 = Date.now();
+    host.enqueueStdin(SID10, "T10_FIRST_TURN"); // delivers immediately (idle) — the REAL rising edge that stamps busySince
+    const stamped10 = host.busySinceMs(SID10);
+    check("(10) the REAL PtyHost.busySinceMs returns a non-null stamp right after a genuine rising edge", stamped10 !== null);
+    check("(10) the stamp is >= the time captured just before the submit (a genuine turn-start timestamp)",
+      typeof stamped10 === "number" && stamped10 >= beforeSubmitMs10);
+
+    const REAL_EXHAUSTION_RECORD_SEAM = {
+      type: "assistant",
+      message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "Prompt is too long" }] },
+      error: "invalid_request", isApiErrorMessage: true,
+    };
+    const olderMarker10 = { ...REAL_EXHAUSTION_RECORD_SEAM, timestamp: new Date(stamped10 - 60_000).toISOString() };
+    const newerMarker10 = { ...REAL_EXHAUSTION_RECORD_SEAM, timestamp: new Date(stamped10 + 1_000).toISOString() };
+    check("(10) an OLDER-than-turn marker, fed the REAL stamp as the cutoff, is rejected as stale (null)",
+      detectContextExhaustionInTail(`${JSON.stringify(olderMarker10)}\n`, stamped10) === null);
+    const newerResult10 = detectContextExhaustionInTail(`${JSON.stringify(newerMarker10)}\n`, stamped10);
+    check("(10) a NEWER-than-turn marker, fed the SAME REAL stamp as the cutoff, is still detected",
+      newerResult10 !== null && newerResult10.matchedText === "Prompt is too long");
+  }
+
+  // ===== (11) card 5f825506 ROUND 3 MAJOR — the HEAD-IS-the-composer-entry case. Round 2's own fix
+  // (test 9b) only ever proved drainPending reaches PAST a non-composer head to find a composer entry
+  // sitting BEHIND it — but the bail condition it used (`exhaustionHoldAppliesTo(head.senderId)`) is
+  // FALSE whenever the composer entry is ITSELF the head, so in that shape the old code fell straight
+  // through to the ORDINARY coalescing branches below instead. Under the daemon-global
+  // `coalesceAgentMessages:true` (the route-keyed branch, which ignores sender AND kind entirely), that
+  // let a held NON-composer entry sitting right behind the composer's own head entry get coalesced into
+  // the composer's recovery turn — exactly the reviewer's repro: [composer "/compact", manager
+  // direction] + exhausted + toggle ON → the direction gets written AFTER the composer text in ONE
+  // turn, and onDeliver fires for it too (marked delivered) even though the CLI reads it as part of the
+  // compaction instructions, never as its own turn. (11a) reproduces it with the toggle ON; (11b) is the
+  // toggle-OFF control (same-sender coalescing already happened to protect this shape pre-fix, since the
+  // manager direction has a DIFFERENT senderId — this control proves the fix doesn't regress that). =====
+  {
+    const SID11a = "wkr-composer-head-coalesce-on";
+    const hostOn = new TestPtyHost(events, { coalesceAgentMessages: true });
+    spawnHostReady(hostOn, SID11a);
+    hostOn.enqueueStdin(SID11a, "T11A_FIRST_TURN"); // delivers immediately (idle); busy=true, pending empty
+    check("(11a) setup: markContextExhausted succeeds", hostOn.markContextExhausted(SID11a) === true);
+    check("(11a) setup: pending queue is empty right after marking", hostOn.getPendingQueueDepth(SID11a) === 0);
+
+    // Arm isHumanSubmitHeld so the composer's own immediate bypass can't fire — it must land in
+    // `live.pending` AS THE HEAD (nothing else is queued yet).
+    hostOn.writeStdin(SID11a, "unrelated raw keystrokes\r");
+    const composer11a = hostOn.enqueueStdin(SID11a, "COMPOSER_HEAD_11A", "human", undefined, undefined, "agent", undefined, "COMPOSER_HEAD_11A", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(11a) setup: the composer entry is HELD (isHumanSubmitHeld blocks the immediate path) and is the ONLY entry — i.e. the HEAD", composer11a.delivered === false);
+    check("(11a) setup: pendingQueueDepth is 1 (the composer entry alone, at the head)", hostOn.getPendingQueueDepth(SID11a) === 1);
+
+    // A manager direction (non-composer, agent-kind, a DIFFERENT senderId, no route — same route key as
+    // the composer entry) arrives behind it while still exhausted.
+    let directionDelivered11a = false;
+    const direction11a = hostOn.enqueueStdin(SID11a, "MANAGER_DIRECTION_11A", "system", () => { directionDelivered11a = true; }, undefined, "agent", undefined, undefined, undefined, "sender-11a");
+    check("(11a) setup: the manager direction is ALSO held, queued behind the composer entry", direction11a.delivered === false);
+    check("(11a) setup: pendingQueueDepth is 2 (composer HEAD, direction behind it)", hostOn.getPendingQueueDepth(SID11a) === 2);
+
+    const deadline11a = Date.now() + HUMAN_SUBMIT_HOLD_TEST_MS * 10;
+    let composerDrained11a = false;
+    while (Date.now() < deadline11a) {
+      hostOn.reconcile();
+      if (writes.some((w) => w.sessionId === SID11a && typeof w.data === "string" && w.data.includes("COMPOSER_HEAD_11A"))) { composerDrained11a = true; break; }
+      // TIMING-GUARD-SAFE: poll-observes-prior-step — this loop's own condition is the composer's write
+      // being recorded; the MAJOR-FIX checks below assert a DIFFERENT fact (whether the SAME synchronous
+      // drainPending call that produced that write also folded the direction entry into it) that is
+      // already fully determined, by synchronous necessity, the instant that write lands — splice/
+      // coalesce/submit all run inside the SAME synchronous drainPending call, so no additional
+      // wall-clock wait could ever change what those checks observe once this loop's own write fires.
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    check("(11a) the composer entry (the HEAD) drains once isHumanSubmitHeld clears", composerDrained11a);
+    check("(11a) MAJOR FIX: the manager direction is NEVER folded into the composer's own turn — the write contains ONLY the composer text, never the direction's",
+      writes.some((w) => w.sessionId === SID11a && typeof w.data === "string" && w.data.includes("COMPOSER_HEAD_11A") && !w.data.includes("MANAGER_DIRECTION_11A")));
+    check("(11a) MAJOR FIX: the direction entry stays QUEUED, not drained as a side effect of the composer's own turn (depth still 1)",
+      hostOn.getPendingQueueDepth(SID11a) === 1);
+    check("(11a) MAJOR FIX: the direction's own onDeliver never fired — it was never handed to the recipient",
+      directionDelivered11a === false);
+    check("(11a) the direction's own text was never written at all (not even as part of a later, separate write) during this drain",
+      !writes.some((w) => w.sessionId === SID11a && typeof w.data === "string" && w.data.includes("MANAGER_DIRECTION_11A")));
+    try { hostOn.stop?.(SID11a); } catch { /* best-effort */ }
+
+    // (11b) TOGGLE-OFF CONTROL — identical setup, default host (coalesceAgentMessages:false). Same-sender
+    // coalescing already protects this shape pre-fix (the direction has a DIFFERENT senderId, so the old
+    // agent-kind run never extended past the composer head) — proves the round-3 fix doesn't regress it.
+    const SID11b = "wkr-composer-head-coalesce-off";
+    spawnReady(SID11b);
+    host.enqueueStdin(SID11b, "T11B_FIRST_TURN");
+    check("(11b) setup: markContextExhausted succeeds", host.markContextExhausted(SID11b) === true);
+    host.writeStdin(SID11b, "unrelated raw keystrokes\r");
+    const composer11b = host.enqueueStdin(SID11b, "COMPOSER_HEAD_11B", "human", undefined, undefined, "agent", undefined, "COMPOSER_HEAD_11B", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(11b) setup: the composer entry is held and is the head", composer11b.delivered === false);
+    let directionDelivered11b = false;
+    const direction11b = host.enqueueStdin(SID11b, "MANAGER_DIRECTION_11B", "system", () => { directionDelivered11b = true; }, undefined, "agent", undefined, undefined, undefined, "sender-11b");
+    check("(11b) setup: the manager direction is held, queued behind the composer entry", direction11b.delivered === false);
+    check("(11b) setup: pendingQueueDepth is 2", host.getPendingQueueDepth(SID11b) === 2);
+
+    const deadline11b = Date.now() + HUMAN_SUBMIT_HOLD_TEST_MS * 10;
+    let composerDrained11b = false;
+    while (Date.now() < deadline11b) {
+      host.reconcile();
+      if (writes.some((w) => w.sessionId === SID11b && typeof w.data === "string" && w.data.includes("COMPOSER_HEAD_11B"))) { composerDrained11b = true; break; }
+      // TIMING-GUARD-SAFE: poll-observes-prior-step — same reasoning as (11a)'s own identical loop just
+      // above: the CONTROL checks below assert a fact already fully determined, synchronously, the
+      // instant this loop's own write fires — nothing an additional wall-clock wait could change.
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    check("(11b) CONTROL: the composer entry drains once isHumanSubmitHeld clears", composerDrained11b);
+    check("(11b) CONTROL: the direction is never folded into the composer's own write",
+      writes.some((w) => w.sessionId === SID11b && typeof w.data === "string" && w.data.includes("COMPOSER_HEAD_11B") && !w.data.includes("MANAGER_DIRECTION_11B")));
+    check("(11b) CONTROL: the direction entry stays queued (depth still 1)", host.getPendingQueueDepth(SID11b) === 1);
+    check("(11b) CONTROL: the direction's own onDeliver never fired", directionDelivered11b === false);
+  }
+
+  // ===== (12) card 5f825506 ROUND 3 MINOR (a)+(c) — a give-up-HELD composer entry sitting behind a
+  // non-composer head must NOT be picked by composerIdx's own scan (the `!this.isGiveUpHeld(m)` exclusion)
+  // while its hold is still in force — nothing is eligible to drain. Once the hold expires, it drains
+  // ALONE, spliced from behind the still-queued non-composer entry, which stays held, not dropped. (c)
+  // extends this with a seeded `live.ambiguousDispatches` entry for the composer's own logicalId, proving
+  // the shared drain tail's giveUpGen archive loop (`archiveAmbiguousDispatch` + `ambiguousDispatches.delete`)
+  // actually ran for THIS composer-only splice path, not just the ordinary coalescing branches. Entries are
+  // injected directly into `live.pending` (the same established pattern as
+  // pty-giveup-recovery-alarm.mjs/pty-giveup-resend-bypass-unsuppressed-park.mjs) rather than driving a
+  // real give-up through the timeout machinery — this file shares ONE process-wide SUBMIT_VERIFY_TIMEOUT_MS
+  // with every other session in it, so forcing the real timers short enough to observe here would risk
+  // firing unrelated give-up cycles for every OTHER still-unconfirmed session in this file. =====
+  {
+    const SID12 = "wkr-giveupheld-composer-skip";
+    spawnReady(SID12);
+    host.enqueueStdin(SID12, "T12_FIRST_TURN"); // delivers immediately (idle); busy=true, pending empty
+    check("(12) setup: markContextExhausted succeeds", host.markContextExhausted(SID12) === true);
+    check("(12) setup: pending queue is empty right after marking", host.getPendingQueueDepth(SID12) === 0);
+
+    const live12 = host.live.get(SID12);
+    const nonComposerId12 = "nc-12";
+    const composerId12 = "gc-12";
+    live12.pending.push({ id: nonComposerId12, text: "NON_COMPOSER_ENTRY_12", source: "system", kind: "agent", logicalId: nonComposerId12, senderId: "sender-12" });
+    live12.pending.push({
+      id: composerId12, text: "GIVEUP_HELD_COMPOSER_12", source: "human", kind: "agent", logicalId: composerId12,
+      ownerText: "GIVEUP_HELD_COMPOSER_12", senderId: HUMAN_COMPOSER_SENDER_ID,
+      giveUpGen: 1, giveUpHeldUntil: Date.now() + 10_000_000,
+    });
+    check("(12) setup: pendingQueueDepth is 2 (non-composer head, give-up-held composer entry behind it)", host.getPendingQueueDepth(SID12) === 2);
+
+    // (c) seed ambiguousDispatches for the composer's own logicalId BEFORE the drain — this is what
+    // archiveAmbiguousDispatch/the delete must act on once it actually drains.
+    const seededSig12 = { len: 42, hash: "seeded-hash-12", writtenAt: Date.now() - 5000, batchId: 1, memberSig: { len: 42, hash: "seeded-hash-12" }, escapedSig: { len: 42, hash: "seeded-hash-12" } };
+    live12.ambiguousDispatches.set(composerId12, seededSig12);
+
+    host.reconcile();
+    check("(12a) MINOR FIX PIN: nothing drains while the only composer entry is give-up-held — composerIdx finds no eligible entry (depth still 2)",
+      host.getPendingQueueDepth(SID12) === 2 && busyLog[SID12]?.at(-1) === false);
+    check("(12a) neither entry's text was written while the composer entry is still give-up-held",
+      !writes.some((w) => w.sessionId === SID12 && typeof w.data === "string"
+        && (w.data.includes("NON_COMPOSER_ENTRY_12") || w.data.includes("GIVEUP_HELD_COMPOSER_12"))));
+    check("(12c) setup: the seeded ambiguousDispatches entry is untouched while the drain never ran", live12.ambiguousDispatches.has(composerId12));
+
+    // Expire the hold, then drain — the composer entry (behind the non-composer head) must now be the
+    // one that drains, ALONE.
+    live12.pending.find((m) => m.id === composerId12).giveUpHeldUntil = Date.now() - 1;
+    host.reconcile();
+    check("(12a) once the hold expires, the composer entry drains ALONE (depth back to 1 — the non-composer entry stays held, not dropped)",
+      host.getPendingQueueDepth(SID12) === 1 && live12.pending[0]?.id === nonComposerId12);
+    check("(12a) the composer text WAS written", writes.some((w) => w.sessionId === SID12 && typeof w.data === "string" && w.data.includes("GIVEUP_HELD_COMPOSER_12")));
+    check("(12a) the non-composer entry's text was NOT written (still held, not drained as a side effect)",
+      !writes.some((w) => w.sessionId === SID12 && typeof w.data === "string" && w.data.includes("NON_COMPOSER_ENTRY_12")));
+    check("(12c) THE FIX, THE ASSERTION THAT GOES RED WITHOUT IT: the shared drain tail's archive loop ran for this composer-only splice — the seeded ambiguousDispatches entry was DELETED",
+      !live12.ambiguousDispatches.has(composerId12));
+    check("(12c) and it was ARCHIVED first (not just dropped) — retiredGiveUpSignatures now holds the seeded signature for this logicalId",
+      (live12.retiredGiveUpSignatures.get(composerId12) ?? []).some((e) => e.hash === "seeded-hash-12" && e.writtenAt === seededSig12.writtenAt));
+  }
+
+  // ===== (13) card 5f825506 ROUND 3 MINOR (b) — TWO composer entries queued FIFO while exhausted: the
+  // FIRST one drains alone (never coalesced with the second, even though both share the SAME senderId,
+  // kind, and route — the exact shape same-sender agent coalescing would otherwise fold together). The
+  // second stays queued until its own turn, draining normally afterward — proving the "drain alone"
+  // semantics hold across SUCCESSIVE composer entries, not just a composer-vs-non-composer pair. =====
+  {
+    const SID13 = "wkr-two-composer-fifo";
+    spawnReady(SID13);
+    host.enqueueStdin(SID13, "T13_FIRST_TURN");
+    check("(13) setup: markContextExhausted succeeds", host.markContextExhausted(SID13) === true);
+    check("(13) setup: pending queue is empty right after marking", host.getPendingQueueDepth(SID13) === 0);
+
+    host.writeStdin(SID13, "unrelated raw keystrokes\r"); // arm isHumanSubmitHeld — both composer entries must queue, not bypass
+    const c1_13 = host.enqueueStdin(SID13, "COMPOSER_FIRST_13", "human", undefined, undefined, "agent", undefined, "COMPOSER_FIRST_13", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(13) setup: the FIRST composer entry is held", c1_13.delivered === false);
+    const c2_13 = host.enqueueStdin(SID13, "COMPOSER_SECOND_13", "human", undefined, undefined, "agent", undefined, "COMPOSER_SECOND_13", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(13) setup: the SECOND composer entry is also held, FIFO behind the first", c2_13.delivered === false);
+    check("(13) setup: pendingQueueDepth is 2", host.getPendingQueueDepth(SID13) === 2);
+
+    const deadline13 = Date.now() + HUMAN_SUBMIT_HOLD_TEST_MS * 10;
+    let firstDrained13 = false;
+    while (Date.now() < deadline13) {
+      host.reconcile();
+      if (writes.some((w) => w.sessionId === SID13 && typeof w.data === "string" && w.data.includes("COMPOSER_FIRST_13"))) { firstDrained13 = true; break; }
+      // TIMING-GUARD-SAFE: poll-observes-prior-step — this loop's own condition is the first composer
+      // entry's write being recorded; the FIFO/no-coalesce checks below assert a fact already fully
+      // determined, synchronously, inside the SAME drainPending call that produced that write (whether
+      // it also folded the second composer entry in) — no additional wall-clock wait could change it.
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    check("(13) FIFO: the FIRST composer entry drains first", firstDrained13);
+    check("(13) FIFO FIX: the write carries ONLY the first composer's text — the second was never coalesced into it",
+      writes.some((w) => w.sessionId === SID13 && typeof w.data === "string" && w.data.includes("COMPOSER_FIRST_13") && !w.data.includes("COMPOSER_SECOND_13")));
+    check("(13) the SECOND composer entry stays queued, not drained alongside the first (depth 1)", host.getPendingQueueDepth(SID13) === 1);
+    check("(13) the second entry's text was not written during the first's drain", !writes.some((w) => w.sessionId === SID13 && typeof w.data === "string" && w.data.includes("COMPOSER_SECOND_13")));
+
+    // End the first composer's own turn — its rising edge already cleared contextExhausted, so the
+    // second now drains via the ordinary (ever-present) busy-queue path, proving it isn't stranded.
+    host.deliverHook(SID13, { hook_event_name: "Stop" });
+    check("(13) the second composer entry now drains too, once its own turn comes (depth back to 0)", host.getPendingQueueDepth(SID13) === 0);
+    check("(13) the second composer's text WAS eventually written", writes.some((w) => w.sessionId === SID13 && typeof w.data === "string" && w.data.includes("COMPOSER_SECOND_13")));
+  }
 } finally {
   try { host.stop?.("wkr-drain-hold"); } catch { /* best-effort */ }
   try { host.stop?.("wkr-ordinary-drain"); } catch { /* best-effort */ }
@@ -232,6 +576,12 @@ try {
   try { host.stop?.("wkr-composer-negative"); } catch { /* best-effort */ }
   try { host.stop?.("wkr-composer-positive"); } catch { /* best-effort */ }
   try { host.stop?.("wkr-composer-preheld"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-composer-strand-fix"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-composer-strand-fix-preheld"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-busysincems-seam"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-composer-head-coalesce-off"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-giveupheld-composer-skip"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-two-composer-fifo"); } catch { /* best-effort */ }
 }
 
 // ===== (5) DB-level clear: stamped, then cleared on a rising-edge-shaped call; guarded against an
@@ -293,6 +643,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — once a session is marked context-exhausted, its held queue survives both the exhaustion-clearing-busy side effect AND the periodic reconcile() drain safety net (proven against a negative control: an ORDINARY session's queue DOES drain on an ordinary Stop, so the hold is specific to contextExhausted, not a general freeze); a fresh UserPromptSubmit rising edge (the real resume/next-turn chokepoint) clears the in-memory hold end-to-end (a message queued after it DOES drain on the next Stop); round 2's mutant-B2 catch proves the hold also fires on an EMPTY queue (not just a pre-populated one); the HUMAN_COMPOSER_SENDER_ID exemption lets a human's own composer entry deliver despite exhaustion while an ordinary agent entry on the identical setup stays held — round 3 proves that exemption ALSO fires with a PRE-HELD entry already queued ahead of it, with the pre-held entry staying held and draining normally once the composer's own turn completes; and the DB-level clear (clearContextExhaustedOnResume) correctly resets the mark while leaving an unrelated session's own lastError completely untouched — both for a row never exhausted AND for one re-exhausted-then-overwritten by something unrelated."
+  ? "\n✅ ALL PASS — once a session is marked context-exhausted, its held queue survives both the exhaustion-clearing-busy side effect AND the periodic reconcile() drain safety net (proven against a negative control: an ORDINARY session's queue DOES drain on an ordinary Stop, so the hold is specific to contextExhausted, not a general freeze); a fresh UserPromptSubmit rising edge (the real resume/next-turn chokepoint) clears the in-memory hold end-to-end (a message queued after it DOES drain on the next Stop); round 2's mutant-B2 catch proves the hold also fires on an EMPTY queue (not just a pre-populated one); the HUMAN_COMPOSER_SENDER_ID exemption lets a human's own composer entry deliver despite exhaustion while an ordinary agent entry on the identical setup stays held — round 3 proves that exemption ALSO fires with a PRE-HELD entry already queued ahead of it, with the pre-held entry staying held and draining normally once the composer's own turn completes; card 5f825506 item 2 (test 9) proves the STRAND FIX: a composer entry that's ALSO blocked by a DIFFERENT conjunct (isHumanSubmitHeld) when it arrives lands held exactly as before, then drains via the ordinary reconcile() safety net alone once that OTHER conjunct clears — no second composer message ever sent; round 2 (test 9b) proves the fix also reaches past a PRE-HELD, NON-COMPOSER entry sitting ahead of the composer's own recovery entry — the composer drains OUT OF ORDER once the other conjunct clears, leaving that agent entry queued and held, not drained or dropped; round 2 (test 10) is a REAL-PtyHost seam test proving the genuine `busySinceMs` stamp — not a fake/stub — correctly feeds detectContextExhaustionInTail's own stale-marker cutoff, rejecting an older-than-turn marker and still detecting a newer one; round 3 (test 11) proves drainPending ALWAYS takes the single-composer-entry path while exhausted, head or not — closing the gap where a composer entry that was ITSELF the head fell through to the ordinary coalescing branches, letting a `coalesceAgentMessages:true` route-keyed run fold a queued manager direction into the composer's own recovery turn (test 11a), with a toggle-OFF control (11b) showing that shape was never exposed there; round 3 (test 12) proves a give-up-HELD composer entry is correctly excluded from that same splice scan until its hold expires, and that the shared drain tail's giveUpGen archive loop (archiveAmbiguousDispatch + ambiguousDispatches.delete) runs for this composer-only splice too, not just the ordinary coalescing branches; round 3 (test 13) proves two queued composer entries drain FIFO, one at a time, never coalesced together even though they share sender/kind/route; and the DB-level clear (clearContextExhaustedOnResume) correctly resets the mark while leaving an unrelated session's own lastError completely untouched — both for a row never exhausted AND for one re-exhausted-then-overwritten by something unrelated."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

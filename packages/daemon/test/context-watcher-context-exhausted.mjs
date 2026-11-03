@@ -43,6 +43,12 @@ const REAL_EXHAUSTION_RECORD = {
   error: "invalid_request", isApiErrorMessage: true,
 };
 
+// card 5f825506 (item 1) — the SAME shape, but carrying an explicit `timestamp` so a test can place it
+// relative to a `busySinceMs` cutoff. REAL_EXHAUSTION_RECORD above stays untouched (no timestamp) so
+// every pre-existing test keeps exercising the "no timestamp ⇒ cutoff never rejects it" fail-open path
+// implicitly, exactly as it did before this card.
+const exhaustionRecordAt = (isoTimestamp) => ({ ...REAL_EXHAUSTION_RECORD, timestamp: isoTimestamp });
+
 function makeEnv() {
   const dbFile = path.join(os.tmpdir(), `loom-ctxw-ctxexh-${RUN_SUFFIX}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
@@ -54,6 +60,10 @@ function makeEnv() {
   const alive = new Set();
   const enqueued = [];
   const markedExhausted = [];
+  // card 5f825506 (item 1) — per-session turn-start stamp, settable per test via e.busySinceMsById;
+  // defaults to `null` (no cutoff supplied) for every test that doesn't set one, which must stay
+  // byte-identical to the pre-card behaviour.
+  const busySinceMsById = new Map();
   const pty = {
     isAlive: (id) => alive.has(id),
     enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true, queued: false }; },
@@ -63,10 +73,11 @@ function makeEnv() {
       db.setBusy(id, false);
       return true;
     },
+    busySinceMs: (id) => busySinceMsById.get(id) ?? null,
   };
   const watcher = new ContextWatcher({ db, pty, ratio: 0 }); // ratio 0 = no env force override; not this file's concern
   const transcriptFiles = [];
-  return { dbFile, db, projId, agentId, alive, enqueued, markedExhausted, pty, watcher, transcriptFiles };
+  return { dbFile, db, projId, agentId, alive, enqueued, markedExhausted, busySinceMsById, pty, watcher, transcriptFiles };
 }
 
 function seedSession(e, id, { role }) {
@@ -82,10 +93,10 @@ function seedSession(e, id, { role }) {
   return { cwd, engineSessionId };
 }
 
-function writeExhaustionFixture(e, cwd, engineSessionId) {
+function writeExhaustionFixture(e, cwd, engineSessionId, record = REAL_EXHAUSTION_RECORD) {
   const file = engineTranscriptPath(cwd, engineSessionId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(REAL_EXHAUSTION_RECORD)}\n`);
+  fs.writeFileSync(file, `${JSON.stringify(record)}\n`);
   e.transcriptFiles.push(file);
   return file;
 }
@@ -241,7 +252,49 @@ const exhaustedEvents = (e, id) => e.db.listEvents(id).filter((ev) => ev.kind ==
   cleanup(e);
 }
 
+// ============================ (7) card 5f825506 item 1 — a STALE marker (timestamped BEFORE the
+// current turn's own busySinceMs cutoff) is NOT re-marked. Reproduces the race: the DB/in-memory mark
+// was already cleared by a rising edge, but the transcript on disk still ends in the OLD terminal
+// record because the CLI hasn't yet written a superseding one. ============================
+{
+  const e = makeEnv();
+  const m = seedSession(e, "mgr-stale-ignored", { role: "manager" });
+  const staleTs = "2026-11-02T20:50:00.000Z"; // well before NOW (21:00:00) and before the cutoff below
+  writeExhaustionFixture(e, m.cwd, m.engineSessionId, exhaustionRecordAt(staleTs));
+  // The current turn started AFTER the stale record's own timestamp.
+  e.busySinceMsById.set("mgr-stale-ignored", Date.parse("2026-11-02T20:55:00.000Z"));
+
+  e.watcher.tick(NOW);
+
+  check("(7) a stale pre-turn marker is NOT re-marked exhausted", !e.markedExhausted.includes("mgr-stale-ignored"));
+  check("(7) busy stays true (never cleared)", e.db.getSession("mgr-stale-ignored").busy === true);
+  check("(7) contextExhaustedAt stays null", e.db.getSession("mgr-stale-ignored").contextExhaustedAt === null);
+  check("(7) no manager_context_exhausted event is filed", exhaustedEvents(e, "mgr-stale-ignored").length === 0);
+
+  cleanup(e);
+}
+
+// ============================ (8) POSITIVE CONTROL for (7) — a marker timestamped INSIDE the current
+// turn (AFTER busySinceMs) is still detected and marked, proving (7) isn't vacuously rejecting every
+// marker once a cutoff is supplied. ============================
+{
+  const e = makeEnv();
+  const m = seedSession(e, "mgr-current-turn", { role: "manager" });
+  const currentTs = "2026-11-02T20:59:00.000Z"; // after the cutoff below, inside the current turn
+  writeExhaustionFixture(e, m.cwd, m.engineSessionId, exhaustionRecordAt(currentTs));
+  e.busySinceMsById.set("mgr-current-turn", Date.parse("2026-11-02T20:55:00.000Z"));
+
+  e.watcher.tick(NOW);
+
+  check("(8) a genuinely current-turn marker IS still marked exhausted despite a cutoff being supplied",
+    e.markedExhausted.includes("mgr-current-turn"));
+  check("(8) busy is now false", e.db.getSession("mgr-current-turn").busy === false);
+  check("(8) exactly ONE manager_context_exhausted event is filed", exhaustedEvents(e, "mgr-current-turn").length === 1);
+
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ContextWatcher detects the terminal context-exhaustion marker for a busy manager AND a busy platform-Lead (tick-based, never a hook), marks it (busy cleared, contextExhaustedAt+lastError stamped), files ONE manager_context_exhausted event under the session's own id (no owning parent to notify), never queues a nudge, never re-fires on a later tick, leaves an ordinary busy manager's detection untouched, skips an idle manager outright, and the new event kind routes through companion/attention-push.ts's classify() into the SAME \"context-overflow\" class its context_escalated/context_blind_turn siblings already use — no new push channel. Round 2: an ALREADY-exhausted manager (busy already false from a prior mark) skips the recycle-ratio nudge, the context_escalated escalation, AND the emergency interrupt on every later tick despite a stale ctxInputTokens reading sitting well above both thresholds — proven against a negative control at the IDENTICAL reading that DOES trip all of it when never exhausted."
+  ? "\n✅ ALL PASS — ContextWatcher detects the terminal context-exhaustion marker for a busy manager AND a busy platform-Lead (tick-based, never a hook), marks it (busy cleared, contextExhaustedAt+lastError stamped), files ONE manager_context_exhausted event under the session's own id (no owning parent to notify), never queues a nudge, never re-fires on a later tick, leaves an ordinary busy manager's detection untouched, skips an idle manager outright, and the new event kind routes through companion/attention-push.ts's classify() into the SAME \"context-overflow\" class its context_escalated/context_blind_turn siblings already use — no new push channel. Round 2: an ALREADY-exhausted manager (busy already false from a prior mark) skips the recycle-ratio nudge, the context_escalated escalation, AND the emergency interrupt on every later tick despite a stale ctxInputTokens reading sitting well above both thresholds — proven against a negative control at the IDENTICAL reading that DOES trip all of it when never exhausted. Card 5f825506: a marker timestamped BEFORE the supplied busySinceMs cutoff is NOT re-marked (7), proven non-vacuous against a positive control where an IDENTICAL setup with the marker inside the current turn still marks exhausted (8)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -409,8 +409,11 @@ function isGenuineUserTurn(rec: Record<string, unknown>): boolean {
  * the session went on to produce real output and is no longer exhausted.
  * @decision 66ff7321 — a marker is ALSO superseded by a later genuine user turn with no assistant
  * reply yet, or by a compact-boundary/summary record (round-2 fix, record has the real wire shapes).
+ *
+ * @decision 5f825506 — `notBeforeMs` rejects only a record it can PROVE predates the current turn;
+ * any ambiguity (missing/unparseable timestamp, or omitted cutoff) fails open to the old behaviour.
  */
-export function detectContextExhaustionInTail(tailText: string): ContextExhaustionMatch | null {
+export function detectContextExhaustionInTail(tailText: string, notBeforeMs?: number | null): ContextExhaustionMatch | null {
   let latest: ContextExhaustionMatch | null = null;
   for (const rawLine of tailText.split("\n")) {
     const line = rawLine.trim();
@@ -422,8 +425,14 @@ export function detectContextExhaustionInTail(tailText: string): ContextExhausti
       const content = message?.content;
       const firstBlock = Array.isArray(content) ? (content[0] as Record<string, unknown> | undefined) : undefined;
       const text = firstBlock?.type === "text" && typeof firstBlock.text === "string" ? firstBlock.text : undefined;
-      const isMatch = message?.model === "<synthetic>" && rec.isApiErrorMessage === true
+      const shapeMatch = message?.model === "<synthetic>" && rec.isApiErrorMessage === true
         && typeof text === "string" && CONTEXT_EXHAUSTION_TEXT_PATTERNS.some((re) => re.test(text));
+      // @decision 5f825506 — a shape-match that's PROVABLY from before the current turn started is not
+      // a match at all (see this function's own doc above for the fail-open rules on a missing/
+      // unparseable timestamp or an exact tie).
+      const recTs = typeof rec.timestamp === "string" ? Date.parse(rec.timestamp) : NaN;
+      const isStale = shapeMatch && notBeforeMs != null && !Number.isNaN(recTs) && recTs < notBeforeMs;
+      const isMatch = shapeMatch && !isStale;
       latest = isMatch ? { error: typeof rec.error === "string" ? rec.error : undefined, matchedText: text as string } : null;
       continue;
     }

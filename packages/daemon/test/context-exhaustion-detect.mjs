@@ -14,13 +14,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // "latest assistant record wins" rule: a real assistant record landing AFTER the exhaustion marker
 // means the session recovered and is no longer exhausted.
 //
-// ROUND 2 (tests 7-9, CR finding, reviewer 6ba057e4) — a STALE-MARKER false positive: `latest` used to
-// be reset only by a LATER type:"assistant" record, so a marker followed by nothing-but-a-new-user-
-// prompt, or by a real /compact landing (neither of which is ever type:"assistant"), stayed detected
-// forever. The compact_boundary/summary fixtures' real wire shapes are read from the installed CLI
-// binary's own embedded zod schema (never hand-typed, per lesson 288) — see the decision record's
-// round-2 section for the exact strings. Test 9 is the regression guard: the ORIGINAL specimen's own
-// trailing turn_duration/last-prompt/cost-state records must still NOT supersede the marker.
+// ROUND 2 (tests 7-9) — a stale-marker false positive; full mechanism in docs/decisions/66ff7321-*.md's
+// own round-2 section.
+//
+// ROUND 5f825506 (tests below, item 1) — the STALE-TURN cutoff: `notBeforeMs` rejects a shape-matching
+// record whose own `timestamp` predates the caller's cutoff.
+//
+// @decision 5f825506 — see that record for the full mechanism (why `Live.busySince`, not
+// `Session.lastActivity`) and the fail-open rules.
 //
 // Run: 1) build (turbo builds shared first), 2) node packages/daemon/test/context-exhaustion-detect.mjs
 import { detectContextExhaustionInTail } from "../dist/pty/claude-transcript.js";
@@ -246,7 +247,65 @@ const REAL_MODEL_ASSISTANT_RECORD = (text) => ({
   check("(10c) a local-command-output system record does NOT supersede the marker — still detected", result !== null);
 }
 
+// ===== (11) card 5f825506 item 1: a notBeforeMs cutoff AFTER the record's own timestamp rejects a
+// shape-matching marker as STALE (predates the current turn) — the fix's whole point. =====
+{
+  const recTs = Date.parse("2026-11-02T20:38:15.497Z"); // REAL_EXHAUSTION_RECORD's own timestamp
+  const tail = jsonl(REAL_EXHAUSTION_RECORD);
+  check("(11) a cutoff strictly AFTER the record's timestamp rejects it as stale (not detected)",
+    detectContextExhaustionInTail(tail, recTs + 1) === null);
+}
+
+// ===== (12) POSITIVE CONTROL for (11): a cutoff strictly BEFORE the record's own timestamp (the
+// genuinely-current-turn case) is STILL detected — proves (11) isn't vacuously rejecting everything. =====
+{
+  const recTs = Date.parse("2026-11-02T20:38:15.497Z");
+  const tail = jsonl(REAL_EXHAUSTION_RECORD);
+  const result = detectContextExhaustionInTail(tail, recTs - 1);
+  check("(12) a cutoff BEFORE the record's timestamp (current-turn exhaustion) is still detected", result !== null);
+  check("(12) matchedText is still the exact assistant text", result?.matchedText === "Prompt is too long");
+}
+
+// ===== (13) EQUAL-TIMESTAMP TIE: a cutoff EXACTLY equal to the record's own timestamp rounds toward
+// "still current" (NOT stale) — the deliberate direction documented on
+// `detectContextExhaustionInTail`'s own doc.
+//
+// @decision 5f825506 — see that record for why a tie rounds this way.
+// =====
+{
+  const recTs = Date.parse("2026-11-02T20:38:15.497Z");
+  const tail = jsonl(REAL_EXHAUSTION_RECORD);
+  check("(13) an EXACT tie (cutoff === record timestamp) is treated as still-current, not stale",
+    detectContextExhaustionInTail(tail, recTs) !== null);
+}
+
+// ===== (14) NO CUTOFF (both omitted and explicit null/undefined) is BYTE-IDENTICAL to the pre-card
+// behaviour — the cutoff is purely additive. =====
+{
+  const tail = jsonl(REAL_EXHAUSTION_RECORD);
+  check("(14a) omitted notBeforeMs ⇒ still detected (byte-identical to the old behaviour)",
+    detectContextExhaustionInTail(tail) !== null);
+  check("(14b) explicit null notBeforeMs ⇒ still detected (same as omitted)",
+    detectContextExhaustionInTail(tail, null) !== null);
+  check("(14c) explicit undefined notBeforeMs ⇒ still detected (same as omitted)",
+    detectContextExhaustionInTail(tail, undefined) !== null);
+}
+
+// ===== (15) FAIL-OPEN on an unparseable/missing record timestamp: a cutoff is supplied, but the
+// matching record itself carries no usable `timestamp` field — ambiguity defers to the old (detecting)
+// behaviour rather than ever silently dropping a real exhaustion it can't actually date. =====
+{
+  const noTimestampRecord = { ...REAL_EXHAUSTION_RECORD };
+  delete noTimestampRecord.timestamp;
+  const tail = jsonl(noTimestampRecord);
+  // An arbitrarily FAR-FUTURE cutoff — if the feature mistakenly treated "no timestamp" as "anything
+  // before now", this would be the case most likely to expose it.
+  const farFutureCutoff = Date.parse("2099-01-01T00:00:00.000Z");
+  const result = detectContextExhaustionInTail(tail, farFutureCutoff);
+  check("(15) a record with no parseable timestamp is NOT rejected as stale even against a far-future cutoff (fails open)", result !== null);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — detectContextExhaustionInTail keys on the record SHAPE (type:\"assistant\" + model:\"<synthetic>\" + isApiErrorMessage:true + a named text match), correctly rejecting the tool_result/prose/user-message false-positive classes and correctly tracking recovery (a later real assistant record) and non-recovery (exhaustion after real output) — both orderings proven, not just one; round 2 adds: a genuine new user prompt with no assistant reply yet supersedes a stale marker (a tool_result-only record does not), a real /compact landing (compact_boundary + summary, together or alone) supersedes it too, and the original specimen's own trailing system/last-prompt/cost-state records still do NOT — still detected exactly as before; round 3 adds: a real type:\"user\",isMeta:true record (the CLI's own caveat content) does NOT supersede it either (proven against a positive control that the same content without the flag DOES), and a local command's own <local-command-stdout> output (type:\"system\",subtype:\"local_command\") does not supersede it."
+  ? "\n✅ ALL PASS — detectContextExhaustionInTail keys on the record SHAPE (type:\"assistant\" + model:\"<synthetic>\" + isApiErrorMessage:true + a named text match), correctly rejecting the tool_result/prose/user-message false-positive classes and correctly tracking recovery (a later real assistant record) and non-recovery (exhaustion after real output) — both orderings proven, not just one; round 2 adds: a genuine new user prompt with no assistant reply yet supersedes a stale marker (a tool_result-only record does not), a real /compact landing (compact_boundary + summary, together or alone) supersedes it too, and the original specimen's own trailing system/last-prompt/cost-state records still do NOT — still detected exactly as before; round 3 adds: a real type:\"user\",isMeta:true record (the CLI's own caveat content) does NOT supersede it either (proven against a positive control that the same content without the flag DOES), and a local command's own <local-command-stdout> output (type:\"system\",subtype:\"local_command\") does not supersede it; card 5f825506 adds the notBeforeMs stale-turn cutoff — a record provably predating the cutoff is rejected (11), a genuinely current-turn record at the identical shape is still detected (12, the positive control proving the fail-open case stays closed), an exact timestamp tie rounds toward still-current (13), an omitted/null/undefined cutoff is byte-identical to the old behaviour (14), and a record with no parseable timestamp fails OPEN even against a far-future cutoff (15)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

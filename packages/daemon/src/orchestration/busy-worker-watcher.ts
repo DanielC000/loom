@@ -13,6 +13,9 @@ export interface BusyWorkerPty {
   /** Card 66ff7321 — mark a session context-exhausted (holds delivery, clears busy). See
    *  PtyHost.markContextExhausted's own doc. Returns false when there's no live claude session to mark. */
   markContextExhausted(sessionId: string): boolean;
+  /** @decision 5f825506 — REQUIRED (round 2) so a `PtyHost.busySinceMs` rename fails to compile
+   *  rather than silently failing open; still called as `pty.busySinceMs?.(id) ?? null`. */
+  busySinceMs(sessionId: string): number | null;
 }
 
 /** Total-elapsed bound for {@link tryReadLastCommitSummary} — see that function's own doc. */
@@ -115,7 +118,7 @@ export class BusyWorkerWatcher {
       // the ONLY place it can be caught. Claude-only: a codex transcript is a different wire format
       // entirely and would simply never match, but skip the wasted read outright.
       if (w.harness !== "codex" && w.engineSessionId) {
-        const exhaustion = checkContextExhaustion(w.cwd, w.engineSessionId, w.harness);
+        const exhaustion = checkContextExhaustion(w.cwd, w.engineSessionId, w.harness, pty.busySinceMs?.(w.id) ?? null);
         if (exhaustion) {
           const marked = pty.markContextExhausted(w.id);
           if (marked) {

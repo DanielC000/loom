@@ -489,7 +489,74 @@ const UNDER_WARN_CTX = 500_000; // 50%
   cleanup(e);
 }
 
+// (20) card 5f825506 item 3 — the read-only WORKER-LOOP check `isWorkerContextExhaustedUnmarked`
+// (context-watcher.ts ~:424) must ALSO honor the `busySinceMs` stale-marker cutoff, not just the
+// manager/platform path (context-watcher-context-exhausted.mjs's own tests (7)/(8)). A marker
+// timestamped BEFORE the worker's own current-turn start must NOT be read as exhaustion — the loop
+// proceeds past its own `continue` and Trigger D (interrupt) fires normally against a genuinely
+// over-floor reading. RED via the mutant "pass null instead of the real busySinceMs(w.id) at the call
+// site": with `notBeforeMs` forced null, `detectContextExhaustionInTail`'s own `isStale` is
+// unconditionally false, so this SAME stale record would be wrongly read as current exhaustion and
+// Trigger D would never fire — exactly what this test's positive assertion would then catch.
+{
+  const e = makeEnv({ projectConfig: { orchestration: { workerContextInterruptRatio: 0.85, workerContextWarnRatio: 0 } } });
+  seedManager(e, "mgr-20");
+  seedWorker(e, "wkr-20", "mgr-20", { busy: true, ctx: OVER_BOTH_CTX });
+
+  const turnStartMs20 = Date.now(); // the worker's own current-turn start (what busySinceMs would report)
+  const staleRecordTs20 = new Date(turnStartMs20 - 60_000).toISOString(); // a minute BEFORE this turn started
+
+  const transcriptFile20 = engineTranscriptPath(e.projId, "eng-wkr-20");
+  fs.mkdirSync(path.dirname(transcriptFile20), { recursive: true });
+  fs.writeFileSync(transcriptFile20, `${JSON.stringify({
+    type: "assistant",
+    message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "Prompt is too long" }] },
+    error: "invalid_request", isApiErrorMessage: true, timestamp: staleRecordTs20,
+  })}\n`);
+  e.pty.busySinceMs = (id) => (id === "wkr-20" ? turnStartMs20 : null);
+
+  try {
+    e.watcher.tick();
+    check("(20) a STALE exhaustion marker (predates busySinceMs) is NOT read as current exhaustion by isWorkerContextExhaustedUnmarked — Trigger D fires normally against the over-floor reading",
+      interruptEvents(e, "wkr-20").length === 1 && e.interrupts.length === 1);
+  } finally {
+    try { fs.rmSync(path.dirname(transcriptFile20), { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  cleanup(e);
+}
+
+// (21) POSITIVE CONTROL for (20) — proves (20)'s own check is non-vacuous (it can also correctly say
+// "yes, exhausted"). The IDENTICAL setup, except the marker's own timestamp is INSIDE the current turn
+// (strictly after busySinceMs) — isWorkerContextExhaustedUnmarked must now read it as exhaustion and
+// `continue`, suppressing Trigger D entirely despite the SAME over-floor reading that fired it in (20).
+{
+  const e = makeEnv({ projectConfig: { orchestration: { workerContextInterruptRatio: 0.85, workerContextWarnRatio: 0 } } });
+  seedManager(e, "mgr-21");
+  seedWorker(e, "wkr-21", "mgr-21", { busy: true, ctx: OVER_BOTH_CTX });
+
+  const turnStartMs21 = Date.now();
+  const freshRecordTs21 = new Date(turnStartMs21 + 5_000).toISOString(); // 5s INTO this turn
+
+  const transcriptFile21 = engineTranscriptPath(e.projId, "eng-wkr-21");
+  fs.mkdirSync(path.dirname(transcriptFile21), { recursive: true });
+  fs.writeFileSync(transcriptFile21, `${JSON.stringify({
+    type: "assistant",
+    message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "Prompt is too long" }] },
+    error: "invalid_request", isApiErrorMessage: true, timestamp: freshRecordTs21,
+  })}\n`);
+  e.pty.busySinceMs = (id) => (id === "wkr-21" ? turnStartMs21 : null);
+
+  try {
+    e.watcher.tick();
+    check("(21) positive control: a FRESH exhaustion marker (inside the current turn) IS read as current exhaustion — Trigger D is correctly suppressed despite the identical over-floor reading that fired in (20)",
+      interruptEvents(e, "wkr-21").length === 0 && e.interrupts.length === 0);
+  } finally {
+    try { fs.rmSync(path.dirname(transcriptFile21), { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ContextWatcher's worker context WARN notice (Trigger C) fires once per worker session id, pushed to the owning manager only, deduped across sustained high ctx, disabled/orphan/codex-skipped correctly; the worker context INTERRUPT (Trigger D) fires once per worker session id ONLY while the worker is busy and not rate-limited, Esc-interrupts the worker directly, tells the owning manager about it, dedupes identically to the manager's own emergency interrupt, and a refusal (e.g. gate-in-flight) records nothing so the next tick retries cleanly. CR round 2: an already-exhausted worker fires NEITHER trigger (reused checkContextExhaustion/isAlreadyContextExhausted, same as the manager/platform loops), a recovery turn's STALE pre-turn reading does NOT fire Trigger D, and a FRESH in-turn reading still does. CR round 3: a REAL ContextWatcher tick followed by a REAL BusyWorkerWatcher tick on the SAME db proves the worker loop's exhaustion DETECT path is now read-only — zero manager_context_exhausted events, exactly one worker_context_exhausted event, and the manager notice delivered."
+  ? "\n✅ ALL PASS — ContextWatcher's worker context WARN notice (Trigger C) fires once per worker session id, pushed to the owning manager only, deduped across sustained high ctx, disabled/orphan/codex-skipped correctly; the worker context INTERRUPT (Trigger D) fires once per worker session id ONLY while the worker is busy and not rate-limited, Esc-interrupts the worker directly, tells the owning manager about it, dedupes identically to the manager's own emergency interrupt, and a refusal (e.g. gate-in-flight) records nothing so the next tick retries cleanly. CR round 2: an already-exhausted worker fires NEITHER trigger (reused checkContextExhaustion/isAlreadyContextExhausted, same as the manager/platform loops), a recovery turn's STALE pre-turn reading does NOT fire Trigger D, and a FRESH in-turn reading still does. CR round 3: a REAL ContextWatcher tick followed by a REAL BusyWorkerWatcher tick on the SAME db proves the worker loop's exhaustion DETECT path is now read-only — zero manager_context_exhausted events, exactly one worker_context_exhausted event, and the manager notice delivered. Card 5f825506 item 3: the read-only isWorkerContextExhaustedUnmarked check also honors the busySinceMs stale-marker cutoff — a marker predating the worker's own current turn is ignored (Trigger D fires normally, 20), and the identical setup with a marker INSIDE the current turn correctly suppresses it instead (21, the non-vacuous positive control)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
