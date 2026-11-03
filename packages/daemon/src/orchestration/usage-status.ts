@@ -205,15 +205,25 @@ function parseExtra(raw: unknown): UsageExtra | null {
 }
 
 /**
- * Parse the windows + extra-usage out of a flat source object — `five_hour`/`seven_day` are required
- * (their absence/shape-drift → `available:false`); the per-model + extra fields are optional (null when
+ * Parse the windows + extra-usage out of a flat source object. `seven_day` is required (its
+ * absence/shape-drift → `available:false`); the per-model + extra fields are optional (null when
  * absent). Shared by both wire shapes {@link parseUsagePayload} accepts: the legacy top-level object, and
  * CLI 2.1.317's `rate_limits` sub-object (where `extra_usage` also lives, per that schema).
+ *
+ * `five_hour` is DIFFERENT from the rest, per card 2ed68346 (the confirmed real wire: see
+ * docs/decisions/26b3977f-usage-endpoint-shape-still-unconfirmed.md's follow-up): an explicit `null` or
+ * absent `five_hour` is a legitimate "no 5h window to report" state, not schema drift — the account's
+ * seven_day data is still usable, so this must stay `available:true` with `fiveHour: null`. A PRESENT
+ * but unparseable `five_hour` (some object that isn't a valid window) is still genuine schema drift,
+ * since that means the server IS reporting something here Loom doesn't understand.
  */
 function parseWindowsFrom(src: Record<string, unknown>, fetchedAt: string): UsageLimitsStatus {
-  const fiveHour = parseWindow(src.five_hour);
+  const fiveHourRaw = src.five_hour;
+  const fiveHourAbsent = fiveHourRaw === null || fiveHourRaw === undefined;
+  const fiveHour = fiveHourAbsent ? null : parseWindow(fiveHourRaw);
+  if (!fiveHourAbsent && fiveHour === null) return unavailable("usage endpoint schema changed", fetchedAt);
   const sevenDay = parseWindow(src.seven_day);
-  if (!fiveHour || !sevenDay) return unavailable("usage endpoint schema changed", fetchedAt);
+  if (!sevenDay) return unavailable("usage endpoint schema changed", fetchedAt);
   return {
     available: true,
     fetchedAt,

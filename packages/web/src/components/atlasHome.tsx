@@ -746,8 +746,10 @@ export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
   const t = (u: number): Tone => (u >= 95 ? "red" : u >= 80 ? "amber" : "phosphor");
   return (
     <>
-      <MeterRow label="5h session" ratio={usage.fiveHour.utilization / 100}
-        value={`${Math.round(usage.fiveHour.utilization)}%`} tone={t(usage.fiveHour.utilization)} />
+      {usage.fiveHour && (
+        <MeterRow label="5h session" ratio={usage.fiveHour.utilization / 100}
+          value={`${Math.round(usage.fiveHour.utilization)}%`} tone={t(usage.fiveHour.utilization)} />
+      )}
       <MeterRow label="7d weekly" ratio={usage.sevenDay.utilization / 100}
         value={`${Math.round(usage.sevenDay.utilization)}%`} tone={t(usage.sevenDay.utilization)} />
       {usage.sevenDayOpus && (
@@ -758,7 +760,9 @@ export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
         <MeterRow label="7d sonnet" ratio={usage.sevenDaySonnet.utilization / 100}
           value={`${Math.round(usage.sevenDaySonnet.utilization)}%`} tone={t(usage.sevenDaySonnet.utilization)} />
       )}
-      <BandFoot>5h resets {relativeResets(usage.fiveHour.resetsAt)}.</BandFoot>
+      {/* card 2ed68346: five_hour can be a confirmed-legitimate null on the real wire — omit the
+          reset line with it rather than crash or show a stale/placeholder countdown. */}
+      {usage.fiveHour && <BandFoot>5h resets {relativeResets(usage.fiveHour.resetsAt)}.</BandFoot>}
     </>
   );
 }

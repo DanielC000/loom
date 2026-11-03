@@ -140,7 +140,11 @@ export type UsageLimitsStatus =
   | {
       available: true;
       fetchedAt: string; // ISO — when this snapshot was fetched
-      fiveHour: UsageWindow;
+      // card 2ed68346: the real wire response has carried an explicit `five_hour: null` (confirmed via
+      // the schema-changed warn's structural-shape log, card 26b3977f) — a legitimate "no 5h window to
+      // show" state, distinct from a malformed/unrecognized value, which still degrades to
+      // `available:false`. Every consumer must handle null here.
+      fiveHour: UsageWindow | null;
       sevenDay: UsageWindow;
       sevenDayOpus: UsageWindow | null;
       sevenDaySonnet: UsageWindow | null;

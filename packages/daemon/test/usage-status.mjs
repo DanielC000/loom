@@ -32,6 +32,30 @@ const LIVE = {
   extra_usage: { is_enabled: true, monthly_limit: 3500, used_credits: 0, utilization: null },
 };
 
+// The CONFIRMED real wire shape (card 2ed68346) — read off the live daemon log's own extended warn
+// (card 26b3977f) after the 2026-11-03T18:24Z restart: `five_hour: null, seven_day: object{utilization:
+// number, resets_at:string, limit_dollars:object, used_dollars:object, remaining_dollars:object,
+// locked_reason:object}, limits: array(len=2) item0=object{kind:string, group:string, percent:number,
+// severity:string, resets_at:string, scope:object, is_active:boolean}`. This is EVIDENCE, not inference —
+// the one difference from every other fixture in this file. `limit_dollars`/`used_dollars`/
+// `remaining_dollars`/`locked_reason` and the `limits` rows' own field VALUES are unconfirmed (the warn
+// logs structural shape only, never values) — modeled here with placeholder values of the right TYPE.
+const CONFIRMED_WIRE = {
+  five_hour: null,
+  seven_day: {
+    utilization: 62,
+    resets_at: "2026-11-03T19:53:57+00:00",
+    limit_dollars: { amount: 140 },
+    used_dollars: { amount: 86.8 },
+    remaining_dollars: { amount: 53.2 },
+    locked_reason: null,
+  },
+  limits: [
+    { kind: "weekly_all", group: "weekly", percent: 62, severity: "normal", resets_at: "2026-11-03T19:53:57+00:00", scope: null, is_active: true },
+    { kind: "session", group: "session", percent: 0, severity: "normal", resets_at: null, scope: null, is_active: false },
+  ],
+};
+
 // The CLI 2.1.317 shape (card 9db2ad8d — see docs/decisions/9db2ad8d-usage-endpoint-schema-change.md):
 // windows + extra_usage move under `rate_limits`, gated by `rate_limits_available`. Reconstructed from
 // that CLI version's own embedded zod schema (binary strings, never executed), not a captured live body.
@@ -79,8 +103,10 @@ const LIVE_NESTED = {
   check("parse: fetchedAt preserved", s.available && s.fetchedAt === at);
 
   check("parse: non-object → unavailable (shape)", parseUsagePayload(null, at).available === false);
-  check("parse: missing five_hour → unavailable (schema drift)",
-    parseUsagePayload({ seven_day: { utilization: 1, resets_at: null } }, at).available === false);
+  // "missing five_hour → schema drift" used to be asserted here. Card 2ed68346 deliberately changed
+  // that: a missing/null five_hour is now a confirmed-legitimate state, not drift — see the
+  // "five_hour key missing entirely" and "confirmed wire" checks below, which assert the new behavior
+  // on this exact shape.
   const drift = parseUsagePayload({ five_hour: { utilization: "nope" }, seven_day: { utilization: 1, resets_at: null } }, at);
   check("parse: non-numeric utilization → unavailable", drift.available === false);
 
@@ -101,6 +127,25 @@ const LIVE_NESTED = {
   // ── genuinely unrecognized shape (neither flat nor nested windows present) → "schema changed" ──
   const unknown = parseUsagePayload({ totally_unknown_field: 1, another_one: "x" }, at);
   check("parse: unrecognized shape → unavailable, reason \"usage endpoint schema changed\"", unknown.available === false && unknown.reason === "usage endpoint schema changed");
+
+  // ── CONFIRMED real wire shape (card 2ed68346): five_hour:null is NOT schema drift ──
+  const confirmed = parseUsagePayload(CONFIRMED_WIRE, at);
+  check("parse: confirmed wire (five_hour:null) → available:true, NOT \"schema changed\"", confirmed.available === true);
+  check("parse: confirmed wire → fiveHour is explicitly null (not undefined, not an error)", confirmed.available && confirmed.fiveHour === null);
+  check("parse: confirmed wire → sevenDay still parses despite the extra dollar/locked_reason fields", confirmed.available && confirmed.sevenDay.utilization === 62 && confirmed.sevenDay.resetsAt === "2026-11-03T19:53:57+00:00");
+
+  // ── five_hour ABSENT (key missing entirely, not explicit null) must read the same way ──
+  const noKeyAtAll = parseUsagePayload({ seven_day: CONFIRMED_WIRE.seven_day }, at);
+  check("parse: five_hour key missing entirely → same as explicit null (available:true, fiveHour:null)", noKeyAtAll.available === true && noKeyAtAll.available && noKeyAtAll.fiveHour === null);
+
+  // ── five_hour PRESENT but malformed is STILL genuine schema drift — the null-tolerance must not ──
+  // swallow a real parse failure for an object the server actually sent.
+  const fiveHourMalformed = parseUsagePayload({ five_hour: { not_utilization: 1 }, seven_day: CONFIRMED_WIRE.seven_day }, at);
+  check("parse: five_hour PRESENT but unparseable → still \"schema changed\" (distinct from null)", fiveHourMalformed.available === false && fiveHourMalformed.reason === "usage endpoint schema changed");
+
+  // ── seven_day missing/invalid is STILL required — five_hour's null-tolerance is one-sided ──
+  const noSevenDay = parseUsagePayload({ five_hour: null }, at);
+  check("parse: seven_day missing (even with five_hour legitimately null) → still \"schema changed\"", noSevenDay.available === false && noSevenDay.reason === "usage endpoint schema changed");
 }
 
 // ── poller graceful failure: no token / 401 / network throw / 200-success ───────

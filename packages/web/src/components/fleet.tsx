@@ -103,7 +103,7 @@ export function PlanUsageStrip() {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
       <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>plan usage</span>
-      <UsageGauge label="5h session" window={data.fiveHour} />
+      {data.fiveHour && <UsageGauge label="5h session" window={data.fiveHour} />}
       <UsageGauge label="7d weekly" window={data.sevenDay} />
       {data.sevenDayOpus && <UsageGauge label="7d opus" window={data.sevenDayOpus} />}
       {data.sevenDaySonnet && <UsageGauge label="7d sonnet" window={data.sevenDaySonnet} />}
