@@ -461,8 +461,12 @@ const UNDER_WARN_CTX = 500_000; // 50%
   try {
     e.watcher.tick(); // the REAL ContextWatcher — must detect-and-skip, never mark or file anything
     check("(19) ContextWatcher's OWN tick never marks the worker (read-only detect-and-skip)", !markedByEither.includes("wkr-19"));
+    // card 4d0285ec item 3 — this must query listEvents (filters on manager_session_id), NOT
+    // listEventsForWorker (filters on worker_session_id): the round-3 regression's own buggy write set
+    // managerSessionId to the WORKER's own id but never set workerSessionId at all, so
+    // listEventsForWorker("wkr-19") would read ZERO even with the bug present — vacuous, passing in RED.
     check("(19) ContextWatcher's OWN tick never files a manager_context_exhausted event under the worker's id",
-      e.db.listEventsForWorker("wkr-19").filter((ev) => ev.kind === "manager_context_exhausted").length === 0);
+      e.db.listEvents("wkr-19").filter((ev) => ev.kind === "manager_context_exhausted").length === 0);
     check("(19) ContextWatcher's OWN tick leaves busy UNCHANGED (still true — it never touched the row)", e.db.getSession("wkr-19").busy === true);
     check("(19) ContextWatcher's OWN tick never queued a notice for this worker's exhaustion", e.enqueued.filter((m) => m.id === "mgr-19").length === 0);
 
@@ -474,9 +478,10 @@ const UNDER_WARN_CTX = 500_000; // 50%
     const workerExhaustedEvents = e.db.listEventsForWorker("wkr-19").filter((ev) => ev.kind === "worker_context_exhausted");
     check("(19) exactly ONE worker_context_exhausted event (never manager_context_exhausted) for this worker",
       workerExhaustedEvents.length === 1 && workerExhaustedEvents[0].managerSessionId === "mgr-19" && workerExhaustedEvents[0].workerSessionId === "wkr-19");
-    check("(19) ZERO manager_context_exhausted events exist for this worker's session id",
-      e.db.listEventsForWorker("wkr-19").filter((ev) => ev.kind === "manager_context_exhausted").length === 0);
-    check("(19) ZERO manager_context_exhausted events exist in the WHOLE db, scoped to this run's worker id",
+    // card 4d0285ec item 3 — dropped the duplicate listEventsForWorker-based check that used to sit here
+    // (same vacuous-query defect as the one fixed above, and redundant with the check below once fixed:
+    // nothing between the two checkpoints could ever write manager_context_exhausted under "wkr-19").
+    check("(19) ZERO manager_context_exhausted events were ever filed with managerSessionId set to the worker's OWN id (listEvents filters on manager_session_id — exactly what the round-3 regression mis-filed under)",
       e.db.listEvents("wkr-19").filter((ev) => ev.kind === "manager_context_exhausted").length === 0);
 
     await waitForCondition(() => e.enqueued.some((m) => m.id === "mgr-19"));
@@ -485,6 +490,46 @@ const UNDER_WARN_CTX = 500_000; // 50%
       !!notice && notice.text.startsWith("[loom:worker-context-exhausted]") && /worker_recycle/.test(notice.text));
   } finally {
     try { fs.rmSync(path.dirname(transcriptFile), { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  cleanup(e);
+}
+
+// (19b) card 4d0285ec item 1 — the worker loop's read-only skip
+// `if (this.isWorkerContextExhaustedUnmarked(pty, w)) continue;` (context-watcher.ts, right before
+// Triggers C/D) had NO behavioural test: scenario (19) above seeds a worker with ctxInputTokens null,
+// so the PRE-EXISTING null-ctx `continue` just below it skips the worker regardless — deleting the new
+// skip line still leaves (19) green. In production an exhausted worker usually sits at HIGH ctx, not
+// null; without the skip, ContextWatcher (which ticks first) would fire Trigger D (an Esc into a dead
+// engine, plus a misleading manager notice) or Trigger C. This scenario seeds that production shape —
+// busy, over BOTH floors, a real exhaustion transcript marker timestamped INSIDE the current turn (same
+// busySinceMs-cutoff setup as (21)'s positive control) — and asserts ContextWatcher's OWN tick fires
+// NEITHER trigger. RED proof: an API-preserving mutant that removes only the skip's `continue` (the
+// isWorkerContextExhaustedUnmarked call itself still runs) must make this scenario fail.
+{
+  const e = makeEnv({ projectConfig: { orchestration: { workerContextWarnRatio: 0.60, workerContextInterruptRatio: 0.85 } } });
+  seedManager(e, "mgr-19b");
+  seedWorker(e, "wkr-19b", "mgr-19b", { busy: true, ctx: OVER_BOTH_CTX }); // seedWorker's default ctxUpdatedAt is +1h fresh
+
+  const turnStartMs19b = Date.now(); // the worker's own current-turn start (what busySinceMs reports)
+  const freshMarkerTs19b = new Date(turnStartMs19b + 5_000).toISOString(); // 5s INTO this turn — not stale
+  const transcriptFile19b = engineTranscriptPath(e.projId, "eng-wkr-19b");
+  fs.mkdirSync(path.dirname(transcriptFile19b), { recursive: true });
+  fs.writeFileSync(transcriptFile19b, `${JSON.stringify({
+    type: "assistant",
+    message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "Prompt is too long" }] },
+    error: "invalid_request", isApiErrorMessage: true, timestamp: freshMarkerTs19b,
+  })}\n`);
+  e.pty.busySinceMs = (id) => (id === "wkr-19b" ? turnStartMs19b : null);
+
+  try {
+    e.watcher.tick();
+    check("(19b) worker over BOTH floors + a real in-turn exhaustion marker → NO worker_context_interrupt (Trigger D skipped)",
+      interruptEvents(e, "wkr-19b").length === 0 && e.interrupts.length === 0);
+    check("(19b) ...and NO worker_context_high either (Trigger C skipped too — the exhaustion skip precedes both)",
+      warnEvents(e, "wkr-19b").length === 0);
+    check("(19b) neither trigger's notice reached the owning manager", e.enqueued.filter((m) => m.id === "mgr-19b").length === 0);
+  } finally {
+    try { fs.rmSync(path.dirname(transcriptFile19b), { recursive: true, force: true }); } catch { /* best-effort */ }
   }
   cleanup(e);
 }
@@ -557,6 +602,6 @@ const UNDER_WARN_CTX = 500_000; // 50%
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ContextWatcher's worker context WARN notice (Trigger C) fires once per worker session id, pushed to the owning manager only, deduped across sustained high ctx, disabled/orphan/codex-skipped correctly; the worker context INTERRUPT (Trigger D) fires once per worker session id ONLY while the worker is busy and not rate-limited, Esc-interrupts the worker directly, tells the owning manager about it, dedupes identically to the manager's own emergency interrupt, and a refusal (e.g. gate-in-flight) records nothing so the next tick retries cleanly. CR round 2: an already-exhausted worker fires NEITHER trigger (reused checkContextExhaustion/isAlreadyContextExhausted, same as the manager/platform loops), a recovery turn's STALE pre-turn reading does NOT fire Trigger D, and a FRESH in-turn reading still does. CR round 3: a REAL ContextWatcher tick followed by a REAL BusyWorkerWatcher tick on the SAME db proves the worker loop's exhaustion DETECT path is now read-only — zero manager_context_exhausted events, exactly one worker_context_exhausted event, and the manager notice delivered. Card 5f825506 item 3: the read-only isWorkerContextExhaustedUnmarked check also honors the busySinceMs stale-marker cutoff — a marker predating the worker's own current turn is ignored (Trigger D fires normally, 20), and the identical setup with a marker INSIDE the current turn correctly suppresses it instead (21, the non-vacuous positive control)."
+  ? "\n✅ ALL PASS — ContextWatcher's worker context WARN notice (Trigger C) fires once per worker session id, pushed to the owning manager only, deduped across sustained high ctx, disabled/orphan/codex-skipped correctly; the worker context INTERRUPT (Trigger D) fires once per worker session id ONLY while the worker is busy and not rate-limited, Esc-interrupts the worker directly, tells the owning manager about it, dedupes identically to the manager's own emergency interrupt, and a refusal (e.g. gate-in-flight) records nothing so the next tick retries cleanly. CR round 2: an already-exhausted worker fires NEITHER trigger (reused checkContextExhaustion/isAlreadyContextExhausted, same as the manager/platform loops), a recovery turn's STALE pre-turn reading does NOT fire Trigger D, and a FRESH in-turn reading still does. CR round 3: a REAL ContextWatcher tick followed by a REAL BusyWorkerWatcher tick on the SAME db proves the worker loop's exhaustion DETECT path is now read-only — zero manager_context_exhausted events, exactly one worker_context_exhausted event, and the manager notice delivered. Card 5f825506 item 3: the read-only isWorkerContextExhaustedUnmarked check also honors the busySinceMs stale-marker cutoff — a marker predating the worker's own current turn is ignored (Trigger D fires normally, 20), and the identical setup with a marker INSIDE the current turn correctly suppresses it instead (21, the non-vacuous positive control). Card 4d0285ec: the worker loop's exhaustion skip itself (19b) is now behaviourally pinned against a production-shaped (high-ctx, not null-ctx) worker — it suppresses BOTH Trigger C and Trigger D, never just whichever one happened to already be blocked by a different guard."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

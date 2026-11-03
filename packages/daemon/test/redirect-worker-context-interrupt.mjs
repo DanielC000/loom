@@ -8,11 +8,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //   (A) hasLiveGateForSession REFUSAL — a real, live gate op (admitted via `runExclusive`, a "running"
 //       state) for the worker's own session id makes redirectWorkerForContextInterrupt return
 //       fired:false, reason:"gate-in-flight", WITHOUT ever calling deliverRedirect (no interrupt, no
-//       redirect_worker event); once the gate settles, the SAME call fires normally. The OTHER THREE live
-//       states `hasLiveGateForSession` also covers (CR round 2 widened it to four independent reads — see
-//       that method's own doc) are exercised separately below: scenario (C) the genuinely QUEUED gate
-//       state, (D) the squash-only state, (E) the repo-guard-only state, and (F, CR round 3) the
-//       pending-merge-call pre-admission state (`peekPendingMerge(...)?.state === "running"`).
+//       redirect_worker event); once the gate settles, the SAME call fires normally. `hasLiveGateForSession`
+//       reads FOUR independent sources (CR round 2 widened it from two — see that method's own doc): the
+//       cap-admitted registry (`snapshot()`), which covers BOTH the RUNNING phase scenario (A) exercises
+//       above and the genuinely QUEUED phase scenario (C) below — one read, two phases, not two of the
+//       four; the mid-squash holder map (`squashOnlySnapshot()`, scenario (D)); the repo-guard-only map
+//       (`repoGuardOnlySnapshot()`, scenario (E)); and (CR round 3) the pending-merge-call pre-admission
+//       state (`peekPendingMerge(...)?.state === "running"`, scenario (F)) — via `PendingOpRegistry`,
+//       never touching `GateSemaphore` at all.
 //   (B) supersedeQueue:false + headInsert:true (CR round 2) — a worker's PRE-EXISTING queued MANAGER
 //       direction SURVIVES this interrupt (unlike redirectWorker's own default, which supersedes it) AND
 //       drains in the CORRECT ORDER: the interrupt's own text delivers FIRST, as its own turn (headInsert

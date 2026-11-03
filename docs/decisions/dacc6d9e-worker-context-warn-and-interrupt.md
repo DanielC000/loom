@@ -184,15 +184,19 @@ close it.
    later) is now the ONLY place a worker's exhaustion is ever marked or notified, closing the race by
    removing one of its two competitors rather than trying to referee it.
 
-2. **Test.** `context-watcher-worker-exhaustion-busy-worker-watcher.mjs`-shaped coverage is exercised
-   through the existing `context-watcher-context-exhausted.mjs` / `busy-worker-watcher-context-exhausted.mjs`
-   pair (see this card's own DoD) — a real `ContextWatcher.tick()` followed by a real
-   `BusyWorkerWatcher.tick()` against one `Db`, with an exhausted-worker transcript fixture, asserting
-   exactly one `worker_context_exhausted` event, the manager notice delivered, and ZERO
-   `manager_context_exhausted` events for the worker's own session id. Shown RED against round 2's own
-   287f1b44 (the pre-round-3 worker loop) via `negative-control --ref 287f1b44` on `context-watcher.ts` —
-   failing on the ASSERTION (zero `manager_context_exhausted` events expected, one found), never on a
-   missing export, per lesson 298's own mutant-not-structural-failure bar.
+2. **Test.** The real coverage is `context-watcher-worker-ratios.mjs` scenario (19) — a real
+   `ContextWatcher.tick()` followed by a real `BusyWorkerWatcher.tick()` against ONE `Db`/pty pair, with a
+   real exhausted-worker transcript fixture, asserting exactly one `worker_context_exhausted` event, the
+   manager notice delivered, and ZERO `manager_context_exhausted` events for the worker's own session id.
+   `context-watcher-context-exhausted.mjs` and `busy-worker-watcher-context-exhausted.mjs` are each the
+   manager/platform-side and worker-side exhaustion detector's OWN single-watcher coverage respectively —
+   neither drives both watchers' `tick()` in sequence against the same `Db`, so neither is this card's
+   regression test. (The file this bullet originally named,
+   `context-watcher-worker-exhaustion-busy-worker-watcher.mjs`, does not exist — card `4d0285ec` corrected
+   this pointer in place.) Shown RED against round 2's own 287f1b44 (the pre-round-3 worker loop) via
+   `negative-control --ref 287f1b44` on `context-watcher.ts` — failing on the ASSERTION (zero
+   `manager_context_exhausted` events expected, one found), never on a missing export, per lesson 298's
+   own mutant-not-structural-failure bar.
 
 3. **The `kind:"warning"` claim in Round 2 finding 2 (above) was WRONG — corrected inline there.** The
    interrupt actually enqueues `kind:"agent"` (`enqueueDurableMessage`'s own `ctx.kind ?? "agent"`
