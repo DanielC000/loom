@@ -102,6 +102,18 @@ check("(b2) naming HTTP_PROXY via --allow forwards the RAW credentialed value (s
 check("(b2) naming it case-insensitively still matches the lowercase https_proxy key present in the inherited env",
   builtEntitled.https_proxy === "http://corpuser:corppass@proxy.corp.example:8080");
 
+// ===================== (b3) card 3faaab0d: npm_config_registry is NOT in BASE_ALLOWLIST =====
+// (a registry URL may carry the same `user:pass@host` userinfo a proxy URL can) — only a mount that
+// names it via its own catalog-row `passEnv` receives one. npm_config_cache stays in the base — it
+// carries no credential. See test/registry-env-isolation.mjs for the real-spawn, passEnv-entitlement proof.
+check("(b3) BASE_ALLOWLIST no longer carries npm_config_registry (card 3faaab0d)", !BASE_ALLOWLIST.includes("npm_config_registry"));
+check("(b3) BASE_ALLOWLIST still carries npm_config_cache (no credential)", BASE_ALLOWLIST.includes("npm_config_cache"));
+const credentialedRegistryEnv = { PATH: "/usr/bin", npm_config_registry: "https://u:SENTINEL@registry.corp.example/" };
+check("(b3) with NO --allow entry naming it, a credentialed npm_config_registry is ABSENT from an unentitled mount's env",
+  !("npm_config_registry" in buildIsolatedEnv(credentialedRegistryEnv, [])));
+check("(b3) naming it via --allow forwards the RAW credentialed value (scoping, never stripping)",
+  buildIsolatedEnv(credentialedRegistryEnv, ["npm_config_registry"]).npm_config_registry === "https://u:SENTINEL@registry.corp.example/");
+
 // ===================== (c) REAL child_process spawn of the launcher =====================
 const ECHO_ENV_FIXTURE = path.join(__dirname, "fixtures", "echo-env.mjs");
 {

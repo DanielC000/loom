@@ -195,13 +195,42 @@ forwarding now needs `passEnv` set explicitly. No schemeless/malformed-proxy-val
 without stripping, there is nothing to parse; an entitled mount's raw value passes through exactly as it
 did before this card, just scoped to who receives it.
 
+## Registry credentials (card `3faaab0d`)
+
+`BASE_ALLOWLIST` also carried `npm_config_registry` unconditionally — a registry URL may embed the SAME
+`user:pass@host` userinfo shape a proxy URL can. Investigated (see this card's own `worker_report blocked`
+on 2026-11-03) rather than assumed:
+
+- **No seeded row needs it at runtime.** Both bundled capabilities (github, image-gen) migrated off
+  `kind:"bundled"`/npx onto `kind:"github-binary"`/`kind:"npm-pinned"` (`capabilities/seed.ts`); the
+  npm-pinned one-time install (`capabilities/npm-pinned.ts`'s `ensureNpmPinnedAsync`) builds its own env
+  directly from `process.env` off the spawn hot path, never through this launcher.
+- **No other npm_config_*/auth-ish key was forwarded either** — `npm_config_cache` (not secret-shaped)
+  was the only sibling in `BASE_ALLOWLIST`; no `npm_config__auth`, no `//registry/:_authToken`-shaped
+  name, no `NPM_TOKEN` anywhere in daemon src.
+- Unlike the proxy keys, **there is no fixed/kind-keyed entitlement for registry** — neither markitdown
+  nor the seeded github-binary capability needs it, so nothing parallels `PROXY_ENV_KEYS`.
+
+**Decision: scope, never strip — same as the proxy fix, narrower application.** `npm_config_registry`
+was removed from `BASE_ALLOWLIST` entirely (`npm_config_cache` stays — no credential). The ONLY path to
+it is an owner-added catalog row's own existing `passEnv` mechanism — no new entitlement plumbing, no
+seeded default. `test/registry-env-isolation.mjs` proves both polarities via real spawn (absent from an
+unentitled mount, including a generic-sentinel check that the value doesn't leak under any OTHER key
+name; present — under exactly that one key — in a mount whose own `passEnv` names it) plus that neither
+fixed proxy-entitled mount (markitdown, github-binary) picks it up either.
+
 ## Do not
 
 - Do not widen `BASE_ALLOWLIST` (`assets/env-isolated-launch.mjs`) to cover a secret-shaped name
-  (`LOOM_MCP_TOKEN`, `CLAUDE_CODE_*`, any credential, or a proxy var that may carry `user:pass@host:port`
-  userinfo — `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, any case) — a server-specific secret belongs in that
-  one mount's own `--allow` list, computed from its OWN declared `env` keys plus `PROXY_ENV_KEYS` for an
-  entitled mount only, never the shared base every mount receives unconditionally.
+  (`LOOM_MCP_TOKEN`, `CLAUDE_CODE_*`, any credential, a proxy var that may carry `user:pass@host:port`
+  userinfo — `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, any case — or a registry URL that may carry the same
+  userinfo shape, `npm_config_registry`) — a server-specific secret belongs in that one mount's own
+  `--allow` list, computed from its OWN declared `env` keys plus `PROXY_ENV_KEYS` for an entitled proxy
+  mount, or a catalog row's own `passEnv` for registry (no fixed/kind-keyed registry entitlement exists),
+  never the shared base every mount receives unconditionally.
+- Do not invent a fixed/kind-keyed entitlement for `npm_config_registry` the way `PROXY_ENV_KEYS` exists
+  for proxy — card `3faaab0d`'s own investigation found no seeded row needs it at runtime; a future seeded
+  row that genuinely does needs a fresh decision, not a silent copy of the proxy shape.
 - Do not key a mount's proxy entitlement on its `slug` or `name` — both are owner-collidable (delete the
   seeded row, recreate one with the same slug). Key it on `def.kind === "github-binary"` (a SEED-ONLY kind
   no owner input can produce) or on the hardcoded mount key (`"markitdown"`) for a non-catalog mount.

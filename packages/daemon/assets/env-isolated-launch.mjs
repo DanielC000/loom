@@ -5,9 +5,9 @@
 // Rebuilds the real target's child env from a fixed base allowlist plus the named --allow keys, both
 // read from THIS process's own inherited env; key NAMES only ever ride argv, VALUES are never logged.
 //
-// @decision fafae623 — never widen BASE_ALLOWLIST to cover a secret-shaped name: LOOM_MCP_TOKEN,
-// CLAUDE_CODE_*, a credential, or a proxy var that may carry `user:pass@host:port` userinfo
-// (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY, card 188d6a8c) — added per-mount instead; see PROXY_ENV_KEYS (pty/host.ts).
+// @decision fafae623 — never widen BASE_ALLOWLIST to cover a secret-shaped name (LOOM_MCP_TOKEN,
+// CLAUDE_CODE_*, a credential, or a proxy/registry var that may carry `user:pass@host` userinfo —
+// HTTP_PROXY/HTTPS_PROXY/ALL_PROXY card 188d6a8c, npm_config_registry card 3faaab0d) — entitle per-mount instead.
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -19,7 +19,7 @@ export const BASE_ALLOWLIST = [
   "TEMP", "TMP",
   "NO_PROXY",
   "NODE_EXTRA_CA_CERTS",
-  "npm_config_cache", "npm_config_registry",
+  "npm_config_cache",
   "PYTHONIOENCODING", "PYTHONUTF8",
   "PLAYWRIGHT_BROWSERS_PATH",
   // POSIX additions (card fafae623 CR round 1, item 5) — UNMEASURED on POSIX (no POSIX host available
