@@ -13,10 +13,11 @@
 //   node --experimental-strip-types packages/web/test/merge-gate.mjs
 import assert from "node:assert/strict";
 import {
-  ago, badgeForInterval, bisectLabel, cadenceConfigWrite, cadenceOf, gateFailureAttentionText,
+  ago, badgeForInterval, bisectLabel, cadenceConfigWrite, cadenceOf, commitMessageConfigWrite,
+  commitMessageDraftFrom, commitMessageNote, commitTrailersOff, gateFailureAttentionText,
   intervalError, intervalFieldOf, INTERVAL_MAX, INTERVAL_MIN, isEscalatedFailure, landingLabel, ordinal,
-  parseInterval, readMergeGate, RECENT_VERDICT_CAP, shortSha, showsTicks, TICK_TRACK_MAX,
-  verdictMark, weakeningNote,
+  parseInterval, readMergeGate, RECENT_VERDICT_CAP, shortSha, SHIP_STATE_TRAILERS_OFF, showsTicks,
+  TICK_TRACK_MAX, verdictMark, weakeningNote,
 } from "../src/lib/mergeGate.ts";
 
 let pass = 0;
@@ -407,6 +408,98 @@ check("no rendered state sentence or badge contains an em-dash", () => {
   }
   const attn = gateFailureAttentionText(st({ gateOwed: true, ungatedSinceLastPass: 3, lastFailure: failure() }));
   assert.ok(!attn.includes("—"), `em-dash in attention text: ${attn}`);
+});
+
+// ── Commit-message switches (card bd828fb3) ──────────────────────────────────────────────────────────
+
+check("an absent commit-message key reads as the 'on' default, both ways of asking", () => {
+  assert.deepEqual(commitMessageDraftFrom(undefined), { trailers: "on", logBody: "on" });
+  assert.deepEqual(commitMessageDraftFrom({}), { trailers: "on", logBody: "on" });
+  assert.equal(commitTrailersOff(undefined), false, "a project that never set the key keeps trailers");
+  assert.equal(commitTrailersOff({}), false);
+  assert.equal(commitTrailersOff({ commitTrailers: "on" }), false);
+  assert.equal(commitTrailersOff({ commitTrailers: "off" }), true);
+});
+
+check("the two switches are INDEPENDENT in both directions", () => {
+  assert.deepEqual(commitMessageDraftFrom({ commitTrailers: "off" }), { trailers: "off", logBody: "on" });
+  assert.deepEqual(commitMessageDraftFrom({ commitLogBody: "off" }), { trailers: "on", logBody: "off" });
+  // The log-body switch must never answer the trailers question: that is the conflation the daemon card
+  // deliberately avoided by shipping two keys instead of one.
+  assert.equal(commitTrailersOff({ commitLogBody: "off" }), false);
+});
+
+check("'on' is written as the ABSENCE of the key, never as a stored default", () => {
+  assert.deepEqual(commitMessageConfigWrite({ trailers: "on", logBody: "on" }), {
+    set: {},
+    unset: ["orchestration.commitTrailers", "orchestration.commitLogBody"],
+  });
+  assert.deepEqual(commitMessageConfigWrite({ trailers: "off", logBody: "on" }), {
+    set: { commitTrailers: "off" },
+    unset: ["orchestration.commitLogBody"],
+  });
+  assert.deepEqual(commitMessageConfigWrite({ trailers: "on", logBody: "off" }), {
+    set: { commitLogBody: "off" },
+    unset: ["orchestration.commitTrailers"],
+  });
+  assert.deepEqual(commitMessageConfigWrite({ trailers: "off", logBody: "off" }), {
+    set: { commitTrailers: "off", commitLogBody: "off" },
+    unset: [],
+  });
+});
+
+check("the draft round-trips through a stored override", () => {
+  for (const trailers of ["on", "off"]) {
+    for (const logBody of ["on", "off"]) {
+      const write = commitMessageConfigWrite({ trailers, logBody });
+      // What the daemon would store: the `set` keys, with every `unset` path genuinely absent.
+      assert.deepEqual(commitMessageDraftFrom(write.set), { trailers, logBody },
+        `round trip failed for trailers=${trailers} logBody=${logBody}`);
+    }
+  }
+});
+
+check("the trailers-off note states every cost the card requires, and the reassurance", () => {
+  const note = commitMessageNote("trailers", "off");
+  assert.equal(note.tone, "amber");
+  assert.match(note.text, /crashes mid-landing/, "the crash-window gap");
+  assert.match(note.text, /already shipped as not merged/, "the merged:null read-out");
+  assert.match(note.text, /auto-confirming retained batch branches/, "the cleanup degradation");
+  assert.match(note.text, /Existing history is never rewritten/, "the retroactivity reassurance");
+  assert.match(note.text, /existing retained branches may need a manual check/, "the in-flight callout");
+});
+
+check("the log-body-off note is MUTED and claims no provenance cost", () => {
+  const note = commitMessageNote("logBody", "off");
+  assert.equal(note.tone, "muted", "amber here would train the amber out of the trailers note");
+  assert.match(note.text, /Nothing in Loom reads that prose/);
+  assert.match(note.text, /Existing history is never rewritten/);
+  // It must NOT borrow the trailers note's costs — that would be a false claim about this switch.
+  assert.ok(!/crashes mid-landing/.test(note.text));
+  assert.ok(!/retained batch branches/.test(note.text));
+});
+
+check("'on' weakens nothing, for either switch", () => {
+  assert.equal(commitMessageNote("trailers", "on"), null);
+  assert.equal(commitMessageNote("logBody", "on"), null);
+});
+
+check("the ship-state read-out says UNKNOWN, never 'not shipped'", () => {
+  assert.match(SHIP_STATE_TRAILERS_OFF.value, /unknown/i);
+  assert.match(SHIP_STATE_TRAILERS_OFF.title, /may still have shipped/);
+  // The whole point of the note: a blank must not be read as a negative, so the copy may never say it.
+  assert.ok(!/did not ship|not shipped|never shipped/i.test(SHIP_STATE_TRAILERS_OFF.title));
+  assert.ok(!/did not ship|not shipped|never shipped/i.test(SHIP_STATE_TRAILERS_OFF.value));
+});
+
+check("no commit-message copy contains an em-dash", () => {
+  const texts = [
+    commitMessageNote("trailers", "off").text,
+    commitMessageNote("logBody", "off").text,
+    SHIP_STATE_TRAILERS_OFF.value,
+    SHIP_STATE_TRAILERS_OFF.title,
+  ];
+  for (const t of texts) assert.ok(!t.includes("—"), `em-dash in: ${t}`);
 });
 
 console.log(`\n${pass} check(s) passed`);

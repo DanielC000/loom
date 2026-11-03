@@ -26,9 +26,10 @@ import { AttentionRow } from "./fleet";
 import { dismissAttention } from "../lib/attention";
 import { errorText } from "../lib/loopbackCredential";
 import {
-  ago, badgeForInterval, bisectLabel, cadenceConfigWrite, cadenceOf, gateFailureAttentionText,
+  ago, badgeForInterval, bisectLabel, cadenceConfigWrite, cadenceOf, commitMessageNote, gateFailureAttentionText,
   intervalError, intervalFieldOf, isEscalatedFailure, landingLabel, readMergeGate, RECENT_VERDICT_CAP,
-  shortSha, showsTicks, TICK_TRACK_MAX, verdictMark, weakeningNote, type MergeGateCadence, type MergeGateStatus, type MergeGateVerdict,
+  shortSha, showsTicks, TICK_TRACK_MAX, verdictMark, weakeningNote, type CommitMessageDraft, type CommitMessageKey,
+  type CommitMessageSwitch, type MergeGateCadence, type MergeGateStatus, type MergeGateVerdict,
 } from "../lib/mergeGate";
 
 // ── Shared query ─────────────────────────────────────────────────────────────────────────────────────
@@ -230,6 +231,71 @@ export function CadenceWeakening({ cadence, interval }: { cadence: MergeGateCade
   return (
     <div data-testid={note.tone === "red" ? "merge-gate-warn-never" : "merge-gate-warn-interval"}
       style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: color.panel2 }}>
+      <span style={{ fontFamily: font.mono, fontSize: 11, color: c, lineHeight: 1.6 }}>{note.text}</span>
+    </div>
+  );
+}
+
+// ── The commit-message switches (card bd828fb3) ──────────────────────────────────────────────────────
+// Two HUMAN-only project keys that govern what the NEXT landing WRITES into its commit message, mounted
+// in the same Settings "Merge gate" section as the cadence control above. They sit AFTER the cadence /
+// interval / ungated-check cluster rather than between its members: that cluster is one mechanism read
+// top to bottom (how often the gate runs, and what runs when it is skipped), and splitting it would make
+// the ungated-check field read as a property of the trailers switch.
+//
+// `Segmented` (not a checkbox or a switch) deliberately: it is the control the cadence above already
+// uses, so the panel reads as one surface, and "On"/"Off" are the project's own stored values rather
+// than a boolean this UI would have to translate.
+
+export function CommitMessagePanel({ draft, onChange }: {
+  draft: CommitMessageDraft;
+  onChange: (next: CommitMessageDraft) => void;
+}) {
+  return (
+    <div data-testid="commit-message-panel" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+          <FieldLabel>Merge-commit trailers</FieldLabel>
+          <Segmented<CommitMessageSwitch>
+            value={draft.trailers}
+            onChange={(trailers) => onChange({ ...draft, trailers })}
+            items={[{ key: "on", label: "On" }, { key: "off", label: "Off" }]}
+            ariaLabel="Merge-commit trailers"
+            data-testid="commit-trailers"
+          />
+          <Hint>the reserved <b style={{ color: color.text, fontWeight: 400 }}>Loom-*</b> lines a landing appends · human-set only</Hint>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+          <FieldLabel>Worker commit log</FieldLabel>
+          <Segmented<CommitMessageSwitch>
+            value={draft.logBody}
+            onChange={(logBody) => onChange({ ...draft, logBody })}
+            items={[{ key: "on", label: "On" }, { key: "off", label: "Off" }]}
+            ariaLabel="Worker commit log"
+            data-testid="commit-log-body"
+          />
+          <Hint>the worker's own commit subjects in a squash commit's body · human-set only</Hint>
+        </div>
+      </div>
+      <CommitMessageWeakening k="trailers" value={draft.trailers} />
+      <CommitMessageWeakening k="logBody" value={draft.logBody} />
+    </div>
+  );
+}
+
+/**
+ * One switch's non-default note, in the same bordered box `CadenceWeakening` uses. The MUTED tone is a
+ * third variant of that box rather than a second amber: the worker-commit-log switch costs readable
+ * prose nothing parses, and painting it the same amber as the provenance loss above would train the
+ * amber out of both.
+ */
+export function CommitMessageWeakening({ k, value }: { k: CommitMessageKey; value: CommitMessageSwitch }) {
+  const note = commitMessageNote(k, value);
+  if (!note) return null;
+  const c = note.tone === "amber" ? color.amber : color.textMuted;
+  return (
+    <div data-testid={k === "trailers" ? "commit-trailers-warn" : "commit-log-body-warn"}
+      style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${note.tone === "amber" ? c : color.border}`, borderRadius: radius.base, background: color.panel2 }}>
       <span style={{ fontFamily: font.mono, fontSize: 11, color: c, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );

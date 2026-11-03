@@ -23,6 +23,9 @@ import { PRIORITY_META, PriorityChip, prio, byPriorityThenPosition } from "../co
 import { errorText } from "../lib/loopbackCredential";
 import { submitDraft } from "../lib/draftSubmit";
 import { usePreviewOnly, PREVIEW_REQUEST_HELD_TITLE } from "../lib/previewOnly";
+// Ship state is only DISCOVERABLE from git while this project writes the reserved trailer paragraph
+// (card bd828fb3) — the drawer says so rather than letting a null read as "did not ship".
+import { commitTrailersOff, SHIP_STATE_TRAILERS_OFF } from "../lib/mergeGate";
 
 const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
 // Everything the detail drawer can write, in ONE place — the drawer's `onSave` prop, the mutation that
@@ -263,6 +266,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
       {openTask && drawerTask && (
         <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
           repos={repos} primaryRepoPath={project?.repoPath ?? ""}
+          trailersOff={commitTrailersOff(project?.config?.orchestration)}
           links={taskLinks(detail)} linksUnavailable={taskDetail.isError && !detail}
           columns={board.data?.columns ?? []} titleById={titleById} onOpenTask={setOpenTaskId}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
@@ -829,8 +833,10 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, repos, primaryRepoPath, links, linksUnavailable, columns, titleById, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
+function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
   { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
+    /** Whether this project writes NO reserved merge trailers, so a missing landing proves nothing. */
+    trailersOff: boolean;
     links: TaskLinks; linksUnavailable: boolean; columns: KanbanColumn[]; titleById: Map<string, string>; onOpenTask: (id: string) => void;
     onClose: () => void; onSave: (patch: TaskEditPatch) => void; saving: boolean; saveError: TaskUpdateConflictError | null; onDismissConflict: () => void;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
@@ -1178,6 +1184,22 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, links, linksUnavaila
             <span style={{ fontFamily: font.mono, fontSize: 12, color: shipVerificationStyle(task.mergedVerification).color }}
               title={`Landed on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}${task.mergedDate ? ` — ${task.mergedDate}` : ""}${shipVerificationStyle(task.mergedVerification).suffix}`}>
               ✓ {task.mergedSha} <span style={{ color: color.textMuted }}>on</span> {shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}
+            </span>
+          </>
+        )}
+        {/* Card bd828fb3 — with `orchestration.commitTrailers: "off"` this project writes no Loom-*
+            trailer paragraph, so Loom's retroactive merge discovery has nothing to read: a card with no
+            recorded landing is UNKNOWN, not unshipped. Says so in the ship-state slot the Shipped line
+            above would occupy, in the same muted-value + qualifying-tooltip shape shipVerificationStyle
+            already uses for its weakest tier — the alternative is a reader taking a blank as a negative.
+            Only ever INSTEAD of a real landing: a recorded mergedSha came from Loom's own DB write, which
+            is unaffected by the trailer switch, so that line stays authoritative and unqualified. */}
+        {!task.mergedSha && trailersOff && (
+          <>
+            <span style={labelStyle}>Shipped</span>
+            <span data-testid="ship-state-trailers-off" title={SHIP_STATE_TRAILERS_OFF.title}
+              style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>
+              {SHIP_STATE_TRAILERS_OFF.value}
             </span>
           </>
         )}

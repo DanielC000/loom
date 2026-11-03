@@ -49,12 +49,12 @@ import { HARNESS_TITLE, type Harness } from "../lib/harnessFields";
 import {
   UNIT_MS, msFromUnit, msInUnit, msRangeError, msRangeErrors, msRangeHint, msStr, type Unit,
 } from "../lib/msUnits";
-import { MergeGateCadencePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
+import { MergeGateCadencePanel, CommitMessagePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
 // The project lifecycle controls (rename / vaultPath / reference repos / registered repos / archive /
 // permanent delete), the archived-projects tier (restore / permanent delete) and their four writes —
 // ONE implementation, shared with the classic Projects page.
 import { ArchivedProjects, ProjectManage, useProjectLifecycleWrites } from "../components/projectLifecycle";
-import { cadenceConfigWrite, intervalError } from "../lib/mergeGate";
+import { cadenceConfigWrite, commitMessageConfigWrite, commitMessageDraftFrom, intervalError, type CommitMessageDraft } from "../lib/mergeGate";
 import { type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
 import { color, font, tone, type Tone } from "../theme";
@@ -462,6 +462,7 @@ interface ProjectConfigFields {
   ungatedLandingCheckCommand: string;
   ungatedLandingCheckTimeout: string;
   cadence: CadenceDraft;
+  commitMessage: CommitMessageDraft;
   maxWorkers: string;
   maxManagers: string;
   recycle: string;
@@ -499,6 +500,7 @@ function projectConfigFieldsOf(ov: ProjectConfigOverride): ProjectConfigFields {
     ungatedLandingCheckCommand: orch?.ungatedLandingCheckCommand ?? "",
     ungatedLandingCheckTimeout: msStr(orch?.ungatedLandingCheckTimeoutMs, "s"),
     cadence: cadenceDraftFrom(orch),
+    commitMessage: commitMessageDraftFrom(orch),
     maxWorkers: numStr(orch?.maxConcurrentWorkers),
     maxManagers: numStr(orch?.maxConcurrentManagers),
     recycle: numStr(orch?.recycleAtContextRatio),
@@ -570,6 +572,11 @@ const PROJECT_CONFIG_COMPARERS: FieldComparers<ProjectConfigFields> = {
   cadence: (a, b) =>
     JSON.stringify(cadenceConfigWrite(a.cadence, a.intervalRaw)) ===
     JSON.stringify(cadenceConfigWrite(b.cadence, b.intervalRaw)),
+  // Same reasoning one level simpler (card bd828fb3): two switches over two stored keys, compared on what
+  // they WRITE rather than on the draft, so toggling to "off" and back reads as no edit (both ways round
+  // trip through the same `unset`) instead of as a pending save.
+  commitMessage: (a, b) =>
+    JSON.stringify(commitMessageConfigWrite(a)) === JSON.stringify(commitMessageConfigWrite(b)),
 };
 
 // What each field is CALLED ON SCREEN — the conflict notice names fields the reader can go and look at,
@@ -580,6 +587,7 @@ const PROJECT_CONFIG_FIELD_LABELS: Record<keyof ProjectConfigFields, string> = {
   ungatedLandingCheckCommand: "Ungated landing check command",
   ungatedLandingCheckTimeout: "Ungated landing check timeout (s)",
   cadence: "Merge gate",
+  commitMessage: "Commit message",
   maxWorkers: "Max workers / manager",
   maxManagers: "Max managers",
   recycle: "Recycle @ ctx ratio",
@@ -639,6 +647,11 @@ function ConfigEditor({ project }: { project: Project }) {
   // three-valued, because "off with an interval 5" runs the gate regularly and calling that "off" would be
   // false about the project's behaviour. cadenceDraftFrom/cadenceConfigWrite own both directions.
   const [cadence, setCadence] = useState<CadenceDraft>(mounted.cadence);
+  // Human-only commit-message switches (card bd828fb3): what the NEXT landing writes into its commit
+  // message. Same trust tier as the cadence above (the party a provenance switch governs must never be
+  // able to loosen its own governor), so the agent config validator rejects both and this REST path is
+  // the only route. "on" is stored as the ABSENCE of the key, exactly like the `every` cadence.
+  const [commitMessage, setCommitMessage] = useState<CommitMessageDraft>(mounted.commitMessage);
   const [maxWorkers, setMaxWorkers] = useState(mounted.maxWorkers);
   const [maxManagers, setMaxManagers] = useState(mounted.maxManagers);
   const [recycle, setRecycle] = useState(mounted.recycle);
@@ -700,7 +713,7 @@ function ConfigEditor({ project }: { project: Project }) {
 
   // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a payload below.
   const values: ProjectConfigFields = {
-    allowText, gateCommand, ungatedLandingCheckCommand, ungatedLandingCheckTimeout, cadence, maxWorkers, maxManagers, recycle, emergencyRecycle, idleNudge,
+    allowText, gateCommand, ungatedLandingCheckCommand, ungatedLandingCheckTimeout, cadence, commitMessage, maxWorkers, maxManagers, recycle, emergencyRecycle, idleNudge,
     stuckWorker, blindTurn, maxUnanswered, idleSnooze, docLint, pythonInterpreter, gateTimeout,
     webhookTimeout, deployCommand, deployTimeout, alertWebhookUrl, alertWebhookEventsText,
     memoryBudgetTokens, memoryTopK, memoryMaxNotes, memoryDuplicateReportIntervalHours,
@@ -711,6 +724,7 @@ function ConfigEditor({ project }: { project: Project }) {
     setAllowText(v.allowText); setGateCommand(v.gateCommand);
     setUngatedLandingCheckCommand(v.ungatedLandingCheckCommand); setUngatedLandingCheckTimeout(v.ungatedLandingCheckTimeout);
     setCadence(v.cadence);
+    setCommitMessage(v.commitMessage);
     setMaxWorkers(v.maxWorkers); setMaxManagers(v.maxManagers); setRecycle(v.recycle);
     setEmergencyRecycle(v.emergencyRecycle); setIdleNudge(v.idleNudge); setStuckWorker(v.stuckWorker);
     setBlindTurn(v.blindTurn); setMaxUnanswered(v.maxUnanswered); setIdleSnooze(v.idleSnooze);
@@ -781,6 +795,13 @@ function ConfigEditor({ project }: { project: Project }) {
       const cadenceWrite = cadenceConfigWrite(cadence.cadence, cadence.intervalRaw);
       Object.assign(orch, cadenceWrite.set);
       unset.push(...cadenceWrite.unset);
+    }
+    // The two commit-message switches → their two stored keys (card bd828fb3). "on" CLEARS the key for
+    // the same reason the `every` cadence does: the default must never be stored back as an override.
+    if (include("commitMessage")) {
+      const commitWrite = commitMessageConfigWrite(commitMessage);
+      Object.assign(orch, commitWrite.set);
+      unset.push(...commitWrite.unset);
     }
     if (include("gateTimeout")) applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s", unset);
     if (include("deployCommand")) {
@@ -1154,6 +1175,14 @@ function ConfigEditor({ project }: { project: Project }) {
           </label>
           <div style={{ marginTop: 8, maxWidth: 420 }}>
             <MsField label="Ungated landing check timeout (s)" value={ungatedLandingCheckTimeout} set={setUngatedLandingCheckTimeout} effectiveMs={resolved.orchestration.ungatedLandingCheckTimeoutMs} defMs={defaults.orchestration.ungatedLandingCheckTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.ungatedLandingCheckTimeoutMs} />
+          </div>
+          {/* What a landing WRITES into its commit message (card bd828fb3) — the trailer paragraph Loom
+              reads back to discover a merge, and the worker commit log in a squash commit's body. Kept
+              inside this section (they are properties of a merge) but below the cadence/interval/ungated
+              cluster, which is one mechanism read top to bottom. */}
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${color.border}` }}>
+            <SectionLabel style={{ margin: "0 0 8px" }}>Commit message</SectionLabel>
+            <CommitMessagePanel draft={commitMessage} onChange={setCommitMessage} />
           </div>
         </div>
         <div style={{ marginTop: 12 }}>

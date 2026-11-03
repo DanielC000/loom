@@ -327,6 +327,103 @@ export function weakeningNote(cadence: MergeGateCadence, interval: number | null
   };
 }
 
+// ── Commit message: the trailer paragraph + the worker commit log ────────────────────────────────────
+// Card bd828fb3 — the web half of epic d9332365 (daemon halves: 3e92e23b the config keys, 9a5d040c the
+// solo squash path, 5933734e the batch path). Two independent HUMAN-only project keys, both defaulting to
+// "on": `orchestration.commitTrailers` (the reserved `Loom-*` paragraph a landing appends, which Loom's
+// own retroactive merge discovery reads back — see commitMessageNote's copy for the costs of losing it)
+// and `orchestration.commitLogBody` (the worker's commit subjects in a solo squash commit's BODY, which
+// nothing in Loom parses). They live here for the same reason the cadence vocabulary does: the Settings
+// control and the board's ship-state note must never word the same state differently.
+//
+// Both resolve PROJECT-level with no platform and no env layer beneath them (shared/config.ts resolves
+// each as `override.orchestration?.<key> ?? PLATFORM_DEFAULTS.orchestration.<key>`), which is why the
+// readers below may default inline instead of calling resolveConfig — the same shortcut `cadenceOf`
+// above already takes, and the same thing to revisit if either key ever grows a platform layer.
+
+/** Either key's two values. Not a boolean: the stored shape is the string union, same as `mergeGate`. */
+export type CommitMessageSwitch = "on" | "off";
+
+/** Which of the two the note/label helpers are talking about. */
+export type CommitMessageKey = "trailers" | "logBody";
+
+export interface CommitMessageDraft {
+  trailers: CommitMessageSwitch;
+  logBody: CommitMessageSwitch;
+}
+
+/** The draft a stored override starts from — an absent key reads as the "on" default. */
+export function commitMessageDraftFrom(override: Partial<OrchestrationConfig> | undefined): CommitMessageDraft {
+  return {
+    trailers: override?.commitTrailers ?? "on",
+    logBody: override?.commitLogBody ?? "on",
+  };
+}
+
+/**
+ * Whether THIS project writes no reserved trailer paragraph — the one fact a ship-state reader needs.
+ * Separate from the draft reader above because the board is not editing anything: it asks a question.
+ */
+export function commitTrailersOff(override: Partial<OrchestrationConfig> | undefined): boolean {
+  return (override?.commitTrailers ?? "on") === "off";
+}
+
+/**
+ * The config write a commit-message draft implies, in the same {set, unset} shape `cadenceConfigWrite`
+ * returns and for the same reason: "on" CLEARS the override key rather than storing the default back, so
+ * a project left at the default keeps an override that is byte-identical to one that never had the key.
+ */
+export function commitMessageConfigWrite(draft: CommitMessageDraft): {
+  set: { commitTrailers?: "off"; commitLogBody?: "off" };
+  unset: string[];
+} {
+  const set: { commitTrailers?: "off"; commitLogBody?: "off" } = {};
+  const unset: string[] = [];
+  if (draft.trailers === "off") set.commitTrailers = "off";
+  else unset.push("orchestration.commitTrailers");
+  if (draft.logBody === "off") set.commitLogBody = "off";
+  else unset.push("orchestration.commitLogBody");
+  return { set, unset };
+}
+
+/**
+ * The note a non-default value carries, same {tone, text} shape as `weakeningNote` and rendered by the
+ * same box. `null` at "on", which weakens nothing.
+ *
+ * AMBER for trailers-off and MUTED for log-body-off, deliberately: the first costs Loom real
+ * provenance (it can lose a landing, mis-read a shipped card, and stop confirming retained branches),
+ * the second costs only readable commit prose that nothing parses. Giving both the same amber would
+ * train the amber out.
+ *
+ * Both notes state that existing history is never rewritten, because that is the first thing a reader
+ * weighing either switch wants to know and it is true of both: a toggle only governs what the NEXT
+ * landing writes.
+ */
+export function commitMessageNote(key: CommitMessageKey, value: CommitMessageSwitch): { tone: "amber" | "muted"; text: string } | null {
+  if (value === "on") return null;
+  if (key === "trailers") {
+    return {
+      tone: "amber",
+      text: "With trailers off, Loom can lose track of a merge if the daemon crashes mid-landing, may show a card that already shipped as not merged, and stops auto-confirming retained batch branches for cleanup. Existing history is never rewritten, and existing retained branches may need a manual check.",
+    };
+  }
+  return {
+    tone: "muted",
+    text: "A squash commit keeps its own subject but stops listing the worker's commit subjects in its body. Nothing in Loom reads that prose, so no ship state and no branch cleanup depends on it. Existing history is never rewritten.",
+  };
+}
+
+/**
+ * The task drawer's ship-state read-out for a card with NO recorded landing on a trailers-off project.
+ * Mirrors `shipVerificationStyle`'s own "trailer-only" pattern (pages/Board.tsx): a muted value plus a
+ * qualifying tooltip, shown rather than hidden, because the honest answer is "not knowable from git
+ * here", which is a different thing from "did not ship".
+ */
+export const SHIP_STATE_TRAILERS_OFF = {
+  value: "unknown · trailers off",
+  title: "This project writes no Loom-* merge-commit trailers, so Loom cannot discover a landing from the commit message. A card with no landing recorded here may still have shipped; check the branch or the repo history.",
+} as const;
+
 /**
  * The Attention-row escalation on a failed periodic gate (direction B's borrowing, chosen alongside A).
  * Returns the row's text, or `null` when there is nothing to escalate — so Overview can append it to its
