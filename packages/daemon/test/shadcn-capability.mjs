@@ -26,9 +26,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       case form planted per spawn — Windows env vars are case-insensitive, so planting both cases at
 //       once collapses to one OS-level slot; the readback checks BOTH case keys regardless of which one
 //       won), a userinfo-shaped npm_config_registry, and a generic var — asserts ALL are absent from the
-//       spawned fixture's own observed env. GREEN on current main: card 188d6a8c (proxy keys dropped from
-//       BASE_ALLOWLIST) and card 3faaab0d (npm_config_registry likewise) have both landed. Do not weaken
-//       or skip these assertions to mask a regression if either guard ever erodes.
+//       spawned fixture's own observed env. Do not weaken or skip these assertions to mask a regression
+//       if either guard (the BASE_ALLOWLIST proxy-key drop, or its npm_config_registry counterpart) ever
+//       erodes.
 //   (e) profiles/validate.ts rejects an explicit codex profile holding the "shadcn" grant specifically
 //       (the existing codexStdioOffenders mechanism is generic over any non-empty capabilities array;
 //       this names "shadcn" for this card's own traceability).

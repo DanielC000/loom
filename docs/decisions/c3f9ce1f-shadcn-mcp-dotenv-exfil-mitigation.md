@@ -30,15 +30,16 @@ negative control (no `.env*` file at all) returned zero hits and shadcn's own `M
 
 ## The mitigation: REDIRECT, not refuse
 
-A `node --import` preload (`packages/daemon/assets/shadcn-no-dotenv-preload.mjs`), self-registering via
-`register(import.meta.url, import.meta.url)`, intercepts resolution of `@dotenvx/dotenvx` (and any
-subpath) and REDIRECTS it — via the module customization hook's `{ url, shortCircuit: true }` return
-shape — to a Loom-owned no-op stub (`shadcn-no-dotenv-stub.mjs`) whose `config()` matches the real
-library's destructured named export and return shape (`{ parsed: {} }`) but loads nothing and mutates
-nothing. `registry.ts`'s `resolveCapabilityServer` (the `"npm-pinned"` branch) prepends
-`["--import", pathToFileURL(SHADCN_NO_DOTENV_PRELOAD_SCRIPT).href]` to the shadcn row's own resolved args
-when `provision.package === "shadcn"`. The launcher needs no change — it already forwards whatever argv
-a mount hands it.
+A `node --import` preload (`packages/daemon/assets/shadcn-no-dotenv-preload.mjs`) intercepts resolution
+of `@dotenvx/dotenvx` (and any subpath) and REDIRECTS it — via the module customization hook's
+`{ url, shortCircuit: true }` return shape — to a Loom-owned no-op stub (`shadcn-no-dotenv-stub.mjs`)
+whose `config()` matches the real library's destructured named export and return shape (`{ parsed: {} }`)
+but loads nothing and mutates nothing. It registers via `module.registerHooks` when available (Node
+>=22.15, covers CJS `require` too — see the "Do not" bullet below), falling back to the self-registering
+`register(import.meta.url, import.meta.url)` on an older Node. `registry.ts`'s `resolveCapabilityServer`
+(the `"npm-pinned"` branch) prepends `["--import", pathToFileURL(SHADCN_NO_DOTENV_PRELOAD_SCRIPT).href]`
+to the shadcn row's own resolved args when `provision.package === "shadcn"`. The launcher needs no
+change — it already forwards whatever argv a mount hands it.
 
 **An earlier, simpler design — REFUSE the import (throw from the `resolve` hook) — was tried first and
 rejected.** It also fully blocks the `.env*` load (confirmed: `loadEnvFiles`'s own `try/catch` swallows
@@ -89,3 +90,50 @@ every client, not just one already proven tolerant of a malformed line.
   actually re-verifies the mechanism against the NEW version's real bundle; the hermetic
   tests (`test/shadcn-no-dotenv-preload.mjs`, `test/shadcn-capability.mjs`) only prove the WIRING and the
   preload/stub mechanism in isolation, never shadcn's own current import shape.
+- Do not assume the ESM `resolve` hook alone covers CJS. shadcn 4.23.0 only ever uses a dynamic
+  `import()` for `@dotenvx/dotenvx`, so a plain `module.register`-based hook (an async, ESM-loader-only
+  module customization hook) was sufficient when this was first shipped — but it does NOT intercept a
+  CJS `require()` of the same specifier: measured directly, `createRequire(<shadcn install>)
+  ("@dotenvx/dotenvx")` under the `register()`-only preload loads the REAL, installed `@dotenvx/dotenvx`
+  package, completely bypassing the redirect. A future shadcn release that switches to (or adds) a CJS
+  `require` of this package would silently defeat the mitigation. **Closed (card `2e02dc38`) by preferring
+  `module.registerHooks`** — a synchronous module customization hook, added in Node 22.15.0, that covers
+  BOTH ESM `import()` AND CJS `require()` resolution in the SAME process, no separate loader thread —
+  over `module.register` whenever it's available (`typeof registerHooks === "function"`); measured
+  directly on Node 22.16.0 that a `registerHooks`-registered `resolve` hook redirecting
+  `@dotenvx/dotenvx` to the real ESM stub file intercepts both a `createRequire(...)("@dotenvx/dotenvx")`
+  call AND a dynamic `import("@dotenvx/dotenvx")` call, including Node's own require(ESM) interop
+  resolving the redirect target. `registerHooks` requires a SYNCHRONOUS hook (an `async` one throws
+  `ERR_INVALID_RETURN_PROPERTY_VALUE`, measured) — the shared `resolve` function in
+  `shadcn-no-dotenv-preload.mjs` is deliberately non-`async` so it satisfies both APIs' protocols with one
+  function body. **The residual gap is narrower, not gone:** this repo's own floor is `engines.node:
+  ">=22"` (root `package.json`), which includes Node 22.0–22.14 — a host on one of those still falls back
+  to the old `register()` path (`typeof registerHooks !== "function"` there) and the CJS gap above still
+  applies on exactly that range. Do not assume every deployment host is on Node >=22.15 just because this
+  mitigation prefers `registerHooks` when present.
+
+## RED-proof narratives (test/shadcn-no-dotenv-preload.mjs)
+
+Both proofs were run by hand during development, not re-run by the test file itself — it only points
+here.
+
+**Original (card `c3f9ce1f`):** with the asset and its wiring left in place but the preload's own
+`resolve()` body changed to unconditionally `return nextResolve(specifier, context);` (i.e. the redirect
+disabled, an API-preserving mutant — same export shape, same registration, just no interception), the
+test's own child-process spawn for case (a) CRASHED outright (non-zero exit, Node's own
+`ERR_MODULE_NOT_FOUND` for `@dotenvx/dotenvx` — never installed in this hermetic test's own
+`node_modules`), so (a)/(b) never even got to report a result. Restoring the real preload file returned
+the run to a clean green with no other change.
+
+**registerHooks adoption (card `2e02dc38`):** with the preload otherwise intact but its
+`typeof registerHooks === "function"` check changed to `typeof registerHooks === "function" && false`
+(an API-preserving mutant — same `resolve` function, same exports, same `register(...)` fallback call;
+only the branch choice is forced), run on a Node 22.16 dev host (which DOES have `registerHooks`): cases
+(a)/(b)/(c)/(d) still passed (the ESM `import()` path still goes through the old `register()` hook,
+unaffected), but case (e) (the CJS `require()` coverage) CRASHED outright — non-zero exit, Node's own
+`MODULE_NOT_FOUND` for `@dotenvx/dotenvx` (never installed in this hermetic test's own `node_modules`,
+same shape as the original proof above), because the CJS `require()` fell straight through to a real
+resolution attempt instead of ever reaching the stub. This proves the mutant genuinely disables the
+`registerHooks` adoption and case (e) genuinely depends on it, not on something structural (the
+function/export shape stays identical throughout both mutants). Restoring the real check returned the
+run to a clean green with no other change.

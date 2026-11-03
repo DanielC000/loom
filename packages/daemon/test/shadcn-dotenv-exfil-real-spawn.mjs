@@ -9,9 +9,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // (never LOOM_ALLOW_REAL_ENGINE -- that gate is specifically for a real claude/codex ENGINE spawn, which
 // this is not; this spawns `npm install` and shadcn's own node bundle, nothing claude/codex-shaped). A
 // reasoned entry in real-engine-spawn-opt-in-guard.mjs's own NON_ENGINE_ALLOWLIST is added only if that
-// guard's Part B reverse sweep actually flags this file -- it uses execFileSync (never a `.spawn(` member
-// call), the same shape npm-pinned-real-spawn.mjs already uses, which that guard does not flag today.
-// Prints a WARN SKIP line and does nothing otherwise -- never attempts network access by default.
+// guard's Part B reverse sweep actually flags this file -- it calls the BARE `spawn` function imported
+// from node:child_process (`spawn(mount.command, mount.args, ...)`), never a `<expr>.spawn(` MEMBER-access
+// call, which is the one shape that guard's AST detector actually matches -- so it does not flag this file
+// today. Prints a WARN SKIP line and does nothing otherwise -- never attempts network access by default.
 //
 // ⭐ MUST RE-RUN ON ANY SHADCN_VERSION BUMP (capabilities/seed.ts): this is the ONLY test that actually
 // re-verifies the mitigation against the real bundle shadcn's next release ships. The hermetic tests
@@ -42,9 +43,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
-import { fileURLToPath } from "node:url";
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawn } from "node:child_process";
 import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 if (process.env.LOOM_NETWORK_SMOKE !== "1") {
@@ -52,7 +52,6 @@ if (process.env.LOOM_NETWORK_SMOKE !== "1") {
   process.exit(0);
 }
 
-const execFileAsync = promisify(execFile);
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
@@ -66,6 +65,7 @@ const { Db } = await import("../dist/db.js");
 const { seedDefaultCapabilities } = await import("../dist/capabilities/seed.js");
 const { ensureNpmPinnedAsync, loomNpmPinnedBin } = await import("../dist/capabilities/npm-pinned.js");
 const { buildMcpServers } = await import("../dist/pty/host.js");
+const { SHADCN_NO_DOTENV_PRELOAD_SCRIPT } = await import("../dist/paths.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -92,8 +92,11 @@ const granted = buildMcpServers({ sessionId: "s-shadcn-realspawn", port: 4317, r
 // [launcherPath, "--allow", csv, "--", nodeBin, "--import", url, bin, "mcp"].
 const mitigatedMount = granted.shadcn;
 const importIdx = mitigatedMount.args.indexOf("--import");
+const SHADCN_PRELOAD_URL = pathToFileURL(SHADCN_NO_DOTENV_PRELOAD_SCRIPT).href;
 check("precondition: the real production mount carries '--import' right after the real command, before the resolved bin",
   importIdx >= 0 && mitigatedMount.args[importIdx + 2] === bin);
+check("precondition: args[idx+1] is the preload's own file:// URL (not some other value the '--import' pair might carry)",
+  mitigatedMount.args[importIdx + 1] === SHADCN_PRELOAD_URL);
 
 // POSITIVE-CONTROL mount: the SAME real mount, with the preload's `--import <url>` pair stripped out —
 // every other argv element (the launcher itself, the allow-list, the real command, the bin, "mcp") is
@@ -178,8 +181,8 @@ check("(d) POSITIVE CONTROL (--import stripped): the sentinel DOES leak — prov
 
 // ===================== (e) a real tool call against the fixture's own real registries still works =====================
 const resultNoEnv = await runExfilProbe(mitigatedMount, null, "no-env-real-tool-call");
-check("(e) a real tool call against the fixture's own components.json registries runs (reaches the registry, not a local config error)",
-  resultNoEnv.viewResult !== null);
+check("(e) a real tool call against the fixture's own components.json registries reaches the registry (the no-.env fixture still requests /r/button.json)",
+  resultNoEnv.hits.length > 0 && resultNoEnv.hits.some((h) => h.url === "/r/button.json"));
 
 // ===================== (f) stdout carries NO non-JSON line before the first JSON-RPC frame =====================
 check("(f) mitigated mount: stdout has NO non-JSON line (the whole reason the redirect was chosen over a refusal)",

@@ -3570,6 +3570,15 @@ function CapabilityForm({ pending, error, onSubmit, onCancel }: {
               </span>
             </div>
           )}
+          <div style={{ padding: 10, background: color.panel, border: `1px solid ${color.amber}`, borderRadius: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ ...fieldLabel, color: color.amber }}>No automatic .env protection here</span>
+            <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+              Loom's built-in protection against a tool reading secrets out of a project's own .env files
+              applies only to the one capability Loom ships with it already in place. A row you add here —
+              including one that launches shadcn, or any other tool that auto-loads .env files — runs
+              without that protection.
+            </span>
+          </div>
         </>
       )}
 
