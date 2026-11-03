@@ -6,7 +6,7 @@ import { Ajv } from "ajv";
 import { mapWithConcurrency } from "../concurrency.js";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
-  usesOrchestrationMcp, contextPercentFor, PROFILE_SPAWNABLE_ROLES,
+  usesOrchestrationMcp, contextPercentFor, contextWindowForModel, PROFILE_SPAWNABLE_ROLES,
   type Session, type StopMode, type OrchestrationEvent, type OrchestrationEventKind, type Task, type Project, type Profile,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
@@ -1997,6 +1997,10 @@ type RedirectResult = Omit<EnqueueResult, "landsAt"> & {
    *  caller-specific advisory (e.g. redirectWorker's) can cite verbatim instead of re-deriving it. */
   discarded?: number;
   advisory?: string;
+  /** See `workerContextWarningFor`'s own doc — populated only by `redirectWorker`, never by
+   *  `redirectSessionAsCompanion` (a companion steer targets any session, not specifically a worker a
+   *  manager owns). */
+  contextWarning?: string;
 };
 
 /**
@@ -11223,6 +11227,41 @@ export class SessionService {
   }
 
   /**
+   * Dispatch-time advisory for `worker_message`/`worker_redirect`: when the target WORKER's LIVE
+   * `ctxInputTokens` (kept fresh mid-turn by the mid-turn sampler, card c5b234aa) is at or above
+   * `workerContextWarnRatio` (the ONE shared key, card dacc6d9e — read via `resolveConfig`, never
+   * hard-coded), return a short advisory string naming the live percentage; otherwise `undefined`.
+   * Advisory only — the caller never refuses on this. `undefined` (never a measured warning) when:
+   * `ctxInputTokens` is null (unmeasured — a codex worker has no ctx telemetry at all, and a claude
+   * worker pre-first-sample reads the same way; null is NEVER treated as 0), the project is
+   * unresolvable, or the ratio resolves to `<= 0` (explicitly disabled). Mirrors `ContextWatcher`'s own
+   * `r = ctxInputTokens / contextWindowForModel(model)` comparison style (card dacc6d9e's
+   * `checkWorkerContextWarn`) so "at or above" means the identical thing on both the dispatch path and
+   * the ticking watcher's manager-facing notice.
+   *
+   * `contextExhaustedAt` (card 66ff7321) is a STRONGER, independent signal checked FIRST and
+   * unconditionally — never gated on the ratio or on `ctxInputTokens` being measured: an exhausted
+   * worker already cleared `busy` to `false` and cannot take another turn at all (see that field's own
+   * decision record), which is a different and more urgent fact than "running high", so this says so
+   * INSTEAD of a percentage rather than alongside one.
+   */
+  private workerContextWarningFor(worker: Session): string | undefined {
+    if (worker.contextExhaustedAt != null) {
+      return "worker is context-exhausted and cannot take another turn: worker_recycle it (keeps the worktree/branch/task) instead of messaging or redirecting it";
+    }
+    if (worker.ctxInputTokens == null) return undefined;
+    const project = this.db.getProject(worker.projectId);
+    if (!project) return undefined;
+    const ratio = resolveConfig(project.config).orchestration.workerContextWarnRatio;
+    if (ratio <= 0) return undefined;
+    const window = contextWindowForModel(worker.model);
+    const r = worker.ctxInputTokens / window;
+    if (r < ratio) return undefined;
+    const pct = contextPercentFor(worker.ctxInputTokens, worker.model);
+    return `worker at ${pct}%: recycle it before sending a large round`;
+  }
+
+  /**
    * Send a framed message to one of a manager's workers (parent-scoped). Submitted as a turn
    * when the worker is idle, or queued FIFO (busy-gated) and drained on the worker's next Stop.
    * A `delivered:false` result reports honestly via `enqueueDurableMessage`'s additive fields
@@ -11237,7 +11276,7 @@ export class SessionService {
    */
   messageWorker(
     managerSessionId: string, workerSessionId: string, text: string, resendOf?: string,
-  ): EnqueueResult & { msgId: string; advisory?: string } {
+  ): EnqueueResult & { msgId: string; advisory?: string; contextWarning?: string } {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const framed = frameFromManager(text);
@@ -11267,6 +11306,11 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
       detail: r.delivered ? { msgId: r.msgId, turnSeqAtDelivery: worker.turnSeq ?? 0 } : { msgId: r.msgId },
     });
+    // Card 17576ca3: dispatch-time advisory, computed once off the row fetched above (synchronous call,
+    // so its ctxInputTokens can't change out from under us) and attached to whichever return path below
+    // actually fires — see `workerContextWarningFor`'s own doc. Never attached on a DROPPED delivery
+    // (the worker is gone) — advice to recycle a session that no longer exists is noise, not an advisory.
+    const contextWarning = r.deliveryState !== "dropped" ? this.workerContextWarningFor(worker) : undefined;
     // ADVISORY (card d9c203e4): a codex session wedged before it ever finished booting (`getCodexBootStuck`
     // non-null — card bba13405's own durable latch) can sit live/resumable/busy:false, indistinguishable
     // from a healthy idle worker, while a held enqueue's plain `queued:true`/`deliveryState:"queued"`
@@ -11282,6 +11326,7 @@ export class SessionService {
       if (bootStuck) {
         return {
           ...r,
+          ...(contextWarning ? { contextWarning } : {}),
           advisory:
             `this worker's codex session appears wedged before it ever finished booting (never reached ` +
             `model-loaded — unmet: ${bootStuck.unmet.join(", ")}); this message is durably queued ` +
@@ -11304,12 +11349,13 @@ export class SessionService {
       const queued = r.position ?? 1;
       return {
         ...r,
+        ...(contextWarning ? { contextWarning } : {}),
         advisory:
           `worker has been mid-turn ~${minutes}m; this message lands at its next turn boundary — use ` +
           `worker_redirect if you need it to stop now (it will discard ${queued} queued message(s); re-send them after).`,
       };
     }
-    return r;
+    return contextWarning ? { ...r, contextWarning } : r;
   }
 
   /**
@@ -11327,10 +11373,15 @@ export class SessionService {
       enqueueSender: managerSessionId,
       eventManagerId: managerSessionId,
     });
-    if (r.discarded && r.discarded > 0) {
-      return { ...r, advisory: `this redirect discarded ${r.discarded} queued message(s) — re-send them after.` };
+    // Card 17576ca3: see `workerContextWarningFor`'s own doc — computed off the row fetched above and
+    // merged into whichever shape below actually returns. Never attached on a DROPPED delivery (the
+    // worker is gone) — advice to recycle a session that no longer exists is noise, not an advisory.
+    const contextWarning = r.deliveryState !== "dropped" ? this.workerContextWarningFor(worker) : undefined;
+    const withContext = contextWarning ? { ...r, contextWarning } : r;
+    if (withContext.discarded && withContext.discarded > 0) {
+      return { ...withContext, advisory: `this redirect discarded ${withContext.discarded} queued message(s) — re-send them after.` };
     }
-    return r;
+    return withContext;
   }
 
   /**

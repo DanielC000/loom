@@ -430,6 +430,13 @@ re-send" become an unconditional reflex. Don't choose between "redirect and lose
 that remainder afterward: it costs a couple of extra tool calls and keeps both the urgency and the
 content, without duplicating what the redirect already said.
 
+**Check a worker's context before relaying a heavy round.** `worker_message`/`worker_redirect` can carry
+an advisory `contextWarning` on their result when the target worker's own live context is already running
+high — read it before piling a large round onto a worker that's close to its limit, and recycle it first
+(it keeps the worktree/branch/task) rather than compounding the risk. It's informational only and never
+blocks the call, and it complements — never substitutes for — actually recognizing and recovering from
+real exhaustion.
+
 **Before you redirect/hold a worker to stop it, VERIFY WHAT IT'S ACTUALLY BUILDING — the working tree
 is authoritative, the event log is not.** A busy flag, a tool-call log, or your own read of what the
 worker "must" be doing is a CONTROL-PLANE signal, not ground truth — it can be stale or simply wrong
