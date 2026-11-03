@@ -467,6 +467,8 @@ interface ProjectConfigFields {
   maxManagers: string;
   recycle: string;
   emergencyRecycle: string;
+  workerCtxWarn: string;
+  workerCtxInterrupt: string;
   idleNudge: string;
   stuckWorker: string;
   blindTurn: string;
@@ -505,6 +507,8 @@ function projectConfigFieldsOf(ov: ProjectConfigOverride): ProjectConfigFields {
     maxManagers: numStr(orch?.maxConcurrentManagers),
     recycle: numStr(orch?.recycleAtContextRatio),
     emergencyRecycle: numStr(orch?.emergencyRecycleAtContextRatio),
+    workerCtxWarn: numStr(orch?.workerContextWarnRatio),
+    workerCtxInterrupt: numStr(orch?.workerContextInterruptRatio),
     idleNudge: numStr(orch?.idleNudgeMinutes),
     stuckWorker: numStr(orch?.stuckWorkerMinutes),
     blindTurn: numStr(orch?.managerBlindTurnMinutes),
@@ -562,6 +566,7 @@ const PROJECT_CONFIG_COMPARERS: FieldComparers<ProjectConfigFields> = {
   pythonInterpreter: trimmedEq,
   rotationHeading: trimmedEq,
   maxWorkers: trimmedEq, maxManagers: trimmedEq, recycle: trimmedEq, emergencyRecycle: trimmedEq,
+  workerCtxWarn: trimmedEq, workerCtxInterrupt: trimmedEq,
   idleNudge: trimmedEq, stuckWorker: trimmedEq, blindTurn: trimmedEq, maxUnanswered: trimmedEq,
   idleSnooze: trimmedEq, rotationFloor: trimmedEq, gateTimeout: trimmedEq, webhookTimeout: trimmedEq,
   deployTimeout: trimmedEq, memoryBudgetTokens: trimmedEq, memoryTopK: trimmedEq, memoryMaxNotes: trimmedEq,
@@ -592,6 +597,8 @@ const PROJECT_CONFIG_FIELD_LABELS: Record<keyof ProjectConfigFields, string> = {
   maxManagers: "Max managers",
   recycle: "Recycle @ ctx ratio",
   emergencyRecycle: "Emergency recycle @ ctx ratio",
+  workerCtxWarn: "Worker warn @ ctx ratio",
+  workerCtxInterrupt: "Worker interrupt @ ctx ratio",
   idleNudge: "Idle nudge (min)",
   stuckWorker: "Worker stuck (min)",
   blindTurn: "Manager blind turn (min)",
@@ -656,6 +663,11 @@ function ConfigEditor({ project }: { project: Project }) {
   const [maxManagers, setMaxManagers] = useState(mounted.maxManagers);
   const [recycle, setRecycle] = useState(mounted.recycle);
   const [emergencyRecycle, setEmergencyRecycle] = useState(mounted.emergencyRecycle);
+  // Card dacc6d9e's WORKER-scoped pair — the worker analogue of the two manager ratios above, same
+  // [0,1] bounds and same resolve-time "interrupt never below warn" clamp. Agent-settable (unlike the
+  // cadence/commit-message switches), so this REST path is one of several write routes, not the only one.
+  const [workerCtxWarn, setWorkerCtxWarn] = useState(mounted.workerCtxWarn);
+  const [workerCtxInterrupt, setWorkerCtxInterrupt] = useState(mounted.workerCtxInterrupt);
   const [idleNudge, setIdleNudge] = useState(mounted.idleNudge);
   const [stuckWorker, setStuckWorker] = useState(mounted.stuckWorker);
   const [blindTurn, setBlindTurn] = useState(mounted.blindTurn);
@@ -713,7 +725,8 @@ function ConfigEditor({ project }: { project: Project }) {
 
   // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a payload below.
   const values: ProjectConfigFields = {
-    allowText, gateCommand, ungatedLandingCheckCommand, ungatedLandingCheckTimeout, cadence, commitMessage, maxWorkers, maxManagers, recycle, emergencyRecycle, idleNudge,
+    allowText, gateCommand, ungatedLandingCheckCommand, ungatedLandingCheckTimeout, cadence, commitMessage, maxWorkers, maxManagers, recycle, emergencyRecycle,
+    workerCtxWarn, workerCtxInterrupt, idleNudge,
     stuckWorker, blindTurn, maxUnanswered, idleSnooze, docLint, pythonInterpreter, gateTimeout,
     webhookTimeout, deployCommand, deployTimeout, alertWebhookUrl, alertWebhookEventsText,
     memoryBudgetTokens, memoryTopK, memoryMaxNotes, memoryDuplicateReportIntervalHours,
@@ -726,7 +739,9 @@ function ConfigEditor({ project }: { project: Project }) {
     setCadence(v.cadence);
     setCommitMessage(v.commitMessage);
     setMaxWorkers(v.maxWorkers); setMaxManagers(v.maxManagers); setRecycle(v.recycle);
-    setEmergencyRecycle(v.emergencyRecycle); setIdleNudge(v.idleNudge); setStuckWorker(v.stuckWorker);
+    setEmergencyRecycle(v.emergencyRecycle);
+    setWorkerCtxWarn(v.workerCtxWarn); setWorkerCtxInterrupt(v.workerCtxInterrupt);
+    setIdleNudge(v.idleNudge); setStuckWorker(v.stuckWorker);
     setBlindTurn(v.blindTurn); setMaxUnanswered(v.maxUnanswered); setIdleSnooze(v.idleSnooze);
     setDocLint(v.docLint); setPythonInterpreter(v.pythonInterpreter); setGateTimeout(v.gateTimeout);
     setWebhookTimeout(v.webhookTimeout); setDeployCommand(v.deployCommand); setDeployTimeout(v.deployTimeout);
@@ -827,6 +842,8 @@ function ConfigEditor({ project }: { project: Project }) {
     if (include("maxManagers")) applyNum(orch, "maxConcurrentManagers", maxManagers, unset);
     if (include("recycle")) applyNum(orch, "recycleAtContextRatio", recycle, unset);
     if (include("emergencyRecycle")) applyNum(orch, "emergencyRecycleAtContextRatio", emergencyRecycle, unset);
+    if (include("workerCtxWarn")) applyNum(orch, "workerContextWarnRatio", workerCtxWarn, unset);
+    if (include("workerCtxInterrupt")) applyNum(orch, "workerContextInterruptRatio", workerCtxInterrupt, unset);
     if (include("idleNudge")) applyNum(orch, "idleNudgeMinutes", idleNudge, unset);
     if (include("stuckWorker")) applyNum(orch, "stuckWorkerMinutes", stuckWorker, unset);
     if (include("blindTurn")) applyNum(orch, "managerBlindTurnMinutes", blindTurn, unset);
@@ -1149,6 +1166,8 @@ function ConfigEditor({ project }: { project: Project }) {
           <NumField label="Max managers (no scheduler effect)" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} def={defaults.orchestration.maxConcurrentManagers} note="The cron Scheduler is one fleet-wide service; its manager cap is set under Settings → Global → Scheduler, not per-project here." />
           <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} def={defaults.orchestration.recycleAtContextRatio} />
           <NumField label="Emergency recycle @ ctx ratio" value={emergencyRecycle} set={setEmergencyRecycle} effective={resolved.orchestration.emergencyRecycleAtContextRatio} def={defaults.orchestration.emergencyRecycleAtContextRatio} note="bypasses the queue and interrupts the manager's turn; 0 disables, clamped to never sit below the ratio above" />
+          <NumField label="Worker warn @ ctx ratio" value={workerCtxWarn} set={setWorkerCtxWarn} effective={resolved.orchestration.workerContextWarnRatio} def={defaults.orchestration.workerContextWarnRatio} note="notifies the owning manager that a worker's context is running high; 0 to 1, 0 disables" />
+          <NumField label="Worker interrupt @ ctx ratio" value={workerCtxInterrupt} set={setWorkerCtxInterrupt} effective={resolved.orchestration.workerContextInterruptRatio} def={defaults.orchestration.workerContextInterruptRatio} note="interrupts the worker's own turn directly; 0 to 1, 0 disables, clamped to never sit below the warn ratio" />
           <NumField label="Idle nudge (min)" value={idleNudge} set={setIdleNudge} effective={resolved.orchestration.idleNudgeMinutes} def={defaults.orchestration.idleNudgeMinutes} />
           <NumField label="Worker stuck (min)" value={stuckWorker} set={setStuckWorker} effective={resolved.orchestration.stuckWorkerMinutes} def={defaults.orchestration.stuckWorkerMinutes} note="0 disables the stuck-worker watchdog" />
           <NumField label="Manager blind turn (min)" value={blindTurn} set={setBlindTurn} effective={resolved.orchestration.managerBlindTurnMinutes} def={defaults.orchestration.managerBlindTurnMinutes} note="0 disables the blind-turn watchdog" />
