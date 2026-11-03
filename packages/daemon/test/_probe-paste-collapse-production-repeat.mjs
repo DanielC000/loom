@@ -14,6 +14,7 @@
 //
 // NOT hermetic CI — needs a logged-in `claude`. RUN: `pnpm build` (repo root) then
 // `node test/_probe-paste-collapse-production-repeat.mjs` from packages/daemon.
+import "./_real-engine-opt-in.mjs";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";

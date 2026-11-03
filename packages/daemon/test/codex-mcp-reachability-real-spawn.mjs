@@ -19,6 +19,7 @@
 // MCP startup (never submits a prompt), then exits via the confirmed double-Ctrl+C.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codex-mcp-reachability-real-spawn.mjs
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

@@ -34,6 +34,7 @@
 // ever falls out of sync with this file's `acquireCodexRealSpawnLock()` call below.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codex-prompt-ascii-fold-real-spawn.mjs
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

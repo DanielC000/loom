@@ -27,6 +27,7 @@
 // real-codex-spawn test file uses, so this file can never run concurrently with them.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codex-doctrine-real-spawn.mjs
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

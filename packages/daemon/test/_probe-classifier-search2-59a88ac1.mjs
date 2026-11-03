@@ -7,6 +7,7 @@
 // tool-permission layer from the model's own judgment. Cooperative framing (no "don't ask" adversarial
 // wording — round 1 showed that phrasing itself reads as a red flag and may have contributed to the
 // refusal).
+import "./_real-engine-opt-in.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

@@ -9,6 +9,7 @@
 // backspacing) should not.
 //
 // RUN: `pnpm build` (repo root) then `node test/_probe-composer-clear-2.mjs` from packages/daemon.
+import "./_real-engine-opt-in.mjs";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";

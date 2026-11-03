@@ -50,6 +50,7 @@
 //
 // Run (deliberately, e.g. after a codex CLI upgrade — never as part of an ordinary gate):
 //   LOOM_RUN_CODEX_RESTORE_REAL_SPAWN=1 node packages/daemon/test/codex-rollout-archive-restore-real-spawn.mjs
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

@@ -4,6 +4,7 @@
 // directly. MCP/hook relay point at a dead port (harmless — the TUI composer still works).
 //
 //   node test/_probe-composer-dirty.mjs    (after a build; requires a logged-in `claude`)
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

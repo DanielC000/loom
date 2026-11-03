@@ -1617,6 +1617,15 @@ async function runOne(name, lane) {
   // already stamps this same way.
   const startTs = Date.now();
   const timeoutMs = await resolveEffectiveTimeoutMs(name);
+  // Card dd6e713d: the codex-real-spawn family (CODEX_REAL_SPAWN_SET, the single source of truth in
+  // test/_codex-real-spawn-lock.mjs) is the ONE engine-spawning set this harness already schedules
+  // ALWAYS-ON (see CODEX_REAL_SPAWN_PHASE_POOL_SIZE above) — a pre-existing, intentional behavior this
+  // card preserves rather than changes (see docs/decisions/dd6e713d-real-engine-spawn-opt-in.md). Every
+  // other real-engine-spawning file (test/_real-engine-spawn-basenames.mjs's
+  // REAL_ENGINE_SPAWN_BASENAMES minus this set) is either underscore-excluded or NOT_HERMETIC, so it is
+  // never selected/spawned by this function at all — this env var is therefore supplied ONLY for a
+  // codex-family member, never for anything else, and nothing about WHICH files get selected changes.
+  const { CODEX_REAL_SPAWN_SET } = await import("../test/_codex-real-spawn-lock.mjs");
   const r = await spawnWithTimeout(process.execPath, [file], {
     timeoutMs,
     // Card d1e10795: LOOM_REAL_HOME carries the harness's own (real) LOOM_HOME through to the spawned
@@ -1653,6 +1662,10 @@ async function runOne(name, lane) {
       ...(process.platform === "win32" && !process.env.PSModuleAnalysisCachePath
         ? { PSModuleAnalysisCachePath: path.join(home, "ps-module-analysis-cache", "ModuleAnalysisCache") }
         : {}),
+      // Card dd6e713d: see this function's own comment above `CODEX_REAL_SPAWN_SET` — supplies the
+      // real-engine-spawn opt-in ONLY to the codex-real-spawn family, so its pre-existing always-on
+      // schedule keeps working unchanged under the new structural refusal in test/_real-engine-opt-in.mjs.
+      ...(CODEX_REAL_SPAWN_SET.has(name) ? { LOOM_ALLOW_REAL_ENGINE: "1" } : {}),
     },
   });
   const endTs = Date.now();

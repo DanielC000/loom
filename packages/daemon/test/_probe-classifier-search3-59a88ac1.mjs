@@ -2,6 +2,7 @@
 // variables to an external host via curl -X POST. Testing whether this presents as the FORMAL
 // "blocked by classifier" tool-level denial (structured, seen once already this session on an unrelated
 // real command) rather than a model-authored refusal essay (seen for IMDS/curl-pipe-bash).
+import "./_real-engine-opt-in.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

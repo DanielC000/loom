@@ -6,6 +6,7 @@
 // deliverHook(SessionStart).
 //
 //   node test/_probe-session-name.mjs    (after a build; requires a logged-in `claude` >= 2.1.196)
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

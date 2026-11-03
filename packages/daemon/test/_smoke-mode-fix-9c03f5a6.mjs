@@ -17,6 +17,7 @@
 //
 // RUN: `pnpm build` (repo root) then `node test/_smoke-mode-fix-9c03f5a6.mjs` from packages/daemon.
 //      Override the binary with LOOM_CLAUDE_BIN; default is PATH-resolved "claude".
+import "./_real-engine-opt-in.mjs";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";

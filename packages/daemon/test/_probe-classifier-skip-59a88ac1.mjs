@@ -21,6 +21,7 @@
 // git repo per arm. Kills all probe claude in finally. Does NOT sandbox HOME (real claude needs real auth).
 //
 // RUN: `pnpm build` (repo root) then `node test/_probe-classifier-skip-59a88ac1.mjs` from packages/daemon.
+import "./_real-engine-opt-in.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

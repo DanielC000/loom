@@ -3,6 +3,7 @@
 // on it. NOT the deliverable itself — see _probe-classifier-skip-59a88ac1.mjs for the real experiment.
 // Tries each candidate as a POSITIVE-CONTROL-ONLY run (allow:[]) and reports marker-file / prompt / stop
 // signals for each, so we can pick the first one that demonstrates a real denial.
+import "./_real-engine-opt-in.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

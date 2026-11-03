@@ -5725,6 +5725,15 @@ export const STATIC_GUARD_REPO_PATHS = [
   // @decision 4b559feb — kept as a reviewer-chosen OVER-INCLUSION on the trust-boundary ground (never
   // weakens the reduced gate; runs in ~1s) — never "owner-directed" (no owner request verified).
   "packages/daemon/test/trailer-derived-value-git-argv-guard.mjs",
+  // Card dd6e713d: a corpus-wide reverse sweep (plus a forward check over a curated basename list) that a
+  // test/*.mjs file capable of launching a real claude/codex engine carries the structural opt-in refusal
+  // (test/_real-engine-opt-in.mjs). Belongs here on the SAME ground as fixed-wait-witness-guard.mjs above:
+  // its invalidator is a NEW or CHANGED `.mjs` test FILE (a probe that forgets the import, or a brand-new
+  // real-engine-spawning file nobody lists), never a behavioural `.ts` edit — so a test-only diff could
+  // take the reduced gate path and never trip it without this entry (the same incident shape
+  // fixed-wait-witness-guard.mjs was added to close). See the guard's own header for the full mechanism
+  // (AST-based spawn-call detection, the three safe markers, the reasoned non-engine allowlist).
+  "packages/daemon/test/real-engine-spawn-opt-in-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run

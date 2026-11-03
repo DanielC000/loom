@@ -36,6 +36,7 @@
 // never by image name or port (CLAUDE.md's standing process-cleanup rule).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/instructions-loaded-real-spawn.mjs
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

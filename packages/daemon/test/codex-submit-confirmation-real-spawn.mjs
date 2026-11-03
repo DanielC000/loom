@@ -37,6 +37,7 @@
 // fails the gate if that ever falls out of sync with this file's `acquireCodexRealSpawnLock()` call.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codex-submit-confirmation-real-spawn.mjs
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";

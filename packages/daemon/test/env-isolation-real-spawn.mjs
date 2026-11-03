@@ -1,3 +1,4 @@
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card fafae623 — THE real-spawn smoke the card's DoD calls for: a REAL `claude` process (not a
 // substituted fake binary — the mechanism under test IS claude's own stdio-MCP-spawn behavior, which no

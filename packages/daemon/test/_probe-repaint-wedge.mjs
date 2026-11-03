@@ -43,6 +43,7 @@
 // RUN: `pnpm build` (repo root) then `node test/_probe-repaint-wedge.mjs` from packages/daemon.
 //      Override the binary with LOOM_CLAUDE_BIN; default is PATH-resolved "claude".
 //      Override attempt count with PROBE_ATTEMPTS (default 3).
+import "./_real-engine-opt-in.mjs";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";

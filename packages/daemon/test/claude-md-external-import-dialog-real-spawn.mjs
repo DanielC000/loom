@@ -64,6 +64,7 @@
 //
 // Run (MANUAL-ONLY — see above): 1) build (turbo builds shared first),
 // 2) node test/claude-md-external-import-dialog-real-spawn.mjs
+import "./_real-engine-opt-in.mjs";
 import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";
