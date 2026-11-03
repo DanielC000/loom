@@ -565,7 +565,11 @@ try {
     check("*** THE FIX (item 2) *** the CORRECTLY-WORDED degraded-occupied refusal fires instead", /this key is occupied by a DIFFERENT, currently-unresolvable entry's own trusted resolvedKey/.test(errText));
 
     boot1.clearMergeQuarantine(x); // an ordinary clear of the UNRELATED degraded entry X — never sub
-    check("*** THE FIX *** sub is STILL blocked (same process) after clearing the unrelated degraded X", boot1.assertRepoNotQuarantined(sub).ok === false);
+    // `stillBlockedEntryFor` (a PURE peek), never `assertRepoNotQuarantined` — the latter's own
+    // resolveQuarantineFor/activeMergeQuarantineFor can lazily re-persist/heal state as a side effect of
+    // being merely queried, which would durably fix up sub's record before the reboot below ever reads
+    // disk and make that reboot check pass vacuously (card 81bbc902).
+    check("*** THE FIX *** sub is STILL blocked (same process) after clearing the unrelated degraded X", boot1.stillBlockedEntryFor(sub) !== undefined);
 
     const reboot2 = await rebootSim();
     reboot2.reenterMergeQuarantinesAtBoot([repo, sub, x]);

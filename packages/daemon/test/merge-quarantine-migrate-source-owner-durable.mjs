@@ -1272,7 +1272,11 @@ try {
     const clearByPathResult = bootThree.clearMergeQuarantine(x);
     check("*** THE FIX (9a55fb90) *** clear-by-path(x) lifts X", clearByPathResult?.wasQuarantined === true);
     check("*** THE FIX (9a55fb90) *** X is no longer active immediately after clear-by-path", !bootThree.activeMergeQuarantineFor(x));
-    const subRightAfterPathClear = bootThree.activeMergeQuarantineFor(sub);
+    // `stillBlockedEntryFor` (a PURE peek), never `activeMergeQuarantineFor` -- the latter can lazily
+    // re-persist/heal state as a side effect of being merely queried, which would durably fix up sub's
+    // record before bootFour below ever reads disk and make its "NO COLLATERAL LOSS" reboot checks pass
+    // vacuously (card 81bbc902).
+    const subRightAfterPathClear = bootThree.stillBlockedEntryFor(sub);
     check(
       "*** THE FIX, NO COLLATERAL LOSS *** sub still holds its own token immediately after clearing X by path",
       !!subRightAfterPathClear && (subRightAfterPathClear.tokens ?? []).includes("token-sub-rev"),
