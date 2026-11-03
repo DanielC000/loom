@@ -154,12 +154,60 @@ path — same trust posture as the existing create/delete routes); no Settings-U
   it. **No containment fix is attempted in this card** — tracked as a disclosed residual for a future
   card, not this one.
 
+## Proxy credentials (card `188d6a8c`)
+
+The original `BASE_ALLOWLIST` carried `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` (any case) unconditionally —
+a proxy URL may embed `user:pass@host:port` userinfo, which is a credential, and the base allowlist
+forwards to EVERY stdio mount regardless of whether that mount can even use it. Investigated (see this
+card's own `worker_report blocked` on 2026-11-03) rather than assumed:
+
+- **Playwright** (`@playwright/mcp@0.0.75`) does not read `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` at all —
+  its README documents its OWN `--proxy-server`/`PLAYWRIGHT_MCP_PROXY_SERVER` instead, neither of which is
+  wired into Loom's spawn args. Forwarding the standard proxy vars to it had zero functional benefit.
+- **markitdown** genuinely needs them: `markitdown/_markitdown.py` imports Python's `requests`, and its
+  URL-fetching converters rely on `requests`' default `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` handling
+  (including a credentialed proxy URL, which `requests` supports natively).
+- The seeded **github** capability (`kind: "github-binary"`, a Loom-downloaded, checksum-verified Go
+  binary) plausibly needs them via Go's `net/http` default `ProxyFromEnvironment` behavior — inferred from
+  Go stdlib convention, not measured against the binary's own source (not vendored in this repo).
+- **codescape** mounts as `{type:"http"}`, never wrapped by this launcher at all — out of scope.
+- A generic owner-added `node-package`/`bundled`/`command`/`npm-pinned` capability is tool-dependent; it
+  already has the exact mechanism it needs (`passEnv`).
+
+**Decision: scope, never strip.** `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`all_proxy` (every case) were
+removed from `BASE_ALLOWLIST` entirely (`NO_PROXY`/`no_proxy` stay — they carry no credential). They are
+forwarded, RAW (credentials included — stripping would break the one real, corporate-proxy use case this
+exists to serve), only to Loom's own entitled, seeded, network-reaching mounts via the ONE named constant
+`PROXY_ENV_KEYS` (`pty/host.ts`):
+
+- **markitdown**: a fixed addition to its `--allow` list (hardcoded, since it's not a catalog row and has
+  no `passEnv` field to opt into) — `passEnvByMountKey["markitdown"] = PROXY_ENV_KEYS`.
+- **The seeded github-binary capability**: keyed on `def.kind === "github-binary"` — a SEED-ONLY kind
+  `validateCapabilityDefInput` structurally rejects from any owner-supplied input (see its own `kind`
+  enum check), so this can never be forged by deleting+recreating a same-slug row. Never keyed on `slug`
+  or `name` — both are owner-collidable once the seeded row is deleted.
+- **Playwright**: nothing added (confirmed no need, above).
+- **Every other owner-added catalog capability**: proxy keys ONLY via its own existing human-only
+  `passEnv` — no code change; the mechanism already existed.
+
+This is a user-visible behavior change: an owner-added capability that relied on the OLD unconditional
+forwarding now needs `passEnv` set explicitly. No schemeless/malformed-proxy-value parser was added —
+without stripping, there is nothing to parse; an entitled mount's raw value passes through exactly as it
+did before this card, just scoped to who receives it.
+
 ## Do not
 
 - Do not widen `BASE_ALLOWLIST` (`assets/env-isolated-launch.mjs`) to cover a secret-shaped name
-  (`LOOM_MCP_TOKEN`, `CLAUDE_CODE_*`, any credential) — a server-specific secret belongs in that one
-  mount's own `--allow` list, computed from its OWN declared `env` keys, never the shared base every
-  mount receives unconditionally.
+  (`LOOM_MCP_TOKEN`, `CLAUDE_CODE_*`, any credential, or a proxy var that may carry `user:pass@host:port`
+  userinfo — `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, any case) — a server-specific secret belongs in that
+  one mount's own `--allow` list, computed from its OWN declared `env` keys plus `PROXY_ENV_KEYS` for an
+  entitled mount only, never the shared base every mount receives unconditionally.
+- Do not key a mount's proxy entitlement on its `slug` or `name` — both are owner-collidable (delete the
+  seeded row, recreate one with the same slug). Key it on `def.kind === "github-binary"` (a SEED-ONLY kind
+  no owner input can produce) or on the hardcoded mount key (`"markitdown"`) for a non-catalog mount.
+- Do not add a strip/parse step for a proxy value reaching an entitled mount — the decision was to scope
+  WHO receives the raw value, never to sanitize it; stripping userinfo would break the credentialed
+  corporate-proxy case that is the entire reason the value is forwarded.
 - Do not compute a mount's `--allow` list from its `env` object AFTER `blanksMcpToken` has run in
   `buildMcpServers`'s chokepoint loop — capture the declared keys BEFORE that same loop adds
   `LOOM_MCP_TOKEN: ""`; the loop's own `MCP_TOKEN_ENV_VAR` filter is defense in depth on top of that

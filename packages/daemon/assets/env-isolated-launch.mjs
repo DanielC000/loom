@@ -5,9 +5,9 @@
 // Rebuilds the real target's child env from a fixed base allowlist plus the named --allow keys, both
 // read from THIS process's own inherited env; key NAMES only ever ride argv, VALUES are never logged.
 //
-// @decision fafae623 — never widen BASE_ALLOWLIST to cover a secret-shaped name (LOOM_MCP_TOKEN,
-// CLAUDE_CODE_*, a credential) — a server-specific secret belongs in a mount's own per-call `--allow`
-// list, never the shared base allowlist every mount receives unconditionally.
+// @decision fafae623 — never widen BASE_ALLOWLIST to cover a secret-shaped name: LOOM_MCP_TOKEN,
+// CLAUDE_CODE_*, a credential, or a proxy var that may carry `user:pass@host:port` userinfo
+// (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY, card 188d6a8c) — added per-mount instead; see PROXY_ENV_KEYS (pty/host.ts).
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -17,16 +17,16 @@ export const BASE_ALLOWLIST = [
   "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC",
   "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME",
   "TEMP", "TMP",
-  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+  "NO_PROXY",
   "NODE_EXTRA_CA_CERTS",
   "npm_config_cache", "npm_config_registry",
   "PYTHONIOENCODING", "PYTHONUTF8",
   "PLAYWRIGHT_BROWSERS_PATH",
   // POSIX additions (card fafae623 CR round 1, item 5) — UNMEASURED on POSIX (no POSIX host available
   // during this card's work); added because every name is a plausible real need for a POSIX stdio MCP
-  // (locale, cert trust, cache/tmp dirs, proxy) and none of them are secret-shaped.
+  // (locale, cert trust, cache/tmp dirs) and none of them are secret-shaped.
   "XDG_CACHE_HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER", "LOGNAME",
-  "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "ALL_PROXY", "all_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
 ];
 
 export function parseLauncherArgv(argv) {

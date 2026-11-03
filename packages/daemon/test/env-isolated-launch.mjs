@@ -79,6 +79,29 @@ check("(b) BASE_ALLOWLIST is non-empty and includes PATH/TEMP/NODE_EXTRA_CA_CERT
 check("(b) --allow key matching is also case-insensitive against the inherited env",
   buildIsolatedEnv({ my_secret: "v" }, ["MY_SECRET"]).my_secret === "v");
 
+// ===================== (b2) card 188d6a8c: HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are NOT in BASE_ALLOWLIST =====
+// (they may carry embedded `user:pass@host:port` credentials) — only a mount that names them via --allow
+// (pty/host.ts's PROXY_ENV_KEYS, added for markitdown/the seeded github-binary capability) receives one.
+// NO_PROXY stays in the base — it carries no credential.
+check("(b2) BASE_ALLOWLIST no longer carries HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/all_proxy (card 188d6a8c)",
+  !BASE_ALLOWLIST.includes("HTTP_PROXY") && !BASE_ALLOWLIST.includes("HTTPS_PROXY")
+  && !BASE_ALLOWLIST.includes("ALL_PROXY") && !BASE_ALLOWLIST.includes("all_proxy"));
+check("(b2) BASE_ALLOWLIST still carries NO_PROXY (no credential, unconditional forwarding is harmless)", BASE_ALLOWLIST.includes("NO_PROXY"));
+const credentialedProxyEnv = {
+  PATH: "/usr/bin", HTTP_PROXY: "http://corpuser:corppass@proxy.corp.example:8080",
+  https_proxy: "http://corpuser:corppass@proxy.corp.example:8080", ALL_PROXY: "http://corpuser:corppass@proxy.corp.example:1080",
+};
+const builtUnentitled = buildIsolatedEnv(credentialedProxyEnv, []);
+check("(b2) with NO --allow entry naming it, a credentialed HTTP_PROXY is ABSENT from an unentitled mount's env",
+  !("HTTP_PROXY" in builtUnentitled));
+check("(b2) same for the lowercase https_proxy variant", !("https_proxy" in builtUnentitled));
+check("(b2) same for ALL_PROXY", !("ALL_PROXY" in builtUnentitled));
+const builtEntitled = buildIsolatedEnv(credentialedProxyEnv, ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"]);
+check("(b2) naming HTTP_PROXY via --allow forwards the RAW credentialed value (scoping, never stripping)",
+  builtEntitled.HTTP_PROXY === "http://corpuser:corppass@proxy.corp.example:8080");
+check("(b2) naming it case-insensitively still matches the lowercase https_proxy key present in the inherited env",
+  builtEntitled.https_proxy === "http://corpuser:corppass@proxy.corp.example:8080");
+
 // ===================== (c) REAL child_process spawn of the launcher =====================
 const ECHO_ENV_FIXTURE = path.join(__dirname, "fixtures", "echo-env.mjs");
 {
@@ -95,6 +118,23 @@ const ECHO_ENV_FIXTURE = path.join(__dirname, "fixtures", "echo-env.mjs");
   check("(c) the real spawned target did NOT receive the non-allow-listed key", !("NOT_ALLOWED_SECRET" in echoed.env));
   check("(c) the real spawned target's argv never carried either secret value",
     !JSON.stringify(echoed.argv).includes("should-survive-abc123") && !JSON.stringify(echoed.argv).includes("should-NEVER-survive-xyz789"));
+}
+{
+  // (c2) card 188d6a8c, REAL spawn: a credentialed HTTP_PROXY in the launcher's own inherited env reaches
+  // the real target ONLY when named via --allow — proves the b2 pure-function result end to end, not just
+  // in isolation.
+  const credEnv = {
+    PATH: process.env.PATH ?? process.env.Path ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "",
+    TEMP: process.env.TEMP ?? process.env.TMP ?? os.tmpdir(), HOME: process.env.HOME ?? "", USERPROFILE: process.env.USERPROFILE ?? "",
+    HTTP_PROXY: "http://corpuser:corppass@proxy.corp.example:8080",
+  };
+  const { stdout: stdoutUnentitled } = await execFileAsync(process.execPath, [LAUNCHER, "--allow", "", "--", process.execPath, ECHO_ENV_FIXTURE], { env: credEnv });
+  const echoedUnentitled = JSON.parse(stdoutUnentitled);
+  check("(c2) an UNENTITLED real target (empty --allow) never receives the credentialed HTTP_PROXY", !("HTTP_PROXY" in echoedUnentitled.env));
+
+  const { stdout: stdoutEntitled } = await execFileAsync(process.execPath, [LAUNCHER, "--allow", "HTTP_PROXY", "--", process.execPath, ECHO_ENV_FIXTURE], { env: credEnv });
+  const echoedEntitled = JSON.parse(stdoutEntitled);
+  check("(c2) an ENTITLED real target (--allow HTTP_PROXY) receives the RAW credentialed value", echoedEntitled.env.HTTP_PROXY === "http://corpuser:corppass@proxy.corp.example:8080");
 }
 {
   // exit-code propagation: the fixture's own process.exit(1) must surface through the launcher.

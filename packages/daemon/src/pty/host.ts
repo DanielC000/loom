@@ -2172,6 +2172,18 @@ export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | 
 }
 
 /**
+ * Card 188d6a8c: proxy env var names that may carry embedded `user:pass@host:port` credentials — removed
+ * from `env-isolated-launch.mjs`'s unconditional `BASE_ALLOWLIST` (every mount used to get these; most
+ * don't need them). Forwarded, RAW, only to the entitled mounts `buildMcpServers` names below (markitdown,
+ * the seeded github-binary capability) via the SAME `--allow` mechanism `passEnv` already uses.
+ * Case-insensitive match downstream (`buildIsolatedEnv`), so listing both cases here isn't required, but
+ * ALL_PROXY/all_proxy keeps symmetry with how BASE_ALLOWLIST used to list it.
+ * @decision fafae623 — never add these back to BASE_ALLOWLIST, and never key a mount's proxy entitlement
+ * on a `slug`/`name` match — both are owner-collidable once a seeded row is deleted.
+ */
+export const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"];
+
+/**
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
  * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit,
@@ -2372,6 +2384,9 @@ export function buildMcpServers(o: {
       const md = markitdownMcpServer(o.pythonInterpreterPath);
       if (md) {
         mcpServers["markitdown"] = md;
+        // Card 188d6a8c: markitdown's own `requests`-based URL converters honor HTTP_PROXY/HTTPS_PROXY —
+        // a fixed addition since it's not a catalog row and has no `passEnv` of its own to opt into.
+        passEnvByMountKey["markitdown"] = PROXY_ENV_KEYS;
       } else {
         // eslint-disable-next-line no-console
         console.warn(`[pty] ${o.sessionId} documentConversion set but the markitdown venv isn't warm yet — spawning WITHOUT the document MCP (provisioning in the background; a later spawn will pick it up). Needs a base Python >=3.10 on PATH (or python.interpreterPath).`);
@@ -2411,7 +2426,14 @@ export function buildMcpServers(o: {
     });
     if (server) {
       mcpServers[def.slug] = server;
-      passEnvByMountKey[def.slug] = def.passEnv ?? [];
+      // Card 188d6a8c: the seeded github-binary capability's Go binary honors HTTP_PROXY/HTTPS_PROXY by
+      // default (net/http) — keyed on `def.kind`, a SEED-ONLY value validateCapabilityDefInput refuses
+      // from any owner input, never on `def.slug`/name (owner-collidable once the seeded row is deleted).
+      // Every other catalog capability gets proxy keys ONLY via its own passEnv, unchanged.
+      passEnvByMountKey[def.slug] = [
+        ...(def.passEnv ?? []),
+        ...(def.kind === "github-binary" ? PROXY_ENV_KEYS : []),
+      ];
     } else {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);
