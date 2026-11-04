@@ -20,6 +20,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { mkdtempManaged } from "./_tmp-fixture.mjs";
 
 // Card a19fbad3 (CR on bf58c19c) — pinned BEFORE any Date use in this file: without this, the
 // `parsePsLstartTimestamp` UTC-construction assertions below pass even if the parser regresses to
@@ -46,6 +47,13 @@ process.env.LOOM_ROOT_CREATION_CAPTURE_AWAIT_MS = "150";
 // attempts the (w...) block's own assertions expect. Also read at module load — must be set before the
 // dist import below, same reason as the AWAIT_MS pin above.
 delete process.env.LOOM_ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS;
+// Card 7664f6b3: scenario (u) below (the codex path through the real spawn()) spawns a FRESH (non-resume)
+// codex session — spawnCodexProcess unconditionally scans codexSessionsRoot() (CODEX_HOME||~/.codex +
+// "sessions") BEFORE createCodexPty is even reached, so faking createCodexPty below does NOT stop that
+// scan from hitting the owner's REAL ~/.codex tree. Sandbox it to a fresh (self-cleaning) temp dir before
+// the dist import below.
+const tmpCodexHome = mkdtempManaged("loom-codex-reap-identity-home-");
+process.env.CODEX_HOME = tmpCodexHome;
 
 const {
   PtyHost, commandLineMatchesSession,
@@ -57,6 +65,8 @@ const {
   ROOT_CREATION_CAPTURE_RETRY_ATTEMPTS, resolveRootCreationCaptureRetryAttempts, resolveRootCreationCaptureBackoffMs,
 } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+const { realCodexHome } = await import("../dist/pty/codex-doctrine.js");
+check("(control) codexSessionsRoot() is sandboxed under the temp CODEX_HOME, not the owner's real ~/.codex", realCodexHome() === tmpCodexHome);
 
 // A controllable PtyHost subclass: `probeRootSurvival`/`killRoot` are overridden per scenario below
 // (never the real OS enumerator — see PtyHost's own doc on why that matters for a hermetic test), and

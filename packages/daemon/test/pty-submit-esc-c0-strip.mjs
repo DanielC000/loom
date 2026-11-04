@@ -48,6 +48,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { waitUntil } from "./_wait.mjs";
+import { mkdtempManaged } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -62,12 +63,20 @@ process.env.LOOM_HOME = tmpHome;
 // choices.
 process.env.LOOM_MODE_LOG_POLL_MS = "10";
 process.env.LOOM_RESUME_MODE_POLL_MS = "10";
+// Card 7664f6b3: scenario (F) below spawns a FRESH (non-resume) codex session — spawnCodexProcess
+// unconditionally scans codexSessionsRoot() (CODEX_HOME||~/.codex + "sessions") BEFORE createCodexPty is
+// even reached, so faking createCodexPty below does NOT stop that scan from hitting the owner's REAL
+// ~/.codex tree. Sandbox it to a fresh (self-cleaning) temp dir before the dist import below.
+const tmpCodexHome = mkdtempManaged("loom-codex-esc-strip-home-");
+process.env.CODEX_HOME = tmpCodexHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+const { realCodexHome } = await import("../dist/pty/codex-doctrine.js");
+check("(control) codexSessionsRoot() is sandboxed under the temp CODEX_HOME, not the owner's real ~/.codex", realCodexHome() === tmpCodexHome);
 
 const fakes = [];
 const fakeCodexPtys = new Map();

@@ -49,9 +49,17 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = mkdtempManaged("loom-codex-boot-stuck-health-");
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 7664f6b3: scenario (3) below spawns a FRESH (non-resume) codex session — spawnCodexProcess
+// unconditionally scans codexSessionsRoot() (CODEX_HOME||~/.codex + "sessions") BEFORE createCodexPty is
+// even reached, so faking createCodexPty above does NOT stop that scan from hitting the owner's REAL
+// ~/.codex tree. Sandbox it to a fresh temp dir before the dist import below.
+const tmpCodexHome = mkdtempManaged("loom-codex-boot-stuck-home-");
+process.env.CODEX_HOME = tmpCodexHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+const { realCodexHome } = await import("../dist/pty/codex-doctrine.js");
+check("(control) codexSessionsRoot() is sandboxed under the temp CODEX_HOME, not the owner's real ~/.codex", realCodexHome() === tmpCodexHome);
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");

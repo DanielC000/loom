@@ -34,6 +34,7 @@ import os from "node:os";
 import path from "node:path";
 import { waitUntil } from "./_wait.mjs";
 import { createSeamHost } from "./_seam-host-fixture.mjs";
+import { mkdtempManaged } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,8 +42,16 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-reap-wiring-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 7664f6b3: spawnCodex() below spawns FRESH (non-resume) codex sessions — spawnCodexProcess
+// unconditionally scans codexSessionsRoot() (CODEX_HOME||~/.codex + "sessions") BEFORE createCodexPty is
+// even reached, so faking createCodexPty below does NOT stop that scan from hitting the owner's REAL
+// ~/.codex tree. Sandbox it to a fresh (self-cleaning) temp dir before the dist import below.
+const tmpCodexHome = mkdtempManaged("loom-codex-reap-wiring-home-");
+process.env.CODEX_HOME = tmpCodexHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { realCodexHome } = await import("../dist/pty/codex-doctrine.js");
+check("(control) codexSessionsRoot() is sandboxed under the temp CODEX_HOME, not the owner's real ~/.codex", realCodexHome() === tmpCodexHome);
 
 const ETX = "\x03";
 

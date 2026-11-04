@@ -45,9 +45,17 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const TMP = mkdtempManaged("loom-codex-queue-sm-");
 process.env.LOOM_HOME = TMP;
+// Card 7664f6b3: the spawn below is a FRESH (non-resume) codex session — spawnCodexProcess unconditionally
+// scans codexSessionsRoot() (CODEX_HOME||~/.codex + "sessions") BEFORE createCodexPty is even reached, so
+// faking createCodexPty below does NOT stop that scan from hitting the owner's REAL ~/.codex tree. Sandbox
+// it to a fresh temp dir before the dist import below.
+const tmpCodexHome = mkdtempManaged("loom-codex-queue-sm-codexhome-");
+process.env.CODEX_HOME = tmpCodexHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { codexAsciiFold } = await import("../dist/pty/codex-host.js");
+const { realCodexHome } = await import("../dist/pty/codex-doctrine.js");
+check("(control) codexSessionsRoot() is sandboxed under the temp CODEX_HOME, not the owner's real ~/.codex", realCodexHome() === tmpCodexHome);
 
 /** A fake, fully-scripted codex pty: no real process, no OS-driven I/O — every "chunk" of output is
  *  pushed by this test calling `fakePty.push(text)` directly. The only REAL async in this file is the

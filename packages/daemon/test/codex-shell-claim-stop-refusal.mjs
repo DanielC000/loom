@@ -16,8 +16,16 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const TMP = mkdtempManaged("loom-codex-shell-claim-");
 process.env.LOOM_HOME = TMP;
+// Card 7664f6b3: spawnReadyCodexSession() below spawns FRESH (non-resume) codex sessions —
+// spawnCodexProcess unconditionally scans codexSessionsRoot() (CODEX_HOME||~/.codex + "sessions") BEFORE
+// createCodexPty is even reached, so faking createCodexPty below does NOT stop that scan from hitting the
+// owner's REAL ~/.codex tree. Sandbox it to a fresh temp dir before the dist import below.
+const tmpCodexHome = mkdtempManaged("loom-codex-shell-claim-codexhome-");
+process.env.CODEX_HOME = tmpCodexHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { realCodexHome } = await import("../dist/pty/codex-doctrine.js");
+check("(control) codexSessionsRoot() is sandboxed under the temp CODEX_HOME, not the owner's real ~/.codex", realCodexHome() === tmpCodexHome);
 
 function makeFakeCodexPty() {
   let onExitCb = null;

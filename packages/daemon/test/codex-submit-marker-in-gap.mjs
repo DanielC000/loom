@@ -29,8 +29,16 @@ const SPINNER_CHUNK = "\x1b]0;\u280b loom-fixture...\x07";
 
 const TMP = mkdtempManaged("loom-codex-submit-marker-gap-");
 process.env.LOOM_HOME = TMP;
+// Card 7664f6b3: the spawns below are FRESH (non-resume) codex sessions — spawnCodexProcess unconditionally
+// scans codexSessionsRoot() (CODEX_HOME||~/.codex + "sessions") BEFORE createCodexPty is even reached, so
+// faking createCodexPty below does NOT stop that scan from hitting the owner's REAL ~/.codex tree. Sandbox
+// it to a fresh temp dir before the dist import below.
+const tmpCodexHome = mkdtempManaged("loom-codex-submit-marker-gap-codexhome-");
+process.env.CODEX_HOME = tmpCodexHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { realCodexHome } = await import("../dist/pty/codex-doctrine.js");
+check("(control) codexSessionsRoot() is sandboxed under the temp CODEX_HOME, not the owner's real ~/.codex", realCodexHome() === tmpCodexHome);
 
 function makeFakePty() {
   let onDataCb = null;
