@@ -277,6 +277,128 @@ interface IncrementalUsageCache {
 }
 
 /**
+ * Outcome of one {@link readIncrementalTail} tick, after the caller has already stat'd the file and
+ * decided it's worth reading. Exported ONLY so a unit test can exercise {@link readIncrementalTail}
+ * directly — neither reader class exposes this shape to its own callers. See that function's own doc for
+ * the full contract.
+ */
+export interface IncrementalTailReadResult {
+  /**
+   * True iff the file SHRANK since the caller's last read (truncation/rotation-in-place). The caller
+   * must reset whatever OTHER per-session state it carries (an accumulator, turns, lastModel, …) to
+   * fresh — `offset`/`partialBytes`/`lines` below already reflect a re-read of the WHOLE current file
+   * from byte 0, so they're ready to apply as-is once that reset happens.
+   */
+  truncated: boolean;
+  /** The new offset — REPLACES the caller's own `offset` in full (always a `\n` boundary). */
+  offset: number;
+  /** The new trailing partial-line buffer — REPLACES the caller's own `partialBytes` in full. */
+  partialBytes: Buffer;
+  /**
+   * Complete new JSONL lines this tick, in order — empty when nothing new arrived, when the new bytes
+   * are still an unterminated partial line, or when the chunk read itself failed (`readFailed`).
+   */
+  lines: string[];
+  /**
+   * True iff the chunk read (the bounded open/read-loop/close below) threw — `lines` is always empty in
+   * this case. `offset`/`partialBytes` are still safe to apply verbatim: unchanged from the caller's own
+   * prior values when `truncated` is false, or already reset to 0/empty when `truncated` is true — a
+   * truncation's reset happens regardless of whether the follow-up read then fails, matching the two
+   * readers' original reset-before-attempt ordering (a truncation discards stale totals even if nothing
+   * fresh can be read this same tick).
+   */
+  readFailed: boolean;
+}
+
+/**
+ * Shared byte-offset / partial-line tail-read plumbing (card 22072f12) — the ~40 lines
+ * {@link IncrementalRunUsageReader} and {@link IncrementalContextStatsReader} used to each carry
+ * independently. Given `size` (the file's CURRENT length, already stat'd by the caller — this function
+ * never stats; the two callers resolve/stat the path very differently, so that stays their own job) and
+ * the caller's own prior `priorOffset`/`priorPartialBytes`, reads only the bytes appended since the last
+ * tick and splits them into complete JSONL lines + a trailing partial remainder.
+ *
+ * Each caller still owns its OWN line-handling semantics entirely — this function does not parse a line
+ * or decide what counts as a "fresh" one; it only decides WHICH complete lines exist. {@link
+ * IncrementalRunUsageReader} dedupes-and-sums via {@link accumulateUsageLine}; {@link
+ * IncrementalContextStatsReader} overwrites last-wins via `foldContextLine` — both fold `result.lines`
+ * through their own callback after applying `result.offset`/`result.partialBytes` (and, on `truncated`,
+ * resetting their own extra state) exactly as before this extraction; this function never calls a fold
+ * callback itself, by design, so neither reader's fold semantics live inside shared code.
+ *
+ * • `size === priorOffset + priorPartialBytes.length` ⇒ no new bytes ⇒ `{truncated:false, lines:[]}`
+ *   with `offset`/`partialBytes` unchanged, no IO at all.
+ * • `size < priorOffset + priorPartialBytes.length` ⇒ truncation/shrink ⇒ `truncated:true`, and the read
+ *   below proceeds as if `priorOffset`/`priorPartialBytes` were `0`/empty (a fresh read of the whole
+ *   current file) — the caller applies its OTHER reset (accumulator/turns/model) around this result.
+ * • else: reads ONLY `[lastReadEnd, size)` (looping on a POSIX short `pread` so nothing is silently
+ *   dropped nor zero-fill-corrupted), PREPENDS the carried `partialBytes`, splits on the LAST `\n`, and
+ *   returns the complete-lines slice (as parsed `string[]`, already split on `\n`) plus the new trailing
+ *   partial remainder.
+ *
+ * UTF-8 safe: `offset` only ever advances to a `\n` boundary (0x0A never appears inside a multibyte UTF-8
+ * sequence), and the partial remainder is carried as raw BYTES — a multibyte character split across a
+ * chunk boundary is never decoded until its line completes. No dedup set lives here: that's each caller's
+ * OWN fold's job (dedupe-and-sum for one, overwrite-last-wins for the other) — this function only ever
+ * decides which raw lines exist, never what they mean. {@link IncrementalRunUsageReader}'s cumulative
+ * must stay byte-identical to a full {@link readRunUsageFromFile} parse; this extraction must not change
+ * that — the RED-proof is a mutant that keeps this function's own API but disables one piece of its
+ * logic (e.g. skip the truncation reset), which must turn BOTH readers' tests red.
+ *
+ * @decision sha:8591caf8 — byte-identical cumulative is load-bearing; any mutant here must redden both
+ * readers' tests, proving both route through this one function.
+ */
+export async function readIncrementalTail(
+  file: string,
+  size: number,
+  priorOffset: number,
+  priorPartialBytes: Buffer,
+): Promise<IncrementalTailReadResult> {
+  let offset = priorOffset;
+  let partialBytes = priorPartialBytes;
+  let truncated = false;
+  let lastReadEnd = offset + partialBytes.length;
+  if (size < lastReadEnd) {
+    // Truncation/shrink of the same file → the byte offsets are meaningless → re-read from 0.
+    truncated = true;
+    offset = 0;
+    partialBytes = Buffer.alloc(0);
+    lastReadEnd = 0;
+  }
+  if (size === lastReadEnd) return { truncated, offset, partialBytes, lines: [], readFailed: false };
+
+  const len = size - lastReadEnd;
+  const buf = Buffer.alloc(len);
+  let got = 0;
+  try {
+    const fh = await fs.promises.open(file, "r");
+    try {
+      // FileHandle.read is a single `pread` — a POSIX short read can return FEWER than `len` bytes,
+      // leaving the buffer tail zero-filled. Loop until `len` is filled so we never account bytes we
+      // didn't read (silent undercount + mid-message JSON corruption); stop on 0 (EOF/concurrent shrink)
+      // and carry ONLY the bytes actually read — the remainder is re-read on the next tick.
+      while (got < len) {
+        const { bytesRead } = await fh.read(buf, got, len - got, lastReadEnd + got);
+        if (bytesRead === 0) break;
+        got += bytesRead;
+      }
+    } finally { await fh.close(); }
+  } catch { return { truncated, offset, partialBytes, lines: [], readFailed: true }; }
+
+  // Prepend the buffered partial line, then split on the LAST newline: everything up to it is complete
+  // lines; the remainder is the next partial (buffer as bytes). `got` may be < `len` on a truncating
+  // read — only the bytes actually read are folded in.
+  const combined = Buffer.concat([partialBytes, got === len ? buf : buf.subarray(0, got)]);
+  const lastNl = combined.lastIndexOf(0x0A);
+  if (lastNl === -1) {
+    return { truncated, offset, partialBytes: combined, lines: [], readFailed: false }; // still no complete line
+  }
+  const complete = combined.subarray(0, lastNl + 1);
+  const rest = combined.subarray(lastNl + 1);
+  return { truncated, offset: offset + complete.length, partialBytes: rest, lines: complete.toString("utf8").split("\n"), readFailed: false };
+}
+
+/**
  * INCREMENTAL + ASYNC cumulative usage reader for the sampler hot path (LAYER 1). Produces, per session, a
  * cumulative RunUsageStats BYTE-IDENTICAL to what a full {@link readRunUsageFromFile} would return — but by
  * parsing only the bytes APPENDED since the last tick, off the event loop (`fs.promises`), instead of
@@ -290,24 +412,20 @@ interface IncrementalUsageCache {
  * Per-session cache holds { engineSessionId, offset (at a `\n` boundary), partialBytes, acc (running totals
  * + the dedup `seen` set) }. Each tick, for a session:
  *  • `fs.promises.stat` the transcript; missing/unreadable ⇒ null (skip), cache untouched.
- *  • size === last-read end (offset + partial length) ⇒ no new bytes ⇒ cumulative unchanged (no IO/parse).
- *  • size < last-read end ⇒ truncation/shrink of THIS file ⇒ RESET the cache and re-read from 0.
+ *  • else delegate the byte-offset/partial-line mechanics to {@link readIncrementalTail} — truncation,
+ *    no-new-bytes, and the bounded chunk read/split are all handled there; this class owns only ITS OWN
+ *    fold (dedupe-and-sum via {@link accumulateUsageLine}) and cache shape.
  *  • engineSessionId changed vs cache ⇒ fork/recycle rotated to a NEW transcript ⇒ RESET and read the new file.
- *  • else read ONLY [lastReadEnd, size), PREPEND the cached partialBytes, split on `\n`, parse only the
- *    COMPLETE lines (advancing offset by their bytes), and buffer the trailing no-newline remainder.
  *
  * The dedup `seen` set lives in the cache and is cleared ONLY on rotation/reset — so a duplicate message.id
  * line-group straddling a tick's offset boundary is counted exactly ONCE, never re-counted (the load-bearing
- * over-count trap). UTF-8 safe: offset advances only to a `\n` (0x0A never appears inside a multibyte
- * sequence) and the partial line is buffered as raw BYTES (a multibyte char split across a chunk is never
- * decoded until complete).
- *
- * IN-MEMORY (per UsageSampler instance): a daemon restart constructs a fresh reader ⇒ empty cache ⇒ the
- * first tick full-parses ⇒ the same cumulative as today ⇒ the DB-aware first-sight path runs identically.
+ * over-count trap).
  *
  * See {@link IncrementalContextStatsReader} below — its sibling for `MidTurnContextSampler` (card
- * c5b234aa), sharing this exact byte-offset/partial-line-buffer mechanism by deliberate duplication, not
- * a shared helper (a p3 follow-up tracks extracting one).
+ * c5b234aa), now sharing this exact byte-offset/partial-line-buffer mechanism via {@link
+ * readIncrementalTail} (card 22072f12) rather than duplicating it; each reader keeps its OWN fold
+ * semantics (dedupe-and-sum vs last-wins) and OWN file-resolution strategy (bare path only vs a
+ * resolve-with-fallback scan) on top of that shared piece.
  */
 export class IncrementalRunUsageReader {
   private cache = new Map<string, IncrementalUsageCache>();
@@ -331,46 +449,13 @@ export class IncrementalRunUsageReader {
       entry = { engineSessionId, offset: 0, partialBytes: Buffer.alloc(0), acc: newUsageAccumulator() };
       this.cache.set(sessionId, entry);
     }
-    let lastReadEnd = entry.offset + entry.partialBytes.length; // where the previous read stopped (= prior size)
-    if (size < lastReadEnd) {
-      // Truncation/shrink of the same file → the byte offsets are meaningless → reset + full re-read from 0.
-      entry = { engineSessionId, offset: 0, partialBytes: Buffer.alloc(0), acc: newUsageAccumulator() };
-      this.cache.set(sessionId, entry);
-      lastReadEnd = 0;
-    }
-    if (size === lastReadEnd) return entry.acc.sawUsage ? statsFromAccumulator(entry.acc) : null; // no new bytes
 
-    const len = size - lastReadEnd;
-    const buf = Buffer.alloc(len);
-    let got = 0;
-    try {
-      const fh = await fs.promises.open(file, "r");
-      try {
-        // FileHandle.read is a single `pread` — a POSIX short read can return FEWER than `len` bytes,
-        // leaving the buffer tail zero-filled. Loop until `len` is filled so we never account bytes we
-        // didn't read (silent undercount + mid-message JSON corruption); stop on 0 (EOF/concurrent shrink)
-        // and carry ONLY the bytes actually read — the remainder is re-read on the next tick.
-        while (got < len) {
-          const { bytesRead } = await fh.read(buf, got, len - got, lastReadEnd + got);
-          if (bytesRead === 0) break;
-          got += bytesRead;
-        }
-      } finally { await fh.close(); }
-    } catch { return entry.acc.sawUsage ? statsFromAccumulator(entry.acc) : null; } // read failed → skip this tick
+    const result = await readIncrementalTail(file, size, entry.offset, entry.partialBytes);
+    if (result.truncated) entry.acc = newUsageAccumulator(); // byte offsets meaningless → fresh accumulator too
+    entry.offset = result.offset;
+    entry.partialBytes = result.partialBytes;
+    for (const line of result.lines) accumulateUsageLine(entry.acc, line);
 
-    // Prepend the buffered partial line, then split on the LAST newline: everything up to it is complete
-    // lines (parse them, advance offset by their bytes); the remainder is the next partial (buffer as bytes).
-    // `got` may be < `len` on a truncating read — only the bytes actually read are folded in.
-    const combined = Buffer.concat([entry.partialBytes, got === len ? buf : buf.subarray(0, got)]);
-    const lastNl = combined.lastIndexOf(0x0A);
-    if (lastNl === -1) {
-      entry.partialBytes = combined; // still no complete line — buffer everything, offset unchanged
-    } else {
-      const complete = combined.subarray(0, lastNl + 1);
-      entry.partialBytes = combined.subarray(lastNl + 1);
-      entry.offset += complete.length;
-      for (const line of complete.toString("utf8").split("\n")) accumulateUsageLine(entry.acc, line);
-    }
     return entry.acc.sawUsage ? statsFromAccumulator(entry.acc) : null;
   }
 
@@ -454,19 +539,15 @@ function foldContextLine(state: { turns: number; lastInputTokens: number | null;
 /**
  * INCREMENTAL + ASYNC mid-turn context-occupancy reader — the sibling of
  * {@link IncrementalRunUsageReader} above, built for `MidTurnContextSampler` instead of `UsageSampler`.
- * Deliberately a SEPARATE class, not a refactor of its sibling into shared plumbing: that reader's
- * byte-identical-by-construction invariant is load-bearing for cost tracking and isn't worth risking here
- * (a follow-up tracks extracting the shared byte-offset/partial-line-buffer mechanics the two classes
- * duplicate). See that class's own doc for the full mechanism this one copies verbatim: per-session
- * `{engineSessionId, offset, partialBytes}` cache, `fs.promises` stat+read of only `[lastReadEnd, size)`,
- * UTF-8-safe partial-line buffering, reset-on-rotation (the session's `engineSessionId` changed — card
- * 8a5bd0d0) and reset-on-truncation (`size < lastReadEnd`). Two real differences from that sibling: the
- * FOLD (this reader tracks "last-wins" occupancy — {@link foldContextLine} — instead of a deduped
- * cumulative sum, so it has no `seen` set to carry), and PATH RESOLUTION (this reader falls back to
- * {@link resolveTranscriptFile}'s dir-encoding-drift scan, caching the winning path per session —
- * {@link resolvedPathCache} below — when the bare {@link engineTranscriptPath} misses; the sibling reader
- * deliberately does NOT, an accepted gap for cost-tracking but not for exhaustion-prevention, where a
- * session that silently never samples is exactly the failure this class exists to close).
+ * Both now delegate the byte-offset/partial-line mechanics to the SAME {@link readIncrementalTail} (card
+ * 22072f12) rather than duplicating it, while staying separate classes: each keeps its OWN fold — this
+ * one tracks "last-wins" occupancy via {@link foldContextLine} instead of a deduped cumulative sum, so it
+ * carries no `seen` set — plus its OWN cache shape, reset-on-rotation (card 8a5bd0d0), and file
+ * resolution. PATH RESOLUTION is the real remaining difference from the sibling: it falls back to
+ * {@link resolveTranscriptFile}'s dir-encoding-drift scan, caching the winning path per session ({@link
+ * resolvedPathCache} below) when the bare {@link engineTranscriptPath} misses; the sibling deliberately
+ * does NOT — an accepted gap for cost-tracking but not for exhaustion-prevention, where a session that
+ * silently never samples is exactly the failure this class exists to close.
  */
 export class IncrementalContextStatsReader {
   private cache = new Map<string, IncrementalContextCache>();
@@ -554,57 +635,28 @@ export class IncrementalContextStatsReader {
       catch { return null; }
     }
 
-    if (!entry) {
-      entry = { engineSessionId, filePath: file, offset: 0, partialBytes: Buffer.alloc(0), turns: 0, lastInputTokens: null, lastModel: null };
-      this.cache.set(sessionId, entry);
-    } else if (entry.filePath !== file) {
-      // The resolved path changed to a DIFFERENT file since the last read (e.g. resolveTranscriptFile's
-      // drift scan found the transcript somewhere new) — entry.offset/partialBytes describe byte
-      // positions in that OTHER file and are meaningless against this one; reset + full re-read from 0.
+    if (!entry || entry.filePath !== file) {
+      // No cache yet, OR the resolved path changed to a DIFFERENT file since the last read (e.g.
+      // resolveTranscriptFile's drift scan found the transcript somewhere new) — entry.offset/partialBytes
+      // would describe byte positions in that OTHER file and are meaningless against this one; reset +
+      // full re-read from 0.
       entry = { engineSessionId, filePath: file, offset: 0, partialBytes: Buffer.alloc(0), turns: 0, lastInputTokens: null, lastModel: null };
       this.cache.set(sessionId, entry);
     }
-    let lastReadEnd = entry.offset + entry.partialBytes.length;
-    if (size < lastReadEnd) {
-      // Truncation/shrink of the same file → the byte offsets are meaningless → reset + full re-read from 0.
-      entry = { engineSessionId, filePath: file, offset: 0, partialBytes: Buffer.alloc(0), turns: 0, lastInputTokens: null, lastModel: null };
-      this.cache.set(sessionId, entry);
-      lastReadEnd = 0;
-    }
-    if (size === lastReadEnd) return null; // no new bytes — nothing new to report
 
-    const len = size - lastReadEnd;
-    const buf = Buffer.alloc(len);
-    let got = 0;
-    try {
-      const fh = await fs.promises.open(file, "r");
-      try {
-        // See IncrementalRunUsageReader.read's own comment: loop until `len` is filled (a short read can
-        // return fewer bytes) so we never account bytes we didn't actually read.
-        while (got < len) {
-          const { bytesRead } = await fh.read(buf, got, len - got, lastReadEnd + got);
-          if (bytesRead === 0) break;
-          got += bytesRead;
-        }
-      } finally { await fh.close(); }
-    } catch { return null; } // read failed → skip this tick, nothing new to report
+    const result = await readIncrementalTail(file, size, entry.offset, entry.partialBytes);
+    if (result.truncated) { entry.turns = 0; entry.lastInputTokens = null; entry.lastModel = null; }
+    entry.offset = result.offset;
+    entry.partialBytes = result.partialBytes;
+    if (result.lines.length === 0) return null; // no new bytes, still-partial, or the read itself failed
 
-    const combined = Buffer.concat([entry.partialBytes, got === len ? buf : buf.subarray(0, got)]);
-    const lastNl = combined.lastIndexOf(0x0A);
-    if (lastNl === -1) {
-      entry.partialBytes = combined; // still no complete line — buffer everything, offset unchanged
-      return null; // the new bytes exist but no COMPLETE line arrived yet — nothing new to report
-    }
-    const complete = combined.subarray(0, lastNl + 1);
-    entry.partialBytes = combined.subarray(lastNl + 1);
-    entry.offset += complete.length;
     // Card c5b234aa, Code Review round 2: track whether THIS call's own batch of new lines folded in a
     // fresh usage reading — `entry.lastInputTokens == null` alone cannot tell that apart from "a PRIOR
     // call already set it and this batch was a user line / tool_result / API-error line that changed
     // nothing," which would silently re-report an old reading as fresh (a false ctxMidTurn:true, and
     // churn on every such line with no new usage to report).
     let foldedUsage = false;
-    for (const line of complete.toString("utf8").split("\n")) {
+    for (const line of result.lines) {
       if (foldContextLine(entry, line)) foldedUsage = true;
     }
     if (!foldedUsage) return null; // this batch had nothing usage-bearing — nothing new to report
