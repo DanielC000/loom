@@ -117,7 +117,7 @@ import type {
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
-  UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession,
+  UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession, SessionUsageTask,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry, ProjectMemoryHistoryEntry,
   DeferredItem, DeferredItemStatus, TaskRelationType,
@@ -451,7 +451,10 @@ CREATE TABLE IF NOT EXISTS run_events (
 -- transcript-rotation resets). Brand-new table ⇒ CREATE TABLE IF NOT EXISTS is itself the additive
 -- migration (no ALTER), exactly like runs/run_events; an existing DB simply gains an empty table on next
 -- boot. agent_id/model are nullable (defensive); ts is the ISO instant the sample was taken. Pruned past
--- usageSampleRetentionDays by pruneUsageSamples.
+-- usageSampleRetentionDays by pruneUsageSamples. task_id (card 58d5a36f) is a MIGRATION-added column —
+-- see migrateUsageSamples() — deliberately absent from this base CREATE TABLE so a base-schema index
+-- can never reference it (the standing schema-change rule); its own index is created inside that
+-- migration instead, mirroring migrateSessions()'s idx_sessions_parent.
 CREATE TABLE IF NOT EXISTS session_usage_samples (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -2993,6 +2996,7 @@ export class Db {
     this.migrateProjectMemory();
     this.migratePurgeLegacySessionEnvHistory();
     this.migratePurgeLegacyAlertWebhookHistory();
+    this.migrateUsageSamples();
   }
 
   /**
@@ -3067,6 +3071,23 @@ export class Db {
     );
     if (!have.has("worker_landed_tip")) this.db.exec("ALTER TABLE mainline_landed_commits ADD COLUMN worker_landed_tip TEXT");
     if (!have.has("worker_branch")) this.db.exec("ALTER TABLE mainline_landed_commits ADD COLUMN worker_branch TEXT");
+  }
+
+  /**
+   * Idempotent additive migration (card 58d5a36f): ADD COLUMN `task_id` on `session_usage_samples` for an
+   * existing DB (fresh installs gain it here too, same as an upgraded one — see the CREATE TABLE's own
+   * comment above for why it's deliberately absent from the base statement). No DEFAULT clause, so SQLite
+   * backfills every pre-existing row to NULL, read by `aggregateSessionUsage` as "fall back to the live
+   * `sessions.task_id` join for this historical row." The index is created here, AFTER the column exists
+   * (mirrors migrateSessions()'s idx_sessions_parent) — never in the base SCHEMA, which would throw on any
+   * already-upgraded install whose column doesn't exist yet at `exec(SCHEMA)` time.
+   */
+  private migrateUsageSamples(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(session_usage_samples)").all() as { name: string }[]).map((c) => c.name),
+    );
+    if (!have.has("task_id")) this.db.exec("ALTER TABLE session_usage_samples ADD COLUMN task_id TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_usage_samples_task ON session_usage_samples(task_id)");
   }
 
   /**
@@ -6600,19 +6621,21 @@ export class Db {
   // SUMs the stored numeric DELTA columns directly (each row is already a delta — not a json_extract of a
   // cumulative snapshot). ---
 
-  /** Append one usage sample (a per-interval billed-usage DELTA for a session segment). */
+  /** Append one usage sample (a per-interval billed-usage DELTA for a session segment). `taskId` (card
+   *  58d5a36f) is denormalized from the session's own `taskId` at call time — `null` for a manager/
+   *  platform session (no single task) or a caller that doesn't resolve one. */
   insertUsageSample(s: UsageSample): void {
     this.db.prepare(
       `INSERT INTO session_usage_samples
-         (id,session_id,project_id,agent_id,model,ts,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_usd)
+         (id,session_id,project_id,agent_id,model,ts,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cost_usd,task_id)
        VALUES
-         (@id,@sessionId,@projectId,@agentId,@model,@ts,@inputTokens,@outputTokens,@cacheCreationTokens,@cacheReadTokens,@costUsd)`,
+         (@id,@sessionId,@projectId,@agentId,@model,@ts,@inputTokens,@outputTokens,@cacheCreationTokens,@cacheReadTokens,@costUsd,@taskId)`,
     ).run({
       id: s.id, sessionId: s.sessionId, projectId: s.projectId,
       agentId: s.agentId ?? null, model: s.model ?? null, ts: s.ts,
       inputTokens: s.inputTokens, outputTokens: s.outputTokens,
       cacheCreationTokens: s.cacheCreationTokens, cacheReadTokens: s.cacheReadTokens,
-      costUsd: s.costUsd,
+      costUsd: s.costUsd, taskId: s.taskId ?? null,
     });
   }
 
@@ -6629,13 +6652,33 @@ export class Db {
    * projectId is omitted/null/"all" the aggregation spans every project. `bucket` is reserved for future
    * granularities (the over-time series is day-grained today). Cost is best-effort — an unpriced model's
    * samples contribute 0 costUsd.
+   *
+   * `taskBreakdown` (card 58d5a36f, default false): when true, ALSO computes `byTask`/
+   * `orchestrationOverhead`/`unattributed` — omitted (not an empty array/zeroed row) otherwise, so an
+   * ordinary call pays nothing extra. Effective task id per sample is `COALESCE(s.task_id, ses.task_id)`
+   * — the denormalized column when the sample carries one (this ALONE is enough to resolve a task even
+   * once the session row is purged — the whole point of denormalizing it), else a live fallback join for
+   * a historical row recorded before that column existed. These three buckets are a STRICT PARTITION of
+   * every in-window sample (every row lands in EXACTLY one, and together they sum to `totals`):
+   *   - a row whose LIVE `sessions.role` is 'manager'/'platform' → `orchestrationOverhead`, regardless of
+   *     its effective task id (one session, many tasks over its lifetime — never honestly attributable to
+   *     any single task; `insertUsageSample`'s callers are expected to never denormalize a task id for
+   *     these roles in the first place — see `UsageSample.taskId`'s own doc — but this read-side check is
+   *     the one that actually enforces the exclusion, independent of write-side discipline).
+   *   - else, a row with a resolvable effective task id → `byTask`.
+   *   - else (no resolvable task id AND not manager/platform — e.g. a plain/setup/auditor/assistant/
+   *     operator session with no task, OR a purged session whose sample never carried its own task id) →
+   *     `unattributed`.
    */
-  aggregateSessionUsage(opts: { sinceIso: string; projectId?: string | null; bucket?: "day" }): {
+  aggregateSessionUsage(opts: { sinceIso: string; projectId?: string | null; bucket?: "day"; taskBreakdown?: boolean }): {
     totals: SessionUsageTotals;
     byProject: SessionUsageProject[];
     byAgent: SessionUsageAgent[];
     byDay: SessionUsageDay[];
     bySession: SessionUsageSession[];
+    byTask?: SessionUsageTask[];
+    orchestrationOverhead?: SessionUsageTotals;
+    unattributed?: SessionUsageTotals;
   } {
     const scoped = opts.projectId != null && opts.projectId !== "all";
     const params: Record<string, string> = { sinceIso: opts.sinceIso };
@@ -6650,6 +6693,15 @@ export class Db {
       COALESCE(SUM(s.cache_creation_tokens), 0) AS cacheCreationTokens,
       COALESCE(SUM(s.cache_read_tokens), 0) AS cacheReadTokens,
       COALESCE(SUM(s.cost_usd), 0) AS costUsd`;
+    // Same shape as `sums` above, parameterized on the aliased table name — the byTask/orchestrationOverhead
+    // queries below read the effective columns off a derived subquery aliased `eff`, not `s` directly.
+    const sumsFor = (alias: string): string => `
+      COUNT(*) AS samples,
+      COALESCE(SUM(${alias}.input_tokens), 0) AS inputTokens,
+      COALESCE(SUM(${alias}.output_tokens), 0) AS outputTokens,
+      COALESCE(SUM(${alias}.cache_creation_tokens), 0) AS cacheCreationTokens,
+      COALESCE(SUM(${alias}.cache_read_tokens), 0) AS cacheReadTokens,
+      COALESCE(SUM(${alias}.cost_usd), 0) AS costUsd`;
     const num = (v: unknown): number => Number(v) || 0;
     const measures = (row: Row): SessionUsageTotals => {
       const t = {
@@ -6724,7 +6776,46 @@ export class Db {
       ...measures(row),
     }));
 
-    return { totals, byProject, byAgent, byDay, bySession };
+    if (!opts.taskBreakdown) return { totals, byProject, byAgent, byDay, bySession };
+
+    // byTask / orchestrationOverhead (card 58d5a36f): a derived subquery aliased `eff` resolves the
+    // EFFECTIVE task id + live role ONCE (COALESCE over the denormalized column + the join fallback),
+    // so both queries below read the same resolution rather than repeating the COALESCE/JOIN twice and
+    // risking the two drifting apart.
+    const effBase = `
+      SELECT s.*, COALESCE(s.task_id, ses.task_id) AS effTaskId, ses.role AS role
+      FROM session_usage_samples s
+      LEFT JOIN sessions ses ON s.session_id = ses.id
+      WHERE ${where}`;
+    const byTask = (this.db.prepare(
+      `SELECT eff.effTaskId AS taskId, t.title AS taskTitle, t.column_key AS taskColumnKey, ${sumsFor("eff")}
+       FROM (${effBase}) eff
+       LEFT JOIN tasks t ON eff.effTaskId = t.id
+       WHERE eff.effTaskId IS NOT NULL AND (eff.role IS NULL OR eff.role NOT IN ('manager', 'platform'))
+       GROUP BY eff.effTaskId ORDER BY costUsd DESC, samples DESC`,
+    ).all(params) as Row[]).map((row) => ({
+      taskId: row.taskId as string,
+      taskTitle: (row.taskTitle as string | null) ?? null,
+      taskColumnKey: (row.taskColumnKey as string | null) ?? null,
+      ...measures(row),
+    }));
+
+    const overheadRow = this.db.prepare(
+      `SELECT ${sumsFor("eff")} FROM (${effBase}) eff WHERE eff.role IN ('manager', 'platform')`,
+    ).get(params) as Row;
+    const orchestrationOverhead = measures(overheadRow);
+
+    // The third partition member (card 58d5a36f Code Review): neither a manager/platform session NOR a
+    // resolvable task id — a plain/setup/auditor/assistant/operator session with no task, or a sample
+    // whose session row has since been purged and never carried its own task id. byTask + overhead +
+    // unattributed sums EXACTLY to totals by construction (see this method's own doc for the partition).
+    const unattributedRow = this.db.prepare(
+      `SELECT ${sumsFor("eff")} FROM (${effBase}) eff
+       WHERE eff.effTaskId IS NULL AND (eff.role IS NULL OR eff.role NOT IN ('manager', 'platform'))`,
+    ).get(params) as Row;
+    const unattributed = measures(unattributedRow);
+
+    return { totals, byProject, byAgent, byDay, bySession, byTask, orchestrationOverhead, unattributed };
   }
 
   /** Retention: delete every sample older than `beforeIso` (ts < beforeIso). Returns rows removed. */

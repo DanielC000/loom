@@ -28,6 +28,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
@@ -87,6 +88,20 @@ const appendTurn = (cwd, engineId, i, t) => {
 // Totals for one project over an all-history window (the sampler's rows are per-interval deltas → a plain SUM).
 const totalsFor = (db, projectId) => db.aggregateSessionUsage({ sinceIso: isoAgo(400 * DAY), projectId }).totals;
 
+// RAW task_id of the MOST RECENTLY inserted sample for `sessionId`, read via a fresh read-only connection
+// to `dbFile` (card 58d5a36f Code Review, killing mutants M3/M4) — never through aggregateSessionUsage's
+// byTask, whose COALESCE(sample.task_id, live sessions.task_id) join-fallback would mask a sampler bug: a
+// mutant that writes `taskId: null` unconditionally (ignoring the session's own taskId) still resolves
+// into byTask via the LIVE session's own task_id, so a byTask-based assertion can't tell "the sampler
+// denormalized it" apart from "the sampler wrote null and the join covered for it." WAL mode (set in the
+// Db constructor) permits this read-only connection to open concurrently with db1/db2's own live writer.
+const rawTaskId = (dbFile, sessionId) => {
+  const raw = new Database(dbFile, { readonly: true });
+  try {
+    return raw.prepare("SELECT task_id AS taskId FROM session_usage_samples WHERE session_id = ? ORDER BY rowid DESC LIMIT 1").get(sessionId)?.taskId ?? null;
+  } finally { raw.close(); }
+};
+
 const mkProject = (db, id, cwd) => db.insertProject({ id, name: id, repoPath: cwd, vaultPath: cwd, config: {}, createdAt: nowIso, archivedAt: null });
 const mkAgent = (db, id, projectId) => db.insertAgent({ id, projectId, name: id, startupPrompt: "doctrine", position: 0, profileId: null, endpoint: true, ioSchema: null });
 const mkSession = (db, s) => db.insertSession({
@@ -98,7 +113,8 @@ try {
   // ===================================================================================================
   // PART 1 — live tick / incremental / zero / reset / teardown / prune (db1).
   // ===================================================================================================
-  const db1 = new Db(path.join(tmpHome, "sampler1.db"));
+  const dbFile1 = path.join(tmpHome, "sampler1.db");
+  const db1 = new Db(dbFile1);
   const cwd1 = path.join(tmpHome, "repo1");
   mkProject(db1, "p1", cwd1);
   mkAgent(db1, "a1", "p1");
@@ -158,45 +174,87 @@ try {
   check("6 tick pruned the >90d row (samples back to 4, the recent rows survive)",
     t.samples === 4 && t.inputTokens === beforeReset + 500 + 200);
 
+  // -- 6b) taskId denormalization (card 58d5a36f): the sampler's tick() writes the session's OWN taskId
+  //        onto every sample it inserts. Asserted via the RAW column (rawTaskId), not aggregateSessionUsage's
+  //        byTask — a mutant that makes the sampler write `taskId: null` unconditionally (ignoring the
+  //        session's real taskId) would STILL resolve into byTask via the live sessions.task_id join
+  //        fallback, so a byTask-based assertion can't distinguish "the sampler denormalized it" from
+  //        "the sampler wrote null and the join covered for it." -------------------------------------------
+  db1.insertTask({ id: "task-1b", projectId: "p1", title: "Task 1b", body: "", columnKey: "in_progress", position: 0, createdAt: nowIso, updatedAt: nowIso });
+  mkSession(db1, { id: "sess1b", projectId: "p1", agentId: "a1", engineSessionId: "eng-1b", cwd: cwd1, taskId: "task-1b", role: "worker" });
+  writeTranscript(cwd1, "eng-1b", [{ in: 90, out: 30, cc: 9, cr: 3 }]);
+  await sampler1.tick(new Date());
+  check("6b tick() denormalizes a worker session's OWN taskId onto the RAW column (not merely resolvable via the live-session join)",
+    rawTaskId(dbFile1, "sess1b") === "task-1b");
+  const byTask1b = db1.aggregateSessionUsage({ sinceIso: isoAgo(400 * DAY), projectId: "p1", taskBreakdown: true }).byTask;
+  check("6b ...and it reads back correctly through byTask too", byTask1b.length === 1 && byTask1b[0].taskId === "task-1b" && byTask1b[0].inputTokens === 90);
+
+  // -- 6c) manager/platform write-time ENFORCEMENT (card 58d5a36f Code Review point 4): a manager-role
+  //        session carrying a taskId (should never happen structurally, but the sampler must not TRUST
+  //        that) still gets taskId: null written at insert time — proven on the RAW column, since the
+  //        read-side role check alone can't protect a row once its session is later purged. -------------
+  mkSession(db1, { id: "sess1c", projectId: "p1", agentId: "a1", engineSessionId: "eng-1c", cwd: cwd1, taskId: "task-should-not-leak", role: "manager" });
+  writeTranscript(cwd1, "eng-1c", [{ in: 70, out: 20, cc: 7, cr: 2 }]);
+  await sampler1.tick(new Date());
+  check("6c tick() forces taskId: null for a manager-role session even though session.taskId is set",
+    rawTaskId(dbFile1, "sess1c") === null);
+
+  mkSession(db1, { id: "sess1d", projectId: "p1", agentId: "a1", engineSessionId: "eng-1d", cwd: cwd1, taskId: "task-should-not-leak-2", role: "platform" });
+  writeTranscript(cwd1, "eng-1d", [{ in: 71, out: 21, cc: 8, cr: 3 }]);
+  await sampler1.tick(new Date());
+  check("6c tick() forces taskId: null for a platform-role session even though session.taskId is set",
+    rawTaskId(dbFile1, "sess1d") === null);
+
   db1.close();
 
   // ===================================================================================================
   // PART 2 — boot backfill: seed-once + marker + zero-skip + lastSeen-seeding (fresh db2).
   // ===================================================================================================
-  const db2 = new Db(path.join(tmpHome, "sampler2.db"));
+  const dbFile2 = path.join(tmpHome, "sampler2.db");
+  const db2 = new Db(dbFile2);
   const cwd2 = path.join(tmpHome, "repo2");
   mkProject(db2, "p2", cwd2);
   mkAgent(db2, "a2", "p2");
   const lastAct = isoAgo(2 * DAY); // the coarse backfill ts comes from the session's last_activity
-  mkSession(db2, { id: "sessB", projectId: "p2", agentId: "a2", engineSessionId: "engB-1", cwd: cwd2, lastActivity: lastAct });
+  db2.insertTask({ id: "task-backfill", projectId: "p2", title: "Task Backfill", body: "", columnKey: "in_progress", position: 0, createdAt: nowIso, updatedAt: nowIso });
+  mkSession(db2, { id: "sessB", projectId: "p2", agentId: "a2", engineSessionId: "engB-1", cwd: cwd2, lastActivity: lastAct, role: "worker", taskId: "task-backfill" });
   // A second session whose transcript carries an all-ZERO usage block → backfill must skip it (no row).
   mkSession(db2, { id: "sessZero", projectId: "p2", agentId: "a2", engineSessionId: "engZ-1", cwd: cwd2, lastActivity: lastAct });
+  // A manager-role session carrying a taskId (shouldn't happen structurally, but backfillOnce must not
+  // TRUST that) — proves the write-time enforcement (point 4) covers the backfill path too, not just tick().
+  mkSession(db2, { id: "sessMgr", projectId: "p2", agentId: "a2", engineSessionId: "engMgr-1", cwd: cwd2, lastActivity: lastAct, role: "manager", taskId: "task-should-not-leak-3" });
 
   writeTranscript(cwd2, "engB-1", [{ in: 500, out: 200, cc: 100, cr: 50 }, { in: 300, out: 100, cc: 50, cr: 25 }]); // cumulative {800,300,150,75}
   writeTranscript(cwd2, "engZ-1", [{ in: 0, out: 0, cc: 0, cr: 0 }]); // zero-usage transcript
+  writeTranscript(cwd2, "engMgr-1", [{ in: 60, out: 25, cc: 6, cr: 3 }]);
 
   const sampler2 = new UsageSampler({ db: db2, intervalMs: 3_600_000, retentionDays: 90 });
 
   const seeded = sampler2.backfillOnce(new Date());
-  check("7 backfill seeds exactly ONE sample (sessB; the zero-usage sessZero is skipped)", seeded === 1);
+  check("7 backfill seeds exactly TWO samples (sessB + sessMgr; the zero-usage sessZero is skipped)", seeded === 2);
   check("7 backfill set the app_meta one-time marker", db2.getMeta("usage_backfill_done") !== undefined);
   let agg = db2.aggregateSessionUsage({ sinceIso: isoAgo(400 * DAY), projectId: "p2" });
-  check("7 backfilled sample == the whole transcript cumulative (in 800 / out 300)",
-    agg.totals.samples === 1 && agg.totals.inputTokens === 800 && agg.totals.outputTokens === 300);
+  check("7 backfilled totals == both transcripts' cumulatives (in 800+60=860 / out 300+25=325)",
+    agg.totals.samples === 2 && agg.totals.inputTokens === 860 && agg.totals.outputTokens === 325);
   check("7 backfilled sample's ts bucket == the session's last_activity day",
     agg.byDay.length === 1 && agg.byDay[0].day === dayOf(lastAct));
+  // -- backfillOnce taskId denormalization + manager-override enforcement, on the RAW column (mutant M4) --
+  check("7b backfillOnce() denormalizes a worker session's OWN taskId onto the RAW column",
+    rawTaskId(dbFile2, "sessB") === "task-backfill");
+  check("7b backfillOnce() forces taskId: null for a manager-role session even though session.taskId is set",
+    rawTaskId(dbFile2, "sessMgr") === null);
 
   // -- 8) second backfill is a no-op (marker) --------------------------------------------------------
   const seeded2 = sampler2.backfillOnce(new Date());
   check("8 second backfill is a no-op (returns 0, marker guard)", seeded2 === 0);
-  check("8 no extra row from the second backfill (samples still 1)", totalsFor(db2, "p2").samples === 1);
+  check("8 no extra row from the second backfill (samples still 2)", totalsFor(db2, "p2").samples === 2);
 
   // -- 9) backfill seeded lastSeen → a still-live session's first live tick is INCREMENTAL ------------
   appendTurn(cwd2, "engB-1", 2, { in: 200, out: 100, cc: 50, cr: 25 }); // cumulative now {1000,...}
-  await sampler2.tick(new Date()); // sessB is still 'live' → ticks; delta must be the 200 increment, NOT 1000 again
+  await sampler2.tick(new Date()); // sessB/sessMgr are still 'live' → tick; sessB's delta must be +200 (not 1000 again), sessMgr unchanged (delta 0, no new row)
   agg = db2.aggregateSessionUsage({ sinceIso: isoAgo(400 * DAY), projectId: "p2" });
-  check("9 live tick after backfill is incremental (samples 2; +200, total 1000 — no double count)",
-    agg.totals.samples === 2 && agg.totals.inputTokens === 1000);
+  check("9 live tick after backfill is incremental (samples 3; +200, total 1060 — no double count)",
+    agg.totals.samples === 3 && agg.totals.inputTokens === 1060);
 
   db2.close();
 

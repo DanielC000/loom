@@ -215,7 +215,15 @@ export interface UsageHistory {
 
 /** One persisted usage sample — a per-interval DELTA of billed usage for one session segment. The
  *  token/cost fields are the CHANGE since the session's previous sample (not cumulative), so they sum
- *  directly. `agentId`/`model` are nullable (defensive); `ts` is the ISO instant the sample was taken. */
+ *  directly. `agentId`/`model` are nullable (defensive); `ts` is the ISO instant the sample was taken.
+ *  `taskId` (card 58d5a36f) is denormalized from the session's own `taskId` at write time — same
+ *  survive-session-deletion rationale as `projectId`/`agentId`. A WRITER must pass `null` for a manager/
+ *  platform session (one session, many tasks — never attributable to a single task), even if that
+ *  session's own `taskId` happens to be set — `usage-sampler.ts`'s two insert sites enforce this by role,
+ *  not by trusting the session row never to carry one, so a purged manager/platform session can never
+ *  resurface misattributed to a task via the read side's live-join fallback. Also `null` for a sample
+ *  recorded before this column existed (a historical row) — the read side falls back to a live
+ *  `sessions.task_id` join for those. */
 export interface UsageSample {
   id: string;
   sessionId: string;
@@ -228,6 +236,7 @@ export interface UsageSample {
   cacheCreationTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+  taskId: string | null;
 }
 
 /** The aggregated measures shared by the grand totals and each breakdown row. `samples` is the COUNT of
@@ -302,9 +311,35 @@ export interface SessionUsageSession extends SessionUsageTotals {
   projectName: string | null;
 }
 
+/** Per-TASK breakdown row (card 58d5a36f) — the totals for one board task, summed across every session
+ *  ever attributed to it (including every session row in a recycle chain: same `taskId`, multiple
+ *  `sessions` rows, each contributing its own usage samples). `taskTitle`/`taskColumnKey` are nullable —
+ *  the task row may since be deleted while its usage samples survive (same "task gone, usage doesn't"
+ *  posture as `projectName`/`agentName` elsewhere in this file). Deliberately EXCLUDES a manager/platform
+ *  session's usage — see {@link SessionUsageHistory.orchestrationOverhead}. */
+export interface SessionUsageTask extends SessionUsageTotals {
+  taskId: string;
+  taskTitle: string | null;
+  taskColumnKey: string | null;
+}
+
 /** GET /api/usage/sessions/history response: grand totals over the window + per-project, per-agent,
  *  per-session, and per-day breakdowns. `since` echoes the (clamped) ISO cutoff actually applied;
- *  `projectId` echoes the applied filter (null = all projects). */
+ *  `projectId` echoes the applied filter (null = all projects). `byTask`/`orchestrationOverhead`/
+ *  `unattributed` (card 58d5a36f) are OMITTED TOGETHER (never an empty array/zeroed row) unless the
+ *  request opted into the task breakdown AND scoped to one REAL project — see the route's own comment.
+ *  These three are a STRICT PARTITION of every in-window sample: `byTask` + `orchestrationOverhead` +
+ *  `unattributed` sums EXACTLY to `totals` (never present without each other, and never a lossy subset).
+ *  - `byTask` holds one row per board task that any non-manager/platform session's usage resolves to (via
+ *    the sample's own denormalized `taskId`, or — for a historical sample recorded before that column
+ *    existed, or one whose session row is since purged — a live `sessions.task_id` join fallback).
+ *  - `orchestrationOverhead` is the single explicit carve-out bucket for manager/platform usage (one
+ *    long-running session, many tasks over its lifetime — never honestly attributable to any ONE of
+ *    them); a single {@link SessionUsageTotals} row, never split by task, and claimed regardless of
+ *    whatever task id a manager/platform sample happens to carry (see `UsageSample.taskId`'s own doc).
+ *  - `unattributed` is everything else: a non-manager/platform session with no task at all (plain/setup/
+ *    auditor/assistant/operator), or a sample whose session row has since been purged and never carried
+ *    its own denormalized task id — present in `totals`, reachable from neither of the other two. */
 export interface SessionUsageHistory {
   since: string;
   projectId: string | null;
@@ -313,6 +348,9 @@ export interface SessionUsageHistory {
   byAgent: SessionUsageAgent[];
   byDay: SessionUsageDay[];
   bySession: SessionUsageSession[];
+  byTask?: SessionUsageTask[];
+  orchestrationOverhead?: SessionUsageTotals;
+  unattributed?: SessionUsageTotals;
 }
 
 // ── Session/run AUDIT LOG (the replayable + diffable timeline) ──────────────────────────────────

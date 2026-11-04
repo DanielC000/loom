@@ -270,6 +270,126 @@ try {
   const ancientAgoMs = Date.now() - Date.parse(rAncient.json().since);
   check("8 since older than 1yr → floored at ~1yr ago", Math.abs(ancientAgoMs - 365 * DAY) < 60_000);
 
+  // =====================================================================================================
+  // 9) byTask / orchestrationOverhead / unattributed (card 58d5a36f) — opt-in via taskBreakdown, scoped
+  //    to ONE project. A dedicated project (pT) + two tasks (task1/task2) so these additions can't
+  //    perturb the "all"/pA/pB totals already asserted above. Every sample below carries ITS OWN
+  //    denormalized taskId at insert time (matching what the sampler actually writes) EXCEPT t-hist,
+  //    which deliberately omits it to simulate a row recorded before this column existed — that is the
+  //    ONLY null-taskId sample in this fixture; t-mgr/t-plat/t-mgr2 carry an EXPLICIT taskId (null, null,
+  //    and "task1" respectively) to make the role-vs-taskId precedence test (M2 below) meaningful.
+  //    These three buckets are a STRICT PARTITION — byTask + orchestrationOverhead + unattributed must
+  //    sum EXACTLY to totals (asserted at the end). Covered, by mutant the Code Review named:
+  //      - a recycle chain (sess-t1 + sess-t1-recycle, same taskId) summed as ONE byTask row, PLUS a
+  //        null-taskId HISTORICAL sample resolved via the live sessions.task_id join fallback (t-hist).
+  //      - M2: a manager session whose OWN taskId is set (sess-tm2, taskId "task1") — its sample must
+  //        land in orchestrationOverhead, NEVER byTask[task1], proving the role check takes priority over
+  //        a non-null effective task id, not just a null one.
+  //      - M9: a worker session with NO taskId, whose session row is then DELETED (purged) before the
+  //        aggregate call (sess-orphan) — its sample has no denormalized taskId AND the join fallback now
+  //        resolves nothing (session gone) → lands in `unattributed`, not silently dropped or misattributed.
+  //      - M10: a worker session with a denormalized taskId on its OWN sample, whose session row is then
+  //        ALSO deleted (sess-t2-purged) — the sample's OWN column still resolves it to task2 WITHOUT
+  //        needing the live join, proving the denormalized column really does survive a purge (G1's whole
+  //        point) — not just "survives as long as the live row sticks around to fall back on".
+  // =====================================================================================================
+  db.insertProject({ id: "pT", name: "Tasky", repoPath: tmpHome, vaultPath: tmpHome, config: {}, archivedAt: null, createdAt: now });
+  mkAgent("aT1", "pT", "Tasker One");
+  db.insertTask({
+    id: "task1", projectId: "pT", title: "Task One", body: "", columnKey: "in_progress", position: 0,
+    priority: "p2", held: false, heldBy: null, createdAt: now, updatedAt: now,
+  });
+  db.insertTask({
+    id: "task2", projectId: "pT", title: "Task Two", body: "", columnKey: "in_progress", position: 1,
+    priority: "p2", held: false, heldBy: null, createdAt: now, updatedAt: now,
+  });
+  const mkTaskSession = (id, role, taskId) => db.insertSession({
+    id, projectId: "pT", agentId: "aT1", engineSessionId: null, title: null, cwd: tmpHome,
+    processState: "exited", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role, taskId,
+  });
+  mkTaskSession("sess-t1", "worker", "task1");
+  mkTaskSession("sess-t1-recycle", "worker", "task1"); // a SECOND session row, same task (a recycle chain)
+  mkTaskSession("sess-tm", "manager", null);           // never gets a taskId — orchestration overhead
+  mkTaskSession("sess-tp", "platform", null);          // same carve-out as manager
+  mkTaskSession("sess-tm2", "manager", "task1");       // M2: a manager session whose OWN taskId IS set
+  mkTaskSession("sess-orphan", "worker", null);        // M9: a worker with no task, later PURGED
+  mkTaskSession("sess-t2-purged", "worker", "task2");  // M10: a worker WITH a task, later PURGED
+
+  const tsNow = isoAgo(1); // just-now, well inside every window used below
+  const seedTask = (id, sessionId, taskId, [i, o, cc, cr, cost]) => db.insertUsageSample({
+    id, sessionId, projectId: "pT", agentId: "aT1", model: "claude-opus-4-8", ts: tsNow, taskId,
+    inputTokens: i, outputTokens: o, cacheCreationTokens: cc, cacheReadTokens: cr, costUsd: cost,
+  });
+  seedTask("t-s1", "sess-t1", "task1", [100, 40, 10, 5, 0.10]);
+  seedTask("t-s2", "sess-t1-recycle", "task1", [50, 20, 5, 2, 0.05]);
+  // The HISTORICAL row: taskId omitted on the sample (null), even though sess-t1's LIVE row carries one —
+  // the read-side join fallback must still attribute it to task1.
+  seedTask("t-hist", "sess-t1", null, [30, 10, 3, 1, 0.03]);
+  seedTask("t-mgr", "sess-tm", null, [200, 80, 20, 8, 0.20]);
+  seedTask("t-plat", "sess-tp", null, [70, 30, 7, 3, 0.07]);
+  seedTask("t-mgr2", "sess-tm2", "task1", [55, 22, 5, 2, 0.05]);      // M2 fixture
+  seedTask("t-orphan", "sess-orphan", null, [40, 15, 4, 2, 0.04]);    // M9 fixture
+  seedTask("t-purged2", "sess-t2-purged", "task2", [20, 8, 2, 1, 0.02]); // M10 fixture
+
+  // Purge the two sessions AFTER their samples are written (the samples must survive the purge — no FK) —
+  // M9/M10 both depend on the session row being GONE by the time aggregateSessionUsage reads it.
+  db.deleteSession("sess-orphan");
+  db.deleteSession("sess-t2-purged");
+
+  const sinceT = isoAgo(2 * HOUR);
+  const noBreakdown = db.aggregateSessionUsage({ sinceIso: sinceT, projectId: "pT" });
+  check("9 taskBreakdown omitted by default: byTask/orchestrationOverhead/unattributed are all undefined",
+    noBreakdown.byTask === undefined && noBreakdown.orchestrationOverhead === undefined && noBreakdown.unattributed === undefined);
+  check("9 totals (pT scope) cover all 8 seeded samples (input 100+50+30+200+70+55+40+20=565)",
+    noBreakdown.totals.samples === 8 && noBreakdown.totals.inputTokens === 565);
+
+  const withTask = db.aggregateSessionUsage({ sinceIso: sinceT, projectId: "pT", taskBreakdown: true });
+  check("9 byTask has exactly TWO rows (task1, task2)", withTask.byTask.length === 2);
+  const byTaskMap = Object.fromEntries(withTask.byTask.map((r) => [r.taskId, r]));
+  check("9 byTask[task1] carries the task's title/columnKey + the summed totals — recycle chain + historical row ONLY (samples 3, input 180, cost 0.18); M2's sess-tm2 sample is EXCLUDED",
+    byTaskMap.task1.taskTitle === "Task One" && byTaskMap.task1.taskColumnKey === "in_progress" &&
+    byTaskMap.task1.samples === 3 && byTaskMap.task1.inputTokens === 180 && approx(byTaskMap.task1.costUsd, 0.18));
+  check("9 (M10) byTask[task2] resolves purely from the sample's OWN denormalized taskId, even though sess-t2-purged no longer exists (samples 1, input 20, cost 0.02)",
+    byTaskMap.task2.taskTitle === "Task Two" && byTaskMap.task2.samples === 1 &&
+    byTaskMap.task2.inputTokens === 20 && approx(byTaskMap.task2.costUsd, 0.02));
+  check("9 (M2) orchestrationOverhead sums manager + platform + the manager-WITH-a-taskId sample (samples 3, input 200+70+55=325, cost 0.32)",
+    withTask.orchestrationOverhead.samples === 3 && withTask.orchestrationOverhead.inputTokens === 325 &&
+    approx(withTask.orchestrationOverhead.costUsd, 0.32));
+  check("9 (M9) unattributed covers the purged, taskless worker session (samples 1, input 40, cost 0.04)",
+    withTask.unattributed.samples === 1 && withTask.unattributed.inputTokens === 40 && approx(withTask.unattributed.costUsd, 0.04));
+  check("9 byTask + orchestrationOverhead + unattributed sum EXACTLY to totals.samples ((3+1)+3+1=8) and .inputTokens ((180+20)+325+40=565)",
+    (byTaskMap.task1.samples + byTaskMap.task2.samples + withTask.orchestrationOverhead.samples + withTask.unattributed.samples) === withTask.totals.samples &&
+    (byTaskMap.task1.inputTokens + byTaskMap.task2.inputTokens + withTask.orchestrationOverhead.inputTokens + withTask.unattributed.inputTokens) === withTask.totals.inputTokens);
+
+  // taskBreakdown is honored ONLY when scoped to one real project — a cross-project "all" request ignores
+  // it (DB-layer contract; the route below additionally never even sets it true for "all"/missing/unknown).
+  const crossProject = db.aggregateSessionUsage({ sinceIso: sinceT, taskBreakdown: true });
+  check("9 taskBreakdown computes even in 'all' scope when asked directly at the DB layer (route gates this, not the DB method)",
+    Array.isArray(crossProject.byTask));
+
+  // -- ROUTE: taskBreakdown=true + a real projectId returns byTask/orchestrationOverhead/unattributed.
+  const rTask = await get(`?since=${encodeURIComponent(sinceT)}&projectId=pT&taskBreakdown=true`);
+  const bTask = rTask.json();
+  check("9 route: taskBreakdown=true + projectId=pT returns byTask (2 rows) + orchestrationOverhead + unattributed",
+    rTask.statusCode === 200 && Array.isArray(bTask.byTask) && bTask.byTask.length === 2 &&
+    bTask.orchestrationOverhead?.samples === 3 && bTask.unattributed?.samples === 1);
+
+  const rTaskNoFlag = await get(`?since=${encodeURIComponent(sinceT)}&projectId=pT`);
+  check("9 route: no taskBreakdown param → byTask/orchestrationOverhead/unattributed all omitted",
+    rTaskNoFlag.json().byTask === undefined && rTaskNoFlag.json().orchestrationOverhead === undefined && rTaskNoFlag.json().unattributed === undefined);
+
+  const rTaskAllScope = await get(`?since=${encodeURIComponent(sinceT)}&taskBreakdown=true`);
+  check("9 route: taskBreakdown=true with NO projectId (all scope) → omitted (per-project only)",
+    rTaskAllScope.json().byTask === undefined && rTaskAllScope.json().orchestrationOverhead === undefined && rTaskAllScope.json().unattributed === undefined);
+
+  // -- ROUTE (point 5): taskBreakdown=true + a projectId that does NOT resolve to a real project → omitted
+  //    too, same as the "all" case, never an empty-but-present breakdown for a bad id.
+  const rTaskUnknownProject = await get(`?since=${encodeURIComponent(sinceT)}&projectId=pDoesNotExist&taskBreakdown=true`);
+  check("9 route: taskBreakdown=true + a NON-EXISTENT projectId → omitted, not an empty array/zeroed row",
+    rTaskUnknownProject.statusCode === 200 && rTaskUnknownProject.json().byTask === undefined &&
+    rTaskUnknownProject.json().orchestrationOverhead === undefined && rTaskUnknownProject.json().unattributed === undefined);
+
   await app.close();
   db.close();
 } finally {

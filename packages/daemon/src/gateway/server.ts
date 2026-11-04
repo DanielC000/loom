@@ -1209,9 +1209,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // `cacheHitRatio` — a prompt-cache hit-ratio tripwire (card 0dd60be4): a warm, byte-stable session
   // startup prefix keeps cache_read dominant (ratio near 1); a broken prefix collapses it toward 0. The
   // new `bySession` breakdown is the granularity that ratio is actually meaningful at (one session = one
-  // fixed prefix — byProject/byAgent blend many prefixes together). ---
+  // fixed prefix — byProject/byAgent blend many prefixes together). `taskBreakdown=true` (card 58d5a36f)
+  // ALSO requests `byTask`/`orchestrationOverhead`/`unattributed` — honored ONLY when scoped to one REAL,
+  // EXISTING project (the per-task breakdown is a per-project concept; a cross-project "all" request, a
+  // MISSING projectId, or a projectId that does not resolve to a real project all ignore the flag and
+  // omit all three fields, same as leaving it off — never an empty-but-present breakdown for a bad id). ---
   app.get("/api/usage/sessions/history", async (req): Promise<SessionUsageHistory> => {
-    const { since, projectId } = req.query as { since?: string; projectId?: string };
+    const { since, projectId, taskBreakdown } = req.query as { since?: string; projectId?: string; taskBreakdown?: string };
     const nowMs = Date.now();
     const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
     const DEFAULT_MS = 30 * 24 * 60 * 60 * 1000;
@@ -1222,7 +1226,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       : nowMs - DEFAULT_MS;
     const sinceIso = new Date(sinceMs).toISOString();
     const filter = projectId && projectId !== "all" ? projectId : null;
-    const agg = deps.db.aggregateSessionUsage({ sinceIso, projectId: filter });
+    const wantsTaskBreakdown = taskBreakdown === "true" && filter != null && deps.db.getProject(filter) != null;
+    const agg = deps.db.aggregateSessionUsage({ sinceIso, projectId: filter, taskBreakdown: wantsTaskBreakdown });
     return { since: sinceIso, projectId: filter, ...agg };
   });
   // --- Markitdown (shared Python venv) provisioning status + retry. HUMAN/REST-ONLY (loopback) — NOT an MCP
@@ -3735,7 +3740,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           ts: s.ts ?? new Date().toISOString(),
           inputTokens: s.inputTokens ?? 0, outputTokens: s.outputTokens ?? 0,
           cacheCreationTokens: s.cacheCreationTokens ?? 0, cacheReadTokens: s.cacheReadTokens ?? 0,
-          costUsd: s.costUsd ?? 0,
+          costUsd: s.costUsd ?? 0, taskId: s.taskId ?? null,
         });
         usageSampleIds.push(id);
       }

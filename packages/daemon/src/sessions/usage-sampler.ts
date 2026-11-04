@@ -8,6 +8,21 @@ import { computeRunCostUsd } from "./pricing.js";
  *  archived_at / held backfills). Daemon-GLOBAL (app_meta is not project-scoped); set once per LOOM_HOME. */
 const BACKFILL_MARKER_KEY = "usage_backfill_done";
 
+/**
+ * The denormalized `UsageSample.taskId` to write for `session` (card 58d5a36f Code Review): `null` for a
+ * manager/platform session, REGARDLESS of whatever that session's own `taskId` happens to be — enforced
+ * HERE, at the one write chokepoint, rather than trusted to never be set upstream. `aggregateSessionUsage`'s
+ * read-side role check already excludes manager/platform from `byTask` even if a sample carries a task id,
+ * but that check depends on the session row still being LIVE to read `role` from; once a manager/platform
+ * session is purged, nothing on the read side can tell it apart from an ordinary purged worker row. Writing
+ * `null` here closes that gap at the source: a purged manager/platform row can never resurface attributed
+ * to a task via the sample's own denormalized column, which is exactly the column designed to survive a
+ * purge.
+ */
+function sampleTaskId(session: Session): string | null {
+  return session.role === "manager" || session.role === "platform" ? null : (session.taskId ?? null);
+}
+
 /** app_meta one-time marker for the corrective reset that ships the restart-double-count fix. The boot that
  *  first deploys this code wipes the (inflated) samples + clears BACKFILL_MARKER_KEY so the corrected
  *  backfill repopulates clean; every later boot is a no-op. Bump the suffix if a future correction needs to
@@ -158,6 +173,7 @@ export class UsageSampler {
       ts,
       ...delta,
       costUsd,
+      taskId: sampleTaskId(session),
     });
     return true;
   }
@@ -274,6 +290,7 @@ export class UsageSampler {
         cacheCreationTokens: cum.cacheCreationTokens,
         cacheReadTokens: cum.cacheReadTokens,
         costUsd,
+        taskId: sampleTaskId(s),
       });
       this.lastSeen.set(s.id, {
         engineSessionId: s.engineSessionId!,
