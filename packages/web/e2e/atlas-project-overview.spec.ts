@@ -23,6 +23,13 @@
 //      from atlas-kpi-deck.spec.ts.
 //   5. THE LANDED CELL IS A READOUT, NOT A BUTTON — its sparkline IS the breakdown, so a fifth
 //      pop-over would open the same 14 bars already drawn beside the figure.
+//   6. THE SESSIONS CARD (card 0bcfa530) lists THIS project's running sessions and nothing else —
+//      measured against another project's live, pty-bearing, spawnable-rig session that is listable
+//      in every way but its project, and against an exited session that the ROSTER does list. ONE
+//      preference moves both lists in one step, and the card grows no toggle of its own.
+//   7. EXPANDING ATTACHES, COLLAPSING DOES NOT STOP. Measured on the mounted pane's REPLAYED BYTES
+//      (each session carries its own sentinel), and on the daemon's own `processState` across a
+//      collapse — sessions outlive viewers, so releasing the view must not touch the pty.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
@@ -119,12 +126,27 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** The pinned grid for the rigged fleet's ptys — small, so a replayed sentinel lands on row 0. */
+const GEOMETRY = { cols: 60, rows: 8 };
+
 /**
  * A project whose fleet is ONE manager on a manager rig and ONE worker on a worker rig.
  *
  * That asymmetry is the whole fixture: `splitRoster` calls the manager's agent spawnable and the
  * worker's agent dispatched, so the two scopes have genuinely different populations — 2 rows and 1 —
  * and a filter that kept or dropped everything could satisfy neither.
+ *
+ * Card 0bcfa530 added three things to it, every one of them ADDITIVE — the two pre-existing scope
+ * legs read none of them and their assertions are untouched:
+ *   · a distinct `ptyBytes` SENTINEL per session, so "expanding attached THAT session's terminal" is
+ *     a measurable byte change rather than a region appearing;
+ *   · a SECOND project with its own live, rigged, pty-bearing session — the cross-project negative:
+ *     a card that ignored the project scope would list it, and it is otherwise listable in every way;
+ *   · the two rig agent ids, so a leg can seed one more session onto this fleet's own rigs.
+ *
+ * ⛔ An EXITED row is deliberately NOT seeded here, even though the Sessions card needs one as a
+ * negative: it would add a ROSTER row, and the two legs above pin the roster's own population and
+ * its segment counts exactly. The leg that needs it seeds it itself, onto `mgrAgentId`.
  */
 async function seedRiggedFleet(loomDaemon: LoomDaemon) {
   const base = loomDaemon.baseURL;
@@ -149,12 +171,30 @@ async function seedRiggedFleet(loomDaemon: LoomDaemon) {
   // every text assertion below read a name the page never draws.
   const mgr = await loomDaemon.seedLiveSession({
     project, id: `e2e-ovsc-mgr-${short}`, agentId: mgrAgent.id, agentName: mgrName, role: "manager",
+    ptyGeometry: GEOMETRY, ptyBytes: `OVSCOPE-MANAGER-PTY-${short}\r\n`,
   });
   const worker = await loomDaemon.seedLiveSession({
     project, id: `e2e-ovsc-wkr-${short}`, agentId: wkrAgent.id, agentName: wkrName, role: "worker",
     parentSessionId: mgr.sessionId, branch: `loom/ovscope${short}`,
+    ptyGeometry: GEOMETRY, ptyBytes: `OVSCOPE-WORKER-PTY-${short}\r\n`,
   });
-  return { project, mgr, worker, mgrName, wkrName };
+  // ANOTHER project's live session, on its OWN spawnable rig so it survives either scope — the only
+  // thing keeping it off this project's card is the project scope itself.
+  const otherProject = await loomDaemon.createProject(uniq("atlasovother"));
+  const otherAgent = await apiJson<{ id: string }>(`${base}/api/projects/${otherProject.id}/agents`,
+    { method: "POST", body: JSON.stringify({ name: uniq("OtherConductor"), startupPrompt: "" }) });
+  await apiJson(`${base}/api/agents/${otherAgent.id}`, { method: "POST", body: JSON.stringify({ profileId: mgrRig.id }) });
+  const other = await loomDaemon.seedLiveSession({
+    project: otherProject, id: `e2e-ovsc-other-${short}`, agentId: otherAgent.id, role: "manager",
+    ptyGeometry: GEOMETRY, ptyBytes: `OVSCOPE-OTHERPROJECT-PTY-${short}\r\n`,
+  });
+  return {
+    project, mgr, worker, mgrName, wkrName, otherProject, other, short,
+    mgrAgentId: mgrAgent.id, wkrAgentId: wkrAgent.id,
+    mgrSentinel: `OVSCOPE-MANAGER-PTY-${short}`,
+    wkrSentinel: `OVSCOPE-WORKER-PTY-${short}`,
+    otherSentinel: `OVSCOPE-OTHERPROJECT-PTY-${short}`,
+  };
 }
 
 /** The scope toggle's two segments, scoped through the control's own testid. */
@@ -165,6 +205,26 @@ const scopeSegment = (page: Page, which: "all" | "spawnable") =>
 /** One roster row, by the session it draws — never by text, which a sibling spec's row can match. */
 const row = (page: Page, sessionId: string) =>
   page.locator(`[data-testid="atlas-roster-row"][data-session-id="${sessionId}"]`);
+
+// ── The Sessions card's locators (card 0bcfa530) ──────────────────────────────────────────────
+// All scoped THROUGH the card's own testid: the e2e daemon is shared, and the Workspace node renders
+// the same component with its own `atlas-session*` testids — a bare row locator would reach neither
+// safely. `atlas-psession*` is this node's set (pages/ProjectHome.tsx `PROJECT_SESSION_IDS`).
+const sessCard = (page: Page) => page.getByTestId("atlas-overview-sessions");
+const sessRows = (page: Page) => sessCard(page).locator("[data-atlas-wsession]");
+const sessTerm = (page: Page) => sessCard(page).getByTestId("atlas-psessions-terminal");
+/** The mounted pane's real rendered buffer, via xterm's own always-in-sync accessibility tree —
+ *  the same legitimate xterm feature atlas-workspace-sessions.spec.ts reads from. Nothing is
+ *  monkeypatched, and a <canvas> is not readable any other way. */
+const sessPaneText = (page: Page) => sessTerm(page).locator(".xterm-accessibility-tree > div");
+const sessRow = (page: Page, id: string) => page.getByTestId(`atlas-psession-row-${id}`);
+const sessExpand = (page: Page, id: string) => page.getByTestId(`atlas-psession-expand-${id}`);
+
+/** One session's live `processState`, read straight off the API the page itself reads. */
+async function processStateOf(baseURL: string, sessionId: string): Promise<string | null> {
+  const rows = await apiJson<{ id: string; processState: string }[]>(`${baseURL}/api/sessions`);
+  return rows.find((s) => s.id === sessionId)?.processState ?? null;
+}
 
 /** Every cell of one row, read as {label → text} off the labels the row itself carries. */
 async function rowCells(page: Page, sessionId: string) {
@@ -383,9 +443,10 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
   // The owner's own item on this tab, verbatim: "Optionaly show either only tarminals of spawnable
   // agents or teminals of all running agents. Adjustable by user preference."
   //
-  // ⚠️ The roster is a TABLE of sessions, not a strip of terminals — this page has mounted no
-  // terminal since the rework (card 269f46ef), and re-adding one is explicitly out of scope. These
-  // legs are about which agents' sessions the table LISTS.
+  // ⚠️ The roster is a TABLE of sessions, not a strip of terminals: these legs are about which
+  // agents' sessions the TABLE lists. The terminal list the owner's wording also asked for is a
+  // SEPARATE card below it (card 0bcfa530, its own legs at the bottom of this file) answering to
+  // this same one preference — so a change to the toggle has to be checked against both.
 
   test("switch ON: the scope toggle really changes the listed population, both ways", async ({ page, loomDaemon }) => {
     const seeded = await seedRiggedFleet(loomDaemon);
@@ -463,5 +524,162 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     await expect(row(page, seeded.mgr.sessionId)).toBeVisible();
     await expect(row(page, seeded.worker.sessionId)).toHaveCount(0);
     await expect(page.locator('[data-testid="atlas-roster-row"]')).toHaveCount(1);
+
+    // …and the ONE preference also restored the Sessions card below (card 0bcfa530). Presence
+    // first: the manager's terminal row proves the card rendered, so the worker's absence is the
+    // restored filter rather than a card that never drew.
+    await expect(sessRow(page, seeded.mgr.sessionId)).toBeVisible();
+    await expect(sessRow(page, seeded.worker.sessionId)).toHaveCount(0);
+    await expect(sessRows(page)).toHaveCount(1);
+  });
+
+  // ── THE SESSIONS CARD (card 0bcfa530) ───────────────────────────────────────────────────────
+  // The owner's decision 925ea659: "Also add a filtered terminal list to the project Overview (new
+  // card)". It is the project-scoped twin of the Workspace node's own Sessions card (9b6be377),
+  // reusing that component, and filtered by the SAME preference as the roster above it.
+
+  test("switch ON: the Sessions card lists this project's running sessions only, and follows the one scope toggle in step with the roster", async ({ page, loomDaemon }) => {
+    const seeded = await seedRiggedFleet(loomDaemon);
+    // The EXITED negative, seeded HERE rather than into the shared fixture (which the roster legs
+    // above pin exactly). On the MANAGER's spawnable rig deliberately: it is then in this project,
+    // listed by the roster, and spawnable under BOTH scopes — so the only thing that can keep it off
+    // the terminal list is "not running", which is precisely the claim under test.
+    const exited = await loomDaemon.seedLiveSession({
+      project: seeded.project, id: `e2e-ovsc-dead-${seeded.short}`, agentId: seeded.mgrAgentId,
+      agentName: seeded.mgrName, role: "worker", processState: "exited",
+    });
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize(WIDE);
+    await page.goto(loomDaemon.baseURL + "/project");
+
+    // FIXTURE IDENTITY first: a silent fallback to a sibling worker's daemon renders a plausible,
+    // entirely wrong page, and every count below would be read off it.
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+    await expect(sessCard(page)).toBeVisible();
+
+    // ── THE POPULATION. Presence before every absence: the two running rows, then the three
+    //    things that must not be here, each of which differs from a listed row in ONE field.
+    await expect(sessRows(page)).toHaveCount(2);
+    await expect(sessRow(page, seeded.mgr.sessionId)).toBeVisible();
+    await expect(sessRow(page, seeded.worker.sessionId)).toBeVisible();
+    // 🔴 THE CROSS-PROJECT NEGATIVE. `seeded.other` is live, pty-bearing and on a spawnable rig —
+    // it survives either scope. Only the project scope keeps it off this card.
+    await expect(sessRow(page, seeded.other.sessionId)).toHaveCount(0);
+    // …and the EXITED row, which is the one place the two cards' populations deliberately diverge:
+    // the roster lists it (it has a row with an `exited` pill), the terminal list cannot.
+    await expect(row(page, exited.sessionId)).toBeVisible();
+    await expect(sessRow(page, exited.sessionId)).toHaveCount(0);
+
+    // The head count is what the card LISTS, never a separately-derived figure that could drift —
+    // the "a card reading 3 beside a list showing 2" shape card 9b6be377 recorded.
+    await expect(sessCard(page).locator(".loom-bandcount").first()).toHaveText("2");
+    // Nothing is mounted at rest. This is what makes the card safe to add to a tab the owner had
+    // furniture REMOVED from: at rest it costs its head plus one line per session.
+    await expect(sessTerm(page)).toHaveCount(0);
+
+    // ── ONE TOGGLE, TWO LISTS. The control lives in the roster's head; flipping it must move BOTH
+    //    populations in the same step, or "one preference" is a claim the page does not keep.
+    await scopeSegment(page, "spawnable").click();
+    await expect(scopeSegment(page, "spawnable")).toHaveAttribute("aria-checked", "true");
+    await expect(row(page, seeded.mgr.sessionId)).toBeVisible();
+    await expect(row(page, seeded.worker.sessionId)).toHaveCount(0);
+    await expect(sessRow(page, seeded.mgr.sessionId)).toBeVisible();
+    await expect(sessRow(page, seeded.worker.sessionId)).toHaveCount(0);
+    await expect(sessRows(page)).toHaveCount(1);
+    await expect(sessCard(page).locator(".loom-bandcount").first()).toHaveText("1");
+
+    // …and the card SAYS it is filtered, naming the control rather than growing a second one. A
+    // list silently showing a subset under the heading "Sessions" is the defect here.
+    await expect(sessCard(page)).toContainText(
+      "Listing only the agents you start by hand; 1 running session dispatched by a manager is hidden by the filter on the card above.",
+    );
+    // ⛔ AND THERE IS NO SECOND TOGGLE. The card's own head carries no scope control — one
+    // preference, one place to change it.
+    await expect(sessCard(page).getByTestId("atlas-roster-scope")).toHaveCount(0);
+    await expect(sessCard(page).getByRole("radio")).toHaveCount(0);
+
+    // ── AND BACK. Both directions, so "the worker vanished" cannot be satisfied by a row that
+    //    merely failed to render once and never came back.
+    await scopeSegment(page, "all").click();
+    await expect(sessRow(page, seeded.worker.sessionId)).toBeVisible();
+    await expect(sessRows(page)).toHaveCount(2);
+    await expect(sessCard(page)).not.toContainText("Listing only the agents");
+  });
+
+  test("switch ON: expanding a Sessions row attaches THAT session's terminal, and collapsing releases the view without stopping the session", async ({ page, loomDaemon }) => {
+    const seeded = await seedRiggedFleet(loomDaemon);
+    // An exited session on the same fleet — not to be listed, but as the CONTRAST CASE for the
+    // `processState` reading below: "still live after a collapse" means nothing unless the same
+    // helper, on the same daemon, at the same moment, can return something that is not "live".
+    const exited = await loomDaemon.seedLiveSession({
+      project: seeded.project, id: `e2e-ovsc-ctl-${seeded.short}`, agentId: seeded.mgrAgentId,
+      role: "worker", processState: "exited",
+    });
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize(WIDE);
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+
+    // AT REST: the rows are there and NOTHING is mounted — presence before the absence claim.
+    await expect(sessRows(page)).toHaveCount(2);
+    await expect(sessTerm(page)).toHaveCount(0);
+    const mgrToggle = sessExpand(page, seeded.mgr.sessionId);
+    const wkrToggle = sessExpand(page, seeded.worker.sessionId);
+    await expect(mgrToggle).toHaveAttribute("aria-expanded", "false");
+
+    // ── EXPAND. The observable is the pane's REPLAYED BYTES, not a region appearing: this
+    //    session's own sentinel is what proves the mount really ATTACHED to the row that was
+    //    clicked, and no amount of chrome can satisfy it.
+    await mgrToggle.click();
+    await expect(sessTerm(page)).toHaveCount(1);
+    await expect(sessPaneText(page).filter({ hasText: seeded.mgrSentinel })).toBeVisible();
+    await expect(mgrToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(sessRow(page, seeded.mgr.sessionId)).toHaveClass(/is-expanded/);
+
+    // ── MOVE IT, never add a second. Still exactly ONE region, now replaying the OTHER session's
+    //    bytes — the byte CHANGE is what tells a moved mount apart from a second one rendering in
+    //    the same place, and the single-mount rule is this card's whole cost model.
+    await wkrToggle.click();
+    await expect(sessTerm(page)).toHaveCount(1);
+    await expect(sessPaneText(page).filter({ hasText: seeded.wkrSentinel })).toBeVisible();
+    await expect(sessPaneText(page).filter({ hasText: seeded.mgrSentinel })).toHaveCount(0);
+    await expect(mgrToggle).toHaveAttribute("aria-expanded", "false");
+
+    // ── COLLAPSE. Sessions outlive viewers: releasing the view must not touch the pty.
+    await expect.poll(() => processStateOf(loomDaemon.baseURL, seeded.worker.sessionId),
+      { message: "the seeded worker is live before the collapse" }).toBe("live");
+    await wkrToggle.click();
+    await expect(sessTerm(page)).toHaveCount(0);
+    await expect(wkrToggle).toHaveAttribute("aria-expanded", "false");
+    // The row is still listed and the DAEMON still reports the session live — read off the same
+    // API the page reads, so this is the session's real state and not a rendering of it.
+    await expect(sessRow(page, seeded.worker.sessionId)).toBeVisible();
+    expect(await processStateOf(loomDaemon.baseURL, seeded.worker.sessionId),
+      "collapsing the terminal stopped the session").toBe("live");
+    // THE CONTRAST CASE, through the same helper against the same daemon in the same breath: a
+    // session that really is not running reads `exited`. Without it, `toBe("live")` above would be
+    // equally satisfied by a helper that returned "live" for everything, including a stopped pty.
+    expect(await processStateOf(loomDaemon.baseURL, exited.sessionId),
+      "the processState read cannot distinguish a stopped session, so the claim above is vacuous")
+      .toBe("exited");
+
+    // …and the STRONGEST form of the same claim: re-expanding replays the SAME bytes, so the pty
+    // entry itself survived the collapse rather than merely the DB row.
+    await wkrToggle.click();
+    await expect(sessTerm(page)).toHaveCount(1);
+    await expect(sessPaneText(page).filter({ hasText: seeded.wkrSentinel })).toBeVisible();
+
+    // The expanded card is a READOUT, the same posture the Workspace card takes: a Composer to
+    // steer with (a terminal you cannot steer is not worth the mount), and no lifecycle buttons —
+    // the row's `Open ↗` reaches the session node's full tile, which owns Stop and Fork.
+    await expect(sessTerm(page).getByTestId("composer")).toBeVisible();
+    await expect(sessTerm(page).getByRole("button", { name: /^stop$/i })).toHaveCount(0);
+    await expect(sessTerm(page).getByRole("button", { name: /^fork$/i })).toHaveCount(0);
+
+    // The per-row exit carries THAT row's own id, never the first the page could find.
+    await expect(page.getByTestId(`atlas-psession-open-${seeded.worker.sessionId}`))
+      .toHaveAttribute("href", `/session/${seeded.worker.sessionId}`);
   });
 });

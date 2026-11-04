@@ -30,18 +30,37 @@ import {
   type BriefReading, type RosterCell,
 } from "../components/atlasProjectOverview";
 import { AgentsQuickSpawn } from "../components/atlasAgents";
+import { SessionTerminalList, type SessionListTestIds } from "../components/sessionTerminals";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
 import { splitRoster } from "../lib/atlasAgents";
+import { projectRunningSessions } from "../lib/workspaceSessions";
 import {
   boardRollup, gateLanes, isLiveSession, mergeThroughput, plural, relativeTime,
   useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
 import {
-  DEFAULT_ROSTER_SCOPE, filterRosterRows, lastEventBySession, readRosterScope, rosterCardLabel,
-  rosterRows, taskTitlesById, writeRosterScope, type RosterScope,
+  DEFAULT_ROSTER_SCOPE, filterRosterRows, filterScopedSessions, lastEventBySession, readRosterScope,
+  rosterCardLabel, rosterRows, taskTitlesById, writeRosterScope, type RosterScope,
 } from "../lib/atlasProjectOverview";
 import { PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt } from "../nav";
 import { color, font } from "../theme";
+
+/** The Sessions card's `aria-controls` target — one region, because there is only ever one mount. */
+const PROJECT_SESSION_TERMINAL_REGION = "atlas-project-session-terminal";
+
+/**
+ * This node's Sessions-card testids (card 0bcfa530). Distinct from the Workspace node's own set
+ * (`atlas-session*`) so a spec written against one node can never be satisfied by the other's card
+ * — the two render the same component over different populations, which is exactly the case where a
+ * shared locator would pass while proving nothing.
+ */
+const PROJECT_SESSION_IDS: SessionListTestIds = {
+  list: "atlas-psessions-list",
+  terminal: "atlas-psessions-terminal",
+  row: "atlas-psession-row",
+  expand: "atlas-psession-expand",
+  open: "atlas-psession-open",
+};
 
 // THE PROJECT NODE — card fd99b2d7 (Atlas P2-1), the project-scoped twin of WorkspaceHome, widened
 // to the approved design's ten tabs by card 25c08fba and narrowed to NINE by card 44f725fe. Every
@@ -323,6 +342,20 @@ export default function ProjectHome() {
   const spawnableRows = filterRosterRows(rows, "spawnable", spawnableAgentIds);
   const visibleRows = filterRosterRows(rows, rosterScope, spawnableAgentIds);
   const hiddenRows = rows.length - visibleRows.length;
+
+  // ── The Sessions card's own population (card 0bcfa530) ──────────────────────────────────────
+  //
+  // The SAME scope preference, applied to a DIFFERENT population — and the difference is the point,
+  // not an oversight. The roster lists every non-archived manager and worker, exited ones included,
+  // because its job is "what is this project working on"; a terminal list can only list sessions
+  // that are actually RUNNING, because an exited session has no pty to attach to and a companion is
+  // driven from its chat surface rather than a raw one (the companion guard, card 5c87f4b6). So the
+  // two cards state their own counts in their own heads and each footer names its own omissions —
+  // the shape card 9b6be377 warns against is one card's HEAD disagreeing with that card's own LIST,
+  // which is why both heads here count exactly what they list.
+  const termRows = projectRunningSessions(sessionsQ.data, projectId);
+  const visibleTermRows = filterScopedSessions(termRows, rosterScope, spawnableAgentIds);
+  const hiddenTermRows = termRows.length - visibleTermRows.length;
   const cellFor: (row: { session: SessionListItem }) => RosterCell = ({ session: s }) => {
     const ctx = s.ctxInputTokens ?? 0;
     const ratio = ctx > 0 ? ctx / contextWindowForModel(s.model) : 0;
@@ -502,6 +535,44 @@ export default function ProjectHome() {
                       dispatched by a manager {rows.length === 1 ? "is" : "are"} hidden by the filter above.
                     </BandEmpty>
                   : <RosterTable rows={visibleRows} cellFor={cellFor} />}
+            </OverviewCard>
+
+            {/* ── THE SESSIONS CARD (card 0bcfa530) ────────────────────────────────────────────
+                The owner's decision 925ea659, verbatim: "Also add a filtered terminal list to the
+                project Overview (new card)" — closing the question card effd47d5's record left open
+                ("his word was 'terminals', and this page has none").
+
+                @decision 0bcfa530 — this card stays DIRECTLY under the roster, is never folded into
+                it, and never grows a second scope toggle or a second `Sessions ↗` exit of its own. */}
+            <OverviewCard label="Sessions" count={visibleTermRows.length}
+              testId="atlas-overview-sessions"
+              footer={<>
+                {/* Same order as the roster's footer, and for the same reason: the sentence that can
+                    make the card's own label read as more than it is comes FIRST, and only while
+                    something is actually hidden. It names the control rather than repeating it —
+                    one preference, one place to change it. */}
+                {hiddenTermRows > 0 ? <>
+                  Listing only the agents you start by hand; {plural(hiddenTermRows, "running session")}{" "}
+                  dispatched by a manager {hiddenTermRows === 1 ? "is" : "are"} hidden by the filter on
+                  the card above.{" "}
+                </> : null}
+                One terminal is mounted at a time, and collapsing it only releases the view — the
+                session keeps running. Companions are driven from their own chat surface and are not
+                listed, and an exited session has no terminal to show.
+              </>}>
+              {/* THREE states, not two — the roster's own rule one card up: a project with nothing
+                  running and a project whose running sessions are all filtered out are different
+                  facts, and reporting the second as the first would tell a reader who has just
+                  hidden four live workers that nothing is running. */}
+              {termRows.length === 0
+                ? <BandEmpty>No session is running in this project.</BandEmpty>
+                : visibleTermRows.length === 0
+                  ? <BandEmpty>
+                      No agent you start by hand has a session running here — {plural(termRows.length, "running session")}{" "}
+                      dispatched by a manager {termRows.length === 1 ? "is" : "are"} hidden by the filter above.
+                    </BandEmpty>
+                  : <SessionTerminalList rows={visibleTermRows} ids={PROJECT_SESSION_IDS}
+                      regionId={PROJECT_SESSION_TERMINAL_REGION} />}
             </OverviewCard>
 
             <OverviewCard label="Board" count={`${board.open} open · ${board.total} total`}

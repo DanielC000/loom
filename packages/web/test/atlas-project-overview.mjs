@@ -7,8 +7,9 @@
 //   node --experimental-strip-types packages/web/test/atlas-project-overview.mjs
 import assert from "node:assert/strict";
 import {
-  DEFAULT_ROSTER_SCOPE, filterRosterRows, lastEventBySession, parseRosterScope, readRosterScope,
-  rosterCardLabel, rosterRows, rosterScopeStorageKey, taskTitlesById, writeRosterScope,
+  DEFAULT_ROSTER_SCOPE, filterRosterRows, filterScopedSessions, lastEventBySession, parseRosterScope,
+  readRosterScope, rosterCardLabel, rosterRows, rosterScopeStorageKey, scopeAdmitsAgent,
+  taskTitlesById, writeRosterScope,
 } from "../src/lib/atlasProjectOverview.ts";
 
 let pass = 0;
@@ -188,6 +189,60 @@ check("no filter mutates the rows it was handed", () => {
 check("an empty roster filters to an empty roster in either scope", () => {
   assert.deepEqual(filterRosterRows([], "all", ONLY_MGR), []);
   assert.deepEqual(filterRosterRows([], "spawnable", ONLY_MGR), []);
+});
+
+// ── scopeAdmitsAgent + filterScopedSessions (card 0bcfa530) ───────────────────────────────────
+//
+// The Sessions card's terminal list answers to the SAME preference as the roster above it, over a
+// flat session list with no manager/worker indent to repair. These legs are about the one thing that
+// would make a second surface under one control a lie: the two disagreeing about what the chosen
+// reading means.
+
+check("the predicate admits everything under 'all', and only the spawnable set under 'spawnable'", () => {
+  assert.equal(scopeAdmitsAgent("a-wkr1", "all", ONLY_MGR), true);
+  assert.equal(scopeAdmitsAgent("a-mgr", "spawnable", ONLY_MGR), true);
+  assert.equal(scopeAdmitsAgent("a-wkr1", "spawnable", ONLY_MGR), false);
+});
+
+// 🔴 `null` is "the agent/rig reads have not landed" and ADMITS everything; an EMPTY set is the real
+//    answer that nothing here is spawnable and admits nothing. Conflating them is the bug, so both
+//    polarities are pinned on the predicate itself, not only on its two callers.
+check("a null set admits everything and an empty set admits nothing", () => {
+  assert.equal(scopeAdmitsAgent("a-wkr1", "spawnable", null), true);
+  assert.equal(scopeAdmitsAgent("a-wkr1", "spawnable", new Set()), false);
+  assert.equal(scopeAdmitsAgent("a-mgr", "spawnable", new Set()), false);
+});
+
+// 🔴 THE LOAD-BEARING ONE. ONE preference drives two surfaces, so for any (scope, set) the two
+//    filters must keep the same SESSIONS — the roster's extra work is the indent, never the
+//    membership. A drifted second copy of the predicate passes every leg above and fails here.
+check("both scoped filters keep exactly the same sessions, in every mode", () => {
+  const sessions = [SCOPE_MGR, SCOPE_W1, SCOPE_W2];
+  for (const scope of ["all", "spawnable"]) {
+    for (const set of [null, new Set(), ONLY_MGR, new Set(["a-wkr1"]), new Set(["a-mgr", "a-wkr2"])]) {
+      assert.deepEqual(
+        filterScopedSessions(sessions, scope, set).map((s) => s.id),
+        filterRosterRows(SCOPE_ROWS, scope, set).map((r) => r.session.id),
+        `scope=${scope} set=${set === null ? "null" : `[${[...set].join(",")}]`}`,
+      );
+    }
+  }
+});
+
+check("the session filter preserves order and never mutates the caller's array", () => {
+  // Deliberately NOT in rosterRows order: the list this filters is the terminal card's own
+  // population (manager-first, then newest-first), so the filter must be order-neutral.
+  const sessions = [SCOPE_W2, SCOPE_MGR, SCOPE_W1];
+  const before = sessions.map((s) => s.id);
+  const out = filterScopedSessions(sessions, "spawnable", new Set(["a-wkr2", "a-wkr1"]));
+  assert.deepEqual(out.map((s) => s.id), ["w2", "w1"]);
+  assert.deepEqual(sessions.map((s) => s.id), before, "the input array was mutated");
+  assert.notEqual(out, sessions);
+});
+
+check("an empty session list filters to an empty list in either scope", () => {
+  assert.deepEqual(filterScopedSessions([], "all", ONLY_MGR), []);
+  assert.deepEqual(filterScopedSessions([], "spawnable", ONLY_MGR), []);
 });
 
 // ── The preference's default, parse and key ───────────────────────────────────────────────────

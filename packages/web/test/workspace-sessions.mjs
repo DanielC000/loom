@@ -22,8 +22,8 @@ import { register } from "node:module";
 register("./_tsxLoaderHook.mjs", import.meta.url);
 
 const {
-  byProjectThenManager, canMountTerminal, liveExpandedSession, toggleExpandedSession,
-  workspaceRunningSessions, workspaceSessionsSummary,
+  byProjectThenManager, canMountTerminal, liveExpandedSession, projectRunningSessions,
+  toggleExpandedSession, workspaceRunningSessions, workspaceSessionsSummary,
 } = await import("../src/lib/workspaceSessions.ts");
 
 /**
@@ -104,6 +104,76 @@ check("the caller's array is not sorted in place", () => {
   assert.deepEqual(ids(input), before, "the input array was sorted in place");
   assert.notEqual(out, input, "the same array instance was returned");
   assert.deepEqual(ids(out), ["a", "b"]);
+});
+
+// ── projectRunningSessions: the same population, one project (card 0bcfa530) ──────────────────
+
+// 17) THE PROJECT SCOPE. Only the named project's rows, and the decoy differs from a listed row in
+//     exactly one field (its projectId) — so a function that ignored the argument, or one that
+//     dropped everything, both fail here.
+check("only the named project's sessions are listed", () => {
+  const rows = projectRunningSessions([
+    s({ id: "mine", projectId: "p1" }),
+    s({ id: "theirs", projectId: "p2" }),
+  ], "p1");
+  assert.deepEqual(ids(rows), ["mine"]);
+});
+
+// 18) 🔴 IT DELEGATES THE POPULATION RULE rather than re-spelling it. Asserted by handing the SAME
+//     rows to both functions and demanding the same answer inside one project — a second, drifted
+//     copy of the predicate (a companion kept, an exited row kept) breaks this without breaking any
+//     assertion above, because the Workspace tier would still be right.
+check("the project scope is the workspace population, narrowed — not a second predicate", () => {
+  const sessions = [
+    s({ id: "live", processState: "live" }),
+    s({ id: "starting", processState: "starting" }),
+    s({ id: "exited", processState: "exited" }),
+    s({ id: "none", processState: "none" }),
+    s({ id: "companion", role: "assistant", processState: "live" }),
+  ];
+  assert.deepEqual(ids(projectRunningSessions(sessions, "p1")), ids(workspaceRunningSessions(sessions)));
+  assert.deepEqual(ids(projectRunningSessions(sessions, "p1")).sort(), ["live", "starting"]);
+});
+
+// 19) An unresolved project lists NOTHING, never the whole fleet. On the project node that card sits
+//     under a project heading, so showing another project's sessions there states something false,
+//     where showing none states only that the page is not ready.
+check("a null or empty projectId yields no rows", () => {
+  const sessions = [s({ id: "a", projectId: "p1" }), s({ id: "b", projectId: "p2" })];
+  assert.deepEqual(projectRunningSessions(sessions, null), []);
+  assert.deepEqual(projectRunningSessions(sessions, undefined), []);
+  assert.deepEqual(projectRunningSessions(sessions, ""), []);
+  // …and the control: the SAME rows with a real id do come back, so the empty results above are the
+  // guard rather than a filter that never matches anything.
+  assert.deepEqual(ids(projectRunningSessions(sessions, "p1")), ["a"]);
+});
+
+// 20) `undefined` sessions (an unresolved `useQuery` on the first render) is an empty array.
+check("undefined sessions give an empty array", () => {
+  assert.deepEqual(projectRunningSessions(undefined, "p1"), []);
+});
+
+// 21) WITHIN one project the order is the shared within-project order — the manager first, then
+//     newest-first — which falls out of `byProjectThenManager` because the project name and id are
+//     ties. Seeded in the wrong order so arrival order cannot pass for the rule.
+check("within one project the manager leads, then newest-first", () => {
+  const rows = projectRunningSessions([
+    s({ id: "old-worker", createdAt: "2026-11-01T00:00:00.000Z" }),
+    s({ id: "new-worker", createdAt: "2026-11-03T00:00:00.000Z" }),
+    s({ id: "manager", role: "manager", createdAt: "2026-10-01T00:00:00.000Z" }),
+  ], "p1");
+  assert.deepEqual(ids(rows), ["manager", "new-worker", "old-worker"]);
+});
+
+// 22) The caller's array is React Query's own cached `["allSessions"]` data — shared with the KPI
+//     readings, the tree and the roster — so it must not be filtered or sorted in place.
+check("projectRunningSessions does not mutate the caller's array", () => {
+  const input = [s({ id: "b", projectId: "p2" }), s({ id: "a", projectId: "p1" })];
+  const before = ids(input);
+  const out = projectRunningSessions(input, "p1");
+  assert.deepEqual(ids(input), before, "the input array was mutated");
+  assert.notEqual(out, input);
+  assert.deepEqual(ids(out), ["a"]);
 });
 
 // ── byProjectThenManager: the render order ─────────────────────────────────────────────────────

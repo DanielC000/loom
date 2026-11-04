@@ -123,7 +123,15 @@ export function rosterCardLabel(
 // `splitRoster`'s agent set as an argument, or this surface becomes a second definition that drifts
 // from the Agents tab silently.
 
-/** Which population the roster table lists. `"all"` is the pre-card behaviour and the default. */
+/**
+ * Which population this tab lists. `"all"` is the pre-card behaviour and the default.
+ *
+ * ⭐ ONE PREFERENCE, TWO SURFACES (card 0bcfa530). It governs the work-in-flight roster table AND
+ * the Sessions card's terminal list below it. The owner's own sentence asked for one adjustable
+ * reading ("Optionaly show either only tarminals of spawnable agents or teminals of all running
+ * agents. Adjustable by user preference."), so the two surfaces answer to one control in one place —
+ * never a second toggle, and never a second idea of what the chosen reading means.
+ */
 export type RosterScope = "all" | "spawnable";
 
 /**
@@ -166,12 +174,49 @@ export function filterRosterRows(
   spawnableAgentIds: ReadonlySet<string> | null,
 ): RosterRow[] {
   if (scope === "all" || spawnableAgentIds === null) return rows.slice();
-  const kept = rows.filter((r) => spawnableAgentIds.has(r.session.agentId));
+  const kept = rows.filter((r) => scopeAdmitsAgent(r.session.agentId, scope, spawnableAgentIds));
   const keptIds = new Set(kept.map((r) => r.session.id));
   return kept.map((r) => ({
     session: r.session,
     child: r.child && r.session.parentSessionId != null && keptIds.has(r.session.parentSessionId),
   }));
+}
+
+/**
+ * Does one scope admit one agent — THE predicate, and the only place it is written.
+ *
+ * Both of this tab's scoped surfaces call it: the roster table through `filterRosterRows` above and
+ * the Sessions card's terminal list through `filterScopedSessions` below. Written out once because
+ * the two readings of a two-value scope are trivial to re-spell slightly differently (a `=== "all"`
+ * forgotten, a `null` conflated with an empty set) and the resulting disagreement is invisible — two
+ * surfaces under one control, showing populations that no longer match.
+ *
+ * `null` means "the agent/rig reads have not landed", which ADMITS everything; see
+ * `filterRosterRows` for why that is not the same as an empty set.
+ */
+export function scopeAdmitsAgent(
+  agentId: string,
+  scope: RosterScope,
+  spawnableAgentIds: ReadonlySet<string> | null,
+): boolean {
+  if (scope === "all" || spawnableAgentIds === null) return true;
+  return spawnableAgentIds.has(agentId);
+}
+
+/**
+ * The SAME scope filter over a flat session list — the Sessions card's terminal list (card
+ * 0bcfa530), which has no manager/worker nesting to repair.
+ *
+ * That is the whole difference from `filterRosterRows`: a roster row carries an `child` indent that
+ * must be demoted when the manager it hangs under is filtered out, and a terminal row carries no
+ * such relationship. Order is preserved and the caller's array is never mutated, same as there.
+ */
+export function filterScopedSessions(
+  sessions: readonly SessionListItem[],
+  scope: RosterScope,
+  spawnableAgentIds: ReadonlySet<string> | null,
+): SessionListItem[] {
+  return sessions.filter((s) => scopeAdmitsAgent(s.agentId, scope, spawnableAgentIds));
 }
 
 /**

@@ -2,12 +2,19 @@ import type { SessionListItem } from "@loom/shared";
 import { isLiveSession } from "./atlasHome";
 import { byManagerThenCreated, isCompanionSession } from "./sessions";
 
-// The derivation behind the Workspace node's "Sessions" card (card 9b6be377, the owner's Atlas
-// feedback item: `"Workspace": Add "Sessions" card with all running session terminals`).
+// The derivations behind the Sessions card (card 9b6be377, the owner's Atlas feedback item:
+// `"Workspace": Add "Sessions" card with all running session terminals`) — and, since card 0bcfa530
+// gave the project node the same card, the derivations behind BOTH tiers' populations.
 //
-// Pure and dependency-free so it can be asserted on plain objects — pages/WorkspaceHome.tsx holds
-// the render and nothing else, and test/workspace-sessions.mjs imports THESE functions rather than
-// a copy of their rules.
+// ⭐ ONE POPULATION RULE, TWO SCOPES, IN ONE FILE. `workspaceRunningSessions` states the rule — what
+// counts as a session worth listing a terminal for — and `projectRunningSessions` is that same rule
+// narrowed to one project. They are not two predicates: the second CALLS the first, so a change to
+// what "running" means cannot reach one tier and miss the other. The file keeps the name the first
+// of the two cards gave it; what it holds is the Sessions card's derivations, at whichever tier.
+//
+// Pure and dependency-free so it can be asserted on plain objects — pages/WorkspaceHome.tsx and
+// pages/ProjectHome.tsx hold the render and nothing else, and test/workspace-sessions.mjs imports
+// THESE functions rather than a copy of their rules.
 
 /**
  * Every running session the card lists, in render order.
@@ -30,6 +37,35 @@ export function workspaceRunningSessions(
     .filter((s) => !isCompanionSession(s) && isLiveSession(s))
     .slice()
     .sort(byProjectThenManager);
+}
+
+/**
+ * The same population, narrowed to ONE project — the project node's own Sessions card (card
+ * 0bcfa530, the twin of the Workspace card above on the Atlas project Overview).
+ *
+ * 🔴 IT DELEGATES RATHER THAN RE-SPELLING THE PREDICATE. The rule for what belongs in a terminal
+ * list — not a companion (the companion guard, card 5c87f4b6: a companion is driven only through
+ * its chat surface, never a raw pty + stdin Composer) and actually running — is stated ONCE, above.
+ * A second copy here would let the two tiers drift into listing different things under one word.
+ *
+ * The ORDER needs nothing extra either: `byProjectThenManager` compares project name, then project
+ * id, then `byManagerThenCreated`, so inside a single project the first two comparisons are always
+ * ties and what is left IS the shared within-project order — the same one the Terminals page and the
+ * roster table use. That is why this returns the right order with no comparator of its own.
+ *
+ * A null/empty `projectId` yields NO rows rather than every project's: on the project node an
+ * unresolved project is a page that cannot yet say whose sessions these are, and listing the whole
+ * fleet under a project heading would state something false rather than nothing.
+ *
+ * @decision 0bcfa530 — never re-spell the running-session predicate here; delegate to
+ * `workspaceRunningSessions`, or the two tiers drift into listing different things under one word.
+ */
+export function projectRunningSessions(
+  sessions: readonly SessionListItem[] | undefined,
+  projectId: string | null | undefined,
+): SessionListItem[] {
+  if (!projectId) return [];
+  return workspaceRunningSessions((sessions ?? []).filter((s) => s.projectId === projectId));
 }
 
 /**

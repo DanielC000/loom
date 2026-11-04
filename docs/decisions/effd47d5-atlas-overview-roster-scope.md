@@ -71,7 +71,8 @@ The strongest assertion in that spec is the one made **before any click**: the s
 
 ## Do not
 
-- **Do not read this card as licence to mount a terminal on this tab.** The roster is a table; `269f46ef` removed furniture here on the owner's own instruction, and his "terminals" wording is an open question (below), not a settled requirement this filter half-answers.
+- ~~**Do not read this card as licence to mount a terminal on this tab.**~~ **SUPERSEDED by card `0bcfa530`**, on the owner's own decision (`925ea659`) — this tab now mounts a terminal list, as its own card under the roster. What still binds is the reason the prohibition existed: a live-pty surface here is the owner's call, not a side effect of a filter, and `269f46ef`'s removals (Board, `KpiDeck`, `BandDisclosure`) stay removed.
+- **Do not add a second scope toggle for that card.** One preference drives both surfaces; `0bcfa530`'s record owns that rule.
 - **Do not re-derive "spawnable" from `session.role !== "worker"`** in this file or any other. Take `splitRoster`'s agent set as an argument, or this surface becomes a second definition that drifts from the Agents tab silently, in the one case where the app has changed its mind about an agent.
 - **Do not pass an empty set to mean "the agent reads have not landed."** `null` is that state. An empty set is the real answer that nothing here is spawnable, and conflating them states an empty fleet over a loading one.
 - **Do not flip the default to `"spawnable"`.** It would hide rows from every existing reader on upgrade. If the owner wants that, it is his call to make explicitly, not a tidy-up.
@@ -80,8 +81,10 @@ The strongest assertion in that spec is the one made **before any click**: the s
 - **Do not shrink the toggle's segments with a CSS rule, and do not swap it for a `<Select>`.** Segment padding and font size are inline in the kit (deliberately — see its own note), so a class rule is silently inert; a collapsed select hides the population comparison the control exists to state. Same trap `Panel`'s inline padding already sets for `.loom-ovcard`'s own `padding` rule, which has been inert since it was written.
 - **Do not bind a rig onto `seedFleet`** to save writing `seedRiggedFleet`. The four original legs assert against agents with no rig, and this card's constraint was to leave them byte-identical.
 
-## Still open — the owner's word was "terminals"
+## ✅ CLOSED — the owner's word was "terminals", and he confirmed it
 
-His sentence says *terminals* of spawnable agents versus *terminals* of all running agents, and the sibling item one level up in the same feedback round is "Workspace: add 'Sessions' card with all running session terminals" — which shipped as exactly that, expandable live terminals (card `9b6be377`). Read beside it, he may well have been asking for the project-scoped twin of that card, filtered, rather than a filter over a table.
+This section asked whether the owner's *terminals* wording meant the project-scoped twin of the Workspace Sessions card (`9b6be377`), filtered, rather than a filter over a table — and recorded that it was his decision to make, not a side effect of this filter.
 
-This card shipped the filter, because it is the part that is unambiguous and because the roster is the only session surface this tab has. **Whether the project Overview should also mount terminals is a separate design decision for the owner** — it would re-add to a tab he had just had furniture removed from, so it is not one to take as a side effect. The manager has the question; nothing here forecloses either answer, and the scope preference would carry straight over to a terminal list if one is ever built on this tab.
+**He answered it on request `925ea659` (2026-11-04), verbatim: "Also add a filtered terminal list to the project Overview (new card)."** That shipped as card `0bcfa530`: a separate `Sessions` card directly under the roster, mounting the same expandable terminal list the Workspace node mounts, driven by **this** preference — the scope carried straight over, exactly as anticipated above.
+
+So the tab now has two scoped surfaces under one control, and the record of how they relate — why the populations differ, why there is no second toggle, and why the list is not folded into the roster — is `docs/decisions/0bcfa530-atlas-project-overview-sessions-card.md`.
