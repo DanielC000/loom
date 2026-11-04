@@ -57,11 +57,14 @@ exfiltration target to a URL an attacker names in that file.
 Every Loom-built stdio MCP mount (card `fafae623`) launches through
 `packages/daemon/assets/env-isolated-launch.mjs`, which rebuilds the child's env from a fixed
 `BASE_ALLOWLIST` (`PATH`, `HOME`, `TEMP`, locale/cert vars, etc. — `env-isolated-launch.mjs:16-30`) plus a
-per-mount `--allow` list. `NO_PROXY` is in that base; `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are
-deliberately **not** (card `188d6a8c`), and `npm_config_registry` is deliberately not either (card
-`3faaab0d`) — both can carry `user:pass@host` userinfo. The shadcn row's seeded `passEnv` is `[]`
-(`seed.ts:157-162`), so it gets nothing beyond that shared base — the row reaches registries with **no**
-proxy configured, on purpose, not as an oversight.
+per-mount `--allow` list. None of `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` (card `188d6a8c`) or
+`NO_PROXY`/`no_proxy` (card `c6da31e9`, which moved `NO_PROXY` out of that base too) are in it, and
+`npm_config_registry` is deliberately not either (card `3faaab0d`) — all can carry `user:pass@host`
+userinfo or (for `NO_PROXY`) internal-topology value with no legitimate standalone use. They're forwarded
+only to an entitled mount, paired automatically: any proxy var a row's `passEnv` names (or the fixed
+github-binary/markitdown entitlements) also pulls in `NO_PROXY`/`no_proxy` alongside it. The shadcn row's
+seeded `passEnv` is `[]` (`seed.ts:157-162`), so it gets nothing beyond that shared base — the row reaches
+registries with **no** proxy configured, on purpose, not as an oversight.
 
 This is a seed-time *default*, not a permanent lock: a human can widen it later via
 `PATCH /api/capabilities/:id` (the owner-only `passEnv` escape hatch every capability row has). Every key

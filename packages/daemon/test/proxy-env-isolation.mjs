@@ -1,9 +1,12 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 188d6a8c: HTTP_PROXY/HTTPS_PROXY/ALL_PROXY (a proxy URL may carry `user:pass@host:port`
 // credentials) are no longer in env-isolated-launch.mjs's unconditional BASE_ALLOWLIST (see that file's
-// own test for the base-allowlist-level proof). This file proves `buildMcpServers`' (pty/host.ts) own
-// per-mount ENTITLEMENT decision: which mounts get PROXY_ENV_KEYS added to their `--allow` list, and that
-// the decision is keyed safely (never on a mutable `slug`/`name` an owner could collide with).
+// own test for the base-allowlist-level proof). Card c6da31e9: NO_PROXY/no_proxy joined them — no
+// credential, but topology (internal hostnames) and useless without a forwarded proxy var, so a
+// ${VAR}-expanding mount with no proxy entitlement at all has no business receiving it either. This file
+// proves `buildMcpServers`' (pty/host.ts) own per-mount ENTITLEMENT decision: which mounts get
+// PROXY_ENV_KEYS added to their `--allow` list, and that the decision is keyed safely (never on a mutable
+// `slug`/`name` an owner could collide with).
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE: LOOM_MARKITDOWN_BIN/LOOM_GITHUB_MCP_BIN point at
 // process.execPath so neither resolver needs a real install.
 //
@@ -26,6 +29,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (g) card d2fece1f: the seeded image-gen capability (kind:"npm-pinned") gets NONE of PROXY_ENV_KEYS —
 //       the fixed entitlement is keyed on `def.kind === "github-binary"` only, and npm-pinned is not that
 //       kind, so it falls through to the same "no fixed entitlement" path as any other owner-added row.
+//   (i) card c6da31e9 review fix: a row whose own passEnv names ONLY a credentialed proxy var (e.g.
+//       passEnv:["HTTPS_PROXY"]) gets NO_PROXY/no_proxy auto-paired into its --allow list too, proven both
+//       in the allow-list computation and via a real spawn; a row naming no proxy key still gets neither.
 //
 // What this file does NOT cover (by construction, not oversight): a real end-to-end spawn of markitdown's
 // or github-binary's OWN resolved mount with a credentialed proxy value actually reaching the process.
@@ -62,8 +68,8 @@ const ECHO_ENV_FIXTURE = path.join(__dirname, "fixtures", "echo-env.mjs");
 const { buildMcpServers, PROXY_ENV_KEYS } = await import("../dist/pty/host.js");
 const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 
-check("(setup) PROXY_ENV_KEYS names the four proxy keys this card scoped out of BASE_ALLOWLIST",
-  JSON.stringify([...PROXY_ENV_KEYS].sort()) === JSON.stringify(["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy"].sort()));
+check("(setup) PROXY_ENV_KEYS names the six proxy/topology keys scoped out of BASE_ALLOWLIST (cards 188d6a8c, c6da31e9)",
+  JSON.stringify([...PROXY_ENV_KEYS].sort()) === JSON.stringify(["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "NO_PROXY", "no_proxy"].sort()));
 
 // ===================== (a) markitdown: fixed addition (not a catalog row) =====================
 {
@@ -202,9 +208,127 @@ const imageGenRow = {
   }
 }
 
+// ===================== (h) card c6da31e9: NO_PROXY reaches an entitled mount, never an unentitled one =====
+// Sections (a)-(g) above already cover NO_PROXY/no_proxy's --allow-list presence/absence through the
+// shared PROXY_ENV_KEYS loop (now 6 entries, not 4) for markitdown/github-binary/an impostor/a plain row/
+// Playwright/image-gen. This section is the REAL-spawn proof (same shape as (e)'s HTTPS_PROXY proof) that
+// the raw NO_PROXY value itself reaches — or doesn't — a real spawned process for both polarities.
+const NO_PROXY_VALUE = "10.0.0.0/8,internal.corp.example";
+const noProxyEntitledRow = {
+  id: "cap-no-proxy-entitled", slug: "no-proxy-entitled-fixture", name: "NO_PROXY Entitled Fixture", description: "",
+  transport: "stdio", kind: "bundled",
+  provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [ECHO_ENV_FIXTURE] }),
+  toolAllowlistJson: "[]", wantsScratchDir: false, requiresConnection: false, secretEnvVar: null,
+  passEnv: ["NO_PROXY"], createdAt: new Date().toISOString(),
+};
+{
+  const mcpServers = buildMcpServers({
+    sessionId: "s-no-proxy-entitled", port: 4317, role: "worker",
+    capabilities: [{ slug: "no-proxy-entitled-fixture" }], capabilityCatalog: [noProxyEntitledRow],
+  });
+  const resolved = mcpServers["no-proxy-entitled-fixture"];
+  const unwrapped = unwrapLauncherMount(resolved);
+  check("(h) an entitled fixture's --allow list carries NO_PROXY (own passEnv:['NO_PROXY'])", unwrapped?.allowKeys.includes("NO_PROXY"));
+
+  const { stdout } = await execFileAsync(resolved.command, resolved.args, {
+    env: {
+      PATH: process.env.PATH ?? process.env.Path ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "",
+      TEMP: process.env.TEMP ?? process.env.TMP ?? os.tmpdir(), HOME: process.env.HOME ?? "", USERPROFILE: process.env.USERPROFILE ?? "",
+      NO_PROXY: NO_PROXY_VALUE,
+    },
+  });
+  const echoed = JSON.parse(stdout);
+  check("(h) the REAL spawned target of an ENTITLED mount (own passEnv:['NO_PROXY']) receives NO_PROXY", echoed.env.NO_PROXY === NO_PROXY_VALUE);
+}
+{
+  // Reuses (d)'s plainRow (no passEnv, kind:"bundled" — not a fixed-entitled kind) to prove the SAME
+  // NO_PROXY value does NOT reach an unentitled mount's real spawned process.
+  const mcpServers = buildMcpServers({
+    sessionId: "s-no-proxy-unentitled", port: 4317, role: "worker",
+    capabilities: [{ slug: "plain-thing" }], capabilityCatalog: [{
+      ...plainRow,
+      provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [ECHO_ENV_FIXTURE] }),
+    }],
+  });
+  const resolved = mcpServers["plain-thing"];
+  const unwrapped = unwrapLauncherMount(resolved);
+  check("(h) an UNentitled fixture's --allow list does NOT carry NO_PROXY (no passEnv, not a fixed-entitled kind)", !unwrapped?.allowKeys.includes("NO_PROXY"));
+
+  const { stdout } = await execFileAsync(resolved.command, resolved.args, {
+    env: {
+      PATH: process.env.PATH ?? process.env.Path ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "",
+      TEMP: process.env.TEMP ?? process.env.TMP ?? os.tmpdir(), HOME: process.env.HOME ?? "", USERPROFILE: process.env.USERPROFILE ?? "",
+      NO_PROXY: NO_PROXY_VALUE,
+    },
+  });
+  const echoed = JSON.parse(stdout);
+  check("(h) the REAL spawned target of an UNENTITLED mount does NOT receive NO_PROXY (moved out of BASE_ALLOWLIST)", !("NO_PROXY" in echoed.env));
+}
+
+// ===================== (i) card c6da31e9 review fix: auto-pairing — a row naming a credentialed proxy var =====
+// in its OWN passEnv must also receive NO_PROXY/no_proxy, even though it never named either itself. Before
+// this fix, passEnv:["HTTPS_PROXY"] (the exact shape 188d6a8c's own record tells owners to use, and (e)
+// above already exercises) got the proxy WITHOUT NO_PROXY — losing the loopback/intranet exclusions
+// withLoopbackNoProxy folds into the base env, so those requests would now go through the proxy. A row
+// naming NO proxy key (passEnv:[]) must still get no NO_PROXY — (d) above already proves that polarity.
+const autoPairRow = {
+  id: "cap-autopair-proxy", slug: "autopair-proxy-fixture", name: "Auto-Pair Proxy Fixture", description: "",
+  transport: "stdio", kind: "bundled",
+  provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [ECHO_ENV_FIXTURE] }),
+  toolAllowlistJson: "[]", wantsScratchDir: false, requiresConnection: false, secretEnvVar: null,
+  passEnv: ["HTTPS_PROXY"], createdAt: new Date().toISOString(),
+};
+const AUTO_PAIR_NO_PROXY_VALUE = "127.0.0.1,localhost,10.0.0.0/8";
+{
+  const mcpServers = buildMcpServers({
+    sessionId: "s-autopair-proxy", port: 4317, role: "worker",
+    capabilities: [{ slug: "autopair-proxy-fixture" }], capabilityCatalog: [autoPairRow],
+  });
+  const resolved = mcpServers["autopair-proxy-fixture"];
+  const unwrapped = unwrapLauncherMount(resolved);
+  check("(i) a row naming only passEnv:['HTTPS_PROXY'] has NO_PROXY auto-paired into its --allow list", unwrapped?.allowKeys.includes("NO_PROXY"));
+  check("(i) a row naming only passEnv:['HTTPS_PROXY'] has no_proxy auto-paired into its --allow list too", unwrapped?.allowKeys.includes("no_proxy"));
+
+  const { stdout } = await execFileAsync(resolved.command, resolved.args, {
+    env: {
+      PATH: process.env.PATH ?? process.env.Path ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "",
+      TEMP: process.env.TEMP ?? process.env.TMP ?? os.tmpdir(), HOME: process.env.HOME ?? "", USERPROFILE: process.env.USERPROFILE ?? "",
+      HTTPS_PROXY: "http://corpuser:corppass@proxy.corp.example:8080",
+      NO_PROXY: AUTO_PAIR_NO_PROXY_VALUE,
+    },
+  });
+  const echoed = JSON.parse(stdout);
+  check("(i) the real spawned target of the auto-paired mount receives NO_PROXY even though its own passEnv never named it",
+    echoed.env.NO_PROXY === AUTO_PAIR_NO_PROXY_VALUE);
+}
+{
+  // (d)'s plainRow already proves passEnv:[] gets no NO_PROXY in the --allow list; re-prove the REAL-spawn
+  // polarity too, same shape as the rest of this file's real-spawn pairs.
+  const mcpServers = buildMcpServers({
+    sessionId: "s-autopair-noproxy-row", port: 4317, role: "worker",
+    capabilities: [{ slug: "plain-thing" }], capabilityCatalog: [{
+      ...plainRow,
+      provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [ECHO_ENV_FIXTURE] }),
+    }],
+  });
+  const resolved = mcpServers["plain-thing"];
+  const unwrapped = unwrapLauncherMount(resolved);
+  check("(i) a row naming no proxy key (passEnv:[]) still has no NO_PROXY auto-paired in", !unwrapped?.allowKeys.includes("NO_PROXY"));
+
+  const { stdout } = await execFileAsync(resolved.command, resolved.args, {
+    env: {
+      PATH: process.env.PATH ?? process.env.Path ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "",
+      TEMP: process.env.TEMP ?? process.env.TMP ?? os.tmpdir(), HOME: process.env.HOME ?? "", USERPROFILE: process.env.USERPROFILE ?? "",
+      NO_PROXY: AUTO_PAIR_NO_PROXY_VALUE,
+    },
+  });
+  const echoed = JSON.parse(stdout);
+  check("(i) the real spawned target of a passEnv:[] row does NOT receive NO_PROXY", !("NO_PROXY" in echoed.env));
+}
+
 cleanupPathSync(tmpHome);
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — proxy env-key entitlement (cards 188d6a8c, d2fece1f): markitdown and the seeded github-binary capability get PROXY_ENV_KEYS (a fixed addition / kind-keyed respectively); a same-slug impostor row, an ordinary owner-added row with no passEnv, a browserTesting:true Playwright mount, and the npm-pinned image-gen mount all get neither; and a REAL child_process spawn proves an owner's own passEnv:['HTTPS_PROXY'] still forwards the raw credentialed value end to end — claude-free, network-free."
+  ? "\n✅ ALL PASS — proxy env-key entitlement (cards 188d6a8c, d2fece1f, c6da31e9, c6da31e9-review): markitdown and the seeded github-binary capability get PROXY_ENV_KEYS (a fixed addition / kind-keyed respectively, now including NO_PROXY/no_proxy); a same-slug impostor row, an ordinary owner-added row with no passEnv, a browserTesting:true Playwright mount, and the npm-pinned image-gen mount all get neither; REAL child_process spawns prove both an owner's own passEnv:['HTTPS_PROXY'] and passEnv:['NO_PROXY'] forward the raw value end to end while an unentitled mount receives neither; and a row naming ONLY a credentialed proxy var in its own passEnv now has NO_PROXY/no_proxy auto-paired in, proven both in the --allow list and via a real spawn — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

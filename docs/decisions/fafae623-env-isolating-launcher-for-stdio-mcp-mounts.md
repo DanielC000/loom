@@ -191,10 +191,9 @@ card's own `worker_report blocked` on 2026-11-03) rather than assumed:
   already has the exact mechanism it needs (`passEnv`).
 
 **Decision: scope, never strip.** `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`all_proxy` (every case) were
-removed from `BASE_ALLOWLIST` entirely (`NO_PROXY`/`no_proxy` stay — they carry no credential). They are
-forwarded, RAW (credentials included — stripping would break the one real, corporate-proxy use case this
-exists to serve), only to Loom's own entitled, seeded, network-reaching mounts via the ONE named constant
-`PROXY_ENV_KEYS` (`pty/host.ts`):
+removed from `BASE_ALLOWLIST` entirely. They are forwarded, RAW (credentials included — stripping would
+break the one real, corporate-proxy use case this exists to serve), only to Loom's own entitled, seeded,
+network-reaching mounts via the ONE named constant `PROXY_ENV_KEYS` (`pty/host.ts`):
 
 - **markitdown**: a fixed addition to its `--allow` list (hardcoded, since it's not a catalog row and has
   no `passEnv` field to opt into) — `passEnvByMountKey["markitdown"] = PROXY_ENV_KEYS`.
@@ -207,10 +206,30 @@ exists to serve), only to Loom's own entitled, seeded, network-reaching mounts v
 - **Every other owner-added catalog capability**: proxy keys ONLY via its own existing human-only
   `passEnv` — no code change; the mechanism already existed.
 
+**Correction (card `c6da31e9`): `NO_PROXY`/`no_proxy` do NOT stay in `BASE_ALLOWLIST` either**, reversing
+this record's original framing above ("they carry no credential" was true but incomplete — credential-
+shaped was never the only criterion). `NO_PROXY` can list internal hostnames (topology — a form of
+reconnaissance value, not a credential) and does nothing on its own without a forwarded proxy var
+alongside it, so leaving it unconditional gave every stdio mount a value with no legitimate standalone use
+and a disclosure cost. It joined `PROXY_ENV_KEYS` instead: markitdown and the seeded github-binary
+capability (the two fixed, kind/mount-keyed entitlements above) now also receive `NO_PROXY`/`no_proxy`
+alongside the credentialed proxy keys; every other mount gets it only via its own `passEnv`, same as the
+proxy keys. `test/env-isolated-launch.mjs`'s own (b2)/(c3) sections and `test/proxy-env-isolation.mjs`'s
+(h) section prove both polarities via real spawn.
+
 This is a user-visible behavior change: an owner-added capability that relied on the OLD unconditional
 forwarding now needs `passEnv` set explicitly. No schemeless/malformed-proxy-value parser was added —
 without stripping, there is nothing to parse; an entitled mount's raw value passes through exactly as it
 did before this card, just scoped to who receives it.
+
+**Correction (card `c6da31e9` review, auto-pairing):** a catalog row whose own `passEnv` names a
+credentialed proxy var (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`all_proxy`, any case — the documented shape,
+e.g. `passEnv:["HTTPS_PROXY"]`) but not `NO_PROXY`/`no_proxy` would otherwise get the proxy WITHOUT
+`NO_PROXY` — losing the loopback/intranet exclusions `withLoopbackNoProxy` folds into the base env, so
+requests that used to bypass the corporate proxy would now go through it. `withAutoPairedNoProxy`
+(`pty/host.ts`) closes this: naming any credentialed proxy key in `passEnv` also adds `NO_PROXY`/`no_proxy`
+to that row's `--allow` list. A row naming no proxy key still gets no `NO_PROXY` — the rule above still
+holds for that case.
 
 **Disclosed, unmeasured residual (card `d2fece1f`):** Chromium, launched by Playwright's own MCP server
 on headless Linux, may fall back to reading the standard `HTTP_PROXY`/`HTTPS_PROXY` env vars itself
@@ -249,7 +268,8 @@ fixed proxy-entitled mount (markitdown, github-binary) picks it up either.
 - Do not widen `BASE_ALLOWLIST` (`assets/env-isolated-launch.mjs`) to cover a secret-shaped name
   (`LOOM_MCP_TOKEN`, `CLAUDE_CODE_*`, any credential, a proxy var that may carry `user:pass@host:port`
   userinfo — `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, any case — or a registry URL that may carry the same
-  userinfo shape, `npm_config_registry`) — a server-specific secret belongs in that one mount's own
+  userinfo shape, `npm_config_registry`) OR a topology-shaped name with no legitimate standalone use
+  (`NO_PROXY`/`no_proxy`, card `c6da31e9`) — a server-specific secret belongs in that one mount's own
   `--allow` list, computed from its OWN declared `env` keys plus `PROXY_ENV_KEYS` for an entitled proxy
   mount, or a catalog row's own `passEnv` for registry (no fixed/kind-keyed registry entitlement exists),
   never the shared base every mount receives unconditionally.
@@ -305,3 +325,7 @@ fixed proxy-entitled mount (markitdown, github-binary) picks it up either.
   for the path-B case in THIS card — it is a disclosed residual for a future card. If you do pick that
   future card up, measure first (force-kill only the launcher's own pid, confirm whether the real child
   survives) rather than assuming a fix is or isn't required.
+- Do not forward a proxy var (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`all_proxy`, from `PROXY_ENV_KEYS` or a
+  catalog row's own `passEnv`) to a mount without also forwarding `NO_PROXY`/`no_proxy` alongside it —
+  `withAutoPairedNoProxy` (`pty/host.ts`) is the one place that pairing happens; do not bypass it by adding
+  a proxy key to `passEnvByMountKey` directly.

@@ -2176,12 +2176,37 @@ export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | 
  * from `env-isolated-launch.mjs`'s unconditional `BASE_ALLOWLIST` (every mount used to get these; most
  * don't need them). Forwarded, RAW, only to the entitled mounts `buildMcpServers` names below (markitdown,
  * the seeded github-binary capability) via the SAME `--allow` mechanism `passEnv` already uses.
+ * Card c6da31e9: NO_PROXY/no_proxy joined this set (moved out of BASE_ALLOWLIST too) — it carries no
+ * credential itself, but it can list internal hostnames (topology) and does nothing without a forwarded
+ * proxy var alongside it, so an unentitled mount's `${VAR}`-expanding server has no legitimate use for it
+ * and no business receiving it alone.
  * Case-insensitive match downstream (`buildIsolatedEnv`), so listing both cases here isn't required, but
- * ALL_PROXY/all_proxy keeps symmetry with how BASE_ALLOWLIST used to list it.
+ * ALL_PROXY/all_proxy (and now NO_PROXY/no_proxy) keeps symmetry with how BASE_ALLOWLIST used to list them.
  * @decision fafae623 — never add these back to BASE_ALLOWLIST, and never key a mount's proxy entitlement
  * on a `slug`/`name` match — both are owner-collidable once a seeded row is deleted.
  */
-export const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"];
+export const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"];
+
+/**
+ * The credential-bearing members of PROXY_ENV_KEYS (a proxy URL may embed `user:pass@host:port`
+ * userinfo) — NO_PROXY/no_proxy are deliberately excluded, since they're the thing being auto-paired IN,
+ * not a trigger for it.
+ */
+const CREDENTIALED_PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"];
+
+/**
+ * Card c6da31e9 review fix: a catalog row whose OWN `passEnv` names a credentialed proxy var (the
+ * documented shape, e.g. `passEnv:["HTTPS_PROXY"]`) must also receive NO_PROXY/no_proxy — otherwise it
+ * gets the proxy without the loopback/intranet exclusions `withLoopbackNoProxy` folds into the base env,
+ * and traffic that used to bypass the corporate proxy now goes through it. A row naming no proxy key is
+ * unaffected (still gets no NO_PROXY, per c6da31e9's own rule). Case-insensitive, since `ENV_KEY_NAME_RE`
+ * accepts either case.
+ */
+function withAutoPairedNoProxy(keys: string[]): string[] {
+  const lower = new Set(keys.map((k) => k.toLowerCase()));
+  const namesCredentialedProxyVar = CREDENTIALED_PROXY_ENV_KEYS.some((k) => lower.has(k.toLowerCase()));
+  return namesCredentialedProxyVar ? [...keys, "NO_PROXY", "no_proxy"] : keys;
+}
 
 /**
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
@@ -2435,10 +2460,10 @@ export function buildMcpServers(o: {
       // checksum-verified binary (or the human-only `LOOM_GITHUB_MCP_BIN` override), never a different
       // executable, regardless of how that row's kind was set.
       // Every other catalog capability gets proxy keys ONLY via its own passEnv, unchanged.
-      passEnvByMountKey[def.slug] = [
+      passEnvByMountKey[def.slug] = withAutoPairedNoProxy([
         ...(def.passEnv ?? []),
         ...(def.kind === "github-binary" ? PROXY_ENV_KEYS : []),
-      ];
+      ]);
     } else {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);

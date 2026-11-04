@@ -6,8 +6,8 @@
 // read from THIS process's own inherited env; key NAMES only ever ride argv, VALUES are never logged.
 //
 // @decision fafae623 — never widen BASE_ALLOWLIST to cover a secret-shaped name (LOOM_MCP_TOKEN,
-// CLAUDE_CODE_*, a credential, or a proxy/registry var that may carry `user:pass@host` userinfo —
-// HTTP_PROXY/HTTPS_PROXY/ALL_PROXY card 188d6a8c, npm_config_registry card 3faaab0d) — entitle per-mount instead.
+// CLAUDE_CODE_*, a credential, or a proxy/registry/topology var — HTTP_PROXY/HTTPS_PROXY/ALL_PROXY card
+// 188d6a8c, NO_PROXY/no_proxy card c6da31e9, npm_config_registry card 3faaab0d) — entitle per-mount instead.
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -17,7 +17,6 @@ export const BASE_ALLOWLIST = [
   "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC",
   "APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME",
   "TEMP", "TMP",
-  "NO_PROXY",
   "NODE_EXTRA_CA_CERTS",
   "npm_config_cache",
   "PYTHONIOENCODING", "PYTHONUTF8",

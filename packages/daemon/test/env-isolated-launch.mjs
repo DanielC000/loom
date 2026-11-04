@@ -81,36 +81,47 @@ check("(b) an EMPTY --allow list still keeps the base allowlist", builtNoAllow.P
 check("(b) an EMPTY --allow list drops MY_SECRET too (it was only reachable via --allow)", !("MY_SECRET" in builtNoAllow));
 
 // case-insensitive base-allowlist matching (Windows env names vary in case).
-const builtMixedCase = buildIsolatedEnv({ Path: "/usr/bin", "No_Proxy": "127.0.0.1" }, []);
+const builtMixedCase = buildIsolatedEnv({ Path: "/usr/bin", "Temp": "C:\\Windows\\Temp", "No_Proxy": "127.0.0.1" }, []);
 check("(b) base allowlist matches case-insensitively (Path survives even though BASE_ALLOWLIST says 'PATH')",
   builtMixedCase.Path === "/usr/bin");
-check("(b) NO_PROXY-family matches case-insensitively too ('No_Proxy' survives)", builtMixedCase.No_Proxy === "127.0.0.1");
+check("(b) another base-allowlist key matches case-insensitively too ('Temp' survives, BASE_ALLOWLIST says 'TEMP')",
+  builtMixedCase.Temp === "C:\\Windows\\Temp");
+check("(b2) card c6da31e9: NO_PROXY-family is NO LONGER base-allowlist-covered — 'No_Proxy' with no --allow entry is ABSENT",
+  !("No_Proxy" in builtMixedCase));
 check("(b) BASE_ALLOWLIST is non-empty and includes PATH/TEMP/NODE_EXTRA_CA_CERTS", BASE_ALLOWLIST.includes("PATH") && BASE_ALLOWLIST.includes("TEMP") && BASE_ALLOWLIST.includes("NODE_EXTRA_CA_CERTS"));
 check("(b) --allow key matching is also case-insensitive against the inherited env",
   buildIsolatedEnv({ my_secret: "v" }, ["MY_SECRET"]).my_secret === "v");
 
-// ===================== (b2) card 188d6a8c: HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are NOT in BASE_ALLOWLIST =====
-// (they may carry embedded `user:pass@host:port` credentials) — only a mount that names them via --allow
-// (pty/host.ts's PROXY_ENV_KEYS, added for markitdown/the seeded github-binary capability) receives one.
-// NO_PROXY stays in the base — it carries no credential.
+// ===================== (b2) card 188d6a8c/c6da31e9: proxy + NO_PROXY/no_proxy are NOT in BASE_ALLOWLIST =====
+// HTTP_PROXY/HTTPS_PROXY/ALL_PROXY may carry embedded `user:pass@host:port` credentials. NO_PROXY/no_proxy
+// carry no credential, but they name internal hostnames (topology) and do nothing on their own without a
+// forwarded proxy var — card c6da31e9 moved them out of the unconditional base too, so a mount with no
+// proxy entitlement at all never receives NO_PROXY/no_proxy either. All six keys reach a mount ONLY via
+// --allow (pty/host.ts's PROXY_ENV_KEYS, added for markitdown/the seeded github-binary capability).
 check("(b2) BASE_ALLOWLIST no longer carries HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/all_proxy (card 188d6a8c)",
   !BASE_ALLOWLIST.includes("HTTP_PROXY") && !BASE_ALLOWLIST.includes("HTTPS_PROXY")
   && !BASE_ALLOWLIST.includes("ALL_PROXY") && !BASE_ALLOWLIST.includes("all_proxy"));
-check("(b2) BASE_ALLOWLIST still carries NO_PROXY (no credential, unconditional forwarding is harmless)", BASE_ALLOWLIST.includes("NO_PROXY"));
+check("(b2) BASE_ALLOWLIST no longer carries NO_PROXY/no_proxy either (card c6da31e9 — entitlement-only now)",
+  !BASE_ALLOWLIST.includes("NO_PROXY") && !BASE_ALLOWLIST.includes("no_proxy"));
 const credentialedProxyEnv = {
   PATH: "/usr/bin", HTTP_PROXY: "http://corpuser:corppass@proxy.corp.example:8080",
   https_proxy: "http://corpuser:corppass@proxy.corp.example:8080", ALL_PROXY: "http://corpuser:corppass@proxy.corp.example:1080",
+  NO_PROXY: "10.0.0.0/8,internal.corp.example",
 };
 const builtUnentitled = buildIsolatedEnv(credentialedProxyEnv, []);
 check("(b2) with NO --allow entry naming it, a credentialed HTTP_PROXY is ABSENT from an unentitled mount's env",
   !("HTTP_PROXY" in builtUnentitled));
 check("(b2) same for the lowercase https_proxy variant", !("https_proxy" in builtUnentitled));
 check("(b2) same for ALL_PROXY", !("ALL_PROXY" in builtUnentitled));
-const builtEntitled = buildIsolatedEnv(credentialedProxyEnv, ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"]);
+check("(b2) an UNentitled mount's env also lacks NO_PROXY (card c6da31e9 — no longer unconditional)",
+  !("NO_PROXY" in builtUnentitled));
+const builtEntitled = buildIsolatedEnv(credentialedProxyEnv, ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]);
 check("(b2) naming HTTP_PROXY via --allow forwards the RAW credentialed value (scoping, never stripping)",
   builtEntitled.HTTP_PROXY === "http://corpuser:corppass@proxy.corp.example:8080");
 check("(b2) naming it case-insensitively still matches the lowercase https_proxy key present in the inherited env",
   builtEntitled.https_proxy === "http://corpuser:corppass@proxy.corp.example:8080");
+check("(b2) an ENTITLED mount's env carries NO_PROXY when named via --allow (card c6da31e9)",
+  builtEntitled.NO_PROXY === "10.0.0.0/8,internal.corp.example");
 
 // ===================== (b3) card 3faaab0d: npm_config_registry is NOT in BASE_ALLOWLIST =====
 // (a registry URL may carry the same `user:pass@host` userinfo a proxy URL can) — only a mount that
@@ -157,6 +168,23 @@ const ECHO_ENV_FIXTURE = path.join(__dirname, "fixtures", "echo-env.mjs");
   const { stdout: stdoutEntitled } = await execFileAsync(process.execPath, [LAUNCHER, "--allow", "HTTP_PROXY", "--", process.execPath, ECHO_ENV_FIXTURE], { env: credEnv });
   const echoedEntitled = JSON.parse(stdoutEntitled);
   check("(c2) an ENTITLED real target (--allow HTTP_PROXY) receives the RAW credentialed value", echoedEntitled.env.HTTP_PROXY === "http://corpuser:corppass@proxy.corp.example:8080");
+}
+{
+  // (c3) card c6da31e9, REAL spawn: NO_PROXY reaches the real target ONLY when named via --allow —
+  // mirrors (c2) for the topology-shaped (not credential-shaped) key that moved out of BASE_ALLOWLIST
+  // alongside the proxy vars.
+  const noProxyEnv = {
+    PATH: process.env.PATH ?? process.env.Path ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "",
+    TEMP: process.env.TEMP ?? process.env.TMP ?? os.tmpdir(), HOME: process.env.HOME ?? "", USERPROFILE: process.env.USERPROFILE ?? "",
+    NO_PROXY: "10.0.0.0/8,internal.corp.example",
+  };
+  const { stdout: stdoutNoProxyUnentitled } = await execFileAsync(process.execPath, [LAUNCHER, "--allow", "", "--", process.execPath, ECHO_ENV_FIXTURE], { env: noProxyEnv });
+  const echoedNoProxyUnentitled = JSON.parse(stdoutNoProxyUnentitled);
+  check("(c3) an UNENTITLED real target (empty --allow) never receives NO_PROXY", !("NO_PROXY" in echoedNoProxyUnentitled.env));
+
+  const { stdout: stdoutNoProxyEntitled } = await execFileAsync(process.execPath, [LAUNCHER, "--allow", "NO_PROXY", "--", process.execPath, ECHO_ENV_FIXTURE], { env: noProxyEnv });
+  const echoedNoProxyEntitled = JSON.parse(stdoutNoProxyEntitled);
+  check("(c3) an ENTITLED real target (--allow NO_PROXY) receives the real value", echoedNoProxyEntitled.env.NO_PROXY === "10.0.0.0/8,internal.corp.example");
 }
 {
   // exit-code propagation: the fixture's own process.exit(1) must surface through the launcher.
