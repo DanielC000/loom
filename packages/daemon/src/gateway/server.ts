@@ -85,6 +85,7 @@ import { listProjectLinks, createProjectLink, deleteProjectLink } from "../proje
 import { isActiveDocumentContentType, listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
+import { releasedSkillsAt, releasedSkillDiffSummary, releasedSkillDiffFile, reAdoptReleasedSkill } from "../skills/inject.js";
 import { permissionWideningField } from "../skills/permissionWidening.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
@@ -4538,6 +4539,57 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // from an earlier failed clear elsewhere) can never make a later boot mistake this now-published,
     // human-reviewed content for an unresolved agent-written collision. See decision record 35099271.
     if (!stampSkillProvenanceHuman(name)) return reply.code(500).send({ error: "published to the bundled asset, but failed to record its provenance as human-reviewed — retry to re-stamp it" });
+    return { ok: true };
+  });
+
+  // --- Released (Loom-stopped-managing) skill copies at a PROJECT's shared doctrine dir (card 8b38b920) ---
+  // Human-only REST, same trust posture as every other skills-write route above — NO MCP tool exposes
+  // this. `targetDir`/the sidecar these three routes read/write is EXACTLY the one `injectSkills` itself
+  // reads/writes for that project's shared cwd (manager/platform/setup/auditor sessions all share
+  // `project.repoPath`) — there is no separate store for this data. See docs/decisions/8b38b920-*.md.
+  app.get("/api/projects/:id/skills/released", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!p.repoPath) return { released: [] }; // a vault-only project has no shared doctrine dir to have released anything from
+    return { released: await releasedSkillsAt(p.repoPath) };
+  });
+  app.get("/api/projects/:id/skills/:name/released-diff", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!p.repoPath) return reply.code(404).send({ error: "this project has no shared doctrine dir" });
+    const { path: relPath } = (req.query ?? {}) as { path?: string };
+    if (typeof relPath === "string" && relPath) {
+      const f = releasedSkillDiffFile(p.repoPath, name, relPath);
+      if (!f) return reply.code(404).send({ error: "not a tracked file of this released skill" });
+      return f;
+    }
+    const d = await releasedSkillDiffSummary(p.repoPath, name);
+    if (!d) return reply.code(404).send({ error: "this skill is not currently released at this project" });
+    return d;
+  });
+  // Never auto-overwrite: `fingerprint` is REQUIRED and must still match the on-disk copy right now — a
+  // concurrent hand edit made between a `released-diff` read and this click is refused, never discarded
+  // unseen. Mirrors the global store's `file-resolve` route's own `shippedHash` TOCTOU guard.
+  app.post("/api/projects/:id/skills/:name/readopt", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const { name } = req.params as { name: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (!p.repoPath) return reply.code(404).send({ error: "this project has no shared doctrine dir" });
+    const b = (req.body ?? {}) as { fingerprint?: string };
+    if (typeof b.fingerprint !== "string" || !b.fingerprint) return reply.code(400).send({ error: "fingerprint required (re-open the diff to get one)" });
+    // Same source a live session's own spawn reads (sessionEnv.LOOM_OBSIDIAN_AUTOSTART) — never diverge,
+    // or this would silently decide the fragment-append question differently than a real session would.
+    const obsidianEnabled = resolveConfig(p.config).obsidian.autoStart;
+    const r = await reAdoptReleasedSkill(p.repoPath, name, b.fingerprint, obsidianEnabled);
+    if (!r.ok) {
+      // card 8b38b920 CR fix round 2 (MINOR, tri-state): "track-unknown" (the check couldn't be verified
+      // either way) is refused the same as a confirmed "tracked" — same 409 bucket, distinct message.
+      const code = r.code === "not-released" ? 404 : r.code === "fingerprint-mismatch" || r.code === "tracked" || r.code === "track-unknown" ? 409 : 500;
+      return reply.code(code).send({ error: r.message });
+    }
     return { ok: true };
   });
 

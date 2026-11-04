@@ -242,6 +242,107 @@ export async function __awaitPendingSkillTrackChecks(): Promise<void> {
   await Promise.all([...inFlightTrackChecks.values()]);
 }
 
+// card 8b38b920: a THIRD reserved top-level key in FINGERPRINTS_FILE, same posture as PENDING_RECLAIM_KEY/
+// LAST_PLACED_KEY (never a real session id). Durably records that Loom has stopped managing a (cwd, name)
+// copy — the gap the card closes: every release site below used to ONLY console.log at the moment it
+// happened, with nothing a human could read later.
+const RELEASED_KEY = "__released";
+const RELEASED_MAX_PER_CWD = 200; // same defensive-cap posture as PENDING_RECLAIM_MAX_PER_CWD
+
+/** Why a (cwd, name) copy is no longer managed:
+ *  - "modified" — Loom recorded a fingerprint for a real past placement, but the on-disk content no
+ *    longer matches it (a hand edit, a force-add, a tracked same-named replacement).
+ *  - "unverifiable-legacy" — a dead claimant's manifest entry named it, but no fingerprint was ever
+ *    recorded for it at all (a pre-f4272888 legacy claim) — Loom genuinely cannot tell modified from
+ *    untouched here, so it never even attempts the content comparison (see `matchesRecordedFingerprint`'s
+ *    own doc on the two existing dead-claim call sites never passing a `storeFallback`).
+ *  - "abandoned" — a shared-cwd dead-claim orphan that Loom gave up verifying as safe to reclaim (the
+ *    30-day age bound, or the per-cwd pending-reclaim cap) — content may be byte-identical to Loom's own
+ *    placement; this is NOT a claim that a human edited it, just that Loom stopped trying. */
+export type ReleaseReason = "modified" | "unverifiable-legacy" | "abandoned";
+/** `firstSeenAt` is set once, on first release, and never refreshed by a later call that merely re-
+ *  confirms the same release — same discipline as {@link PendingReclaimRecord.firstSeenAt}. */
+interface ReleasedRecord { readonly reason: ReleaseReason; readonly firstSeenAt: number; }
+type ReleasedMap = Map<string, ReleasedRecord>;
+
+/** Record (or re-affirm, without disturbing `firstSeenAt`) that `name` at `cwd` is no longer managed.
+ *  Bounded the same way `pendingWorking` is bounded in `injectSkills`'s shared-cwd block (oldest
+ *  `firstSeenAt` evicted first) — see the eviction call at the end of `injectSkills`. */
+function recordReleased(released: ReleasedMap, name: string, reason: ReleaseReason): void {
+  if (released.has(name)) return; // keep the original firstSeenAt + reason; a repeat sighting is not a new event
+  released.set(name, { reason, firstSeenAt: Date.now() });
+}
+
+/** Clear a stale `__released` record the moment `name` is legitimately (re)placed or pruned — e.g. a
+ *  hand-reverted copy whose content now matches Loom's own placement again, or a human's explicit
+ *  re-adopt. Logged, never silent: a copy resuming Loom management (or finally being pruned) after being
+ *  released is exactly the kind of state change this whole card exists to make visible. No-op if nothing
+ *  was recorded. */
+function clearReleased(released: ReleasedMap, name: string, cwd: string, how: string): void {
+  if (!released.delete(name)) return;
+  console.log(`[skills] '${name}' at ${cwd} is Loom-managed again (${how}) — cleared its released record`);
+}
+
+/** Drop the oldest-by-`firstSeenAt` entries beyond {@link RELEASED_MAX_PER_CWD} — defensive, practically
+ *  never hit in a real project (mirrors the pending-reclaim cap eviction in `injectSkills`). */
+function boundReleased(released: ReleasedMap): void {
+  if (released.size <= RELEASED_MAX_PER_CWD) return;
+  const overflow = [...released.keys()]
+    .sort((a, b) => (released.get(a)!.firstSeenAt - released.get(b)!.firstSeenAt) || a.localeCompare(b))
+    .slice(0, released.size - RELEASED_MAX_PER_CWD);
+  for (const name of overflow) released.delete(name);
+}
+
+function sanitizeReleasedRecord(raw: unknown): ReleasedRecord | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as { reason?: unknown; firstSeenAt?: unknown };
+  if (r.reason !== "modified" && r.reason !== "unverifiable-legacy" && r.reason !== "abandoned") return null;
+  if (typeof r.firstSeenAt !== "number" || !Number.isFinite(r.firstSeenAt) || r.firstSeenAt < 0) return null;
+  return { reason: r.reason, firstSeenAt: r.firstSeenAt };
+}
+
+function sanitizeReleasedMap(raw: unknown): ReleasedMap {
+  const out: ReleasedMap = new Map();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [name, rec] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isSafeManifestEntry(name)) continue;
+    const sanitized = sanitizeReleasedRecord(rec);
+    if (sanitized) out.set(name, sanitized);
+  }
+  return out;
+}
+
+// A FOURTH reserved top-level key: names a skill a human has explicitly re-adopted (the REST path below)
+// but that no LIVE session's manifest claims yet — bridging `injectSkills`'s own "unclaimed dir = the
+// repo's own, never touch it" default (see the `want`-loop's early skip) until the next live session at
+// this cwd actually claims it. Resolves (clears) the moment that happens — see the `want` loop's success
+// branch. Same bounded-cap posture as the other reserved keys.
+const READOPTED_KEY = "__readopted";
+const READOPTED_MAX_PER_CWD = 200;
+interface ReadoptedRecord { readonly firstSeenAt: number; }
+type ReadoptedMap = Map<string, ReadoptedRecord>;
+
+function sanitizeReadoptedMap(raw: unknown): ReadoptedMap {
+  const out: ReadoptedMap = new Map();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [name, rec] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isSafeManifestEntry(name)) continue;
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+    const firstSeenAt = (rec as { firstSeenAt?: unknown }).firstSeenAt;
+    if (typeof firstSeenAt !== "number" || !Number.isFinite(firstSeenAt) || firstSeenAt < 0) continue;
+    out.set(name, { firstSeenAt });
+  }
+  return out;
+}
+
+function boundReadopted(readopted: ReadoptedMap): void {
+  if (readopted.size <= READOPTED_MAX_PER_CWD) return;
+  const overflow = [...readopted.keys()]
+    .sort((a, b) => (readopted.get(a)!.firstSeenAt - readopted.get(b)!.firstSeenAt) || a.localeCompare(b))
+    .slice(0, readopted.size - READOPTED_MAX_PER_CWD);
+  for (const name of overflow) readopted.delete(name);
+}
+
 /** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
  *  these — when the session's project has `obsidian.autoStart` on. Every other skill is untouched. */
 const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "loom-session-end"]);
@@ -356,6 +457,51 @@ function escapedAncestor(cwd: string, candidates: string[]): { path: string; rea
   return null;
 }
 
+/** Shared chokepoint (card 8b38b920 CR fix round, item 2): resolve `cwd`'s `.claude/skills` dir, refusing
+ *  BEFORE any read/write if `.claude` or `.claude/skills` escapes `cwd` via a symlink/junction (the same
+ *  {@link escapedAncestor} check `injectSkills` has always run). Before this, the released/readopt
+ *  functions below each computed `claudeSkillsDir(cwd)` directly, with NO escape check at all — through a
+ *  `.claude`/`.claude/skills` junction, an agent could steer a human's released-diff read or readopt click
+ *  into reading or writing outside the repo entirely. Every caller that touches this dir — a live
+ *  `injectSkills` placement, or any of `releasedSkillsAt`/`releasedSkillDiffSummary`/`releasedSkillDiffFile`/
+ *  `reAdoptReleasedSkill` (which run off a human's REST click, with no live session of their own) — now goes
+ *  through this ONE function, so the check can never again drift between callers. Returns null (logging the
+ *  refusal) when escaped; every caller then degrades the same way `injectSkills` always has for this case —
+ *  never touching the escaped target, never throwing. Refuses BEFORE any write, never after (the original
+ *  escape-check discipline from card 5c3d0518).
+ *
+ *  `action` is a short caller-supplied label folded into the refusal's own log line (e.g. "injection",
+ *  "readopt") purely so the daemon log reads sensibly per caller — `injectSkills`'s own regression test
+ *  (`skills-inject-symlink-escape.mjs`) asserts on its literal text, so it keeps passing "injection" here
+ *  unchanged; it carries no other meaning and never affects the check itself.
+ *
+ *  @decision 8b38b920 — the ONE resolver every reader/writer of this dir must share; do not re-derive the
+ *  escape check per caller again. */
+function resolveSkillsTargetDir(cwd: string, action: string): { targetDir: string; claudeDir: string } | null {
+  const targetDir = claudeSkillsDir(cwd);
+  const claudeDir = path.dirname(targetDir);
+  const escaped = escapedAncestor(cwd, [claudeDir, targetDir]);
+  if (escaped) {
+    console.log(`[skills] refusing ${action}: ${escaped.path} resolves to ${escaped.real}, outside this working directory (${cwd}) — ${action} skipped`);
+    return null;
+  }
+  return { targetDir, claudeDir };
+}
+
+/** card 8b38b920 CR fix round 2, item 5 (INVESTIGATE+FIX): {@link resolveSkillsTargetDir} only guards the
+ *  `.claude`/`.claude/skills` ANCESTORS — it never checks the PER-SKILL dir itself. A
+ *  `.claude/skills/<released-name>` that is ITSELF a symlink/junction escaping `cwd` would otherwise let
+ *  `releasedSkillDiffSummary`/`releasedSkillDiffFile` list/serve files from its far end into a human's
+ *  diff view, and let `reAdoptReleasedSkill` copy the store's content INTO it. Checked here, as a second,
+ *  separate call at each of those three call sites — NOT folded into `resolveSkillsTargetDir` itself,
+ *  because `injectSkills`'s own per-name placement logic is explicitly OUT of scope for this fix (see the
+ *  decision record's residual note; it keeps its existing behavior unchanged). Deliberately checks only
+ *  the one candidate (the per-name dir) — the ancestors above it are already covered by the caller's own
+ *  `resolveSkillsTargetDir` call. */
+function perSkillDirEscapes(cwd: string, dest: string): boolean {
+  return escapedAncestor(cwd, [dest]) !== null;
+}
+
 /** Filter a raw manifest entry list (one session's record) down to safe names. A non-array value (e.g. a
  *  dict `{"x":5}` where an array was expected) is COERCED to `[]` rather than thrown on — readManifest's
  *  caller must never have injection disabled for the whole session just because one record is malformed.
@@ -420,7 +566,7 @@ function readManifest(manifestPath: string, sessionId: string): Manifest {
  *  actually recorded placing there`, now the SOLE source the overwrite/delete gate reads (card f4272888 —
  *  see the decision record for the full redesign). Every OTHER top-level key is a pre-f4272888 per-session
  *  fingerprint record; see `readFingerprintsFile`'s own doc for the one-shot migration fold. */
-interface FingerprintsFileData { pending: PendingReclaimMap; lastPlaced: LastPlacedMap; }
+interface FingerprintsFileData { pending: PendingReclaimMap; lastPlaced: LastPlacedMap; released: ReleasedMap; readopted: ReadoptedMap; }
 /** `name -> every fingerprint recorded as Loom's own for it`. A `Map`, not `Record<string,string[]>`
  *  (card f4272888) — the same "__proto__"/untrusted-key reasoning as {@link Manifest}. A normal write
  *  (a real placement, any session) REPLACES the whole entry with a single-element array; more than one
@@ -431,7 +577,7 @@ type LastPlacedMap = Map<string, string[]>;
  *  happens to be missing/corrupt (a real regression this fixed — card f4e93dbf round 2, caught by
  *  `skills-capability-bound.mjs` case 17 only after several EARLIER worktree cases had already written
  *  through the same stale reference). */
-function emptyFingerprintsFile(): FingerprintsFileData { return { pending: new Map(), lastPlaced: new Map() }; }
+function emptyFingerprintsFile(): FingerprintsFileData { return { pending: new Map(), lastPlaced: new Map(), released: new Map(), readopted: new Map() }; }
 
 /** Validate+bound one untrusted {@link LAST_PLACED_KEY} entry: a non-empty array of valid fingerprints
  *  (same `sanitizeFingerprint` bound as everywhere else in this file), capped at
@@ -500,9 +646,13 @@ function readFingerprintsFile(fingerprintsPath: string): FingerprintsFileData {
   catch (e) { console.log(`[skills] ignoring corrupt fingerprints file at ${fingerprintsPath}: ${(e as Error).message}`); return emptyFingerprintsFile(); }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return emptyFingerprintsFile();
   let pending: PendingReclaimMap = new Map();
+  let released: ReleasedMap = new Map();
+  let readopted: ReadoptedMap = new Map();
   const lastPlaced: LastPlacedMap = new Map();
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (key === PENDING_RECLAIM_KEY) { pending = sanitizePendingReclaimMap(value); continue; }
+    if (key === RELEASED_KEY) { released = sanitizeReleasedMap(value); continue; }
+    if (key === READOPTED_KEY) { readopted = sanitizeReadoptedMap(value); continue; }
     // @decision 31f997e7 — UNION with any legacy fold already set for this name here; a bare REPLACE
     // discards it whenever this key is reached AFTER a legacy section for the same name in one read.
     if (key === LAST_PLACED_KEY) {
@@ -523,20 +673,22 @@ function readFingerprintsFile(fingerprintsPath: string): FingerprintsFileData {
       if (!existing.includes(sanitized)) lastPlaced.set(name, [...existing, sanitized].slice(0, LAST_PLACED_MAX_FPS_PER_NAME));
     }
   }
-  return { pending, lastPlaced };
+  return { pending, lastPlaced, released, readopted };
 }
 
-/** Serialize `pending` + `lastPlaced` back to the {@link FINGERPRINTS_FILE} on-disk shape — the exact
- *  inverse of `readFingerprintsFile`'s parse, MINUS any legacy per-session section (card f4272888: never
- *  written back — see that function's own "ONE-SHOT MIGRATION FOLD" doc). Each reserved key is omitted
- *  entirely when its map is empty, so an ordinary cwd with nothing ever orphaned/placed never carries
- *  either key at all. `Object.fromEntries` on a `Map`, never a bracket-assignment loop — spec'd to use
- *  `CreateDataProperty` (the same safe operation `JSON.parse` itself uses), so a `"__proto__"`-keyed entry
- *  becomes a genuine own property instead of reassigning `out`'s prototype. */
-function serializeFingerprintsFile(lastPlaced: LastPlacedMap, pending: PendingReclaimMap): Record<string, unknown> {
+/** Serialize `pending`/`lastPlaced`/`released`/`readopted` back to the {@link FINGERPRINTS_FILE} on-disk
+ *  shape — the exact inverse of `readFingerprintsFile`'s parse, MINUS any legacy per-session section (card
+ *  f4272888: never written back — see that function's own "ONE-SHOT MIGRATION FOLD" doc). Each reserved
+ *  key is omitted entirely when its map is empty, so an ordinary cwd with nothing ever orphaned/placed/
+ *  released never carries any of them at all. `Object.fromEntries` on a `Map`, never a bracket-assignment
+ *  loop — spec'd to use `CreateDataProperty` (the same safe operation `JSON.parse` itself uses), so a
+ *  `"__proto__"`-keyed entry becomes a genuine own property instead of reassigning `out`'s prototype. */
+function serializeFingerprintsFile(lastPlaced: LastPlacedMap, pending: PendingReclaimMap, released: ReleasedMap = new Map(), readopted: ReadoptedMap = new Map()): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (pending.size > 0) out[PENDING_RECLAIM_KEY] = Object.fromEntries(pending);
   if (lastPlaced.size > 0) out[LAST_PLACED_KEY] = Object.fromEntries(lastPlaced);
+  if (released.size > 0) out[RELEASED_KEY] = Object.fromEntries(released);
+  if (readopted.size > 0) out[READOPTED_KEY] = Object.fromEntries(readopted);
   return out;
 }
 
@@ -995,19 +1147,16 @@ export function injectSkills(
     // never pruned, and logged as invalid on every subsequent spawn.
     storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).filter(isValidSkillName);
   } catch { return { claimedNames: [], claimedFingerprints: EMPTY_FINGERPRINTS }; } // no store yet
-  const targetDir = claudeSkillsDir(cwd);
-  const claudeDir = path.dirname(targetDir);
   // Refuse BEFORE any write if `.claude` or `.claude/skills` is a symlink/junction redirecting outside
-  // this session's own cwd (card 5c3d0518, from the review of 97e6a1c6) — otherwise every injection write
-  // below (mkdir, the skill copies, the manifest) lands on whatever that link points at instead of this
-  // repo. Logged loudly and skipped for this session, never thrown into the spawn: the session still
-  // boots, just without its injected skills, exactly like the existing "no store yet" early-return above
-  // and the non-fatal catch around this call at its one call site (pty/host.ts).
-  const escaped = escapedAncestor(cwd, [claudeDir, targetDir]);
-  if (escaped) {
-    console.log(`[skills] refusing injection: ${escaped.path} resolves to ${escaped.real}, outside this session's working directory (${cwd}) — skill injection skipped for this session`);
-    return { claimedNames: [], claimedFingerprints: EMPTY_FINGERPRINTS };
-  }
+  // this session's own cwd (card 5c3d0518, from the review of 97e6a1c6; now the SHARED `resolveSkillsTargetDir`
+  // chokepoint — card 8b38b920 CR fix round, item 2) — otherwise every injection write below (mkdir, the
+  // skill copies, the manifest) lands on whatever that link points at instead of this repo. Logged loudly
+  // and skipped for this session, never thrown into the spawn: the session still boots, just without its
+  // injected skills, exactly like the existing "no store yet" early-return above and the non-fatal catch
+  // around this call at its one call site (pty/host.ts).
+  const resolvedTarget = resolveSkillsTargetDir(cwd, "injection");
+  if (!resolvedTarget) return { claimedNames: [], claimedFingerprints: EMPTY_FINGERPRINTS };
+  const { targetDir, claudeDir } = resolvedTarget;
   fs.mkdirSync(targetDir, { recursive: true });
 
   // What THIS session should have present: a non-empty subset ∩ the store, else ALL store skills — EXCEPT
@@ -1060,6 +1209,10 @@ export function injectSkills(
   // reclaim away never touches it; a dead session dying never deletes anything from it, since it was
   // never session-scoped to begin with. See the decision record for the full redesign.
   const lastPlaced = fingerprintsFile.lastPlaced;
+  // card 8b38b920: the durable "Loom stopped managing this (cwd,name)" record + its re-adopt bridge — see
+  // RELEASED_KEY/READOPTED_KEY's own docs above.
+  const released = fingerprintsFile.released;
+  const readopted = fingerprintsFile.readopted;
   // Prune a manifest key for any OTHER session the caller-injected predicate says is not CURRENTLY
   // live/starting (card 9d73e537; see this function's own doc comment for why "live", not "resumable").
   // Never asked about our own key — this call IS that session, live, right now. A throw for one id is
@@ -1138,6 +1291,10 @@ export function injectSkills(
       const recordedFps = lastPlaced.get(stale);
       if (!recordedFps || recordedFps.length === 0) {
         if (!pendingWorking.has(stale)) console.log(`[skills] keeping dead-session claim '${stale}' (shared cwd): no recorded content fingerprint (a legacy claim) — cannot verify it's still Loom's own, so not reclaiming`);
+        // card 8b38b920: a legacy claim with no recorded fingerprint is genuinely unverifiable (never a
+        // storeFallback check on this path — see matchesRecordedFingerprint's own doc) — durably recorded
+        // so a human can discover it, rather than only ever a console.log at the moment it happens.
+        recordReleased(released, stale, "unverifiable-legacy");
         continue; // never trusted, with or without a pending record — same posture as before round 2
       }
       const existing = pendingWorking.get(stale);
@@ -1158,11 +1315,16 @@ export function injectSkills(
       if (!currentFp || !matchesRecordedFingerprint(currentFp, rec.deadFingerprints)) {
         console.log(`[skills] keeping dead-session claim '${name}' (shared cwd): on-disk content doesn't match any recorded Loom placement (edited, or files added) — not reclaiming`);
         pendingWorking.delete(name); // resolved: edited — drop the record and never touch it again
+        recordReleased(released, name, "modified"); // card 8b38b920
         continue;
       }
       if (nowMs - rec.firstSeenAt > PENDING_RECLAIM_MAX_AGE_MS) {
         console.log(`[skills] giving up on dead-session claim '${name}' (shared cwd): still unresolved after the ${PENDING_RECLAIM_MAX_AGE_MS}ms age bound — dropping the pending-reclaim record, never acting on it again`);
         pendingWorking.delete(name);
+        // card 8b38b920: content may be byte-identical to Loom's own placement — this is Loom giving up
+        // verifying it's SAFE to reclaim (persistently tracked, or a repeatedly-failing check), never a
+        // claim that a human edited it. Keep it a distinct reason from "modified".
+        recordReleased(released, name, "abandoned");
         continue;
       }
 
@@ -1210,6 +1372,7 @@ export function injectSkills(
       for (const name of overflow) {
         console.log(`[skills] dropping pending-reclaim record for '${name}' (shared cwd): over the per-cwd cap of ${PENDING_RECLAIM_MAX_PER_CWD} — never acting on it`);
         pendingWorking.delete(name);
+        recordReleased(released, name, "abandoned"); // card 8b38b920 — same reason as the age give-up above: capped out, not necessarily edited
       }
     }
   }
@@ -1238,7 +1401,11 @@ export function injectSkills(
     // touching the old one, but it is NOT a single atomic replace with no delete step — it rm's `dest`
     // then renames, with a real (if brief) window where `dest` is simply missing (card d467d56d; see
     // that function's own doc).
-    if (exists && !myPrev.includes(name) && !otherClaimed.has(name) && !reclaimableNow.has(name)) continue;
+    // card 8b38b920: `readopted.has(name)` — a human explicitly re-adopted this name via the REST path but
+    // no live session has claimed it yet — is treated as already-claimed too, same posture as
+    // `reclaimableNow`, so the very next live session whose `want` includes it becomes its new manifest
+    // owner instead of this check silently treating the freshly-readopted copy as "the repo's own."
+    if (exists && !myPrev.includes(name) && !otherClaimed.has(name) && !reclaimableNow.has(name) && !readopted.has(name)) continue;
     // card f4272888: a name that already exists at `dest` — whether I placed it before, or ANOTHER live
     // session did (the `otherClaimed` case, a fresh first-time claim in a shared cwd) — is re-copied only
     // if current disk still matches `lastPlaced.get(name)` (the single persisted fact: the content SOME
@@ -1249,10 +1416,27 @@ export function injectSkills(
     //
     // @decision 31f997e7 — a shared cwd's content reflects whatever ANY live co-claimant last placed; this
     // is why the gate is keyed on the single global `lastPlaced` fact, never a single claimant's own value.
-    if (exists && (myPrev.includes(name) || otherClaimed.has(name))) {
+    //
+    // card 8b38b920 CR fix round, item 1 (CRITICAL): `readopted.has(name)` MUST also run through this same
+    // gate. `reAdoptReleasedSkill` sets a fresh `lastPlaced` entry for `name` the moment it writes (see its
+    // own doc) — so a re-adopted name is NOT "nothing recorded yet to match against"; it has exactly as
+    // real a `lastPlaced` fact as a `myPrev`/`otherClaimed` name does. Without this, the early "repo's own"
+    // skip above already treats a readopted name as claimed (so the `continue` there is never taken), and
+    // this `if` used to fall through FALSE for it (readopted alone, with no live claimant) — reaching the
+    // unconditional `copySkillAtomic` below with no check at all. That silently overwrote ANY hand edit made
+    // AFTER the re-adopt, the instant the next live session's `want` included the name: readopt(correct fp)
+    // -> edit again -> injectSkills(fresh session) lost the second edit with no trace, in an unbounded
+    // window. See the decision record's now-corrected "Do not" bullet.
+    if (exists && (myPrev.includes(name) || otherClaimed.has(name) || readopted.has(name))) {
       const recorded = lastPlaced.get(name);
       if (!matchesRecordedFingerprint(fingerprintSkillDir(dest), recorded, () => wouldPlaceFingerprint(name, obsidianEnabled))) {
         console.log(`[skills] keeping hand-modified copy of '${name}' at ${dest}: on-disk content doesn't match any current claimant's last placement (edited, or files added) — not overwriting`);
+        recordReleased(released, name, "modified"); // card 8b38b920 — durable; this is the actual "frozen doctrine" bug
+        // card 8b38b920 CR fix round, item 1: a re-adopted name that's since been hand-edited again is now
+        // genuinely "repo's own, nobody's" again (no live claimant) — drop the stale readopted bridge so the
+        // early "repo's own" skip above treats it that way on every later call too, instead of looping back
+        // through this same mismatch branch forever.
+        if (readopted.delete(name)) console.log(`[skills] '${name}' at ${cwd} was re-adopted but has since been hand-edited again — dropping its stale re-adopted marker`);
         continue;
       }
     }
@@ -1282,6 +1466,15 @@ export function injectSkills(
         lastPlaced.set(name, [fp]);
         recordLoomPlacedFingerprint(cwd, name, fp); // unchanged — the SEPARATE in-process trust-boundary registry (015fdb23), never read by the gate above
       }
+      // card 8b38b920: a successful placement here means `name` is Loom-managed again — whether that's an
+      // ordinary first-time claim (nothing to clear), a hand-reverted copy whose content matches again
+      // (the residual named in this card's own investigation — reworded per the CR fix round's nit 5: this
+      // only resumes management while a live claimant — myPrev/otherClaimed/readopted — still exists for
+      // `name`; once nothing claims it, the early "repo's own" skip above catches it first and this branch
+      // never fires), or a human re-adopt now picked up by a live session. Clear + log both reserved-key
+      // records unconditionally; each is a no-op if absent.
+      clearReleased(released, name, cwd, "re-placed by a live session");
+      if (readopted.delete(name)) console.log(`[skills] '${name}' at ${cwd} was claimed by a live session — its re-adopted marker is no longer needed`);
     } else failed.push(name);
   }
 
@@ -1306,9 +1499,14 @@ export function injectSkills(
     const recorded = lastPlaced.get(stale);
     if (!matchesRecordedFingerprint(fingerprintSkillDir(target), recorded, () => wouldPlaceFingerprint(stale, obsidianEnabled))) {
       console.log(`[skills] keeping hand-modified copy of '${stale}' at ${target}: on-disk content doesn't match any current claimant's last placement (edited, or files added) — not pruning`);
+      recordReleased(released, stale, "modified"); // card 8b38b920 — durable; this is the actual "frozen doctrine" bug's prune-sibling trigger
       continue;
     }
     try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* ignore */ }
+    // card 8b38b920: the dir is now gone, so any stale released record for it is resolved too — a name
+    // that was released while still wanted, then later dropped from `want` and found to match again, is
+    // pruned here rather than re-placed; either way, the release no longer applies.
+    clearReleased(released, stale, cwd, "pruned after its content matched Loom's last placement again");
   }
 
   manifest.set(sessionId, placed); // record ONLY what I actually injected (never the repo's own / collisions)
@@ -1337,7 +1535,11 @@ export function injectSkills(
   // serializes to nothing and the reserved key is omitted entirely, same as before this card.
   const pendingOut: PendingReclaimMap = new Map();
   for (const [name, rec] of pendingWorking) pendingOut.set(name, { deadFingerprints: [...rec.deadFingerprints], firstSeenAt: rec.firstSeenAt });
-  const fingerprintsOut = serializeFingerprintsFile(lastPlaced, pendingOut);
+  // card 8b38b920: bound both reserved keys the same defensive way pendingWorking is bounded above —
+  // practically never hit in a real project.
+  boundReleased(released);
+  boundReadopted(readopted);
+  const fingerprintsOut = serializeFingerprintsFile(lastPlaced, pendingOut, released, readopted);
   try { writeJsonAtomic(fingerprintsPath, fingerprintsOut); }
   catch (e) { console.log(`[skills] failed to write fingerprints file ${fingerprintsPath}: ${(e as Error).message}`); }
   hideFromGit(cwd, [...placed, MANIFEST, FINGERPRINTS_FILE, MANIFEST_TMP_GLOB, FINGERPRINTS_TMP_GLOB]);
@@ -1387,4 +1589,321 @@ function hideFromGit(cwd: string, entries: string[]): void {
   if (missing.length === 0) return;
   const prefix = cur === "" || cur.endsWith("\n") ? "" : "\n";
   try { fs.appendFileSync(excludePath, `${prefix}# loom-managed exclusions (injected per session; do not commit)\n${missing.join("\n")}\n`); } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// card 8b38b920 — human-only REST surface (never an MCP tool): list a project's released (Loom-stopped-
+// managing) skill copies, diff one against the current store, and re-adopt it after review. All three
+// read/write the SAME `targetDir`/`FINGERPRINTS_FILE` sidecar `injectSkills` itself reads/writes — there is
+// no separate store for this data.
+// ---------------------------------------------------------------------------------------------------------
+
+/** Best-effort read of one file's text content; `null` on any error (missing, unreadable, …) — mirrors
+ *  `store.ts`'s own `readFileOrNull`, kept as a tiny local copy rather than widening that file's export
+ *  surface for a single cross-module caller. */
+function readTextOrNull(p: string): string | null {
+  try { return fs.readFileSync(p, "utf8"); } catch { return null; }
+}
+
+/** Every relative file path under `dir`, recursively — `null`/missing reads as "no files" (never throws). */
+function safeListFilesRecursiveSorted(dir: string): string[] {
+  try { return listFilesRecursiveSorted(dir); } catch { return []; }
+}
+
+/** card 8b38b920 CR fix round, item 4 (LEAD DECISION); TRI-STATED in fix round 2 (MINOR) — a FAILED check
+ *  (timeout, `canonicalGit`'s own fail-closed refusal, an unreadable `.git`) used to report `tracked:true`,
+ *  which is simply FALSE: the REST 409 said "has at least one git-tracked file" when the truth is "could
+ *  not be verified either way." `"unknown"` names that case honestly instead of folding it into either
+ *  real answer. */
+export type GitTrackedState = "tracked" | "untracked" | "unknown";
+
+/** Whether ANY file currently on disk under `target` (a released skill's dir) is git-tracked, in whichever
+ *  repo actually contains it (`innermostGitRepoRoot` above — never assumed to be `cwd`, same idiom the
+ *  dead-claim reclaim check uses). No repo anywhere up-tree ⇒ `"untracked"` (nothing to be tracked by).
+ *  Unlike `kickUntrackedCheck` above, this runs off a human's REST click, never the spawn hot path — so
+ *  it's fine to await it directly instead of firing-and-forgetting it. Fails toward `"unknown"` on any
+ *  error (an unreachable repo, a timeout, `canonicalGit`'s own fail-closed refusal) — NEVER toward
+ *  `"untracked"` (that would silently clear the way for an overwrite of real, repo-owned content) and
+ *  never toward a bare `"tracked"` either (that would misreport a merely-unverifiable state as a confirmed
+ *  one). Every caller must keep REFUSING a write on `"unknown"`, exactly as it already does on `"tracked"`
+ *  — see {@link reAdoptReleasedSkill}. */
+async function gitTrackedState(target: string): Promise<GitTrackedState> {
+  const repoRoot = innermostGitRepoRoot(target);
+  if (!repoRoot) return "untracked";
+  // `target` itself can BE `repoRoot` (a released dir that is itself a nested repo's root, e.g. a
+  // vendored/submodule-like skill) — `path.relative` then yields `""`, and git rejects an empty pathspec
+  // outright ("empty string is not a valid pathspec"). `"."` means the same thing git DOES accept: every
+  // tracked file at/under `repoRoot`, which here is exactly `target`.
+  const relPath = path.relative(repoRoot, target).split(path.sep).join("/");
+  const pathspec = relPath === "" ? "." : relPath;
+  try {
+    const git = canonicalGit(repoRoot, UNTRACKED_CHECK_TIMEOUT_MS);
+    const out = await withTimeout(git.raw(["ls-files", "--", pathspec]), UNTRACKED_CHECK_TIMEOUT_MS, "git ls-files (released-skill tracked check)");
+    return out.trim() !== "" ? "tracked" : "untracked";
+  } catch (e) {
+    console.log(`[skills] tracked-check failed for ${target} (treating as unknown, refusing a readopt until it can be verified): ${(e as Error)?.message ?? e}`);
+    return "unknown";
+  }
+}
+
+export interface ReleasedSkillSummary {
+  readonly name: string;
+  readonly reason: ReleaseReason;
+  readonly firstSeenAt: number;
+  /** card 8b38b920 CR fix round, item 4, TRI-STATED in fix round 2 — see {@link GitTrackedState}'s own
+   *  doc. Surfaced so a human sees WHY a readopt of this name will be refused, before they try it. */
+  readonly tracked: GitTrackedState;
+}
+
+/** card 8b38b920 CR fix round 2 (NIT): batched sibling of {@link gitTrackedState} for {@link
+ *  releasedSkillsAt}'s list — ONE `git ls-files -- .claude/skills` per repo root instead of up to
+ *  `RELEASED_MAX_PER_CWD` (200) concurrent per-name git subprocesses on a single GET. Every name sharing
+ *  `targetDir`'s OWN innermost repo root is resolved from that one batched read; a name whose own
+ *  innermost repo root diverges from it (its skill dir is itself a nested repo — rare) still gets its own
+ *  individual {@link gitTrackedState} call, so the rare case is never silently mis-answered just to avoid
+ *  a second git call. A failed batched read reports `"unknown"` for every name it would have covered —
+ *  same fail-closed posture as `gitTrackedState`'s own catch branch, never silently downgraded to
+ *  `"untracked"` just because it's the batched path. */
+async function batchGitTrackedStates(targetDir: string, names: readonly string[]): Promise<Map<string, GitTrackedState>> {
+  const out = new Map<string, GitTrackedState>();
+  const sharedRepoRoot = innermostGitRepoRoot(targetDir);
+  if (!sharedRepoRoot) {
+    for (const name of names) out.set(name, "untracked");
+    return out;
+  }
+  const pathspec = path.relative(sharedRepoRoot, targetDir).split(path.sep).join("/");
+  // `targetDir` itself can BE `sharedRepoRoot` (`.claude/skills` is itself a nested repo's root) — same
+  // empty-pathspec hazard `gitTrackedState` guards against; "." is what git accepts for "everything here".
+  // The BARE `pathspec` (possibly "") is still what the `rel` matching below uses — that ternary already
+  // handles "" correctly (`rel = name`), so only the git ARGUMENT needs the substitution.
+  const gitPathspec = pathspec === "" ? "." : pathspec;
+  let tracked: Set<string> | null = null;
+  try {
+    const git = canonicalGit(sharedRepoRoot, UNTRACKED_CHECK_TIMEOUT_MS);
+    // card 8b38b920 fix round 3 (minor, quotePath): `-z` makes git emit NUL-separated, NEVER C-quoted
+    // paths — without it, git's default `core.quotePath=true` C-quotes a non-ASCII filename (e.g. a
+    // literal `é` becomes `"\303\251.md"`), which then never matches the plain `rel` string built below,
+    // so a released skill whose only tracked file has a non-ASCII name silently reported "untracked".
+    const raw = await withTimeout(git.raw(["ls-files", "-z", "--", gitPathspec]), UNTRACKED_CHECK_TIMEOUT_MS, "git ls-files (released-skill batch tracked check)");
+    tracked = new Set(raw.split("\u0000").map((l) => l.trim()).filter(Boolean));
+  } catch (e) {
+    console.log(`[skills] batched tracked-check failed for ${targetDir} (treating every name it would have covered as unknown): ${(e as Error)?.message ?? e}`);
+  }
+  const individual: string[] = [];
+  for (const name of names) {
+    if (innermostGitRepoRoot(path.join(targetDir, name)) !== sharedRepoRoot) { individual.push(name); continue; }
+    if (tracked === null) { out.set(name, "unknown"); continue; }
+    const rel = pathspec ? `${pathspec}/${name}` : name;
+    out.set(name, [...tracked].some((f) => f === rel || f.startsWith(`${rel}/`)) ? "tracked" : "untracked");
+  }
+  for (const name of individual) out.set(name, await gitTrackedState(path.join(targetDir, name)));
+  return out;
+}
+
+/** Fresh, uncached read of every currently-released skill at `cwd`'s shared doctrine dir — see
+ *  `ReleaseReason`'s own doc for what each reason means. Never throws; a missing/corrupt sidecar, or an
+ *  escaped `.claude`/`.claude/skills` ancestor ({@link resolveSkillsTargetDir}), both read as "nothing
+ *  released," same fail-safe posture as every other reader of this file. */
+export async function releasedSkillsAt(cwd: string): Promise<ReleasedSkillSummary[]> {
+  const resolved = resolveSkillsTargetDir(cwd, "released-skill list");
+  if (!resolved) return [];
+  const fingerprintsPath = path.join(resolved.targetDir, FINGERPRINTS_FILE);
+  const { released } = readFingerprintsFile(fingerprintsPath);
+  const entries = [...released].sort((a, b) => a[0].localeCompare(b[0]));
+  const trackedByName = await batchGitTrackedStates(resolved.targetDir, entries.map(([name]) => name));
+  return entries.map(([name, rec]) => ({
+    name, reason: rec.reason, firstSeenAt: rec.firstSeenAt,
+    tracked: trackedByName.get(name) ?? "unknown",
+  }));
+}
+
+export interface ReleasedSkillDiffFile { readonly path: string; readonly differs: boolean; }
+export interface ReleasedSkillDiffSummary {
+  readonly name: string;
+  readonly reason: ReleaseReason;
+  readonly firstSeenAt: number;
+  /** The on-disk content fingerprint RIGHT NOW — pass this back to {@link reAdoptReleasedSkill} (via the
+   *  REST layer) so a concurrent hand edit made after this diff was fetched is refused, never silently
+   *  discarded. `null` means "cannot verify" (the dir is unreadable) — never readoptable while that holds. */
+  readonly currentFingerprint: string | null;
+  /** card 8b38b920 CR fix round, item 4, TRI-STATED in fix round 2 — see {@link ReleasedSkillSummary.tracked}'s own doc. */
+  readonly tracked: GitTrackedState;
+  /** Every tracked relative path under either the on-disk copy or the current store copy, content-free —
+   *  the summary tier of the same two-tier (summary + per-file content-on-demand) shape `store.ts`'s own
+   *  `skillUpdateDiff`/`skillFileDiff` already use for the global store's base/mine/shipped diff. */
+  readonly files: readonly ReleasedSkillDiffFile[];
+}
+
+/** `null` iff `name` isn't currently released at `cwd` (including an escaped `.claude`/`.claude/skills`
+ *  ancestor, {@link resolveSkillsTargetDir}, OR the per-name dir itself escaping, {@link
+ *  perSkillDirEscapes}) — the REST layer 404s on that, never on "no diff to show" (a released name always
+ *  has SOMETHING to show, even if every file happens to be identical). */
+export async function releasedSkillDiffSummary(cwd: string, name: string): Promise<ReleasedSkillDiffSummary | null> {
+  if (!isValidSkillName(name)) return null;
+  const resolved = resolveSkillsTargetDir(cwd, "released-skill diff");
+  if (!resolved) return null;
+  const { targetDir } = resolved;
+  const fingerprintsPath = path.join(targetDir, FINGERPRINTS_FILE);
+  const { released } = readFingerprintsFile(fingerprintsPath);
+  const rec = released.get(name);
+  if (!rec) return null;
+  const dest = path.join(targetDir, name);
+  if (perSkillDirEscapes(cwd, dest)) {
+    console.log(`[skills] refusing released-skill diff: '${name}' at ${cwd} is itself a symlink/junction escaping this working directory — skipped`);
+    return null;
+  }
+  const currentFingerprint = fingerprintSkillDir(dest);
+  const tracked = await gitTrackedState(dest);
+  const relPaths = new Set([...safeListFilesRecursiveSorted(path.join(SKILLS_DIR, name)), ...safeListFilesRecursiveSorted(dest)]);
+  const files = [...relPaths].sort().map((relPath) => {
+    const onDisk = readTextOrNull(path.join(dest, ...relPath.split("/")));
+    const store = readTextOrNull(path.join(SKILLS_DIR, name, ...relPath.split("/")));
+    return { path: relPath, differs: onDisk !== store };
+  });
+  return { name, reason: rec.reason, firstSeenAt: rec.firstSeenAt, currentFingerprint, tracked, files };
+}
+
+export interface ReleasedSkillDiffFileContent { readonly path: string; readonly onDisk: string | null; readonly store: string | null; }
+
+/** The content tier of the diff above — one tracked file's two sides, fetched on demand. `relPath` is
+ *  validated by MEMBERSHIP in the live server-derived tracked-file set (mirrors `store.ts`'s own
+ *  `isTrackedSkillFile` discipline: the caller names a CHOICE from that set, never a path), so traversal
+ *  and untracked paths both 404 through the same `null` return, with no string sanitization to get subtly
+ *  wrong. `null` iff `name` isn't released, `relPath` isn't one of its tracked files, `.claude`/
+ *  `.claude/skills` escapes `cwd` ({@link resolveSkillsTargetDir}), or the per-name dir itself escapes
+ *  ({@link perSkillDirEscapes}). */
+export function releasedSkillDiffFile(cwd: string, name: string, relPath: string): ReleasedSkillDiffFileContent | null {
+  if (!isValidSkillName(name)) return null;
+  const resolved = resolveSkillsTargetDir(cwd, "released-skill diff");
+  if (!resolved) return null;
+  const { targetDir } = resolved;
+  const fingerprintsPath = path.join(targetDir, FINGERPRINTS_FILE);
+  const { released } = readFingerprintsFile(fingerprintsPath);
+  if (!released.has(name)) return null;
+  const dest = path.join(targetDir, name);
+  if (perSkillDirEscapes(cwd, dest)) {
+    console.log(`[skills] refusing released-skill diff file: '${name}' at ${cwd} is itself a symlink/junction escaping this working directory — skipped`);
+    return null;
+  }
+  const known = new Set([...safeListFilesRecursiveSorted(path.join(SKILLS_DIR, name)), ...safeListFilesRecursiveSorted(dest)]);
+  if (!known.has(relPath)) return null;
+  return {
+    path: relPath,
+    onDisk: readTextOrNull(path.join(dest, ...relPath.split("/"))),
+    store: readTextOrNull(path.join(SKILLS_DIR, name, ...relPath.split("/"))),
+  };
+}
+
+export type ReAdoptReleasedSkillResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: "not-released" | "fingerprint-mismatch" | "tracked" | "track-unknown" | "copy-failed"; readonly message: string };
+
+/**
+ * The human-only re-adopt action (card 8b38b920's own design decision, approved by the manager): overwrite
+ * a released copy with the CURRENT store copy, write the fresh fingerprint to `lastPlaced`, clear the
+ * `__released` record, and mark `name` in `__readopted` so the next live session at `cwd` claims it (see
+ * `injectSkills`'s `want`-loop skip + its success-branch clear for the other half of this bridge). NEVER
+ * auto-overwrite: the caller must supply `expectedFingerprint` — the fingerprint it showed the human in a
+ * prior {@link releasedSkillDiffSummary} read — and this REFUSES (`"fingerprint-mismatch"`) if the on-disk
+ * copy has changed since, so a concurrent hand edit made between the diff and the click is never discarded
+ * unseen. There is no session here (this runs off a human's REST click, not a live `injectSkills` call), so
+ * `obsidianEnabled` must be resolved by the caller (the REST handler) the same way a live session's own
+ * spawn resolves it — via `resolveConfig(project.config).obsidian.autoStart` — and passed in explicitly.
+ *
+ * card 8b38b920 CR fix round, item 4 (LEAD DECISION): ALSO refuses (`"tracked"`) when any file under the
+ * released dir is git-tracked — a readopt must never overwrite content git itself considers repo-owned,
+ * even if Loom's own fingerprint bookkeeping would otherwise allow it. card 8b38b920 CR fix round 2 (MINOR,
+ * tri-state): a tracked-check that could not be VERIFIED either way (`"track-unknown"`) is ALSO refused —
+ * never folded into `"tracked"`'s own message, since "has at least one git-tracked file" would be a false
+ * claim about a state that was never actually confirmed.
+ *
+ * @decision 8b38b920 — never auto-overwrite anywhere; this function is reachable ONLY from a human-only
+ * REST route, never an MCP tool, and only after the stale-fingerprint and tracked-file refusals above pass.
+ */
+export async function reAdoptReleasedSkill(cwd: string, name: string, expectedFingerprint: string, obsidianEnabled: boolean): Promise<ReAdoptReleasedSkillResult> {
+  if (!isValidSkillName(name)) return { ok: false, code: "not-released", message: "invalid skill name" };
+  const resolved = resolveSkillsTargetDir(cwd, "readopt");
+  if (!resolved) return { ok: false, code: "copy-failed", message: "this project's skills directory could not be safely resolved (a symlink/junction escapes its working directory) — refusing" };
+  const { targetDir } = resolved;
+  const dest = path.join(targetDir, name);
+  // card 8b38b920 CR fix round 2, item 5: the per-name dir itself may be a symlink/junction escaping `cwd`
+  // even though `.claude`/`.claude/skills` above didn't — checked BEFORE the await below so an escaped
+  // path never even reaches a git subprocess, let alone the copy further down.
+  if (perSkillDirEscapes(cwd, dest)) {
+    return { ok: false, code: "copy-failed", message: `'${name}' at this project is itself a symlink/junction escaping its working directory — refusing` };
+  }
+  // card 8b38b920 CR fix round 2 (MAJOR, TOCTOU): run the ONLY await — the git subprocess below, up to
+  // UNTRACKED_CHECK_TIMEOUT_MS — BEFORE touching the sidecar or the live fingerprint at all. Everything
+  // from here to the final `writeJsonAtomic` below is then one uninterrupted synchronous block: nothing
+  // else running in this process (notably a synchronous `injectSkills` call racing the same sidecar) can
+  // observe or mutate state between this function's read and its write. Checking tracked-ness BEFORE
+  // confirming `name` is even released is deliberate — it's the only way to get the await out first; the
+  // tracked result is just held in a local and consulted after the released/fingerprint checks below, so
+  // the returned error PRECEDENCE (not-released, then fingerprint-mismatch, then tracked) is unchanged.
+  const tracked = await gitTrackedState(dest);
+  // card 8b38b920 fix round 3 (minor): `resolved`/`perSkillDirEscapes` above only prove the path was safe
+  // BEFORE the await — the git subprocess can take up to UNTRACKED_CHECK_TIMEOUT_MS, long enough for
+  // something to swap `.claude`/`.claude/skills`/the per-name dir for a junction in the meantime (the
+  // `gitTrackedState` answer above is itself a pre-await fact for the same reason — see this function's
+  // own doc). Both checks are cheap and synchronous (`fs.realpathSync`), so re-running them here, before
+  // the sidecar is ever read, costs nothing and closes that window with the SAME codes/messages as the
+  // pre-await refusals.
+  if (resolveSkillsTargetDir(cwd, "readopt") === null) {
+    return { ok: false, code: "copy-failed", message: "this project's skills directory could not be safely resolved (a symlink/junction escapes its working directory) — refusing" };
+  }
+  if (perSkillDirEscapes(cwd, dest)) {
+    return { ok: false, code: "copy-failed", message: `'${name}' at this project is itself a symlink/junction escaping its working directory — refusing` };
+  }
+  const fingerprintsPath = path.join(targetDir, FINGERPRINTS_FILE);
+  const fingerprintsFile = readFingerprintsFile(fingerprintsPath);
+  if (!fingerprintsFile.released.has(name)) {
+    return { ok: false, code: "not-released", message: `'${name}' is not currently released from Loom management at this project` };
+  }
+  const currentFp = fingerprintSkillDir(dest);
+  if (currentFp !== expectedFingerprint) {
+    return { ok: false, code: "fingerprint-mismatch", message: "the on-disk copy has changed since you reviewed it — re-open the diff and try again" };
+  }
+  // card 8b38b920 CR fix round, item 4 (LEAD DECISION): never overwrite repo-owned content — a released
+  // dir with at least one git-tracked file (force-added, or a tracked same-named replacement) is refused
+  // outright, rather than silently clobbering something git itself considers committed. Fix round 2
+  // (MINOR, tri-state): an UNVERIFIABLE check is refused too, but with its own honest code/message — never
+  // reported as a confirmed "tracked" when it is really "couldn't tell."
+  if (tracked === "unknown") {
+    return { ok: false, code: "track-unknown", message: `'${name}' at this project: could not verify whether the copy is git-tracked — re-open the diff and try again once that can be checked` };
+  }
+  if (tracked === "tracked") {
+    return { ok: false, code: "tracked", message: `'${name}' at this project has at least one git-tracked file under it — refusing to overwrite repo-owned content` };
+  }
+  const src = path.join(SKILLS_DIR, name);
+  if (!fs.existsSync(src)) return { ok: false, code: "copy-failed", message: `'${name}' no longer exists in the skill store` };
+  let fragment: string | null = null;
+  if (obsidianEnabled) { try { fragment = fs.readFileSync(OBSIDIAN_PREFLIGHT_FRAGMENT, "utf8"); } catch { /* best effort, same degrade real placement gives a missing fragment */ } }
+  if (!copySkillAtomic(src, dest)) {
+    return { ok: false, code: "copy-failed", message: `failed to re-adopt '${name}' — the previous on-disk copy may be left in place` };
+  }
+  if (!applyPlacementTransforms(name, dest, fragment)) {
+    quarantineUndeliverableDest(dest, name, path.dirname(targetDir));
+    return { ok: false, code: "copy-failed", message: `'${name}' could not be safely delivered (its permission-widening content could not be stripped) and was withheld` };
+  }
+  const fp = fingerprintSkillDir(dest);
+  // card 8b38b920 CR fix round, item 5 (nit): do NOT clear `__released` unless `fp` is real — an unreadable
+  // fingerprint after a successful copy used to still delete the released record WITHOUT setting
+  // `__readopted`, leaving the name neither released (so a human loses visibility) nor readopted (so no
+  // live session's "repo's own" skip ever revisits it either) — total silence, strictly worse than before.
+  if (!fp) {
+    console.log(`[skills] '${name}' at ${cwd}: re-adopt copy succeeded but its fingerprint could not be computed afterward — keeping it released (never clearing without also setting '__readopted') so a human can still see and retry it`);
+    return { ok: false, code: "copy-failed", message: `'${name}' was copied but its content could not be verified afterward — left released so you can retry` };
+  }
+  fingerprintsFile.released.delete(name);
+  fingerprintsFile.lastPlaced.set(name, [fp]);
+  recordLoomPlacedFingerprint(cwd, name, fp); // same trust-boundary registry injectSkills itself writes on a real placement
+  fingerprintsFile.readopted.set(name, { firstSeenAt: Date.now() });
+  boundReadopted(fingerprintsFile.readopted);
+  try {
+    writeJsonAtomic(fingerprintsPath, serializeFingerprintsFile(fingerprintsFile.lastPlaced, fingerprintsFile.pending, fingerprintsFile.released, fingerprintsFile.readopted));
+  } catch (e) {
+    console.log(`[skills] failed to write fingerprints file ${fingerprintsPath} after re-adopting '${name}': ${(e as Error).message}`);
+  }
+  console.log(`[skills] '${name}' at ${cwd} was re-adopted by a human: overwritten with the current store copy, awaiting the next live session there to claim it`);
+  return { ok: true };
 }
