@@ -129,10 +129,11 @@ close it.
    pty/host.ts) before this entry ever reaches `drainPending`, so its `senderId` is `null` — and
    `drainPending`'s same-sender extension loop is gated on `senderKey !== null` (host.ts, the
    `head.giveUpGen === undefined && senderKey !== null` guard), so a null-sender agent head can never
-   extend into a coalesced run regardless of whether the reorder scan ran. It always drains ALONE as its
-   own turn, which is exactly what keeps the ordering fix sound: the interrupt lands as one isolated turn
-   at the queue front, and the manager's own (non-null-sender) direction drains right after it as its own
-   separate turn, never merged with it.
+   extend into a coalesced run regardless of whether the reorder scan ran — under the default
+   `coalesceAgentMessages:false` (finding 4 below names the legacy toggle's exception). It always drains
+   ALONE as its own turn under that default, which is exactly what keeps the ordering fix sound: the
+   interrupt lands as one isolated turn at the queue front, and the manager's own (non-null-sender)
+   direction drains right after it as its own separate turn, never merged with it.
 
 3. **Gaps in `hasLiveGateForSession`.** The original predicate only read the cap-admitted registry
    (`snapshot()`) and the mid-squash holder map (`squashOnlySnapshot()`) — missing two further live
@@ -203,10 +204,11 @@ close it.
    default); the ordering fix is sound for an entirely different reason — `coalesceSenderIdentity`
    null-maps the `"system"` sender sentinel before the entry reaches `drainPending`, and a null-sender
    agent head can never extend the same-sender coalescing run (`senderKey !== null` guard) — so it still
-   always drains alone. See the inline correction for the full explanation; `pty-head-insert.mjs` gained a
-   PRODUCTION-shape scenario (E) proving exactly this: an agent-kind, null-sender, headInsert entry ahead
-   of a queued same-manager two-message agent run drains alone, as its own isolated turn, while the
-   manager's run is left intact to coalesce on its own next turn.
+   always drains alone under the default `coalesceAgentMessages:false` (finding 4 below names the legacy
+   toggle's exception). See the inline correction for the full explanation; `pty-head-insert.mjs` gained a
+   PRODUCTION-shape scenario (E) proving exactly this under that default: an agent-kind, null-sender,
+   headInsert entry ahead of a queued same-manager two-message agent run drains alone, as its own isolated
+   turn, while the manager's run is left intact to coalesce on its own next turn.
 
 4. **A named, documented (not closed) residual: the legacy `coalesceAgentMessages:true` toggle (default
    `false`) can still mix the interrupt into the manager's run.** `drainPending`'s branch selection is

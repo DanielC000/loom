@@ -20,9 +20,13 @@ splices the new entry at `live.pending[0]`, skipping the same-sender reorder/lea
 
 This redirect's own shape — `enqueueSender:"system"` (null-mapped by `coalesceSenderIdentity`) and
 `kind` defaulting to `"agent"` — means the entry drains COMPLETELY ALONE at drain time regardless of
-where it sits: `drainPending`'s agent-coalescing extension loop is gated on `senderKey !== null`, so a
-null-sender entry can never coalesce forward into (or be coalesced into by) anything else queued, same- or
-different-sender. Moving it to the front was therefore safe to do by reusing the exact same mechanism
+where it sits, **under the default `coalesceAgentMessages:false`**: `drainPending`'s agent-coalescing
+extension loop (the same-sender branch, taken only when `!coalesceAgentMessages`) is gated on
+`senderKey !== null`, so a null-sender entry can never coalesce forward into (or be coalesced into by)
+anything else queued, same- or different-sender. Under the legacy `coalesceAgentMessages:true` toggle,
+every drain instead takes the route-keyed branch, whose own extension condition never consults `senderId`
+at all — so there, a null-sender head CAN coalesce with a following same-route, same-proactive entry,
+kind included. Moving it to the front was therefore safe to do by reusing the exact same mechanism
 `dacc6d9e` already shipped and tested (`pty-head-insert.mjs` scenario E) — no new `pty/host.ts` design was
 needed.
 
@@ -38,7 +42,10 @@ needed.
 - Do not add `supersedeQueue:true` (or flush this queue some other way) to "simplify" the ordering — this
   queue can hold other parties' inbound content; only the INSERTION POSITION changes here, never the
   flush behavior.
-- Do not assume this redirect's "drains alone" property is guaranteed by `headInsert` itself — it comes
-  from the null `senderId` (`enqueueSender:"system"`) combined with `kind:"agent"`'s sender-gated
-  coalescing extension. If this call site ever gains a real sender or an explicit non-"agent" `kind`, the
-  isolation guarantee must be re-verified, not assumed to still hold.
+- Do not assume this redirect's "drains alone" property is guaranteed by `headInsert` itself, or that it
+  holds unconditionally — it comes from the null `senderId` (`enqueueSender:"system"`) combined with
+  `kind:"agent"`'s sender-gated coalescing extension, and that extension only runs under the default
+  `coalesceAgentMessages:false`; under the legacy `coalesceAgentMessages:true` toggle the route-keyed
+  branch ignores `senderId` entirely and this isolation does not hold. If this call site ever gains a
+  real sender or an explicit non-"agent" `kind`, the isolation guarantee must be re-verified, not assumed
+  to still hold.

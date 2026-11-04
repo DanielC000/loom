@@ -12,15 +12,19 @@
 //      entry — never between two ordinary entries;
 //   D. headInsert is a one-shot per-call option — it does not retroactively reorder anything already
 //      queued, and a later PLAIN arrival still goes to the tail, behind every headInsert entry.
-//   E. card dacc6d9e round 3 — the PRODUCTION shape: an agent-kind, null-sender head-inserted interrupt
-//      (kind:"agent" — `enqueueDurableMessage`'s own `ctx.kind ?? "agent"` default; sender "system",
-//      null-mapped by `coalesceSenderIdentity` before this reaches drainPending; headInsert:true) ahead
-//      of an already-queued SAME-MANAGER two-message agent run. Proves it drains ALONE, as its own turn,
-//      never coalesced with the manager's run either backward (onto the run) or forward (the run folding
-//      into it) — and that the manager's run is left fully intact to coalesce together on its OWN next
-//      turn, exactly as docs/decisions/dacc6d9e-*.md's round-3 correction explains (drainPending's
-//      same-sender extension loop is gated on `senderKey !== null`, so a null-sender head can never
-//      extend into a run regardless of kind).
+//   E. card dacc6d9e round 3 — the PRODUCTION shape under the default `coalesceAgentMessages:false` (this
+//      host is constructed below with no override, so that is what this scenario exercises): an
+//      agent-kind, null-sender head-inserted interrupt (kind:"agent" — `enqueueDurableMessage`'s own
+//      `ctx.kind ?? "agent"` default; sender "system", null-mapped by `coalesceSenderIdentity` before
+//      this reaches drainPending; headInsert:true) ahead of an already-queued SAME-MANAGER two-message
+//      agent run. Proves it drains ALONE, as its own turn, never coalesced with the manager's run either
+//      backward (onto the run) or forward (the run folding into it) — and that the manager's run is left
+//      fully intact to coalesce together on its OWN next turn, exactly as docs/decisions/dacc6d9e-*.md's
+//      round-3 correction explains (drainPending's same-sender extension loop, taken only when
+//      `!coalesceAgentMessages`, is gated on `senderKey !== null`, so a null-sender head can never extend
+//      into a run regardless of kind). Under the legacy `coalesceAgentMessages:true` toggle this
+//      isolation does NOT hold (same record's round-3 finding 4, a named residual) — this scenario does
+//      not exercise that toggle.
 //   F. card 3dee1d51 — a give-up-held entry ALREADY sitting at the queue head (ineligible to drain —
 //      `isGiveUpHeld`) is NOT dropped, and NOT reordered relative to what's queued behind it, when a
 //      headInsert:true arrival lands: the new entry becomes the new front, the held entry and everything

@@ -2,9 +2,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // Service-level guard for SessionService.redirectManagerForEmergencyRecycle (card 3dee1d51, fixing
 // 9f279c7b's own regression). NO claude, NO live daemon. In-process Db + SessionService + a
 // contract-faithful PtyStub — BYTE-IDENTICAL to redirect-worker-context-interrupt.mjs's own (senderId-
-// aware, headInsert-aware, single-sender-run `drainNext` mirroring the REAL `drainPending` contract) —
-// never the dumb FIFO stub recycle-purges-stale-context-nudge.mjs / context-watcher-sampler-cascade.mjs
-// use, which has no senderId/headInsert handling at all and so cannot prove ordering.
+// aware, headInsert-aware, single-sender-run `drainNext`, keying only on raw `senderId` equality — no
+// kind split, no route key, no held/giveUpGen exclusion, no caps, and — unlike the real `drainPending` —
+// it would coalesce two entries that both carry a null `senderId`) — never the dumb FIFO stub
+// recycle-purges-stale-context-nudge.mjs / context-watcher-sampler-cascade.mjs use, which has no
+// senderId/headInsert handling at all and so cannot prove ordering.
 //
 // PROVES:
 //   (A) ORDER — two worker reports from two DIFFERENT workers, queued while the manager is busy, now
@@ -17,15 +19,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 //       themselves.
 //   (C) NOTHING LOST — a pre-existing head-inserted entry from a DIFFERENT mechanism is not dropped or
 //       reordered relative to what's queued behind it; the emergency text only ever changes who's first.
-//   (D) ISOLATION PROBE — the emergency text's own drains-ALONE property holds because its sender is
-//       null (enqueueSender:"system"), not because of its queue position; see MUTANT 2 below.
+//   (D) ISOLATION PROBE — in this stub the emergency text's sender is the raw string "system" (this stub
+//       has no `coalesceSenderIdentity`, so it is never null-mapped); (D) proves only that "system"
+//       differs from the probe entry's own sender (the manager's own session id), not real null-sender
+//       isolation — that is proved on the real PtyHost by pty-head-insert.mjs scenario E. See MUTANT 2
+//       below for how this probe still catches a real regression here.
 //
 // MUTANT PROOFS (run by hand against this file, documented again at the bottom, never left wired into
 // the hermetic run): (1) temporarily drop `headInsert: true` from redirectManagerForEmergencyRecycle's
 // deliverRedirect call → scenario (A)'s ORDER checks go RED (the emergency text reverts to the tail).
-// (2) temporarily change that call's `enqueueSender` from the literal "system" (which null-maps via
-// coalesceSenderIdentity) to `sessionId` (the manager's own id) → scenario (D)'s "drains alone" checks
-// go RED (the emergency text wrongly coalesces into the probe entry, which deliberately shares that id).
+// (2) temporarily change that call's `enqueueSender` from the literal "system" to `sessionId` (the
+// manager's own id) → scenario (D)'s "drains alone" checks go RED (in this stub "system" and `sessionId`
+// are just two different strings, never null-mapped; the mutant makes the emergency text's senderId
+// collide with the probe entry's, which deliberately shares that id, so they wrongly coalesce).
 //
 // Run: 1) build daemon, 2) node test/redirect-manager-emergency-interrupt.mjs
 import fs from "node:fs";
@@ -183,20 +189,25 @@ try {
       eq(pty.getPending(mgr), ["[loom:other-head-insert] some other front-of-queue notice", `[loom:worker-report] worker ${wkrD} — done: shipped D`]));
     check("(C) the emergency text delivered first, alone", pty.delivered.length === 1 && pty.delivered[0].text.startsWith("[loom:context-emergency:redirect]"));
 
-    pty.drainNext(mgr); // the other head-insert notice, alone (kind "warning" never coalesces with the agent-kind report behind it)
+    pty.drainNext(mgr); // the other head-insert notice, alone — in this stub it separates from the agent-kind report behind it only because they have DIFFERENT senders (the stub's drainNext has no kind split); on the real host a "warning"-kind entry additionally never coalesces with an agent-kind one, regardless of sender
     pty.drainNext(mgr); // the worker report
     check("(C) FULL SEQUENCE: emergency, then the other head-insert notice, then the worker report — nothing lost",
       eq(pty.delivered.map((d) => d.text.includes("shipped D") ? "D" : tagOf(d.text)), ["EMERGENCY", "OTHER", "D"]));
     check("(C) the manager's queue is now fully drained", pty.getPending(mgr).length === 0);
   }
 
-  // ===================== (D) ISOLATION PROBE — "drains alone" pins the NULL sender, not the queue position =====================
+  // ===================== (D) ISOLATION PROBE — "drains alone" pins the emergency text's distinct sender, not the queue position =====================
   // Card 3dee1d51's own mutant 2 (run by hand, documented at the bottom): mutate
-  // redirectManagerForEmergencyRecycle's `enqueueSender` from the literal "system" (which null-maps via
-  // coalesceSenderIdentity) to `sessionId` (the manager's OWN session id) and rerun THIS scenario alone —
-  // the adjacent entry below deliberately shares that same senderId, so under the mutant the emergency
-  // text would wrongly coalesce INTO it instead of draining alone. Under the real fix this probe entry's
-  // senderId is irrelevant to the emergency text (null never matches anything), so it stays isolated.
+  // redirectManagerForEmergencyRecycle's `enqueueSender` from the literal "system" to `sessionId` (the
+  // manager's OWN session id) and rerun THIS scenario alone — the adjacent entry below deliberately
+  // shares that same senderId, so under the mutant the emergency text would wrongly coalesce INTO it
+  // instead of draining alone. In THIS stub, "system" is never null-mapped (there is no
+  // `coalesceSenderIdentity` here) — it stays the raw string "system" throughout, so this probe proves
+  // isolation only because that string differs from the probe entry's own senderId (the manager's
+  // session id), not because either one is null. Real null-sender isolation — the property the real
+  // `redirectManagerForEmergencyRecycle` actually relies on, via the real `coalesceSenderIdentity`
+  // null-mapping "system" before `drainPending` ever sees it — is proved on the real PtyHost instead, by
+  // pty-head-insert.mjs scenario E.
   {
     const pty = new PtyStub();
     const sessions = new SessionService(db, pty, new OrchestrationControl());
