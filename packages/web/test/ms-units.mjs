@@ -15,6 +15,10 @@
 //   (4) Two source scans: every GLOBAL_FIELDS entry in Settings.tsx has a bound (a missing one renders a
 //       silently unbounded field, since MsField simply drops the hint when `bounds` is undefined), and no
 //       bare `Number(...) * UNIT_MS` conversion has crept back in anywhere under src/.
+//   (5) Card 826483a7: the four rate-limit loop-breaker fields are actually RENDERED (card dfef375f
+//       landed them REST-only), each ms one in a unit that renders its shared bound whole, and their one
+//       cross-field invariant (backoff base vs ceiling) behaves as the resolve-time CLAMP it is rather
+//       than a rejection the UI would have to invent.
 //
 // Like fleet.mjs/merge-gate.mjs, the web package has no test runner, so this is a self-contained node
 // script, auto-discovered by test/run-all.mjs (wired into @loom/web's `build`). Standalone:
@@ -23,7 +27,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { PLATFORM_MS_BOUNDS, ORCHESTRATION_TIMEOUT_MS_BOUNDS, MAX_TIMER_DELAY_MS } from "@loom/shared";
+import { PLATFORM_MS_BOUNDS, ORCHESTRATION_TIMEOUT_MS_BOUNDS, MAX_TIMER_DELAY_MS, resolveConfig } from "@loom/shared";
 import {
   UNIT_MS, msFromUnit, msInUnit, msRangeError, msRangeErrors, msRangeHint, msStr,
 } from "../src/lib/msUnits.ts";
@@ -257,14 +261,154 @@ check("every GLOBAL_FIELDS entry in Settings.tsx has a PLATFORM_MS_BOUNDS entry"
     settingsSrc.indexOf("// Loads /api/platform/config then mounts the form"),
   );
   assert.equal(block.length > 0, true, "could not locate the GLOBAL_FIELDS table");
-  const entries = [...block.matchAll(/\{\s*grp:\s*"(\w+)",\s*key:\s*"(\w+)"/g)].map((m) => [m[1], m[2]]);
+  // `sub` (card 826483a7's presentational second axis) sits BETWEEN grp and key on the entries that carry
+  // it, so it must be optional-matched here rather than ignored: a `grp,key`-only pattern silently skips
+  // every sub-carrying entry, which is the exact fail-OPEN this scan exists to prevent. The count
+  // assertion below is what makes a future regression here loud instead of invisible.
+  const entries = [...block.matchAll(/\{\s*grp:\s*"(\w+)",\s*(?:sub:\s*"\w+",\s*)?key:\s*"(\w+)"/g)].map((m) => [m[1], m[2]]);
   // Positive control on the scan itself: a broken regex returning zero rows must fail, not pass silently.
-  assert.equal(entries.length, 21, `expected 21 GLOBAL_FIELDS entries, parsed ${entries.length}`);
+  assert.equal(entries.length, 24, `expected 24 GLOBAL_FIELDS entries, parsed ${entries.length}`);
   for (const [grp, key] of entries) {
     const group = PLATFORM_MS_BOUNDS[grp];
     assert.ok(group, `GLOBAL_FIELDS group "${grp}" has no PLATFORM_MS_BOUNDS group`);
     assert.ok(group[key], `GLOBAL_FIELDS field ${grp}.${key} has no PLATFORM_MS_BOUNDS entry (it would render unbounded)`);
   }
+});
+
+// ── (5) The rate-limit loop-breaker fields are actually rendered, in units that read whole ───────────
+//
+// Card 826483a7. Card dfef375f landed four platform fields that no control rendered — REST-only, so the
+// only way to tune the loop breaker was a hand-written PATCH. These pin that they are on the page AND
+// that each ms one is displayed in the unit whose shared bound is a WHOLE number: `loopBreakerQuickGapMs`
+// has a deliberately-seconds floor (1s), and both backoff fields' floor is 60_000 — shown in hours that
+// renders "min 0.016666666666666666h", which reads as a broken hint rather than a policy minimum.
+
+/** The GLOBAL_FIELDS table as Settings.tsx literally declares it: key -> {grp, unit}. */
+function globalFieldsTable() {
+  const block = settingsSrc.slice(
+    settingsSrc.indexOf("const GLOBAL_FIELDS: GlobalFieldDesc[] = ["),
+    settingsSrc.indexOf("// Loads /api/platform/config then mounts the form"),
+  );
+  const out = new Map();
+  for (const m of block.matchAll(
+    /\{\s*grp:\s*"(\w+)",\s*(?:sub:\s*"(\w+)",\s*)?key:\s*"(\w+)",\s*label:\s*"([^"]*)",\s*unit:\s*"(\w+)"/g,
+  )) out.set(m[3], { grp: m[1], sub: m[2], label: m[4], unit: m[5] });
+  return out;
+}
+
+check("the three loop-breaker ms fields are rendered by Settings.tsx, under the loopBreaker sub-panel", () => {
+  const table = globalFieldsTable();
+  // Positive control: the same parse finds a long-standing field, so a zero/short parse cannot read as
+  // "the loop-breaker fields are missing".
+  assert.ok(table.get("defaultBackoffMs"), "the parse no longer finds a pre-existing GLOBAL_FIELDS entry");
+  assert.equal(table.get("defaultBackoffMs").sub, undefined, "a plain rateLimit field must carry no sub");
+  for (const key of ["loopBreakerQuickGapMs", "loopBreakerBackoffBaseMs", "loopBreakerBackoffCeilingMs"]) {
+    const f = table.get(key);
+    assert.ok(f, `${key} is REST-only again — no GLOBAL_FIELDS entry renders it`);
+    assert.equal(f.grp, "rateLimit", `${key} must PATCH into the rateLimit group`);
+    assert.equal(f.sub, "loopBreaker", `${key} must render in the loop-breaker panel, not the Rate Limits grid`);
+  }
+});
+
+check("each loop-breaker ms field is displayed in a unit that renders BOTH its shared bounds whole", () => {
+  const table = globalFieldsTable();
+  for (const key of ["loopBreakerQuickGapMs", "loopBreakerBackoffBaseMs", "loopBreakerBackoffCeilingMs"]) {
+    const { unit } = table.get(key);
+    const b = PLATFORM_MS_BOUNDS.rateLimit[key];
+    for (const half of ["min", "max"]) {
+      assert.equal(
+        Number.isInteger(b[half] / UNIT_MS[unit]), true,
+        `${key} shown in "${unit}" renders its ${half} as ${b[half] / UNIT_MS[unit]}${unit} — pick a unit whose bound is whole`,
+      );
+    }
+  }
+  // Discriminating control: hours is a REAL option the table could have picked for the two backoff
+  // fields, and it is exactly what this assertion rejects — so the check above is not vacuous.
+  assert.equal(Number.isInteger(PLATFORM_MS_BOUNDS.rateLimit.loopBreakerBackoffBaseMs.min / UNIT_MS.h), false);
+  // The two backoff fields share ONE unit on purpose: "base must not exceed ceiling" (the clamp below) is
+  // only readable on the page if both are entered in the same unit.
+  assert.equal(table.get("loopBreakerBackoffBaseMs").unit, table.get("loopBreakerBackoffCeilingMs").unit);
+});
+
+check("an out-of-range loop-breaker entry is rejected in the field's OWN unit, never raw ms", () => {
+  const table = globalFieldsTable();
+  for (const key of ["loopBreakerQuickGapMs", "loopBreakerBackoffBaseMs", "loopBreakerBackoffCeilingMs"]) {
+    const { unit, label } = table.get(key);
+    const b = PLATFORM_MS_BOUNDS.rateLimit[key];
+    const expected = `must be between ${msInUnit(b.min, unit)} and ${msInUnit(b.max, unit)}`;
+    const overMax = String(b.max / UNIT_MS[unit] + 1);
+    assert.equal(msRangeError(overMax, unit, b), expected, `${label} ceiling`);
+    // The raw millisecond ceiling — what the server's own 400 quotes — never reaches the user.
+    assert.equal(new RegExp(String(b.max)).test(msRangeError(overMax, unit, b)), false);
+    // In range stays silent, so the error above is not a field that simply always complains.
+    assert.equal(msRangeError(String(b.max / UNIT_MS[unit]), unit, b), null, `${label} exactly on max`);
+  }
+  // And a blocked Save names the field, using the label the page actually renders.
+  assert.deepEqual(
+    msRangeErrors([[
+      table.get("loopBreakerBackoffCeilingMs").label, "99999", table.get("loopBreakerBackoffCeilingMs").unit,
+      PLATFORM_MS_BOUNDS.rateLimit.loopBreakerBackoffCeilingMs,
+    ]]),
+    ["Backoff ceiling (m) must be between 1m and 1440m"],
+  );
+});
+
+check("the plain-count loop-breaker field has its OWN control, deliberately outside the ms grid", () => {
+  // Absent from GLOBAL_FIELDS (it has no unit to translate), but it must still be ON the page — so assert
+  // both halves: a bare "not in the grid" check passes just as happily if nothing renders it at all.
+  assert.equal(globalFieldsTable().has("loopBreakerMaxRecaps"), false);
+  assert.equal("loopBreakerMaxRecaps" in PLATFORM_MS_BOUNDS.rateLimit, false);
+  assert.ok(
+    /<NumField label="Max consecutive re-caps"/.test(settingsSrc),
+    "loopBreakerMaxRecaps has no NumField — it is REST-only again",
+  );
+  // Its value must reach the wire: the field is read inside buildGlobalOverride's rateLimit branch (the
+  // mis-bound-write-key hazard — a rendered control writing nothing looks identical to a working one).
+  assert.ok(
+    /entries\.loopBreakerMaxRecaps\s*=/.test(settingsSrc),
+    "the Max consecutive re-caps control never writes loopBreakerMaxRecaps into the PATCH body",
+  );
+});
+
+check("backoff base above its ceiling is CLAMPED at resolve time, never rejected (card dfef375f round 2 item 7)", () => {
+  // The loop breaker's one cross-field invariant. It is deliberately NOT a zod rejection: base and ceiling
+  // are independently valid, only the COMBINATION is wrong, and a human editing one field at a time must
+  // not get a 400 for a transient combination. So the UI must NOT invent a client-side rejection either —
+  // it states the clamp in the base field's note and lets the `effective:` hint show the resolved value.
+  // Second arg IS the PlatformConfigOverride (no `platform:` wrapper) — the same call Settings.tsx makes.
+  const resolved = resolveConfig(undefined, {
+    rateLimit: { loopBreakerBackoffBaseMs: 86_400_000, loopBreakerBackoffCeilingMs: 1_800_000 },
+  }).platform.rateLimit;
+  assert.equal(resolved.loopBreakerBackoffCeilingMs, 1_800_000, "the ceiling itself is honored as written");
+  assert.equal(resolved.loopBreakerBackoffBaseMs, 1_800_000, "a base above the ceiling must resolve TO the ceiling");
+  // Control: a base BELOW the ceiling is passed through untouched, so the clamp is a clamp and not a
+  // blanket overwrite of the base with the ceiling.
+  const ok = resolveConfig(undefined, {
+    rateLimit: { loopBreakerBackoffBaseMs: 600_000, loopBreakerBackoffCeilingMs: 1_800_000 },
+  }).platform.rateLimit;
+  assert.equal(ok.loopBreakerBackoffBaseMs, 600_000);
+  // Both single-field values the clamp fired on are individually IN RANGE — so the combination really is
+  // the only thing wrong, which is why no single-field bound check can catch it.
+  assert.equal(msRangeError("1440", "m", PLATFORM_MS_BOUNDS.rateLimit.loopBreakerBackoffBaseMs), null);
+  assert.equal(msRangeError("30", "m", PLATFORM_MS_BOUNDS.rateLimit.loopBreakerBackoffCeilingMs), null);
+  // And the page says so where the user is typing, naming the referenced field rather than its position
+  // (the Settings positional-hint trap: "the field above" is true at one width, if any).
+  assert.ok(
+    /Clamped to never exceed the backoff ceiling\./.test(settingsSrc),
+    "the backoff-base note no longer states the clamp against the ceiling by name",
+  );
+  // And the LIVE advisory is a status, not an error: it must never join globalRangeErrors (which gates
+  // Save), or the UI would be rejecting the very combination the daemon accepts and clamps.
+  assert.ok(/data-testid="loop-breaker-clamp-note"/.test(settingsSrc), "the live clamp advisory is gone");
+  assert.ok(/role="status"[\s\S]{0,120}loop-breaker-clamp-note/.test(settingsSrc),
+    "the clamp advisory must be role=status, not role=alert — it does not block Save");
+  const rangeErrorsCall = settingsSrc.slice(
+    settingsSrc.indexOf("const globalRangeErrors = msRangeErrors(["),
+    settingsSrc.indexOf("const group = (grp: Grp"),
+  );
+  assert.equal(rangeErrorsCall.length > 0, true, "could not locate the globalRangeErrors call");
+  assert.equal(/loopBreakerClamp/.test(rangeErrorsCall), false,
+    "the clamp advisory leaked into globalRangeErrors — that would block Save on a combination the daemon accepts");
 });
 
 check("no bare `Number(...) * UNIT_MS` conversion survives anywhere under src/", () => {

@@ -1397,7 +1397,13 @@ function ConfigEditor({ project }: { project: Project }) {
 // to a human display unit. Keys are unique ACROSS groups, so the form holds one flat string dict. Units
 // follow the epic: rate-limit backoff/deadlines/windows in h/m, buffers + cadences + timeouts in s.
 type Grp = "rateLimit" | "watchers" | "timeouts";
-interface GlobalFieldDesc { grp: Grp; key: string; label: string; unit: Unit; note?: string; }
+/** `grp` is the CONFIG group (it drives both the PATCH body and the bounds lookup, so it must stay the
+ *  real key name). `sub` is a purely PRESENTATIONAL second axis: a coherent sub-mechanism that earns its
+ *  own panel rather than swelling its group's grid, while still PATCHing into `grp`. Today's one member
+ *  is the rate-limit loop breaker (card 826483a7) — 4 controls whose escalation semantics are unrelated
+ *  to the park-math fields they would otherwise sit indistinguishably beside. */
+type GlobalFieldSub = "loopBreaker";
+interface GlobalFieldDesc { grp: Grp; sub?: GlobalFieldSub; key: string; label: string; unit: Unit; note?: string; }
 /** This field's accepted canonical-ms range, read from the SHARED table (card 0a5d61c9) — never a local
  *  literal. Every ms-keyed member of these three groups has an entry, so the lookup is always defined. */
 const globalBounds = (f: GlobalFieldDesc): MsBounds =>
@@ -1409,6 +1415,16 @@ const GLOBAL_FIELDS: GlobalFieldDesc[] = [
   { grp: "rateLimit", key: "deadlineNoResetMs", label: "Deadline, no reset (h)", unit: "h" },
   { grp: "rateLimit", key: "recencyWindowMs", label: "Recency window (h)", unit: "h" },
   { grp: "rateLimit", key: "resetBufferMs", label: "Reset buffer (s)", unit: "s" },
+  // Rate-limit Loop Breaker (card dfef375f's fields, surfaced by card 826483a7). Each unit is the one
+  // that renders its SHARED bound as a whole number: `loopBreakerQuickGapMs`'s floor is deliberately
+  // seconds (a "quick" gap is short by design), and both backoff fields are shown in MINUTES — the same
+  // unit on purpose, so "base must not exceed ceiling" is readable without converting between the two.
+  { grp: "rateLimit", sub: "loopBreaker", key: "loopBreakerQuickGapMs", label: "Quick re-cap gap (s)", unit: "s",
+    note: "A cap arriving this soon after the session's own resume counts as a quick re-cap. Any later cap resets the streak to 0." },
+  { grp: "rateLimit", sub: "loopBreaker", key: "loopBreakerBackoffBaseMs", label: "Backoff base (m)", unit: "m",
+    note: "First escalated park once the breaker trips; doubles on each further quick re-cap. Clamped to never exceed the backoff ceiling." },
+  { grp: "rateLimit", sub: "loopBreaker", key: "loopBreakerBackoffCeilingMs", label: "Backoff ceiling (m)", unit: "m",
+    note: "Upper limit on that doubling. Reaching it never bails the episode on its own — only Max consecutive re-caps does." },
   // Watcher Cadences
   { grp: "watchers", key: "contextWatchMs", label: "Context watch (s)", unit: "s" },
   { grp: "watchers", key: "idleWatchMs", label: "Idle watch (s)", unit: "s" },
@@ -1564,6 +1580,10 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // control alongside the GLOBAL_FIELDS ms grid rather than joining it. Per-field-nullable already
   // (rateLimitPatchOverride is derived from rateLimitOverride.shape), so blank clears just this field.
   const [exhaustedThresholdPct, setExhaustedThresholdPct] = useState(numStr(override.rateLimit?.exhaustedThresholdPct));
+  // Card 826483a7 — `rateLimit.loopBreakerMaxRecaps` is likewise a plain count (no ms unit, so it is
+  // deliberately absent from PLATFORM_MS_BOUNDS), and takes exhaustedThresholdPct's own-control shape
+  // rather than joining the GLOBAL_FIELDS ms grid. Its 3 ms siblings DO ride the grid, under `sub`.
+  const [loopBreakerMaxRecaps, setLoopBreakerMaxRecaps] = useState(numStr(override.rateLimit?.loopBreakerMaxRecaps));
   // Sweep §2 — the whole `connections` (P2 authenticated_request guard) group had zero UI. Unlike
   // rateLimit/watchers/timeouts, `connections` is NOT one of server.ts's DEEP_MERGE_GROUPS — a submitted
   // group REPLACES the persisted one wholesale (same as `integrations` below) — so all 4 fields must be
@@ -1607,6 +1627,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         if (t === "") { entries.exhaustedThresholdPct = null; } else {
           const n = Number(t);
           entries.exhaustedThresholdPct = Number.isFinite(n) ? n : t;
+        }
+        // Card 826483a7 — same plain-count treatment as exhaustedThresholdPct above (its 3 ms siblings
+        // are already covered by the GLOBAL_FIELDS loop, `sub` being presentational only).
+        const r = loopBreakerMaxRecaps.trim();
+        if (r === "") { entries.loopBreakerMaxRecaps = null; } else {
+          const n = Number(r);
+          entries.loopBreakerMaxRecaps = Number.isFinite(n) ? n : r;
         }
       }
       (o as Record<string, unknown>)[grp] = entries;
@@ -1776,6 +1803,25 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // 0a5d61c9). An out-of-range entry blocks Save rather than round-tripping to a 400 that quotes the raw ms
   // ceiling under an s/m/h label. Each field also renders its own inline message; this list is what names
   // the offending field next to the Save button.
+  // Card 826483a7 — the loop breaker's ONE cross-field relation, surfaced LIVE as the user types.
+  // `resolvePlatform` CLAMPS a backoff base above its ceiling rather than rejecting it (base and ceiling
+  // are independently valid; only the COMBINATION is wrong, and a human editing one field at a time must
+  // not get a 400 for a transient combination), so this must NOT join `globalRangeErrors` below and must
+  // not block Save. Without it the clamp is only inferable by cross-reading two fields' `effective:`
+  // hints — and those read the STORED override, so they do not move until after a save.
+  const loopBreakerClamp = (() => {
+    const read = (key: string, fallbackMs: number): number => {
+      const s = vals[key] ?? "";
+      return s.trim() === "" ? fallbackMs : msFromUnit(s, "m");
+    };
+    const base = read("loopBreakerBackoffBaseMs", defaults.rateLimit.loopBreakerBackoffBaseMs);
+    const ceiling = read("loopBreakerBackoffCeilingMs", defaults.rateLimit.loopBreakerBackoffCeilingMs);
+    // A junk/out-of-range entry is somebody else's complaint (the strict-zod 400 and msRangeError own
+    // those) — never shadow one with a clamp advisory derived from NaN.
+    if (!Number.isFinite(base) || !Number.isFinite(ceiling) || base <= ceiling) return null;
+    return msInUnit(ceiling, "m");
+  })();
+
   const globalRangeErrors = msRangeErrors([
     ...GLOBAL_FIELDS.map((f) => [f.label, vals[f.key] ?? "", f.unit, globalBounds(f)] as const),
     ["Request timeout (s)", connRequestTimeoutS, "s", PLATFORM_MS_BOUNDS.connections.requestTimeoutMs],
@@ -1784,7 +1830,10 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     ["Update-check cadence (h)", updateCheckHours, "h", PLATFORM_MS_BOUNDS.updateCheckIntervalMs],
   ]);
 
-  const group = (grp: Grp) => GLOBAL_FIELDS.filter((f) => f.grp === grp);
+  // Both axes, always — `group("rateLimit")` must NOT also return the loopBreaker fields, or they render
+  // twice (once in their own panel, once in the group's grid). Passing `sub` undefined is the real filter
+  // for "the group's own fields", not a defaulted-away argument.
+  const group = (grp: Grp, sub?: GlobalFieldSub) => GLOBAL_FIELDS.filter((f) => f.grp === grp && f.sub === sub);
   // resolved/defaults sub-groups are typed structs (no index signature); the field key is known to
   // exist, so read it through an `unknown`-cast Record. ?? 0 satisfies noUncheckedIndexedAccess.
   const msOf = (g: PlatformConfig[Grp], key: string): number => (g as unknown as Record<string, number>)[key] ?? 0;
@@ -1816,6 +1865,35 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             effective={resolved.rateLimit.exhaustedThresholdPct} def={defaults.rateLimit.exhaustedThresholdPct}
             note="Usage % at which a session is treated as rate-limit exhausted. Whole number, 50-100." />
         </div>
+      </Panel>
+
+      {/* Card 826483a7 — the loop breaker's own panel, not four more cells in the Rate Limits grid above:
+          these decide whether to STOP retrying, while that grid tunes how long one ordinary park waits.
+          The mechanism is explained once here so each field's own note can stay to a line. */}
+      <Panel>
+        <SectionLabel>Rate-limit Loop Breaker</SectionLabel>
+        <Hint style={{ display: "block", maxWidth: "68ch", lineHeight: 1.6 }}>
+          Catches a session whose resume lands straight back in a still-capped account, because the reported
+          reset keeps arriving early. Each consecutive quick re-cap parks it for a doubling backoff instead;
+          once the streak reaches Max consecutive re-caps, the episode bails and stops resuming on its own.
+          Applies immediately, no restart.
+        </Hint>
+        <div className="loom-field-grid loom-field-grid-2" style={{ marginTop: 12 }}>
+          {group("rateLimit", "loopBreaker").map(renderField)}
+          <NumField label="Max consecutive re-caps" value={loopBreakerMaxRecaps} set={setLoopBreakerMaxRecaps}
+            effective={resolved.rateLimit.loopBreakerMaxRecaps} def={defaults.rateLimit.loopBreakerMaxRecaps}
+            note="Consecutive quick re-caps before the episode bails. Whole number, 1-20." />
+        </div>
+        {/* An advisory, never an error: this combination saves cleanly and is clamped at resolve time, so
+            it takes `role="status"` and leaves Save alone — unlike the out-of-range row beside Save, which
+            blocks it. Names both fields rather than pointing at one by position. */}
+        {loopBreakerClamp && (
+          <span role="status" data-testid="loop-breaker-clamp-note"
+            style={{ display: "block", marginTop: 10, color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            Backoff base sits above Backoff ceiling — it saves as entered, but the daemon will back off by
+            no more than {loopBreakerClamp}.
+          </span>
+        )}
       </Panel>
 
       <Panel>
