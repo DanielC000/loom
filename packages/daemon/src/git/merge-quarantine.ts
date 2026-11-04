@@ -5779,12 +5779,20 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
  * resolvable: for an entry that graduated then went unresolvable again, recomputing its key now
  * degrades back to a shared ancestor, falsely "protecting" an unrelated file. See the decision record.
  */
+// @decision a50faa55 — an in-memory arm at a key is never proof its own content is physically at that
+// key's file (d4b25feb arms it unconditionally, even on a refused write) — never credit it without
+// confirming the file's own content, including when the occupant is itself a placeholder.
 function physicalOwnerRepoPaths(filename: string): string[] {
   const owners = new Set<string>();
   for (const [k, e] of activeQuarantines) {
     const isFreshWriteTarget = isRepoPathCurrentlyResolvable(e.repoPath) && path.basename(quarantinePathFor(e.repoPath)) === filename;
     if (`${quarantineHashForKey(k)}.json` === filename || isFreshWriteTarget) {
-      owners.add(e.repoPath);
+      // Only a POSITIVELY-confirmed different occupant excludes this claim — "none" (genuinely e's own
+      // content, or nothing readable there at all) and "unknown" (an unreadable file for a reason other
+      // than missing) both leave the pre-existing credit unchanged, same conservative bias every other
+      // caller of this helper already has.
+      const occupant = differentUnresolvableOccupantRepoPathAt(path.join(MERGE_QUARANTINE_DIR, filename), e.repoPath);
+      if (occupant.state !== "occupant") owners.add(e.repoPath);
     }
   }
   for (const p of pendingUnresolvedQuarantines) {

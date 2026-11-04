@@ -2489,10 +2489,9 @@ try {
       "(X-newer) clearing X DOES lift X's own stale, pre-union pending snapshot (wasQuarantined:true) — this is NOT a no-op for X's own bookkeeping, unlike the sub-older parity shapes elsewhere in this file",
       clearResult?.wasQuarantined === true,
     );
-    check(
-      "*** PARITY (X-newer) *** sub's own latch file is KEPT regardless (sub still structurally depends on it) — lifting X's own orphaned snapshot never touches sub's protection",
-      clearResult?.latchKept === true,
-    );
+    // @decision a50faa55 — dropped the placeholder exemption, so this file can now be swept here;
+    // `latchKept` is no longer the right proxy. Sub's real enforcement comes from `activeQuarantines`
+    // (d4b25feb), not this credit — the behavioural property (survives a reboot) is asserted below.
     check("*** PARITY (X-newer) *** the corrupt tmp residue is UNAFFECTED by clearing X's own unrelated bookkeeping, in-process", fs.existsSync(corruptTmpPath));
 
     const fresh = await freshBootModule();
@@ -2500,6 +2499,14 @@ try {
     check(
       "*** PARITY (X-newer), CONFIRMED *** sub's quarantine SURVIVES a reboot regardless (the clear above never touched it)",
       !!fresh.activeMergeQuarantineFor(sub),
+    );
+    // Second regression guard (a50faa55 round 3) — `stillBlockedEntryFor` is a PURE peek, never the
+    // mutating/self-healing `activeMergeQuarantineFor`: with the dropped placeholder exemption re-added,
+    // X's own `token-x-ph-newer` re-arms on this exact reboot even though the check above still passes,
+    // so sub-survival alone doesn't catch X's own resurrection.
+    check(
+      "*** PARITY (X-newer), SECOND REGRESSION GUARD *** X itself does NOT resurrect as a blocker after a reboot",
+      !fresh.stillBlockedEntryFor(x),
     );
     fresh.clearMergeQuarantine(sub);
   } else if (scenarioName === "followup38032559-finding1b-real-occupant-existing-sibling-fold") {
