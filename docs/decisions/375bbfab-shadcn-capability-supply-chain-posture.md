@@ -83,8 +83,10 @@ Closed by a `node --import` preload (`packages/daemon/assets/shadcn-no-dotenv-pr
 intercepts resolution of `@dotenvx/dotenvx` and redirects it to a Loom-owned no-op stub whose `config()`
 matches the real library's shape but loads and mutates nothing. `registry.ts`'s `npm-pinned` branch
 (`registry.ts:648`) prepends `--import <preload>` keyed on `provision.package === "shadcn"` — never on
-`row.slug`/`row.name` (both owner-collidable: delete the seeded row, recreate one with the same
-slug/name) — safe because `"npm-pinned"` is itself seed-only and no PATCH route touches `provisionJson`.
+`row.slug`/`row.name` — safe because `"npm-pinned"` is itself seed-only and no PATCH route touches
+`provisionJson`. (Card `0e06ca9c` additionally closed the delete-and-recreate route at the seeded
+`"shadcn"` slug itself — an owner can no longer even create a row there — but the package-keyed check
+remains the real guard: it's what makes this safe for every OTHER slug too.)
 Full mechanism, the rejected refusal-shape alternative, and the Node-version residual (prefers
 `registerHooks` for CJS+ESM coverage on Node ≥22.15; falls back to ESM-only `register()`, with a known gap,
 on Node 22.0–22.14):

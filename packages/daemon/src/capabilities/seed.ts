@@ -216,8 +216,12 @@ export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt"
  * Seed Loom's bundled registry-capability catalog rows into `capability_defs`, seed-if-absent BY SLUG
  * (mirrors `seedDefaultProfiles`' seed-if-absent-by-name) — idempotent, and matches the standing
  * seed-if-absent contract every other bundled entity here uses (a slug an owner has since deleted is
- * eligible to reappear on a later boot, exactly like a deleted bundled profile/skill would). CORE product,
- * UNGATED — ships to every loomctl user (no `LOOM_DEV` gate), unlike the platform-only seeds.
+ * eligible to reappear on THIS seed-if-absent pass, exactly like a deleted bundled profile/skill would).
+ * CORE product, UNGATED — ships to every loomctl user (no `LOOM_DEV` gate), unlike the platform-only seeds.
+ *
+ * @decision 0e06ca9c — "eligible to reappear" above is about LOOM'S OWN reseed only; an owner can never
+ * pre-empt it by creating their own row at one of these slugs (see `registry.ts`'s
+ * `SEEDED_CAPABILITY_SLUGS`).
  */
 export function seedDefaultCapabilities(db: Db): string[] {
   const existing = new Set(db.listCapabilityDefs().map((c) => c.slug));

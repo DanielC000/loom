@@ -62,9 +62,10 @@ every client, not just one already proven tolerant of a malformed line.
 - Do not revert to the refusal shape (throwing from the preload's `resolve` hook) without re-deriving why
   it was rejected here — it is not "broken," it is strictly worse (a stray stdout line every reader must
   independently tolerate, for no behavioral gain over the redirect).
-- Do not key the `--import` injection on `row.slug` or `row.name` — both are owner-collidable (delete the
-  seeded row, recreate one with the same slug/name), per decision `fafae623`'s identical rule for the
-  proxy-entitlement case. Key it on `provision.package === "shadcn"` (checked in `registry.ts`'s
+- Do not key the `--import` injection on `row.slug` or `row.name`, per decision `fafae623`'s identical
+  rule for the proxy-entitlement case — defense in depth for every row other than the seeded `"shadcn"`
+  one itself, whose delete-and-recreate route card `0e06ca9c` separately closed outright. Key it on
+  `provision.package === "shadcn"` (checked in `registry.ts`'s
   `"npm-pinned"` branch) — safe because `"npm-pinned"` is itself a SEED-ONLY `CapabilityProvisionKind`
   (never accepted from an owner by `validateCapabilityDefInput`) and no PATCH route touches
   `provisionJson` at all (the only capabilities PATCH route, `gateway/server.ts`, edits `passEnv` only) —

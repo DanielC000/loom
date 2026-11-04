@@ -186,6 +186,11 @@ card's own `worker_report blocked` on 2026-11-03) rather than assumed:
   this entitlement relies on is narrower and still holds: every `github-binary` row's executable is
   Loom's fixed, checksum-verified binary (or the human-only `LOOM_GITHUB_MCP_BIN` override) — the
   entitlement can never reach a different executable, regardless of how the row's `kind` got set.
+  **Correction (card `0e06ca9c`): this indirect path is now CLOSED.** `registry.ts`'s
+  `SEEDED_CAPABILITY_SLUGS` refuses `validateCapabilityDefInput` for a create at `"github"` regardless of
+  whether the seeded row currently exists there, so an owner can no longer POST a legacy npx row at that
+  slug at all — `migrateGithubCapabilityToBinary`'s narrow-match can now only ever see a genuinely
+  pre-migration row, never an owner-recreated lookalike.
 - **codescape** mounts as `{type:"http"}`, never wrapped by this launcher at all — out of scope.
 - A generic owner-added `node-package`/`bundled`/`command`/`npm-pinned` capability is tool-dependent; it
   already has the exact mechanism it needs (`passEnv`).
@@ -198,10 +203,10 @@ network-reaching mounts via the ONE named constant `PROXY_ENV_KEYS` (`pty/host.t
 - **markitdown**: a fixed addition to its `--allow` list (hardcoded, since it's not a catalog row and has
   no `passEnv` field to opt into) — `passEnvByMountKey["markitdown"] = PROXY_ENV_KEYS`.
 - **The seeded github-binary capability**: keyed on `def.kind === "github-binary"`, never on `slug` or
-  `name` — both are owner-collidable once the seeded row is deleted. `validateCapabilityDefInput` refuses
-  a direct owner-authored `kind:"github-binary"` row, but the kind CAN still be reached indirectly (see
-  the correction above) — the entitlement holds anyway because every row of that kind is pinned to
-  Loom's fixed, checksum-verified executable, never a different one.
+  `name`. `validateCapabilityDefInput` refuses a direct owner-authored `kind:"github-binary"` row, and
+  (card `0e06ca9c`) can no longer be reached indirectly either — the entitlement holds both because the
+  kind can't be owner-created, AND because every row of that kind is pinned to Loom's fixed,
+  checksum-verified executable, never a different one.
 - **Playwright**: nothing added (confirmed no need, above).
 - **Every other owner-added catalog capability**: proxy keys ONLY via its own existing human-only
   `passEnv` — no code change; the mechanism already existed.
@@ -276,12 +281,11 @@ fixed proxy-entitled mount (markitdown, github-binary) picks it up either.
 - Do not invent a fixed/kind-keyed entitlement for `npm_config_registry` the way `PROXY_ENV_KEYS` exists
   for proxy — card `3faaab0d`'s own investigation found no seeded row needs it at runtime; a future seeded
   row that genuinely does needs a fresh decision, not a silent copy of the proxy shape.
-- Do not key a mount's proxy entitlement on its `slug` or `name` — both are owner-collidable (delete the
-  seeded row, recreate one with the same slug). Key it on `def.kind === "github-binary"` instead — not
-  because an owner can never reach that kind (they can, indirectly, via the delete-and-recreate +
-  boot-migration path above), but because every row of that kind, however it got there, is pinned to
-  Loom's fixed, checksum-verified executable — or on the hardcoded mount key (`"markitdown"`) for a
-  non-catalog mount.
+- Do not key a mount's proxy entitlement on its `slug` or `name` — card `0e06ca9c` closed the
+  delete-and-recreate route at the seeded `"github"` slug specifically, but this rule stays defense in
+  depth for every OTHER row: `def.kind === "github-binary"` is safe anyway because every row of that
+  kind, however it got there, is pinned to Loom's fixed, checksum-verified executable — or the hardcoded
+  mount key (`"markitdown"`) for a non-catalog mount.
 - Do not add a strip/parse step for a proxy value reaching an entitled mount — the decision was to scope
   WHO receives the raw value, never to sanitize it; stripping userinfo would break the credentialed
   corporate-proxy case that is the entire reason the value is forwarded.

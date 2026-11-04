@@ -32,6 +32,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (j) hardening: transport:"http" is rejected in v1 (resolveCapabilityServer hardcodes stdio); a
 //       PROFILE capabilities grant naming a reserved legacy slug is rejected (validate.ts), not just a
 //       catalog-def create.
+//   (k) card 0e06ca9c: SEEDED_CAPABILITY_SLUGS is DERIVED from bundledCapabilities(), never hand-typed;
+//       an owner can never CREATE a row at a seeded slug ("github"/"image-gen"/"shadcn"), whether the
+//       seeded row currently exists at that slug OR was already deleted — closing the delete-and-recreate
+//       path a seeded row's security/containment logic could otherwise be keyed on. DELETE stays allowed,
+//       and Loom's own seed-if-absent-by-slug contract (seedDefaultCapabilities) still refills a deleted
+//       seeded row on the next seed pass. A non-seeded slug is unaffected (positive control).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/capability-registry.mjs
 import fs from "node:fs";
@@ -59,7 +65,8 @@ const {
 } = await import("../dist/capabilities/registry.js");
 const { validateProfile, agentProfileKeyError } = await import("../dist/profiles/validate.js");
 const { LOOM_FIRST_PARTY_SERVER_IDS } = await import("../dist/pty/tool-attribution.js");
-const { RESERVED_CAPABILITY_SLUGS } = await import("../dist/capabilities/registry.js");
+const { RESERVED_CAPABILITY_SLUGS, SEEDED_CAPABILITY_SLUGS } = await import("../dist/capabilities/registry.js");
+const { bundledCapabilities, seedDefaultCapabilities } = await import("../dist/capabilities/seed.js");
 const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 fs.mkdirSync(SETTINGS_DIR, { recursive: true });
 
@@ -510,6 +517,59 @@ deleteCapabilityDef(db, capRow.id);
 check("(db) deleteCapabilityDef removes the row", db.getCapabilityDefBySlug("gh-mcp") === undefined);
 db.close();
 
+// ===================== (k) card 0e06ca9c: seeded capability slugs protected from delete-and-recreate =====================
+// SEEDED_CAPABILITY_SLUGS must be DERIVED from bundledCapabilities(), never a second hand-typed list that
+// can drift from the real seed catalog.
+const expectedSeededSlugs = bundledCapabilities().map((c) => c.slug);
+check("(0e06ca9c) SEEDED_CAPABILITY_SLUGS is exactly bundledCapabilities()'s own slug list (derived, not hand-typed)",
+  JSON.stringify([...SEEDED_CAPABILITY_SLUGS].sort()) === JSON.stringify([...expectedSeededSlugs].sort()));
+// Named explicitly too (mirrors the a6598c1e LOOM_FIRST_PARTY_SERVER_IDS check above) so a reader sees the
+// current, real membership without having to cross-reference seed.ts.
+check("(0e06ca9c) SEEDED_CAPABILITY_SLUGS currently names 'github', 'image-gen', and 'shadcn'",
+  JSON.stringify([...SEEDED_CAPABILITY_SLUGS].sort()) === JSON.stringify(["github", "image-gen", "shadcn"].sort()));
+
+// Polarity 1: EVERY seeded slug is refused at validateCapabilityDefInput (owner-catalog create) — the
+// row doesn't even need to exist in a DB for this; the check is purely on the slug string.
+for (const slug of SEEDED_CAPABILITY_SLUGS) {
+  const r = validateCapabilityDefInput({ slug, name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
+  check(`(0e06ca9c) validateCapabilityDefInput REJECTS the seeded slug '${slug}'`, r.ok === false && /seeded/.test(r.error));
+}
+
+// Polarity 2: a NON-seeded slug is unaffected (positive control — the new check must not have over-widened).
+const nonSeededSlugOk = validateCapabilityDefInput({ slug: "my-own-thing", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
+check("(0e06ca9c) a NON-seeded slug still validates ok (positive control)", nonSeededSlugOk.ok === true);
+
+// The actual delete-and-recreate scenario, end to end, against a real seeded DB: create refused BOTH
+// while the seeded row exists AND after it has been deleted — and Loom's own reseed-after-delete
+// contract (seedDefaultCapabilities, seed-if-absent-by-slug) still refills the row on the next seed pass.
+const seedDb = new Db();
+const seededNow = seedDefaultCapabilities(seedDb);
+check("(0e06ca9c) seedDefaultCapabilities seeds all 3 bundled rows into a fresh DB", JSON.stringify([...seededNow].sort()) === JSON.stringify(["github", "image-gen", "shadcn"].sort()));
+
+const imageGenRow = seedDb.getCapabilityDefBySlug("image-gen");
+check("(0e06ca9c) the seeded 'image-gen' row exists before the scenario starts", !!imageGenRow);
+
+let createWhileSeededThrew = false;
+try {
+  createCapabilityDef(seedDb, { slug: "image-gen", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
+} catch { createWhileSeededThrew = true; }
+check("(0e06ca9c) createCapabilityDef at 'image-gen' is refused WHILE the seeded row still exists", createWhileSeededThrew);
+
+deleteCapabilityDef(seedDb, imageGenRow.id);
+check("(0e06ca9c) the seeded 'image-gen' row is actually gone after delete", seedDb.getCapabilityDefBySlug("image-gen") === undefined);
+
+let createAfterDeleteThrew = false;
+try {
+  createCapabilityDef(seedDb, { slug: "image-gen", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
+} catch { createAfterDeleteThrew = true; }
+check("(0e06ca9c) createCapabilityDef at 'image-gen' is STILL refused AFTER the seeded row is deleted (the actual delete-and-recreate protection)", createAfterDeleteThrew);
+check("(0e06ca9c) the deleted slug is NOT left occupied by a half-created row", seedDb.getCapabilityDefBySlug("image-gen") === undefined);
+
+const reseeded = seedDefaultCapabilities(seedDb);
+check("(0e06ca9c) seedDefaultCapabilities' own seed-if-absent-by-slug contract still refills the deleted seeded row on the next seed pass", reseeded.includes("image-gen"));
+check("(0e06ca9c) the reseeded row is Loom's own bundled definition, not an owner row that slipped through", seedDb.getCapabilityDefBySlug("image-gen")?.kind === "npm-pinned");
+seedDb.close();
+
 // ===================== (g) per-slug python-venv provisioning tracker (FAKE provisioner — no real venv/network) =====================
 __setCapabilityProvisionerForTest(async () => ({ outcome: "ready", binary: "/fake/venv/bin/a-fake-pypi-pkg" }));
 const venvDef = { ...fakeBundled, slug: "venv-thing", kind: "python-venv", provisionJson: JSON.stringify({ kind: "python-venv", packages: ["a-fake-pypi-pkg"], binary: "a-fake-pypi-pkg" }) };
@@ -525,6 +585,6 @@ __setCapabilityProvisionerForTest(); // restore + reset all per-slug state
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — capability registry (agent-tooling P4): resolveProfileCapabilities bridge, buildMcpServers' ONE generalized loop (byte-identical-when-none, log-and-skip, owner-added dispatch, credential-tie env injection, the byte-identical bridge regression), validateCapabilityDefInput (incl. the http-transport + reserved-legacy-slug hardening), DB CRUD, the per-slug python-venv provisioning tracker, the mcp-config-to-argv/log secret-leak fix (conditional file-diversion + redaction, byte-identical when secret-free), and malformed-JSON-row never-throws hardening — claude-free, network-free."
+  ? "\n✅ ALL PASS — capability registry (agent-tooling P4): resolveProfileCapabilities bridge, buildMcpServers' ONE generalized loop (byte-identical-when-none, log-and-skip, owner-added dispatch, credential-tie env injection, the byte-identical bridge regression), validateCapabilityDefInput (incl. the http-transport + reserved-legacy-slug + seeded-slug hardening), DB CRUD, the seeded-slug delete-and-recreate protection (card 0e06ca9c) + reseed-after-delete contract, the per-slug python-venv provisioning tracker, the mcp-config-to-argv/log secret-leak fix (conditional file-diversion + redaction, byte-identical when secret-free), and malformed-JSON-row never-throws hardening — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

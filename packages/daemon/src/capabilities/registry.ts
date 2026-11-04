@@ -45,6 +45,7 @@ import { loomNpmPinnedBin, ensureNpmPinnedAsync, validateNpmPinnedSpec, npmPinne
 import type { EnsureNpmPinnedOpts, EnsureNpmPinnedResult, NpmPinnedProvisionOutcome } from "./npm-pinned.js";
 import { resolveExecutable } from "../pty/resolve-bin.js";
 import { LOOM_FIRST_PARTY_SERVER_IDS } from "../pty/tool-attribution.js";
+import { bundledCapabilities } from "./seed.js";
 
 /** One owner-added catalog row as stored/read at the DB layer (mirrors ConnectionRow's shape). */
 export interface CapabilityDefRow {
@@ -130,6 +131,16 @@ export const RESERVED_CAPABILITY_SLUGS = [
   ...LOOM_FIRST_PARTY_SERVER_IDS,
 ] as const;
 
+/**
+ * The slugs Loom's own `bundledCapabilities()` (seed.ts) seeds — DERIVED, never hand-typed, so this can
+ * never drift from the real seed list. Checked ONLY at the owner-create entry point below — never folded
+ * into `RESERVED_CAPABILITY_SLUGS` (see its own call site for why).
+ *
+ * @decision 0e06ca9c — blocks an owner from ever CREATING a row at one of these slugs, whether or not
+ * the seeded row currently exists there. DELETE stays unguarded.
+ */
+export const SEEDED_CAPABILITY_SLUGS: readonly string[] = bundledCapabilities().map((c) => c.slug);
+
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
 }
@@ -190,6 +201,9 @@ export function validateCapabilityDefInput(input: {
   }
   if ((RESERVED_CAPABILITY_SLUGS as readonly string[]).includes(input.slug)) {
     return { ok: false, error: `slug '${input.slug}' is reserved for a builtin capability` };
+  }
+  if ((SEEDED_CAPABILITY_SLUGS as readonly string[]).includes(input.slug)) {
+    return { ok: false, error: `slug '${input.slug}' belongs to a Loom-seeded capability and cannot be used for a new row` };
   }
   if (!isNonBlankStr(input.name, NAME_MAX)) return { ok: false, error: `name must be a non-empty string of at most ${NAME_MAX} characters` };
   if (typeof input.description !== "string" || input.description.length > DESCRIPTION_MAX) {
