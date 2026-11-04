@@ -107,10 +107,16 @@ function retirementsUnderTest(): Map<string, string> {
   return new Map(rows.map((r) => [r.from, r.to]));
 }
 
-// The two that deliberately STAYED as workspace-tier rows, in order: the tier's own home, and the
-// reserved Platform home — which the mockup pins "above the project list in the tree, not inside it"
-// because it is a sibling ENTITY of the projects (a home with its own agents), not a surface of them.
-const WORKSPACE_TIER = ["/home", "/platform"];
+// The rows that deliberately STAYED at the workspace tier, IN ORDER: the tier's own home, the
+// Terminals node, and the reserved Platform home — which the mockup pins "above the project list in
+// the tree, not inside it" because it is a sibling ENTITY of the projects (a home with its own
+// agents), not a surface of them.
+//
+// ⭐ THE ORDER IS THE CLAIM, not incidental to it. Card b439c2dc is the owner's own placement —
+// "In the left sidebar place it between home and Platform" — and the `toEqual` below is the only
+// assertion in the suite that pins it: a Terminals row that drifted above Home or below Platform
+// would satisfy every containment check in this file and still be the wrong sidebar.
+const WORKSPACE_TIER = ["/home", "/workspace-terminals", "/platform"];
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
 // navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
@@ -391,13 +397,14 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
         "more than one project row reads as the branch you are inside").toHaveCount(1);
 
       // ── CLAIM 3: the workspace tier is the entities, and the ten destinations have left the rows ──
-      // The tier's own list, in order, read off the tree: the Workspace home and the Platform node,
-      // and nothing else. This is the card's headline claim stated as an equality, so a destination
-      // creeping back in fails here even if every absence check below were deleted.
+      // The tier's own list, in order, read off the tree — `WORKSPACE_TIER` above, and nothing else.
+      // This is the card's headline claim stated as an equality, so a destination creeping back in
+      // fails here even if every absence check below were deleted.
       const tierRoutes = await tree.locator("ul.loom-atlas-nodes").first()
         .locator("> li a.loom-atlas-node")
         .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
-      expect(tierRoutes, "the workspace tier is no longer exactly the Workspace home + the Platform node")
+      expect(tierRoutes,
+        "the workspace tier is no longer exactly the Workspace home, the Terminals node and the Platform node, in that order")
         .toEqual(WORKSPACE_TIER);
 
       const treeRoutes = await tree.locator("a.loom-atlas-node")

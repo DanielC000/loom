@@ -42,6 +42,7 @@ import { isLiveSession, liveCountsByProject } from "../lib/atlasHome";
 import { sortProjectsRunningFirst } from "../lib/projectOrder";
 import { standingOperators } from "../lib/atlasAgents";
 import { groupSessionRows } from "../lib/sessions";
+import { workspaceRunningSessions } from "../lib/workspaceSessions";
 import { api } from "../lib/api";
 import { color, font } from "../theme";
 
@@ -89,11 +90,15 @@ function workspaceTierPages(pages: NavPage[]): NavPage[] {
 // "which node tab does this become" field card 0d0c6cee could not yet guess — and card 25c08fba took
 // `/terminals` down to PROJECT depth as the project node's Sessions tab, so it is no longer an
 // unscoped destination this tier places at all. The last two, Mission Control and Projects, are
-// RETIRED (card 5afd71bd, `ATLAS_RETIREMENTS` in src/nav.tsx), so the tier is now exactly this list
-// plus the Workspace home, and card 0d0c6cee's "Not yet re-homed" escape hatch is gone with them.
+// RETIRED (card 5afd71bd, `ATLAS_RETIREMENTS` in src/nav.tsx), so this list plus the tier's two
+// ATLAS_HOMES rows — the Workspace home and card b439c2dc's Terminals node — is the whole tier, and
+// card 0d0c6cee's "Not yet re-homed" escape hatch is gone with them.
 //
 // A one-entry literal rather than a `nav.tsx` field of its own: this stays the single placement
-// judgement card 0d0c6cee made, and nothing since has needed a second entry.
+// judgement card 0d0c6cee made, and nothing since has needed a second entry. ⚠️ An ATLAS_HOMES row
+// at this tier is NOT reachable through here — this list filters NAV_PAGES, and an Atlas-only
+// address has no NAV_PAGES row to find. `WORKSPACE_TERMINALS` below is resolved the way
+// `WORKSPACE_HOME` is instead; don't add such an address here expecting a row.
 //
 // @decision 5afd71bd — the hatch is gone, so an unscoped destination named in none of this list,
 // `WORKSPACE_NODE_TABS` or `ATLAS_RETIREMENTS` is simply ABSENT from the tree. Decide its placement in
@@ -350,6 +355,17 @@ function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }:
 
 const WORKSPACE_HOME = ATLAS_HOMES.find((h) => h.key === "workspace")!;
 
+/**
+ * The Workspace tier's Terminals node — card b439c2dc, the owner's own placement: "In the left
+ * sidebar place it between home and Platform."
+ *
+ * A SECOND Atlas-only home row at this tier, which `WORKSPACE_TIER_NODES` above cannot carry: that
+ * list filters NAV_PAGES, and this address is an ATLAS_HOMES row (there is no classic-rail twin to
+ * filter — the classic rail keeps its own `/terminals`). So it is resolved the way the Workspace
+ * home itself is, from the one declaration in src/nav.tsx, and rendered between the two.
+ */
+const WORKSPACE_TERMINALS = ATLAS_HOMES.find((h) => h.key === "workspace-terminals")!;
+
 // One project row — cards e47df20a (P1-4) and 0d0c6cee. A real control: clicking it writes the active
 // project to the SAME ActiveProjectProvider the rail chip writes and every `scoped` page reads, so a
 // tree selection and a chip selection are indistinguishable downstream. There is deliberately no
@@ -539,6 +555,18 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
     () => standingOperators(sessionsQ.data).filter((o) => o.home.to === "/platform").length,
     [sessionsQ.data],
   );
+  // The Terminals node's own metric (card b439c2dc): how many sessions that node lists BEFORE the
+  // reader narrows it. Derived through `workspaceRunningSessions` — the one predicate
+  // pages/WorkspaceTerminals.tsx and the Workspace node's Sessions card both read — rather than a
+  // fourth hand-rolled "is it running" test in this file. Same cache entry, so it costs no request.
+  //
+  // ⚠️ It is the UNFILTERED count on purpose, so it does NOT track that page's own head count once
+  // a project filter is applied (5 here, "RUNNING 2" there). That is correct, not a drift: a rail
+  // metric describes the WORKSPACE, and one that fell to 2 because of a filter set on the page it
+  // leads to would misreport the fleet to a reader who is looking at the rail precisely to find out
+  // what else is running. The two agree at rest, which is the only state where they are claims
+  // about the same population.
+  const terminalsLive = useMemo(() => workspaceRunningSessions(sessionsQ.data).length, [sessionsQ.data]);
   // EVERY project's live sessions — not just the selected one, and NOT companion-filtered here: the
   // only predicate below is `isLiveSession`, so an assistant-role (companion) session IS in this map.
   // Companions are dropped downstream, at the render site, by `groupSessionRows` (see `sessionRows`
@@ -660,6 +688,13 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
         <SectionLabel style={{ margin: "0 0 4px", padding: "0 10px" }}>Workspace</SectionLabel>
         <ul className="loom-atlas-nodes">
           <HomeNode home={WORKSPACE_HOME} testId={`atlas-home-${WORKSPACE_HOME.key}`} />
+          {/* Between Home and Platform — the owner's own placement (card b439c2dc). Its metric is
+              the UNFILTERED count of what that node lists; see `terminalsLive` above for why it
+              deliberately does not follow the page's own project filter. */}
+          <HomeNode home={WORKSPACE_TERMINALS} testId={`atlas-home-${WORKSPACE_TERMINALS.key}`}
+            metric={terminalsLive > 0
+              ? <NodeMeta value={`${terminalsLive} live`} title={`${terminalsLive} running session${terminalsLive === 1 ? "" : "s"} across the workspace`} />
+              : undefined} />
           {/* Pinned directly above the project list, as the mockup's own note says it is: "the
               reserved Platform home is pinned above the project list in the tree, not inside it". */}
           {platformNodes.map((p) => (

@@ -22,6 +22,7 @@ import Platform from "./pages/Platform";
 import Settings, { WorkspaceSettings } from "./pages/Settings";
 import { mergeRedirectQuery } from "./lib/redirectQuery";
 import WorkspaceHome from "./pages/WorkspaceHome";
+import WorkspaceTerminals from "./pages/WorkspaceTerminals";
 import ProjectHome from "./pages/ProjectHome";
 import AgentsNode from "./pages/AgentsNode";
 
@@ -192,7 +193,7 @@ export const PARAM_PAGES: ParamPage[] = [
 // frame's crumbs and heading stay a function of the node, not of which tab is showing.
 export type AtlasHome = {
   /** Stable identity for the tree row's test id and the shell's own address lookup. */
-  key: "workspace" | "project" | "agents" | "workspace-settings";
+  key: "workspace" | "project" | "agents" | "workspace-settings" | "workspace-terminals";
   to: string;
   /** The tree row's label. */
   label: string;
@@ -220,6 +221,15 @@ export const ATLAS_HOMES: AtlasHome[] = [
   // Atlas-only, hence ATLAS_HOMES and not NAV_PAGES: a NAV_PAGES entry is mounted by BOTH shells, so
   // it would put a second Settings row in the classic rail for a user who never opted in.
   { key: "workspace-settings", to: "/workspace-settings", label: "Settings", scoped: false, tierHead: false, element: <WorkspaceSettings /> },
+  // The Workspace tier's own Terminals node (card b439c2dc, owner intake). `/terminals` cannot serve
+  // here: card 25c08fba took that address down to PROJECT depth as the project node's Sessions tab,
+  // so a workspace-tier row pointing at it would land on the project node — and a second <Route> on
+  // one literal path is the precedence contest AtlasShell's REHOMED_TAB_PATHS note forbids.
+  //
+  // Atlas-only for the same reason the Settings node above is: a NAV_PAGES entry is mounted by BOTH
+  // shells, so it would put a SECOND "Terminals" row in the classic rail — beside the one already
+  // there — for a user who never opted in. The classic page stays exactly as it is.
+  { key: "workspace-terminals", to: "/workspace-terminals", label: "Terminals", scoped: false, tierHead: false, element: <WorkspaceTerminals /> },
 ];
 
 // ── The Workspace node's tabs ──────────────────────────────────────────────────────────────────

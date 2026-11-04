@@ -47,6 +47,11 @@ const ICONS: Record<string, ReactElement> = {
   // for the same reason `/home` and `/project` share one: they are the same kind of node told apart
   // by depth, and two near-identical slider stacks would read as two different things.
   "/workspace-settings": <G><path d="M4 7h9M19 7h1M4 12h4M14 12h6M4 17h11M19 17h1" /><circle cx="15" cy="7" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="17" cy="17" r="2" /></G>,
+  // The Workspace tier's Terminals node (card b439c2dc). The SAME prompt-in-a-frame glyph as
+  // `/terminals` above, on the same rule `/workspace-settings` and `/home`/`/project` follow: they
+  // are the same KIND of node told apart by depth, and a second terminal outline differing only in
+  // its stroke would read as a different thing rather than the same thing one tier up.
+  "/workspace-terminals": <G sw={1.7}><rect x="3" y="4.5" width="18" height="15" rx="2.2" /><path d="M7 10l3 2.5-3 2.5M12.5 15.5H17" /></G>,
 };
 
 // Fallback glyph for a route with no dedicated icon (a future destination added to nav.tsx before its

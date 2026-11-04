@@ -896,10 +896,11 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
 
     const nodes = page.locator(TREE_NODES);
     const total = await nodes.count();
-    // TWO is what a one-project workspace with nothing running renders since card 4a0ad464 removed
-    // the project branch's last two page rows (`Home` and `Overview`): the Workspace home and the
-    // Platform node, and nothing else is an ANCHOR — a project row is a <button> and a session row
-    // only exists while something is running. The floor is "more than one", which is all this leg
+    // THREE is what a one-project workspace with nothing running renders: the Workspace home, card
+    // b439c2dc's Terminals node and the Platform node (it was TWO until that card, card 4a0ad464
+    // having removed the project branch's last two page rows, `Home` and `Overview`). Nothing else
+    // is an ANCHOR — a project row is a <button> and a session row only exists while something is
+    // running. The floor is "more than one", which is all this leg
     // needs, stated against that reading rather than against a row count that moves every time a
     // surface is re-homed.
     expect(total, "no tree nodes to tab through").toBeGreaterThan(1);

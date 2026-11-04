@@ -3072,6 +3072,63 @@ button.loom-ovbrief-cell.is-open {
   overflow-y: auto;
   padding-top: 4px;
 }
+/* ── The Terminals node (card b439c2dc) ───────────────────────────────────────────────────
+   The SAME card as `.loom-wsessions` above, on a surface that is the whole content column rather
+   than one band on a deck — so the only thing this modifier changes is how much of that room the
+   list is allowed to take. The row grammar, the expanded-row mark and the terminal frame are the
+   shared ones; re-styling any of them here would give one of the two mounts its own vocabulary,
+   which is exactly what sharing the component was for. */
+.loom-termpage .loom-wsessions-list {
+  /* ~16 rows before it scrolls, against the deck card's ~8. Still BOUNDED, for the reason that card
+     is bounded: N running sessions must change this track's scroll depth, never the page's layout —
+     the terminal below it is the thing a reader came for and must not be pushed off-screen by a
+     busy fleet. `vh` rather than a row count so a short viewport yields first. */
+  max-height: min(42vh, 540px);
+}
+/* The project filter in the band head: label and control as ONE group, so a head that wraps at a
+   narrow width never leaves the label stranded above the wrong field. `baseline`, not `center` —
+   this group sits beside a `SectionLabel` and two counts, and centring floats its label out of
+   their shared text line the moment the head wraps (the same measurement card f3b18f27 made on
+   `.loom-quickstart`). */
+.loom-termpage-filter {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+/* The terminal's seat while nothing is in it (card b439c2dc). It wears the SAME top rule and the
+   same offsets as `.loom-wsession-term`, so the pane that lands here replaces it on exactly the
+   same line rather than nudging the list — the position is the whole point of the seat. */
+.loom-termpage-seat {
+  margin-top: 10px;
+  padding: 16px 2px 0;
+  border-top: 1px solid var(--loom-border);
+  /* Enough presence to read as a reserved area rather than a stray caption, and no more: this is a
+     seat, not a placeholder box, so it gets no fill, no dashed outline and no centred text. */
+  min-height: 150px;
+}
+.loom-termpage-seatlead {
+  margin: 0 0 6px;
+  font-family: var(--loom-font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  /* `text-dim`, not `text-muted`: this is the one instruction on the page, and muted at this size
+     reads as a footnote beside the rows above it. */
+  color: var(--loom-text-dim);
+}
+.loom-termpage-seatnote {
+  margin: 0;
+  max-width: 62ch;
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--loom-text-muted);
+}
+/* The one token in the note that names a control the reader can see, lifted out of the muted run so
+   the sentence points at something rather than describing it. */
+.loom-termpage-seatkey {
+  color: var(--loom-text-dim);
+}
 .loom-wsessionrow {
   display: flex;
   align-items: center;
