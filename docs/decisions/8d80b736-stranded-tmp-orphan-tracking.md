@@ -76,8 +76,15 @@ the write-failure `else` branch of `clearTokenFromPendingIndices`'s own reduce b
   token DOES resurrect here, after a LATER successful clear narrows the tracked file, followed by a
   reboot: the stranded tmp from the EARLIER failed reduce still holds the full, pre-clear token set, and
   nothing tracks it, so boot's own tmp-recovery pass arms it as a fail-closed duplicate carrying the
-  already-cleared token back. This is a CONFIRMED, OPEN gap, deliberately NOT fixed by this card — tracked
-  on follow-up card `5332762e` ("track the stranded tmp from a failed clear-time narrowing write").
+  already-cleared token back. **FIXED by card `5332762e`** ("track the stranded tmp from a failed
+  clear-time narrowing write") — same tracking shape (basename, Set-deduped, `replaceEntryEverywhere`),
+  with one deliberate ordering difference from this card's own 3 sites: the tracking runs AFTER, never
+  before, that same call's own `rewriteOrphanLatchFilesAfterPartialClear`, or that helper would
+  immediately try to re-narrow the tmp the SAME call just minted — see `5332762e`'s own record for why
+  that specific ordering also matters for card `e1572b69`'s sibling finding. The card `5332762e` kickoff's
+  own suspicion that `rewriteOrphanLatchFilesAfterPartialClear`'s own write-failure tmp "likely has the
+  same shape (untested)" turned out to be investigated and CONFIRMED a real defect, but a DIFFERENT shape
+  (a permanent disk-debris leak, not a resurrection) — tracked separately as card `e1572b69`.
 
 ## Test-coverage ripple (Round 2 correction — see "Round 2" below for why Round 1's own claim here was wrong)
 

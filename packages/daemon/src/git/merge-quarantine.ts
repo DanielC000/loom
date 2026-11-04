@@ -4985,6 +4985,15 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
+      // @decision 5332762e — track the stranded tmp's basename in orphanLatchFiles, AFTER (never
+      // before) the rewriteOrphanLatchFilesAfterPartialClear call just above — tracking first would make
+      // it re-narrow the tmp THIS SAME call just minted. See the decision record.
+      if (written.strandedTmp) {
+        const withStrandedTmp: MergeQuarantineEntry = { ...updated, orphanLatchFiles: [...new Set([...(updated.orphanLatchFiles ?? []), path.basename(written.strandedTmp)])] };
+        replaceEntryEverywhere(activeQuarantines, updated, withStrandedTmp);
+        updated = withStrandedTmp;
+        live.entry = withStrandedTmp;
+      }
     }
     // @decision 55939b88 — log once here (never in a write branch above) via the shared formatter, using
     // `live.entry`'s final post-write state, not the pre-write `remaining` local. See the decision record.
