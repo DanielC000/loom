@@ -39,6 +39,17 @@ db.insertSession({
   processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
   lastError: null, role: "manager",
 });
+// Real worker rows, parented to mgrR, for every id worker_recycle is called with below — card 3ae8c355
+// made the write tools refuse a workerSessionId with no session row ("no such worker session '<id>'"),
+// so a fake, row-less id now errors before ever reaching the stub `sessions.recycleWorker`.
+["wkr1", "wkr2", "wkr3", "wkr4", "wkr4b"].forEach((id, i) => {
+  db.insertSession({
+    id, projectId: "pR", agentId: "aR", engineSessionId: null, title: null, cwd: "/r",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker", parentSessionId: "mgrR",
+    taskId: `aaaaaaaa-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, branch: `loom/${id}`,
+  });
+});
 
 // A stub SessionService: records exactly what recycleWorker/recycleManager were called with, so the
 // test asserts the ALIAS RESOLUTION happening at the tool boundary (orchestration.ts), not the real

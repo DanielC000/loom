@@ -50,6 +50,17 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "manager",
   });
+  // Real worker rows, parented to mgrA, for every id worker_message/worker_redirect are called with
+  // below — card 3ae8c355 made the write tools refuse a workerSessionId with no session row ("no such
+  // worker session '<id>'"), so a fake, row-less id now errors before ever reaching the stub.
+  ["wkr1", "wkr2", "wkr3", "wkr4"].forEach((id, i) => {
+    db.insertSession({
+      id, projectId: "pA", agentId: "agentA", engineSessionId: null, title: null, cwd: "/a",
+      processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "worker", parentSessionId: "mgrA",
+      taskId: `aaaaaaaa-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, branch: `loom/${id}`,
+    });
+  });
 
   // A stub SessionService: records exactly what each service method was called with, so these tests
   // assert the ALIAS RESOLUTION happening at the tool boundary (orchestration.ts), not the real (heavy)
