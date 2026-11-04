@@ -39,6 +39,7 @@ const projectRow = {
 const agentRow = {
   id: "agent-1", projectId: "proj-1", name: "Dev", startupPrompt: "go build things",
   position: 0, profileId: "profile-1", endpoint: false, ioSchema: null,
+  connections: ["conn-2"], capabilities: [{ slug: "github-binary" }],
   futureColumnFromTheDb: "leak-me",
 };
 
@@ -58,6 +59,7 @@ const EXPECTED_PROJECT_KEYS = [
 ];
 const EXPECTED_AGENT_KEYS = [
   "id", "projectId", "name", "startupPrompt", "position", "profileId", "endpoint", "ioSchema",
+  "connections", "capabilities",
 ];
 const EXPECTED_PROFILE_KEYS = [
   "id", "name", "role", "description", "allowDelta", "skills", "model", "icon", "browserTesting",

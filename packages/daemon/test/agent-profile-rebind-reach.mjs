@@ -51,6 +51,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       proof (see the worker's done-report) — the specific checks here were confirmed to FAIL against
 //       the pre-fix call sites (no refusal, no rebindReach, no event) before the fix landed. Section (G)'s
 //       own RED-first proof is separate (see its own comment) since it was added in round 3.
+//   (I) card caca806c item 1(a), Code Review MAJOR ruling: an agent carrying its OWN connections/
+//       capabilities grant (card caca806c's agent-level grant surface) REFUSES a rebind that changes its
+//       resolved role, on every agent-facing surface (Setup agent_update/profile_assign, Platform
+//       agent_update/profile_assign, Manager assignAgentProfile) — REST stays exempt, same posture as (G).
+//       Each surface: the refusal (no write) + two negative controls (grant-free passes; role-unchanged
+//       passes). A by-hand mutant proof (documented, not wired in — see its own comment) shows each
+//       refusal flips to a successful rebind with the new check removed.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-profile-rebind-reach.mjs
 import fs from "node:fs";
@@ -81,6 +88,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { agentRebindRestrictedToolsWideningError } = await import("../dist/profiles/validate.js");
+const { rebindWideningFields } = await import("../dist/profiles/grantReach.js");
 
 // ===================== (0) the pure guard predicate =====================
 {
@@ -580,8 +588,194 @@ const mkHumanSchedule = (e, id, agentId) => {
   cleanup(e);
 }
 
+// ===================== (I) card caca806c item 1(a), Code Review MAJOR ruling: an agent carrying its OWN
+// connections/capabilities grant REFUSES a rebind that changes its resolved role =====================
+// Covers all FOUR agent-facing rebind call sites this file already exercises above (Setup agent_update/
+// profile_assign, Platform agent_update/profile_assign, Manager assignAgentProfile). REST
+// (POST /api/agents/:id) is deliberately NOT covered here — human-only, same exemption shape as every
+// other rebind-time check in this file's own section (G) (acd3c688's schedule-provenance reset).
+// Each surface gets: the REFUSAL itself (no write), NEGATIVE CONTROL 1 (the SAME role-changing rebind on
+// a grant-FREE agent is allowed), and NEGATIVE CONTROL 2 (a role-UNCHANGED rebind on the SAME
+// grant-carrying agent is allowed — no divergence, nothing to refuse).
+
+// ---- (I-A) Setup agent_update ----
+{
+  const e = mkDb("caca-setup-agent-update");
+  const client = await mcpClient(new SetupMcpRouter(e.db, {}), "any-caller");
+  const call = (name, args) => client.callTool({ name, arguments: args }).then(parseMcp);
+  const workerProf = mkProfile(e, "prof-caca-sau-worker", { role: "worker" });
+  const workerProf2 = mkProfile(e, "prof-caca-sau-worker-2", { role: "worker" });
+  const managerProf = mkProfile(e, "prof-caca-sau-manager", { role: "manager" });
+  mkAgent(e, "agent-caca-sau-grant", "proj-caca-sau", "CacaSAU", workerProf, { connections: ["agent-conn-1"] });
+  mkAgent(e, "agent-caca-sau-nograd", "proj-caca-sau", "CacaSAU", workerProf);
+
+  const refusedA = await call("agent_update", { agentId: "agent-caca-sau-grant", profileId: managerProf });
+  check("(I-A) agent_update REFUSES a role-changing rebind on an agent carrying its own connections grant", !!refusedA.error && /connections/.test(refusedA.error));
+  check("(I-A) ...no write: the agent is still on the OLD profile", e.db.getAgent("agent-caca-sau-grant").profileId === workerProf);
+
+  const okA = await call("agent_update", { agentId: "agent-caca-sau-nograd", profileId: managerProf });
+  check("(I-A) NEGATIVE CONTROL 1: the SAME role-changing rebind on a grant-FREE agent is ALLOWED", !okA.error && e.db.getAgent("agent-caca-sau-nograd").profileId === managerProf);
+
+  const okA2 = await call("agent_update", { agentId: "agent-caca-sau-grant", profileId: workerProf2 });
+  check("(I-A) NEGATIVE CONTROL 2: a role-UNCHANGED rebind on the SAME grant-carrying agent is ALLOWED", !okA2.error && e.db.getAgent("agent-caca-sau-grant").profileId === workerProf2);
+  cleanup(e);
+}
+
+// ---- (I-B) Setup profile_assign ----
+{
+  const e = mkDb("caca-setup-profile-assign");
+  const client = await mcpClient(new SetupMcpRouter(e.db, {}), "any-caller");
+  const call = (name, args) => client.callTool({ name, arguments: args }).then(parseMcp);
+  const workerProf = mkProfile(e, "prof-caca-sap-worker", { role: "worker" });
+  const workerProf2 = mkProfile(e, "prof-caca-sap-worker-2", { role: "worker" });
+  const managerProf = mkProfile(e, "prof-caca-sap-manager", { role: "manager" });
+  mkAgent(e, "agent-caca-sap-grant", "proj-caca-sap", "CacaSAP", workerProf, { capabilities: [{ slug: "agent-cap-1" }] });
+  mkAgent(e, "agent-caca-sap-nograd", "proj-caca-sap", "CacaSAP", workerProf);
+
+  const refusedB = await call("profile_assign", { agentId: "agent-caca-sap-grant", profileId: managerProf });
+  check("(I-B) profile_assign REFUSES a role-changing rebind on an agent carrying its own capabilities grant", !!refusedB.error && /capabilities/.test(refusedB.error));
+  check("(I-B) ...no write: the agent is still on the OLD profile", e.db.getAgent("agent-caca-sap-grant").profileId === workerProf);
+
+  const okB = await call("profile_assign", { agentId: "agent-caca-sap-nograd", profileId: managerProf });
+  check("(I-B) NEGATIVE CONTROL 1: the SAME role-changing rebind on a grant-FREE agent is ALLOWED", !okB.error && e.db.getAgent("agent-caca-sap-nograd").profileId === managerProf);
+
+  const okB2 = await call("profile_assign", { agentId: "agent-caca-sap-grant", profileId: workerProf2 });
+  check("(I-B) NEGATIVE CONTROL 2: a role-UNCHANGED rebind on the SAME grant-carrying agent is ALLOWED", !okB2.error && e.db.getAgent("agent-caca-sap-grant").profileId === workerProf2);
+  cleanup(e);
+}
+
+// ---- (I-C) Platform agent_update + profile_assign ----
+{
+  const e = mkDb("caca-platform-rebind");
+  const client = await mcpClient(new PlatformMcpRouter(e.db, {}), "any-caller");
+  const call = (name, args) => client.callTool({ name, arguments: args }).then(parseMcp);
+  const workerProf = mkProfile(e, "prof-caca-pl-worker", { role: "worker" });
+  const workerProf2 = mkProfile(e, "prof-caca-pl-worker-2", { role: "worker" });
+  const assistantProf = mkProfile(e, "prof-caca-pl-assistant", { role: "assistant" });
+  mkAgent(e, "agent-caca-pl-update-grant", "proj-caca-pl", "CacaPL", workerProf, { connections: ["agent-conn-pl"] });
+  mkAgent(e, "agent-caca-pl-update-nograd", "proj-caca-pl", "CacaPL", workerProf);
+  mkAgent(e, "agent-caca-pl-assign-grant", "proj-caca-pl", "CacaPL", workerProf, { capabilities: [{ slug: "agent-cap-pl" }] });
+
+  const refusedC1 = await call("agent_update", { agentId: "agent-caca-pl-update-grant", profileId: assistantProf });
+  check("(I-C) Platform agent_update REFUSES a role-changing rebind on a grant-carrying agent", !!refusedC1.error && /connections/.test(refusedC1.error));
+  check("(I-C) ...no write", e.db.getAgent("agent-caca-pl-update-grant").profileId === workerProf);
+  const okC1 = await call("agent_update", { agentId: "agent-caca-pl-update-nograd", profileId: assistantProf });
+  check("(I-C) NEGATIVE CONTROL 1 (agent_update): the SAME role-changing rebind on a grant-FREE agent is ALLOWED", !okC1.error);
+  const okC1b = await call("agent_update", { agentId: "agent-caca-pl-update-grant", profileId: workerProf2 });
+  check("(I-C) NEGATIVE CONTROL 2 (agent_update): a role-UNCHANGED rebind on the SAME grant-carrying agent is ALLOWED", !okC1b.error);
+
+  const refusedC2 = await call("profile_assign", { agentId: "agent-caca-pl-assign-grant", profileId: assistantProf });
+  check("(I-C) Platform profile_assign REFUSES the same shape, naming capabilities", !!refusedC2.error && /capabilities/.test(refusedC2.error));
+  check("(I-C) ...no write", e.db.getAgent("agent-caca-pl-assign-grant").profileId === workerProf);
+  cleanup(e);
+}
+
+// ---- (I-D) Manager assignAgentProfile (direct SessionService call) ----
+{
+  const e = mkDb("caca-manager-rebind");
+  const now = e.now;
+  ensureProject(e, "pCacaD", "CacaD", { reserved: false });
+  const workerProf = mkProfile(e, "prof-caca-d-worker", { role: "worker" });
+  const workerProf2 = mkProfile(e, "prof-caca-d-worker-2", { role: "worker" });
+  const managerProf = mkProfile(e, "prof-caca-d-manager", { role: "manager" });
+  mkAgent(e, "agent-caca-d-grant", "pCacaD", "CacaD", workerProf, { connections: ["agent-conn-d"] });
+  mkAgent(e, "agent-caca-d-nograd", "pCacaD", "CacaD", workerProf);
+  e.db.insertSession({
+    id: "MCACAD", projectId: "pCacaD", agentId: "agent-caca-d-grant", engineSessionId: null, title: null, cwd: tmpHome,
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager", parentSessionId: null,
+  });
+  const svc = new SessionService(e.db, { enqueueStdin: () => ({ delivered: false }) }, new OrchestrationControl());
+
+  let threwD = null;
+  try { svc.assignAgentProfile("MCACAD", "agent-caca-d-grant", managerProf); } catch (err) { threwD = err; }
+  check("(I-D) assignAgentProfile REFUSES a role-changing rebind on a grant-carrying agent", threwD !== null && /connections/.test(threwD.message));
+  check("(I-D) ...the refusal names the human route", /Profiles\/Agents UI/.test(threwD.message));
+  check("(I-D) ...no write: still bound to the OLD profile", e.db.getAgent("agent-caca-d-grant").profileId === workerProf);
+
+  const okD = svc.assignAgentProfile("MCACAD", "agent-caca-d-nograd", managerProf);
+  check("(I-D) NEGATIVE CONTROL 1: the SAME role-changing rebind on a grant-FREE agent is ALLOWED", okD.profileId === managerProf);
+
+  const okD2 = svc.assignAgentProfile("MCACAD", "agent-caca-d-grant", workerProf2);
+  check("(I-D) NEGATIVE CONTROL 2: a role-UNCHANGED rebind on the SAME grant-carrying agent is ALLOWED", okD2.profileId === workerProf2);
+  cleanup(e);
+}
+
+// ===================== (J) card caca806c item 1(b): `rebindWideningFields`'s agentGrants fold — a
+// rebind onto a profile that merely NAMES a connection the agent already has via its OWN row must not
+// be reported as "adding" that connection. Unit-tested directly against `rebindWideningFields` (not
+// through a live MCP/manager surface): every real agent-facing rebind call site's own
+// `agentAssignableProfileError` entry gate refuses binding onto any NEW profile that itself carries a
+// non-empty connections/capabilities grant, which makes a false-positive widening on the NEW-profile
+// side structurally unreachable through those surfaces today — this proves the shared helper itself is
+// correct (defense-in-depth: a future caller, or a changed entry gate, can't silently reopen it). =====================
+{
+  const fakeDb = { getProfile: () => ({ connections: [], capabilities: [] }) }; // the OLD profile: grant-free
+  const agentGrants = { connections: ["agent-conn-j"], capabilities: [] };
+
+  // WITHOUT the fold (no agentGrants passed): the raw profile-only comparison sees [] -> ["agent-conn-j"]
+  // as a genuine widening — this is the OLD, pre-caca806c shape, kept here as the CONTRAST case.
+  const unfolded = rebindWideningFields(fakeDb, "old", { connections: ["agent-conn-j"], capabilities: [] });
+  check("(J) CONTRAST: without agentGrants, the raw profile-only before/after sees the connection as newly added",
+    JSON.stringify(unfolded.before.connections) === JSON.stringify([]) && JSON.stringify(unfolded.after.connections) === JSON.stringify(["agent-conn-j"]));
+
+  // WITH the fold: the agent ALREADY carries "agent-conn-j" via its own row, so BOTH before and after
+  // must already include it — the delta must disappear.
+  const folded = rebindWideningFields(fakeDb, "old", { connections: ["agent-conn-j"], capabilities: [] }, agentGrants);
+  check("(J) WITH agentGrants: before is folded to include the agent's own connection too",
+    JSON.stringify(folded.before.connections) === JSON.stringify(["agent-conn-j"]));
+  check("(J) ...and after is folded the SAME way, so before === after on this field (no genuine delta)",
+    JSON.stringify(folded.after.connections) === JSON.stringify(["agent-conn-j"]));
+
+  // NEGATIVE CONTROL: the new profile also names a connection the agent does NOT already carry via its
+  // own row — genuinely new reach, and the fold must NOT mask that.
+  const newProfileWithExtra = { connections: ["agent-conn-j", "really-new-conn"], capabilities: [] };
+  const foldedWithGenuineAdd = rebindWideningFields(fakeDb, "old", newProfileWithExtra, agentGrants);
+  check("(J) NEGATIVE CONTROL: a genuinely NEW connection (not carried by the agent) still shows up in 'after' post-fold",
+    foldedWithGenuineAdd.after.connections.includes("really-new-conn") && !foldedWithGenuineAdd.before.connections.includes("really-new-conn"));
+}
+
+// ===================== (J-REST) card caca806c round 3 item 3: the SAME `rebindWideningFields` fold,
+// through the REAL REST route this time — (J) above deliberately proved the bare helper only, because
+// every agent-facing MCP surface's own entry gate (`agentAssignableProfileError`) refuses binding onto a
+// NEW profile that itself carries a grant, making the false-positive-widening scenario structurally
+// unreachable there. REST (`POST /api/agents/:id`) is human-authorized and has NO such entry gate, so
+// this scenario is actually reachable here if the REST call site ever forgets to pass `agentGrants`.
+{
+  const e = mkDb("rest-rebind-fold");
+  const oldProf = mkProfile(e, "prof-rest-fold-old", { role: "worker" }); // grant-free
+  const newProfSameConn = mkProfile(e, "prof-rest-fold-new", { role: "worker", connections: ["agent-conn-j2"] });
+  mkAgent(e, "agent-rest-fold-a", "proj-rest-fold", "RestFoldA", oldProf, { connections: ["agent-conn-j2"] });
+  const app = await mkApp(e);
+
+  const res = await app.inject({ method: "POST", url: "/api/agents/agent-rest-fold-a", payload: { profileId: newProfSameConn } });
+  check("(J-REST) POST -> 200", res.statusCode === 200);
+  const body = JSON.parse(res.payload);
+  check("(J-REST) a rebind onto a profile naming a connection the agent ALREADY carries on its own row reports NO new widening (the fold applies through the real REST route, not just the bare helper)",
+    body.rebindReach === undefined);
+
+  // NEGATIVE CONTROL: a DIFFERENT agent, same starting shape, rebinding onto a profile that ALSO names a
+  // connection it does NOT already carry — the fold must not mask a genuinely new grant.
+  const newProfExtra = mkProfile(e, "prof-rest-fold-extra", { role: "worker", connections: ["agent-conn-j2", "really-new-conn-rest"] });
+  mkAgent(e, "agent-rest-fold-b", "proj-rest-fold", "RestFoldB", oldProf, { connections: ["agent-conn-j2"] });
+  const res2 = await app.inject({ method: "POST", url: "/api/agents/agent-rest-fold-b", payload: { profileId: newProfExtra } });
+  check("(J-REST) POST -> 200", res2.statusCode === 200);
+  const body2 = JSON.parse(res2.payload);
+  check("(J-REST) NEGATIVE CONTROL: a genuinely new connection (not carried by the agent) still reports via rebindReach",
+    body2.rebindReach?.addedKeys?.includes("connections") === true);
+
+  cleanup(e);
+}
+
+// MUTANT PROOF (lesson 298/319; run BY HAND, same posture as this file's own documented RED-FIRST
+// proofs — NOT wired into this automated run; ESM named exports are read-only, so an in-process
+// monkeypatch of `agentCredentialGrantRoleChangeOnRebindError` is not possible here): with its call
+// removed from all five rebind call sites (reverting to the pre-fix shape), re-running (I-A)..(I-D)
+// flips each REFUSAL above to a successful, unrefused rebind — see the worker_report for this round's
+// run of that recipe.
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an agent REBIND onto a different, already-existing profile now files an agent_profile_rebind audit event (with a rebindReach response field) on every surface (setup/platform/manager/REST); the manager's agent_assign_profile REFUSES a restrictedTools removal via rebind with no write (its ONLY route to that axis), while Setup/Platform/REST stay audit-only by design (Setup's own round-1 guard was reversed — it was bypassable via profile_update); the event survives deleteAgent's cascade; and (round 3, card acd3c688) every AGENT-surface rebind resets a createdBy:human schedule targeting that agent to createdBy:agent, never touching a sibling schedule on a different agent or a HUMAN REST rebind — claude-free, network-free."
+  ? "\n✅ ALL PASS — an agent REBIND onto a different, already-existing profile now files an agent_profile_rebind audit event (with a rebindReach response field) on every surface (setup/platform/manager/REST); the manager's agent_assign_profile REFUSES a restrictedTools removal via rebind with no write (its ONLY route to that axis), while Setup/Platform/REST stay audit-only by design (Setup's own round-1 guard was reversed — it was bypassable via profile_update); the event survives deleteAgent's cascade; (round 3, card acd3c688) every AGENT-surface rebind resets a createdBy:human schedule targeting that agent to createdBy:agent, never touching a sibling schedule on a different agent or a HUMAN REST rebind; (card caca806c) an agent carrying its own connections/capabilities grant REFUSES a role-changing rebind on every agent-facing surface (setup/platform/manager), with a role-unchanged or grant-free rebind unaffected; and (card caca806c item 1(b)) rebindWideningFields' agentGrants fold prevents a profile rebind from being mis-reported as newly granting a connection/capability the agent already carried on its own row, while a genuinely new one still shows up — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 cleanupPathSync(tmpHome);
 process.exit(failures === 0 ? 0 : 1);

@@ -122,6 +122,65 @@ check("(b) absent profile (undefined) ⇒ same backstop",
   backstopUndef.role === null && backstopUndef.startupPrompt === "p" &&
   backstopUndef.allow.length === 0 && backstopUndef.skills === null);
 
+// --- (d) resolveProfile connections/capabilities: the UNION of profile + agent grants (card caca806c)
+// Owner correction 2026-11-04: an agent-level grant is ADDITIVE on top of the profile's — a landed
+// commit must never stop honouring an EXISTING profile-level grant. Fan-out migration afe1bc90 retires
+// the profile-level fields later; until then BOTH must resolve. -----------------------------------
+const unionProfile = {
+  id: "profUnion", name: "UnionRig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null,
+  connections: ["connProfileOnly", "connShared"],
+  capabilities: [{ slug: "cap-profile-only" }, { slug: "cap-shared", connectionId: "connShared" }],
+};
+
+// (i) a profile-level grant reaches EVERY agent on the profile — proven against TWO separate
+// agent-shaped inputs (not a one-agent fluke), each carrying no agent-level grant of its own.
+const sibling1 = resolveProfile({ startupPrompt: "" }, unionProfile);
+const sibling2 = resolveProfile({ startupPrompt: "" }, unionProfile);
+check("(d-i) profile connections reach sibling agent #1", JSON.stringify(sibling1.connections) === JSON.stringify(["connProfileOnly", "connShared"]));
+check("(d-i) profile connections reach sibling agent #2 too (every agent on the profile, not one)", JSON.stringify(sibling2.connections) === JSON.stringify(["connProfileOnly", "connShared"]));
+check("(d-i) profile capabilities reach sibling agents", sibling1.capabilities.some((g) => g.slug === "cap-profile-only") && sibling2.capabilities.some((g) => g.slug === "cap-profile-only"));
+
+// (ii) an agent-level grant reaches ONLY the granted agent — the siblings above (same profile, no
+// agent-level grant) must never see it.
+const granted = resolveProfile(
+  { startupPrompt: "", connections: ["connAgentOnly", "connShared"], capabilities: [{ slug: "cap-agent-only" }, { slug: "cap-shared", connectionId: "connShared" }] },
+  unionProfile,
+);
+check("(d-ii) the granted agent's own connection grant resolves", granted.connections.includes("connAgentOnly"));
+check("(d-ii) the granted agent's own grant does NOT leak to sibling agents on the same profile", !sibling1.connections.includes("connAgentOnly") && !sibling2.connections.includes("connAgentOnly"));
+check("(d-ii) same for capabilities: the agent-only grant does not leak to siblings", !sibling1.capabilities.some((g) => g.slug === "cap-agent-only") && !sibling2.capabilities.some((g) => g.slug === "cap-agent-only"));
+
+// Union + de-dupe: the granted agent sees BOTH halves (additive, never replacing), profile-order-first,
+// and a grant present on BOTH sides collapses to exactly one entry (never doubled).
+check("(d) the granted agent sees its own grant AND the profile's (additive union)",
+  granted.connections.includes("connAgentOnly") && granted.connections.includes("connProfileOnly"));
+check("(d) a connection id granted on BOTH profile and agent de-duplicates to one entry",
+  granted.connections.filter((c) => c === "connShared").length === 1);
+check("(d) union order is profile-first, then the agent's own",
+  JSON.stringify(granted.connections) === JSON.stringify(["connProfileOnly", "connShared", "connAgentOnly"]));
+check("(d) a capability grant present on BOTH sides with the IDENTICAL connectionId de-duplicates to one entry",
+  granted.capabilities.filter((g) => g.slug === "cap-shared").length === 1);
+
+// Code Review round (card caca806c item 3): capability identity now keys on SLUG ALONE, never
+// slug+connectionId — pty/host.ts mounts one MCP server per slug (last write wins), so an agent grant
+// re-binding the SAME slug to a DIFFERENT connection must collapse to exactly ONE entry, and the
+// PROFILE's own binding wins (profile-first). The OLD behaviour (two distinct entries, keyed on
+// slug+connectionId) is exactly the shape that let the two race for which connection actually mounted.
+const rebindProfile = { ...unionProfile, capabilities: [{ slug: "cap-rebind", connectionId: "connA" }] };
+const rebound = resolveProfile({ startupPrompt: "", capabilities: [{ slug: "cap-rebind", connectionId: "connB" }] }, rebindProfile);
+check("(d) a capability re-bound to a DIFFERENT connection on the agent COLLAPSES to ONE entry (slug-only dedup)",
+  rebound.capabilities.filter((g) => g.slug === "cap-rebind").length === 1);
+check("(d) ...and the surviving entry is the PROFILE's own binding (profile-first), not the agent's",
+  rebound.capabilities.find((g) => g.slug === "cap-rebind")?.connectionId === "connA");
+
+// Null/absent profile: nothing to union with — the agent's own grants stand alone (pre-existing
+// backstop behaviour, unaffected by this change).
+const noProfile = resolveProfile({ startupPrompt: "", connections: ["connSolo"], capabilities: [{ slug: "cap-solo" }] }, null);
+check("(d) a null profile leaves the agent's own connections standing alone",
+  JSON.stringify(noProfile.connections) === JSON.stringify(["connSolo"]));
+check("(d) a null profile leaves the agent's own capabilities standing alone",
+  noProfile.capabilities.length === 1 && noProfile.capabilities[0].slug === "cap-solo");
+
 // --- (c) bundled profiles seed: present, correct roles, idempotent ---------------------------
 const seeded1 = seedDefaultProfiles(db3);
 check("(c) first seed returns every bundled profile name",

@@ -31,7 +31,7 @@ import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { splitGateSteps, gateCommandFieldWarnings } from "../orchestration/gate-runner.js";
-import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, agentLockedRoleSkillsError, roleChangeLockedSkillsCarryoverError, HARNESS_ID_SCHEMA, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, agentAssignableProfileError, agentCredentialGrantRoleChangeOnRebindError, roleChangeCapabilityCarryoverError, boundAgentCredentialGrantRoleChangeError, agentLockedRoleSkillsError, roleChangeLockedSkillsCarryoverError, HARNESS_ID_SCHEMA, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore, cloneSourceFieldError, reservedProjectManagerProfileError, reservedProjectAgentBoundToProfile, nonReservedElevatedProfileError, nonReservedAgentBoundToProfile } from "../agents/clone-core.js";
@@ -1523,7 +1523,11 @@ export class PlatformMcpRouter {
             const nonReservedErr = nonReservedElevatedProfileError(db.getProject(resolved.projectId), newProfile);
             if (nonReservedErr) return ok({ error: nonReservedErr });
           }
-          const { before: beforeFields, after: afterFields } = rebindWideningFields(db, resolved.profileId, newProfile);
+          const { before: beforeFields, after: afterFields } = rebindWideningFields(db, resolved.profileId, newProfile, resolved);
+          // @decision caca806c — an agent carrying its own connections/capabilities grant refuses a
+          // rebind that changes its resolved role.
+          const grantRoleErr = agentCredentialGrantRoleChangeOnRebindError(resolved, beforeFields.role, afterFields.role);
+          if (grantRoleErr) return ok({ error: grantRoleErr });
           rebindReach = recordAgentProfileRebindReach(db, {
             agentId: resolved.id, agentName: resolved.name, projectId: resolved.projectId,
             before: beforeFields, after: afterFields, source: "platform",
@@ -2168,7 +2172,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not set a non-empty `skills` subset while the RESOLVED role is elevated/locked (platform/setup/assistant/operator/auditor/workspace-auditor) — an explicit subset bypasses the locked-role skill-trust filter, so it's human-only there too; clearing `skills` (null/[]) is always fine, even on a locked role. A role CHANGE into a locked role is ALSO rejected if the resulting (post-patch) `skills` would still be a non-empty subset — e.g. setting `skills` while unlocked, then flipping `role` to locked in a later call that never mentions `skills`; flip and clear in the SAME call to do both at once. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. A `role` CHANGE is REJECTED outright if the stored profile carries any of those human-set capabilities — carrying e.g. browserTesting onto a role nobody reviewed it for (changing a QA-Tester-shaped rig to \"assistant\") is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. Conversely, flipping `role` to any OTHER elevated/locked role (platform/auditor/workspace-auditor/operator/setup — \"assistant\" exempt) is REJECTED if this profile is already bound to an agent OUTSIDE a reserved/system project. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged. BLAST-RADIUS SIGNAL: a `role` CHANGE, or flipping `restrictedTools` false (removing a rig's tool restriction) — including on an elevated/locked-role profile, e.g. a Companion — on a profile that already has bound agents reaches each of them on their NEXT session; the response then carries a `grantReach` field ({addedKeys, agentCount, agents[], roleChange?}) naming exactly who. RELAY THIS to whoever asked for the change — there is no human-facing confirm on this surface, so your relay is the only signal a human gets.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not set a non-empty `skills` subset while the RESOLVED role is elevated/locked (platform/setup/assistant/operator/auditor/workspace-auditor) — an explicit subset bypasses the locked-role skill-trust filter, so it's human-only there too; clearing `skills` (null/[]) is always fine, even on a locked role. A role CHANGE into a locked role is ALSO rejected if the resulting (post-patch) `skills` would still be a non-empty subset — e.g. setting `skills` while unlocked, then flipping `role` to locked in a later call that never mentions `skills`; flip and clear in the SAME call to do both at once. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. A `role` CHANGE is REJECTED outright if the stored profile carries any of those human-set capabilities — carrying e.g. browserTesting onto a role nobody reviewed it for (changing a QA-Tester-shaped rig to \"assistant\") is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). A `role` CHANGE is ALSO REJECTED if ANY agent currently bound to this profile carries its own agent-level `connections`/`capabilities` grant — the profile's own fields can be grant-free while a bound agent still carries one; checked independently of the profile-level check above. Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. Conversely, flipping `role` to any OTHER elevated/locked role (platform/auditor/workspace-auditor/operator/setup — \"assistant\" exempt) is REJECTED if this profile is already bound to an agent OUTSIDE a reserved/system project. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged. BLAST-RADIUS SIGNAL: a `role` CHANGE, or flipping `restrictedTools` false (removing a rig's tool restriction) — including on an elevated/locked-role profile, e.g. a Companion — on a profile that already has bound agents reaches each of them on their NEXT session; the response then carries a `grantReach` field ({addedKeys, agentCount, agents[], roleChange?}) naming exactly who. RELAY THIS to whoever asked for the change — there is no human-facing confirm on this surface, so your relay is the only signal a human gets.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
@@ -2191,6 +2195,12 @@ export class PlatformMcpRouter {
         // human-set capability (checked against `existing`, pre-patch — see the decision record).
         const carryoverErr = roleChangeCapabilityCarryoverError(existing.role, v.value.role, existing);
         if (carryoverErr) return ok({ error: carryoverErr });
+        // @decision caca806c (round 3, item 2) — the PROFILE's own fields can be grant-free while a
+        // bound AGENT still carries its own; checked separately from the profile-level check above.
+        const boundAgentGrantErr = boundAgentCredentialGrantRoleChangeError(
+          db.listAllAgents().filter((a) => a.profileId === profileId), existing.role, v.value.role,
+        );
+        if (boundAgentGrantErr) return ok({ error: boundAgentGrantErr });
         // @decision 509176c8 — a non-empty explicit `skills` subset is human-only on a locked role.
         const skillsErr = agentLockedRoleSkillsError(patchNoId, v.value.role);
         if (skillsErr) return ok({ error: skillsErr });
@@ -2252,7 +2262,11 @@ export class PlatformMcpRouter {
         const nonReservedErr = nonReservedElevatedProfileError(db.getProject(agent.projectId), profile);
         if (nonReservedErr) return ok({ error: nonReservedErr });
         // @decision 8b236b22 — audit-only (no additional guard) for this surface; see agent_update's own.
-        const { before: beforeFields, after: afterFields } = rebindWideningFields(db, agent.profileId, profile);
+        const { before: beforeFields, after: afterFields } = rebindWideningFields(db, agent.profileId, profile, agent);
+        // @decision caca806c — an agent carrying its own connections/capabilities grant refuses a
+        // rebind that changes its resolved role.
+        const grantRoleErr = agentCredentialGrantRoleChangeOnRebindError(agent, beforeFields.role, afterFields.role);
+        if (grantRoleErr) return ok({ error: grantRoleErr });
         const rebindReach = recordAgentProfileRebindReach(db, {
           agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
           before: beforeFields, after: afterFields, source: "platform",
@@ -2274,7 +2288,7 @@ export class PlatformMcpRouter {
           "Reuses the human DELETE /api/profiles/:id service path exactly (db.deleteProfile): SAFE for any " +
           "agent still assigned it — NO in-use guard, a dangling profileId simply resolves to the plain " +
           "backstop (resolveProfile), and a bundled profile re-seeds on next boot, so this is non-destructive " +
-          "to assigned agents (matches the REST path — it does not refuse an in-use profile). 404 (\"profile " +
+          "to assigned agents (matches the REST path — it does not refuse an in-use profile) EXCEPT one case: REFUSED when the profile's role is non-null and an agent bound to it carries its own human-set connections/capabilities grant, since deleting it would drop that agent to no role (ask the human). 404 (\"profile " +
           "not found\") if the id is unknown — a no-op write is avoided (the schedule_delete precedent; the " +
           "raw REST endpoint itself is a blind idempotent delete). FULL id required (no 8-char prefix, like " +
           "profile_create/profile_update). BLAST-RADIUS SIGNAL: that backstop can itself WIDEN " +
@@ -2291,6 +2305,12 @@ export class PlatformMcpRouter {
         // Blast radius (card be447b3f): deletion is itself a widening write path, not just update — routed
         // through the SHARED delete helpers alongside the manager's own profile_delete and the human REST
         // route, so this can never drift from either of them.
+        // @decision caca806c (round 4) — deleting a role-bearing profile drops each bound agent to role
+        // null; refuse when any carries its own grant (same predicate as profile_update's role change).
+        const boundAgentGrantErr = boundAgentCredentialGrantRoleChangeError(
+          db.listAllAgents().filter((a) => a.profileId === profileId), existing.role, null,
+        );
+        if (boundAgentGrantErr) return ok({ error: boundAgentGrantErr });
         // @decision 8fd36112 — compute BEFORE delete, file only after it succeeds.
         const grantReach = computeProfileDeleteGrantReach(db, { profileId, existing });
         db.deleteProfile(profileId);

@@ -150,6 +150,27 @@ export interface Agent {
    * non-endpoint agent). Stored verbatim as a JSON value.
    */
   ioSchema: unknown | null;
+  /**
+   * Agent-tooling epic (card caca806c): THE canonical home for an authenticated-egress connection-id
+   * allowlist — moved here from `Profile.connections` because a Profile is a shared, cross-project rig
+   * (one profile can bind dozens of agents) while a Connection is already PROJECT-scoped; a profile-level
+   * grant either reached every agent on a shared rig or forced a project-specific profile fork. Default
+   * OFF (absent/empty — NOT "all", same secure-default direction the field had on the profile). Resolved
+   * at spawn by `resolveProfile` (alongside the profile's credential-free fields) and pinned onto the
+   * session row exactly like the profile-sourced version was. HUMAN-set only: the agent-edit REST surface
+   * (`POST /api/agents/:id`) is the ONLY write path — no MCP tool (`agent_create`/`agent_update` on any
+   * router) ever declares this key, so an agent-facing payload naming it is rejected before it reaches
+   * `agents/validate.ts`. NEVER copied by clone (`createAgentCore`'s literal omits it, mirroring
+   * `endpoint`/`ioSchema`) — a clone into another project would either be dead or a silently widened
+   * grant.
+   */
+  connections?: string[];
+  /**
+   * Agent-tooling epic (card caca806c): THE canonical home for registry-capability grants — moved here
+   * WHOLESALE from `Profile.capabilities` (no profile/agent split within one grant). Same reasoning,
+   * trust posture, and clone-exclusion as `connections` above.
+   */
+  capabilities?: CapabilityGrant[];
 }
 
 /** An agent enriched with its project name — for a global "Project / Agent" label map (god-eye pickers). */

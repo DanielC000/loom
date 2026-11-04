@@ -1910,6 +1910,41 @@ export function resolveProfileCapabilities(p: { browserTesting?: boolean; docume
 }
 
 /**
+ * Union two connection-id allowlists, profile order first, de-duplicated. Card `caca806c`: a landed
+ * commit may never stop honouring an EXISTING profile-level grant, so the agent-level field (card
+ * `caca806c`'s own new surface) is additive on top of the profile's, never a replacement for it — until
+ * the fan-out migration (card `afe1bc90`) moves every profile grant onto its agents and retires this.
+ */
+export function unionConnections(profileConns: readonly string[], agentConns: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const c of [...profileConns, ...agentConns]) {
+    if (!seen.has(c)) { seen.add(c); out.push(c); }
+  }
+  return out;
+}
+
+/**
+ * Capability-grant sibling of {@link unionConnections} — de-duplicated by SLUG ALONE, profile order
+ * first (Code Review round, card `caca806c` item 3): `pty/host.ts`'s `buildMcpServers` mounts one MCP
+ * server per slug (`mcpServers[def.slug] = server` — last write wins), so a profile grant and an agent
+ * grant for the SAME slug but DIFFERENT bound connections would otherwise both survive this union (the
+ * old dedup key was `capabilityGrantKey`, slug + connectionId) and silently race for which one actually
+ * gets mounted. Deliberately NOT `capabilityGrantKey` — that key stays correct for `hasNewEntry`'s
+ * "is this a NEW grant" check (`profileGrants.ts`), a different question this union never asks. Profile
+ * order first means a profile's own binding for a slug always wins over an agent-level one naming the
+ * same slug — enforced at WRITE time too, see `agentCapabilityProfileCollisionError` (agents/validate.ts).
+ */
+export function unionCapabilities(profileCaps: readonly CapabilityGrant[], agentCaps: readonly CapabilityGrant[]): CapabilityGrant[] {
+  const seen = new Set<string>();
+  const out: CapabilityGrant[] = [];
+  for (const g of [...profileCaps, ...agentCaps]) {
+    if (!seen.has(g.slug)) { seen.add(g.slug); out.push(g); }
+  }
+  return out;
+}
+
+/**
  * Resolve an agent + its (optional) Profile into the effective spawn shape — the sibling of
  * resolveConfig for the "who". Clean separation of jobs: the **injected startup prompt ALWAYS comes
  * from the agent** (`agent.startupPrompt ?? ""`; an empty prompt = a session that boots but is inert,
@@ -1920,14 +1955,21 @@ export function resolveProfileCapabilities(p: { browserTesting?: boolean; docume
  * session, no allow delta / skill filter / model / icon, the agent's own prompt verbatim.
  */
 export function resolveProfile(
-  agent: { startupPrompt: string | null },
+  agent: { startupPrompt: string | null; connections?: string[] | null; capabilities?: CapabilityGrant[] | null },
   profile?: Profile | null,
 ): ResolvedProfile {
   // The injected prompt is sourced from the agent regardless of whether a profile is present.
   const startupPrompt = agent.startupPrompt ?? "";
+  // Card caca806c: connections/capabilities are now the UNION of the profile's grants (the pre-existing
+  // surface) and the agent's own grants (the new, additive surface) — never agent-only. A profile-level
+  // grant must keep reaching every agent on it until card afe1bc90's fan-out migration retires the
+  // profile-level fields; see unionConnections/unionCapabilities above.
+  const agentConnections = agent.connections ?? [];
+  const agentCapabilities = agent.capabilities ?? [];
   if (!profile) {
-    // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [], vaultWrite: false, capabilities: [], harness: null };
+    // The backstop: a null/absent profile confers NO browser/document capability (false) — today's
+    // behavior. No profile also means nothing to union with — the agent's own grants stand alone.
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: agentConnections, vaultWrite: false, capabilities: agentCapabilities, harness: null };
   }
   return {
     role: profile.role ?? null,
@@ -1943,12 +1985,13 @@ export function resolveProfile(
     restrictedTools: profile.restrictedTools ?? false,
     // Declared no-commit role (lifecycle-only; no spawn-time effect). Backstop false.
     noCommit: profile.noCommit ?? false,
-    // Authenticated-egress connection-id allowlist. Backstop [] (NOT "all" — the secure default).
-    connections: profile.connections ?? [],
+    // Authenticated-egress connection-id allowlist — the UNION of the profile's + the agent's own (see
+    // above). Backstop [] (NOT "all" — the secure default).
+    connections: unionConnections(profile.connections ?? [], agentConnections),
     // Confined vault-write grant for the vault_write tool. Backstop false.
     vaultWrite: profile.vaultWrite ?? false,
-    // Registry-capability grants — RAW passthrough (see the field doc on ResolvedProfile). Backstop [].
-    capabilities: profile.capabilities ?? [],
+    // Registry-capability grants — the UNION of the profile's + the agent's own (see above). Backstop [].
+    capabilities: unionCapabilities(profile.capabilities ?? [], agentCapabilities),
     // Multi-harness epic (df1f94b0) Phase 1: which vendor CLI to spawn. Backstop null (engine default,
     // "claude") — mirrors model's null-backstop shape, not a boolean-flag backstop.
     harness: profile.harness ?? null,

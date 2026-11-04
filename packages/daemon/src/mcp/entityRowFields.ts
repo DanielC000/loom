@@ -74,6 +74,9 @@ export function projectFields(row: Project | undefined): Project | undefined {
 const AGENT_FIELDS: Record<keyof Agent, 1> = {
   id: 1, projectId: 1, name: 1, startupPrompt: 1, position: 1, profileId: 1,
   endpoint: 1, ioSchema: 1,
+  // Card caca806c: ids only (never a secret) — same disclosure posture authenticated_request's own
+  // tool description already gives an agent about its OWN usable connections.
+  connections: 1, capabilities: 1,
 };
 const AGENT_KEYS = Object.keys(AGENT_FIELDS) as (keyof Agent)[];
 

@@ -17,7 +17,7 @@ import {
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, isForcedRoleFreshStart, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
-import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError, explicitRoleGrantCarryoverError, sessionSkillsForRole, lockedRoleSkillsDroppedReason } from "../profiles/validate.js";
+import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError, agentCredentialGrantRoleChangeOnRebindError, boundAgentCredentialGrantRoleChangeError, explicitRoleGrantCarryoverError, sessionSkillsForRole, lockedRoleSkillsDroppedReason } from "../profiles/validate.js";
 import { computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
@@ -3683,12 +3683,22 @@ export class SessionService {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
-    const resolved = resolveProfile(agent, profile);
+    const resolvedWithAgentGrants = resolveProfile(agent, profile);
+    // @decision caca806c (round 4) — a plain spawn is role-null AND unrestricted, so it drops BOTH grant
+    // sources: the profile's (never looked up above) and the AGENT ROW's own (which resolveProfile's
+    // no-profile backstop would otherwise still hand back). Stripped here, at the one chokepoint.
+    const resolved = forcePlain
+      ? { ...resolvedWithAgentGrants, connections: [], capabilities: [] }
+      : resolvedWithAgentGrants;
     if (!opts?.skipGrantCarryoverCheck && !opts?.spawnHumanAuthorized) {
       const carryoverError = explicitRoleGrantCarryoverError(resolved.role, explicitRole, {
         connections: resolved.connections, capabilities: resolved.capabilities, vaultWrite: resolved.vaultWrite,
         harness: resolved.harness ?? undefined, browserTesting: resolved.browserTesting,
         documentConversion: resolved.documentConversion, allowDelta: resolved.allow,
+      }, {
+        // @decision caca806c (round 3) — the AGENT ROW's own raw grants, not the resolved (unioned)
+        // fields above — the null→worker check must see the agent's grant regardless of profile presence.
+        connections: agent.connections, capabilities: agent.capabilities,
       });
       if (carryoverError) throw new Error(carryoverError);
     }
@@ -18464,8 +18474,11 @@ export class SessionService {
    * @decision d25e4ea7 — also refuses a manager-role profile when the agent's project is barred
    * (`managerSessionBarredFrom`) — defense-in-depth; not reachable via a live manager spawn today.
    * @decision 8b236b22 — this is the manager's ONLY route to touch restrictedTools on an agent (no
-   * profile_update tool exists on this surface), so a rebind REFUSES a restrictedTools removal; any
+   * profile_update tool exists on this surface), so a rebind REFUSES a restrictedTools removal; most
    * other widening (e.g. role) is allowed and audited via `rebindReach`.
+   *
+   * @decision caca806c — an EXCEPTION to that: a role change is also REFUSED when the agent itself
+   * carries a connections/capabilities grant.
    */
   assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent & { rebindReach?: AgentRebindReach } {
     this.requireManager(managerSessionId, "agent_assign_profile");
@@ -18481,9 +18494,13 @@ export class SessionService {
       if (reservedErr) throw new Error(reservedErr);
       newProfile = profile;
     }
-    const { before: beforeFields, after: afterFields } = rebindWideningFields(this.db, agent.profileId, newProfile);
+    const { before: beforeFields, after: afterFields } = rebindWideningFields(this.db, agent.profileId, newProfile, agent);
     const restrictedErr = agentRebindRestrictedToolsWideningError(beforeFields, afterFields);
     if (restrictedErr) throw new Error(restrictedErr);
+    // @decision caca806c — an agent carrying its own connections/capabilities grant refuses a rebind that
+    // changes its resolved role; checked before the write, like restrictedErr above.
+    const grantRoleErr = agentCredentialGrantRoleChangeOnRebindError(agent, beforeFields.role, afterFields.role);
+    if (grantRoleErr) throw new Error(grantRoleErr);
     const rebindReach = recordAgentProfileRebindReach(this.db, {
       agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
       before: beforeFields, after: afterFields, source: "manager",
@@ -18682,6 +18699,12 @@ export class SessionService {
       const blockers = external.map(({ agent, project }) => `${agent.name} (${agent.id}) in project ${project.name} (${project.id})`).join(", ");
       throw new Error(`profile_delete: profile is still referenced by agents outside your project — ${blockers}`);
     }
+    // @decision caca806c (round 4) — deleting a role-bearing profile drops each bound agent to role null;
+    // refuse when any carries its own grant (same predicate as profile_update's role change).
+    const boundAgentGrantErr = boundAgentCredentialGrantRoleChangeError(
+      this.db.listAllAgents().filter((a) => a.profileId === profileId), existing.role, null,
+    );
+    if (boundAgentGrantErr) throw new Error(boundAgentGrantErr);
     // @decision 8fd36112 — compute BEFORE delete, file only after it succeeds.
     const grantReach = computeProfileDeleteGrantReach(this.db, { profileId, existing });
     this.db.deleteProfile(profileId);

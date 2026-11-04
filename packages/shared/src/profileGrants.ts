@@ -96,9 +96,10 @@ const GRANT_ADDED: Record<
   harness: (b, a) => isDefaultHarness(b.harness) && !isDefaultHarness(a.harness),
 };
 
-/** A capability grant's identity for "is this new": the slug, plus the connection it is bound to — a
- *  re-bind onto a DIFFERENT connection hands the rig a credential it did not have before. */
-function capabilityGrantKey(g: { slug: string; connectionId?: string }): string {
+/** A capability grant's identity for "is this new" (and for de-duplicating a union of grants, card
+ *  `caca806c`): the slug, plus the connection it is bound to — a re-bind onto a DIFFERENT connection
+ *  hands the rig a credential it did not have before. */
+export function capabilityGrantKey(g: { slug: string; connectionId?: string }): string {
   return `${g.slug}\u0000${g.connectionId ?? ""}`;
 }
 

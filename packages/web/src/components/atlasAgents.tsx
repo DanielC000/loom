@@ -506,7 +506,7 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
   // until the query settles so an end user never flashes a dev-layer rig mid-load.
   const platformHomeQ = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
   const isDev = platformHomeQ.isSuccess && !!platformHomeQ.data?.project;
-  const { create, update, remove } = useAgentWrites(projectId, {
+  const { create, update, saveGrants, remove } = useAgentWrites(projectId, {
     onCreated: (agent) => setEditing(agent.id),
     onDeleted: onClose,
   });
@@ -537,8 +537,11 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
             liveCount={liveCount}
             onAssignProfile={(profileId) => update.mutate({ id: agent.id, patch: { profileId } })}
             onSavePrompt={(startupPrompt) => update.mutate({ id: agent.id, patch: { startupPrompt } })}
+            onSaveGrants={(patch) => saveGrants.mutate({ id: agent.id, patch })}
             onDelete={() => remove.mutate(agent.id)}
-            saving={update.isPending} deleting={remove.isPending} />
+            saving={update.isPending} savingGrants={saveGrants.isPending} grantsError={saveGrants.error as Error | null}
+            grantsErrorAgentId={saveGrants.variables?.id}
+            deleting={remove.isPending} />
         ) : (
           // Not "loading": the agent may equally have been deleted from another surface while this
           // was open, and the editor has nothing to show either way.

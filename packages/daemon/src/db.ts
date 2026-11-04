@@ -379,7 +379,12 @@ CREATE TABLE IF NOT EXISTS agents (
   -- legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0 (not an endpoint). Fully additive —
   -- the flag changes NO spawn behavior. io_schema is an OPTIONAL JSON blob (NULL on non-endpoint agents).
   endpoint INTEGER NOT NULL DEFAULT 0,
-  io_schema TEXT
+  io_schema TEXT,
+  -- Card caca806c: THE canonical home for the authenticated-egress connection-id allowlist + registry-
+  -- capability grants (moved off profiles -- a profile is a shared cross-project rig, a Connection is
+  -- already project-scoped). [] = no access (NOT "all"), mirrors the profile columns' own default/shape.
+  connections TEXT NOT NULL DEFAULT '[]',
+  capabilities TEXT NOT NULL DEFAULT '[]'
 );
 -- Agent Runs R1: project-scoped API keys (durable, hashed at rest — NEVER plaintext). The secret is a
 -- salted SHA-256 (salt+hash columns); the plaintext is shown to the human ONCE at create/rotate. A key
@@ -2266,6 +2271,9 @@ const AGENT_ADDED_COLUMNS: Record<string, string> = {
   // COLUMN, so legacy rows backfill to endpoint=0) + an optional JSON I/O schema blob (NULL on legacy).
   endpoint: "INTEGER NOT NULL DEFAULT 0",
   io_schema: "TEXT",
+  // Card caca806c: see the CREATE TABLE comment above — same columns, added here for an existing DB.
+  connections: "TEXT NOT NULL DEFAULT '[]'",
+  capabilities: "TEXT NOT NULL DEFAULT '[]'",
 };
 
 /** Columns added to `profiles` after the initial rig schema; applied to existing DBs by migrateProfiles(). */
@@ -6187,8 +6195,8 @@ export class Db {
   }
   insertAgent(a: Agent): void {
     this.db.prepare(
-      `INSERT INTO agents (id,project_id,name,startup_prompt,position,profile_id,endpoint,io_schema)
-       VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId,@endpoint,@ioSchema)`,
+      `INSERT INTO agents (id,project_id,name,startup_prompt,position,profile_id,endpoint,io_schema,connections,capabilities)
+       VALUES (@id,@projectId,@name,@startupPrompt,@position,@profileId,@endpoint,@ioSchema,@connections,@capabilities)`,
     ).run({
       ...a, profileId: a.profileId ?? null,
       // @decision e7dabf95 — STRIP (never reject) startupPrompt here: boot-time seeding/cloning callers
@@ -6197,6 +6205,10 @@ export class Db {
       // Agent Runs R1: absent on plain phase-1/2 agent literals ⇒ endpoint 0 + io_schema NULL (additive).
       endpoint: a.endpoint ? 1 : 0,
       ioSchema: a.ioSchema == null ? null : JSON.stringify(a.ioSchema),
+      // Card caca806c: absent on every existing caller (createAgentCore never sets these — see that
+      // function's own doc on why clone never copies them) ⇒ '[]' (additive, no access).
+      connections: JSON.stringify(a.connections ?? []),
+      capabilities: JSON.stringify(a.capabilities ?? []),
     });
   }
   /**
@@ -6205,7 +6217,7 @@ export class Db {
    * backstop). `?? null` coerces a provided-but-undefined value so an explicit clear reaches the
    * column (a truly absent key is filtered out and left as-is).
    */
-  updateAgent(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean; ioSchema?: unknown | null }): void {
+  updateAgent(id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean; ioSchema?: unknown | null; connections?: string[]; capabilities?: CapabilityGrant[] }): void {
     const cols: Record<string, unknown> = {
       name: patch.name,
       // @decision e7dabf95 — STRIP (never reject), same posture as insertAgent above.
@@ -6217,6 +6229,10 @@ export class Db {
       // present writes JSON text (null clears). updateAgentPreset/assign_profile omit both ⇒ left as-is.
       endpoint: patch.endpoint === undefined ? undefined : patch.endpoint ? 1 : 0,
       io_schema: "ioSchema" in patch ? (patch.ioSchema == null ? null : JSON.stringify(patch.ioSchema)) : undefined,
+      // Card caca806c: HUMAN-only, same posture as endpoint/ioSchema above — only the agent-edit REST
+      // surface (with allowCredentialGrants) ever passes these; omitted ⇒ left as-is.
+      connections: patch.connections === undefined ? undefined : JSON.stringify(patch.connections),
+      capabilities: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities),
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -11561,6 +11577,10 @@ function toAgent(r0: unknown): Agent {
     // stored as JSON text; parse it back (a corrupt blob never wedges a read → null).
     endpoint: (r.endpoint as number) === 1,
     ioSchema: parseJsonOrNull(r.io_schema as string | null),
+    // Card caca806c: THE canonical home for these grants now — [] on legacy/plain rows (additive).
+    // malformed/absent degrades to [] = no access, same guard shape as toProfile's own connections/capabilities.
+    connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
+    capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
   };
 }
 /** Parse a nullable JSON text column back to its value; null on absent/empty/corrupt (never throws). */

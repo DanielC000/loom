@@ -311,15 +311,64 @@ export function explicitRoleGrantCarryoverError(
   profileRole: SessionRole | null | undefined,
   explicitRole: SessionRole | undefined,
   existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>,
+  agentOwnGrants: { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null },
 ): string | null {
-  if (explicitRole === undefined) return null; // no explicit role ⇒ nothing to diverge from (startNew/forcePlain)
+  if (explicitRole === undefined) return null; // no explicit role ⇒ nothing to diverge from; forcePlain drops BOTH the profile's and the agent row's grants upstream (resolveAgentSpawn), so it carries none
   if ((profileRole ?? null) === explicitRole) return null; // no divergence
-  if (profileRole == null && explicitRole === "worker") return null; // null→worker is not a divergence
+  if (profileRole == null && explicitRole === "worker") {
+    // @decision caca806c (round 3) — keys on the AGENT ROW's OWN connections/capabilities, regardless of
+    // whether a profile is bound at all; a BOUND role-less profile's own grant stays fully exempt
+    // (acd3c688) because it is never folded into `agentOwnGrants` here — only the agent row's raw fields are.
+    const carriedByAgent = carriedForbiddenGrants({
+      connections: agentOwnGrants.connections ?? undefined, capabilities: agentOwnGrants.capabilities ?? undefined,
+      vaultWrite: false, harness: undefined, browserTesting: false, documentConversion: false, allowDelta: [],
+    });
+    if (carriedByAgent.length > 0) {
+      return `cannot spawn as role "worker": this agent carries its own human-set ${describeCarriedGrants(carriedByAgent)} — ask the human to authorize this spawn, or remove the agent-level grant`;
+    }
+    return null;
+  }
   const carried = carriedForbiddenGrants(existing).filter(
     (key) => !(key === "harness" && TRANSCRIPT_ROOT_DENY_ROLES.has(explicitRole)),
   );
   if (carried.length === 0) return null;
   return `cannot spawn as role "${explicitRole}": the bound profile's own role is "${profileRole ?? "null"}" and it carries human-set ${describeCarriedGrants(carried)} — ask the human to authorize this spawn, or rebind a profile without them`;
+}
+
+/**
+ * @decision caca806c — an agent-facing REBIND refuses when the AGENT ROW itself carries a grant and the
+ * resolved role would change; mirrors `roleChangeCapabilityCarryoverError`, but reads the agent's own
+ * `connections`/`capabilities`, not the profile's.
+ */
+export function agentCredentialGrantRoleChangeOnRebindError(
+  agentGrants: { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null },
+  previousRole: string | null | undefined,
+  newRole: string | null | undefined,
+): string | null {
+  if ((previousRole ?? null) === (newRole ?? null)) return null; // not a role change
+  const carried: string[] = [];
+  if (agentGrants.connections && agentGrants.connections.length > 0) carried.push("connections");
+  if (agentGrants.capabilities && agentGrants.capabilities.length > 0) carried.push("capabilities");
+  if (carried.length === 0) return null;
+  return `cannot rebind: this agent carries its own ${carried.join(", ")} grant, and this rebind would change its resolved role from "${previousRole ?? "null"}" to "${newRole ?? "null"}" — ask the human to rebind this agent's profile in the Profiles/Agents UI`;
+}
+
+/**
+ * @decision caca806c (round 3, item 2) — the ONE shared predicate for BOTH `profile_update` handlers:
+ * refuses a PROFILE role CHANGE when ANY bound agent carries its own agent-row connections/capabilities.
+ * See the decision record for why this is distinct from `roleChangeCapabilityCarryoverError` above.
+ */
+export function boundAgentCredentialGrantRoleChangeError(
+  boundAgents: readonly { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null }[],
+  previousRole: string | null | undefined,
+  newRole: string | null | undefined,
+): string | null {
+  if ((previousRole ?? null) === (newRole ?? null)) return null; // not a role change
+  const offending = boundAgents.some(
+    (a) => (a.connections && a.connections.length > 0) || (a.capabilities && a.capabilities.length > 0),
+  );
+  if (!offending) return null;
+  return `cannot change role: at least one agent bound to this profile carries its own human-set connections/capabilities grant, and this change would change its resolved role from "${previousRole ?? "null"}" to "${newRole ?? "null"}" — ask the human to change the role in the Profiles UI`;
 }
 
 /**

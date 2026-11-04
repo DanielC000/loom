@@ -178,6 +178,67 @@ const worktrees = [];
   // But the SAME exemption must NOT extend to any OTHER null-role target — only null→worker is exempt.
   const errNullMgr = await throws(() => svc.spawnSessionAsPlatform("pG", "aNullRoleGrant", "manager"));
   check("(ii-5) null→manager is STILL checked (the exemption is scoped to worker only) — REFUSED", errNullMgr instanceof Error && /connections/.test(errNullMgr.message));
+
+  // Card caca806c item 1(c), Code Review MAJOR ruling (c): the null→worker exemption does NOT cover a
+  // PROFILE-LESS agent that itself carries its OWN connections/capabilities (card caca806c's agent-level
+  // grant surface) — `resolved.connections`/`capabilities` with no bound profile is EXACTLY the agent's
+  // own grants (resolveProfile's backstop), so this is a real divergence the exemption must not swallow.
+  db.insertAgent({ id: "aNullRoleAgentConnGrant", projectId: "pG", name: "aNullRoleAgentConnGrant", startupPrompt: "x", position: 0, profileId: null, connections: ["agent-level-conn"] });
+  db.insertTask({ id: "task-ergc-nullrole-agentconn", projectId: "pG", title: "TNAC", body: "", columnKey: "todo", position: 5, createdAt: now, updatedAt: now });
+  const sessionsBeforeNAC = db.listAllSessions().length;
+  const errNullAgentConn = await throws(() => svc.spawnWorker(mgr.id, { taskId: "task-ergc-nullrole-agentconn", agentId: "aNullRoleAgentConnGrant", kickoffPrompt: "KICK" }));
+  check("(ii-6) a PROFILE-LESS agent carrying its OWN connections grant, spawned as worker, is REFUSED (the null→worker exemption does not cover agent-level grants)",
+    errNullAgentConn instanceof Error && /connections/.test(errNullAgentConn.message));
+  check("(ii-6) NO new session row was created", db.listAllSessions().length === sessionsBeforeNAC);
+
+  // Same shape, via the agent's OWN capabilities array instead of connections.
+  db.insertAgent({ id: "aNullRoleAgentCapGrant", projectId: "pG", name: "aNullRoleAgentCapGrant", startupPrompt: "x", position: 0, profileId: null, capabilities: [{ slug: "agent-level-cap" }] });
+  db.insertTask({ id: "task-ergc-nullrole-agentcap", projectId: "pG", title: "TNAP", body: "", columnKey: "todo", position: 6, createdAt: now, updatedAt: now });
+  const errNullAgentCap = await throws(() => svc.spawnWorker(mgr.id, { taskId: "task-ergc-nullrole-agentcap", agentId: "aNullRoleAgentCapGrant", kickoffPrompt: "KICK" }));
+  check("(ii-6b) ...and via capabilities instead of connections, SAME refusal", errNullAgentCap instanceof Error && /capabilities/.test(errNullAgentCap.message));
+
+  // NEGATIVE CONTROL: a genuinely grant-free, profile-less agent still spawns as worker fine — the
+  // exemption stays intact for the case it actually exists for.
+  db.insertAgent({ id: "aNullRoleAgentNoGrant", projectId: "pG", name: "aNullRoleAgentNoGrant", startupPrompt: "x", position: 0, profileId: null });
+  db.insertTask({ id: "task-ergc-nullrole-nograd", projectId: "pG", title: "TNG", body: "", columnKey: "todo", position: 7, createdAt: now, updatedAt: now });
+  const wNoGrant = await svc.spawnWorker(mgr.id, { taskId: "task-ergc-nullrole-nograd", agentId: "aNullRoleAgentNoGrant", kickoffPrompt: "KICK" });
+  worktrees.push(wNoGrant.worktreePath);
+  check("(ii-6c) NEGATIVE CONTROL: a profile-less, grant-FREE agent still spawns as worker fine", wNoGrant.role === "worker" && wNoGrant.processState === "live");
+
+  // Round 3 CRITICAL (Code Review, reproduced end to end): (ii-6)'s refusal was gated on
+  // `agentHasNoProfile` (`!profile` at the call site) — so REBINDING a grant-carrying, profile-less
+  // agent onto a GRANT-FREE role:null profile made `agentHasNoProfile` false (a profile is now bound)
+  // and the carried-grant check never ran at all, even though the agent's own grant is unchanged.
+  db.insertProfile({ id: "profNullRoleNoGrant", name: "Null-role no-grant rig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
+  db.insertAgent({ id: "aRebindToNullNoGrant", projectId: "pG", name: "aRebindToNullNoGrant", startupPrompt: "x", position: 0, profileId: null, connections: ["agent-level-conn-rebind"] });
+  const rebound = svc.assignAgentProfile(mgr.id, "aRebindToNullNoGrant", "profNullRoleNoGrant");
+  check("(ii-7) rebind onto a grant-free role:null profile SUCCEEDS (null→null is not a role change)", rebound.profileId === "profNullRoleNoGrant");
+  db.insertTask({ id: "task-ergc-rebind-nullrole", projectId: "pG", title: "TRNR", body: "", columnKey: "todo", position: 8, createdAt: now, updatedAt: now });
+  const sessionsBeforeRebind = db.listAllSessions().length;
+  const errRebindThenSpawn = await throws(() => svc.spawnWorker(mgr.id, { taskId: "task-ergc-rebind-nullrole", agentId: "aRebindToNullNoGrant", kickoffPrompt: "KICK" }));
+  check("(ii-7) ...then worker_spawn on it is REFUSED (the agent's own grant must still be seen post-rebind)",
+    errRebindThenSpawn instanceof Error && /connections/.test(errRebindThenSpawn.message));
+  check("(ii-7) NO new session row was created", db.listAllSessions().length === sessionsBeforeRebind);
+
+  // Same bypass, reached without a rebind at all: a human grants an agent that is ALREADY bound to a
+  // grant-free role:null profile (e.g. via the agent-edit REST surface) — `agentHasNoProfile` is false
+  // from the start here too.
+  db.insertAgent({ id: "aBoundNullRoleGrant", projectId: "pG", name: "aBoundNullRoleGrant", startupPrompt: "x", position: 0, profileId: "profNullRoleNoGrant", connections: ["agent-level-conn-bound"] });
+  db.insertTask({ id: "task-ergc-bound-nullrole", projectId: "pG", title: "TBNR", body: "", columnKey: "todo", position: 9, createdAt: now, updatedAt: now });
+  const sessionsBeforeBound = db.listAllSessions().length;
+  const errBoundThenSpawn = await throws(() => svc.spawnWorker(mgr.id, { taskId: "task-ergc-bound-nullrole", agentId: "aBoundNullRoleGrant", kickoffPrompt: "KICK" }));
+  check("(ii-8) a human-granted agent already bound to a grant-free role:null profile: worker_spawn is REFUSED",
+    errBoundThenSpawn instanceof Error && /connections/.test(errBoundThenSpawn.message));
+  check("(ii-8) NO new session row was created", db.listAllSessions().length === sessionsBeforeBound);
+
+  // MUTANT PROOF (lesson 298/319; run BY HAND against this file, same posture as this file's own
+  // header RED/GREEN note above — a live in-process monkeypatch is not possible here: ESM named-export
+  // bindings are read-only, reassigning `explicitRoleGrantCarryoverError` on the imported module
+  // namespace throws "Cannot assign to read only property" rather than swapping the implementation, so
+  // this is NOT wired into the automated run): with the null→worker branch's new carried-grant check
+  // temporarily removed (reverting to the unconditional `return null;` it used to be), re-running (ii-6)
+  // alone flips from REFUSED to the agent-level grant spawning through unchecked — see the worker_report
+  // for this round's run of that recipe.
 }
 
 // ============================== (iii) schedule_create → Scheduler fire ==============================
@@ -350,6 +411,25 @@ try {
   check("(recycle-D2) the successor's harness stays ROW-PINNED to the OLD row's value, not the newly-added codex (old-row-carry, not role-force)", w3.harness !== "codex");
 } finally {
   try { const { removeWorktree } = await import("../dist/git/worktrees.js"); for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } } catch { /* best-effort */ }
+}
+
+// ============================== (plain) forcePlain drops BOTH grant sources (card caca806c round 4) ==============================
+{
+  db.insertProfile({ id: "profPlainGrant", name: "Plain grant rig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["prof-conn"] });
+  // Agent-row grants only, no profile (the exact round-4 hole), AND agent-row + profile-conn grants.
+  db.insertAgent({ id: "aPlainAgentOnly", projectId: "pG", name: "aPlainAgentOnly", startupPrompt: "x", position: 0, profileId: null, connections: ["agent-conn"], capabilities: [{ slug: "agent-cap" }] });
+  db.insertAgent({ id: "aPlainBoth", projectId: "pG", name: "aPlainBoth", startupPrompt: "x", position: 0, profileId: "profPlainGrant", connections: ["agent-conn"], capabilities: [{ slug: "agent-cap" }] });
+  const viaPlatform = svc.spawnSessionAsPlatform("pG", "aPlainAgentOnly", "plain");
+  check("(plain-1) spawnSessionAsPlatform(plain) on an AGENT-ROW-grant agent: session is role-null", viaPlatform.role == null);
+  check("(plain-1) ...and carries NO connections (agent-row grant stripped)", (viaPlatform.connections ?? []).length === 0);
+  check("(plain-1) ...and carries NO capabilities (agent-row grant stripped)", (viaPlatform.capabilities ?? []).length === 0);
+  const bothPlain = svc.spawnSessionAsPlatform("pG", "aPlainBoth", "plain");
+  check("(plain-2) a plain spawn on an agent with profile AND agent grants carries neither source", (bothPlain.connections ?? []).length === 0 && (bothPlain.capabilities ?? []).length === 0);
+  const restPlain = svc.startNew("aPlainAgentOnly", { forcePlain: true });
+  check("(plain-3) the human REST path (startNew forcePlain) hits the same chokepoint: no grants", (restPlain.connections ?? []).length === 0 && (restPlain.capabilities ?? []).length === 0);
+  // Positive control: a NON-plain spawn of the same agent still carries the agent-row grants (union intact).
+  const nonPlain = svc.startNew("aPlainAgentOnly");
+  check("(plain-4) control: a non-plain startNew of the same agent STILL carries its agent-row grants", (nonPlain.connections ?? []).includes("agent-conn") && (nonPlain.capabilities ?? []).some((c) => c.slug === "agent-cap"));
 }
 
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }

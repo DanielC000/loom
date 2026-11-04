@@ -1,5 +1,6 @@
 import type { Db } from "../db.js";
 import type { SessionRole } from "@loom/shared";
+import { resolveProfile } from "@loom/shared";
 
 /**
  * Warn (never block) at agent create/update time when a startupPrompt names a tool that is NOT on
@@ -181,17 +182,22 @@ export function resolveKnownToolSurface(profile: ToolSurfaceProfile): Set<string
 }
 
 /** Resolve the ToolSurfaceProfile for an agent from its assigned profile row (or the profile-less
- *  "plain" default — role:null, matching config.ts's own profile-less resolution). */
-export function toolSurfaceProfileForAgentProfile(db: Db, profileId: string | null | undefined): ToolSurfaceProfile {
-  if (!profileId) return { role: null };
+ *  "plain" default — role:null, matching config.ts's own profile-less resolution). `connections` is
+ *  the UNION of the profile's grant + the agent's own (card caca806c) — computed via the SAME
+ *  `resolveProfile` the real spawn path uses, so this lint can never drift from what a session would
+ *  actually resolve; `agentConnections` is passed in separately since this function only has the
+ *  profileId, not the agent row. */
+export function toolSurfaceProfileForAgentProfile(db: Db, profileId: string | null | undefined, agentConnections?: readonly string[] | null): ToolSurfaceProfile {
+  const agentLike = { startupPrompt: null, connections: agentConnections ? [...agentConnections] : agentConnections };
+  if (!profileId) return { role: null, connections: resolveProfile(agentLike, null).connections };
   const profile = db.getProfile(profileId);
-  if (!profile) return { role: null };
+  if (!profile) return { role: null, connections: resolveProfile(agentLike, null).connections };
   return {
     role: profile.role ?? null,
     browserTesting: profile.browserTesting,
     documentConversion: profile.documentConversion,
     vaultWrite: profile.vaultWrite,
-    connections: profile.connections,
+    connections: resolveProfile(agentLike, profile).connections,
   };
 }
 
@@ -233,22 +239,23 @@ export function toolSurfaceWarning(offendingTools: readonly string[]): string | 
 
 /** Convenience for an agent_create-shaped write: lint the prompt against the (about-to-be-assigned)
  *  profileId. Never throws. */
-export function agentCreatePromptWarning(db: Db, args: { startupPrompt?: string | null; profileId?: string | null }): string | null {
-  const profile = toolSurfaceProfileForAgentProfile(db, args.profileId);
+export function agentCreatePromptWarning(db: Db, args: { startupPrompt?: string | null; profileId?: string | null; connections?: readonly string[] | null }): string | null {
+  const profile = toolSurfaceProfileForAgentProfile(db, args.profileId, args.connections);
   return toolSurfaceWarning(lintStartupPromptToolSurface(args.startupPrompt, profile));
 }
 
-/** Convenience for an agent_update-shaped PATCH: lint the EFFECTIVE prompt/profile (the patch's
- *  value where present, else the existing agent's) — a patch that touches only `name`, say, still
- *  gets checked against the agent's unchanged startupPrompt/profile. Never throws. */
+/** Convenience for an agent_update-shaped PATCH: lint the EFFECTIVE prompt/profile/connections (the
+ *  patch's value where present, else the existing agent's) — a patch that touches only `name`, say,
+ *  still gets checked against the agent's unchanged startupPrompt/profile/connections. Never throws. */
 export function agentUpdatePromptWarning(
   db: Db,
-  existing: { startupPrompt: string; profileId: string | null },
-  patch: { startupPrompt?: string; profileId?: string | null },
+  existing: { startupPrompt: string; profileId: string | null; connections?: readonly string[] | null },
+  patch: { startupPrompt?: string; profileId?: string | null; connections?: readonly string[] | null },
 ): string | null {
   const effectivePrompt = patch.startupPrompt !== undefined ? patch.startupPrompt : existing.startupPrompt;
   const effectiveProfileId = patch.profileId !== undefined ? patch.profileId : existing.profileId;
-  const profile = toolSurfaceProfileForAgentProfile(db, effectiveProfileId);
+  const effectiveConnections = patch.connections !== undefined ? patch.connections : existing.connections;
+  const profile = toolSurfaceProfileForAgentProfile(db, effectiveProfileId, effectiveConnections);
   return toolSurfaceWarning(lintStartupPromptToolSurface(effectivePrompt, profile));
 }
 

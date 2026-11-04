@@ -160,6 +160,25 @@ try {
   check("(f) cloneAgentCore with NO opts SUCCEEDS for a browserTesting:true (QA-Tester-shaped) source profile",
     browserClone.ok === true && browserClone.agent.profileId === "profBrowserTesting");
 
+  // ============== (g) card caca806c: an agent's OWN connections/capabilities (set directly on the agent
+  // row, never via its profile) are NEVER carried onto a clone — createAgentCore's own literal never
+  // reads source.connections/source.capabilities, the same way it never reads source.endpoint. =========
+  db.insertAgent({
+    id: "agentSourceOwnCreds", projectId: "pSrc", name: "SourceOwnCreds", startupPrompt: "x", position: 20,
+    profileId: "profClean", connections: ["connDirect"], capabilities: [{ slug: "direct-cap", connectionId: "connDirect" }],
+  });
+  const ownCredsClone = cloneAgentCore(db, "agentSourceOwnCreds", "pTarget", {});
+  check("(g) cloneAgentCore does NOT carry the source agent's OWN connections onto the clone",
+    ownCredsClone.ok === true && (ownCredsClone.agent.connections ?? []).length === 0);
+  check("(g) cloneAgentCore does NOT carry the source agent's OWN capabilities onto the clone",
+    ownCredsClone.ok === true && (ownCredsClone.agent.capabilities ?? []).length === 0);
+  // Same proof for createAgentCore directly (a fresh create is never handed a source to copy from at
+  // all, but this confirms the literal genuinely defaults to empty rather than merely "undefined" leaking
+  // through as something else at the db layer).
+  const freshCreate = createAgentCore(db, { projectId: "pTarget", name: "FreshCreateNoCreds", profileId: "profClean" });
+  check("(g) createAgentCore mints a fresh agent with NO connections", freshCreate.ok === true && (freshCreate.agent.connections ?? []).length === 0);
+  check("(g) createAgentCore mints a fresh agent with NO capabilities", freshCreate.ok === true && (freshCreate.agent.capabilities ?? []).length === 0);
+
   db.close();
 } finally {
   cleanupPathSync(tmpHome);

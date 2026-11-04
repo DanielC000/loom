@@ -6785,7 +6785,7 @@ export class OrchestrationMcpRouter {
           "not gone — a reference there still blocks). Reuses sessions.deleteProfileAsManager, which calls the SAME db.deleteProfile " +
           "the human DELETE /api/profiles/:id and the Platform Lead's profile_delete use — a reference confined " +
           "to your own project does NOT block delete (matches the human path's safe-by-design cascade: a " +
-          "dangling profileId resolves to the plain backstop). 404 (\"profile not found\") if the id is unknown. " +
+          "dangling profileId resolves to the plain backstop) EXCEPT one case: REFUSED when the profile's role is non-null and an agent bound to it carries its own human-set connections/capabilities grant, since deleting it would drop that agent to no role (ask the human). 404 (\"profile not found\") if the id is unknown. " +
           "FULL id required (no 8-char prefix). BLAST-RADIUS SIGNAL: that backstop can itself " +
           "WIDEN reach for any agent still bound to this profile IN YOUR OWN PROJECT (the only ones delete " +
           "can ever reach, by the in-use guard above) — deleting a `restrictedTools:true` profile un-restricts " +

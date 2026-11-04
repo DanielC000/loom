@@ -490,6 +490,17 @@ const parseMcp = (res) => JSON.parse(res.content[0].text);
   // ===== 404 is unaffected by the new reach computation =====
   const missing = await call("profile_delete", { profileId: "does-not-exist" });
   check("(N) deleting an unknown id still 404s cleanly", missing.error === "profile not found");
+
+  // ===== card caca806c round 4: refused when a bound agent carries its OWN grant and the profile has a role =====
+  const roleProf = mkProfile(e, "prof-platform-delete-granted", { role: "worker" });
+  e.db.insertAgent({ id: "agent-pd-granted", projectId: "proj-pd", name: "PdGranted", startupPrompt: "", position: 5, profileId: roleProf, capabilities: [{ slug: "agent-cap" }] });
+  const refused = await call("profile_delete", { profileId: roleProf });
+  check("(N-r4) platform profile_delete on a role profile with a grant-carrying bound agent is REFUSED with the shared role-change message",
+    typeof refused.error === "string" && /cannot change role/.test(refused.error) && /"worker" to "null"/.test(refused.error));
+  check("(N-r4) ...and the profile survives", !!e.db.getProfile(roleProf));
+  const nullProf = mkProfile(e, "prof-platform-delete-granted-null", { role: null });
+  e.db.insertAgent({ id: "agent-pd-granted-null", projectId: "proj-pd", name: "PdGrantedNull", startupPrompt: "", position: 6, profileId: nullProf, capabilities: [{ slug: "agent-cap" }] });
+  check("(N-r4) NEGATIVE CONTROL: a role-null profile under a grant-carrying agent still deletes", (await call("profile_delete", { profileId: nullProf })).deleted === true);
   cleanup(e);
 }
 
@@ -565,6 +576,19 @@ const parseMcp = (res) => JSON.parse(res.content[0].text);
     plain.deleted === true);
   check("(P) ...returns NO grantReach", plain.grantReach === undefined);
   check("(P) ...and files NO new event", reachEvents(e).length === before);
+
+  // ===== card caca806c round 4: deleting a role-bearing profile is refused when a bound agent carries its OWN grant =====
+  const roleProf = mkProfile(e, "prof-manager-delete-granted", { role: "worker" });
+  e.db.insertAgent({ id: "agent-granted-bound", projectId: "proj-mgr-own", name: "GrantedBound", startupPrompt: "", position: 5, profileId: roleProf, connections: ["agent-conn"] });
+  let delErr = null;
+  try { svc.deleteProfileAsManager("mgr-sess", roleProf); } catch (err) { delErr = err; }
+  check("(P-r4) deleteProfileAsManager on a role profile with a grant-carrying bound agent THROWS the shared role-change refusal",
+    delErr instanceof Error && /cannot change role/.test(delErr.message) && /"worker" to "null"/.test(delErr.message));
+  check("(P-r4) ...and the profile survives", !!e.db.getProfile(roleProf));
+  // Negative control: the SAME grant-carrying agent bound to a ROLE-NULL profile deletes fine (no role change).
+  const nullProf = mkProfile(e, "prof-manager-delete-granted-null", { role: null });
+  e.db.insertAgent({ id: "agent-granted-bound-null", projectId: "proj-mgr-own", name: "GrantedBoundNull", startupPrompt: "", position: 6, profileId: nullProf, connections: ["agent-conn"] });
+  check("(P-r4) NEGATIVE CONTROL: a role-null profile under a grant-carrying agent still deletes", svc.deleteProfileAsManager("mgr-sess", nullProf).deleted === true);
   cleanup(e);
 }
 

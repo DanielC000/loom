@@ -14,6 +14,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (c) the credential tie (OQ1): a requiresConnection capability with a bound connectionId gets its
 //       resolved secret injected ONLY into the mounted server's own `env` block (never args) — and a grant
 //       with no connectionId mounts WITHOUT a secret, without ever calling the secret resolver.
+//   (c2) card caca806c item 3: resolveProfile's union of a profile-level + agent-level grant for the SAME
+//       slug collapses to one entry (profile-first) BEFORE buildMcpServers ever sees it, and feeding that
+//       real output into buildMcpServers mounts the PROFILE's own connection's secret, never the agent's.
 //   (d) the byte-identical BRIDGE regression: an old-shape buildMcpServers call (booleans only, no
 //       `capabilities` field at all) is byte-for-byte identical to the equivalent new-shape call.
 //   (e) validateCapabilityDefInput: reserved-slug rejection, the deferred `command` kind rejection,
@@ -51,7 +54,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-cr-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { resolveProfileCapabilities } = await import("@loom/shared");
+const { resolveProfileCapabilities, resolveProfile } = await import("@loom/shared");
 const {
   buildMcpServers, buildSpawnArgs, collectMcpEnvSecrets, mcpConfigHasSecret, redactSecrets, capabilityToolAllowlist,
 } = await import("../dist/pty/host.js");
@@ -173,6 +176,31 @@ const withCredNoBinding = buildMcpServers({
 check("(credential-tie) no connectionId on the grant ⇒ mounts WITHOUT an env secret", withCredNoBinding["needs-cred"]?.env?.FAKE_TOKEN === undefined);
 check("(8d26596b) ...but the env block still carries the LOOM_MCP_TOKEN blank, like every other stdio mount", withCredNoBinding["needs-cred"]?.env?.[MCP_TOKEN_ENV_VAR] === "");
 check("(credential-tie) no connectionId on the grant ⇒ the secret resolver is never even called", secretResolverCalls === 0);
+
+// ===================== (c2) card caca806c item 3: a same-slug collision between a profile grant and an
+// agent-level grant mounts the PROFILE's own binding, never the agent's ===========================
+// resolveProfile's unionCapabilities (shared/config.ts) dedupes by SLUG ALONE, profile entry first — so
+// feeding its OUTPUT straight into buildMcpServers (the real spawn-path sequence) must show the mounted
+// server for the collided slug resolves the PROFILE's connectionId's secret, never the agent's.
+const credDefCollision = {
+  ...fakeBundled, id: "cap-collision", slug: "needs-cred-collision", requiresConnection: true, secretEnvVar: "FAKE_TOKEN_COLLISION",
+  provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [] }),
+};
+const collisionResolved = resolveProfile(
+  { startupPrompt: "", capabilities: [{ slug: "needs-cred-collision", connectionId: "connAgent" }] },
+  { role: "worker", capabilities: [{ slug: "needs-cred-collision", connectionId: "connProfile" }] },
+);
+check("(collision) resolveProfile's own union already collapsed to ONE entry for the collided slug",
+  collisionResolved.capabilities.filter((g) => g.slug === "needs-cred-collision").length === 1);
+check("(collision) ...carrying the PROFILE's connectionId, not the agent's",
+  collisionResolved.capabilities.find((g) => g.slug === "needs-cred-collision")?.connectionId === "connProfile");
+const withCollision = buildMcpServers({
+  sessionId: "s6", port: 4317, role: "worker",
+  capabilities: collisionResolved.capabilities, capabilityCatalog: [credDefCollision],
+  resolveConnectionSecret: (id) => (id === "connProfile" ? "profile-secret" : id === "connAgent" ? "agent-secret" : undefined),
+});
+check("(collision) the mounted server for the collided slug injects the PROFILE's secret",
+  withCollision["needs-cred-collision"]?.env?.FAKE_TOKEN_COLLISION === "profile-secret");
 
 // ===================== CODE-REVIEW FIX: the secret must NEVER ride claude's argv or the spawn log =====================
 // Simulates createPty's EXACT sequence: buildMcpServers → collectMcpEnvSecrets → (conditionally)

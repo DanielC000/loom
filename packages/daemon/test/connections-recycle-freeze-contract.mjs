@@ -1,7 +1,12 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// @decision 298b826e — recycle freezes Profile.connections at the predecessor's value; do not "fix" this
-// to re-resolve the live profile without a fresh owner decision — the owner deliberately chose to KEEP
-// the freeze (Option B) rather than widen what recycle_me does.
+// @decision 298b826e — recycle freezes `connections` at the predecessor's value; do not "fix" this to
+// re-resolve the live grant without a fresh owner decision (Option B, kept deliberately).
+//
+// Card caca806c made the Agent an ADDITIVE second source of grants alongside the Profile (resolveProfile
+// unions the two) rather than moving them off the Profile — the freeze invariant is unchanged either
+// way, and now must hold regardless of which of the two sources a post-spawn grant arrives through: the
+// MANAGER/WORKER blocks below cover a grant bound to the AGENT after first spawn; the PROFILE block
+// covers the same freeze for a grant bound to the shared PROFILE after first spawn.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, same hermetic shape as respawn-profile-attrs.mjs: isolated
 // LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService driven against a FAKE pty via PtyHost's
@@ -42,11 +47,16 @@ commitAll(repo, "init", "-c user.email=cfc@loom -c user.name=cfc");
 const now = new Date().toISOString();
 const db = new Db();
 db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
-// BOTH rigs start with NO connections — the owner binds one to each profile AFTER the first spawn.
-db.insertProfile({ id: "profMgr", name: "MgrRig", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [] });
-db.insertProfile({ id: "profWorker", name: "WorkerRig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [] });
+// BOTH rigs start with NO connections — the owner binds one to each AGENT AFTER the first spawn (card
+// caca806c adds connections to the agent, ADDITIVE to the profile's own — see this file's own header
+// note). A third profile (profMgr2) is set up below to cover the SAME freeze for a grant bound to the
+// shared PROFILE instead.
+db.insertProfile({ id: "profMgr", name: "MgrRig", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null });
+db.insertProfile({ id: "profWorker", name: "WorkerRig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+db.insertProfile({ id: "profMgr2", name: "MgrRig2", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "MgrProfiled", startupPrompt: "MGR_PROMPT", position: 0, profileId: "profMgr" });
 db.insertAgent({ id: "agentWorker", projectId: "pP", name: "WorkerProfiled", startupPrompt: "WORKER_PROMPT", position: 1, profileId: "profWorker" });
+db.insertAgent({ id: "agentMgr2", projectId: "pP", name: "MgrProfiled2", startupPrompt: "MGR2_PROMPT", position: 2, profileId: "profMgr2" });
 const tW = "22222222-2222-4222-8222-222222222222";
 db.insertTask({ id: tW, projectId: "pP", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
@@ -70,37 +80,37 @@ let workerWorktree = null, recycledWorktree = null;
 try {
   // ===================== MANAGER: fresh spawn -> bind -> recycle keeps [] -> a NEW fresh spawn resolves =====================
   const mgr1 = svc.startManager("agentMgr", "GO");
-  check("(mgr) fresh spawn while profile.connections=[] -> session.connections is []", JSON.stringify(db.getSession(mgr1.id).connections ?? []) === "[]");
+  check("(mgr) fresh spawn while agent.connections=[] -> session.connections is []", JSON.stringify(db.getSession(mgr1.id).connections ?? []) === "[]");
 
-  db.updateProfile("profMgr", { connections: ["conn-mgr-1"] }); // the owner binds AFTER mgr1 already started
-  check("(mgr) profile now carries the newly-bound connection id", JSON.stringify(db.getProfile("profMgr").connections) === JSON.stringify(["conn-mgr-1"]));
+  db.updateAgent("agentMgr", { connections: ["conn-mgr-1"] }); // the owner binds AFTER mgr1 already started
+  check("(mgr) agent now carries the newly-bound connection id", JSON.stringify(db.getAgent("agentMgr").connections) === JSON.stringify(["conn-mgr-1"]));
 
   db.setBusy(mgr1.id, false);
   const mgr2 = await svc.recycleManager(mgr1.id, "CONTINUE: pick up the fleet.");
   check(
-    "(mgr) PINNED CONTRACT: recycle_me's successor keeps [] (frozen from the predecessor), NOT the live profile's bound connection",
+    "(mgr) PINNED CONTRACT: recycle_me's successor keeps [] (frozen from the predecessor), NOT the live agent's bound connection",
     JSON.stringify(db.getSession(mgr2.id).connections ?? []) === "[]",
   );
 
   const mgr3 = svc.startManager("agentMgr", "GO AGAIN");
   check(
-    "(mgr) CONTRAST (polarity check): a genuinely FRESH startManager call (never recycled) DOES resolve the live profile's connections",
+    "(mgr) CONTRAST (polarity check): a genuinely FRESH startManager call (never recycled) DOES resolve the live agent's connections",
     JSON.stringify(db.getSession(mgr3.id).connections ?? []) === JSON.stringify(["conn-mgr-1"]),
   );
 
   // ===================== WORKER: fresh spawn -> bind -> recycle keeps [] -> a NEW fresh spawn resolves =====================
   const w1 = await svc.spawnWorker(mgr3.id, { taskId: tW, agentId: "agentWorker", kickoffPrompt: "GO" });
   workerWorktree = w1.worktreePath;
-  check("(worker) fresh spawn while profile.connections=[] -> session.connections is []", JSON.stringify(db.getSession(w1.id).connections ?? []) === "[]");
+  check("(worker) fresh spawn while agent.connections=[] -> session.connections is []", JSON.stringify(db.getSession(w1.id).connections ?? []) === "[]");
 
-  db.updateProfile("profWorker", { connections: ["conn-worker-1"] }); // bound AFTER w1 already started
-  check("(worker) profile now carries the newly-bound connection id", JSON.stringify(db.getProfile("profWorker").connections) === JSON.stringify(["conn-worker-1"]));
+  db.updateAgent("agentWorker", { connections: ["conn-worker-1"] }); // bound AFTER w1 already started
+  check("(worker) agent now carries the newly-bound connection id", JSON.stringify(db.getAgent("agentWorker").connections) === JSON.stringify(["conn-worker-1"]));
 
   db.setBusy(w1.id, false);
   const w2 = await svc.recycleWorker(mgr3.id, w1.id, "HANDOFF: continue.");
   recycledWorktree = w2.worktreePath;
   check(
-    "(worker) PINNED CONTRACT: recycleWorker's successor keeps [] (frozen from the predecessor), NOT the live profile's bound connection",
+    "(worker) PINNED CONTRACT: recycleWorker's successor keeps [] (frozen from the predecessor), NOT the live agent's bound connection",
     JSON.stringify(db.getSession(w2.id).connections ?? []) === "[]",
   );
 
@@ -109,10 +119,31 @@ try {
   db.insertTask({ id: tW2, projectId: "pP", title: "t2", body: "", columnKey: "backlog", position: 2, priority: "p2", createdAt: now, updatedAt: now });
   const w3 = await svc.spawnWorker(mgr3.id, { taskId: tW2, agentId: "agentWorker", kickoffPrompt: "GO AGAIN" });
   check(
-    "(worker) CONTRAST (polarity check): a genuinely FRESH spawnWorker call (never recycled) DOES resolve the live profile's connections",
+    "(worker) CONTRAST (polarity check): a genuinely FRESH spawnWorker call (never recycled) DOES resolve the live agent's connections",
     JSON.stringify(db.getSession(w3.id).connections ?? []) === JSON.stringify(["conn-worker-1"]),
   );
   try { await (await import("../dist/git/worktrees.js")).removeWorktree(repo, w3.worktreePath); } catch { /* best-effort */ }
+
+  // ===================== PROFILE SOURCE: fresh spawn -> bind the PROFILE (not the agent) -> recycle
+  // keeps the frozen value -> a NEW fresh spawn resolves the profile's grant too =====================
+  const mgrP1 = svc.startManager("agentMgr2", "GO");
+  check("(profile) fresh spawn while profile.connections=[] and agent.connections=[] -> session.connections is []", JSON.stringify(db.getSession(mgrP1.id).connections ?? []) === "[]");
+
+  db.updateProfile("profMgr2", { connections: ["conn-profile-1"] }); // the owner binds the PROFILE AFTER mgrP1 already started
+  check("(profile) profile now carries the newly-bound connection id", JSON.stringify(db.getProfile("profMgr2").connections) === JSON.stringify(["conn-profile-1"]));
+
+  db.setBusy(mgrP1.id, false);
+  const mgrP2 = await svc.recycleManager(mgrP1.id, "CONTINUE: pick up the fleet.");
+  check(
+    "(profile) PINNED CONTRACT: recycle_me's successor keeps [] (frozen from the predecessor), NOT the live PROFILE's bound connection",
+    JSON.stringify(db.getSession(mgrP2.id).connections ?? []) === "[]",
+  );
+
+  const mgrP3 = svc.startManager("agentMgr2", "GO AGAIN");
+  check(
+    "(profile) CONTRAST (polarity check): a genuinely FRESH startManager call (never recycled) DOES resolve the live PROFILE's connection",
+    JSON.stringify(db.getSession(mgrP3.id).connections ?? []) === JSON.stringify(["conn-profile-1"]),
+  );
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
@@ -124,6 +155,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — connections is pinned on the session row at spawn and stays FROZEN across recycle (both recycleManager and recycleWorker) exactly per the documented contract; a connection bound to the profile after a session's first spawn is picked up only by a genuinely fresh spawn, never by recycle_me — pinned here so a future change to this freeze is deliberate, not accidental."
+  ? "\n✅ ALL PASS — connections is pinned on the session row at spawn and stays FROZEN across recycle (both recycleManager and recycleWorker) exactly per the documented contract, whether the post-spawn grant arrives via the AGENT or via the shared PROFILE; either way it's picked up only by a genuinely fresh spawn, never by recycle_me — pinned here so a future change to this freeze is deliberate, not accidental."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

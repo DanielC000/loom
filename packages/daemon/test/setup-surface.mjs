@@ -382,6 +382,21 @@ try {
   check("(o) profile_update: a capability-free worker→manager role change still succeeds (control)",
     !upCleanFlip.error && upCleanFlip.role === "manager");
 
+  // Round 3 item 2 (card caca806c): the PROFILE's own fields can be grant-free while a BOUND AGENT still
+  // carries its own connections/capabilities — a separate predicate (boundAgentCredentialGrantRoleChangeError)
+  // must refuse the role change too. A freshly-minted, grant-free worker rig, with an agent bound to it
+  // carrying its own agent-level connections grant (simulating a prior human REST grant, caca806c).
+  const grantFreeWrkForBoundAgent = await call("profile_create", { profile: { name: "GrantFreeWrkRig", role: "worker" } });
+  db.insertAgent({ id: "agentBoundGrantRig", projectId: created.id, name: "AgentBoundGrantRig", startupPrompt: "x", position: 30, profileId: grantFreeWrkForBoundAgent.id, connections: ["agent-level-conn-profupd"] });
+  const upBoundAgentGrantFlip = await call("profile_update", { profileId: grantFreeWrkForBoundAgent.id, patch: { role: "manager" } });
+  check("(o) profile_update REFUSES a worker→manager role change when a BOUND AGENT (not the profile) carries its own connections grant (card caca806c round 3 item 2)",
+    typeof upBoundAgentGrantFlip.error === "string" && /connections/i.test(upBoundAgentGrantFlip.error));
+  check("(o) profile_update: the refused role-change left the profile's role UNCHANGED (still worker)", db.getProfile(grantFreeWrkForBoundAgent.id)?.role === "worker");
+  // An unrelated patch on the SAME profile (no role change) still succeeds despite the bound agent's grant.
+  const upBoundAgentUnrelated = await call("profile_update", { profileId: grantFreeWrkForBoundAgent.id, patch: { description: "still a worker rig" } });
+  check("(o) profile_update: an unrelated patch on the SAME profile (bound agent still carries its grant) still succeeds",
+    !upBoundAgentUnrelated.error && upBoundAgentUnrelated.description === "still a worker rig" && upBoundAgentUnrelated.role === "worker");
+
   // reads.
   const projs = await call("list_all_projects", {});
   check("(c) list_all_projects: includes the created project", projs.some((p) => p.id === created.id));
@@ -449,8 +464,14 @@ try {
   check("(c) session_spawn(manager): returns a live session", !!mgr.id && mgr.role === "manager" && !mgr.error);
   const plain = await call("session_spawn", { projectId: created.id, agentId: agent.id, role: "plain" });
   check("(c) session_spawn(plain): returns a role-null session", !!plain.id && plain.role == null && !plain.error);
+  // Card caca806c round 4: a plain spawn drops the AGENT ROW's own grants too (role-null + unrestricted).
+  db.insertAgent({ id: "agentGrantPlainSetup", projectId: created.id, name: "agentGrantPlainSetup", startupPrompt: "", position: 9, profileId: null, connections: ["agent-conn"], capabilities: [{ slug: "agent-cap" }] });
+  const grantPlain = await call("session_spawn", { projectId: created.id, agentId: "agentGrantPlainSetup", role: "plain" });
+  check("(c) session_spawn(plain) on an agent carrying its OWN grants: spawns role-null", !!grantPlain.id && grantPlain.role == null && !grantPlain.error);
+  check("(c) ...and the session row carries NO connections/capabilities (agent-row grants stripped at the plain chokepoint)",
+    (db.getSession(grantPlain.id)?.connections ?? []).length === 0 && (db.getSession(grantPlain.id)?.capabilities ?? []).length === 0);
   check("(c) session_spawn: drove the (fake) pty for both", host.spawned.some((o) => o.sessionId === mgr.id) && host.spawned.some((o) => o.sessionId === plain.id));
-  check("(c) session_spawn: created exactly two sessions", db.listAllSessions().length === nSpawnBefore + 2);
+  check("(c) session_spawn: created exactly three sessions (manager, plain, grant-carrying plain)", db.listAllSessions().length === nSpawnBefore + 3);
 
   // ============ (d) THE VALIDATOR REJECTIONS — host-RCE / exfil keys are rejected by construction ============
   // project_create REJECTS gateCommand + alertWebhook (agent validator).

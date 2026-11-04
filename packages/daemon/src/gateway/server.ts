@@ -90,7 +90,7 @@ import { permissionWideningField } from "../skills/permissionWidening.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
-import { validateAgentPatch } from "../agents/validate.js";
+import { validateAgentPatch, agentCredentialGrantCrossProjectError, agentCapabilityProfileCollisionError } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
@@ -5792,14 +5792,34 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // PATCH validation + normalization is shared with the elevated loom-platform agent_update MCP tool
     // (agents/validate.ts) so the two write paths can't diverge. allowEndpointFlags:true keeps the
     // HUMAN-only endpoint/ioSchema (Agent Runs R1) writable here — the MCP path passes false.
-    const v = validateAgentPatch(req.body, (pid) => !!deps.db.getProfile(pid), { allowEndpointFlags: true });
+    // Card caca806c: allowCredentialGrants:true, same posture — connections/capabilities are HUMAN-only,
+    // and no MCP agent_update/agent_create inputSchema ever declares either key.
+    const v = validateAgentPatch(req.body, (pid) => !!deps.db.getProfile(pid), { allowEndpointFlags: true, allowCredentialGrants: true });
     if (!v.ok) return reply.code(v.kind === "notFound" ? 404 : 400).send({ error: v.error });
+    // Card caca806c: write-time refusal for a credential grant this agent's own project can't reach
+    // (mirrors connections/store.ts's isConnectionUsableByProject), plus the oauth2-can't-statically-
+    // inject guard (capabilityGrantBindingError, same function the profile write path already uses).
+    if ("connections" in v.patch || "capabilities" in v.patch) {
+      const scopeErr = agentCredentialGrantCrossProjectError(v.patch, existing.projectId, (id) => getConnectionMetadata(deps.db, id)?.projectId);
+      if (scopeErr) return reply.code(400).send({ error: scopeErr });
+      const bindingError = capabilityGrantBindingError(v.patch.capabilities ?? [], deps.db);
+      if (bindingError) return reply.code(400).send({ error: bindingError });
+      // @decision caca806c (round 3, item 4) — collision-check against the POST-PATCH bound profile, not
+      // the one being replaced: a single PATCH carrying both `profileId` and `capabilities` must check
+      // the NEW binding — see the decision record for why the old binding would be the wrong comparand.
+      const effectiveProfileId = "profileId" in v.patch ? v.patch.profileId : existing.profileId;
+      const boundProfile = effectiveProfileId != null ? deps.db.getProfile(effectiveProfileId) : null;
+      const collisionErr = agentCapabilityProfileCollisionError(v.patch.capabilities, boundProfile?.capabilities);
+      if (collisionErr) return reply.code(400).send({ error: collisionErr });
+    }
     // @decision 8b236b22 — human-only, audit-only (no guard, this caller is already trusted): compute
     // the old/new bound profile's widening whenever `profileId` is a patch key at all.
     let rebindReach: ReturnType<typeof recordAgentProfileRebindReach> | undefined;
     if ("profileId" in v.patch) {
       const newProfile = v.patch.profileId != null ? deps.db.getProfile(v.patch.profileId)! : null;
-      const { before: beforeFields, after: afterFields } = rebindWideningFields(deps.db, existing.profileId, newProfile);
+      // @decision caca806c (round 3, item 3) — pass `existing` (the agent row) as `agentGrants` so the
+      // agent's own connections/capabilities fold into BOTH before/after, same as the 5 agent-facing sites.
+      const { before: beforeFields, after: afterFields } = rebindWideningFields(deps.db, existing.profileId, newProfile, existing);
       rebindReach = recordAgentProfileRebindReach(deps.db, {
         agentId: existing.id, agentName: existing.name, projectId: existing.projectId,
         before: beforeFields, after: afterFields, source: "rest",

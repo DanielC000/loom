@@ -11,7 +11,7 @@ import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
 import { expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
-import { validateProfile, agentProfileKeyError, agentAssignableProfileError, roleChangeCapabilityCarryoverError, agentLockedRoleSkillsError, roleChangeLockedSkillsCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
+import { validateProfile, agentProfileKeyError, agentAssignableProfileError, agentCredentialGrantRoleChangeOnRebindError, roleChangeCapabilityCarryoverError, boundAgentCredentialGrantRoleChangeError, agentLockedRoleSkillsError, roleChangeLockedSkillsCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { recordProfileGrantReach, recordAgentProfileRebindReach, grantFieldsOf, setupVisibleGrantReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
 import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler.js";
@@ -652,7 +652,11 @@ export class SetupMcpRouter {
             const assignErr = agentAssignableProfileError(newProfile);
             if (assignErr) return ok({ error: assignErr });
           }
-          const { before: beforeFields, after: afterFields } = rebindWideningFields(db, resolved.profileId, newProfile);
+          const { before: beforeFields, after: afterFields } = rebindWideningFields(db, resolved.profileId, newProfile, resolved);
+          // @decision caca806c — an agent carrying its own connections/capabilities grant refuses a
+          // rebind that changes its resolved role.
+          const grantRoleErr = agentCredentialGrantRoleChangeOnRebindError(resolved, beforeFields.role, afterFields.role);
+          if (grantRoleErr) return ok({ error: grantRoleErr });
           rebindReach = recordAgentProfileRebindReach(db, {
             agentId: resolved.id, agentName: resolved.name, projectId: resolved.projectId,
             before: beforeFields, after: afterFields, source: "setup",
@@ -771,7 +775,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker or null ONLY — a patch that yields any other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup) is rejected (human-only). LEAST-PRIVILEGE: REJECTED outright, before the patch is even validated, when the profile's CURRENT (pre-patch) role is anything but manager/worker/null — this includes the Setup Assistant's own rig, so this surface can never self-modify, and closes a patch that clears `role` to null in the SAME call that also strips another field (e.g. a Companion's restrictedTools), which would otherwise pass the resolved-role check below. A `role` CHANGE is ALSO REJECTED outright if the stored profile carries any human-set AGENT_FORBIDDEN_PROFILE_KEYS-class capability — e.g. flipping a QA-Tester-shaped worker rig's human-set browserTesting to \"manager\" is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). A non-empty `skills` subset on a locked RESOLVED role is rejected too — unreachable in practice, since the role checks below already confine this surface to manager/worker/null, but checked the same way the Platform Lead's own profile_update is. Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged. BLAST-RADIUS SIGNAL: a `role` CHANGE, or flipping `restrictedTools` false (removing a rig's tool restriction), on a profile that already has bound agents reaches each of them on their NEXT session — the response then carries a `grantReach` field ({addedKeys, agentCount, agents[], roleChange?}) naming exactly who. RELAY THIS to whoever asked for the change before treating the edit as routine, the same way you would surface any other newly-widened trust boundary — there is no human-facing confirm on this surface, so your relay is the only signal. `agents[]` here is narrowed to LIVE projects only (this surface's other reads already exclude archived ones) — `agentCount` stays the true total regardless.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker or null ONLY — a patch that yields any other role (elevated platform/auditor/workspace-auditor, or operator/assistant/setup) is rejected (human-only). LEAST-PRIVILEGE: REJECTED outright, before the patch is even validated, when the profile's CURRENT (pre-patch) role is anything but manager/worker/null — this includes the Setup Assistant's own rig, so this surface can never self-modify, and closes a patch that clears `role` to null in the SAME call that also strips another field (e.g. a Companion's restrictedTools), which would otherwise pass the resolved-role check below. A `role` CHANGE is ALSO REJECTED outright if the stored profile carries any human-set AGENT_FORBIDDEN_PROFILE_KEYS-class capability — e.g. flipping a QA-Tester-shaped worker rig's human-set browserTesting to \"manager\" is the exact escalation this guards; the error names the offending keys (\"ask the human to change the role in the Profiles UI\"). A `role` CHANGE is ALSO REJECTED if ANY agent currently bound to this profile carries its own agent-level `connections`/`capabilities` grant — the profile's own fields can be grant-free while a bound agent still carries one, and this is checked independently of the profile-level check above. A non-empty `skills` subset on a locked RESOLVED role is rejected too — unreachable in practice, since the role checks below already confine this surface to manager/worker/null, but checked the same way the Platform Lead's own profile_update is. Flipping `role` to \"manager\" is REJECTED if this profile is already bound to an agent in a reserved/system project (a manager session can never start there) — a profile is shared across projects, so this can strand an agent you never directly touched. The patch may not touch `connections`/`capabilities`/`vaultWrite`/`harness`/`browserTesting`/`documentConversion`/`allowDelta` (authenticated-egress grants / registry-capability grants / the confined vault-write grant / the spawn binary / the browser-automation + document-conversion capabilities / the spawn permission allowlist delta — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged. BLAST-RADIUS SIGNAL: a `role` CHANGE, or flipping `restrictedTools` false (removing a rig's tool restriction), on a profile that already has bound agents reaches each of them on their NEXT session — the response then carries a `grantReach` field ({addedKeys, agentCount, agents[], roleChange?}) naming exactly who. RELAY THIS to whoever asked for the change before treating the edit as routine, the same way you would surface any other newly-widened trust boundary — there is no human-facing confirm on this surface, so your relay is the only signal. `agents[]` here is narrowed to LIVE projects only (this surface's other reads already exclude archived ones) — `agentCount` stays the true total regardless.",
         inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
@@ -804,6 +808,12 @@ export class SetupMcpRouter {
         // human-set capability (checked against `existing`, pre-patch — see the decision record).
         const carryoverErr = roleChangeCapabilityCarryoverError(existing.role, v.value.role, existing);
         if (carryoverErr) return ok({ error: carryoverErr });
+        // @decision caca806c (round 3, item 2) — the PROFILE's own fields can be grant-free while a
+        // bound AGENT still carries its own; checked separately from the profile-level check above.
+        const boundAgentGrantErr = boundAgentCredentialGrantRoleChangeError(
+          db.listAllAgents().filter((a) => a.profileId === profileId), existing.role, v.value.role,
+        );
+        if (boundAgentGrantErr) return ok({ error: boundAgentGrantErr });
         // @decision 509176c8 — defense in depth: setupRoleError below already makes a locked
         // RESOLVED role unreachable here, but this mirrors the Platform Lead's own profile_update.
         const skillsErr = agentLockedRoleSkillsError(patchNoId, v.value.role);
@@ -867,7 +877,11 @@ export class SetupMcpRouter {
         const assignErr = agentAssignableProfileError(assigned);
         if (assignErr) return ok({ error: assignErr });
         // @decision 8b236b22 — audit-only, no guard; see agent_update's own comment above.
-        const { before: beforeFields, after: afterFields } = rebindWideningFields(db, agent.profileId, assigned);
+        const { before: beforeFields, after: afterFields } = rebindWideningFields(db, agent.profileId, assigned, agent);
+        // @decision caca806c — an agent carrying its own connections/capabilities grant refuses a
+        // rebind that changes its resolved role.
+        const grantRoleErr = agentCredentialGrantRoleChangeOnRebindError(agent, beforeFields.role, afterFields.role);
+        if (grantRoleErr) return ok({ error: grantRoleErr });
         const rebindReach = recordAgentProfileRebindReach(db, {
           agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
           before: beforeFields, after: afterFields, source: "setup",

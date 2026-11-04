@@ -45,6 +45,10 @@ const assertKeySet = (actual, expected, label) => {
 const agentRow = {
   id: "agent-1", projectId: "proj-1", name: "Dev", startupPrompt: "go build things",
   position: 0, profileId: "profile-1", endpoint: false, ioSchema: null,
+  // Card caca806c: a REAL Agent row always carries these as `[]` (never `undefined` — toAgent()'s
+  // JSON.parse(... || "[]") backstop), unlike endpoint/ioSchema's own undefined-strips-via-JSON.stringify
+  // shape — so the fixture must set them to prove the key survives the full:true wire round-trip.
+  connections: [], capabilities: [],
   futureColumnFromTheDb: "leak-me",
 };
 
@@ -71,6 +75,7 @@ const sessionRow = {
 // from a plain Agent row — see the module doc comment on why the sentinel still names it).
 const EXPECTED_AGENT_FULL_KEYS = [
   "id", "projectId", "name", "startupPrompt", "position", "profileId", "endpoint", "ioSchema",
+  "connections", "capabilities",
 ];
 const EXPECTED_SESSION_FULL_KEYS = [
   "id", "projectId", "agentId", "engineSessionId", "title", "cwd", "processState", "resumability",

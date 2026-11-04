@@ -56,6 +56,8 @@ export const DEFAULT_AGENT_SUMMARY_CAP = 100;
 const AGENT_LIST_FIELDS: Record<keyof AgentListItem, 1> = {
   id: 1, projectId: 1, name: 1, startupPrompt: 1, position: 1, profileId: 1,
   endpoint: 1, ioSchema: 1, projectName: 1,
+  // Card caca806c: ids only (never a secret) — mirrors entityRowFields.ts's AGENT_FIELDS.
+  connections: 1, capabilities: 1,
 };
 const AGENT_LIST_KEYS = Object.keys(AGENT_LIST_FIELDS) as (keyof AgentListItem)[];
 

@@ -332,6 +332,19 @@ try {
   check("profile_update: a role change on a capability-free profile still succeeds (card 05153988)",
     !puRoleChangeClean.error && puRoleChangeClean.role === "manager");
 
+  // Round 3 item 2 (card caca806c): the PROFILE's own fields can be grant-free while a BOUND AGENT still
+  // carries its own connections/capabilities — boundAgentCredentialGrantRoleChangeError must refuse the
+  // role change too, independently of the profile-level 05153988 check above.
+  const pcForBoundAgent = await call("profile_create", { profile: { name: "GrantFreePlatformRig", role: "worker" } });
+  db.insertAgent({ id: "agentBoundGrantPlatform", projectId: "pOrd", name: "AgentBoundGrantPlatform", startupPrompt: "x", position: 2, profileId: pcForBoundAgent.id, capabilities: [{ slug: "agent-level-cap-profupd" }] });
+  const puBoundAgentGrantFlip = await call("profile_update", { profileId: pcForBoundAgent.id, patch: { role: "manager" } });
+  check("profile_update: REFUSES a role change when a BOUND AGENT (not the profile) carries its own capabilities grant (card caca806c round 3 item 2)",
+    typeof puBoundAgentGrantFlip.error === "string" && /capabilities/i.test(puBoundAgentGrantFlip.error));
+  check("profile_update: the refused role-change left the profile's role UNCHANGED (still worker)", db.getProfile(pcForBoundAgent.id)?.role === "worker");
+  const puBoundAgentUnrelated = await call("profile_update", { profileId: pcForBoundAgent.id, patch: { description: "still a worker rig" } });
+  check("profile_update: an unrelated patch on the SAME profile (bound agent still carries its grant) still succeeds",
+    !puBoundAgentUnrelated.error && puBoundAgentUnrelated.description === "still a worker rig" && puBoundAgentUnrelated.role === "worker");
+
   const pa = await call("profile_assign", { agentId: "agentWork", profileId: "profQA" });
   check("profile_assign: assigns an existing profile", pa.profileId === "profQA" && !pa.error);
   check("profile_assign: persists to the agent row", db.getAgent("agentWork")?.profileId === "profQA");
@@ -410,6 +423,12 @@ try {
   const spawnPlain = await call("session_spawn", { projectId: "pOrd", agentId: "agentWork", role: "plain" });
   check("(c) session_spawn SUCCEEDS for role:\"plain\" (vanilla, role null)", !!spawnPlain.id && (spawnPlain.role === null || spawnPlain.role === undefined) && !spawnPlain.error);
   check("(c) the plain spawn drove the (fake) pty with no role", host.spawned.some((o) => o.sessionId === spawnPlain.id && !o.role));
+  // Card caca806c round 4: a plain spawn drops the AGENT ROW's own grants too (role-null + unrestricted).
+  db.insertAgent({ id: "agentGrantPlain", projectId: "pOrd", name: "agentGrantPlain", startupPrompt: "", position: 0, profileId: null, connections: ["agent-conn"], capabilities: [{ slug: "agent-cap" }] });
+  const spawnGrantPlain = await call("session_spawn", { projectId: "pOrd", agentId: "agentGrantPlain", role: "plain" });
+  check("(c) session_spawn(plain) on an agent carrying its OWN grants: spawns, role-null", !!spawnGrantPlain.id && spawnGrantPlain.role == null && !spawnGrantPlain.error);
+  check("(c) ...and the session row carries NO connections/capabilities (agent-row grants stripped at the plain chokepoint)",
+    (db.getSession(spawnGrantPlain.id)?.connections ?? []).length === 0 && (db.getSession(spawnGrantPlain.id)?.capabilities ?? []).length === 0);
   // guardrails: unknown project / agent / agent-not-in-project.
   check("session_spawn: unknown project rejected", (await call("session_spawn", { projectId: "ghost", agentId: "agentMgr", role: "manager" })).error === "project not found");
   check("session_spawn: unknown agent rejected", (await call("session_spawn", { projectId: "pOrd", agentId: "ghost", role: "manager" })).error === "agent not found");
