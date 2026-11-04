@@ -76,11 +76,34 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS_DIR = path.resolve(__dirname, "..", "assets");
 
-// Single source of truth for an id-citation shape — `@decision <id>`, `card <id>`, `decision <id>`,
-// `record <id>`, or a bare backtick-wrapped 8-hex id — all equally unresolvable off an npm install.
-// Shared by DENY_PATTERNS's own entry below, idCitationCount, and every positive control that plants or
-// strips one, so widening this ONE source widens every consumer at once (card a2f2becc round 2 CR).
-const ID_CITATION_RE_SOURCE = "@decision\\s+[0-9a-f]{8}\\b|\\b(?:card|decision|record)\\s+[0-9a-f]{8}\\b|`[0-9a-f]{8}`";
+// A hex-shaped id that is NOT purely numeric (a date, a record count) and NOT purely alphabetic (an
+// unlikely but possible all-[a-f] token) — requires at least one digit AND at least one a-f letter — AND
+// is a genuine standalone TOKEN, not a substring of something longer: bounded on both sides by neither a
+// word character NOR a hyphen. The hyphen exclusion (beyond plain `\b`) is load-bearing, not cosmetic —
+// `\b` alone treats a hyphen as a valid boundary, so a bare v4-uuid's own first 8-hex segment (e.g.
+// "1c48279c-a4e7-4c55-...", a real session/project id shape used throughout this repo's own generated
+// content) would otherwise false-positive identically to a real short id (measured directly: a real
+// composed fresh-spawn prompt's own temp-path segment tripped the bare form before this exclusion was
+// added). Card 3a721c44.
+const HEX_ID_CORE =
+  "(?<![\\w-])(?=[0-9a-f]{8}(?![\\w-]))(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{8}";
+
+// Single source of truth for an id-citation shape — `@decision <id>`, `@decision sha:<id>`, `card <id>`/
+// `cards <id>`, `decision <id>`/`decisions <id>`, `record <id>`/`records <id>`, `task <id>`/`tasks <id>`,
+// a backtick-wrapped id, OR a BARE id anywhere, word-bounded (card 3a721c44) — all equally unresolvable
+// off an npm install. The bare final alternative is a SUPERSET of every other alternative here (each of
+// them already leaves the id itself word-bounded) — it is what catches a parenthetical "(db9b0130)", a
+// possessive "99a1cf6f's", and a plural list's SECOND-and-later id ("cards X, Y" — the keyword
+// alternative catches the first, this one catches the rest) without a separate list-continuation
+// grammar. The other alternatives exist only for readability; don't rely on their absence to skip a case
+// the bare one already covers. Shared by DENY_PATTERNS's own entry below, idCitationCount, and every
+// positive control that plants or strips one, so widening this ONE source widens every consumer at once
+// (card a2f2becc round 2 CR; card 3a721c44 widened it further).
+const ID_CITATION_RE_SOURCE =
+  "@decision\\s+(?:sha:)?" + HEX_ID_CORE +
+  "|\\b(?:cards?|decisions?|records?|tasks?)\\s+" + HEX_ID_CORE +
+  "|`" + HEX_ID_CORE + "`" +
+  "|\\b" + HEX_ID_CORE + "\\b";
 
 // ===================== THE DENYLIST — re-derived against real shipped content, not copied verbatim =====
 const DENY_PATTERNS = [
@@ -165,13 +188,30 @@ const SKILL_SURFACE_ALLOWLIST = [
 // in), and so does a DECREASE (the stale-entry check — see positive control (ii) below) until the number
 // here is lowered to match a real landed cleanup.
 //
-// EMPTY — every shipped, end-user-reachable MCP router this file scans (OrchestrationMcpRouter,
-// TaskMcpRouter, SetupMcpRouter, OperatorMcpRouter, RunMcpRouter, WorkspaceAuditMcpRouter,
-// PlatformMcpRouter) is now fully clean of the "decision/card id citation" pattern; any citation
-// appearing on any of them from here on is a REAL regression, not backlog, and fails against an implicit
-// expectedCount of 0. Positive control (ii) below plants a SYNTHETIC baseline rather than retargeting to
-// a real tool, since there is no longer a nonzero-baselined entry here to retarget to.
-const ROUTER_ID_CITATION_ALLOWLIST = [];
+// Card 3a721c44: the widened pattern's own bare-hex alternative (see ID_CITATION_RE_SOURCE's own doc)
+// catches two legitimate FORMAT EXAMPLES that were always there but that the OLD, narrower pattern never
+// saw — a tool's description illustrating the shape of an id a caller might pass, not a citation of a
+// real decision/card. Both are REASONED, permanent entries (never backlog debt — unlike the cleanup-
+// backlog entries this list used to carry before cards 6927a53f/03249f1e drained it to empty), re-
+// verified every run exactly like every other entry here: an increase OR a decrease still fails loud.
+// Every OTHER shipped, end-user-reachable MCP router/tool stays at the implicit expectedCount of 0.
+const ROUTER_ID_CITATION_ALLOWLIST = [
+  {
+    surface: "TaskMcpRouter(worker)", tool: "decisions_for", expectedCount: 2,
+    reason: "the description illustrates `query`'s own accepted SHAPES with real-looking examples — " +
+      "\"a32533a1\" (a bare 8-hex id) and \"sha:c70a5e0e\" (the sha: form) — never a citation of either as " +
+      "a real decision/card; TaskMcpRouter renders identically for worker and manager.",
+  },
+  {
+    surface: "TaskMcpRouter(manager)", tool: "decisions_for", expectedCount: 2,
+    reason: "same format-example precedent as TaskMcpRouter(worker)::decisions_for above — one render per role.",
+  },
+  {
+    surface: "OrchestrationMcpRouter(manager)", tool: "agent_list", expectedCount: 1,
+    reason: "the description illustrates resolving an agent-id PREFIX with a real-looking example " +
+      "(\"b5d7304f…\") — never a citation of a real decision/card.",
+  },
+];
 
 function idCitationCount(text) {
   return [...text.matchAll(new RegExp(ID_CITATION_RE_SOURCE, "gi"))].length;
@@ -430,6 +470,41 @@ function scanSkillFile(relPath, text) {
     !loomsOwnRe.test("this project's vault points at Loom's own operational home directory — refusing to commit or push it"));
   check("(pattern self-check) the dev reserved-home PROJECT phrasing still trips its OWN separate pattern after this narrowing (devHomeRe, unaffected)",
     devHomeRe.test("no reserved Loom Platform project exists"));
+}
+
+// Card 3a721c44: the widened ID_CITATION_RE_SOURCE — plural lists, `task <id>`, bare parenthetical/
+// possessive forms, and `@decision sha:<id>` — plus the false-positive guards the letter+digit-mix
+// heuristic exists to satisfy. Tested directly against the shared source, the same way devHomeRe/
+// loomsOwnRe above are tested against DENY_PATTERNS's own entries.
+{
+  const idRe = DENY_PATTERNS.find((p) => p.name === "decision/card id citation").re;
+
+  // ---- NEW SHAPES — each must trip the pattern ----
+  check("(pattern self-check 3a721c44) plural \"cards X, Y\" trips it on BOTH ids (idCitationCount === 2)",
+    idCitationCount("gate state tracked across cards 99a1cf6f, db9b0130") === 2);
+  check("(pattern self-check 3a721c44) a v4-uuid's own first 8-hex segment (a real session/project-id " +
+    "shape, e.g. in a generated temp path) does NOT trip it — the hyphen exclusion, not just \\b",
+    !idRe.test("C:\\\\Users\\\\x\\\\AppData\\\\Local\\\\Temp\\\\loom-eu-1c48279c-a4e7-4c55-9be4-ae5c0123abcd\\\\projects"));
+  check("(pattern self-check 3a721c44) \"task <id>\" (worker_merge_confirm's real shape) trips it",
+    idRe.test("WORKTREE-GC WARNING (task 035fb673): distinct from the nested-repo case"));
+  check("(pattern self-check 3a721c44) a bare parenthetical \"(<id>)\" trips it",
+    idRe.test("the inert-diff proof (db9b0130) backs this"));
+  check("(pattern self-check 3a721c44) a bare possessive \"<id>'s\" trips it",
+    idRe.test("99a1cf6f's own admission is reused by the retry"));
+  check("(pattern self-check 3a721c44) the `@decision sha:<id>` form trips it",
+    idRe.test("@decision sha:c70a5e0e — a verified-commit anchor, not a card"));
+
+  // ---- FALSE-POSITIVE GUARDS — none of these may trip it ----
+  check("(pattern self-check 3a721c44) \"record 12345678 entries\" (all-digit, the keyword-adjacent trap) does NOT trip it",
+    !idRe.test("record 12345678 entries"));
+  check("(pattern self-check 3a721c44) a bare date-like token \"20261103\" does NOT trip it",
+    !idRe.test("the deploy landed on 20261103 with no incident"));
+  check("(pattern self-check 3a721c44) an all-digit 8-char token in parens \"(12345678)\" does NOT trip it",
+    !idRe.test("row count (12345678) was sampled"));
+  check("(pattern self-check 3a721c44) an all-letter 8-char token (no digit) \"deadbeef\" does NOT trip it",
+    !idRe.test("the fixture seeds a deadbeef placeholder value"));
+  check("(pattern self-check 3a721c44) an all-letter possessive \"deadbeef's\" does NOT trip it either",
+    !idRe.test("deadbeef's own default stays unchanged"));
 }
 
 // --- Hermetic LOOM_HOME + a sandboxed HOME. LOOM_DEV deliberately LEFT UNSET — every surface here must
@@ -1040,7 +1115,9 @@ function walkTsFiles(dir) {
   const sid = insertFakeSessionForRole(fx, "manager");
   const origRegisterTool = McpServer.prototype.registerTool;
   McpServer.prototype.registerTool = function (name, config, handler) {
-    if (name === "idle_report") config = { ...config, description: (config.description ?? "") + "\ncard 00000000" };
+    // Card 3a721c44: "0a1b2c3d" (not "00000000") — the new HEX_ID_CORE requires a letter+digit MIX, so an
+    // all-digit synthetic plant would silently stop tripping the ratchet this control exists to prove.
+    if (name === "idle_report") config = { ...config, description: (config.description ?? "") + "\ncard 0a1b2c3d" };
     return origRegisterTool.call(this, name, config, handler);
   };
   let tools;
@@ -1051,7 +1128,7 @@ function walkTsFiles(dir) {
     McpServer.prototype.registerTool = origRegisterTool; // restore unconditionally, even on throw
   }
   const idleReport = tools.find((t) => t.name === "idle_report");
-  check("(e positive control i) sanity: the plant landed on the real idle_report description", idleReport?.description?.includes("card 00000000"));
+  check("(e positive control i) sanity: the plant landed on the real idle_report description", idleReport?.description?.includes("card 0a1b2c3d"));
   // Goes through the SAME scanSurfaceRatchet function the live check uses — never a separately
   // reimplemented comparison (card a2f2becc round 2 CR, sharpened round 3: a mutant that corrupts
   // scanSurfaceRatchet's own verdict must turn THIS control red too, not just the live loop).
@@ -1066,9 +1143,13 @@ function walkTsFiles(dir) {
 // =====================     baseline. SYNTHETIC, not a real-source strip: prior cleanup passes retargeted
 // =====================     this control from gate_cancel to worker_list to gate_status to gate_queue, each
 // =====================     cleaned to 0 in turn — the cleanup that removed gate_queue/gate_history/
-// =====================     served_status from the allowlist leaves NO nonzero-baselined entry anywhere
-// =====================     left to retarget to next, so instead of stripping a real citation out of some
-// =====================     still-dirty tool's description, this plants a TEMPORARY allowlist entry against
+// =====================     served_status from the allowlist left no nonzero-baselined entry on THIS
+// =====================     surface/tool to retarget to (card 3a721c44 later added two reasoned, PERMANENT
+// =====================     format-example entries elsewhere — TaskMcpRouter::decisions_for and
+// =====================     OrchestrationMcpRouter(manager)::agent_list — but those are real tools this
+// =====================     control must not perturb, so it still plants on idle_report instead), so
+// =====================     instead of stripping a real citation out of some still-dirty tool's description,
+// =====================     this plants a TEMPORARY allowlist entry against
 // =====================     a REAL rendered tool's MEASURED citation count + 1 (never a hand-assumed
 // =====================     count, so it can never silently stop proving anything as the real corpus
 // =====================     changes), through the exact same ratchetVerdict/idCitationExpected/
@@ -1106,7 +1187,8 @@ function walkTsFiles(dir) {
   const sid = insertFakeSessionForRole(fx, "setup");
   const origRegisterTool = McpServer.prototype.registerTool;
   McpServer.prototype.registerTool = function (name, config, handler) {
-    if (name === "list_all_sessions") config = { ...config, description: (config.description ?? "") + "\ncard 00000000" };
+    // Card 3a721c44: same all-digit trap as control (i) above — "0a1b2c3d" is letter+digit mixed.
+    if (name === "list_all_sessions") config = { ...config, description: (config.description ?? "") + "\ncard 0a1b2c3d" };
     return origRegisterTool.call(this, name, config, handler);
   };
   let tools;
@@ -1117,7 +1199,7 @@ function walkTsFiles(dir) {
     McpServer.prototype.registerTool = origRegisterTool;
   }
   const listAllSessions = tools.find((t) => t.name === "list_all_sessions");
-  check("(e positive control iii) sanity: the plant landed on the real list_all_sessions description", listAllSessions?.description?.includes("card 00000000"));
+  check("(e positive control iii) sanity: the plant landed on the real list_all_sessions description", listAllSessions?.description?.includes("card 0a1b2c3d"));
   // Goes through the SAME scanSurfaceRatchet function the live check uses (see control (i)'s own note).
   const verdict = scanSurfaceRatchet("SetupMcpRouter", tools).find((v) => v.tool === "list_all_sessions");
   check(`(e positive control iii) a re-introduced id citation on the now-clean SetupMcpRouter trips the ratchet — RED (baseline is a hard ${verdict?.expected}, measured ${verdict?.real})`, !!verdict && !verdict.ok && verdict.expected === 0);
