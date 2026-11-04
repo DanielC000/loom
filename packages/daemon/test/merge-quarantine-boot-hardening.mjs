@@ -55,12 +55,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const {
   enterMergeQuarantine, clearMergeQuarantine, clearMergeQuarantineByToken, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
+  resetClearedTokensTestOnly,
 } = await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const GIT_ID = "-c user.email=mqbh@loom -c user.name=mqbh";
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+// @decision d2592cd5 (Follow-up) — a clear run while the real latch is relocated out of the dir (for a
+// clean in-memory slate, then restored) must never durably tombstone the token — nothing was really
+// confirmed gone — or the restored file wrongly reads as already-cleared on the simulated reboot.
+//
+// @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO resets the IN-MEMORY clearedTokens
+// map directly (`resetClearedTokensTestOnly`): the boot-rescan this file calls next no longer wipes it
+// as a side effect (that destructive behavior was a real cross-scenario regression, fixed at source).
+function wipeDurableTombstoneSidecar() {
+  resetClearedTokensTestOnly(); // wipes both the in-memory map AND the durable sidecar file
+}
 const tmpDirs = [];
 
 function makeRepo(tag) {
@@ -275,6 +287,7 @@ try {
     const parkedTmpPath = path.join(os.tmpdir(), `loom-mqbh-parked-${path.basename(tmpPath)}`);
     fs.renameSync(tmpPath, parkedTmpPath);
     clearMergeQuarantine(repo);
+    wipeDurableTombstoneSidecar();
     check("(TW) precondition: in-memory is genuinely clean before the parked tmp returns", !activeMergeQuarantineFor(repo));
     fs.renameSync(parkedTmpPath, tmpPath);
     check("(TW) precondition: only a .tmp-<pid> file is on disk (no final .json), in-memory genuinely clean",
@@ -382,6 +395,7 @@ try {
       const parkedWfr1Path = path.join(os.tmpdir(), `loom-mqbh-parked-${tmpAfterFailure[0]}`);
       fs.renameSync(tmpPathForWfr1, parkedWfr1Path);
       clearMergeQuarantine(repo);
+      wipeDurableTombstoneSidecar();
       check("(WFR-1) precondition: in-memory is genuinely clean before the parked tmp returns", !activeMergeQuarantineFor(repo));
       fs.renameSync(parkedWfr1Path, tmpPathForWfr1);
     } else {
@@ -513,6 +527,7 @@ try {
     const parked = path.join(os.tmpdir(), `loom-mqbh-parked-${path.basename(tmpPath)}`);
     fs.renameSync(tmpPath, parked);
     clearMergeQuarantine(repo); // genuinely clear the stale in-memory entry first
+    wipeDurableTombstoneSidecar();
     fs.renameSync(parked, tmpPath);
 
     // Patch fs.openSync to fail ONLY the promote's own NEW tmp write (a different pid-suffix than the

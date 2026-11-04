@@ -35,7 +35,7 @@ const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleHref = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
   enterMergeQuarantine, clearMergeQuarantine, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
-  quarantineLatchIdFor,
+  quarantineLatchIdFor, resetClearedTokensTestOnly,
 } = await import(mergeQuarantineModuleHref);
 
 // A genuinely fresh ESM module instance (its OWN empty `activeQuarantines` map, a real module-scope
@@ -89,6 +89,10 @@ try {
     const parkedPath = path.join(os.tmpdir(), `loom-mqp1b-parked-${sfx}.json`);
     fs.renameSync(latchPath, parkedPath);
     clearMergeQuarantine(repo);
+    // @decision d2592cd5 (Follow-up) — this setup-only clear runs while the real latch is relocated out
+    // of the dir, so it durably tombstones the real token even though nothing was genuinely confirmed
+    // gone; reset it explicitly or the restored tmp's own token reads as already-cleared at boot below.
+    resetClearedTokensTestOnly();
     check("(CFRT) precondition: in-memory is genuinely clean before the manufactured state is set up", !activeMergeQuarantineFor(repo));
 
     const tmpPath = `${latchPath}.tmp-777777`; // an arbitrary foreign pid — a DIFFERENT raise than this process's own
@@ -167,6 +171,9 @@ try {
     const parkedPath = path.join(os.tmpdir(), `loom-mqp1b-r1-parked-${sfx}.json`);
     fs.renameSync(latchPath, parkedPath);
     clearMergeQuarantine(repo);
+    // @decision d2592cd5 (Follow-up) — same reset as CFRT above: this setup-only clear must never
+    // durably tombstone the real token while it's only temporarily hidden from disk.
+    resetClearedTokensTestOnly();
     const tmpPath = `${latchPath}.tmp-888888`; // an arbitrary foreign pid
     fs.renameSync(parkedPath, tmpPath);
     fs.writeFileSync(latchPath, "{"); // the corrupt final — unparsable JSON

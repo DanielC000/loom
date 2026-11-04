@@ -34,6 +34,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const {
   enterMergeQuarantine, clearMergeQuarantine, clearMergeQuarantineByToken, activeMergeQuarantineFor, reenterMergeQuarantinesAtBoot, MERGE_QUARANTINE_DIR,
+  resetClearedTokensTestOnly,
 } = await import(pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href);
 
 let failures = 0;
@@ -172,6 +173,10 @@ try {
     const parkedPath = path.join(os.tmpdir(), `loom-mqtrunc-parked-legacy-${sfx}.json`);
     fs.renameSync(bareTmpPath, parkedPath);
     clearMergeQuarantine(repo);
+    // @decision d2592cd5 (Follow-up) — this setup-only clear runs while the real latch is relocated out
+    // of the dir, so it durably tombstones the real token even though nothing was genuinely confirmed
+    // gone; reset it explicitly or the restored tmp's own token reads as already-cleared at boot below.
+    resetClearedTokensTestOnly();
     check("(LEGACY) precondition: in-memory is genuinely clean before the parked tmp returns", !activeMergeQuarantineFor(repo));
     fs.renameSync(parkedPath, bareTmpPath);
     check("(LEGACY) precondition: only a bare-pid tmp is on disk, in-memory genuinely clean",

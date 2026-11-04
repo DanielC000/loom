@@ -106,19 +106,30 @@ function writeOrphanContentsForFixture(fixture, tag) {
 // the SAME pre-clear orphan files as the in-process leg, never from whatever the in-process clear itself
 // already rewrote or deleted on disk (a reboot booted from the latter would no longer be an independent
 // derivation of the same inputs).
+//
+// @decision d2592cd5 (Follow-up) — ALSO snapshot/restore the durable cleared-tokens tombstone sidecar
+// (outside MERGE_QUARANTINE_DIR by design) — without this, leg tk1's own durable write leaks into leg
+// tk2's supposedly-independent reboot derivation, since both share one `loomHome`.
+const SIDECAR_BASENAME = "merge-quarantine-cleared-tokens.dat";
+function sidecarPath() { return path.join(loomHome, SIDECAR_BASENAME); }
+
 function snapshotQuarantineDir() {
   const dir = mod.MERGE_QUARANTINE_DIR;
   const snapshot = new Map();
   for (const f of fs.readdirSync(dir)) snapshot.set(f, fs.readFileSync(path.join(dir, f)));
-  return snapshot;
+  let sidecar;
+  try { sidecar = fs.readFileSync(sidecarPath()); } catch { sidecar = undefined; }
+  return { dirSnapshot: snapshot, sidecar };
 }
 
-function restoreQuarantineDirFromSnapshot(snapshot) {
+function restoreQuarantineDirFromSnapshot({ dirSnapshot, sidecar }) {
   const dir = mod.MERGE_QUARANTINE_DIR;
   for (const f of fs.readdirSync(dir)) {
-    if (!snapshot.has(f)) fs.rmSync(path.join(dir, f), { force: true });
+    if (!dirSnapshot.has(f)) fs.rmSync(path.join(dir, f), { force: true });
   }
-  for (const [f, content] of snapshot) fs.writeFileSync(path.join(dir, f), content);
+  for (const [f, content] of dirSnapshot) fs.writeFileSync(path.join(dir, f), content);
+  if (sidecar === undefined) fs.rmSync(sidecarPath(), { force: true });
+  else fs.writeFileSync(sidecarPath(), sidecar);
 }
 
 // @decision 9f387d7e — read the pure `stillBlockedEntryFor` before the mutating

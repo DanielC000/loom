@@ -491,10 +491,15 @@ const unreadablePlaceholderTokens = new Set<string>();
  * before this process's own clear durably removed the token, then read back by a LATER reconciliation —
  * can never resurrect a token this process already knows is gone FOR THAT SAME IDENTITY.
  *
- * In-memory only, reset on a reboot — safe: a reboot re-reads disk fresh (no earlier in-process read to
- * contradict), and a genuinely-destroyed token's own durable write already removed it from disk before
- * the process exited; a token this process kept ALIVE elsewhere (never tombstoned) is correctly re-read
- * from wherever it actually survives.
+ * In-memory only, reset on a reboot. **Corrected (card `d2592cd5`): the "safe" claim that used to follow
+ * here was FALSE for a reboot specifically** — "a genuinely-destroyed token's own durable write already
+ * removed it from disk before the process exited" assumes exactly ONE on-disk record per identity; an
+ * unresolvable identity can have SEVERAL independent records (a primary latch plus a stranded/orphan tmp
+ * sibling), and a token durably removed from only ONE of them still durably survives, untouched, on a
+ * SIBLING's own stale bytes — a reboot re-reads that sibling fresh and resurrects it. See {@link
+ * loadClearedTokensTombstoneFileAtBoot} for the durable twin that closes this: it seeds this very map
+ * from a reboot-surviving sidecar BEFORE any latch file is read, so the claim below is restored, but only
+ * because of that seeding — never assume it holds on a process that skipped it.
  *
  * @decision 8db913e2 (round 3, CR2 B1) — closes the fail-closed resurrection the round-2 chokepoint union
  * introduced: a partial clear's own cleared token could be read back from a STALE pre-clear copy of
@@ -509,6 +514,38 @@ const unreadablePlaceholderTokens = new Set<string>();
  * (see {@link classifyLiteralGate}) — `.literal` is a plain `Set<literalKey>` again, by presence alone.
  */
 const clearedTokens = new Map<string, { direct: Set<string>; literal: Set<string> }>();
+
+/**
+ * The DURABLE subset of {@link clearedTokens} — populated ONLY by {@link tombstoneDurablyIfConfirmed},
+ * scoped to exactly the tokens+identity ITS OWN caller just confirmed durably, never by a bulk copy of
+ * `clearedTokens` as a whole. `clearedTokens` itself holds every in-memory tombstone, INCLUDING one added
+ * for a write that failed (`tombstoneIfNotSurviving` fires unconditionally, by design) — persisting that
+ * whole map would durably tombstone a token nothing durable ever actually removed the moment ANY other,
+ * unrelated call later confirms (card `d2592cd5`, fix round: reproduced RED as P1/P2 — a second identity's
+ * successful clear made an earlier, gated-off token durable via the shared map). This set is this
+ * module's own narrow, write-confirmed ledger — {@link persistClearedTokensTombstoneFile} serializes
+ * ONLY this, never `clearedTokens`.
+ *
+ * Also seeded (additively, never destructively) by {@link loadClearedTokensTombstoneFileAtBoot} — every
+ * token read back from the sidecar file was, by construction, already durably confirmed by some earlier
+ * process, so a later persist in THIS process must not drop it simply because this process never
+ * re-confirmed it itself.
+ *
+ * @decision d2592cd5 (fix round) — never populate this from `clearedTokens` in bulk; only ever via
+ * `tombstoneDurablyIfConfirmed`'s own narrow, per-call token+identity set, or the boot-load union above.
+ */
+const durablyTombstonedTokens = new Map<string, { direct: Set<string>; literal: Set<string> }>();
+
+/**
+ * Guards {@link loadClearedTokensTombstoneFileAtBoot} against running more than once per process — see
+ * that function's own doc for why a second, mid-process call must never wipe what this process has
+ * genuinely accumulated since its real boot.
+ *
+ * @decision d2592cd5 (Follow-up, three-original-sites round) — `reenterMergeQuarantinesAtBoot` has
+ * exactly ONE production caller (`index.ts`, once per process), but the test corpus calls it MANY times
+ * per module instance as a cheap re-scan; without this flag, each such call wipes `clearedTokens`.
+ */
+let clearedTokensTombstoneLoadedThisBoot = false;
 
 /**
  * @decision 8db913e2 (round 4, CR3 BLOCKER 1) — THE ONE place any token is ever added to
@@ -581,6 +618,358 @@ function tombstoneIfNotSurviving(tokens: string[], clearingIdentity: string, tou
     const owners = clearedTokens.get(t);
     if (owners) { owners.direct.add(identity); owners.literal.add(literalIdentity); } else clearedTokens.set(t, { direct: new Set([identity]), literal: new Set([literalIdentity]) });
   }
+}
+
+/**
+ * A DURABLE (reboot-surviving) echo of {@link clearedTokens}. The in-memory map's own doc comment
+ * ("in-memory only, reset on a reboot — safe: ... a genuinely-destroyed token's own durable write
+ * already removed it from disk") is FALSE exactly when an unresolvable identity has MULTIPLE independent
+ * on-disk records (a primary latch plus a stranded/orphan tmp sibling tracked via `orphanLatchFiles`) and
+ * only ONE of them received the durable write that removed a token — the sibling's stale copy survives
+ * untouched on disk, and a reboot (which reconstructs each on-disk record independently, with no
+ * in-memory tombstone to consult — `reenterMergeQuarantinesAtBoot` runs once per process, before this
+ * module's own in-memory structures can hold anything) re-counts the already-cleared token as outstanding
+ * again.
+ *
+ * This durable form lives OUTSIDE {@link MERGE_QUARANTINE_DIR} entirely — a sibling of it, directly under
+ * `LOOM_HOME` — rather than inside it. Not merely named to dodge a `.json` pattern: several existing
+ * tests (and, in production, several existing sweeps) diff `MERGE_QUARANTINE_DIR`'s own raw directory
+ * listing to find "whatever just changed" — living outside it is what makes this structurally invisible
+ * to every one of them, present or future, by construction, with no per-scan exclusion to maintain.
+ *
+ * @decision d2592cd5 — never move this sidecar back inside `MERGE_QUARANTINE_DIR` — a test or sweep that
+ * diffs that directory's own raw listing would start seeing it as "whatever just changed" there.
+ */
+const CLEARED_TOKENS_TOMBSTONE_BASENAME = "merge-quarantine-cleared-tokens.dat";
+
+/**
+ * Hard CAP on {@link durablyTombstonedTokens}' own size (and so, directly, on the durable sidecar's
+ * size): once exceeded, the OLDEST entries (Map iteration order is insertion order; nothing in this
+ * module ever re-inserts an existing key, so this is genuinely oldest-first) are evicted before the next
+ * persist. This is the ONLY bound on the sidecar's growth over an arbitrarily long daemon uptime — a
+ * disk-verified, per-identity prune was found unsafe (a later same-process operation can legitimately
+ * reintroduce stale content for an identity that looked fully-lifted moments earlier) and deleted rather
+ * than kept unused; see the cap-only argument in the `d2592cd5` decision record.
+ *
+ * @decision d2592cd5 — evicting an old entry only reverts that ONE token to the pre-existing, already-
+ * reviewed, fail-closed (over-blocking, never fail-open) behavior; never read as unsafe. Eviction here
+ * must NEVER touch the live, in-memory {@link clearedTokens} map — only the durable echo.
+ */
+const CLEARED_TOKENS_TOMBSTONE_MAX_ENTRIES = 5000;
+
+function clearedTokensTombstonePath(): string {
+  return path.join(LOOM_HOME, CLEARED_TOKENS_TOMBSTONE_BASENAME);
+}
+
+/**
+ * Serializes the CURRENT {@link durablyTombstonedTokens} map to its durable sidecar — NEVER
+ * {@link clearedTokens} itself, which also holds a token tombstoned for a write that FAILED (see
+ * `durablyTombstonedTokens`'s own doc for the fail-open this card closes) — via the SAME write-tmp-then-
+ * rename durability discipline every other latch write in this module uses — the tmp name also carries
+ * no `.json.tmp-` substring, so it is equally invisible to every scan (see {@link
+ * CLEARED_TOKENS_TOMBSTONE_BASENAME}'s own doc). Enforces {@link CLEARED_TOKENS_TOMBSTONE_MAX_ENTRIES}
+ * (oldest-first) before writing. Best-effort: catches and logs any failure, NEVER throws — a failed write
+ * here only means this reboot-persistence step didn't happen for whatever is currently in
+ * `durablyTombstonedTokens`; every existing in-memory safety net (and every on-disk record itself) is
+ * completely unaffected either way, so this can only leave the pre-existing, already-reviewed, fail-closed
+ * (over-blocking, never fail-open) behavior exactly as it was — never worse. @decision d2592cd5
+ */
+function persistClearedTokensTombstoneFile(): void {
+  try {
+    while (durablyTombstonedTokens.size > CLEARED_TOKENS_TOMBSTONE_MAX_ENTRIES) {
+      const oldest = durablyTombstonedTokens.keys().next();
+      if (oldest.done) break;
+      durablyTombstonedTokens.delete(oldest.value);
+    }
+    const obj: Record<string, { direct: string[]; literal: string[] }> = {};
+    for (const [token, owners] of durablyTombstonedTokens) {
+      obj[token] = { direct: [...owners.direct], literal: [...owners.literal] };
+    }
+    const final = clearedTokensTombstonePath();
+    const tmp = `${final}.writing-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    fs.mkdirSync(LOOM_HOME, { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(obj), "utf8");
+    fs.renameSync(tmp, final);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] could not durably persist the cleared-tokens tombstone file: ${(e as Error).message} — a reboot before this is fixed will not see this process's own cleared token(s), so a stale sibling on-disk record for the SAME identity may re-count one as outstanding again (over-blocking; never a false lift — the SAME posture every other durable-write failure in this module already accepts).`);
+  }
+}
+
+/**
+ * Reads the durable cleared-tokens tombstone file and UNIONS it into BOTH the in-memory
+ * {@link clearedTokens} map (so this process's own runtime checks see it) AND {@link
+ * durablyTombstonedTokens} (so a LATER persist in this process never drops it — every token read back
+ * here was, by construction, already durably confirmed by some earlier process) — ADDITIVE ONLY, never a
+ * `.clear()`-then-reseed on either map, and never gated on either being empty. A real production process
+ * calls this exactly once, genuinely before either map can hold anything else, so additive-vs-destructive
+ * makes no observable difference there. It is NOT equally safe to assume mid-process:
+ * `reenterMergeQuarantinesAtBoot` (this function's only caller) has exactly one PRODUCTION call site, but
+ * the test corpus calls it many times per module instance, including AFTER real in-process clears have
+ * already populated `clearedTokens` with tokens the sidecar file was never told about (no durable write
+ * happened for them) — a destructive reseed there wiped already-correct in-memory state, confirmed as a
+ * real regression (card `d2592cd5`, three-original-sites round). Additive-only is also guarded against
+ * running more than once per process via `clearedTokensTombstoneLoadedThisBoot`, purely to avoid a wasted
+ * disk read on a repeat call — never for correctness, since a repeat read can only ever add entries, never
+ * remove one. FAIL-CLOSED on read: missing (ENOENT — the ordinary case, nothing has ever been durably
+ * tombstoned yet), unreadable, or unparsable all mean "nothing (further) durably tombstoned" — never a
+ * crash, and never treated as proof of anything beyond what it actually, successfully parsed. This can
+ * only make boot MORE conservative (more tokens still counted outstanding), never less.
+ *
+ * @decision d2592cd5 (Follow-up, three-original-sites round; fix round) — never reintroduce
+ * `clearedTokens.clear()` here (now also covering `durablyTombstonedTokens`): a mid-process boot-rescan
+ * must never discard an already-correct in-memory tombstone the sidecar file was never told about.
+ */
+function loadClearedTokensTombstoneFileAtBoot(): void {
+  if (clearedTokensTombstoneLoadedThisBoot) return;
+  clearedTokensTombstoneLoadedThisBoot = true;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(clearedTokensTombstonePath(), "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] boot-time cleared-tokens tombstone file could not be read (${(e as Error).message}) — proceeding as if NOTHING is durably tombstoned yet (fail-closed: this can only make boot MORE conservative, never less).`);
+    }
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[merge-quarantine] boot-time cleared-tokens tombstone file is corrupt (${(e as Error).message}) — proceeding as if NOTHING is durably tombstoned yet (fail-closed: this can only make boot MORE conservative, never less).`);
+    return;
+  }
+  if (!parsed || typeof parsed !== "object") return;
+  for (const [token, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") continue;
+    const direct = (value as { direct?: unknown }).direct;
+    const literal = (value as { literal?: unknown }).literal;
+    if (!Array.isArray(direct) || !direct.every((d): d is string => typeof d === "string")) continue;
+    if (!Array.isArray(literal) || !literal.every((l): l is string => typeof l === "string")) continue;
+    // @decision d2592cd5 (Follow-up, three-original-sites round) — UNION onto any already-live entry for
+    // this exact token, never a bare `.set()` overwrite — additive-only (see this function's own doc).
+    const existing = clearedTokens.get(token);
+    clearedTokens.set(token, {
+      direct: existing ? new Set([...existing.direct, ...direct]) : new Set(direct),
+      literal: existing ? new Set([...existing.literal, ...literal]) : new Set(literal),
+    });
+    // @decision d2592cd5 (fix round) — same additive union, onto the durable-echo map too: a token read
+    // back from the sidecar is already durably confirmed, so a later persist in THIS process must not
+    // drop it just because this process never itself called `tombstoneDurablyIfConfirmed` for it.
+    const existingDurable = durablyTombstonedTokens.get(token);
+    durablyTombstonedTokens.set(token, {
+      direct: existingDurable ? new Set([...existingDurable.direct, ...direct]) : new Set(direct),
+      literal: existingDurable ? new Set([...existingDurable.literal, ...literal]) : new Set(literal),
+    });
+  }
+}
+
+/**
+ * TEST-ONLY: wipes the in-memory {@link clearedTokens} map, {@link durablyTombstonedTokens}, AND the
+ * durable sidecar file on disk (best-effort; a failed unlink is swallowed exactly like every other
+ * best-effort durable-write cleanup in this module), and un-arms `clearedTokensTombstoneLoadedThisBoot`
+ * so the NEXT `reenterMergeQuarantinesAtBoot` call genuinely re-reads (now genuinely empty) fresh rather
+ * than resurrecting the wiped-in-memory state from the UNtouched file. All three are required — wiping
+ * only the maps leaves the file to re-seed the exact same entries right back in on the next boot-rescan;
+ * wiping only the file leaves the in-memory maps correctly populated but silently diverging from what's
+ * durable. {@link loadClearedTokensTombstoneFileAtBoot} is deliberately additive-only now (see its own
+ * doc) — a test that needs to pretend its own prior, artificial setup clear never happened (e.g. a
+ * relocate/clear/restore fixture trick) must reset this explicitly, never lean on a mid-process boot-
+ * rescan to do it as a side effect. Never imported by `index.ts` — the `TestOnly` suffix is load-bearing
+ * (see `clearTokenFromPendingIndicesTestOnly`'s own doc for the identical rationale).
+ *
+ * @decision d2592cd5 (Follow-up, three-original-sites round) — a test needing a clean `clearedTokens`
+ * slate calls this directly; never make the real boot-rescan path destructive again to serve it. (Fix
+ * round) Extended to cover `durablyTombstonedTokens` too — see this function's own doc.
+ */
+export function resetClearedTokensTestOnly(): void {
+  clearedTokens.clear();
+  durablyTombstonedTokens.clear();
+  clearedTokensTombstoneLoadedThisBoot = false;
+  try {
+    fs.rmSync(clearedTokensTombstonePath(), { force: true });
+  } catch {
+    // best-effort — same posture as every other durable-write cleanup in this module.
+  }
+}
+
+/**
+ * The DURABLE twin of {@link tombstoneIfNotSurviving} — call ONLY when the caller's own clearing WRITE
+ * for `tokens` under `clearingIdentity` has ITSELF been durably confirmed to succeed. Never gate this on
+ * the generic "nothing survives in memory" check `tombstoneIfNotSurviving` already runs unconditionally
+ * (that check ALSO fires when the caller's own underlying write FAILED — by design, see e.g.
+ * `clearTokenFromPendingIndices`'s own "never a false lift" comments) — persisting a durable tombstone
+ * there would let a LATER reboot subtract a token that NOTHING durable ever actually removed, which is a
+ * genuine fail-open regression this gate exists to prevent.
+ *
+ * `clearingIdentity` accepts either ONE raw repoPath spelling, or (for a caller whose single clear spans
+ * several distinct raw spellings for the same normalized identity — e.g. `clearMergeQuarantineLatchFile`'s
+ * own per-bucket loop) an array of them; EVERY raw spelling passed gets its own `.literal` attribution,
+ * exactly mirroring `tombstoneIfNotSurviving`'s own per-raw-spelling loop at that same call site, but the
+ * underlying file is written exactly ONCE regardless of how many spellings were passed.
+ *
+ * `tokens`+`clearingIdentity` are added ONLY to {@link durablyTombstonedTokens} — the narrow, write-
+ * confirmed ledger {@link persistClearedTokensTombstoneFile} actually serializes — NEVER by copying the
+ * whole {@link clearedTokens} map (which also holds tokens tombstoned in-memory for a write that FAILED,
+ * via `tombstoneIfNotSurviving`'s own unconditional firing). Copying the whole map was this card's own
+ * CRITICAL bug (fix round): any later, UNRELATED confirmed clear would durably persist every gated-off
+ * token sitting in `clearedTokens` too, the instant `persistClearedTokensTombstoneFile` ran — reproduced
+ * RED as Scenarios P1/P2 (a second identity's own successful `clearByToken` making an earlier, write-
+ * failed token durable across a reboot).
+ *
+ * @decision d2592cd5 (fix round) — never call this unconditionally; a false `durablyConfirmed` must skip
+ * the write, AND it must only ever ADD the tokens/identity THIS call was given — never bulk-copy
+ * `clearedTokens`.
+ */
+function tombstoneDurablyIfConfirmed(durablyConfirmed: boolean, tokens: string[], clearingIdentity: string | string[]): void {
+  if (!durablyConfirmed) return;
+  if (tokens.length === 0) return;
+  const rawIdentities = Array.isArray(clearingIdentity) ? clearingIdentity : [clearingIdentity];
+  if (rawIdentities.length === 0) return;
+  for (const raw of rawIdentities) {
+    const identity = directPathIdentity(raw);
+    const literalIdentity = literalRepoPathKey(raw);
+    for (const t of tokens) {
+      const owners = durablyTombstonedTokens.get(t);
+      if (owners) { owners.direct.add(identity); owners.literal.add(literalIdentity); } else durablyTombstonedTokens.set(t, { direct: new Set([identity]), literal: new Set([literalIdentity]) });
+    }
+  }
+  persistClearedTokensTombstoneFile();
+}
+
+/**
+ * Re-verifies BY CONTENT that no physical `.json`/`.json.tmp-*` file left in `MERGE_QUARANTINE_DIR`
+ * right now still names `identity` — the last-chance guard a PENDING-tier identity-wide clear needs
+ * before durably tombstoning, because a wholly separate on-disk sibling for the same identity (one never
+ * folded into this entry's own `orphanLatchFiles`, e.g. a `BlockedCoOccupant.alsoClear` kept file a prior,
+ * unrelated clear call reported but never persisted anywhere this clear can see) is invisible to both
+ * this clear's own sweep tracking AND every in-memory lookup — `identityHasOwnRecordAnywhere` only checks
+ * `activeQuarantines`/`pendingUnresolvedQuarantines`, not disk. Fail-closed: a readdir/read/parse failure
+ * returns `true` (treat as "still there"), never `false`.
+ *
+ * @decision d2592cd5 (Follow-up, AE scenario) — call this immediately before every `tombstoneDurablyIfConfirmed`
+ * in the pending-branch clear paths; never trust `pendingAnyKept` alone for a PENDING-tier identity-wide
+ * clear — it can only ever see what THIS clear's own sweep already tracked.
+ */
+function identityHasAnyPhysicalRecordOnDisk(identity: string): boolean {
+  let names: string[];
+  try {
+    names = fs.readdirSync(MERGE_QUARANTINE_DIR);
+  } catch {
+    return true;
+  }
+  for (const f of names) {
+    if (!f.endsWith(".json") && !/\.json\.tmp-/.test(f)) continue;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8");
+    } catch {
+      return true;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const repoPath = isReadableLatchRecord(parsed) ? (parsed as { repoPath?: unknown }).repoPath : undefined;
+    if (typeof repoPath === "string" && directPathIdentity(repoPath) === identity) return true;
+  }
+  return false;
+}
+
+/**
+ * Every basename currently referenced IN MEMORY — a live armed-key final, a pending entry's own
+ * `sourceFile`, or anyone's tracked `orphanLatchFiles` — by a record belonging to `identity`: the
+ * "already accounted for" set a PARTIAL clear's own {@link identityHasAnyPhysicalRecordHoldingToken}
+ * re-verification must exclude, so a legitimately-tracked (even if currently stale/write-failed) sibling
+ * never defeats the durable tombstone. Call AFTER every in-memory mutation a clear makes is already
+ * applied, right before its own tombstone decision — never before, or a basename this SAME call is about
+ * to rewrite/retire would be wrongly excluded on the strength of its PRE-clear state.
+ *
+ * @decision d2592cd5 (Follow-up, three-original-sites round) — derive this fresh from live state rather
+ * than hand-threading a written-basenames set through each clear path — a missed accumulation there
+ * would silently reopen the exact over-blocking regression this helper exists to avoid.
+ */
+function trackedBasenamesForIdentity(identity: string): Set<string> {
+  const basenames = new Set<string>();
+  for (const [key, entry] of activeQuarantines) {
+    if (directPathIdentity(entry.repoPath) !== identity) continue;
+    basenames.add(path.basename(quarantinePathForKey(key)));
+    for (const f of entry.orphanLatchFiles ?? []) basenames.add(f);
+  }
+  for (const p of pendingUnresolvedQuarantines) {
+    if (directPathIdentity(p.entry.repoPath) !== identity) continue;
+    basenames.add(p.sourceFile);
+    for (const f of p.entry.orphanLatchFiles ?? []) basenames.add(f);
+  }
+  return basenames;
+}
+
+/**
+ * The TOKEN-AWARE twin of {@link identityHasAnyPhysicalRecordOnDisk} — safe to use at a PARTIAL (reduce)
+ * clear, where a KNOWN, ALREADY-TRACKED sibling for the same identity (this entry's own written finals,
+ * plus every basename in its own `orphanLatchFiles` — including one whose rewrite just FAILED and so
+ * still, acknowledgedly, holds the stale token) is expected to keep physically surviving; the bare
+ * identity-only check would wrongly treat any such already-accounted-for survivor as a reason to skip the
+ * durable tombstone, defeating this card's own core mechanism (a tracked-but-stale sibling is exactly what
+ * the tombstone exists to cover for at the NEXT boot). `excludeBasenames` names every basename this call's
+ * own tracking already accounts for; only an identity-matching file OUTSIDE that set, still physically
+ * carrying one of `tokens` right now, is the genuine AE danger (a wholly separate, untracked sibling).
+ * Fail-closed: a readdir/read/parse failure returns `true` (treat as "still there"). Called at the three
+ * PARTIAL (reduce) clear sites: `clearTokenFromPendingIndices`'s reduce branch, `clearActiveEntryTokenAtKey`'s
+ * reduce branch, and `clearMergeQuarantineByKey`'s one deferred call.
+ *
+ * @decision d2592cd5 (Follow-up, three-original-sites round) — pass every basename this call's own
+ * write/orphan tracking already accounts for as `excludeBasenames`: a known, tracked-but-stale sibling
+ * must never itself defeat the tombstone (only a genuinely UNTRACKED one may).
+ */
+function identityHasAnyPhysicalRecordHoldingToken(identity: string, tokens: readonly string[], excludeBasenames: ReadonlySet<string>): boolean {
+  if (tokens.length === 0) return false;
+  let names: string[];
+  try {
+    names = fs.readdirSync(MERGE_QUARANTINE_DIR);
+  } catch {
+    return true;
+  }
+  for (const f of names) {
+    if (excludeBasenames.has(f)) continue;
+    if (!f.endsWith(".json") && !/\.json\.tmp-/.test(f)) continue;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8");
+    } catch {
+      return true;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!isReadableLatchRecord(parsed)) continue;
+    const repoPath = (parsed as { repoPath?: unknown }).repoPath;
+    if (typeof repoPath !== "string" || directPathIdentity(repoPath) !== identity) continue;
+    const onDiskTokens = readSurvivingOnDiskTokens(parsed as { tokens?: unknown; token?: unknown }, identity).raw;
+    if (onDiskTokens.some((t) => tokens.includes(t))) return true;
+  }
+  return false;
+}
+
+/**
+ * The boot-time twin of {@link readSurvivingOnDiskTokens}'s own in-process filtering — now meaningful
+ * (previously a structural no-op per `8bc779f0`'s own "Do not", which this card's record explicitly
+ * supersedes) because {@link loadClearedTokensTombstoneFileAtBoot} seeds `clearedTokens` before any boot
+ * read runs. Never mutates `rawTokens`; returns a fresh array, possibly empty — a caller MUST treat an
+ * empty result as "nothing left to arm for this file" (this module's own invariant: no live record ever
+ * has zero tokens), never as a live record with an empty token list.
+ *
+ * @decision d2592cd5 — never arm a boot-time record with zero surviving tokens; skip it instead.
+ */
+function filterBootTombstonedTokens(rawTokens: string[], repoPath: string): string[] {
+  return rawTokens.filter((t) => !tokenTombstonedForIdentity(t, repoPath));
 }
 
 /** Every `pendingUnresolvedQuarantines` index satisfying `pred` — never just the first (card 188b145f,
@@ -4948,6 +5337,10 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // @decision 0d3b64c6 (round 2, S1) — `live.entry.repoPath` (RAW), never the already-normalized
       // `identity` local — see tombstoneIfNotSurviving's own doc for why a pre-normalized value drops
       // the literal namespace's own attribution.
+      //
+      // @decision d2592cd5 (fix round, Follow-up) — this full-lift branch deliberately does NOT call
+      // `tombstoneDurablyIfConfirmed` — see the decision record's "the two full-lift branches" section
+      // for why leaving this in-memory-only is safe (never fail-open) rather than a gap to close here.
       tombstoneIfNotSurviving([token], live.entry.repoPath);
       sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile);
       // @decision 8db913e2 (Follow-up f2cc5f18) — `live.entry.tokens` captured via the `live` binding
@@ -5047,6 +5440,14 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     // @decision 55939b88 — log once here (never in a write branch above) via the shared formatter, using
     // `live.entry`'s final post-write state, not the pre-write `remaining` local. See the decision record.
     logPartialClearStillBlocked(token, live.entry, writeFailed);
+    // @decision d2592cd5 — durable echo ONLY when the narrowing write above actually succeeded for every
+    // target it touched (`writeFailed` is false); never on the generic in-memory tombstone call above,
+    // which also fires on a failed write by design.
+    //
+    // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
+    // UNTRACKED on-disk sibling for this identity still carries `token` — see
+    // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
+    tombstoneDurablyIfConfirmed(!writeFailed && !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)), [token], live.entry.repoPath);
   }
 }
 
@@ -5123,6 +5524,9 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       // eslint-disable-next-line no-console
       console.warn(`[merge-quarantine] a token-clear's own full lift at key ${key} also kept ${result.contentKeptRepoPaths.length} orphan file reference(s) alive, content-parsed as belonging to (no human route reaches this path — logging only): ${result.contentKeptRepoPaths.map((rp) => `'${rp}'`).join(", ")}`);
     }
+    // @decision d2592cd5 (fix round, Follow-up) — this unconditional, in-memory-only call is deliberately
+    // NOT paired with a `tombstoneDurablyIfConfirmed` of its own — see the decision record's "the two
+    // full-lift branches" section for why that's safe (never fail-open), not a gap left open here.
     tombstoneIfNotSurviving([token], entry.repoPath);
     return;
   }
@@ -5243,6 +5647,14 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // reduce branch, but the LOG-ONLY `loggedTokens`/`loggedContributors` union (round 3), never `updated`
   // directly — `updated` itself stays exactly what was actually written/stored.
   logPartialClearStillBlocked(token, { ...updated, tokens: [...loggedTokens], contributorRepoPaths: loggedContributors.size > 0 ? [...loggedContributors] : undefined }, writeFailed);
+  // @decision d2592cd5 — same success-gated durable echo as clearTokenFromPendingIndices's own reduce
+  // branch; never on the generic in-memory tombstone call above, which also fires on a failed write.
+  //
+  // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
+  // UNTRACKED on-disk sibling for this identity still carries `token` — see
+  // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
+  const identity = directPathIdentity(entry.repoPath);
+  tombstoneDurablyIfConfirmed(!writeFailed && !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)), [token], entry.repoPath);
 }
 
 /**
@@ -6430,6 +6842,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
   // FOREIGN occupant (d2582692's shape) this clear ends up PROTECTING, not destroying.
   const candidateTokens: string[] = [...(entry?.tokens ?? [])];
+  // @decision d2592cd5 — set true at either of this function's own two write-failure branches below; the
+  // durable tombstone call at this function's own end is gated on this staying false.
+  let anyWriteFailed = false;
 
   // Lift EVERY key this entry is armed under (its own tracked set), never reference equality — a union or
   // an orphan merge REBUILDS the entry object, so a map slot holding an OLDER build of the "same" logical
@@ -6589,6 +7004,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
         writtenBasenames.add(`${quarantineHashForKey(k)}.json`);
         const result = writeLatchAndAdopt(activeQuarantines, updated, { ...NO_DROPS, tokens: new Set(entry!.tokens) }, false, k, false, false);
         if (result === false) {
+          anyWriteFailed = true; // @decision d2592cd5
           // eslint-disable-next-line no-console
           console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin's armed copy at key ${k} after this clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union an already-cleared token back in.`);
         } else {
@@ -6612,6 +7028,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       } else {
         // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere. Keep the tmp — now
         // tracked (444cd8e2) below, so a later clear narrows/sweeps it; boot's own recovery pass is a backstop only.
+        anyWriteFailed = true; // @decision d2592cd5
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin at ${p.sourceFile} after this clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with an already-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       }
@@ -6770,6 +7187,14 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 182c01cc (round 2, finding 1) — a RELOCATED co-occupant alone must still produce a
   // non-void result naming it: `latchKept` stays absent, but `stillBlockedCoOccupants` never is.
   const anyReferencing = keptReferencingRepoPaths.size > 0 || orphanReferencingRepoPaths.size > 0;
+  // @decision d2592cd5 — durable echo, gated on BOTH every write above having succeeded (anyWriteFailed)
+  // AND nothing being kept/unattributed (the same expression this function's own `latchKept` already
+  // uses below) — a kept/unattributed file can itself still physically hold one of `candidateTokens`.
+  //
+  // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
+  // UNTRACKED on-disk sibling for this identity still carries any of `candidateTokens` — see
+  // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
+  tombstoneDurablyIfConfirmed(!anyWriteFailed && !anyReferencing && !anyKeptUnattributed && keptContentRepoPaths.size === 0 && !identityHasAnyPhysicalRecordHoldingToken(identity, candidateTokens, trackedBasenamesForIdentity(identity)), candidateTokens, identityRepoPath);
   if (anyReferencing || anyKeptUnattributed || relocatedCoOccupants.size > 0 || keptContentRepoPaths.size > 0) {
     return {
       wasQuarantined: anythingProcessed,
@@ -7569,6 +7994,9 @@ function tryClearMergeQuarantineByOwnIdentity(
     // made after every mutation in this block is already applied — see `tombstoneIfNotSurviving`'s doc.
     const pendingCandidateTokens: string[] = [];
     const pendingTouchedBasenames: string[] = [];
+    // @decision d2592cd5 (Follow-up) — this branch's own write-success signal for the durable tombstone
+    // below, mirroring clearMergeQuarantineByKey's own anyWriteFailed-combined gate.
+    let pendingAnyKept = false;
     // @decision 882d6cff (round 4) — capture whether this claimant's own sourceFile survived because a
     // DIFFERENT, still-pending claimant shares it (never surfaced before this round) — see the decision
     // record for why this is expected, not a bug, and how to lift it durably.
@@ -7612,6 +8040,8 @@ function tryClearMergeQuarantineByOwnIdentity(
         for (const cc of r.contentKept) { keptContentRepoPaths.add(cc.repoPath); if (cc.blockedBy) keptContentBlockedBy.set(cc.repoPath, cc.blockedBy); }
         // @decision 702b4241 (round 2) — same fold as clearMergeQuarantineByKey's own two loops.
         if (r.unattributed) anyKeptUnattributed = true;
+        // @decision d2592cd5 (Follow-up) — this delete genuinely kept/relocated/content-kept something.
+        if (r.kept.length > 0 || r.relocated.length > 0 || r.contentKept.length > 0 || r.unattributed) pendingAnyKept = true;
       }
       pendingTouchedBasenames.push(p.sourceFile);
       // @decision 883e29bc (round 4) — never a bare unlink: `p` is already removed from
@@ -7624,6 +8054,8 @@ function tryClearMergeQuarantineByOwnIdentity(
       if (sweepResult.kept) {
         if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(rp, blockedCoOccupant(rp, p.sourceFile));
         else anyKeptUnattributed = true;
+        // @decision d2592cd5 (Follow-up) — this entry's own sourceFile sweep kept something too.
+        pendingAnyKept = true;
       }
     }
     // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
@@ -7643,9 +8075,15 @@ function tryClearMergeQuarantineByOwnIdentity(
       if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
     }
     if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
+    // @decision d2592cd5 (Follow-up) — the orphan sweep ALSO kept/relocated/content-kept something.
+    if (orphanSweepResult.referencingRepoPaths.length > 0 || orphanSweepResult.contentKept.length > 0 || orphanSweepResult.anyUnattributed) pendingAnyKept = true;
     // @decision 0d3b64c6 (round 2, S1) — `repoPath` (this function's own RAW parameter), never the
     // already-normalized `identity` local.
     tombstoneIfNotSurviving(pendingCandidateTokens, repoPath, pendingTouchedBasenames);
+    // @decision d2592cd5 (Follow-up, AE scenario) — gated on this branch's own write-success signal AND
+    // a fresh disk re-verification (never trust sweep tracking alone — see identityHasAnyPhysicalRecordOnDisk's
+    // own doc for the wholly-separate-sibling gap it closes).
+    tombstoneDurablyIfConfirmed(!pendingAnyKept && !identityHasAnyPhysicalRecordOnDisk(identity), pendingCandidateTokens, repoPath);
   }
   // @decision 3b1944b6 — an EXPLICIT no-match signal, never an inferred one: `repoPath` has no
   // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
@@ -8737,6 +9175,9 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // now by a DIFFERENT identity's own entry — never a working route for the content-kept repoPath.
     const keptContentBlockedBy = new Map<string, ContentKeptBlockedBy>();
     let anyKeptUnattributed = false;
+    // @decision d2592cd5 (Follow-up) — this branch's own write-success signal for the durable tombstone
+    // below, mirroring clearMergeQuarantineByKey's own anyWriteFailed-combined gate.
+    let pendingAnyKept = false;
     // @decision 8db913e2 (round 4) — candidates + touched basenames for the ONE tombstone call below,
     // made after every mutation in this block is already applied — see `tombstoneIfNotSurviving`'s doc.
     const pendingCandidateTokens: string[] = [];
@@ -8765,6 +9206,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       const ownFolded = foldOrphanSweepResult(sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile, pending.entry.tokens), pending.sourceFile, new Map());
       for (const rp of ownFolded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupant(rp, pending.sourceFile)); }
       if (ownFolded.unattributed) anyKeptUnattributed = true;
+      // @decision d2592cd5 (Follow-up) — this entry's own sourceFile sweep kept something too.
+      if (ownFolded.referencingRepoPaths.length > 0 || ownFolded.unattributed) pendingAnyKept = true;
     }
     // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
     // pending entry's own tokens, captured as each is processed above, before `tombstoneIfNotSurviving`.
@@ -8793,18 +9236,26 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
     }
     if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
-    // @decision 0d3b64c6 (round 2, S1) — call once PER raw spelling in the bucket (never the normalized
-    // `bucketIdentity` alone), so every distinct literal form actually seen gets its own attribution.
-    for (const bucket of byIdentityForTombstone.values()) for (const raw of bucket.rawRepoPaths) tombstoneIfNotSurviving(bucket.tokens, raw, bucket.basenames);
+    // @decision d2592cd5 (Follow-up) — the orphan sweep ALSO kept/content-kept something.
+    if (orphanSweepResult.referencingRepoPaths.length > 0 || orphanSweepResult.contentKept.length > 0 || orphanSweepResult.anyUnattributed) pendingAnyKept = true;
     // @decision 9f387d7e — `${id}.json` IS itself one of the matched pending entries' own sourceFile:
-    // excluded from the union above (never a mere orphan reference in that case) and instead swept
-    // directly via the SAME own-latch path every matched pending entry's own sourceFile already went
-    // through at the top of this branch.
+    // excluded from the union above (never a mere orphan reference) and instead swept directly via the
+    // SAME own-latch path every matched pending entry's own sourceFile already went through above.
     if (idJsonIsMatchedSourceFile) {
       // @decision 656fdf39 (CR 66fad7ed round 2) — the matched entry's OWN (already-reconciled) tokens.
       const finalFolded = foldOrphanSweepResult(sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`, matchedSourceFileEntry.entry.tokens), `${id}.json`, new Map());
       for (const rp of finalFolded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, `${id}.json`)); }
       if (finalFolded.unattributed) anyKeptUnattributed = true;
+      // @decision d2592cd5 (Follow-up) — same signal, for this matched-source-file sweep.
+      if (finalFolded.referencingRepoPaths.length > 0 || finalFolded.unattributed) pendingAnyKept = true;
+    }
+    // @decision 0d3b64c6 (round 2, S1) — call once PER raw spelling in the bucket (never the normalized
+    // `bucketIdentity` alone), so every distinct literal form actually seen gets its own attribution.
+    for (const [bucketIdentity, bucket] of byIdentityForTombstone) {
+      for (const raw of bucket.rawRepoPaths) tombstoneIfNotSurviving(bucket.tokens, raw, bucket.basenames);
+      // @decision d2592cd5 (Follow-up, AE scenario) — gated on this branch's own write-success signal AND
+      // a fresh disk re-verification, PER IDENTITY — see identityHasAnyPhysicalRecordOnDisk's own doc.
+      tombstoneDurablyIfConfirmed(!pendingAnyKept && !identityHasAnyPhysicalRecordOnDisk(bucketIdentity), bucket.tokens, [...bucket.rawRepoPaths]);
     }
     // @decision be79f4d5 — ownership-checked (never the unconditional sibling): a DIFFERENT, surviving
     // pending/active entry can own a `.tmp-<pid>` residue sharing THIS exact hash prefix (e.g. its own
@@ -9072,6 +9523,13 @@ function reenterMergeQuarantinesAtBootImpl(
   // — a disk layout no real (post-fix) code path can produce. Always undefined in production.
   testOnlyInjectUnprotectedPending?: PendingUnresolvedQuarantine[],
 ): MergeQuarantineEntry[] {
+  // Seed the durable cleared-tokens tombstone FIRST, before any latch file below is read, so every raw-
+  // token-read site's own filterBootTombstonedTokens call sees it. In a real production process this runs
+  // once, before `clearedTokens` can hold anything else; the test corpus calls it many times per module
+  // instance, by which point `clearedTokens` may already carry real in-process entries — safe either way,
+  // since `loadClearedTokensTombstoneFileAtBoot`'s own union is additive-only, never a destructive reseed.
+  // @decision d2592cd5
+  loadClearedTokensTombstoneFileAtBoot();
   // @decision 7673d096 — index BOTH the fresh AND the legacy hash per registered repo, or a pre-upgrade
   // corrupt/torn latch falls through to the broad every-repo sweep instead of its own one repo.
   //
@@ -9449,9 +9907,19 @@ function reenterMergeQuarantinesAtBootImpl(
       // A pre-round-7 latch may carry the OLD singular `token` (or, pre-round-6, none at all) — accept
       // either shape. It can never be auto-cleared this way regardless (every raising process is gone by
       // definition of a restart); only the human REST route (or a fresh in-process raise) ever reaches it.
-      const tokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
+      const rawTokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
         ? parsed.tokens
         : [typeof parsed.token === "string" ? parsed.token : randomUUID()];
+      // @decision d2592cd5 — subtract any token the durable cleared-tokens tombstone (seeded at this
+      // function's top) already proves cleared for this identity — a sibling record (e.g. a stranded tmp
+      // recovered elsewhere below) can durably hold a stale copy of an already-cleared token.
+      const tokens = filterBootTombstonedTokens(rawTokens, parsed.repoPath);
+      if (tokens.length === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] boot-time latch ${f} for ${parsed.repoPath} is fully covered by the durable cleared-tokens tombstone — every token it names was already durably confirmed cleared by an earlier process; deleting it rather than re-arming an already-resolved record.`);
+        try { fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, f)); } catch { /* best-effort — a leftover fully-tombstoned file is harmless, and filters to empty again on the next boot too */ }
+        continue;
+      }
       // @decision 92c645cc (round 2, item 2) — a LEGACY (field-less) placeholder final, written by
       // round-1/main code before this field existed, is recognized by branch text alone via
       // isPlaceholderEntryShape — never trust a clean JSON.parse by itself to mean "real data".
@@ -9774,9 +10242,17 @@ function reenterMergeQuarantinesAtBootImpl(
       if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") {
         throw new Error("tmp latch JSON is missing repoPath/branch/reason");
       }
-      const tokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
+      const rawTokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
         ? parsed.tokens
         : [typeof parsed.token === "string" ? parsed.token : randomUUID()];
+      // @decision d2592cd5 — same durable-tombstone subtraction as PASS 1's own primary-latch read above.
+      const tokens = filterBootTombstonedTokens(rawTokens, parsed.repoPath);
+      if (tokens.length === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] boot-time tmp latch ${f} for ${parsed.repoPath} is fully covered by the durable cleared-tokens tombstone — every token it names was already durably confirmed cleared by an earlier process; deleting it rather than re-arming an already-resolved record.`);
+        try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover fully-tombstoned file is harmless, and filters to empty again on the next boot too */ }
+        continue;
+      }
       let entry: MergeQuarantineEntry = {
         repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
         opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
@@ -9960,9 +10436,17 @@ function reenterMergeQuarantinesAtBootImpl(
       if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") {
         throw new Error("safety-tmp latch JSON is missing repoPath/branch/reason");
       }
-      const tokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
+      const rawTokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
         ? parsed.tokens
         : [typeof parsed.token === "string" ? parsed.token : randomUUID()];
+      // @decision d2592cd5 — same durable-tombstone subtraction as PASS 1's own primary-latch read above.
+      const tokens = filterBootTombstonedTokens(rawTokens, parsed.repoPath);
+      if (tokens.length === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] boot-time safety-tmp latch ${f} for ${parsed.repoPath} is fully covered by the durable cleared-tokens tombstone — every token it names was already durably confirmed cleared by an earlier process; deleting it rather than recovering an already-resolved record.`);
+        try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover fully-tombstoned file is harmless, and filters to empty again on the next boot too */ }
+        continue;
+      }
       let entry: MergeQuarantineEntry = {
         repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
         opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
