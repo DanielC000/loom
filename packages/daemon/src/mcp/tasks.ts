@@ -45,8 +45,12 @@ export type TaskWithMerged = Omit<Task, "mergedVerification"> & {
    * history, or a solo ALREADY_MERGED/boot-reconcile landing — all wait on the web board drawer's lazy
    * backfill (human-triggered, not agent-facing) to fill in from a live `merged.verification` read; never
    * read `null` as an anomaly.
+   *
+   * @decision e8d4fdc3 round 3 (card aa09a59a) — `"ledger"` can ALSO land here, never from the merge-time
+   * stamp above: `resolveDeferredEffective`'s auto-clear persist write-throughs a blocker's live
+   * `merged.verification`, including this tier — never read it as an anomaly either.
    */
-  mergedVerificationAtMerge: "content" | "pathset" | "trailer-only" | null;
+  mergedVerificationAtMerge: "content" | "pathset" | "trailer-only" | "ledger" | null;
 };
 
 /** The lightweight task row tasks_list returns by default — no body (the unbounded field). Carries
@@ -112,7 +116,10 @@ export async function resolveMergedInfo(db: Db, projectId: string, task: Pick<Ta
   // @decision c13666c6 — branch-gone ledger gate; absent repoKey (degraded to primary above) scopes
   // the ledger to "primary" too, matching the repo this call is actually checking.
   const goneBranchLedger = db.getGoneBranchLedgerFacts(projectId, resolvedKey ?? "primary");
-  const merged = await getTaskMergedInfo(repoPath, task.id, { goneBranchLedger });
+  // @decision e8d4fdc3 round 3 (card aa09a59a) — SAME scope as goneBranchLedger above; lets
+  // getTaskMergedInfo fall back to the branch-keyed ledger read once its trailer scan misses.
+  const workerTipLedger = db.getWorkerTipLedgerFacts(projectId, resolvedKey ?? "primary");
+  const merged = await getTaskMergedInfo(repoPath, task.id, { goneBranchLedger, workerTipLedger });
   return { merged, repoKey: resolvedKey };
 }
 

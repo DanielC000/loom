@@ -23,11 +23,29 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       merged:null, never throws.
 //   (6) card f9ada472 (d9332365's trailers-off degrade, analysis §2c): a task whose branch's content
 //       genuinely landed on main, via a commit carrying NO `Loom-Worker-Branch:` trailer at all (exactly
-//       what an `orchestration.commitTrailers:"off"` landing produces) resolves merged:null — the
-//       documented, visible "shipped work looking unshipped" degrade, never a throw and never a false
-//       merged:true. Scenario (1) above is this test's own polarity proof: the IDENTICAL reader resolves
-//       a real sha for a trailer-carrying commit, so (6)'s null is the trailer's absence, not a broken
-//       reader.
+//       what an `orchestration.commitTrailers:"off"` landing produces) STILL resolves merged:null here —
+//       this scenario's fixture is a hand-rolled `execSync` commit with NO `mainline_landed_commits` row
+//       behind it (no SessionService ever ran), so card aa09a59a's branch-keyed ledger fallback below
+//       genuinely has nothing to find either; this is the one case neither the trailer scan nor the
+//       ledger can ever close (pre-ledger history, or a landing this project's own merge code never
+//       actually ran through). Scenario (1) above is this test's own polarity proof: the IDENTICAL reader
+//       resolves a real sha for a trailer-carrying commit, so (6)'s null is the trailer's absence, not a
+//       broken reader.
+//   (7) card aa09a59a — the SAME trailer-less shape as (6), but with the `mainline_landed_commits` row a
+//       REAL trailers-off `confirmWorkerMerge` landing would have written (`worker_branch`/
+//       `worker_landed_tip` stamped). getTaskMergedInfo's trailer scan still misses it (no trailer was
+//       ever written), but now falls back to the branch-keyed ledger read and resolves merged.sha ===
+//       the landed commit, with verification:"ledger" — this is the actual fix for gap 2 of
+//       docs/decisions/d9332365-optional-merge-commit-trailers.md ("every agent-facing `merged` field
+//       reads `null` on a trailers-off project — in steady state, not just after a crash").
+//   (8)/(9) card aa09a59a round 2, MAJOR fix — (3)'s own re-cut shape, but ALSO carrying the ledger row a
+//       real PRIOR landing writes. Pre-fix, the branch-keyed ledger fallback had no notion of the
+//       branch's LIVE tip and resolved the old, already-superseded squash as merged — bypassing the
+//       re-task guard entirely. (8) is trailers-ON, (9) is trailers-OFF (the shape that actually shipped
+//       the bug, since the ledger fallback is the only mechanism answering a trailers-off read at all).
+//   (10) card aa09a59a round 2, test-gap close — the gone-branch ancestry re-verify (`mergeBase ===
+//       landedSha`) is load-bearing: a ledger row pointing at a commit no longer reachable from `base`
+//       (main reset/force-moved past it) must resolve null, never the stale sha.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/task-merged-state.mjs
 import fs from "node:fs";
@@ -109,9 +127,11 @@ try {
   check("(5) a project with no real repoPath fails safe to merged:null (no throw)", got5.merged === null);
 
   // (6) card f9ada472: content genuinely lands, but the commit carries NO Loom-Worker-Branch trailer at
-  // all — exactly the shape a commitTrailers:"off" landing produces. Deliberately the SAME file-write +
+  // all — exactly the shape a commitTrailers:"off" landing produces, with NO ledger row behind it either
+  // (a hand-rolled execSync commit, never a real confirmWorkerMerge). Deliberately the SAME file-write +
   // commit shape as (1)'s genuine landing above, minus the trailer, so the only variable is the trailer's
-  // presence.
+  // presence — and (7) below is this scenario's own twin, adding back the ledger row a real landing
+  // would have written.
   const noTrailer = createProjectTask(db, "pRepo", { title: "feat(x): trailers-off landing" });
   const branch6 = `loom/${taskKey(noTrailer.id)}`;
   fs.writeFileSync(path.join(repo, "notrailer.txt"), "trailers-off content\n");
@@ -120,10 +140,92 @@ try {
   const noTrailerSha = git("log -1 --format=%H").trim();
   check("(6) setup control: the landed commit carries NO Loom-Worker-Branch trailer", !git(`log -1 --format=%B ${noTrailerSha}`).includes("Loom-Worker-Branch:"));
   const got6 = await getProjectTask(db, "pRepo", noTrailer.id);
-  check("(6) a genuinely-landed but trailer-less task resolves merged:null, never a throw", got6.merged === null);
+  check("(6) a genuinely-landed but trailer-less AND ledger-less task resolves merged:null, never a throw", got6.merged === null);
   const row6 = (await listProjectTasks(db, "pRepo", { includeBody: true })).find((t) => t.id === noTrailer.id);
   check("(6) listProjectTasks ALSO resolves merged:null for the trailer-less landing (never a false merged:true)", row6?.merged === null);
   check("(6) polarity check: the SAME branch (`loom/<taskKey>`) WOULD have resolved if the trailer had been written — proven by scenario (1)'s own identical reader finding a real sha there", typeof got1.merged?.sha === "string");
+
+  // (7) card aa09a59a — the SAME trailer-less shape as (6), but WITH the mainline_landed_commits row a
+  // real trailers-off confirmWorkerMerge would have written (worker_branch/worker_landed_tip stamped).
+  // `tip` is this commit's OWN sha (the thing actually on mainline); `workerLandedTip` is a plausible
+  // worker-branch pre-squash tip — never git-resolved by the branch-only fallback, so a dummy sha is fine.
+  const ledgerBacked = createProjectTask(db, "pRepo", { title: "feat(x): trailers-off landing, ledger-backed" });
+  const branch7 = `loom/${taskKey(ledgerBacked.id)}`;
+  fs.writeFileSync(path.join(repo, "ledgerbacked.txt"), "trailers-off content with a ledger row\n");
+  git("add -A");
+  git(`-c user.email=x@loom -c user.name=x commit -q -m "feat(x): ledger-backed trailers-off landing"`); // no Loom-Worker-Branch trailer
+  const ledgerBackedSha = git("log -1 --format=%H").trim();
+  const ledgerBackedBase = git(`log -1 --format=%H ${ledgerBackedSha}^`).trim();
+  db.recordMainlineLandedCommit("pRepo", "primary", defaultBranch, ledgerBackedSha, ledgerBackedBase, "f".repeat(40), branch7);
+  const got7 = await getProjectTask(db, "pRepo", ledgerBacked.id);
+  check("(7) a trailers-off landing WITH a ledger row resolves merged non-null via the branch-keyed ledger fallback", !!got7.merged);
+  check("(7) merged.sha is the ledger-recorded landed commit's short sha", got7.merged?.sha === ledgerBackedSha.slice(0, 7));
+  check("(7) verification reports the NEW \"ledger\" tier, never silently reusing content/pathset/trailer-only", got7.merged?.verification === "ledger");
+  check("(7) merged.date is a parseable ISO date (the commit's own authored date, re-read via git)", !isNaN(Date.parse(got7.merged?.date ?? "")));
+  const row7 = (await listProjectTasks(db, "pRepo", { includeBody: true })).find((t) => t.id === ledgerBacked.id);
+  check("(7) listProjectTasks ALSO resolves the ledger-backed landing the same way", row7?.merged?.sha === ledgerBackedSha.slice(0, 7) && row7?.merged?.verification === "ledger");
+
+  // (8) card aa09a59a round 2, MAJOR fix — the branch-keyed ledger fallback used to bypass the re-task
+  // guard: same re-cut shape as (3) (trailers ON — the landed commit carries its trailer), but now ALSO
+  // carrying the mainline_landed_commits row a real landing writes unconditionally, independent of
+  // commitTrailers config (docs/decisions/e8d4fdc3-*.md round 1/2). Pre-fix, getTaskMergedInfo's own
+  // trailer-map lookup correctly returned null (the re-task guard inside resolveMergedCommitMapHit), but
+  // then fell through to the branch-keyed ledger fallback — which had no notion of the branch's LIVE tip
+  // and resolved the old, already-superseded squash as merged.
+  const retaskOn = createProjectTask(db, "pRepo", { title: "re-spawned task, trailers on, ledger-backed" });
+  const branch8 = `loom/${taskKey(retaskOn.id)}`;
+  git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "chore: first landing (trailers on)" -m "Loom-Worker-Branch: ${branch8}"`);
+  const landedSha8 = git("log -1 --format=%H").trim();
+  const landedBase8 = git(`log -1 --format=%H ${landedSha8}^`).trim();
+  db.recordMainlineLandedCommit("pRepo", "primary", defaultBranch, landedSha8, landedBase8, "e".repeat(40), branch8);
+  git(`branch ${branch8}`);
+  git(`checkout -q ${branch8}`);
+  git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "new live work on the re-cut branch (trailers on)"`);
+  git(`checkout -q ${defaultBranch}`);
+  const got8 = await getProjectTask(db, "pRepo", retaskOn.id);
+  check("(8) MAJOR FIX: a re-cut branch with a ledger row from its PRIOR landing resolves merged:null (trailers on) — never the old squash via the ledger fallback", got8.merged === null);
+  const row8 = (await listProjectTasks(db, "pRepo", { includeBody: true })).find((t) => t.id === retaskOn.id);
+  check("(8) listProjectTasks ALSO resolves merged:null for the re-cut, ledger-backed task (trailers on)", row8?.merged === null);
+
+  // (9) card aa09a59a round 2 — the SAME re-cut-with-ledger-row bug as (8), but trailers-OFF shaped (no
+  // trailer at all, like (7)'s own landing). The branch-keyed ledger fallback is the ONLY mechanism that
+  // ever answers a trailers-off read at all, so this is the shape that actually shipped the bug.
+  const retaskOff = createProjectTask(db, "pRepo", { title: "feat(x): re-spawned, trailers off, ledger-backed" });
+  const branch9 = `loom/${taskKey(retaskOff.id)}`;
+  fs.writeFileSync(path.join(repo, "retask-ledgeroff.txt"), "trailers-off content, later re-cut\n");
+  git("add -A");
+  git(`-c user.email=x@loom -c user.name=x commit -q -m "feat(x): trailers-off landing, later re-cut"`); // no Loom-Worker-Branch trailer
+  const landedSha9 = git("log -1 --format=%H").trim();
+  const landedBase9 = git(`log -1 --format=%H ${landedSha9}^`).trim();
+  db.recordMainlineLandedCommit("pRepo", "primary", defaultBranch, landedSha9, landedBase9, "d".repeat(40), branch9);
+  git(`branch ${branch9}`);
+  git(`checkout -q ${branch9}`);
+  git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "new live work on the re-cut branch (trailers off)"`);
+  git(`checkout -q ${defaultBranch}`);
+  const got9 = await getProjectTask(db, "pRepo", retaskOff.id);
+  check("(9) MAJOR FIX: a re-cut branch with a ledger row (trailers off) resolves merged:null — never the old squash via the ledger fallback", got9.merged === null);
+  const row9 = (await listProjectTasks(db, "pRepo", { includeBody: true })).find((t) => t.id === retaskOff.id);
+  check("(9) listProjectTasks ALSO resolves merged:null for the re-cut, ledger-backed task (trailers off)", row9?.merged === null);
+
+  // (10) card aa09a59a round 2, MAJOR test gap — the gone-branch ancestry re-verify
+  // (`lookupGoneBranchLedgerSha`'s `mergeBase === landedSha` check in git/worktrees.ts) is load-bearing:
+  // a ledger row can point at a commit that is no longer reachable from `base` at all (main reset/
+  // force-moved past it after the row was written) — the branch itself is GONE (never created here), so
+  // this exercises the branch-ABSENT arm, not (8)/(9)'s branch-PRESENT arm. `divergentSha` is committed
+  // on a sibling branch that is never merged into `defaultBranch` and is deleted immediately after, so it
+  // is unreachable from `defaultBranch` by construction — standing in for "main moved past it".
+  git(`checkout -q -b divergent-reset-sibling ${defaultBranch}`);
+  fs.writeFileSync(path.join(repo, "divergent.txt"), "never reaches main\n");
+  git("add -A");
+  git(`-c user.email=x@loom -c user.name=x commit -q -m "divergent commit, never merged into main"`);
+  const divergentSha = git("log -1 --format=%H").trim();
+  git(`checkout -q ${defaultBranch}`);
+  git(`branch -D divergent-reset-sibling`);
+  const resetPast = createProjectTask(db, "pRepo", { title: "ledger row past a reset main" });
+  const branch10 = `loom/${taskKey(resetPast.id)}`;
+  db.recordMainlineLandedCommit("pRepo", "primary", defaultBranch, divergentSha, defaultBranch, "c".repeat(40), branch10);
+  const got10 = await getProjectTask(db, "pRepo", resetPast.id);
+  check("(10) TEST-GAP CLOSE: a ledger row no longer reachable from base (main reset/force-moved past it) resolves merged:null — the ancestry re-verify is load-bearing", got10.merged === null);
 } finally {
   db.close();
   fs.rmSync(file, { force: true });
@@ -133,6 +235,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getProjectTask/listProjectTasks resolve a task's git-derived merged state via the deterministic loom/<taskKey> branch + Loom-Worker-Branch trailer (never title text), stay fresh across a cache-invalidating new landing, and fail safe to null for a never-merged task, a no-repo project, and a re-cut branch still carrying new live work over its own prior squash."
+  ? "\n✅ ALL PASS — getProjectTask/listProjectTasks resolve a task's git-derived merged state via the deterministic loom/<taskKey> branch + Loom-Worker-Branch trailer (never title text), stay fresh across a cache-invalidating new landing, and fail safe to null for a never-merged task, a no-repo project, a re-cut branch still carrying new live work over its own prior squash (with or without a ledger row from the prior landing, trailers on or off), and a ledger row no longer reachable from base."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

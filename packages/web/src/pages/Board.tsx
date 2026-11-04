@@ -817,12 +817,16 @@ function shipRepoLabel(mergedRepoKey: string | null | undefined, repos: RepoRegi
 // the SAME confident tick, never weakened to look like the weaker case. "trailer-only" (pre-fix history —
 // the commit predates any content/path check, trailer PRESENCE alone) is the one tier that must NOT read
 // as a second confident tick — muted color + a qualifying tooltip suffix, but still shown, never hidden.
+// "ledger" (card aa09a59a) is ALSO a confident tick — it names a sha Loom's own merge code
+// content-verified at landing time — but still carries its own qualifying suffix (never silently
+// bucketed with the unqualified default) since the read-time re-check only re-proves reachability, not
+// content, and typically fires once the worker's branch is already gone.
 // `null`/undefined (unknown — not yet computed, or a legacy row) reads the same as a confident tick: this
 // is the byte-identical default every pre-existing "✓ sha" render already had before this field existed.
 function shipVerificationStyle(verification: Task["mergedVerification"]): { color: string; suffix: string } {
-  return verification === "trailer-only"
-    ? { color: color.textMuted, suffix: " (unverified content — pre-dates path-set verification)" }
-    : { color: color.phosphor, suffix: "" };
+  if (verification === "trailer-only") return { color: color.textMuted, suffix: " (unverified content — pre-dates path-set verification)" };
+  if (verification === "ledger") return { color: color.phosphor, suffix: " (verified when Loom landed it; branch since deleted)" };
+  return { color: color.phosphor, suffix: "" };
 }
 
 // Centered modal detail dialog: view + edit a task's title and description (the `body` field that the

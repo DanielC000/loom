@@ -2962,17 +2962,15 @@ export interface Task {
   /**
    * Which verification mode produced `mergedSha` (card 52e978ad) — mirrors the daemon's
    * `MergedVerificationMode` (`git/worktrees.ts`): `"content"` (byte-verified against a still-live branch
-   * tip), `"pathset"` (verified from the landed commit's own ancestry against its persisted path-set
-   * trailer — proves the same FILES landed, not the same content), or `"trailer-only"` (pre-fix history —
-   * trailer PRESENCE alone, the weakest of the three). `null`/absent means unknown — either this card
-   * hasn't been through the verification-aware write path yet, or the write path that stamped `mergedSha`
-   * didn't itself know its own mode (the fresh-squash merge-confirm path is the one exception that always
-   * knows: it stamps `"content"` directly, since it just created that commit from the live branch in the
-   * same call). Never read absence as either "verified" or "unverified" — just "no signal yet"; the web
-   * board/drawer render a muted, qualified treatment for `"trailer-only"` and treat everything else
-   * (including absent) as the plain confident tick.
+   * tip), `"pathset"` (same files, via a persisted path-set trailer), `"trailer-only"` (trailer PRESENCE
+   * alone, weakest), or `"ledger"` (card aa09a59a — a read-time ledger match, re-verified reachable; the
+   * sha WAS content-verified when it landed). `null`/absent means unknown, not unverified — this card
+   * either hasn't been through the verification-aware write path, or that path didn't know its own mode
+   * (the fresh-squash confirm always does: `"content"`). The web board/drawer render a muted, qualified
+   * treatment for `"trailer-only"`, a confident tick with its OWN tooltip for `"ledger"`, and the plain
+   * confident tick (no qualifier) for everything else, including absent.
    */
-  mergedVerification?: "content" | "pathset" | "trailer-only" | null;
+  mergedVerification?: "content" | "pathset" | "trailer-only" | "ledger" | null;
   /**
    * Card 3df86c87 — this card's PARENT (same project only), or `null`/absent for a top-level card. Max 2
    * levels below a top card (epic → task → subtask); no type field ("epic" = "has children"). Validated at

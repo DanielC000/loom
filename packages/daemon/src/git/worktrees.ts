@@ -275,6 +275,10 @@ export interface WorkerTipLedgerFacts {
    *  returned sha is still an ancestor of the ref being checked before trusting it — this never does
    *  that verification itself. */
   lookupByWorkerTip: (branch: string, workerTip: string) => string | null;
+  /** @decision e8d4fdc3 round 3 (card aa09a59a) — branch-ONLY twin of {@link lookupByWorkerTip}, for a
+   *  read-only consumer with no live branch ref (see `getTaskMergedInfo`'s own doc for why that's safe
+   *  and needed). Most-recent row wins on >1; caller must still verify reachability from the checked ref. */
+  lookupLandedForBranch: (branch: string) => string | null;
 }
 
 // @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via this stub
@@ -9039,10 +9043,10 @@ export function __workerDiffCacheSizeForTest(): number {
   return diffCache.size;
 }
 
-/** @decision 52e978ad — the three verification modes are NOT interchangeable: `"content"` (byte-for-byte,
- *  strongest), `"pathset"` (same file set only, survives branch deletion), `"trailer-only"` (trailer PRESENCE
- *  alone, weakest — two indistinguishable causes). Never render all three as one flat "verified" tick. */
-export type MergedVerificationMode = "content" | "pathset" | "trailer-only";
+/** @decision 52e978ad — four verification modes, NOT interchangeable: `"content"` (byte-for-byte,
+ *  strongest), `"pathset"` (same file set), `"trailer-only"` (trailer PRESENCE alone, weakest), `"ledger"`
+ *  (card aa09a59a — a read-time ledger match, re-verified reachable; see `getTaskMergedInfo`'s own doc). */
+export type MergedVerificationMode = "content" | "pathset" | "trailer-only" | "ledger";
 
 /** A task's landed squash-merge commit on main, as surfaced by {@link getTaskMergedInfo}. */
 export interface MergedCommitInfo {
@@ -9051,7 +9055,7 @@ export interface MergedCommitInfo {
   /** Strict ISO-8601 author date of that commit (git's `%aI`). */
   date: string;
   /**
-   * Which of the three verification modes answered this — see {@link MergedVerificationMode}. Absent
+   * Which of the four verification modes answered this — see {@link MergedVerificationMode}. Absent
    * means unknown/not computed by this caller (e.g. a persisted cache row written before this field
    * existed) — NEVER read absence as either "verified" or "unverified", just "no signal either way".
    */
@@ -9446,29 +9450,74 @@ export async function resolveWorkerBranchInfo(
   }));
 }
 
+/** @decision e8d4fdc3 round 4 — a PRESENT branch defers to the tip-keyed {@link
+ *  tryWorkerTipLedgerFallback}, never the branch-only lookup below, which alone can't tell "still landed"
+ *  apart from "re-cut, live again" (see that record's "Round 4" section). */
+async function tryWorkerTipLedgerBranchFallback(
+  repoPath: string, branch: string, base: string, deps: BoundedGitDeps,
+): Promise<MergedCommitInfo | null> {
+  if (!deps.workerTipLedger) return null;
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const branchPresent = (await withTimeout(
+      git.raw(["branch", "--list", "--end-of-options", branch]), timeoutMs, "git branch --list (worker-tip ledger branch fallback)",
+    )).trim() !== "";
+    const landedSha = branchPresent
+      ? await tryWorkerTipLedgerFallback(git, timeoutMs, branch, base, deps)
+      : await lookupGoneBranchLedgerSha(git, timeoutMs, branch, base, deps.workerTipLedger);
+    if (!landedSha) return null;
+    const dateOut = (await withTimeout(
+      git.raw(["log", "-1", "--format=%aI", "--end-of-options", landedSha]), timeoutMs, "git log -1 --format=%aI (worker-tip ledger branch fallback)",
+    )).trim();
+    if (!dateOut) return null;
+    return { sha: landedSha.slice(0, 7), date: dateOut, verification: "ledger" };
+  } catch {
+    return null;
+  }
+}
+
+/** The branch-ONLY ledger lookup, used by {@link tryWorkerTipLedgerBranchFallback} only once that caller
+ *  has confirmed the branch ref is ABSENT — see its own doc above for why a present branch must never
+ *  reach this. Re-verifies reachability from `base` via merge-base equality (never `--is-ancestor`). */
+async function lookupGoneBranchLedgerSha(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, branch: string, base: string, ledger: WorkerTipLedgerFacts,
+): Promise<string | null> {
+  const landedSha = ledger.lookupLandedForBranch(branch);
+  if (!landedSha) return null;
+  const mergeBase = (await withTimeout(
+    git.raw(["merge-base", "--end-of-options", landedSha, base]), timeoutMs, "git merge-base (worker-tip ledger branch fallback)",
+  )).trim();
+  return mergeBase === landedSha ? landedSha : null;
+}
+
 /** @decision 52e978ad — is `taskId` merged? Keyed by the `Loom-Worker-Branch:` trailer, NEVER by title text
  *  — a title can be edited/coerced after merge, the trailer never drifts.
  *
  *  `null` covers several causes (never
  *  merged, outside scan window, re-task in progress, git error) — NEVER read as authoritative "never
- *  merged". */
+ *  merged".
+ *
+ *  @decision e8d4fdc3 round 3 (card aa09a59a) — a trailer-map miss falls back to
+ *  {@link tryWorkerTipLedgerBranchFallback}, the only mechanism that still answers this once the worker's
+ *  branch is gone (`finalizeMerge` deletes it unconditionally on every successful landing). */
 export async function getTaskMergedInfo(
   repoPath: string, taskId: string, deps: BoundedGitDeps = {},
 ): Promise<MergedCommitInfo | null> {
   const branch = `loom/${taskKey(taskId)}`;
   const { map } = await getMergedCommitMapCached(repoPath, "HEAD", deps);
   const candidates = map.get(branch);
-  if (!candidates || candidates.length === 0) return null;
-  // Verification delegated to {@link resolveMergedCommitMapHitList} (card 6ee48e4d factored the
-  // single-candidate verifier out of a hand-inlined copy here so boot-reconcile Pass A's {@link
-  // findLandedSquashCommitViaMap} shares the IDENTICAL re-task-guard + content/path-set check; card
-  // c0d0eac9 widened this to a bounded multi-candidate walk) — reports which of the two verification
-  // means (or the pre-fix degrade) answered it (card 52e978ad) — see {@link MergedVerificationMode}.
-  // `date` comes from the WINNING entry (`resolved.entry`), never `candidates[0]` — the winner isn't
-  // always the newest candidate once the strict-fallback floor (card c0d0eac9) kicks in.
-  const resolved = await resolveMergedCommitMapHitList(repoPath, branch, candidates, "HEAD", deps);
-  if (!resolved) return null;
-  return { sha: resolved.resolved.sha.slice(0, 7), date: resolved.entry.date, verification: resolved.resolved.verification };
+  if (candidates && candidates.length > 0) {
+    // Verification delegated to {@link resolveMergedCommitMapHitList} (card 6ee48e4d factored the
+    // single-candidate verifier out of a hand-inlined copy here so boot-reconcile Pass A's {@link
+    // findLandedSquashCommitViaMap} shares the IDENTICAL re-task-guard + content/path-set check; card
+    // c0d0eac9 widened this to a bounded multi-candidate walk) — reports which verification tier (or the
+    // pre-fix degrade) answered it (card 52e978ad) — see {@link MergedVerificationMode}.
+    // `date` comes from the WINNING entry (`resolved.entry`), never `candidates[0]` — the winner isn't
+    // always the newest candidate once the strict-fallback floor (card c0d0eac9) kicks in.
+    const resolved = await resolveMergedCommitMapHitList(repoPath, branch, candidates, "HEAD", deps);
+    if (resolved) return { sha: resolved.resolved.sha.slice(0, 7), date: resolved.entry.date, verification: resolved.resolved.verification };
+  }
+  return await tryWorkerTipLedgerBranchFallback(repoPath, branch, "HEAD", deps);
 }
 
 /** TEST-ONLY: clear the merged-commit map cache (settled + in-flight) between hermetic test cases reusing the same temp repos.

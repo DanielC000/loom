@@ -19189,6 +19189,9 @@ export class SessionService {
     // @decision c13666c6 — the SAME ledger facts confirmWorkerMerge resolved once; absent (a caller not
     // yet wired) skips the branch-gone ledger gate, byte-identical to before this card.
     goneBranchLedger?: GoneBranchLedgerFacts,
+    // @decision e8d4fdc3 (card aa09a59a) — the SAME worker-tip ledger facts confirmWorkerMerge resolved
+    // once; absent skips the ALREADY_MERGED fallback, byte-identical to before this card.
+    workerTipLedger?: WorkerTipLedgerFacts,
   ): Promise<{ suppress: boolean; sha: string | null }> {
     if (taskId) {
       const task = this.db.getTask(taskId);
@@ -19197,7 +19200,7 @@ export class SessionService {
         if (terminalKey && task.columnKey === terminalKey) return { suppress: true, sha: null };
       }
     }
-    if (await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger })) return { suppress: true, sha: null };
+    if (await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger, workerTipLedger })) return { suppress: true, sha: null };
     const sha = await getWorktreeLatestNonMergeSha(worktreePath, { timeoutMs: this.gitOpMs });
     try {
       const already = this.db.listEventsForWorker(workerSessionId)
@@ -19630,7 +19633,7 @@ export class SessionService {
     // events — never its own about-to-be-appended one (which would otherwise self-suppress the very first
     // notification).
     const rejectNotify = async (reason: string, msg: string): Promise<{ suppressed: boolean; sha: string | null }> => {
-      const { suppress: suppressed, sha } = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, worktreePath, reason, expectedMainlineRef, goneBranchLedger);
+      const { suppress: suppressed, sha } = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, worktreePath, reason, expectedMainlineRef, goneBranchLedger, workerTipLedger);
       if (!suppressed) {
         // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this is confirmWorkerMergeTracked's own
         // onSettledAfterPending's SUPPRESSING push (outcome.value.notified:true skips its generic echo —
@@ -19711,7 +19714,7 @@ export class SessionService {
     };
     {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, undefined, project.id);
-      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger }))) return refuseReviewedTipMoved(rt, "confirm-start");
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger, workerTipLedger }))) return refuseReviewedTipMoved(rt, "confirm-start");
     }
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
@@ -19838,7 +19841,7 @@ export class SessionService {
       // detected here and could still see an over-refusal in that narrow combination — but no incorrect
       // commit can ever result either way, since `mergeBranchLocked` never reaches subject construction
       // on ANY noop path; the residual cost is at most an unnecessary refusal, not a missed guard.
-      const priorLanding = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger });
+      const priorLanding = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger, workerTipLedger });
       const taskForTitleGuard = priorLanding ? null : this.db.getTask(taskId);
       const titleGuard = taskForTitleGuard ? checkTitleHtmlEntities(taskForTitleGuard.title, false) : null;
       if (titleGuard) {
@@ -22048,14 +22051,14 @@ export class SessionService {
     const squashTip = expectedTipForLanding(landingPin) ?? (await resolveBranchTip(repoPath, branch, { timeoutMs: this.gitOpMs })) ?? undefined;
     {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null, project.id);
-      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger }))) return refuseReviewedTipMoved(rt, "pre-squash");
+      if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger, workerTipLedger }))) return refuseReviewedTipMoved(rt, "pre-squash");
     }
     const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
     // @decision 24c22912 (round 2, item 3) — CLOSE THE NO-GATECOMMAND ASYMMETRY: `expectAlreadyLanded`
     //  above is derived only inside `if (gate)`, leaving a GATELESS project unprotected. Derived fresh
     //  here, only when nothing already has (`!gate`) and the branch isn't owed/held. See that record.
     if (!gate && !owedBase) {
-      const noGateLanded = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger });
+      const noGateLanded = await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger, workerTipLedger });
       if (noGateLanded) expectAlreadyLanded = true;
     }
     // @decision 1ac74580 — never move this earlier: every refusal above this point (incl. the
@@ -22064,7 +22067,7 @@ export class SessionService {
     evt("merge_landing_started", {});
     // Card 9a5d040c: thread the project's resolved commitTrailers/commitLogBody through the SAME deps
     // object `goneBranchLedger` already rides — `targetRepo` (resolveRepoByKey) already carries both.
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory, goneBranchLedger, commitTrailers: targetRepo.commitTrailers, commitLogBody: targetRepo.commitLogBody }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs, gitFactory: this.soloMergeGitFactory, goneBranchLedger, workerTipLedger, commitTrailers: targetRepo.commitTrailers, commitLogBody: targetRepo.commitLogBody }, gateBaseMainHead, gateBaseBranchHead, thisOpId, squashTip, expectedMainlineBranch, expectedMainlineRef, expectAlreadyLanded, worker.cutBaseSha ?? null);
     // @decision 2a6a292a round 20 (card aa7677fa) — record the ledger entry UNCONDITIONALLY (independent
     // of mainlineCheckedTip): a landing whose own tripwire check fail-opened still needs a walkable row.
     // @decision 2a6a292a round 21 (card aa7677fa round 3) — gated on `merge.landedBase` too: an unverified

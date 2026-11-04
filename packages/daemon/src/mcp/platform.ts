@@ -3420,13 +3420,17 @@ export class PlatformMcpRouter {
           "before relaying such a claim as fact. `verification` names WHICH check answered it: \"content\" " +
           "(byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the " +
           "landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, " +
-          "not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). " +
+          "not the same content), \"trailer-only\" (pre-fix history — trailer PRESENCE alone, weaker), or " +
+          "\"ledger\" (a read-time match against Loom's own merge ledger, re-verified reachable — the sha " +
+          "WAS content-verified when it landed; typically answers this once the worker's branch is already " +
+          "gone, e.g. on an `orchestration.commitTrailers:\"off\"` project, where the other three tiers " +
+          "never can). " +
           "Absent means unknown, not unverified — treat it the same as a confident match, never as a red flag. " +
           "`merged.verification` is recomputed FRESH on every read — a full row (includeBody:true) ALSO " +
           "carries `mergedVerificationAtMerge` — the verification mode recorded ONCE when " +
           "that card's merge landed and never re-derived since; the two can legitimately disagree once the " +
-          "branch is later deleted (live content-verification then degrades to pathset/trailer-only, while " +
-          "the frozen at-merge value doesn't move) — never treat a disagreement between them as a bug. " +
+          "branch is later deleted (live content-verification then degrades to pathset/trailer-only/ledger, " +
+          "while the frozen at-merge value doesn't move) — never treat a disagreement between them as a bug. " +
           "`mergedVerificationAtMerge:null` on a MERGED card means one of: a solo " +
           "ALREADY_MERGED/boot-reconcile landing, a `noop` batch landing (content already present elsewhere " +
           "in the batch), a batch landing on a project with `orchestration.commitTrailers:\"off\"` " +

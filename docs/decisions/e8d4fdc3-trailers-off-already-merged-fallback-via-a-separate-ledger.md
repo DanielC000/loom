@@ -181,3 +181,129 @@ into "trailers ON never reaches the fallback"; it can, and after round 2 it does
   production — see "Honesty correction" above; it is structurally unreachable there.
 - Do not generalize `commit-trailers-solo-merge.mjs` scenario (C) into "trailers ON never reaches the
   ledger fallback" — see "Correcting the … claim" above; it can, and does so safely post-round-2.
+
+## Round 3 (card `aa09a59a`) — `getTaskMergedInfo`'s own trailer-miss has no path through round 1/2's fallback at all
+
+Round 1/2's `tryWorkerTipLedgerFallback` serves `findLandedSquashCommit`'s callers inside
+`confirmWorkerMerge`/boot-reconcile Pass A — all of which run WHILE the worker's branch may still be live
+(a re-confirm, a boot-time reconcile of a not-yet-finalized landing). `getTaskMergedInfo`
+(`git/worktrees.ts`) is a structurally different caller: it answers `tasks_list`/`tasks_get`/
+`list_all_tasks`'s `merged` field and the board drawer's lazy backfill, which read a card's ship state
+*after* the landing has already finalized — the steady-state case, not a race window.
+
+### (a) Why the round 1/2 fallback cannot serve this read
+
+`tryWorkerTipLedgerFallback` (`git/worktrees.ts`) resolves the branch's own LIVE tip first — `git
+rev-parse --verify refs/heads/<branch>` — and only then calls `WorkerTipLedgerFacts.lookupByWorkerTip
+(branch, workerTip)`, which needs that tip as half of its match key. But `finalizeMerge`
+(`sessions/service.ts:28016`) delegates to `finalizeWorktreeAndBranch` (`sessions/service.ts:27859`),
+whose own compare-and-swap `deleteBranch` call (`sessions/service.ts:27976`) runs unconditionally on every
+successful landing that reaches it (the one skip, `skipGoneBranchDelete`, fires only when the branch is
+*already* confirmed gone — it never leaves a live ref behind). So the moment a landing finalizes, the
+branch ref the round 1/2 fallback needs to rev-parse no longer exists, and the rev-parse fails closed
+(returns null) before the ledger is ever consulted. `getTaskMergedInfo`'s callers read a card's merged
+state *because* the worker is done and retired — by construction, the branch is gone in exactly the case
+this read exists to serve. A tip-keyed fallback can never answer it.
+
+### (b) Why the branch-keyed lookup is sound without a live ref
+
+`Db.getLandedCommitByWorkerBranch` (`db.ts:4308`, exposed as `WorkerTipLedgerFacts.lookupLandedForBranch`)
+drops the tip half of the key entirely and matches on `(project_id, repo_key, worker_branch)` alone across
+both `mainline_landed_commits` and `batch_landed_worker_tips`. This is safe for the same reason round 2's
+branch-keying is safe: the trust boundary is the ROW, never git content — `worker_branch`/
+`worker_landed_tip`/`landed_sha` are written ONLY by Loom's own merge code (`recordMainlineLedgerEntryIfRepoUnchanged`
+for solo, `recordBatchLandedWorkerTip` for batch), and only once a landing already genuinely happened; no
+agent or external actor has a write path into either table. Dropping the tip half does not reopen round
+2's review-fork forgery (a fresh fork branch sharing a landed tip): that forgery worked by matching the
+WRONG BRANCH via a shared tip, but a branch-only key has no tip to share in the first place — it can only
+ever return a row that was written for *this exact branch name*.
+
+Rows are never pruned except on a repo rebind (`db.ts:4112`/`4115`, "a rebind invalidates stale ancestry in
+the OLD repo") or a project delete (`db.ts:4722`/`4725`) — both of which also invalidate the OLD repo's
+mainline-watermark trust state for the same reason, so a surviving row's ancestry claim is never stale
+relative to the repo it's being checked against. `tryWorkerTipLedgerBranchFallback`
+(`git/worktrees.ts:9451`) still re-verifies the returned sha is reachable from `base` via a plain
+`merge-base --end-of-options <sha> <base>` equality compare (never `--is-ancestor` — decision `0eaaa693`'s
+own "Do not" on why) before trusting it; a row surviving from a since-rewritten or force-pushed history
+would fail that re-verify and fall through to `null`, same fail-closed posture as every other ledger
+fallback in this family.
+
+On a re-land (a branch held, then later landed again with a wider range) `Db.getLandedCommitByWorkerBranch`
+can see >1 row for the same branch across the two tables; it takes the one with the LATER `landed_at`,
+breaking an exact tie toward the solo table (an arbitrary but deterministic choice — the two tables' own
+row ids are not comparable with each other, so id cannot serve as the tiebreak).
+
+### (c) What the `"ledger"` tier means
+
+`"ledger"` (`MergedVerificationMode`, `git/worktrees.ts`) is a FOURTH, deliberately separate tier from
+`"content"`/`"pathset"`/`"trailer-only"` — never folded into any of the three. It means: this sha's own
+content WAS verified at the moment Loom landed it (every ledger-writing landing already ran the real
+squash/cherry-pick through the ordinary gate+commit path), but what answered THIS particular read is a
+read-time ledger-row match re-verified for reachability only, not content, at read time. It is reported
+honestly as its own tier rather than reused as `"content"` (which would overstate what this specific read
+re-checked) or `"trailer-only"` (which would understate it — unlike a bare trailer-presence check, a
+ledger row traces to a Loom-authored write, not arbitrary commit text). The board drawer
+(`Board.tsx`'s `shipVerificationStyle`) renders it as a confident tick (same color as `"content"`/
+`"pathset"`/absent) but with its own qualifying tooltip suffix ("verified when Loom landed it; branch since
+deleted") — distinct from `"trailer-only"`'s muted/qualified treatment, since `"ledger"` is not the weakest
+tier, just the one whose read-time check is narrower than its write-time guarantee.
+
+`Task.mergedVerificationAtMerge` additionally documents a path `"ledger"` can reach that `"content"`/
+`"pathset"`/`"trailer-only"` cannot: `resolveDeferredEffective`'s auto-clear persist write-through
+(`mcp/tasks.ts`) can stamp this column with a blocker's live `merged.verification` read, including
+`"ledger"` — never from the merge-time stamp `finalizeMerge` itself writes (which only ever knows
+`"content"`/`"pathset"`/`"trailer-only"`/null at landing time, before any ledger-only read has happened).
+
+### Do not (round 3 additions)
+
+- Do not assume `tryWorkerTipLedgerFallback`'s tip-keyed match can ever serve a POST-finalize read (board,
+  `tasks_list`/`tasks_get`) — see (a) above; the branch is gone by construction before that read's steady
+  state is even reached. Use `tryWorkerTipLedgerBranchFallback`/`lookupLandedForBranch` for any caller that
+  reads merged state without a live branch ref in hand.
+- Do not widen `Db.getLandedCommitByWorkerBranch`'s match to include a tip condition "for extra safety" —
+  the whole point is answering with no live tip available; requiring one defeats the fallback and
+  reintroduces the exact gap this round closes. Branch-only matching is sound per (b) above precisely
+  because the row, not git content, is the trust boundary.
+- Do not skip `tryWorkerTipLedgerBranchFallback`'s own `merge-base` reachability re-verify, and do not
+  switch it to `--is-ancestor` — same `0eaaa693` constraint as the tip-keyed fallback.
+- Do not report `"ledger"` as `"content"` or fold it into `"trailer-only"` — see (c) above; each
+  misrepresents what was actually re-checked at read time.
+
+## Round 4 (card `aa09a59a` round 2, Code Review) — the branch-only lookup bypassed the re-task guard on a LIVE branch
+
+Round 3's `tryWorkerTipLedgerBranchFallback` consulted `lookupLandedForBranch` (branch-only) whenever
+`getTaskMergedInfo`'s own trailer-map lookup found nothing for this branch — including the trailer-map's
+own DELIBERATE null for a branch that is still present and descends from its own prior squash (the
+re-task guard inside `resolveMergedCommitMapHit`: `mergeBase === hit.sha` ⇒ "re-cut onto its own prior
+squash: live again, not landed"). The branch-only lookup has no notion of the branch's current tip at
+all, so once a branch landed once and was later re-dispatched with new live work, `getTaskMergedInfo`
+kept reporting the OLD squash as `merged`, with `verification:"ledger"` — the old landed commit is real
+mainline history and is reachable from `base` forever, so the fallback's own `mergeBase === landedSha`
+re-verify can never catch this; it was built to re-confirm the row hasn't been invalidated by a
+force-push/rewrite, not to detect a re-cut. `resolveDeferredEffective` (`mcp/tasks.ts`) then treated a
+blocker in this exact state as cleared.
+
+Confirm-path callers (`findLandedSquashCommit`'s own `tryWorkerTipLedgerFallback`) were never affected:
+they key on `(branch, workerTip)` together, so a re-cut branch's new live tip simply never matches the
+old row and the fallback correctly returns nothing — this was a read/confirm asymmetry specific to the
+branch-only lookup.
+
+### The fix
+
+`tryWorkerTipLedgerBranchFallback` now checks branch presence FIRST (`git branch --list`). A GONE branch
+(the case round 3 built this for) still uses the branch-only `lookupLandedForBranch` + merge-base
+re-verify, unchanged. A PRESENT branch instead defers to the tip-keyed `tryWorkerTipLedgerFallback` —
+the SAME mechanism `findLandedSquashCommit`'s own fallback already uses — which fails closed (no row
+matches the branch's NEW tip) for a re-cut branch, and still succeeds for the narrow window where the
+branch is present but genuinely unmoved since its landing (e.g. `finalizeMerge`'s branch delete hasn't
+run yet). This makes the read path symmetric with the confirm path instead of adding a second,
+independent notion of "is this branch really still landed."
+
+### Do not (round 4 additions)
+
+- Do not let `tryWorkerTipLedgerBranchFallback`'s branch-only lookup (`lookupLandedForBranch`) run while
+  the branch ref is present — see the bug above; a live branch can ALWAYS merge-base-reach its own old
+  landed commit, so that check alone can never distinguish "still landed" from "re-cut, live again."
+- Do not add a second, hand-rolled tip-presence check inside `tryWorkerTipLedgerBranchFallback` instead
+  of calling `tryWorkerTipLedgerFallback` directly — the tip-keyed mechanism already exists and is
+  exercised by the confirm path; a second copy would drift from it independently.

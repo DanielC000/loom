@@ -4325,6 +4325,24 @@ export class Db {
     const distinct = new Set(rows.map((r) => r.landed_sha));
     return distinct.size === 1 ? [...distinct][0]! : null;
   }
+  /** @decision e8d4fdc3 round 3 (card aa09a59a) — the BRANCH-ONLY twin of {@link getLandedCommitByWorkerTip}
+   *  / {@link getBatchLandedWorkerTip}: no tip condition at all, so it still answers after the worker's
+   *  branch (and its live tip) is gone — the case those two can never serve. Safe without a tip because the
+   *  row itself, never git content, is the trust boundary (only Loom's own merge code ever writes one).
+   *  Most recent across BOTH tables wins on >1 row for the same branch (a held-branch late range, a
+   *  re-land) — compared by `landed_at`, solo winning an exact tie (an arbitrary but deterministic
+   *  tie-break; the two tables' ids are not comparable with each other). */
+  getLandedCommitByWorkerBranch(projectId: string, repoKey: string, branch: string): string | null {
+    const solo = this.db.prepare(
+      "SELECT tip, landed_at FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip IS NOT NULL ORDER BY landed_at DESC, id DESC LIMIT 1",
+    ).get(projectId, repoKey, branch) as { tip: string; landed_at: string } | undefined;
+    const batch = this.db.prepare(
+      "SELECT landed_sha AS tip, landed_at FROM batch_landed_worker_tips WHERE project_id = ? AND repo_key = ? AND worker_branch = ? ORDER BY landed_at DESC, id DESC LIMIT 1",
+    ).get(projectId, repoKey, branch) as { tip: string; landed_at: string } | undefined;
+    if (!solo) return batch?.tip ?? null;
+    if (!batch) return solo.tip;
+    return solo.landed_at >= batch.landed_at ? solo.tip : batch.tip;
+  }
   /** @decision e8d4fdc3 — the ONE construction point for {@link WorkerTipLedgerFacts} (git/worktrees.ts).
    *  `lookupByWorkerTip` consults BOTH ledger sources for the same (branch, tip) and fails closed (`null`)
    *  on a disagreement between them — never read by any mainline-watermark trust decision.
@@ -4347,6 +4365,7 @@ export class Db {
         if (solo !== null && batch !== null) return solo === batch ? solo : null;
         return solo ?? batch;
       },
+      lookupLandedForBranch: (branch: string) => this.getLandedCommitByWorkerBranch(projectId, repoKey, branch),
     };
   }
   /** @decision 2a6a292a round 20 (card aa7677fa) — a PURE DB walk, never a git call: a forged commit was

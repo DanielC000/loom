@@ -26,6 +26,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       read time — never throws.
 //   (7) Omitting `deferredUntilTaskId` entirely is byte-identical to today: a plain `deferred:true` with
 //       no blocker never auto-clears, no matter what else merges.
+//   (8) card aa09a59a — a blocker that lands with NO `Loom-Worker-Branch:` trailer at all (the
+//       `orchestration.commitTrailers:"off"` shape), but WITH the `mainline_landed_commits` ledger row a
+//       real trailers-off confirmWorkerMerge would have written, still auto-clears the dependent card —
+//       proving resolveDeferredEffective's auto-clear now benefits from getTaskMergedInfo's branch-keyed
+//       ledger fallback, not just the trailer scan. Before that card, this EXACT shape never cleared
+//       (deferredStuck would eventually flip true once the blocker reached the terminal column with no
+//       proven merge — see d9332365's gap 3).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/task-defer-until.mjs
 import fs from "node:fs";
@@ -45,6 +52,7 @@ fs.mkdirSync(repo, { recursive: true });
 const git = (cmd) => execSync(`git ${cmd}`, { cwd: repo }).toString();
 git("init -q");
 git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m init`);
+const defaultBranch = git("rev-parse --abbrev-ref HEAD").trim();
 
 const landBlocker = (blockerId, msg) => {
   const branch = `loom/${taskKey(blockerId)}`;
@@ -160,6 +168,27 @@ try {
   const got7 = await getProjectTask(db, "pRepo", plainDeferred.id);
   check("(7) a plain deferred:true with no deferredUntilTaskId NEVER auto-clears", got7.deferred === true);
   check("(7) deferredUntilTaskId reads null/absent when never set", got7.deferredUntilTaskId === null || got7.deferredUntilTaskId === undefined);
+
+  // --- (8) card aa09a59a — a trailers-off landing (no Loom-Worker-Branch trailer at all), but WITH the
+  // mainline_landed_commits ledger row a real confirmWorkerMerge on such a project would have written.
+  // Before that card's branch-keyed fallback, this exact shape never auto-cleared (gap 2/3 of
+  // docs/decisions/d9332365-optional-merge-commit-trailers.md).
+  const blocker8 = createProjectTask(db, "pRepo", { title: "blocker card 8 (trailers-off)" });
+  const dependent8 = createProjectTask(db, "pRepo", { title: "dependent card 8 (trailers-off blocker)" });
+  await updateProjectTask(db, "pRepo", dependent8.id, { deferred: true, deferredUntilTaskId: blocker8.id });
+  const got8Before = await getProjectTask(db, "pRepo", dependent8.id);
+  check("(8) POSITIVE CONTROL: stays deferred:true before the trailers-off blocker lands", got8Before.deferred === true);
+  const branch8 = `loom/${taskKey(blocker8.id)}`;
+  git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(x): trailers-off blocker landed"`); // no trailer
+  const blocker8Sha = git("log -1 --format=%H").trim();
+  check("(8) setup control: the blocker's landed commit carries NO Loom-Worker-Branch trailer", !git(`log -1 --format=%B ${blocker8Sha}`).includes("Loom-Worker-Branch:"));
+  db.recordMainlineLandedCommit("pRepo", "primary", defaultBranch, blocker8Sha, "HEAD", "e".repeat(40), branch8);
+  const got8After = await getProjectTask(db, "pRepo", dependent8.id);
+  check("(8) auto-clears to deferred:false via the branch-keyed ledger fallback (trailer scan alone would still miss it)", got8After.deferred === false);
+  const row8After = (await listProjectTasks(db, "pRepo", { includeBody: true })).find((t) => t.id === dependent8.id);
+  check("(8) listProjectTasks ALSO auto-clears the same way", row8After?.deferred === false);
+  const raw8After = db.getTask(dependent8.id);
+  check("(8) the RAW DB row is persisted deferred=false", raw8After.deferred === false);
 } finally {
   db.close();
   fs.rmSync(file, { force: true });

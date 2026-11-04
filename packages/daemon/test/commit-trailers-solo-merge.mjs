@@ -34,6 +34,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) card e8d4fdc3 — trailers "ON" is byte-identical: the SAME already-landed-plus-reported-done shape,
 //       with trailers on, resolves via the EXISTING trailer lookup alone (the ledger fallback is never
 //       reached — `findLandedSquashCommit`'s trailer walk finds it first).
+//   (F) card aa09a59a — the SAME ledger-backed trailers-off already-landed shape as (B), but on a GATELESS
+//       project AND with an HTML-entity title: proves the title-entity guard's `priorLanding` site
+//       (~19844) now threads workerTipLedger too, so it no longer wrongly refuses an already-landed
+//       branch it can no longer see via the trailer scan — PROVEN by mutant (dropping workerTipLedger at
+//       ONLY this call site flips the test red). The gateless `noGateLanded` check (~22061) is ALSO
+//       threaded in production, but this scenario does not independently prove ITS threading matters:
+//       by mutant, dropping workerTipLedger at only that call site leaves this test green, because
+//       `mergeBranch`'s own ALREADY_MERGED detection (fed the SAME ledger-threaded deps at the call just
+//       below) resolves the landing before `noGateLanded`'s own answer is ever load-bearing here (card
+//       aa09a59a round 2, Code Review). A scenario that isolates `noGateLanded` specifically is a
+//       separate, optional addition, not implied by this one.
 //
 // Run: 1) build (pnpm --filter @loom/daemon build), 2) node packages/daemon/test/commit-trailers-solo-merge.mjs
 import fs from "node:fs";
@@ -101,10 +112,10 @@ function newProject(tag, repo, orchestrationConfig) {
   return { ...d, projId, agentId, mgrId, repo };
 }
 
-async function addWorker(ctx, tag, fileContent) {
+async function addWorker(ctx, tag, fileContent, title) {
   const n = `${tag}${++seq}`;
   const taskId = `ctsm-${n}-task`, workerId = `ctsm-${n}-wkr`;
-  ctx.db.insertTask({ id: taskId, projectId: ctx.projId, title: `feat(test): ${n}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  ctx.db.insertTask({ id: taskId, projectId: ctx.projId, title: title ?? `feat(test): ${n}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   const { worktreePath, branch } = await createWorktree(ctx.repo, ctx.projId, taskId);
   registerForCleanup(worktreePath);
   fs.writeFileSync(path.join(worktreePath, `${n}.ts`), fileContent);
@@ -374,6 +385,40 @@ function seedReportedDone(ctx, w) {
   // branch still checked out in a live worktree, regardless of whether Pass A's classification is right.
   check("(E) secondary defense-in-depth: Z's worktree is STILL present (never deleted — cc9bce38's own checked-out guard, independent of this fix)", fs.existsSync(z.worktreePath));
   check("(E) secondary defense-in-depth: Z's branch is STILL present (never deleted — cc9bce38's own checked-out guard, independent of this fix)", git(repo, "branch", "--list", z.branch).includes(z.branch));
+  ctx.db.close();
+}
+
+// ======================= (F) card aa09a59a — a trailers-off, already-landed branch (ledger-backed,
+// exactly like (B)) must behave like its trailers-on twin at the title-entity guard (service.ts ~19844,
+// `priorLanding`): the card's OWN title carries an HTML entity, so pre-fix `priorLanding` reads null
+// (trailer scan misses, no ledger fallback) and the title guard WOULD wrongly refuse an already-landed
+// branch; post-fix it resolves non-null via the newly-threaded ledger and the guard is correctly skipped
+// — PROVEN by mutant (dropping workerTipLedger at only this call site flips this test red). The project
+// is ALSO gateless so this scenario reaches the `noGateLanded` check (~22061) on the same code path, but
+// — by mutant — dropping workerTipLedger at only THAT call site leaves this test green: `mergeBranch`'s
+// own ALREADY_MERGED detection (fed the same threaded deps at the call right below `noGateLanded`)
+// resolves the landing regardless, so this scenario does not independently prove noGateLanded's own
+// threading matters (card aa09a59a round 2, Code Review). =======================
+{
+  const repo = makeRepo("F");
+  const ctx = newProject("F", repo, { commitTrailers: "off", gateCommand: "" }); // gateless AND trailers off
+  const w = await addWorker(ctx, "F", "export const f = 1;\n", "feat(x): trailers-off &amp; gateless landing");
+  const landedBase = git(repo, "rev-parse", "HEAD");
+  // The SAME content the worker's own branch carries, committed directly onto main with NO trailer —
+  // mirrors what a real trailers-off squash of this exact branch would have produced.
+  fs.writeFileSync(path.join(repo, `${w.n}.ts`), "export const f = 1;\n");
+  commitAll(repo, `feat(test): ${w.n} work`, GIT_ID);
+  const landedSha = git(repo, "rev-parse", "HEAD");
+  check("(F) setup control: the fabricated landing carries NO reserved trailer (trailers off)", !hasAnyTrailer(git(repo, "log", "-1", "--format=%B", landedSha)));
+  ctx.db.recordMainlineLandedCommit(ctx.projId, "primary", "main", landedSha, landedBase, w.preSquashTip, w.branch);
+  check("(F) setup control: the ledger reverse-lookup resolves the fabricated landing", ctx.db.getLandedCommitByWorkerTip(ctx.projId, "primary", w.branch, w.preSquashTip) === landedSha);
+  seedReportedDone(ctx, w);
+
+  const r = await confirm(ctx, w.workerId);
+  const v = r.ok ? r.value : { __unsettled: r };
+  check(`(F) THE FIX: a gateless, trailers-off, ledger-backed already-landed branch with an HTML-entity title still resolves ALREADY_MERGED — the title-entity guard does not wrongly refuse it (got: ${JSON.stringify(v)})`,
+    r.settled === true && v.merged === true && v.emptyKind === "ALREADY_MERGED");
+  check("(F) never the title-entity MERGE-SUBJECT GUARD refusal", !/MERGE-SUBJECT GUARD/.test(v.detailText ?? v.reason ?? ""));
   ctx.db.close();
 }
 
