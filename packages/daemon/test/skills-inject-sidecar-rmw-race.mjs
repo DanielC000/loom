@@ -1,37 +1,6 @@
-// Hermetic simulated-interleave test for the cross-process manifest/fingerprints sidecar
-// read-modify-write race (card 4c2a0bfd, investigated off 3b2a8707's own Code Review round 3). See
-// docs/decisions/31f997e7-capability-bound-skill-delivery-is-hygiene-not-a-boundary.md's "CARD 4c2a0bfd"
-// section for the full cost analysis + accepted residuals this test pins.
-//
-// `injectSkills` is fully synchronous (no async/await anywhere in its call path), so two REAL calls in
-// one process can never interleave — the race this card is about is CROSS-PROCESS only (two daemons
-// sharing one cwd). To exercise it hermetically and deterministically (never a real, timing-dependent
-// two-process race), this test hooks pty/claude-config.ts's own `__setRenameSyncForTest` seam — the fix
-// routes the manifest/fingerprints write through its `writeJsonAtomic`, so the FIRST rename of a "sess-A"
-// call synchronously runs a COMPLETE second ("sess-B") injectSkills call to completion first, simulating
-// sess-B's whole read-modify-write cycle happening in the gap between sess-A's own read (already done,
-// before the write block) and sess-A's write — exactly two daemons racing on one cwd.
-//
-// Negative-control note (card 4c2a0bfd): running this file via
-//   pnpm --filter @loom/daemon negative-control --file packages/daemon/src/skills/inject.ts \
-//     --test packages/daemon/test/skills-inject-sidecar-rmw-race.mjs
-// swaps inject.ts back to its pre-fix HEAD content, which never calls into writeJsonAtomic/
-// __setRenameSyncForTest at all (it called raw fs.writeFileSync/fs.renameSync directly) — so the hook
-// never fires and checks (1a)/(1b) below go RED (sess-B's nested cycle never runs), proving the fix is
-// what wires this interleave point up at all. This is a behavioral assertion about the real write path
-// actually reaching the shared helper, not a bare "does the function exist" check (lesson 298) —
-// __setRenameSyncForTest exists unchanged either way; what differs is whether inject.ts's own code calls
-// into it.
-//
-// Separately mutant-verified by hand (not automated here — the mutant target, writeJsonAtomic's own
-// tmp-name expression, lives in a shared file this card does not permanently touch): temporarily
-// reverting ONLY pty/claude-config.ts's `const tmp = ...` line in writeJsonAtomic back to the pre-this-
-// card fixed `${filePath}.tmp` suffix (API-keeping — same signature, same callers), rebuilding, and
-// re-running this file turns check (1c) ("no spurious failure log") RED — sess-A's and sess-B's renames
-// then target the IDENTICAL tmp path, so whichever one's rename loses the race throws ENOENT against an
-// already-consumed tmp file and logs "[skills] failed to write manifest ...". Reverted immediately after
-// (confirmed via `git diff` showing no residual change to that file) — see the worker_report for the
-// RED/GREEN transcript.
+// @decision 31f997e7 — the plain cross-process lost update this test pins at (1f) is ACCEPTED, not a
+// bug: do not "fix" it by widening the interleave mechanism below without re-reading "CARD 4c2a0bfd" in
+// that record first (card 4c2a0bfd itself has no file of its own — its narrative is a section there).
 //
 // Sets LOOM_HOME to a temp dir BEFORE importing (paths.ts reads it at module load). No claude.
 // Run after build: node test/skills-inject-sidecar-rmw-race.mjs

@@ -846,6 +846,14 @@ A unique tmp name removes the COLLISION hazard above; it does not, and cannot, r
 
 **Escalation path, named but deliberately not taken here:** `pty/claude-config.ts` also has a full cross-process advisory lock (`withTrustLock`, PID-liveness-based stale-lock breaking) that COULD serialize the whole manifest+fingerprints RMW region if this residual is ever judged worth closing. Not ported — porting a general cross-process lock onto this synchronous hot spawn path is not proportionate to a cost ceiling of "freeze," one this same file already tolerates elsewhere (see "What remains" point 5 below).
 
+### Test methodology (`skills-inject-sidecar-rmw-race.mjs`)
+
+Since `injectSkills` is fully synchronous, a real cross-process race can't be reproduced hermetically by just calling it twice — there is no gap for a second call to land in. The test instead hooks `pty/claude-config.ts`'s own `__setRenameSyncForTest` seam: the first manifest rename of a "sess-A" call synchronously runs a COMPLETE second ("sess-B") `injectSkills` call to completion before sess-A's own rename proceeds, simulating sess-B's whole read-modify-write cycle landing in the gap between sess-A's read and sess-A's write.
+
+Negative-control (`pnpm --filter @loom/daemon negative-control --file packages/daemon/src/skills/inject.ts --test packages/daemon/test/skills-inject-sidecar-rmw-race.mjs`, default `--ref HEAD`): pre-fix `inject.ts` never calls `writeJsonAtomic`/`__setRenameSyncForTest` at all (raw `fs.writeFileSync`/`fs.renameSync`), so the hook never fires and the hook-fired/nested-ran assertions go RED — a behavioral assertion that the real write path reaches the shared helper, not a bare "does the function exist" check (lesson 298, since `__setRenameSyncForTest` exists unchanged either way).
+
+Mutant (hand-verified, not automated in the test file, since the target lives in a shared `pty/` file this card does not permanently touch): temporarily reverting ONLY `writeJsonAtomic`'s own `const tmp = ...` line (`pty/claude-config.ts`) back to the pre-this-card fixed `${filePath}.tmp` form (API-keeping — same signature, same callers) turns the "no spurious failure log" assertion RED, and inverts which session's claim survives (sess-A's write now throws instead of sess-B's being overwritten) — both explained by the same reintroduced collision. Reverted immediately; confirmed byte-identical via `git diff` before rebuilding green again.
+
 ## What remains (accurate as of card `3b2a8707`, UPDATED for card `f4272888` where noted)
 
 1. An EXPLICIT `skills` subset naming a bound skill still bypasses both the grant check and the isolation
