@@ -18,11 +18,14 @@ import { readFileSync } from "node:fs";
 
 const src = readFileSync(new URL("../src/pages/Usage.tsx", import.meta.url), "utf8");
 
-// Scope to the interactive-session section: from its section marker to the by-day chart's MetricToggle.
-// This covers the section head tag, description, empty state, aggregate strip, per-project/-agent rows,
-// and the ByDayChart — i.e. every interactive-session-facing string — and nothing from Agent Runs / live.
+// Scope to the interactive-session section: from its section marker to the note that closes the file
+// (card 30266229 moved the shared primitives — MetricToggle included, which used to END this slice — to
+// components/usageKit.tsx and left that note in their place). This covers the section head tag,
+// description, empty state, aggregate strip, per-project/-agent rows, and the ByDayChart — i.e. every
+// interactive-session-facing string — and nothing from Agent Runs / live occupancy, both of which are
+// declared ABOVE the start marker.
 const startMarker = "// ── Interactive-sessions (historical · est. consumption) section";
-const endMarker = "// Cost / Tokens toggle for the by-day chart";
+const endMarker = "// `MetricToggle` (the by-day chart's cost|tokens picker)";
 const startIdx = src.indexOf(startMarker);
 const endIdx = src.indexOf(endMarker);
 assert.notEqual(startIdx, -1, "interactive-session section marker not found — did Usage.tsx get restructured?");

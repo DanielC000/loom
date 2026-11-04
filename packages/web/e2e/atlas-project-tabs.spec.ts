@@ -1,13 +1,18 @@
-// The project node's NINE tabs (card 25c08fba, Atlas restructure 3 of 11 — item 3 of the gap audit at
-// $LOOM_PROJECT_WORK_DIR/atlas-gap-audit/REPORT.md; it built TEN, and card 44f725fe unified the two
-// home tabs — Overview and Deck — into one, leaving nine).
+// The project node's tabs (card 25c08fba, Atlas restructure 3 of 11 — item 3 of the gap audit at
+// $LOOM_PROJECT_WORK_DIR/atlas-gap-audit/REPORT.md).
+//
+// ⛔ THE COUNT IS NOT STATED HERE, and no leg asserts one. It has moved twice already — card 44f725fe
+// unified the two home tabs into one, card 30266229 added Usage — and every leg below reads the set
+// out of src/nav.tsx's own PROJECT_NODE_TABS instead, so a card that adds or removes a tab reddens
+// nothing it did not actually break. The one number left is a FLOOR on the declaration, and it exists
+// only to stop the DOM comparison passing against a declaration that has been emptied.
 //
 // The approved round-4 V2 design puts every project-scoped surface on the project NODE, as a tab under
 // its persistent readout, rather than leaving each one a full page of its own (`atlas.js`'s `PROJ_TABS`
 // prepended by `homeTabs("proj")`). This spec is the witness for the four claims that are actually
 // this card's:
 //
-//   1. THE TAB SET. All nine tabs render, in the declared order, with the declared labels — read off
+//   1. THE TAB SET. Every declared tab renders, in the declared order, with the declared labels — read off
 //      src/nav.tsx's own PROJECT_NODE_TABS rather than typed here, so a label or an order change
 //      cannot pass by drifting the test alongside the code.
 //   2. THE COUNTS ARE REAL. Four seeded populations, at four DELIBERATELY DIFFERENT sizes, each read
@@ -53,7 +58,7 @@ const PROJECT_KEY = "loom.projectId";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 
-// Wide enough that the board's seven intrinsic lanes and the ten-tab row both lay out without the
+// Wide enough that the board's seven intrinsic lanes and the whole tab row both lay out without the
 // narrow-breakpoint rules taking over — the dialog's margin equality is measured against it.
 const VIEWPORT = { width: 1600, height: 1000 };
 
@@ -214,9 +219,9 @@ async function seedProjectNode(loomDaemon: LoomDaemon) {
 }
 
 test.describe("Atlas project node tabs (card 25c08fba)", () => {
-  test("switch ON: the ten declared tabs render with real counts, and each one is a real address",
+  test("switch ON: every declared tab renders with real counts, and each one is a real address",
     async ({ page, loomDaemon }) => {
-      // Ten tabs, each clicked and then RELOADED, on a page whose board/memory/agents reads all have to
+      // Every tab clicked and then RELOADED, on a page whose board/memory/agents reads all have to
       // resolve, is well past the 30s default.
       test.setTimeout(240_000);
 
@@ -231,10 +236,10 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
         + ` — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
       expect(rows, "positive control: the parse did not resolve the Board tab, a row the declaration carries")
         .toContainEqual({ key: "board", label: "Board", to: "/board" });
-      // NINE since card 44f725fe unified the two home tabs (card 25c08fba's own claim was ten).
-      // Stated as a floor on the DECLARATION (not on the DOM) so a shrunk declaration cannot make the
-      // DOM comparison below pass vacuously against a shorter list.
-      expect(rows.length, "the approved design declares nine project tabs").toBeGreaterThanOrEqual(9);
+      // A FLOOR on the DECLARATION (not on the DOM, and deliberately not the exact count — see this
+      // file's header), so a shrunk declaration cannot make the DOM comparison below pass vacuously
+      // against a shorter list.
+      expect(rows.length, "the approved design declares at least nine project tabs").toBeGreaterThanOrEqual(9);
       // ⛔ And the removed home tab has not crept back as a tenth: a floor alone cannot see an
       // ADDITION, and `deck` is the one key card 44f725fe exists to keep off this declaration.
       expect(rows.map((t) => t.key), "the unified home tab is a single `overview` row")
@@ -289,7 +294,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       for (const t of rows) {
         // Through whichever half of the row holds it: landing on a strip-carrying tab collapses the
         // row (card d4350286), so the tabs after the first few live in the More menu by the time the
-        // loop reaches them. Every one of the ten is still exercised — that is this section's claim.
+        // loop reaches them. Every declared tab is still exercised — that is this section's claim.
         await openNodeTab(page, t.key);
         // The click navigated to exactly the address the declaration names — query included, since a
         // home tab's `?tab=` IS its address.
@@ -320,7 +325,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
 
   test("switch ON: every tab stays reachable at phone width, and one of the last ones still navigates",
     async ({ page, loomDaemon }) => {
-      // Ten tabs is five times what this row was built for, and an unwrapped row is CLIPPED at its
+      // This tab set is many times what the row was built for, and an unwrapped row is CLIPPED at its
       // container's edge rather than scrolled — so at 420 the tail of the set was simply off-screen,
       // with no scrollbar and no other way to reach it. "They are all in the DOM" is not the claim
       // worth making here; "a reader can see and click the last one" is.
@@ -354,7 +359,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
           `the ${key} tab runs past the right edge of a 420px viewport (x=${Math.round(box!.x)},`
           + ` w=${Math.round(box!.width)}) — the tab row is clipping its tail`).toBeLessThanOrEqual(420);
       }
-      // (b) Nothing is lost: the two halves together are exactly the ten declared tabs.
+      // (b) Nothing is lost: the two halves together are exactly the declared tab set.
       expect((await nodeTabKeys(page)).sort(), "a declared tab is in neither the row nor the menu")
         .toEqual(rows.map((t) => t.key).sort());
 
@@ -388,7 +393,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       await expect(page, `the last tab did not navigate at 420px`).toHaveURL(loomDaemon.baseURL + last.to);
       await expect(tabLink(page, last.key)).toHaveAttribute("aria-selected", "true");
 
-      // CONTRAST CASE: the same nine tabs at 1440 sit on ONE line with NO menu at all, so the fold
+      // CONTRAST CASE: the same tab set at 1600 sits on ONE line with NO menu at all, so the fold
       // above is the narrow viewport's answer and not a layout imposed on every width. (This is the
       // Overview tab, the one tab with no KPI strip — a strip-carrying tab folds at 1440 too, by
       // design, and card d4350286's own spec is where that is measured.)
@@ -397,7 +402,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       await expect(tabRow(page)).toBeVisible();
       const tops = await tabRow(page).locator('[role="tab"]').evaluateAll((els) =>
         [...new Set(els.map((el) => Math.round(el.getBoundingClientRect().top)))]);
-      expect(tops.length, `the nine tabs wrapped onto ${tops.length} lines at ${VIEWPORT.width}px`).toBe(1);
+      expect(tops.length, `the ${rows.length} declared tabs wrapped onto ${tops.length} lines at ${VIEWPORT.width}px`).toBe(1);
     });
 
   test("switch ON: the Board tab is the whole board, and a card opens the centred dialog",

@@ -990,9 +990,13 @@ export const api = {
   // breakdown (bySession, capped/ranked by cost) for the over-time chart + the prompt-cache hit-ratio
   // tripwire (every row, incl. totals, also carries its own cacheHitRatio). Human-only loopback — NOT an
   // agent MCP tool. DISTINCT from the runs-backed usageHistory.
-  sessionUsageHistory: (sinceIso: string, projectId?: string) => {
+  // `taskBreakdown` (card 58d5a36f/30266229) adds byTask + orchestrationOverhead + unattributed — a
+  // strict partition of the window's totals. The server returns all three only when the request is
+  // ALSO scoped to one real project, so passing it with no/"all" projectId is a no-op, not an error.
+  sessionUsageHistory: (sinceIso: string, projectId?: string, taskBreakdown?: boolean) => {
     const params = new URLSearchParams({ since: sinceIso });
     if (projectId && projectId !== "all") params.set("projectId", projectId);
+    if (taskBreakdown) params.set("taskBreakdown", "true");
     return get<SessionUsageHistory>(`/api/usage/sessions/history?${params.toString()}`);
   },
   // Drop the GLOBAL usage-awareness latch so new worker_spawn is unblocked without touching any

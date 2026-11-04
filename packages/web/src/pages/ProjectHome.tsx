@@ -18,6 +18,7 @@ import Repository from "./Repository";
 import Memory from "./Memory";
 import Runs from "./Runs";
 import Archive from "./Archive";
+import ProjectUsage from "./ProjectUsage";
 import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
@@ -457,6 +458,15 @@ export default function ProjectHome() {
             </section>
           </>
         ) : null}
+
+        {/* THE USAGE TAB (card 30266229). The node's SECOND non-re-homed tab — see PROJECT_NODE_TABS in
+            src/nav.tsx for why it is a `?tab=` rather than an address of its own.
+
+            Rendered only while selected, like the home tab above and unlike the eight re-homed bodies:
+            it holds no unfinished INPUT to protect (its window picker, sort and expanded-row set are
+            all re-derivable choices, not typed text), and keeping a polling usage query mounted behind
+            nine other tabs would make every project address pay for a breakdown nobody opened. */}
+        {tab === "usage" ? <ProjectUsage /> : null}
         {project && <span hidden data-testid="atlas-project-name">{project.name}</span>}
       </div>
     </HarnessMixProvider>

@@ -1,12 +1,20 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import type { SessionListItem, UsageHistory, UsageHistoryTotals, UsageHistoryAgent, UsageHistoryProject, SessionUsageHistory, SessionUsageTotals, SessionUsageAgent, SessionUsageProject, SessionUsageDay, SessionUsageSession } from "@loom/shared";
+import type { SessionListItem, UsageHistory, UsageHistoryTotals, UsageHistoryAgent, UsageHistoryProject, SessionUsageHistory, SessionUsageAgent, SessionUsageProject, SessionUsageDay, SessionUsageSession } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
 import { isRateLimited } from "../lib/attention";
 import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Select } from "../components/ui";
+// The SHARED usage kit (card 30266229): the token/cost/ratio formatting, the four historical windows and
+// the small presentational primitives this page used to declare itself, now in ONE place so the
+// per-project Usage tab (pages/ProjectUsage.tsx) renders in the same visual language rather than a
+// second one. Every import below is this page's OWN former declaration, moved verbatim.
+import {
+  Field, MetricToggle, RowName, SectionHead, SortToggle, Stat, TIMESPANS, WindowSelect,
+  fmtRatio, fmtTokens, fmtUsd, ratioTone, sessionTotalTokens, sinceIsoFor, type Timespan,
+} from "../components/usageKit";
 import { color, font, tone, type Tone } from "../theme";
 
 // USAGE — a god-eye page split into THREE deliberately separate, distinctly-labeled planes:
@@ -73,60 +81,9 @@ function shortModel(model?: string | null): string {
   if (!model) return "—";
   return model.replace(/^claude-/i, "");
 }
-function fmtTokens(n: number): string {
-  // Interactive cache-read totals reach the billions over a wide window — keep the readout legible with a
-  // B tier above M/k rather than printing "6020.4M".
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
-}
-function fmtUsd(n: number): string {
-  if (n === 0) return "$0.00";
-  if (n < 0.01) return `<$0.01`;
-  // Thousands separators — estimated interactive totals run to the thousands ($6,020.00 reads far better
-  // than $6020.00).
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-// Prompt-cache hit ratio (cacheRead / (cacheRead + cacheCreation + input)) — the fixed-prefix cache-health
-// tripwire. null = no usage in the row to divide by (never rendered as a misleading "0%").
-function fmtRatio(r: number | null): string {
-  return r == null ? "—" : `${Math.round(r * 100)}%`;
-}
-// Warm (read-dominated, byte-stable prefix) reads phosphor-green; a collapsing ratio (broken prefix,
-// re-paying the whole prefix every turn) escalates amber then red; unmeasured stays muted.
-function ratioTone(r: number | null): Tone {
-  if (r == null) return "muted";
-  if (r >= 0.8) return "phosphor";
-  if (r >= 0.4) return "amber";
-  return "red";
-}
-
-// ── Historical window controls ─────────────────────────────────────────────────
-type Timespan = "24h" | "7d" | "30d" | "all";
-const TIMESPANS: { key: Timespan; label: string; window: string }[] = [
-  { key: "24h", label: "Last 24 hours", window: "past 24 hours" },
-  { key: "7d", label: "Last 7 days", window: "past 7 days" },
-  { key: "30d", label: "Last 30 days", window: "past 30 days" },
-  { key: "all", label: "All time", window: "all time" },
-];
-const SPAN_MS: Record<Exclude<Timespan, "all">, number> = {
-  "24h": 24 * 60 * 60 * 1000,
-  "7d": 7 * 24 * 60 * 60 * 1000,
-  "30d": 30 * 24 * 60 * 60 * 1000,
-};
-// The window cutoff to request. "All" sends the epoch — the server floors it at 1 year ago, so this is
-// "everything Loom still retains" without the client guessing the retention bound.
-function sinceIsoFor(span: Timespan): string {
-  if (span === "all") return new Date(0).toISOString();
-  return new Date(Date.now() - SPAN_MS[span]).toISOString();
-}
-// Total throughput across a run-usage row: every billed token class summed.
+// Total throughput across a run-usage row: every billed token class summed. The interactive-session
+// twin (`sessionTotalTokens`) is in the shared kit; this runs-plane one stays here, where its plane is.
 function totalTokens(t: UsageHistoryTotals): number {
-  return t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens;
-}
-// Same sum for an interactive-session usage row (totals / per-day / per-project / per-agent all share the
-// SessionUsageTotals token fields).
-function sessionTotalTokens(t: SessionUsageTotals): number {
   return t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens;
 }
 
@@ -186,9 +143,7 @@ export default function Usage() {
           </Select>
         </Field>
         <Field label="Window">
-          <Select value={span} onChange={(e) => setSpan(e.target.value as Timespan)} style={{ minWidth: 150 }}>
-            {TIMESPANS.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
-          </Select>
+          <WindowSelect value={span} onChange={setSpan} />
         </Field>
         <span style={{ flex: 1 }} />
         <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
@@ -408,20 +363,6 @@ function HistorySection({
   );
 }
 
-// A breakdown row's leading label: the primary name with an optional secondary subtitle stacked under it
-// (the owning project for agent rows — e.g. "Dev" · "Fire Studio"), so identically-named agents across
-// projects read unambiguously. With no subtitle it lays out exactly like the old single-line name.
-function RowName({ name, subtitle }: { name: string; subtitle?: string | null }) {
-  return (
-    <span style={{ display: "flex", flexDirection: "column", minWidth: 160, maxWidth: 200, overflow: "hidden" }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
-      {subtitle && (
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
-      )}
-    </span>
-  );
-}
-
 // One historical breakdown row (project or agent): name, run count, a token meter relative to the
 // section's max, and the billed cost. `subtitle` (the owning project, for agent rows) renders as a small
 // secondary label so identically-named agents across projects disambiguate.
@@ -438,34 +379,6 @@ function HistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: str
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 64, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
-  );
-}
-
-function SortToggle({ value, onChange }: { value: "tokens" | "cost"; onChange: (v: "tokens" | "cost") => void }) {
-  const items: { key: "tokens" | "cost"; label: string }[] = [
-    { key: "cost", label: "Cost" },
-    { key: "tokens", label: "Tokens" },
-  ];
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>sort</span>
-      <span style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: 4, overflow: "hidden" }}>
-        {items.map((it) => {
-          const active = value === it.key;
-          return (
-            <button key={it.key} onClick={() => onChange(it.key)}
-              style={{
-                background: active ? color.phosphorDim : "transparent",
-                color: active ? color.phosphor : color.textDim,
-                border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: 11,
-                cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em",
-              }}>
-              {it.label}
-            </button>
-          );
-        })}
-      </span>
-    </span>
   );
 }
 
@@ -711,61 +624,6 @@ function ByDayChart({
   );
 }
 
-// Cost / Tokens toggle for the by-day chart — same shape as SortToggle, but it picks the charted measure.
-function MetricToggle({ value, onChange }: { value: "cost" | "tokens"; onChange: (v: "cost" | "tokens") => void }) {
-  const items: { key: "cost" | "tokens"; label: string }[] = [
-    { key: "cost", label: "Cost" },
-    { key: "tokens", label: "Tokens" },
-  ];
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>chart</span>
-      <span style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: 4, overflow: "hidden" }}>
-        {items.map((it) => {
-          const active = value === it.key;
-          return (
-            <button key={it.key} onClick={() => onChange(it.key)}
-              style={{
-                background: active ? color.phosphorDim : "transparent",
-                color: active ? color.phosphor : color.textDim,
-                border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: 11,
-                cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em",
-              }}>
-              {it.label}
-            </button>
-          );
-        })}
-      </span>
-    </span>
-  );
-}
-
-// ── Shared bits ────────────────────────────────────────────────────────────────
-// Section header with a right-aligned tag pill so the live vs historical distinction reads at a glance.
-function SectionHead({ title, tag, tagTone }: { title: string; tag: string; tagTone: Tone }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${color.border}`, paddingBottom: 6 }}>
-      <span style={{ fontFamily: font.head, fontSize: 14, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.text }}>{title}</span>
-      <Badge tone={tagTone}>{tag}</Badge>
-    </div>
-  );
-}
-
-// A labelled form control (label above the field), for the scope-control bar.
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <label style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function Stat({ label, value, tone: t = "phosphor" }: { label: string; value: string; tone?: Tone }) {
-  return (
-    <span style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: 4, padding: "4px 12px", minWidth: 72 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 20, color: tone[t] }}>{value}</span>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
-    </span>
-  );
-}
+// `MetricToggle` (the by-day chart's cost|tokens picker), `SectionHead`, `Field`, `Stat`, `RowName` and
+// `SortToggle` moved to components/usageKit.tsx (card 30266229) and are imported at the top of this file
+// — same markup, one declaration, now shared with the per-project Usage tab.

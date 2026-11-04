@@ -7,7 +7,7 @@
 // strip itself to go — verbatim: "Chips like … on the tabs row are not necessary and need too much
 // space causing the need for a 'More..' tab. remove them." — so the row is alone on its line and
 // every declared tab FITS at every desktop width. The machinery stays: it is still what keeps a
-// nine-tab row reachable at phone width, where it was never the strip that made the tabs overflow.
+// ten-tab row reachable at phone width, where it was never the strip that made the tabs overflow.
 //
 // MEASURED on this build (card 4a0ad464's own sweep, both home nodes, no strip anywhere): a trigger
 // appears at 900 and below with the tree rail present, and — because the rail becomes a DRAWER below
@@ -505,11 +505,12 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
         // ⛔ A TRIGGER IS NOT UNCONDITIONALLY REQUIRED HERE. Below 820px the tree is a drawer, so the
         // content column gets the rail's 244px back and a short enough tab set legitimately fits with
         // nothing to fold — a BETTER outcome than folding, not a defect. MEASURED on this build: at
-        // 720 the project node's nine tabs fit and the Workspace node's do not. What must hold either
-        // way is that NOTHING IS UNREACHABLE, so that is what is asserted; the menu's own behaviour
-        // is then exercised only where a fold actually happened. (Hardcoding "there is always a
-        // trigger at 720" is what went red on card `44f725fe`, which removed one project tab and so
-        // let the remaining nine fit at 720.)
+        // 720 (with NINE project tabs, before card 30266229 added a tenth) the project node's fit and
+        // the Workspace node's did not — and that measurement is exactly as perishable as the count it
+        // was taken at, which is why no leg asserts it. What must hold either way is that NOTHING IS
+        // UNREACHABLE, so that is what is asserted; the menu's own behaviour is then exercised only
+        // where a fold actually happened. (Hardcoding "there is always a trigger at 720" is what went
+        // red on card `44f725fe`, which removed one project tab and so let the rest fit at 720.)
         if (!g.hasMore) {
           const rowKeys = g.tabKeys.slice().sort();
           if (JSON.stringify(rowKeys) !== JSON.stringify(declared[who])) {

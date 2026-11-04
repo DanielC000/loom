@@ -280,8 +280,9 @@ export function workspaceNodeTabOf(tab: WorkspaceNodeTab): { key: string; label:
 // Card 25c08fba (Atlas restructure 3 of 11). The approved round-4 V2 design puts every
 // project-scoped surface on the project NODE, as a tab under its persistent readout, rather than
 // leaving each one a full page of its own — `atlas.js`'s `PROJ_TABS`, prepended by `homeTabs("proj")`.
-// That prefix was Overview + Deck; card 44f725fe unified the two into ONE home tab, so the rows below
-// are NINE, in exactly that order.
+// That prefix was Overview + Deck; card 44f725fe unified the two into ONE home tab, and card 30266229
+// added the owner's per-project Usage tab after them — so the rows below are TEN, in that order. Read
+// the count off this array, never off this sentence.
 //
 // 🔴 A TAB'S ADDRESS IS THE PATH IT ALREADY HAD. Only the HOME tab is `?tab=` on the node's own path
 // (and in practice it is the bare path, since it is the default) — every other tab keeps `/board`,
@@ -331,6 +332,14 @@ export const PROJECT_NODE_TABS: ProjectNodeTab[] = [
   { key: "memory", label: "Memory", to: "/memory" },
   { key: "runs", label: "Runs", to: "/runs" },
   { key: "archive", label: "Archive", to: "/archive" },
+  // Usage — the owner's own feedback item (card 30266229): per-project consumption broken down BY TASK.
+  // The one project tab that is NOT re-homed from an existing address and is NOT the home tab: it is a
+  // SECOND `?tab=` on the node's own path, Atlas-only by construction, because `/usage` is already the
+  // WORKSPACE node's own cross-project tab (WORKSPACE_NODE_TABS above) and a project-depth slice of a
+  // god-eye page is a different surface, not a re-home of it. That makes `?tab=` correct here rather
+  // than a violation of the anchor below: this body owns no `?tab=` of its own to collide with, and
+  // there is no classic address to leave behind — so no LEGACY_REDIRECTS row and no NAV_PAGES entry.
+  { key: "usage", label: "Usage", to: `${PROJECT_NODE_PATH}?tab=usage` },
   { key: "settings", label: "Settings", to: "/settings" },
 ];
 

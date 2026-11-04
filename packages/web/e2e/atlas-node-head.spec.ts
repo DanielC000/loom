@@ -207,8 +207,9 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     expect(fleet.working).not.toBe(fleet.live);
 
     const keys = await renderedTabKeys(page);
-    // The node is the nine-tab one card 25c08fba built and card 44f725fe unified the two home tabs
-    // of — otherwise "on every tab" could pass on a node that had lost the tabs this card is about.
+    // The node is the many-tab one card 25c08fba built, not a remnant of it — otherwise "on every tab"
+    // could pass on a node that had lost the tabs this card is about. A FLOOR, deliberately: the exact
+    // count has moved twice (cards 44f725fe, 30266229) and is nav.tsx's to state, not this spec's.
     expect(keys.length, `project node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(9);
 
     // ⭐ Verdicts are COLLECTED and asserted once, never `expect`ed inside the loop: an in-loop

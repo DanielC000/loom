@@ -253,6 +253,15 @@ export interface LoomDaemon {
     cacheCreationTokens?: number;
     cacheReadTokens?: number;
     costUsd?: number;
+    /** The DENORMALIZED task attribution (card 58d5a36f) — what the per-project Usage tab's `byTask`
+     *  breakdown groups on. Omitted ⇒ null, and the read side then falls back to a live
+     *  `sessions.task_id` join, which for the default minted `e2e-session-<uuid>` (no session row at
+     *  all) resolves to nothing — i.e. the sample lands in `unattributed`. Pass a real board task id to
+     *  attribute it; pass `sessionId` of a seeded manager-role session to land it in
+     *  `orchestrationOverhead` instead, which the read side claims BY ROLE regardless of this field. */
+    taskId?: string;
+    /** The sample's ISO instant. Omitted ⇒ now, which is inside every window a spec would ask for. */
+    ts?: string;
   }) => Promise<string>;
   /**
    * Seed a full companion (card 0954ed9c: the Companion Manage e2e spec) via the test-only

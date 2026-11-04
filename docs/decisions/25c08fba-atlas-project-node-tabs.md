@@ -37,7 +37,8 @@ It is an unscoped god-eye page in the classic rail and the design's project-node
 
 ## Do not
 
-- **Do not re-address a project tab as `?tab=` on `/project`.** It collides with the tab body's own `?tab=`, and the both-shells redirect row it would need breaks the switch-OFF contract.
+- **Do not re-address a RE-HOMED page's tab as `?tab=` on `/project`.** It collides with that body's own `?tab=` (Repository, Actors and Automation each read one off the query string), and the both-shells `LEGACY_REDIRECTS` row it would need to leave its old address behind breaks the switch-OFF contract.
+  - Both reasons are properties of a page that ALREADY HAS AN ADDRESS, so a brand-new tab that has neither — no body `?tab=` of its own, and no prior address to redirect from — may be a `?tab=` on `/project`, exactly as the `overview` home tab already is. Card `30266229`'s Usage tab is that case; see `docs/decisions/30266229-per-project-usage-by-task.md` for the full reading.
 - **Do not unmount an inactive tab body, and do not park one with an inline `display`** — that out-specifies the UA `[hidden]` rule. Unfinished input must survive a tab switch.
 - **Do not declare a hook below the `!projectId` early return.** See above; it blanks the app rather than failing locally.
 - **Do not derive a re-homed tab's depth or label from the page's own `scoped` flag.** `/terminals` is at project depth under Atlas and at workspace depth in the classic rail, and only the tab declaration knows that.

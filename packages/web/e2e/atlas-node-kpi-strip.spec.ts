@@ -71,7 +71,7 @@ async function seedProjectWithBoard(loomDaemon: LoomDaemon) {
  * Every tab key the node actually offers, read off the live node — the row's, plus the ones folded
  * into its More menu since card d4350286. ⛔ Reading the ROW alone would quietly shrink this spec's
  * population to whatever currently fits, which is the same defect in a new costume as the hardcoded
- * list the header above refuses: the node whose nineteen tabs needed a readout still has nineteen.
+ * list the header above refuses: the node whose whole tab set needed a readout still has all of it.
  */
 async function renderedTabKeys(page: Page): Promise<string[]> {
   return nodeTabKeys(page);
@@ -128,9 +128,10 @@ test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
     await expect(page.locator(".loom-atlas-nodehead h1")).toContainText(seeded.project.name);
 
     const keys = await renderedTabKeys(page);
-    // The node is the nine-tab one card 25c08fba built and card 44f725fe unified the two home tabs
-    // of, not a one-tab remnant — otherwise "no tab carries a strip" could pass on a node that had
-    // lost the tabs this claim is about.
+    // The node is the many-tab one card 25c08fba built, not a one-tab remnant — otherwise "no tab
+    // carries a strip" could pass on a node that had lost the tabs this claim is about. A FLOOR,
+    // deliberately: the exact count has moved twice (cards 44f725fe, 30266229) and is nav.tsx's to
+    // state, not this spec's.
     expect(keys.length, `project node tabs: ${keys.join(", ")}`).toBeGreaterThanOrEqual(9);
     expect(keys).toContain("board");
     expect(keys).toContain("memory");
