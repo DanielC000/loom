@@ -5025,8 +5025,8 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       live.entry = rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
     } else {
       writeFailed = true;
-      // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere (round-1's "subset"
-      // reasoning was retracted). Keep the tmp; boot's recovery pass re-arms it as a duplicate.
+      // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere. Keep the tmp — now
+      // tracked (5332762e) below, so a later clear narrows/sweeps it; boot's own recovery pass is a backstop only.
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       // @decision e1572b69 — capture the return BEFORE the strandedTmp block below, which compares
@@ -5166,6 +5166,10 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // the decision record.
   const loggedTokens = new Set<string>();
   const loggedContributors = new Set<string>();
+  // @decision 444cd8e2 — basenames of any dual-tracked twin write (below) that fails its own rename;
+  // tracked into `updated.orphanLatchFiles` AFTER (never before) this branch's own
+  // `rewriteOrphanLatchFilesAfterPartialClear` call, mirroring 5332762e's established ordering rule.
+  const strandedTwinTmpBasenames = new Set<string>();
   // @decision 2dd97aaa (Follow-up 58957b1e) — `updated` drops `token`; pass it as `droppedTokens` — the
   // tombstone call above can fail to protect this write (an unrelated in-memory record still holding
   // `token` at this instant defeats `tombstoneIfNotSurviving`'s own "surviving anywhere" scan).
@@ -5217,15 +5221,24 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       for (const c of written.entry.contributorRepoPaths ?? []) loggedContributors.add(c);
     } else {
       writeFailed = true;
-      // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere (round-1's "subset"
-      // reasoning was retracted). Keep the tmp; boot's recovery pass re-arms it as a duplicate.
+      // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere. Keep the tmp — now
+      // tracked (444cd8e2) below, so a later clear narrows/sweeps it; boot's own recovery pass is a backstop only.
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
+      // @decision 444cd8e2 — collect now; tracked AFTER the loop's own rewrite call below (ordering rule).
+      if (written.strandedTmp) strandedTwinTmpBasenames.add(path.basename(written.strandedTmp));
     }
   }
   // @decision e1572b69 — capture the return: a stranded-tmp-tracking replacement must reach the log
   // spread below (and any future reader of `updated`), never a stale pre-replaceEntryEverywhere local.
   updated = rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames, new Set([token]));
+  // @decision 444cd8e2 — track any dual-tracked twin's own stranded tmp(s), AFTER (never before) the
+  // rewrite call just above (5332762e's ordering rule) — tracking first would re-narrow a tmp just minted.
+  if (strandedTwinTmpBasenames.size > 0) {
+    const withStrandedTmp: MergeQuarantineEntry = { ...updated, orphanLatchFiles: [...new Set([...(updated.orphanLatchFiles ?? []), ...strandedTwinTmpBasenames])] };
+    replaceEntryEverywhere(activeQuarantines, updated, withStrandedTmp);
+    updated = withStrandedTmp;
+  }
   // @decision 55939b88 (round 2/3) — same shared formatter as `clearTokenFromPendingIndices`'s own
   // reduce branch, but the LOG-ONLY `loggedTokens`/`loggedContributors` union (round 3), never `updated`
   // directly — `updated` itself stays exactly what was actually written/stored.
@@ -6597,8 +6610,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
         p.entry = writtenTwin.entry;
         p.sourceFile = writtenTwin.filename;
       } else {
-        // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere (round-1's "subset"
-        // reasoning was retracted). Keep the tmp; boot's recovery pass re-arms it as a duplicate.
+        // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere. Keep the tmp — now
+        // tracked (444cd8e2) below, so a later clear narrows/sweeps it; boot's own recovery pass is a backstop only.
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not durably persist the reduced token set for ${p.entry.repoPath}'s own tied pending twin at ${p.sourceFile} after this clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with an already-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
       }
@@ -6613,6 +6626,15 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // `p.entry` itself self-heals via this call's own internal `replaceEntryEverywhere` scan of
       // `pendingUnresolvedQuarantines`, but `updated` must never be left pointing at a stale object either.
       if (overlapTokens.length > 0) updated = rewriteOrphanLatchFilesAfterPartialClear(writtenTwin.ok ? writtenTwin.entry : updated, writtenBasenames, new Set(overlapTokens));
+      // @decision 444cd8e2 — track P's own stranded tmp AFTER (never before) the rewrite call just above
+      // (5332762e's ordering rule) — tracking first would re-narrow a tmp this same call just minted.
+      if (!writtenTwin.ok && writtenTwin.strandedTmp) {
+        const basename = path.basename(writtenTwin.strandedTmp);
+        const withStrandedTmp: MergeQuarantineEntry = { ...updated, orphanLatchFiles: [...new Set([...(updated.orphanLatchFiles ?? []), basename])] };
+        replaceEntryEverywhere(activeQuarantines, updated, withStrandedTmp);
+        updated = withStrandedTmp;
+        p.entry = withStrandedTmp;
+      }
       candidateTokens.push(...overlapTokens);
       continue; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched; nothing to splice
     }
