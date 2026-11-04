@@ -183,8 +183,13 @@ const SKIP_CHECK_ALLOWLIST = [
   { file: "sessions/service.ts", mustContain: '"assistant", false, companionName', method: "composeCompanionReinjectPrompt" },
   // resume() — re-derives for the row's own already-pinned role.
   { file: "sessions/service.ts", mustContain: "effectiveForcePlain(session, agent)", method: "resume" },
-  // upgradeCompanionCapabilities — re-pins an EXISTING assistant-role session.
-  { file: "sessions/service.ts", mustContain: '"assistant", false, undefined', method: "upgradeCompanionCapabilities" },
+  // repinCapabilitySurface (card 6745e4bc, round 2) — shared core for upgradeCompanionCapabilities AND
+  // repinSessionGrants. Both are HUMAN-authorized REST routes (the SAME bypass class as
+  // spawnHumanAuthorized above, NOT "role never changes" — the profile's own role CAN diverge from the
+  // session's at repin time; see the method's own doc comment for why that's safe here anyway). The
+  // literal call site now derives the role from THIS SESSION's OWN ROW (`session.role`), never a
+  // caller-supplied variable — this mustContain text also proves that invariant, not just the flag's presence.
+  { file: "sessions/service.ts", mustContain: "config, session.role ?? undefined, false, undefined", method: "repinCapabilitySurface" },
   // forkSession — carries the SOURCE row's already-pinned role forward.
   { file: "sessions/service.ts", mustContain: "forkAgent, config, src.role", method: "forkSession" },
   // startRun — every forbidden-key field is hardcoded false/absent on the spawned run session regardless.

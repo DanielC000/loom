@@ -2715,6 +2715,19 @@ export class ForkLiveManagerError extends Error {
   }
 }
 
+/** Card 6745e4bc (Code Review round 2): every KNOWN refusal `repinSessionGrants`/`repinCapabilitySurface`
+ *  can throw — role-out-of-scope, the companion redirect, the codex+restrictedTools combination (card
+ *  `b94fcb72`), and a stale-id refusal (archived, or superseded by a recycle successor). Lets
+ *  `POST /api/sessions/:id/repin-grants` map exactly these to a 409, while an unexpected (non-refusal)
+ *  throw — e.g. "project not found"/"agent not found", a data-integrity violation rather than a
+ *  deliberate refusal — surfaces as a real 500 instead of being swallowed into the same status code. */
+export class RepinGrantsRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RepinGrantsRefusalError";
+  }
+}
+
 // @decision ad131671 — card 15806f81: forkSession's own singleton refusal, mirrored on
 // MANAGER_SESSION_BARRED_ERROR's shape (a plain message string, checked by equality at the REST route).
 export const SETUP_SESSION_FORK_BARRED_ERROR =
@@ -2772,6 +2785,30 @@ async function defaultDistImporterCheckBuild(worktreePath: string, cancelSignal?
     worktreePath, cancelSignal,
   );
   return result.code === 0 ? { ok: true } : { ok: false, reason: `turbo build exited ${result.code}: ${result.out.slice(-500)}` };
+}
+
+/**
+ * @decision 6745e4bc — one diff entry per CHANGED field only. Normalizes the OLD side with the SAME
+ * backstop defaults `resolveAgentSpawn` uses (false/[]/null), so an absent old column never reads as a
+ * spurious change against the patch's own default.
+ */
+function diffCapabilitySurfaceFields(
+  old: Pick<Session, "browserTesting" | "documentConversion" | "capabilities" | "restrictedTools" | "noCommit" | "skills" | "connections" | "vaultWrite">,
+  patch: { browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; skills: string[] | null; connections: string[]; vaultWrite: boolean },
+): Record<string, { old: unknown; new: unknown }> {
+  const diff: Record<string, { old: unknown; new: unknown }> = {};
+  const push = (key: string, oldVal: unknown, newVal: unknown) => {
+    if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) diff[key] = { old: oldVal, new: newVal };
+  };
+  push("browserTesting", old.browserTesting ?? false, patch.browserTesting);
+  push("documentConversion", old.documentConversion ?? false, patch.documentConversion);
+  push("capabilities", old.capabilities ?? [], patch.capabilities);
+  push("restrictedTools", old.restrictedTools ?? false, patch.restrictedTools);
+  push("noCommit", old.noCommit ?? false, patch.noCommit);
+  push("skills", old.skills ?? null, patch.skills);
+  push("connections", old.connections ?? [], patch.connections);
+  push("vaultWrite", old.vaultWrite ?? false, patch.vaultWrite);
+  return diff;
 }
 
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
@@ -5227,6 +5264,36 @@ export class SessionService {
     return { ...session, harness: undefined, processState: "live", busy: false };
   }
 
+  /**
+   * @decision 6745e4bc — shared re-pin core for `upgradeCompanionCapabilities` (forces an immediate
+   * respawn) and `repinSessionGrants` (row-write only, no forced respawn — see that method's doc). The
+   * caller owns everything else: recordSkillsDropped, any audit event, whether to force it live.
+   * @decision 1a048349 — `connections`/`vaultWrite`: live on the very next tool call for a REVOCATION or
+   * a non-empty→non-empty change (TaskMcpRouter re-resolves off the row); a FIRST-TIME grant is NOT live
+   * until this session's next resume/fork/recycle — the newly-registered tool has no `tools/list_changed` signal.
+   * @decision acd3c688 — `skipGrantCarryoverCheck` is safe here because both callers are HUMAN-authorized
+   * REST routes (the `spawnHumanAuthorized` class), never because role can't diverge from the bound
+   * profile's own role — it can, at repin time, and correctly drops `skills` (card `509176c8`) when it does.
+   */
+  private repinCapabilitySurface(session: Session, agent: Agent, config: ResolvedConfig): {
+    patch: {
+      browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean;
+      noCommit: boolean; skills: string[] | null; connections: string[]; vaultWrite: boolean;
+    };
+    skillsDropped: { sessionRole: SessionRole; agentId: string; profileId: string | null; profileRole: SessionRole | null } | undefined;
+  } {
+    // @decision 6745e4bc round 2 — resolved from THIS session's OWN row, never a caller-supplied
+    // parameter: the caller can only ever re-pin the role this session already has, not a different one.
+    const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite, skillsDropped } =
+      this.resolveAgentSpawn(agent, config, session.role ?? undefined, false, undefined, { skipGrantCarryoverCheck: true });
+    // Card b94fcb72: the row's harness stays pinned, and codex ignores restrictedTools — re-pinning `true` onto a
+    // codex row would resume UNrestricted while reading as restricted. Refuse BEFORE any write.
+    if (restrictedTools === true && session.harness === "codex") throw new RepinGrantsRefusalError(CODEX_RESTRICTED_TOOLS_REASON);
+    const patch = { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite };
+    this.db.setSessionCapabilitySurface(session.id, patch);
+    return { patch, skillsDropped };
+  }
+
   // @decision d88163b7 — companion-specific CONVERSATION-PRESERVING respawn: re-resolve + re-pin the
   // capability surface, stop the old pty, then resume() into the SAME transcript. A deliberate,
   // human-triggered escape hatch (REST only) — never auto-fire this from a capability-grant write.
@@ -5240,18 +5307,7 @@ export class SessionService {
     const agent = this.db.getAgent(session.agentId);
     if (!agent) throw new Error("agent not found");
     const config = resolveConfig(project.config);
-    // @decision 1a048349 — `connections`/`vaultWrite` are re-pinned here for a stateless-router reason,
-    // not a respawn one: TaskMcpRouter re-resolves them fresh off this ROW on every request, so the row
-    // write alone takes effect on the very next tool call — never assume they need the respawn below.
-    // @decision acd3c688 — re-pins an EXISTING assistant-role session (explicitRole always equals its
-    // own current role); human-REST-only trigger (upgrade()/startOne's auto-respawn-on-enable, both
-    // gated per dbba993f) — skip the carryover check.
-    const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite, skillsDropped } =
-      this.resolveAgentSpawn(agent, config, "assistant", false, undefined, { skipGrantCarryoverCheck: true });
-    // Card b94fcb72: the row's harness stays pinned, and codex ignores restrictedTools — re-pinning `true` onto a
-    // codex row would resume UNrestricted while reading as restricted. Refuse BEFORE any write or pty stop.
-    if (restrictedTools === true && session.harness === "codex") throw new Error(CODEX_RESTRICTED_TOOLS_REASON);
-    this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite });
+    const { skillsDropped } = this.repinCapabilitySurface(session, agent, config);
     this.recordSkillsDropped(session, sessionId, skillsDropped);
     const carried: QueuedMessage[] = [];
     const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
@@ -5334,6 +5390,46 @@ export class SessionService {
       });
     }
     return resumed;
+  }
+
+  // @decision 6745e4bc — HUMAN-ONLY (REST, never an MCP tool anywhere) re-pin of a manager/worker/
+  // platform-lead session's frozen grants. Row-write only — a forced respawn here could interrupt a
+  // mid-build/mid-git-op turn with nothing to recapture it, unlike a companion's short chat turn.
+  repinSessionGrants(sessionId: string): { session: Session; diff: Record<string, { old: unknown; new: unknown }> } {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("session not found");
+    // @decision 6745e4bc round 2 — a STALE id refuses before any role check: an archived row has no live
+    // process to re-pin, and a row with a recycle successor is no longer the lineage's current owner —
+    // name the successor id so the caller can redirect to it instead of guessing.
+    const successor = this.db.getSuccessor(sessionId);
+    if (successor) {
+      throw new RepinGrantsRefusalError(`session ${sessionId} has been superseded by its recycle successor ${successor.id} — re-pin grants on the successor instead`);
+    }
+    if (session.archivedAt) {
+      throw new RepinGrantsRefusalError(`session ${sessionId} is archived — it has no live process to re-pin grants on`);
+    }
+    if (session.role === "assistant") throw new RepinGrantsRefusalError("companion sessions use POST /api/companion/:sessionId/upgrade instead");
+    if (session.role !== "manager" && session.role !== "worker" && session.role !== "platform") {
+      throw new RepinGrantsRefusalError("only a manager, worker, or platform-lead session can have its grants re-pinned");
+    }
+    const project = this.db.getProject(session.projectId);
+    if (!project) throw new Error("project not found");
+    const agent = this.db.getAgent(session.agentId);
+    if (!agent) throw new Error("agent not found");
+    const config = resolveConfig(project.config);
+    const { patch, skillsDropped } = this.repinCapabilitySurface(session, agent, config);
+    // @decision 6745e4bc round 2 — the SAME managerSessionId attribution as the grants_repinned event
+    // right below (parentSessionId ?? sessionId), so a worker's own locked_role_skills_dropped and
+    // grants_repinned rows for one repin call always attribute to its parent manager, not its own id.
+    const managerSessionId = session.parentSessionId ?? sessionId;
+    this.recordSkillsDropped(session, managerSessionId, skillsDropped);
+    const diff = diffCapabilitySurfaceFields(session, patch);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId: sessionId, taskId: session.taskId ?? null,
+      kind: "grants_repinned", detail: { diff },
+    });
+    return { session: this.db.getSession(sessionId)!, diff };
   }
 
   // @decision 39fcaad3 — daemon_restart's safety gates (supervisor-check, rebuild-first) are ROLE-

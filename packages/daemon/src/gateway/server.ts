@@ -25,7 +25,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS, CommondirPinConflictEr
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError, ForkLiveManagerError } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError, ForkLiveManagerError, RepinGrantsRefusalError } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -6447,6 +6447,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // @decision 4ee527d1 — a human deliberately stopping a WORKER here IS a retirement; no-op otherwise.
     deps.sessions.retireWorkerSessionIfWorker(id, "human_stop");
     return reply.send({ ok: true });
+  });
+  // @decision 6745e4bc — HUMAN-ONLY re-pin of a manager/worker/platform-lead session's frozen grants.
+  // Row-write only, never a forced respawn — Tier-0 loopback-only (stricter than /stop above, which is
+  // Tier-1; same tier as the companion upgrade route), INTENTIONALLY NO MCP path on any surface.
+  app.post("/api/sessions/:id/repin-grants", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    try {
+      const result = deps.sessions.repinSessionGrants(id);
+      return reply.send({ sessionId: id, session: result.session, diff: result.diff });
+    } catch (e) {
+      // @decision 6745e4bc round 2 — map ONLY a known refusal to 409; an unexpected throw (e.g. a
+      // data-integrity "project not found") rethrows for Fastify's default handler to surface as a 500.
+      if (e instanceof RepinGrantsRefusalError) return reply.code(409).send({ error: e.message });
+      throw e;
+    }
   });
   // Manual per-session rate-limit override + retry-now (HUMAN/REST only — trust boundary like
   // stop/merge, NEVER an MCP tool). MIRRORS RateLimitWatcher.resume() exactly (the proven recovery

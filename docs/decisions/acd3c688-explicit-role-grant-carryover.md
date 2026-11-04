@@ -315,3 +315,27 @@ round-3 `browserTesting` rebind gap; a brand-new agent has no schedules yet.
 - Do not build a UI surfacing a schedule's `createdBy`, and do not treat "the reset is irreversible via
   the UI" as a bug to fix — both are accepted, named here deliberately so a future reader doesn't
   rediscover and re-litigate them.
+
+## Round 5 (card `6745e4bc`'s own Code Review): `repinCapabilitySurface`'s `skipGrantCarryoverCheck` justification corrected
+
+A prior inline comment on `SessionService.repinCapabilitySurface` (the shared core for
+`upgradeCompanionCapabilities`/`repinSessionGrants`) justified its `skipGrantCarryoverCheck: true` as
+"`role` is the session's OWN current (immutable) role — an EXISTING role being re-pinned, never a
+different one." That reasoning is wrong: the check this flag bypasses
+(`explicitRoleGrantCarryoverError`) guards against the BOUND PROFILE's own `role` field diverging from
+the session's resolved role — and that divergence CAN happen at repin time, because the owner may have
+since rebound the agent to a profile with a different `role`. `repinSessionGrants`'s own test fixture
+(`repin-session-grants.mjs` scenario (12)) exercises exactly this: a session row pinned `role:"platform"`
+whose bound profile (`profMgr`) carries `role:"manager"` — re-pinning it is a legitimate, intentional
+divergence, not an accident this check needs to catch.
+
+The real justification is the SAME class as `spawnHumanAuthorized` elsewhere in this file: both callers of
+`repinCapabilitySurface` (`upgradeCompanionCapabilities`, `repinSessionGrants`) are HUMAN-authorized REST
+routes with no agent-reachable path to either. `explicitRoleGrantCarryoverError` exists to stop an
+AGENT-reachable spawn path from mismatching role and profile grants (see this record's own "Chosen
+design" above) — there is no such path here to guard against, independent of whether role diverges.
+
+This divergence is also exactly the shape `sessionSkillsForRole` (card `509176c8`) exists for: when the
+session's resolved role is a LOCKED_PROFILE_ROLES member and differs from the bound profile's own role,
+the profile's pinned `skills` subset is dropped (trust-filtered deliver-all) rather than applied — so a
+repin that re-triggers this divergence correctly drops `skills` too, same as a fresh spawn would.

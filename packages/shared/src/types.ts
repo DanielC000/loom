@@ -2168,6 +2168,10 @@ export type OrchestrationEventKind =
   // matching one of the deleted agent/project's OWN sessions, which `""` can never match. See the
   // `8b236b22` decision record for the verified mechanics.
   | "agent_profile_rebind"
+  // @decision 6745e4bc — a HUMAN re-pinned a manager/worker/platform-lead session's frozen capability
+  // surface from its live Profile; `detail` carries { diff }. Audit-only, excluded from the same four
+  // kind-groupings as `agent_profile_rebind` above for the same reason.
+  | "grants_repinned"
   // OBSERVABILITY ONLY — records whether a PRIVATE, presence-gated per-project discovery block was
   // appended to a spawn/recycle's startupPrompt, filed at all FIVE real injection call sites in the
   // daemon's own `sessions/service.ts`. WHAT the block is and WHY it's gated stays documented
@@ -2305,7 +2309,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_session_barred: true,
   vault_index_lock_stale: true,
   vault_index_lock_cleared: true,
-  profile_grant_reach: true, agent_profile_rebind: true,
+  profile_grant_reach: true, agent_profile_rebind: true, grants_repinned: true,
   process_survived_kill: true,
   trust_lock_degraded: true,
   wake_target_redirected: true,
