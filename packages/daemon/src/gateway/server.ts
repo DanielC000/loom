@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, QuestionAttachmentKind, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
+import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, byRecentlyDone, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir } from "../paths.js";
@@ -178,6 +178,18 @@ const DEFAULT_ARCHIVE_PAGE_LIMIT = 100;
 const parsePageParam = (v: string | undefined, fallback: number): number => {
   const n = Number(v);
   return v && Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
+/** Parse `?doneLimit=` on GET /api/projects/:id/board (card a483cbec). Unlike {@link parsePageParam} there
+ *  is no numeric fallback: absent, blank, or ANYTHING unparseable/negative returns `undefined`, which the
+ *  route reads as "no window" and answers with today's full, byte-identical response. Failing open to the
+ *  complete set is the only safe direction — a garbled param that silently became some default window
+ *  would hand a consumer a truncated done lane with no way to tell. `Number` (not `Number.parseInt`) for
+ *  the same scientific-notation reason as its sibling; floored, so `?doneLimit=50.7` is a window of 50. */
+const parseDoneLimit = (v: string | undefined): number | undefined => {
+  if (!v) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
 };
 
 /** Maps the run-history UI's outcome-filter value (`fired`/`deferred`/`failed`/`missed`) to the matching
@@ -4828,6 +4840,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // task's body is dropped to a `hasBody` flag — its drawer lazy-fetches the body on open via the new
   // GET /api/tasks/:id below. The terminal column is resolved the SAME way listProjectTasks does (by
   // role, with no hardcoded key), so a renamed "done" lane still gets this treatment.
+  //
+  // `?doneLimit=N` is an OPT-IN window over the TERMINAL lane only: the N most-recently-done cards in
+  // `byRecentlyDone` order (the shared comparator the web lane itself sorts by), plus `doneTotal`, that
+  // lane's TRUE length.
+  //
+  // @decision a483cbec — the param is opt-in and the DEFAULT must stay unwindowed, with no extra
+  // response keys: four other consumers of the `["board", projectId]` cache entry read the whole done
+  // set, and windowing by default silently truncates every one of them.
   app.get("/api/projects/:id/board", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
@@ -4836,7 +4856,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const tasks = deps.db.listTasks(p.id);
     // Card 3df86c87: parent/children/blocker roll-up per card (counts only — the drawer's GET /api/tasks/:id
     // carries the full relation view). The web board learns of a change through its 4s poll of this route.
-    return { columns: cols, tasks: toBoardTasks(tasks, terminalKey, boardRollup(deps.db, p.id, tasks)) };
+    //
+    // Rolled up over the FULL task list even when a window is requested, then looked up per returned row:
+    // boardRollup treats its `tasks` argument as the UNIVERSE it counts children against, so handing it
+    // the windowed list alone would under-count a live parent's `childCount` by however many of its
+    // children the window dropped.
+    const rollup = boardRollup(deps.db, p.id, tasks);
+    const doneLimit = parseDoneLimit((req.query as { doneLimit?: string }).doneLimit);
+    if (doneLimit === undefined) return { columns: cols, tasks: toBoardTasks(tasks, terminalKey, rollup) };
+    const done = terminalKey ? tasks.filter((t) => t.columnKey === terminalKey) : [];
+    const live = terminalKey ? tasks.filter((t) => t.columnKey !== terminalKey) : tasks;
+    // Sort a COPY: `tasks` is this request's own array from db.listTasks, but `live`/`done` share its rows
+    // and the full-set branch above must stay order-identical to today for the same input.
+    const window = [...done].sort(byRecentlyDone).slice(0, doneLimit);
+    return {
+      columns: cols,
+      tasks: toBoardTasks([...live, ...window], terminalKey, rollup),
+      // The lane's true length, which the client's header count reads instead of the window's own length.
+      doneTotal: done.length,
+      // The EFFECTIVE limit after parsing, so a client can tell a honoured window from a coerced one
+      // rather than assuming the number it sent came back (same reason GET /api/archived-sessions echoes
+      // its own post-clamp `limit`). Never clamped DOWN: the uncapped full set is already one request
+      // away — omit the param — so there is nothing for a ceiling here to protect.
+      doneLimit,
+    };
   });
   // A single task's full row (incl. body) — the lazy per-card fetch the board drawer uses to load a
   // DONE card's body on open (the board LIST route above omits it). Same store as tasks_get/tasks_update.

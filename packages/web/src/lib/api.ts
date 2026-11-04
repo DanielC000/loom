@@ -763,8 +763,15 @@ export const api = {
   // server-side to "primary"; this UI only ever calls it for the primary repo.
   gitMainlineWatermarkReset: (projectId: string) =>
     post<{ reset: boolean }>(`/api/projects/${projectId}/mainline-watermark/reset`, {}),
-  board: (projectId: string) =>
-    get<{ columns: KanbanColumn[]; tasks: BoardTask[] }>(`/api/projects/${projectId}/board`),
+  // `doneLimit` (card a483cbec) is OPT-IN: pass a number to ask for only the N most-recently-done
+  // terminal-lane cards (plus `doneTotal`, the lane's true length, and `doneLimit`, the effective
+  // post-parse window). Omit it — as every consumer other than pages/Board.tsx does — and the request
+  // URL is byte-identical to before, so the shared `["board", projectId]` cache entry still holds the
+  // WHOLE done set. `doneTotal`/`doneLimit` are absent, not zero, on that unwindowed response: read
+  // `doneTotal !== undefined` as "this response is windowed", never a falsy check.
+  board: (projectId: string, doneLimit?: number) =>
+    get<{ columns: KanbanColumn[]; tasks: BoardTask[]; doneTotal?: number; doneLimit?: number }>(
+      `/api/projects/${projectId}/board${doneLimit === undefined ? "" : `?doneLimit=${doneLimit}`}`),
   // One task's full row (incl. body) — the board drawer's lazy fetch for a DONE card, whose body the
   // board() list route above omits (card 4fa2c146).
   getTask: (id: string) => get<Task>(`/api/tasks/${id}`),

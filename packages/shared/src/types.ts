@@ -3050,6 +3050,23 @@ export type BoardTask = Omit<Task, "body"> & {
   blockedByFirst: { id: string; title: string } | null;
 };
 
+/** The minimal shape {@link byRecentlyDone} needs — `Task` and {@link BoardTask} both satisfy it. */
+export type RecentlyDoneSortable = Pick<Task, "updatedAt" | "position" | "id">;
+
+/**
+ * A DONE lane's card order: most-recently-done first. `updatedAt` (an ISO string, so a lexical compare
+ * is chronological) is the stand-in for completion time; tie-break on `position` then `id` so two cards
+ * sharing a timestamp never reshuffle between reads (deterministic, no flicker on the board's poll).
+ *
+ * Lives HERE, in shared, because two independent readers must agree on it exactly: the web board sorts
+ * the lane it renders, and `GET /api/projects/:id/board?doneLimit=N` picks *which* N cards to ship by
+ * the same order (card a483cbec). A second copy of this comparator is a window that disagrees with the
+ * lane it fills — the client would render the server's "newest N" in a different order, or page past
+ * cards the server never sent.
+ */
+export const byRecentlyDone = (a: RecentlyDoneSortable, b: RecentlyDoneSortable): number =>
+  a.updatedAt === b.updatedAt ? (a.position - b.position || (a.id < b.id ? -1 : 1)) : (a.updatedAt > b.updatedAt ? -1 : 1);
+
 /** Card 3df86c87 — the three task relation types (docs/decisions/3df86c87-*.md). Only `blocks` drives scheduling. */
 export type TaskRelationType = "blocks" | "related" | "discovered-from";
 

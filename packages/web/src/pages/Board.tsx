@@ -3,6 +3,11 @@ import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge, RepoRegistryEntry } from "@loom/shared";
+// The done lane's order lives in shared, not here: the server picks WHICH cards a `?doneLimit=` window
+// contains by this same comparator, so a second copy would be a window that disagrees with its lane.
+// `columnKeyForRole` is the daemon's OWN terminal-lane resolver, used here only to identify which lane
+// a windowed response describes — never to decide a lane's tint or sort (that stays `isDoneColumn`).
+import { byRecentlyDone, columnKeyForRole } from "@loom/shared";
 import { api, type TaskUpdateConflictError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
@@ -44,17 +49,16 @@ type TaskEditPatch = {
   repoKey?: string | null; parentId?: string | null; baseVersion?: number;
 } & RelationPatch;
 // A live lane's card order lives beside `prio` in components/priority — see that comment for why it
-// is not in this file.
-// Done columns sort most-recently-done first. `updatedAt` (ISO string → lexical compare is chronological)
-// is the stand-in for completion time; tie-break on position then id so equal-timestamp cards never
-// reshuffle on the 3s refetch (deterministic, no flicker).
-const byRecentlyDone = (a: BoardTask, b: BoardTask) =>
-  a.updatedAt === b.updatedAt ? (a.position - b.position || (a.id < b.id ? -1 : 1)) : (a.updatedAt > b.updatedAt ? -1 : 1);
+// is not in this file. The done lane's own order (`byRecentlyDone`) is imported from @loom/shared above.
 
-// ── Done-lane render cap ──────────────────────────────────────────────────────
-// @decision 7da27eb5 — cap only the TERMINAL lane, and only AFTER filtering (capping first searches
+// ── Done-lane paging ──────────────────────────────────────────────────────────
+// @decision 7da27eb5 — page only the TERMINAL lane, and only AFTER filtering (paging first searches
 // just the newest page and silently loses an older match). The lane header's count is the full
-// filtered length, never the sliced one.
+// filtered length, never the rendered one.
+//
+// @decision a483cbec — while NO filter is active this page size is also the server's `?doneLimit=`
+// window, so the lane's unrendered cards are never fetched at all; the instant a filter IS active the
+// client must drop the param and fetch the whole set, or a search can only ever see the newest page.
 const DONE_LANE_PAGE = 50;
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
@@ -75,10 +79,49 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   const active = useActiveProject();
   const projectId = propProjectId ?? active.projectId;
   const [openTaskId, setOpenTaskId] = useState<string | null>(null); // task whose detail drawer is open
+
+  // ── Client-side view filter (no server round-trip) ───────────────────────────
+  // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
+  // card by its primary handle); priority + column are multi-select (empty set = no constraint). All
+  // three AND together. Non-matching cards vanish from every column; the column header count and the
+  // "N of M shown" affordance reflect the filtered view.
+  //
+  // Declared ABOVE the board query because `filterActive` decides whether that query may ask the server
+  // for a done WINDOW at all (card a483cbec) — the filter runs over whatever the response contains, so a
+  // windowed response while filtering could only ever search the newest page.
+  const [search, setSearch] = useState("");
+  const [priFilter, setPriFilter] = useState<Set<TaskPriority>>(() => new Set());
+  const [colFilter, setColFilter] = useState<Set<string>>(() => new Set());
+  const togglePri = (p: TaskPriority) => setPriFilter((s) => { const n = new Set(s); n.delete(p) || n.add(p); return n; });
+  const toggleCol = (k: string) => setColFilter((s) => { const n = new Set(s); n.delete(k) || n.add(k); return n; });
+  const clearFilters = () => { setSearch(""); setPriFilter(new Set()); setColFilter(new Set()); };
+  const q = search.trim().toLowerCase();
+  const filterActive = q !== "" || priFilter.size > 0 || colFilter.size > 0;
+
+  // ── The done-lane window (card a483cbec) ─────────────────────────────────────
+  // How many done cards this board currently asks the server for. The "Show N more" reveal bumps it by
+  // one page, which changes the query key and so is a real refetch rather than a client-side unhide.
+  // Reset on a project switch for the same reason `<Column>`'s key carries the project id: lane B must
+  // not open already-expanded because lane A was.
+  const [doneWindow, setDoneWindow] = useState(DONE_LANE_PAGE);
+  useEffect(() => { setDoneWindow(DONE_LANE_PAGE); }, [projectId]);
+  // `null` ⇒ send no `?doneLimit=` at all and fetch the WHOLE board. That is the state while any filter
+  // is active, preserving 7da27eb5's load-bearing invariant (filter first, page second) across the new
+  // server window: a search for a done card from last year has to be able to reach it.
+  const doneLimit = filterActive ? null : doneWindow;
   // Poll so the board reflects task changes made by ANOTHER process (the orchestrator via MCP), not
   // just this client's own mutations — otherwise external card moves only appear on a manual refresh.
-  // keepPreviousData (above) makes the 4s refetch flicker-free. Matches the Platform board's polling.
-  const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, refetchInterval: 4000, placeholderData: keepPreviousData });
+  // keepPreviousData (above) makes the 4s refetch flicker-free, and ALSO covers the two key changes this
+  // board now makes on purpose — a window bump and the windowed↔full switch — so neither flashes an
+  // empty lane. Matches the Platform board's polling.
+  //
+  // The key EXTENDS `["board", projectId]` rather than replacing it: that exact entry stays the full,
+  // unwindowed set its four other consumers read, while `invalidateQueries(["board", projectId])` below
+  // still reaches every windowed entry too, because react-query matches a key by prefix.
+  const board = useQuery({ queryKey: ["board", projectId, doneLimit], queryFn: () => api.board(projectId, doneLimit ?? undefined), enabled: !!projectId, refetchInterval: 4000, placeholderData: keepPreviousData });
+  // True while a DIFFERENT window (or the windowed↔full switch) is in flight and the lane is still
+  // showing the previous response — the reveal button's loading state.
+  const windowPending = board.isPlaceholderData;
   // Link the board to the orchestration spine: a worker carries its task id, so cards can show the
   // live worker's status + branch for the task they represent.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
@@ -192,19 +235,6 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // the board response and renders the real drawer regardless of this fetch's outcome.
   const drawerError = needsBodyFetch && !drawerTask && taskDetail.isError;
 
-  // ── Client-side view filter (no server round-trip) ───────────────────────────
-  // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
-  // card by its primary handle); priority + column are multi-select (empty set = no constraint). All
-  // three AND together. Non-matching cards vanish from every column; the column header count and the
-  // "N of M shown" affordance reflect the filtered view.
-  const [search, setSearch] = useState("");
-  const [priFilter, setPriFilter] = useState<Set<TaskPriority>>(() => new Set());
-  const [colFilter, setColFilter] = useState<Set<string>>(() => new Set());
-  const togglePri = (p: TaskPriority) => setPriFilter((s) => { const n = new Set(s); n.delete(p) || n.add(p); return n; });
-  const toggleCol = (k: string) => setColFilter((s) => { const n = new Set(s); n.delete(k) || n.add(k); return n; });
-  const clearFilters = () => { setSearch(""); setPriFilter(new Set()); setColFilter(new Set()); };
-  const q = search.trim().toLowerCase();
-  const filterActive = q !== "" || priFilter.size > 0 || colFilter.size > 0;
   const allTasks = board.data?.tasks ?? [];
   // Hierarchy lookups (card 1ae4f88c), both built off the UNFILTERED list on purpose:
   //  · titleById resolves a card's `parentId` to a title for its board-card chip. The board response
@@ -233,6 +263,22 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     (priFilter.size === 0 || priFilter.has(prio(t))) &&
     (colFilter.size === 0 || colFilter.has(t.columnKey)));
 
+  // ── Reading a windowed response (card a483cbec) ──────────────────────────────
+  // WHICH lane the server windowed is resolved by the DAEMON'S OWN resolver, never by this board's
+  // `isDoneColumn` (role, else a key-substring guess). On a legacy role-less board the two genuinely
+  // disagree — `columnKeyForRole` falls back to the LAST column, `isDoneColumn` to a name guess — and
+  // attributing one lane's window and total to a different lane is worse than not windowing at all.
+  // Gated on `!filterActive` too, so the brief moment a stale windowed response is still on screen
+  // after a filter goes on reads its counts off the rendered set rather than a total it no longer spans.
+  const windowedTotal = filterActive ? undefined : board.data?.doneTotal;
+  const windowedLaneKey = windowedTotal === undefined ? undefined : columnKeyForRole(board.data?.columns ?? [], "terminal");
+  const laneTotalFor = (col: KanbanColumn) => (col.key === windowedLaneKey ? windowedTotal : undefined);
+  // The done cards the window left on the server. Added back into the FilterBar's "N of M shown"
+  // readout, which is about the FILTER, not about what the lane renders — so it must keep counting the
+  // whole board (exactly as it did under 7da27eb5's render-only cap), never just what was fetched.
+  const unfetchedDone = windowedTotal === undefined ? 0
+    : windowedTotal - allTasks.filter((t) => t.columnKey === windowedLaneKey).length;
+
   return (
     <div>
       {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
@@ -253,7 +299,8 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
             error={create.error ? errorText(create.error) : null} />
           <FilterBar search={search} onSearch={setSearch} columns={board.data.columns}
             priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
-            shown={shownTasks.length} total={allTasks.length} active={filterActive} onClear={clearFilters} />
+            shown={shownTasks.length + unfetchedDone} total={allTasks.length + unfetchedDone}
+            active={filterActive} onClear={clearFilters} />
           <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "stretch" }}>
             <DndContext onDragEnd={onDragEnd}>
               {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
@@ -270,6 +317,12 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                     filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
                     multiRepo={multiRepo} repos={repos} primaryRepoPath={project?.repoPath ?? ""}
                     titleById={titleById}
+                    // The server's TRUE lane length on a windowed response, else undefined. It is what
+                    // both the header count and the soft-WIP readout must read — `tasks`/`cardCount`
+                    // only span what was FETCHED, so on a windowed lane both would read the window.
+                    laneTotal={laneTotalFor(col)}
+                    onRevealMore={() => setDoneWindow((n) => n + DONE_LANE_PAGE)}
+                    revealPending={windowPending}
                     cardCount={allTasks.filter((t) => t.columnKey === col.key).length} />
                 ))}
               </div>
@@ -346,21 +399,35 @@ function labelColorFor(accent: string | null): string {
   return accent;
 }
 
-function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount }:
+function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount, laneTotal, onRevealMore, revealPending }:
   { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void; multiRepo: boolean;
-    repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number }) {
+    repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number;
+    /** Card a483cbec — the server's TRUE lane length when THIS lane came back windowed, else undefined. */
+    laneTotal?: number; onRevealMore?: () => void; revealPending?: boolean }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   const doneLane = isDoneColumn(col);
-  // Reveal state for DONE_LANE_PAGE, held HERE rather than in Board so it is genuinely per-lane. It
-  // survives the board's 4s refetch because Column's key is stable across a poll (the poll re-renders
-  // this component, it does not remount it) — and that key carries the project id, so switching project
-  // DOES remount the lane and collapse it back to one page.
+  // Two ways this lane can be showing one page, and they are not interchangeable (card a483cbec):
+  //  · SERVER-WINDOWED (`laneTotal` set, i.e. no filter is active) — `tasks` already IS the page, so
+  //    there is nothing to slice, and revealing more means FETCHING more. That window is a query
+  //    parameter, so it necessarily lives in Board; it is also inherently board-wide (a board has one
+  //    terminal lane), so nothing per-lane is lost by it living there.
+  //  · CLIENT-CAPPED (`laneTotal` undefined) — the whole set is in hand, either because a filter is
+  //    active or because nothing asked for a window. 7da27eb5's render cap applies, and its reveal
+  //    state stays HERE so it is genuinely per-lane and survives the 4s poll (Column's key is stable
+  //    across a refetch, and carries the project id, so a project switch collapses the lane again).
+  const serverWindowed = laneTotal !== undefined;
   const [expanded, setExpanded] = useState(false);
   // `tasks` arrives already filtered (Board's search/priority/column filter) and already sorted, so
   // slicing here caps only what is RENDERED — a search that matches an old done card has already pulled
   // it out of the full set by the time we get here, and it lands inside the first page.
-  const visible = doneLane && !expanded ? tasks.slice(0, DONE_LANE_PAGE) : tasks;
-  const hidden = tasks.length - visible.length;
+  const visible = doneLane && !serverWindowed && !expanded ? tasks.slice(0, DONE_LANE_PAGE) : tasks;
+  // The lane's real length: the server's total when windowed, else what we were handed.
+  const laneLength = laneTotal ?? tasks.length;
+  const hidden = laneLength - visible.length;
+  // A windowed reveal loads the NEXT page rather than everything at once — one click on a 4,763-card
+  // lane would re-pay the whole payload the window exists to avoid. So the button offers a page (or
+  // just the remainder, when that is smaller), and `hidden` stays the honest count behind it.
+  const step = serverWindowed ? Math.min(DONE_LANE_PAGE, hidden) : hidden;
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
   // bar, neutral AA-safe label, neutral hairline card border.
@@ -369,10 +436,12 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
   const cardAccent = accent ?? color.border; // un-accented lane → a neutral hairline left-border
   // SOFT WIP limit (advisory, never blocks). Shown as "N / limit" WHENEVER a limit is set (so an
   // approaching "2 / 3" is visible, not just a breach) — neutral under, amber AT-or-over. The count is
-  // the column's TRUE card load (`cardCount`, unfiltered), NOT the filtered `tasks.length`, so an active
-  // board filter can't make the WIP count / over-limit state read wrong.
+  // the column's TRUE card load (`laneTotal` when the lane came back windowed, else `cardCount`,
+  // unfiltered), NOT the filtered `tasks.length`, so neither an active board filter nor a done window
+  // can make the WIP count / over-limit state read wrong.
+  const wipCount = laneTotal ?? cardCount;
   const hasWipLimit = col.wipLimit !== undefined;
-  const atOrOverWip = hasWipLimit && cardCount >= col.wipLimit!;
+  const atOrOverWip = hasWipLimit && wipCount >= col.wipLimit!;
 
   // The board header is plain, non-editable display — column CRUD (add/rename/delete/reorder/role/
   // accent/WIP) lives ONLY in Settings › Board Columns (ColumnManager). Here we render the label, its
@@ -394,38 +463,49 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
       <SectionLabel style={{ color: labelColor, margin: 0, padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
         {hasWipLimit ? (
-          <span aria-label={`${cardCount} of ${col.wipLimit} cards${atOrOverWip ? ", at or over the soft WIP limit" : ""}`}
+          <span aria-label={`${wipCount} of ${col.wipLimit} cards${atOrOverWip ? ", at or over the soft WIP limit" : ""}`}
             title={atOrOverWip
               ? `At or over the soft WIP limit of ${col.wipLimit} (advisory — does not block; counts the column's true load)`
               : `Soft WIP limit of ${col.wipLimit} (advisory; counts the column's true load)`}
             style={{ marginLeft: "auto", flexShrink: 0, color: atOrOverWip ? color.amber : color.textDim, fontWeight: atOrOverWip ? 700 : undefined }}>
-            {cardCount} / {col.wipLimit}
+            {wipCount} / {col.wipLimit}
           </span>
         ) : (
-          <span style={{ marginLeft: "auto", flexShrink: 0, color: "inherit" }}>({tasks.length})</span>
+          <span style={{ marginLeft: "auto", flexShrink: 0, color: "inherit" }}>({laneLength})</span>
         )}
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
         {visible.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
-        {/* The reveal for the done-lane cap. Sits INSIDE the lane's own scroll region (so it trails the
+        {/* The reveal for the done-lane page. Sits INSIDE the lane's own scroll region (so it trails the
             last rendered card rather than pinning to the lane footer) and is full-width so it reads as
-            the continuation of the list it extends, not as a card. One-way: revealing the rest is not a
+            the continuation of the list it extends, not as a card. One-way: revealing more is not a
             state the user then has to undo, and a collapse control would only re-hide what they asked
-            for. Absent entirely when nothing is hidden, so an un-capped lane is byte-identical. */}
+            for. Absent entirely when nothing is hidden, so an un-paged lane is byte-identical.
+
+            Windowed, this is a FETCH, so it gets the one state a pure unhide never needed: while the
+            next page is in flight the label says so, the button is inert, and `aria-busy` carries the
+            same fact to a screen reader rather than leaving it to the visible text alone. The lane keeps
+            showing the page it already has (keepPreviousData), so nothing flashes empty underneath. */}
         {hidden > 0 && (
-          <Button variant="ghost" onClick={() => setExpanded(true)}
-            aria-label={`Show ${hidden} more card${hidden === 1 ? "" : "s"} in ${col.label}`}
+          <Button variant="ghost"
+            onClick={() => (serverWindowed ? onRevealMore?.() : setExpanded(true))}
+            disabled={serverWindowed && revealPending}
+            aria-busy={serverWindowed && revealPending ? true : undefined}
+            aria-label={serverWindowed && revealPending
+              ? `Showing ${step} more card${step === 1 ? "" : "s"} in ${col.label}`
+              : `Show ${step} more card${step === 1 ? "" : "s"} in ${col.label}`}
+            title={serverWindowed ? `${hidden} older card${hidden === 1 ? "" : "s"} not loaded yet` : undefined}
             style={{ width: "100%", marginTop: 2, color: color.textDim, border: `1px dashed ${color.border}` }}>
-            Show {hidden} more
+            {serverWindowed && revealPending ? `Showing ${step} more…` : `Show ${step} more`}
           </Button>
         )}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
-        {tasks.length === 0 && filterActive && (
+        {laneLength === 0 && filterActive && (
           <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
         )}
         {/* Genuinely-empty lane (no filter): a calm placeholder that doubles as a drop-target hint, so an
             empty column reads as intentional rather than a broken blank — and lights up when dragged over. */}
-        {tasks.length === 0 && !filterActive && (
+        {laneLength === 0 && !filterActive && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 72, textAlign: "center",
             color: isOver ? color.phosphor : color.textMuted, fontFamily: font.mono, fontSize: 11,
             border: `1px dashed ${isOver ? color.phosphor : color.border}`, borderRadius: 4,
