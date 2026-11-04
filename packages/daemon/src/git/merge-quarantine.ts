@@ -4134,13 +4134,26 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // union above produced — a union against an on-disk or in-memory sibling can reintroduce a key
   // `toPersist` already correctly excluded; never trust a union's own output unfiltered.
   // @decision 8db913e2 (Follow-up 43cf3b26) — plural counterpart of the re-filter just above.
-  const toWrite: MergeQuarantineEntry = toWriteUnfiltered.resolvedKey === undefined && toWriteUnfiltered.resolvedKeys === undefined
+  const toWriteFiltered: MergeQuarantineEntry = toWriteUnfiltered.resolvedKey === undefined && toWriteUnfiltered.resolvedKeys === undefined
     ? toWriteUnfiltered
     : {
       ...toWriteUnfiltered,
       resolvedKey: excludeLiftedResolvedKey(toWriteUnfiltered.resolvedKey, final, liftedKeys),
       resolvedKeys: excludeLiftedResolvedKeys(toWriteUnfiltered.resolvedKeys, final, liftedKeys),
     };
+  // @decision da7bf48e (M1) — carry `oldAtFinalBasename`'s own `orphanLatchFiles` forward also into
+  // `toWrite`, in addition to `kept`'s own carry below, which must stay: `written.entry` is built from
+  // `toWrite` alone, so a replaced slot's tracked strays must be handed forward here too.
+  // @decision da7bf48e (M1, Code Review round 2) — but exclude `finalBasename` itself: unlike `kept`
+  // (which physically lives there), `written.entry` relocates away, and `final` gets unlinked and can be
+  // reused by a DIFFERENT occupant's own latch next — see the decision record's "M1" section.
+  const toWrite: MergeQuarantineEntry = atFinalBasenameSameIdentity
+    ? {
+      ...toWriteFiltered,
+      orphanLatchFiles: [...new Set([...(toWriteFiltered.orphanLatchFiles ?? []), ...(oldAtFinalBasename!.orphanLatchFiles ?? [])])]
+        .filter((f) => f !== finalBasename),
+    }
+    : toWriteFiltered;
   // @decision 8db913e2 (Follow-up 4b06875f) — `toPersist`/`toWrite` carry `resolvedKey` ONLY as filtered by
   // `excludeLiftedResolvedKey` (never `armedKeys`) — including the in-memory entry a union below may
   // introduce; nothing here bypasses that filter. This keeps 82032b5c/c9114934's own invariant intact.
@@ -4161,9 +4174,17 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // @decision 8db913e2 (Follow-up 6451a749, Round 2) — `orphanLatchFiles` comes from `toPersist`
     // ALONE, never `toWrite`: `toWrite` can carry a FOREIGN orphan reference (from `filename`'s own
     // record); `kept` lives at `finalBasename` and must never inherit one to wrongly sweep later.
+    // @decision 8d80b736 (card da7bf48e) — track `written.strandedTmp`'s own basename (never the
+    // absolute path, never unlink), AND union `oldAtFinalBasename`'s own `orphanLatchFiles` forward when
+    // `atFinalBasenameSameIdentity` — or an untracked/overwritten stray durably resurrects a cleared token.
     const kept: MergeQuarantineEntry = {
       ...toWrite,
-      orphanLatchFiles: [...new Set([...(toPersist.orphanLatchFiles ?? []), finalBasename])],
+      orphanLatchFiles: [...new Set([
+        ...(toPersist.orphanLatchFiles ?? []),
+        ...(atFinalBasenameSameIdentity ? (oldAtFinalBasename!.orphanLatchFiles ?? []) : []),
+        finalBasename,
+        ...(written.strandedTmp ? [path.basename(written.strandedTmp)] : []),
+      ])],
     };
     // @decision 8db913e2 (Follow-up 37452ddd) — `oldAtFinalBasename` can ALSO be an 883e29bc twin armed
     // in `activeQuarantines`; re-point via `replaceEntryEverywhere` before overwriting this slot, or the

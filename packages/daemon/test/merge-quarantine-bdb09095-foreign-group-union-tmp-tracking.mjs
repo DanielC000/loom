@@ -1,31 +1,16 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Card bdb09095 (from the 444cd8e2 Code Review, by trace only). `consumeMatchedPendingsIntoArmedEntry`'s
-// own `foreignGroups` `group.length > 1` arm (merge-quarantine.ts, the
-// `writePendingDivertFile(base.sourceFile, foreignUnion, new Set())` call inside the raise-divert branch)
-// kept its own stranded tmp on a write failure (correct, per 59e758e5's "never unlink without proof the
-// content is secured elsewhere") but never referenced it in `foreignUnion.orphanLatchFiles` — the same
-// missing-tracking defect class 5332762e/444cd8e2/8d80b736 already fixed at five OTHER sites.
+// @decision bdb09095 — a foreign-group union's write-failure branch must track its stranded tmp's
+// basename into orphanLatchFiles (never unlink it, never store the absolute path), or an untracked
+// stray durably resurrects an already-cleared token after reboot.
 //
-// THE FIX: when `written.strandedTmp` is truthy, add `path.basename(written.strandedTmp)` to
-// `foreignUnion.orphanLatchFiles` (Set-deduped, never the absolute path, never an unlink) and
-// `replaceEntryEverywhere` the group onto the updated object before the push — see
-// docs/decisions/bdb09095-foreign-group-union-tracks-stranded-tmp.md.
+// SCENARIO "hash" — the group's `base` (earliest `enteredAt`) shares a canonicalRepoLockKey-derived hash
+// with something a later full lift separately sweeps at that SAME hash, incidentally removing the stray
+// even pre-fix. Included as a regression-safety sanity check: the fix must not change this already-
+// working case (both orderings share identical end-state assertions).
 //
-// SCENARIO "hash" — the group's `base` (earliest `enteredAt`) happens to share a canonicalRepoLockKey-
-// derived hash with something a later full lift separately deletes at that SAME hash — an unrelated,
-// hash-keyed sweep (`sweepTmpResidueForHashIfUnreferenced`) already incidentally removed the stray even
-// pre-fix. Included as a regression-safety sanity check: the fix must not change this already-working
-// case (both orderings share identical end-state assertions for "no stray"/"unblocked after reboot").
-//
-// SCENARIO "legacy" — `base` is instead a label-named pending record with no identity-hash tie (a prior
-// raise's own "legacy-...json" fallback name — realistic, since `base` is picked purely by oldest
-// `enteredAt`, never by name shape). Pre-fix, the stranded tmp survives the full lift and a real reboot;
-// PASS 1b's tmp-recovery pass re-arms it, wrongly RE-BLOCKING the repo by tokens already fully cleared.
-// It also interacts with d2592cd5: the untracked stray's physical bytes make the full-identity-clear
-// path's own `identityHasAnyPhysicalRecordOnDisk` (merge-quarantine.ts ~L856) withhold the durable
-// tombstone for the WHOLE identity — even `fb`, a token never physically present in the stray at all —
-// so a reboot used to resurrect every token for the identity, not only the ones the stray itself carried.
-// *** THIS is the scenario the negative control turns RED. ***
+// SCENARIO "legacy" — `base` is instead a label-named pending record with no identity-hash tie. Pre-fix,
+// the stranded tmp survives the full lift and a real reboot, interacting with `d2592cd5` to withhold the
+// durable tombstone for the WHOLE identity. *** THIS is the scenario the negative control turns RED. ***
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-bdb09095-foreign-group-union-tmp-tracking.mjs
 import fs from "node:fs";
@@ -212,6 +197,25 @@ async function runScenario(tag, extraEnteredAtOffsetMs) {
     !!fLiveNow && fTmpName !== null && (fLiveNow.orphanLatchFiles ?? []).includes(fTmpName));
 
   check(`(${tag} in-process) F is still blocked by fb/fc/fd right now (pre-clear)`, !!activeMergeQuarantineFor(f));
+
+  // DoD test gap (b), card da7bf48e's own triage note on this card's Code Review: a PARTIAL (reduce)
+  // clear of a token held in the tracked tmp, BEFORE the full lift, followed by a reboot — the cleared
+  // token must stay durably tombstoned and the remaining tokens must stay blocked (never fail-open, never
+  // resurrected). Only asserted for "legacy" — same scope reason as DoD item 2 below.
+  if (tag === "legacy") {
+    clearMergeQuarantineByToken(f, `${tag}-tok-fb`);
+    const reduceTombstoneContent = readJsonIfExists(path.join(loomHome, "merge-quarantine-cleared-tokens.dat"));
+    const reduceTombstonedTokens = new Set(reduceTombstoneContent && typeof reduceTombstoneContent === "object" ? Object.keys(reduceTombstoneContent) : []);
+    check(`*** DoD GAP (b) (${tag}) *** fb IS durably tombstoned right after the reduce-clear`, reduceTombstonedTokens.has(`${tag}-tok-fb`));
+
+    const rebootedAfterReduce = await freshMergeQuarantineModule();
+    rebootedAfterReduce.reenterMergeQuarantinesAtBoot([]);
+    const fAfterReduceBoot = rebootedAfterReduce.activeMergeQuarantineFor(f);
+    check(`*** DoD GAP (b) (${tag}) *** fb stays lifted after the reduce-clear + a real reboot (not resurrected)`,
+      !fAfterReduceBoot || !(fAfterReduceBoot.tokens ?? []).includes(`${tag}-tok-fb`));
+    check(`*** DoD GAP (b) (${tag}) *** fc/fd stay blocked after the reduce-clear + a real reboot (never under-blocks)`,
+      !!fAfterReduceBoot && (fAfterReduceBoot.tokens ?? []).includes(`${tag}-tok-fc`) && (fAfterReduceBoot.tokens ?? []).includes(`${tag}-tok-fd`));
+  }
 
   // Full lift: clear every one of F's own tokens, PLUS TOP's own fresh raise token — F and TOP are
   // genuine cross-tier siblings (same physical repo, card 8a1bc2ef), so a query folds them together

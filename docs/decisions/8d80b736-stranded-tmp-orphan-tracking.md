@@ -124,17 +124,139 @@ query (`activeMergeQuarantineFor`) as the discriminator — per decision `59e758
 query self-heals a split as a side effect of being merely queried, masking exactly the defect this round
 fixes (as Round 1's own now-corrected ripple note above demonstrates first-hand).
 
+## Round 3 (card `da7bf48e`, 2026-11-04) — the raise-side `mustDivert:true` shape is NOT safe; fixed
+
+Re-raised, trace-only, by the `444cd8e2` and `bdb09095` Code Reviews, both citing this site without
+checking this record. Investigated by repro under card `da7bf48e` before any fix, per the "Do not" bullet
+below (now superseded).
+
+**Clear-path: CONFIRMED SAFE, as originally analyzed.** `deleteMergeQuarantineLatchByKey`'s own trailing
+`sweepTmpResidueForHashIfUnreferenced(quarantineHashForKey(key), ..., freedKey: key)` is CONTENT-aware
+(`f8e11853`), not filename-hash-keyed — it finds and removes any tmp residue whose own parsed content
+canonicalises onto the just-freed key, regardless of whether anyone tracks it, within the SAME
+synchronous clear call. Reproduced with a genuine `fs.renameSync` failure (not `fs.openSync`, which never
+leaves a real file on disk): the untracked stray survives only transiently and is gone before any reboot;
+no resurrection, no fail-open.
+
+**Raise-path: NOT safe — a real, reproduced resurrection.** An earlier raise-path repro attempt (built on
+a degraded occupant sharing its own enclosing repo's NATURAL canonical key) never actually reached this
+function at all — `unincorporatedOccupantRepoPathAt`'s same-identity check returns "none" there, since
+`final`'s own on-disk content and `existing.repoPath` are the same identity. The genuine repro needs
+decision `e0192ffb`'s own fixture shape instead (`merge-quarantine-degraded-occupant-guard.mjs`'s
+"existing-branch-raise-protects-foreign-pending-occupant"): a foreign, pure-pending X occupies a key that
+`existing` (a DIFFERENT identity, e.g. a just-graduated sibling) does not. When X's own protect call ALSO
+double-faults there, `resolveRaiseOverwrite` calls `protectOccupantContentBeforeDelete` a SECOND,
+redundant time for X (same failure), returns `mustDivert:true`, and `enterMergeQuarantine`'s own
+`mustDivert` branch is `replaceEntryEverywhere(...); divertRaiseEntry(baseEntry); return token;` — no
+sweep follows at all. The untracked stray survives indefinitely; a real reboot's PASS 1b re-arms it,
+resurrecting X's already-cleared token. Reproduced with a genuine `fs.renameSync` failure scoped to X's
+own exact pending-divert mint basename (a bare `"pending-"` prefix also fails the unrelated raiser's own
+divert mint and produces a confusing triple fault — scope the injection precisely).
+
+**Self-healing-reader trap, found WHILE building the repro:** `activeMergeQuarantineFor`'s own lazy
+re-resolve can retry the SAME occupant's protect call successfully later in the same process (e.g.
+triggered by an unrelated `clearMergeQuarantine` call on the raiser), silently overwriting the
+double-fault's own tracked `kept` record with a fresh, untracked one — making a fix LOOK like it isn't
+working when the test's own assertions are the ones destroying the fixture. Assert via the shared PURE
+reader `stillBlockedEntryFor` instead (mirrors `assertRepoNotQuarantined`'s own enforcement decision,
+never mutates).
+
+**The fix:** the double-fault branch's own `kept` record now tracks `path.basename(written.strandedTmp)`
+in `orphanLatchFiles` (same shape as `bdb09095`/`444cd8e2`/`5332762e`), AND unions
+`oldAtFinalBasename`'s own `orphanLatchFiles` forward when `atFinalBasenameSameIdentity` — required
+because `resolveRaiseOverwrite`'s own redundant second call for the SAME identity overwrites this
+function's own `pendingUnresolvedQuarantines` slot, and without the union that overwrite silently drops
+the FIRST call's own already-tracked stray (reproduced: tracking without the union still resurrected one
+of the two stray tmps this exact double-double-fault shape produces).
+
+Test: `merge-quarantine-da7bf48e-occupant-protect-double-fault.mjs` — both call-path families, a genuine
+`fs.renameSync` double fault, a full lift, and a real reboot. Negative-controlled (`node
+packages/daemon/scripts/negative-control.mjs --file packages/daemon/src/git/merge-quarantine.ts --test
+packages/daemon/test/merge-quarantine-da7bf48e-occupant-protect-double-fault.mjs --ref fda21b05`): RED
+against that pre-fix sha (exactly the raise-path's own 3 fix assertions), GREEN after, tree restored
+byte-identical. API-keeping mutant (keeps the tracking call, writes a wrong/fixed basename instead of the
+real one): the same 3 assertions go RED; reverted.
+
+## Round 4 (card `da7bf48e`, Code Review M1, 2026-11-04) — Round 3's own fix was INCOMPLETE; the SUCCESS branches needed it too
+
+Round 3's own "fixed" claim covered only the DOUBLE-FAULT branch's own double-call union (both internal
+protect calls failing) — it said nothing about what happens when a LATER protect call for the SAME
+identity SUCCEEDS. `protectOccupantContentBeforeDelete`'s own SUCCESS branches (`atFilenameSameIdentity` /
+`else if atFinalBasenameSameIdentity`) replace the same-identity slot with `written.entry`, built from
+`toPersist`/`oldAtFilename` alone — the OLD `kept` record's own tracked stray tmp(s) were silently dropped,
+untracked again, never swept, and boot PASS 1b re-armed them. Reproduced two ways:
+
+- **V1 (transient fault, the realistic shape):** only the FIRST of the raise's own two internal protect
+  calls fails; the SECOND (`resolveRaiseOverwrite`'s own redundant retry) succeeds. The stray from the
+  first call survives untracked past the SUCCESS write.
+- **V6 (persistent double fault, then a genuinely SEPARATE later raise):** the first raise double-faults
+  BOTH internal calls (Round 3's own shape, correctly unioning both strays via `kept`) — but a SECOND,
+  independent top-level raise, before X is ever cleared, succeeds and drops BOTH tracked strays at once.
+
+**Correction to Round 3's own self-healing-reader-trap paragraph above:** that paragraph framed "a later
+successful protect retry overwriting the double-fault's own tracked `kept` record" as something that
+happens only as a side effect of the TEST's own mutating reads — that framing was WRONG. V1/V6 above prove
+it is a genuine, reachable PRODUCTION path: a real retry or a real second raise, not a test artifact. The
+guidance to assert via the pure `stillBlockedEntryFor` (never `activeMergeQuarantineFor`) in a TEST still
+stands, but for a narrower reason: so the TEST's own assertions don't trigger an INCIDENTAL extra retry the
+test never intended to exercise, confounding what it's trying to measure — not because the underlying
+mechanism itself is test-only.
+
+**The fix:** carry `oldAtFinalBasename`'s own `orphanLatchFiles` forward into `toWrite` BEFORE the write,
+same identity only — `toWrite` feeds every SUCCESS branch's own `written.entry`, not just the double-fault
+branch's own `kept` record, so a replaced slot's own tracked strays are handed forward there instead of
+being re-derived per branch.
+
+Tests: V1, V6, and V3 (partial clear → reboot → clear → reboot) added to
+`merge-quarantine-da7bf48e-occupant-protect-double-fault.mjs`. Each RED at `fda21b05` and at `4bca8b30`
+(the tip before this round) via negative-control, GREEN after, tree restored byte-identical. An
+API-keeping mutant (keeps the carry-forward structure, passes an empty list) turns V1/V6/V3 red; reverted.
+
+## Round 5 (card `da7bf48e`, 2nd Code Review M1, 2026-11-04) — Round 4's own carry included a stale self-reference
+
+Round 4's fix (above) carried `oldAtFinalBasename.orphanLatchFiles` into `toWrite` wholesale — but
+`oldAtFinalBasename` can itself BE a double-fault `kept` record (Round 3's own shape), whose own
+`orphanLatchFiles` deliberately self-references `finalBasename` (it physically lives there). Once THIS
+call's SUCCESS relocates to `written.filename` and the caller unlinks `final`, that self-reference is
+stale: a different occupant (e.g. a sibling identity sharing the same canonical key) can mint its own
+latch at that exact basename next, and the carried-forward self-reference made `written.entry` wrongly
+cross-reference that stranger's live latch. Enforcement stayed correct (the orphan sweep content-checks
+before touching a referenced file), but a later full clear of THIS identity reported the stranger as a
+spurious co-occupant — `latchKept:true`, naming the stranger in `referencingRepoPaths`/
+`stillBlockedCoOccupants`, with reason text suggesting the stranger's own live latch could be lifted by
+clearing "the shared latch by its own 24-hex id," which would wrongly imply lifting the stranger's own
+legitimate quarantine.
+
+**The fix:** filter `finalBasename` out of the unioned set in the `toWrite` carry specifically — `kept`'s
+own carry (which self-references `finalBasename` on purpose) is untouched.
+
+Test: V1 and V6 in `merge-quarantine-da7bf48e-occupant-protect-double-fault.mjs` now additionally assert,
+after X's full clear, that the result does not name the raiser (teamA/W) in `referencingRepoPaths`/
+`stillBlockedCoOccupants` and does not report `latchKept` for its file, and that the raiser (teamA/W)
+stays blocked — in-process and after a reboot — with its own latch file surviving on disk. RED at the
+pre-Round-5 tip, GREEN after.
+
 ## Do not
 
-- Do not add this same tracking to `protectOccupantContentBeforeDelete`'s own double-fault branch
-  (~`merge-quarantine.ts:3739`) without first finding a concrete repro showing it can resurrect a
-  *successfully, durably* cleared token — as analyzed, its own stranded tmp never holds content more
-  current than what the pre-existing, already-tracked file already (correctly) re-arms at boot.
+- Do not re-litigate this site as "confirmed safe" from the Round-1/2 analysis alone — see Round 3/4
+  above. The clear-path remains safe for the original reason; the raise-path's DOUBLE-FAULT branch (Round
+  3) and its SUCCESS branches (Round 4) are two SEPARATE carry-forward sites — fixing one is not evidence
+  the other is covered.
+- Do not carry `oldAtFinalBasename`'s own `orphanLatchFiles` forward anywhere OTHER than `toWrite`, also
+  into `toWrite` — not INSTEAD of `kept`'s own carry (above), which must stay: `kept` lives AT
+  `finalBasename` itself and needs that self-reference; `toWrite` does not. `written.entry` (what every
+  SUCCESS branch re-points to) is derived from `toWrite` alone; a carry-forward added only to the
+  double-fault branch's own `kept` record (Round 3's own shape) never reaches a LATER call's own SUCCESS
+  path, which is exactly the Round 4 gap.
+- **(Round 5, Code Review M1)** Do not carry `finalBasename` itself forward into `toWrite`'s own carry —
+  only `kept` (two bullets below) may self-reference it; see "Round 5" above for the stale-self-reference
+  gap this closes and why it's scoped to `toWrite` alone.
 - Do NOT treat `clearTokenFromPendingIndices`'s own reduce-write-failure branch
-  (~`merge-quarantine.ts:4972-4978`) as covered by the bullet above — it is a CONFIRMED, OPEN,
-  clear-then-resurrect gap (see "Scope" above), tracked separately on card `5332762e`. Do not fix it as
-  part of THIS card without a Lead ruling to widen scope — it is a different write site with its own
-  reduce-branch mechanics, not a drop-in application of this card's 3-site fix.
+  (~`merge-quarantine.ts:4972-4978`) as covered by this card's own `protectOccupantContentBeforeDelete`
+  fixes (Round 3/4) — it is a CONFIRMED, OPEN, clear-then-resurrect gap (see "Scope" above), tracked
+  separately on card `5332762e`. Do not fix it as part of THIS card without a Lead ruling to widen scope —
+  it is a different write site with its own reduce-branch mechanics, not a drop-in application of this
+  card's fix.
 - Do not forget `replaceEntryEverywhere` at a NEW triple-fault "keep" branch — Round 2 (see above) found
   this card's OWN original fix omitted it at all 3 of its own sites, splitting a dual-tracked twin into
   two same-identity objects. Mirror the double-fault `secured` branch's own call every time.

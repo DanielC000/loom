@@ -79,6 +79,28 @@ at that later time — whether it is genuinely safe to remove.
   `67136b71`, `d2592cd5`, `merge-quarantine-boot-hardening.mjs` — green, both env states where applicable.
   `guards` + the lesson-299 named list — green.
 
+## Round 2 (card `da7bf48e`'s own triage note) — the 2nd `replaceEntryEverywhere` (~L2976) is already behaviorally pinned, not merely structural
+
+Card `da7bf48e`'s handoff flagged this call as "pinned only STRUCTURALLY (a mutant that skips it leaves
+every end-state green)" and asked for a behavioral case or this note. Checked directly, 2026-11-04: an
+API-keeping mutant that skips ONLY this `replaceEntryEverywhere` call (keeps building
+`trackedForeignUnion` and keeps `foreignUnion = trackedForeignUnion`, so the PENDING push still carries
+the tracked object) turns `merge-quarantine-bdb09095-foreign-group-union-tmp-tracking.mjs`'s own
+pre-existing "*** THE FIX (${tag}) *** the in-memory record now TRACKS the stranded tmp's basename in
+orphanLatchFiles" check RED, for both the `hash` and `legacy` tags — restored byte-identical, GREEN after.
+
+That check reads `activeMergeQuarantineFor(sF)` (S_F's own degraded key) right after the raise, before any
+clear. Because `direct` at that key is the group's own `foreignUnion`/`trackedForeignUnion` object (re-
+pointed there by the `group.length > 1` loop just above this write, `67136b71`'s own fix) and
+`isKeyVerifiedFor(f, KsF)` is false (F is now resolvable at a DIFFERENT real key), `activeMergeQuarantineFor`
+returns `direct` as-is rather than self-healing through `pendingUnresolvedQuarantines` — so skipping the
+`replaceEntryEverywhere` call genuinely leaves the ACTIVE slot stale and untracked, exactly as this fix's
+own commit message describes. The predecessor's observation about the FULL-LIFT END-STATE checks (no
+stray tmp on disk, unblocked after reboot, every token tombstoned) staying green under this same mutant is
+correct — those are reached via `f`'s own identity, which the mutant leaves correctly tracked on the
+PENDING copy — but "end-state checks stay green" is not the same claim as "no check pins it," and the
+in-process check above already does. No new test was added; this round corrects the record instead.
+
 ## Do not
 
 - Do not unlink the stranded tmp here — `59e758e5` forbids unlinking without proof content is secured
