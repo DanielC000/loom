@@ -68,7 +68,7 @@ Once the owner's one-time setup is done (see *Automated release (CI)* below), cu
    ```sh
    git push && git push --tags         # pushing vX.Y.Z runs .github/workflows/release.yml
    ```
-   The workflow then (steps 5–7, automated): checks out → Node 22 + pnpm → **verifies `ci.yml` is green for this commit** (`scripts/check-release-ci.mjs`, fails closed) → `pnpm install` → `pnpm build` → daemon test gate → `pnpm pack:npm` → **`npm publish`** (to `latest`, or `beta` for a prerelease tag, with `--provenance`) → **creates the GitHub Release** with the CHANGELOG section as notes and `loomctl-X.Y.Z.tgz` attached. Watch it under the repo's **Actions** tab.
+   The workflow then (steps 5–7, automated): checks out → Node 22 + pnpm → **verifies `ci.yml` is green for this commit** (`scripts/check-release-ci.mjs`, fails closed) → `pnpm install` → `pnpm build` → daemon test gate → `pnpm pack:npm` → **real `npm i -g` smoke test on `windows-latest` + `ubuntu-latest`** (`global-install-smoke`, below — fails the release if the packed tarball doesn't install and run cleanly) → **`npm publish`** (to `latest`, or `beta` for a prerelease tag, with `--provenance`) → **creates the GitHub Release** with the CHANGELOG section as notes and `loomctl-X.Y.Z.tgz` attached. Watch it under the repo's **Actions** tab.
 
 If you ever need to run any of these by hand (no CI, or a recovery), the manual equivalents are:
 
@@ -100,6 +100,39 @@ compile failure there (a blocked `csc.exe`, or the exe locked by the live daemon
 the previous exe in place, it never blocks the restart. The next tagged release rebuilds the exe fresh
 regardless, via this job.
 
+**`global-install-smoke` (card `884c8d56`) — a matrix job on `windows-latest` AND `ubuntu-latest`,
+between `release` (which packs the tarball and uploads it as an artifact) and `publish` (which
+`release` and this job both gate).** Each matrix leg downloads the packed tarball and runs a real
+`npm install --global <tarball>` into a scratch `--prefix`, then two checks, each hard-failing the
+release on any problem:
+
+1. **`loom --version`** — npm's `--prefix` global-install layout differs by platform (POSIX puts shims
+   in `<prefix>/bin`, Windows puts them directly in `<prefix>`), so this step puts the right bin dir on
+   `PATH` per-platform and runs the REAL installed shim via the bare `loom` name on BOTH legs — one code
+   path — never a hand-built `bin/loom.mjs` path (correct on one platform only, breaking the other).
+   `shell: bash` on `windows-latest` is Git-for-Windows' MSYS Git Bash, where `$RUNNER_TEMP` arrives in
+   WINDOWS form (e.g. `D:\a\_temp`); joining that directly into PATH (`PATH="$PREFIX:$PATH"`) splits on
+   the drive letter's own colon and loses it, and npm's generated sh shim's own `$0`/basedir computation
+   (`sed`+`cygpath -w`) then re-maps the drive-missing basedir onto the MSYS/Git install root instead of
+   the real path — a genuine `MODULE_NOT_FOUND` for a path that was never real, reproduced directly in
+   Git Bash. The fix is to `cygpath -u` the prefix into POSIX form before putting it on `PATH`, so the
+   shim's own `$0` is a genuine POSIX path and its `cygpath -w` round-trips back to the real Windows
+   path — not to call a different shim name (an earlier version of this doc, and of the CI step, blamed
+   a nonexistent "MSYS argv-mangling bug" in the bare `loom` shim and worked around it with `loom.cmd`,
+   which only avoided the failure because it never computes a basedir from `$0` at all). This only proves
+   `bin/loom.mjs` itself runs and reads `package.json` correctly — it never loads `dist/` or `vendor/`.
+2. **A dynamic-import smoke** (`scripts/smoke-dist-shared-import.mjs`) — imports a real nested `dist/`
+   module that imports `@loom/shared` (rewritten to `"#loom-shared"` at pack time, resolved via
+   `npm root -g --prefix`, never hand-built), proving the vendored-shared `"#loom-shared"` imports-map
+   resolution works end to end from a nested `dist/` path, without booting the daemon. (The imported
+   module itself pulls in no third-party dependency — this does not catch a missing *runtime* dependency,
+   only a broken vendored-shared resolution.)
+
+Together these close the exact gap that let `npm i -g loomctl` break on Windows for every published
+version (`bundledDependencies` + a transitive OS-restricted optional dependency, see the *Building &
+locally installing the npm package* section above) ship silently: there was previously no real
+global-install smoke test anywhere in CI or the release workflow.
+
 **Owner one-time setup (the release workflow is inert until all are done):**
 
 1. **The public GitHub repo must exist.** Pushing tags + Actions + Releases all require the repo to
@@ -126,7 +159,7 @@ pnpm pack:npm        # → loomctl-X.Y.Z.tgz at the repo root
 | `dist/` | `packages/daemon/dist` (copied as-is, **not** bundled) | daemon entry `dist/index.js`; copying preserves each module's `import.meta.url` so the daemon's relative asset lookups still resolve |
 | `dist/web/` | `packages/web/dist` | Part 1's `resolveWebDistDir()` resolves `<daemon-dist>/web` |
 | `assets/` | `packages/daemon/assets` (**skills curated**) | the daemon reads `hook-relay.mjs` / `vault-lint.mjs` / bundled skills LIVE from here. The build **omits the dev-only / private-product skills** from the staged `assets/skills/` — the current omitted set, and why each entry is withheld, is `DEV_ONLY_SKILLS` in `scripts/curate-release-skills.mjs`; see *The dev-only Platform layer* below |
-| `node_modules/@loom/shared/` | `packages/shared/dist` | `@loom/shared` is private (not on npm) → shipped as a **`bundledDependency`** |
+| `vendor/loom-shared/dist/` | `packages/shared/dist` | `@loom/shared` is private (not on npm) → **vendored outside `node_modules`**, resolved via the package.json `imports` map (`"#loom-shared"`) — **never `bundledDependencies`**, see below |
 | `bin/loom.mjs` | repo `bin/` | the `loom` command: boots the daemon, waits for `/api/version`, opens the browser |
 | `package.json` | generated; `name:"loomctl"`, `version` = root `package.json` | a `name:"loom"` (monorepo) OR `name:"loomctl"` (packaged) package.json above the daemon satisfies Part 3's `loomVersion()` walk-up — `GET /api/version` returns the real version |
 
@@ -134,7 +167,29 @@ Native deps (`better-sqlite3`, `node-pty`) and the runtime-resolved `@playwright
 
 **`ssh2` (+ its optional `cpu-features`) at `npm i -g` time (card `fcf2d7e6`, measured 2026-11-04):** both run an `install` script during a real end-user install (they're excluded from the dev root's own `pnpm.onlyBuiltDependencies`, so a contributor's `pnpm install` never builds them — only a packaged `npm install` does). `ssh2`'s own `install.js` always `process.exit(0)` regardless of whether its `node-gyp rebuild` succeeds, so it can never fail the overall install; `cpu-features` is a real `optionalDependency` of `ssh2`, so npm tolerates its script failing too. Measured on this host (Windows, VS2022 Build Tools + Python present): both build cleanly and quietly, producing a working native binding each. When the build succeeds, `ssh2` uses its own compiled `sshcrypto.node` native cipher implementation instead of its pure-JS fallback, and `cpu-features`'s AES-NI detection only affects cipher *offer order*, not which implementation runs. **The no-build-tools case is UNMEASURED** — on this host `node-gyp` could always find a real Python/MSVC toolchain no matter how the probe was aimed at it, so the actual "noisy failure on a vanilla end-user machine with no build tools" outcome was not reproduced; don't assume it's silent just because the always-exit-0 case is. See `docs/decisions/a3d5c7f4-ssh-connection-type.md` for the cross-environment crypto-path implication for Loom's own connections feature.
 
-`scripts/build-npm-package.mjs` also refuses the build outright (loud, exit 1) on three packaging regressions, each checked at the point its own input is actually ready — never a silent strip: an **orphaned web bundle** (a stale content-hashed asset not referenced by Vite's own build manifest), a **stray dist-patch test shim** (a leftover `graceful-teardown.clockshim-*`/`graceful-teardown.winrace-*.js` sibling in `packages/daemon/dist`), and — against the **actual packed tarball contents**, via `npm pack --dry-run --json` on the assembled `dist-npm/` staging dir, not just the source `assets/` tree — a **missing npm-pinned lock asset** for any bundled "npm-pinned" capability row (shadcn, image-gen): the required set is derived from `bundledCapabilities()` (`dist/capabilities/seed.js`) + `npmPinnedLockAssetPath()` (`dist/capabilities/npm-pinned.js`), never hardcoded, so a future npm-pinned row is covered automatically. See `docs/decisions/1ebbf523-npm-pinned-lock-pack-assertion.md` for why a source-only check (which `build-npm-package.mjs` also still runs, as a cheap "built inputs exist" precondition) isn't enough on its own: npm's own pack-time file-inclusion logic can drop a nested `package-lock.json`, and that earlier check only verified a single representative lock, not every seeded row.
+**`bundledDependencies` is forbidden in the generated package.json (card `884c8d56`).** `npm install
+--global` of *any* tarball that declares `bundledDependencies` fails to os-gate-skip a transitive,
+OS-restricted `optionalDependency` elsewhere in the tree — a known, still-open upstream bug,
+[npm/cli#7355](https://github.com/npm/cli/issues/7355) (a regression from
+[npm/cli#7126](https://github.com/npm/cli/pull/7126) on npm ≥10.4). This broke `npm i -g loomctl` on
+Windows for every published version: `fsevents` (macOS-only, pulled in transitively via
+`@playwright/mcp -> playwright`) tried to build and failed instead of being skipped. `@loom/shared` is
+the only reason `bundledDependencies` was ever set, so it is now vendored outside `node_modules` (see
+the table row above) and resolved via the package.json `imports` map instead of a bare `"@loom/shared"`
+specifier — `rewriteSharedSpecifiers()` mechanically rewrites every compiled `from "@loom/shared"` import
+in the staged `dist/` to `from "#loom-shared"`. Full record: `docs/decisions/884c8d56-no-bundleddependencies-in-published-package.md`.
+
+`scripts/build-npm-package.mjs` also refuses the build outright (loud, exit 1) on packaging regressions, each checked at the point its own input is actually ready — never a silent strip: an **orphaned web bundle** (a stale content-hashed asset not referenced by Vite's own build manifest), a **stray dist-patch test shim** (a leftover `graceful-teardown.clockshim-*`/`graceful-teardown.winrace-*.js` sibling in `packages/daemon/dist`), a **surviving `@loom/shared` specifier of ANY form (`from`/bare `import`/dynamic `import()`/`require()`, either quote style, a subpath) or a reintroduced `bundledDependencies`/`bundleDependencies`** (`survivingSharedImportSpecifiers()`, checked against the package.json re-read from disk after writing it — widened beyond the (deliberately narrow) rewrite, which only ever handles the one `from "@loom/shared"` form tsc emits; restricted to `.js`, since the shipped `.d.ts` files also carry the `from`-form harmlessly, with no runtime import resolution to break), and — against the **actual packed tarball contents**, via `npm pack --dry-run --json` on the assembled `dist-npm/` staging dir, not just the source `assets/` tree — a **missing npm-pinned lock asset** for any bundled "npm-pinned" capability row (shadcn, image-gen): the required set is derived from `bundledCapabilities()` (`dist/capabilities/seed.js`) + `npmPinnedLockAssetPath()` (`dist/capabilities/npm-pinned.js`), never hardcoded, so a future npm-pinned row is covered automatically. See `docs/decisions/1ebbf523-npm-pinned-lock-pack-assertion.md` for why a source-only check (which `build-npm-package.mjs` also still runs, as a cheap "built inputs exist" precondition) isn't enough on its own: npm's own pack-time file-inclusion logic can drop a nested `package-lock.json`, and that earlier check only verified a single representative lock, not every seeded row. Hermetic fixture test: `packages/daemon/test/build-npm-package-shared-vendor.mjs`.
+
+**A release-CI `global-install-smoke` job** (below) packs the real tarball and, on both
+`windows-latest` and `ubuntu-latest` before publish, runs a real `npm i -g` + `loom --version` (via the
+platform-correct installed shim on `PATH`, not a hand-built path) AND dynamic-imports a real nested
+`dist/` module through the `"#loom-shared"` imports map (`scripts/smoke-dist-shared-import.mjs`) — the
+`loom --version` step alone only proves `bin/loom.mjs` runs; it never loads `dist/` or `vendor/`, so the
+dynamic-import step is what actually proves the vendored-shared resolution works end to end on a real
+global install. Together they're the standing guard against this class of regression recurring, since
+the upstream npm bug stays open and a future dependency could reintroduce a similar transitive,
+OS-restricted optional dependency.
 
 ### The dev-only remainder of the Platform layer
 
@@ -158,7 +213,11 @@ end-user Lead's own surface (see that record's §2) and the Skills UI's "publish
 
 To add or remove a dev-only skill from the published package, edit `DEV_ONLY_SKILLS` in `scripts/curate-release-skills.mjs` — that one list drives both the build curation and the test.
 
-**Smoke-test the tarball in a clean dir** (the install path an end user takes — never the repo):
+**Smoke-test the tarball in a clean dir** (the install path an end user takes — never the repo). This is
+a **local** `npm install`, which exercises the daemon boot path but — unlike a real `npm i -g` — would
+not have caught the `bundledDependencies` global-install bug above (a local install already skips the
+offending optional dependency gracefully); the `global-install-smoke` CI job is what actually proves the
+`-g` path:
 
 ```sh
 mkdir /tmp/loom-test && cd /tmp/loom-test && npm init -y

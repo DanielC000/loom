@@ -469,7 +469,7 @@ function checkRootForCodescapeLeaks(label, rootDir, { realFiles } = {}) {
 
 checkRootForCodescapeLeaks("packages/web/dist (built web bundle)", PACKAGED_ROOTS.webDist);
 checkRootForCodescapeLeaks("packages/daemon/dist (published as dist/)", PACKAGED_ROOTS.daemonDist);
-checkRootForCodescapeLeaks("packages/shared/dist (bundled as node_modules/@loom/shared/dist)", PACKAGED_ROOTS.sharedDist);
+checkRootForCodescapeLeaks("packages/shared/dist (vendored as vendor/loom-shared/dist, card 884c8d56)", PACKAGED_ROOTS.sharedDist);
 checkRootForCodescapeLeaks("packages/daemon/assets, curated (published as assets/)", PACKAGED_ROOTS.daemonAssets, {
   realFiles: fs.existsSync(PACKAGED_ROOTS.daemonAssets) ? shippedAssetsFiles(PACKAGED_ROOTS.daemonAssets) : undefined,
 });

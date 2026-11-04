@@ -5,9 +5,10 @@
 // Why a staging dir instead of packing the repo root:
 //   - The published shape differs from the dev root (clean deps, no workspace: specs, a generated
 //     package.json) — assembling it separately keeps the dev root + dev workflow untouched.
-//   - @loom/shared is private (not on npm), so it CANNOT be a registry dependency; it ships bundled
-//     (a real node_modules/@loom/shared + bundledDependencies). npm pack from a controlled staging
-//     dir is the reliable way to bundle it (pnpm's workspace symlinks make in-place bundling flaky).
+//   - @loom/shared is private (not on npm), so it CANNOT be a registry dependency; it ships VENDORED
+//     outside node_modules (vendor/loom-shared/, resolved via the package.json `imports` map, never
+//     bundledDependencies — see the decision note further down). npm pack from a controlled staging
+//     dir is the reliable way to assemble it (pnpm's workspace symlinks make in-place assembly flaky).
 //   - The compiled daemon dist is copied byte-for-byte (NOT esbuild-bundled): bundling would collapse
 //     every module's import.meta.url into one location and break the daemon's relative asset lookups
 //     (paths.ts uses ../assets while skills/seed.ts uses ../../assets — different depths).
@@ -20,7 +21,7 @@
 //     dist/                   = packages/daemon/dist  (daemon entry at dist/index.js)
 //     dist/web/               = packages/web/dist     (resolveWebDistDir → <daemon-dist>/web)
 //     assets/                 = packages/daemon/assets (hook-relay, vault-lint, bundled skills)
-//     node_modules/@loom/shared/  bundled workspace package (real dir → bundledDependencies)
+//     vendor/loom-shared/dist/    vendored workspace package, resolved via the `imports` map
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -81,6 +82,92 @@ export async function requiredNpmPinnedLockPackedPaths(daemonDistDir) {
 export function missingPackedPaths(requiredPaths, packedPaths) {
   const packedSet = new Set(packedPaths);
   return requiredPaths.filter((p) => !packedSet.has(p));
+}
+
+// @decision 884c8d56 — never ship @loom/shared via bundledDependencies again: npm global installs
+// (npm/cli#7355) fail to skip a transitive OS-restricted optional dep (e.g. fsevents) whenever
+// bundledDependencies is present at all. Vendor dist/ outside node_modules; resolve via `imports` instead.
+export const SHARED_IMPORT_SPECIFIER = 'from "@loom/shared"';
+export const SHARED_IMPORT_REWRITE = 'from "#loom-shared"';
+
+// The REWRITE stays narrow (only the exact `from "@loom/shared"` form tsc ever emits for a value
+// import/re-export) — deliberately NOT a bare substring match on `@loom/shared` anywhere, which would
+// also catch unrelated quoted data (e.g. deploy-packages.js's own `{ name: "@loom/shared", ... }`
+// restart-mapping entry) and prose mentions inside comments, neither of which is a module specifier to
+// rewrite. The post-rewrite SURVIVOR CHECK below is deliberately WIDER than the rewrite: it must catch
+// every specifier FORM a surviving reference could take (not just the one tsc happens to emit today),
+// so a future TS output shape, a hand-written dynamic `import(...)`, or a `require(...)` doesn't silently
+// slip past as an unresolvable runtime reference to a package that no longer exists in the tarball.
+function jsFilesContaining(distDir, needle) {
+  const hits = [];
+  for (const rel of fs.readdirSync(distDir, { recursive: true })) {
+    if (!rel.endsWith(".js")) continue;
+    const abs = path.join(distDir, rel);
+    const text = fs.readFileSync(abs, "utf8");
+    if (text.includes(needle)) hits.push(rel.split(path.sep).join("/"));
+  }
+  return hits.sort();
+}
+
+// Same corpus walk as jsFilesContaining(), but matched against a REGEX rather than a literal substring —
+// used by the widened survivor check below. Restricted to `.js` files only (same as jsFilesContaining):
+// the shipped `.d.ts` files also carry the `from "@loom/shared"` form (tsc never rewrites type-only
+// imports, and this build doesn't either), but they are type-only declarations with no runtime import
+// resolution — a surviving reference there is harmless and deliberately NOT scanned for.
+function jsFilesMatching(distDir, re) {
+  const hits = [];
+  for (const rel of fs.readdirSync(distDir, { recursive: true })) {
+    if (!rel.endsWith(".js")) continue;
+    const abs = path.join(distDir, rel);
+    const text = fs.readFileSync(abs, "utf8");
+    if (re.test(text)) hits.push(rel.split(path.sep).join("/"));
+  }
+  return hits.sort();
+}
+
+// Rewrites every `from "@loom/shared"` import specifier in the staged `distDir` to `from "#loom-shared"`
+// (the package.json `imports` map entry pointing at the vendored copy) and returns the list of files it
+// changed. Pure except for the file writes it's explicitly meant to perform — safe to call once, on a
+// fully-copied staging dist.
+export function rewriteSharedSpecifiers(distDir) {
+  const files = jsFilesContaining(distDir, SHARED_IMPORT_SPECIFIER);
+  for (const rel of files) {
+    const abs = path.join(distDir, rel);
+    const text = fs.readFileSync(abs, "utf8");
+    fs.writeFileSync(abs, text.split(SHARED_IMPORT_SPECIFIER).join(SHARED_IMPORT_REWRITE));
+  }
+  return files;
+}
+
+// Post-rewrite assertion, WIDENED (Code Review round, card 884c8d56) to catch a surviving reference to
+// the un-vendored `@loom/shared` specifier in any of the forms actually listed below — NOT "regardless of
+// its syntactic form" (a prior version of this comment overclaimed that): a `from "..."` import/
+// re-export, a bare `import "..."` side-effect import, a dynamic `import("...")`, or a `require("...")`
+// — either quote style, and a subpath (`@loom/shared/foo`). Known misses, not covered: a template-literal
+// (backtick) specifier (`` import(`@loom/shared`) ``), `require (` with whitespace before the paren, and
+// a `.resolve(...)` form (`require.resolve("@loom/shared")`, `import.meta.resolve("@loom/shared")`). It
+// must NOT match deploy-packages.js's own `{ name: "@loom/shared", ... }` data string (no
+// `from`/`import`/`require(` precedes the quoted name) or a bare prose mention inside a comment (no
+// surrounding quotes at all) — both are asserted against in
+// packages/daemon/test/build-npm-package-shared-vendor.mjs. Used to FAIL the build loudly if the
+// (narrow) rewrite above missed a form it doesn't cover, rather than silently shipping a tarball that
+// still needs the registry/node_modules to resolve `@loom/shared` at runtime.
+export const SHARED_SPECIFIER_SURVIVOR_RE =
+  /(?:from|import)\s*\(?\s*["']@loom\/shared(?:\/[^"']*)?["']|require\(\s*["']@loom\/shared/;
+
+export function survivingSharedImportSpecifiers(distDir) {
+  return jsFilesMatching(distDir, SHARED_SPECIFIER_SURVIVOR_RE);
+}
+
+// Pure check (Code Review round 2, card 884c8d56) — which of npm's two recognized spellings,
+// `bundledDependencies` and its alias `bundleDependencies`, are present on a package.json object,
+// regardless of array length (an empty array still counts: the upstream trigger, npm/cli#7355, is the
+// field's mere PRESENCE, not how many packages it names or whether the array is empty). Extracted as its
+// own exported function so packages/daemon/test/build-npm-package-shared-vendor.mjs can assert it
+// directly against fixture objects, rather than only indirectly through the isMain block's on-disk
+// re-read below.
+export function forbiddenBundledKeys(pkgJson) {
+  return ["bundledDependencies", "bundleDependencies"].filter((k) => k in pkgJson);
 }
 
 // Everything below is the actual packaging side effects (build/verify/stage/pack) — guarded so this
@@ -255,26 +342,14 @@ if (fs.existsSync(stagedSkills)) {
   log(omitted.length ? `curate skills → omitted: ${omitted.join(", ")}` : `curate skills → no omitted skills present (omit set: ${DEV_ONLY_SKILLS.join(", ")})`);
 }
 
-log("bundle @loom/shared → node_modules/@loom/shared/");
-const sharedPkgDir = path.join(stage, "node_modules", "@loom", "shared");
-fs.mkdirSync(sharedPkgDir, { recursive: true });
-fs.cpSync(sharedDist, path.join(sharedPkgDir, "dist"), { recursive: true });
-fs.writeFileSync(
-  path.join(sharedPkgDir, "package.json"),
-  JSON.stringify(
-    {
-      name: "@loom/shared",
-      version: "0.0.0",
-      private: true,
-      type: "module",
-      main: "./dist/index.js",
-      types: "./dist/index.d.ts",
-      exports: { ".": { types: "./dist/index.d.ts", default: "./dist/index.js" } },
-    },
-    null,
-    2,
-  ) + "\n",
-);
+log("vendor @loom/shared → vendor/loom-shared/dist/ (never node_modules, per the decision above)");
+const vendorSharedDist = path.join(stage, "vendor", "loom-shared", "dist");
+fs.mkdirSync(vendorSharedDist, { recursive: true });
+fs.cpSync(sharedDist, vendorSharedDist, { recursive: true });
+
+log("rewrite \"@loom/shared\" import specifiers → \"#loom-shared\" in the staged dist/");
+const rewrittenFiles = rewriteSharedSpecifiers(path.join(stage, "dist"));
+log(`rewrote ${rewrittenFiles.length} file(s)`);
 
 log("copy bin/ + README.md + LICENSE");
 fs.cpSync(path.join(repoRoot, "bin"), path.join(stage, "bin"), { recursive: true });
@@ -285,9 +360,10 @@ if (fs.existsSync(path.join(repoRoot, "LICENSE"))) {
   fs.copyFileSync(path.join(repoRoot, "LICENSE"), path.join(stage, "LICENSE"));
 }
 
-// 5. Generate the published package.json. @loom/shared is bundled (concrete "0.0.0" matching the
-//    bundled package's own version, so npm uses the bundled copy and never hits the registry); every
-//    other daemon dependency stays a real registry dep so `npm i` fetches it (incl. the native
+// 5. Generate the published package.json. @loom/shared is VENDORED (step above) and resolved via the
+//    `imports` map below — it is NOT a dependency of any kind (no entry in `dependencies`, and
+//    `bundledDependencies` is never set — see the decision note near rewriteSharedSpecifiers above).
+//    Every other daemon dependency stays a real registry dep so `npm i` fetches it (incl. the native
 //    better-sqlite3 / node-pty prebuilt binaries and the runtime-resolved @playwright/mcp).
 const deps = { ...daemonPkg.dependencies };
 delete deps["@loom/shared"];
@@ -305,12 +381,47 @@ const pkg = {
   type: "module",
   bin: { loom: "bin/loom.mjs" },
   engines: { node: ">=22" },
-  files: ["bin", "dist", "assets", "README.md", "LICENSE"],
-  dependencies: { ...deps, "@loom/shared": "0.0.0" },
-  bundledDependencies: ["@loom/shared"],
+  files: ["bin", "dist", "assets", "vendor", "README.md", "LICENSE"],
+  dependencies: deps,
+  imports: { "#loom-shared": "./vendor/loom-shared/dist/index.js" },
 };
 fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
 log(`wrote staging package.json (loomctl@${pkg.version})`);
+
+// 5a. Refuse to ship if the rewrite above missed a specifier, or if bundledDependencies crept back in
+// (card 884c8d56 — this is the mechanical backstop for the @decision note above, not advisory: a
+// surviving "@loom/shared" specifier would try to resolve against the registry/node_modules at runtime
+// and crash, and a reintroduced bundledDependencies reopens the exact npm/cli#7355 install failure).
+{
+  const surviving = survivingSharedImportSpecifiers(path.join(stage, "dist"));
+  if (surviving.length > 0) {
+    console.error(
+      `[pack:npm] refusing to package — ${surviving.length} staged file(s) still import "@loom/shared" ` +
+        `after the rewrite: ${surviving.join(", ")}. Fix rewriteSharedSpecifiers() rather than shipping a ` +
+        "tarball that needs a registry/node_modules copy of @loom/shared at runtime.",
+    );
+    process.exit(1);
+  }
+  // Re-read the package.json ACTUALLY WRITTEN to disk (Code Review round, card 884c8d56) — the
+  // in-memory `pkg` literal above never sets either key anywhere, so checking it directly (as a prior
+  // round of this fix did) could never fire even if a future edit reintroduced the field. forbiddenBundledKeys()
+  // (defined above) checks BOTH spellings npm recognizes — `bundledDependencies` and its alias
+  // `bundleDependencies` — and flags mere PRESENCE of either key, regardless of array length: the
+  // upstream trigger (npm/cli#7355) is the field's presence, not how many packages it names or whether
+  // the array is empty.
+  const writtenPkg = JSON.parse(fs.readFileSync(path.join(stage, "package.json"), "utf8"));
+  const bundledKeys = forbiddenBundledKeys(writtenPkg);
+  if (bundledKeys.length > 0) {
+    console.error(
+      `[pack:npm] refusing to package — the generated package.json (re-read from disk) carries ` +
+        `${bundledKeys.join(" / ")} (${JSON.stringify(bundledKeys.map((k) => writtenPkg[k]))}). This is ` +
+        "forbidden (card 884c8d56, npm/cli#7355) — vendor the dependency outside node_modules and resolve " +
+        "it via the `imports` map instead.",
+    );
+    process.exit(1);
+  }
+  log(`verified no "@loom/shared" specifiers survive and bundledDependencies is unset`);
+}
 
 // 5b. Verify every seeded npm-pinned row's committed lock asset survives npm's OWN pack logic against
 // the ACTUAL packed contents (card 1ebbf523 — see docs/decisions/1ebbf523-npm-pinned-lock-pack-assertion.md),
