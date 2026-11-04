@@ -1,7 +1,24 @@
-# b439c2dc — the Atlas Terminals node is a single-mount list, not the classic tile grid
+# b439c2dc — the Atlas Terminals node (its ADDRESS; its body was replaced by card 17420720)
 
 Owner intake, verbatim: *"add a terminals page with a terminals page like the one on the current ui.
 In the left sidebar place it between home and Platform."*
+
+> ## ⛔ SUPERSEDED IN PART — read this first
+>
+> This card shipped the node as a single-column, single-mount list and argued below for why it should
+> NOT be the classic tile grid. **The owner overruled that**: *"atlas terminals page sucks. it should
+> be terminal cards in grid like in the old ui."* Card `17420720` replaced the body — the node now
+> renders by MOUNTING `pages/Terminals.tsx` itself.
+>
+> - **Still true, and still binding:** everything about the node's ADDRESS — why `/workspace-terminals`
+>   and not `/terminals`, and why it is an `ATLAS_HOMES` row rather than a `NAV_PAGES` one.
+> - **No longer true:** "Why it is NOT the classic grid", the one-terminal-at-a-time contract, the
+>   `atRest` reserved seat, the `atlas-terminals-*` testids and the "not redundant with the Workspace
+>   node's Sessions card" argument. Those sections are kept below as the record of a decision that was
+>   made and then reversed; do not read them as current prohibitions.
+>
+> Current design, what single-mount means now, and what was deleted:
+> `docs/decisions/17420720-atlas-terminals-is-the-classic-grid.md`.
 
 ## What shipped
 
@@ -50,16 +67,20 @@ classic god-eye page has always had.
 
 ## Do not
 
-- **Do not render the classic tile grid here, and do not mount a second terminal beside
-  `SessionTerminalList`'s.** One attach at a time is this page's whole performance contract; a "show
-  all terminals" affordance would put the cockpit freeze one click away.
+⛔ Three of these five no longer bind — each is marked at its own bullet rather than in a header, so
+a reader skimming the list cannot pick up a dead rule. The live list is card `17420720`'s own record.
+
+- ~~**Do not render the classic tile grid here**~~ — **OVERRULED by the owner** (card `17420720`).
+  The node now IS the classic grid. What replaced this rule: no session's terminal may be mounted
+  TWICE.
 - **Do not re-point the Atlas tree's Terminals row at `/terminals`.** That address is the project
   node's Sessions tab under Atlas; a workspace-tier row pointing at it lands on the project node.
 - **Do not add `/workspace-terminals` to `NAV_PAGES`.** It would put a second Terminals row in the
   classic rail for a user who never opted into Atlas, beside the one that already exists.
-- **Do not share this node's testids with the Workspace node's `atlas-session-*` set.** The two
-  surfaces render the same population, so a shared stem makes a passing spec prove nothing about
-  which page it was looking at.
-- **Do not re-derive the running-session predicate here.** Delegate to
-  `lib/workspaceSessions.ts`'s `workspaceRunningSessions`, or this node and the deck card drift into
-  listing different things under one word.
+- ~~**Do not share this node's testids with the Workspace node's `atlas-session-*` set.**~~ — **MOOT**
+  (card `17420720`): the node has no row testids of its own any more. It mounts the classic page, so
+  a spec scopes through `atlas-terminals-node` and then reads that page's own `tile-identity` /
+  `sessions-grid-*` names.
+- ~~**Do not re-derive the running-session predicate here.**~~ — **MOOT** (card `17420720`): this node
+  derives no population at all now. `pages/Terminals.tsx` owns the one it has always used, and the
+  deck cards keep delegating to `lib/workspaceSessions.ts`'s `workspaceRunningSessions` as before.

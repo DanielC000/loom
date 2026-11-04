@@ -18,7 +18,7 @@
 // @decision 9b6be377 — ONE mounted terminal, and NOTHING at rest, on EVERY node that mounts this.
 // Never render a second TerminalCard beside it, never pre-expand a row, and never pass `resizable`
 // for a claude session (pty geometry is pinned daemon-side).
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { SessionListItem } from "@loom/shared";
 import { StatusPill } from "./ui";
@@ -66,26 +66,19 @@ export interface SessionListTestIds {
  * unique per mount — not per row: there is only ever one region, because there is only ever one
  * mount.
  */
-export function SessionTerminalList({ rows, ids, regionId, showProject = false, height = SESSION_TERMINAL_HEIGHT, atRest }: {
+// Card b439c2dc added an `atRest` prop here — a reserved seat drawn where the terminal lands while
+// nothing was expanded — for its one whole-PAGE caller, the Atlas Terminals node. Card 17420720
+// removed it again: on the owner's verdict that node now mounts the classic tile GRID
+// (pages/Terminals.tsx) instead of this list, so the prop had no caller left and its own rationale
+// ("it exists for a caller that is a whole page") had stopped being true. Both remaining mounts are
+// DECK cards, which never passed it. Don't reintroduce it without such a caller.
+export function SessionTerminalList({ rows, ids, regionId, showProject = false, height = SESSION_TERMINAL_HEIGHT }: {
   rows: readonly SessionListItem[];
   ids: SessionListTestIds;
   regionId: string;
   /** Whether a row names its project. False on the project node, where every row shares one. */
   showProject?: boolean;
   height?: number;
-  /**
-   * What stands where the terminal goes while NOTHING is expanded (card b439c2dc).
-   *
-   * ⛔ NOT a relaxation of the single-mount rule — it is rendered INSTEAD of the region, never
-   * beside it, and it mounts no terminal. It exists for a caller that is a whole PAGE rather than a
-   * card on a deck: there, "nothing at rest" leaves the column's largest area unexplained, and a
-   * reader has no way to learn that the terminal lands below the list until they click a row.
-   *
-   * Optional and defaulting to nothing, so the two DECK mounts (the Workspace node's Sessions card
-   * and the project node's) are byte-identical to before this prop existed — on a card inside a
-   * band, a reserved seat for a terminal would be furniture the deck has no room for.
-   */
-  atRest?: ReactNode;
 }) {
   // `wanted` is what the reader last asked for; the MOUNT is re-derived through
   // `liveExpandedSession` on every render, so an expansion can never outlive its row (a session that
@@ -122,10 +115,6 @@ export function SessionTerminalList({ rows, ids, regionId, showProject = false, 
           )}
         </div>
       )}
-      {/* The reserved seat, when there is nothing in it. `!expanded`, not `!expandedId`: a row whose
-          session has since gone resolves to no mount, and the seat belongs there too rather than
-          leaving the slot blank the one moment a reader is most likely to be looking at it. */}
-      {!expanded && atRest}
     </>
   );
 }

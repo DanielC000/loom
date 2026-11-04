@@ -57,10 +57,22 @@ type SessionRow = SessionRowGroup<SessionListItem>;
 // there. Both props are optional and independent on purpose: a host that knows only the name still
 // gets the filter pre-selection it got before this card.
 
+// `layoutKey` (card 17420720) is the THIRD, independent host prop, and the one the Atlas WORKSPACE
+// Terminals node needs. It names the storage slot the reader's own grid layout is kept under, and it
+// is what the columns picker and the per-tile order gate on — previously that was `projectId`, which
+// conflated two different questions: "is there ONE project to start a session in" (the quick-start's
+// question, still `projectId`'s) and "is there a slot to persist this grid's layout under" (this
+// one). The god-eye workspace mount answers NO to the first and YES to the second: it has no single
+// project to spawn into, but it is a standing page a reader lays out once and comes back to. Both
+// remain optional and independent, so a host passing neither — the CLASSIC page — keeps
+// `DEFAULT_TILE_LAYOUT`, draws no columns picker and no reorder controls, byte-identically to before.
+//
 // @decision ac0cfe91 — the column control NEVER resizes a pty (a narrowed pane re-solves its font for
 // the daemon's pinned grid, which TerminalPane already did), and ShellsSection stays off it: a shell
-// FITS its grid and pushes the new geometry to the real pty. It also gates on `projectId` alone.
-export default function Terminals({ projectId, projectName }: { projectId?: string; projectName?: string } = {}) {
+// FITS its grid and pushes the new geometry to the real pty.
+export default function Terminals({ projectId, projectName, layoutKey }: {
+  projectId?: string; projectName?: string; layoutKey?: string;
+} = {}) {
   const [filter, setFilter] = useState<string>(projectName ?? "");  // projectName filter ("" = all)
   // Re-sync when the host changes which project it is showing — the Atlas tab stays MOUNTED across a
   // project switch (it is parked with `hidden`, never unmounted), so a mount-time initial value alone
@@ -101,23 +113,27 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
   // drops companion/assistant sessions at the source so they can never render a pty tile in any row.
   const rows = useMemo<SessionRow[]>(() => groupSessionRows(shown), [shown]);
 
-  // ── The reader's own layout for this project's grid (card ac0cfe91) ────────────────────────────
-  // Gated on `projectId`, for the SAME reason the quick-start above is and with the same consequence:
-  // the god-eye mount passes none, so it keeps `DEFAULT_TILE_LAYOUT` — `auto` columns and no order —
-  // and renders byte-identically to before this card. Here the gate is not merely consistent, it is
-  // structural: the preference is stored PER PROJECT (lib/terminalLayout.ts `tileLayoutStorageKey`),
-  // and a mount with no single project in scope has no key to store it under.
+  // ── The reader's own layout for this grid (card ac0cfe91; `layoutKey` added by card 17420720) ──
+  // The gate is STRUCTURAL rather than merely consistent with the quick-start's: the preference is
+  // stored under one key (lib/terminalLayout.ts `tileLayoutStorageKey`), and a mount with no slot to
+  // store it under has nowhere to keep it. What supplies that slot is now either prop — `projectId`
+  // for a project-scoped mount, or an explicit `layoutKey` for a standing cross-project page. A host
+  // passing NEITHER (the classic page) keeps `DEFAULT_TILE_LAYOUT`, exactly as before.
+  //
+  // ⛔ `layoutKey` FIRST, deliberately: a host passing both is naming the slot explicitly, and the
+  // project id is then its fallback, not an override of what it asked for.
+  const layoutScope = layoutKey ?? projectId;
   //
   // Read in an effect rather than a `useState` initialiser because this component is MOUNTED across a
   // project switch — the Atlas node parks every visited tab body with `hidden` instead of unmounting it
   // — exactly like the filter re-sync above. An initialiser would pin the first project's layout and
   // then apply it to every project the reader navigated to afterwards.
   const [layout, setLayout] = useState<TileLayout>(DEFAULT_TILE_LAYOUT);
-  useEffect(() => { setLayout(projectId ? readTileLayout(projectId) : DEFAULT_TILE_LAYOUT); }, [projectId]);
+  useEffect(() => { setLayout(layoutScope ? readTileLayout(layoutScope) : DEFAULT_TILE_LAYOUT); }, [layoutScope]);
   const saveLayout = useCallback((next: TileLayout) => {
     setLayout(next);
-    if (projectId) writeTileLayout(projectId, next);
-  }, [projectId]);
+    if (layoutScope) writeTileLayout(layoutScope, next);
+  }, [layoutScope]);
 
   // A manager row's manager is held at its own row's head — see `applyTileOrder`'s own note: RowHeader
   // names `list[0]` as the manager and counts the rest as its workers, so promoting a worker above it
@@ -195,8 +211,10 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
           </div>
         )}
         {/* Columns, and — only once there is one to undo — the way back out of a chosen order. Both
-            ride the SAME bar as the filter and the quick-start, per the note above it. */}
-        {projectId && (
+            ride the SAME bar as the filter and the quick-start, per the note above it. Gated on the
+            LAYOUT SLOT, not on `projectId`: a control whose only effect is to write a preference must
+            appear exactly where that preference has somewhere to be written. */}
+        {layoutScope && (
           <div className="loom-sessionbar-group">
             <span style={barLabelStyle}>Columns</span>
             <Select data-testid="sessions-columns" aria-label="Terminal grid columns"
@@ -214,7 +232,7 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
             Order an inch to its left, and the pair would otherwise stutter. The `aria-label` carries
             the full phrase for a reader who gets the button without its label — and it CONTAINS the
             visible word, so the accessible name still matches what is on screen (WCAG 2.5.3). */}
-        {projectId && layout.order.length > 0 && (
+        {layoutScope && layout.order.length > 0 && (
           <div className="loom-sessionbar-group">
             <span style={barLabelStyle}>Order</span>
             <Button data-testid="sessions-order-reset" aria-label="Reset the terminal order"
@@ -229,7 +247,7 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
         // it. A row with fewer than two movable tiles gets NO controls at all rather than a pair of
         // permanently-dead buttons on a lone tile — there is nothing in it to put in an order.
         const firstMovable = pinnedIdOf(row) === undefined ? 0 : 1;
-        const reorderable = !!projectId && row.list.length - firstMovable >= 2;
+        const reorderable = !!layoutScope && row.list.length - firstMovable >= 2;
         return (
           <section key={row.key} style={{ marginBottom: 20 }}>
             <RowHeader row={row} />
