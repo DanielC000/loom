@@ -285,6 +285,68 @@ export function buildTelegramConnect(
   };
 }
 
+// ── Unbound/unconfigured assistant sessions (card ed49cef6) ────────────────────────────────────────────
+// A live, non-archived assistant-role session with neither a companion_config row nor any binding is
+// reachable by NOTHING — absent from `configs ∪ bindings` (the Companion page's own merge key) and, by
+// design, excluded from every fleet view (lib/sessions.ts's isCompanionSession — untouched by this card).
+// Derived CLIENT-SIDE from data the page already fetches (GET /api/sessions, archived-filtered server-
+// side) — no new daemon field. "assistant" and the live/starting check mirror the daemon's COMPANION_ROLE
+// (lib/sessions.ts) and isLiveSession (lib/atlasHome.ts) as local literals, matching this module's
+// existing no-sibling-value-import convention (see IN_APP_CHANNEL above) so this hermetically-tested file
+// stays import-light.
+// ⚠️ `provisionedLoaded` is LOAD-BEARING (review round 1): an EMPTY `provisionedIds` means EITHER "nothing
+// is provisioned" OR "those two reads haven't answered yet" — indistinguishable from the set alone, while
+// ["allSessions"] is usually already warm when they haven't. So the caller passes whether BOTH reads
+// genuinely SUCCEEDED, and an unresolved one yields NO rows: fail toward "not shown", never "not
+// provisioned".
+export function unprovisionedAssistantSessions(
+  sessions: readonly { id: string; role?: string | null; processState?: string | null }[],
+  provisionedIds: ReadonlySet<string>,
+  provisionedLoaded: boolean,
+): { id: string }[] {
+  if (!provisionedLoaded) return [];
+  return sessions.filter(
+    (s) =>
+      s.role === "assistant" &&
+      (s.processState === "live" || s.processState === "starting") &&
+      !provisionedIds.has(s.id),
+  );
+}
+
+// Whether a companion row (the configs ∪ bindings merge) is the fully-orphaned shape above — neither a
+// config nor any binding. Distinct from "binding only" (no config, but a binding exists — e.g. an
+// env-bootstrapped companion before its own REST config lands), which IS reachable and keeps its own badge.
+export function isUnprovisionedCompanion(c: { config?: unknown; bindings: readonly unknown[] }): boolean {
+  return !c.config && c.bindings.length === 0;
+}
+
+/** One companion's measured activity, as read off the shared session list. */
+export interface CompanionActivity { ctxTurns: number; createdAt: string }
+
+// The page's DEFAULT focus — the history-bearing pick, extracted out of pages/Companion so the ranking is
+// unit-testable (review round 1; the component keeps only the activity-map read). Most real activity by
+// `ctxTurns` wins, ties broken by the OLDEST session (earliest `createdAt` — the longest-running thread);
+// a session missing from `activity` reads as unmeasured (0 turns, "" createdAt) rather than throwing.
+//
+// ⚠️ An UNPROVISIONED orphan is excluded from the ranking outright, never merely out-ranked: it is a row to
+// triage, not a conversation to open, and it has no chat at all — so a REAL companion with FEWER turns must
+// still win, however busy the orphan's own session got. An orphan is picked only when it is ALL there is
+// (otherwise a page showing nothing but orphans would focus nothing and sit on "Loading…" forever).
+export function pickDefaultCompanion<T extends { sessionId: string; config?: unknown; bindings: readonly unknown[] }>(
+  companions: readonly T[],
+  activity: ReadonlyMap<string, CompanionActivity>,
+): T | null {
+  const real = companions.filter((c) => !isUnprovisionedCompanion(c));
+  const candidates = real.length > 0 ? real : companions;
+  if (candidates.length === 0) return null;
+  const of = (c: T): CompanionActivity => activity.get(c.sessionId) ?? { ctxTurns: 0, createdAt: "" };
+  return candidates.reduce((best, cur) => {
+    const a = of(cur);
+    const b = of(best);
+    return a.ctxTurns > b.ctxTurns || (a.ctxTurns === b.ctxTurns && a.createdAt < b.createdAt) ? cur : best;
+  });
+}
+
 // ── Per-channel display (which channels a companion is reachable on) ──────────────────────────────────────
 // A companion may now hold MANY bindings (one per channel). The Manage view lists each as a channel row.
 // These pure helpers order + label them so the display logic stays testable and out of the component.

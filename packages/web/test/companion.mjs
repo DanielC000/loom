@@ -12,8 +12,9 @@ import { register } from "node:module";
 import {
   COMPANION_DEFAULT_NAME, COMPANION_ID_MAX, COMPANION_TOKEN_MAX, TELEGRAM_CHANNEL, bindingFromCreateForm,
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelBadgeLabel, channelDisplayName, companionDisplayName,
-  emptyConfigForm, emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody,
-  provisionErrorMessage, validateBinding, validateSender, validatePairing, validateTelegramConnect,
+  emptyConfigForm, emptyTelegramForm, formFromMasked, hasChannelBinding, isUnprovisionedCompanion, maskedToken,
+  pickDefaultCompanion, provisionBody, provisionErrorMessage, unprovisionedAssistantSessions, validateBinding,
+  validateSender, validatePairing, validateTelegramConnect,
 } from "../src/lib/companion.ts";
 // api.ts loads here with no daemon/build — letting us drive api.provisionCompanion against a mocked
 // global fetch. Its `@loom/shared` import is type-only (erased under --experimental-strip-types), but
@@ -384,6 +385,115 @@ await acheck("connect Telegram: PUTs the config (token) then POSTs the telegram 
   assert.equal(calls[1].url, "/api/companion/bindings");
   assert.equal(calls[1].method, "POST");
   assert.deepEqual(calls[1].body, { sessionId: "sess-1", channel: "telegram", chatId: "999", scope: "dm" }, "the telegram route is bound after the token lands");
+});
+
+// ── Unbound/unconfigured assistant sessions (card ed49cef6) — the derivation behind the "not provisioned"
+// row on /companion ──────────────────────────────────────────────────────────────────────────────────
+
+check("unprovisionedAssistantSessions: a live assistant session absent from configs∪bindings is returned", () => {
+  const sessions = [{ id: "s1", role: "assistant", processState: "live" }];
+  assert.deepEqual(unprovisionedAssistantSessions(sessions, new Set(), true), [{ id: "s1", role: "assistant", processState: "live" }]);
+});
+
+check("unprovisionedAssistantSessions: a 'starting' assistant session also counts as live for this purpose", () => {
+  const sessions = [{ id: "s1", role: "assistant", processState: "starting" }];
+  assert.equal(unprovisionedAssistantSessions(sessions, new Set(), true).length, 1);
+});
+
+check("unprovisionedAssistantSessions: EXCLUDES a session already in configs∪bindings (not an orphan)", () => {
+  const sessions = [{ id: "s1", role: "assistant", processState: "live" }];
+  assert.deepEqual(unprovisionedAssistantSessions(sessions, new Set(["s1"]), true), [], "already provisioned/bound — not an orphan");
+});
+
+check("unprovisionedAssistantSessions: EXCLUDES a non-assistant-role session (every fleet-view exclusion stays untouched elsewhere; this derivation is additive, not a role-check bypass)", () => {
+  const sessions = [{ id: "s1", role: "worker", processState: "live" }, { id: "s2", role: null, processState: "live" }, { id: "s3", processState: "live" }];
+  assert.deepEqual(unprovisionedAssistantSessions(sessions, new Set(), true), []);
+});
+
+check("unprovisionedAssistantSessions: EXCLUDES an exited assistant session — only live/starting ones are surfaced", () => {
+  const sessions = [{ id: "s1", role: "assistant", processState: "exited" }];
+  assert.deepEqual(unprovisionedAssistantSessions(sessions, new Set(), true), []);
+});
+
+check("unprovisionedAssistantSessions: an empty session list or empty provisioned set is handled (no throw, no false positives)", () => {
+  assert.deepEqual(unprovisionedAssistantSessions([], new Set(), true), []);
+  assert.deepEqual(unprovisionedAssistantSessions([], new Set(["s1"]), true), []);
+});
+
+// ⭐ The LOADING GATE (review round 1). `provisionedIds` being empty is ambiguous — "nothing provisioned"
+// vs "the configs/bindings reads haven't answered" — so the caller must say which, and an unanswered read
+// must yield NOTHING. Without this, a real configured companion's own live session reads as an orphan for
+// as long as those reads are in flight (and forever if one errors), which the page renders as "not
+// provisioned" with a Stop button.
+check("unprovisionedAssistantSessions: provisionedLoaded=false yields NO rows, even for a genuine orphan", () => {
+  const sessions = [{ id: "s1", role: "assistant", processState: "live" }];
+  assert.deepEqual(unprovisionedAssistantSessions(sessions, new Set(), false), [],
+    "configs/bindings unresolved — fail toward 'not shown', never 'not provisioned'");
+  // And the gate is checked BEFORE the role/liveness filter, so it holds for a whole mixed list.
+  const many = [
+    { id: "s1", role: "assistant", processState: "live" },
+    { id: "s2", role: "assistant", processState: "starting" },
+    { id: "s3", role: "worker", processState: "live" },
+  ];
+  assert.deepEqual(unprovisionedAssistantSessions(many, new Set(), false), []);
+  assert.equal(unprovisionedAssistantSessions(many, new Set(), true).length, 2, "same input, loaded ⇒ the two orphans DO surface");
+});
+
+// ── pickDefaultCompanion (card ed49cef6, review round 1) — the page's history-bearing default focus ────
+
+// A companion row shaped as the page's own merge produces: `config` present ⇒ provisioned, `bindings`
+// non-empty ⇒ reachable, NEITHER ⇒ the unprovisioned orphan this card surfaces.
+const realRow = (sessionId) => ({ sessionId, config: maskedRow(), bindings: [{ channel: "in-app" }] });
+const orphanRow = (sessionId) => ({ sessionId, bindings: [] });
+const activityOf = (entries) => new Map(entries.map(([id, ctxTurns, createdAt = ""]) => [id, { ctxTurns, createdAt }]));
+
+check("pickDefaultCompanion: picks the most-active companion, ties broken by the OLDEST session", () => {
+  const rows = [realRow("a"), realRow("b"), realRow("c")];
+  assert.equal(pickDefaultCompanion(rows, activityOf([["a", 5], ["b", 90], ["c", 12]]))?.sessionId, "b");
+  assert.equal(
+    pickDefaultCompanion(rows, activityOf([["a", 7, "2026-03-01"], ["b", 7, "2026-01-01"], ["c", 7, "2026-02-01"]]))?.sessionId,
+    "b", "equal turns ⇒ the longest-running thread wins",
+  );
+});
+
+check("pickDefaultCompanion: an unmeasured companion (absent from the activity map) reads as 0 turns, no throw", () => {
+  const rows = [realRow("a"), realRow("b")];
+  assert.equal(pickDefaultCompanion(rows, activityOf([["b", 3]]))?.sessionId, "b");
+  assert.equal(pickDefaultCompanion(rows, new Map())?.sessionId, "a", "all unmeasured ⇒ the first row, the pre-existing fallback");
+});
+
+// ⭐ THE FOCUS RULE. An orphan is a row to TRIAGE, not a thread to open — so it never takes the default
+// focus off a real companion, however many turns its own session happens to carry.
+check("pickDefaultCompanion: an ORPHAN with MORE ctxTurns does NOT win over a real companion with fewer", () => {
+  const rows = [orphanRow("orphan"), realRow("real")];
+  assert.equal(
+    pickDefaultCompanion(rows, activityOf([["orphan", 500], ["real", 1]]))?.sessionId,
+    "real", "unprovisioned rows are excluded from the ranking outright, not merely out-ranked",
+  );
+  // Same with the orphan sorting FIRST and the real companion unmeasured — the exclusion is not an artifact
+  // of iteration order or of the orphan happening to have an activity entry.
+  assert.equal(pickDefaultCompanion(rows, activityOf([["orphan", 500]]))?.sessionId, "real");
+});
+
+check("pickDefaultCompanion: a 'binding only' companion is NOT an orphan — it stays a focus candidate", () => {
+  const bindingOnly = { sessionId: "bo", bindings: [{ channel: "in-app" }] };
+  const rows = [bindingOnly, realRow("real")];
+  assert.equal(pickDefaultCompanion(rows, activityOf([["bo", 9], ["real", 1]]))?.sessionId, "bo",
+    "it has a route in and out — reachable, so it may be the opening view");
+});
+
+check("pickDefaultCompanion: falls back to an orphan ONLY when there is no real companion at all", () => {
+  const rows = [orphanRow("o1"), orphanRow("o2")];
+  assert.equal(pickDefaultCompanion(rows, activityOf([["o1", 1], ["o2", 40]]))?.sessionId, "o2",
+    "nothing else to focus — the orphans rank among themselves rather than the page focusing nothing");
+  assert.equal(pickDefaultCompanion([], new Map()), null, "no companions at all ⇒ null (the create box is the page)");
+});
+
+check("isUnprovisionedCompanion: true only for neither config nor any binding", () => {
+  assert.equal(isUnprovisionedCompanion({ config: undefined, bindings: [] }), true);
+  assert.equal(isUnprovisionedCompanion({ config: maskedRow(), bindings: [] }), false, "has a config — reachable via Manage, not an orphan");
+  assert.equal(isUnprovisionedCompanion({ config: undefined, bindings: [{ channel: "in-app" }] }), false, "has a binding — 'binding only', not an orphan");
+  assert.equal(isUnprovisionedCompanion({ config: maskedRow(), bindings: [{ channel: "in-app" }] }), false);
 });
 
 // A representative masked config row (as the REST GET returns it) — NEVER carries the token, only last-4.

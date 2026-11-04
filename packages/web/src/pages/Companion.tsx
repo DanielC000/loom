@@ -9,8 +9,8 @@ import {
 } from "../lib/companionCapabilities";
 import {
   bindingsForDisplay, buildConfigBody, buildTelegramConnect, channelDisplayName, companionDisplayName, COMPANION_DEFAULT_NAME, emptyConfigForm,
-  emptyTelegramForm, formFromMasked, hasChannelBinding, maskedToken, provisionBody, provisionErrorMessage,
-  validateBinding, validatePairing, validateSender, validatePersonaPrompt, COMPANION_PROMPT_MAX, TELEGRAM_CHANNEL,
+  emptyTelegramForm, formFromMasked, hasChannelBinding, isUnprovisionedCompanion, maskedToken, pickDefaultCompanion, provisionBody, provisionErrorMessage,
+  unprovisionedAssistantSessions, validateBinding, validatePairing, validateSender, validatePersonaPrompt, COMPANION_PROMPT_MAX, TELEGRAM_CHANNEL,
   reminderTitle, humanCron, reminderNextFireAt,
   type CompanionConfigForm, type CompanionTelegramForm,
 } from "../lib/companion";
@@ -94,6 +94,15 @@ export default function Companion() {
   // createdAt, to pick the history-bearing default selection below. Never used to reorder the switcher.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
 
+  // Have BOTH companion reads actually ANSWERED? Everything orphan-derived below is gated on this (card
+  // ed49cef6, review round 1). `isSuccess` — not `data !== undefined` — because a query that errored on a
+  // refetch keeps its last-good `data` while its status flips to error, and a stale config list is exactly
+  // what we must NOT treat as the authoritative "what is provisioned" answer. ["allSessions"] is usually
+  // already warm app-wide, so without this gate the orphan derivation ran against an EMPTY provisioned set
+  // and every live assistant session — real, configured companions included — rendered as "not provisioned"
+  // with a Stop button, permanently if either read errored.
+  const provisionedLoaded = configs.isSuccess && bindings.isSuccess;
+
   // Merge configs + bindings into companions, keyed by session id. A session may hold MANY bindings
   // (one per channel), so collect them into a list. MULTI-COMPANION (55f1b62): the daemon now arms EVERY
   // enabled config concurrently, so this list can hold 2+ — the switcher below picks which one is in focus.
@@ -104,12 +113,23 @@ export default function Companion() {
       const cur = byId.get(b.sessionId) ?? { sessionId: b.sessionId, bindings: [] };
       byId.set(b.sessionId, { ...cur, bindings: [...cur.bindings, b] });
     }
+    // Card ed49cef6: a live, unconfigured, unbound assistant session is reachable by nothing — surface
+    // it here (derived from the same ["allSessions"] fetch the activity-pick below already reads) so it
+    // can be provisioned or stopped instead of sitting invisible forever. Gated on `provisionedLoaded`
+    // above: until BOTH reads succeed, `byId` is not yet the real provisioned set, so NO orphan is listed.
+    for (const s of unprovisionedAssistantSessions(sessions.data ?? [], new Set(byId.keys()), provisionedLoaded)) {
+      byId.set(s.id, { sessionId: s.id, bindings: [] });
+    }
     return [...byId.values()].sort((a, b) => a.sessionId.localeCompare(b.sessionId));
-  }, [configs.data, bindings.data]);
+  }, [configs.data, bindings.data, sessions.data, provisionedLoaded]);
 
   const invalidateAll = () => {
     qc.invalidateQueries({ queryKey: ["companionConfigs"] });
     qc.invalidateQueries({ queryKey: ["companionBindings"] });
+    // Card ed49cef6: an orphaned entry above is derived from ["allSessions"], and both Stop and a
+    // companion delete that retires its provisioned session change that list too — invalidate it
+    // alongside the two above so either action's result disappears from the page without a manual reload.
+    qc.invalidateQueries({ queryKey: ["allSessions"] });
   };
 
   // Which companion is in focus, and whether the "New companion" create form is open OVER the current one.
@@ -136,17 +156,17 @@ export default function Companion() {
   // Picks the most real activity by ctxTurns (from the shared ["allSessions"] cache), ties broken by the
   // OLDEST session (earliest createdAt — the longest-running real thread). While `sessions` hasn't loaded
   // yet every companion reads as equally (un)measured, so this reduces to the first companion — the same
-  // fallback as before, never worse. An explicit pick (`selectedId` matches) always wins over this.
-  const mostActiveCompanion = useMemo(() => {
-    if (companions.length === 0) return null;
-    const activity = new Map(sessions.data?.map((s) => [s.id, { ctxTurns: s.ctxTurns ?? 0, createdAt: s.createdAt }]) ?? []);
-    const of = (c: CompanionRow) => activity.get(c.sessionId) ?? { ctxTurns: 0, createdAt: "" };
-    return companions.reduce((best, cur) => {
-      const a = of(cur);
-      const b = of(best);
-      return a.ctxTurns > b.ctxTurns || (a.ctxTurns === b.ctxTurns && a.createdAt < b.createdAt) ? cur : best;
-    });
-  }, [companions, sessions.data]);
+  // fallback as before, never worse. An explicit pick (`selectedId` matches) always wins over this. The
+  // ranking itself lives in `pickDefaultCompanion` (lib/companion), which also keeps an UNPROVISIONED
+  // orphan out of the candidates entirely — it is a row to triage, not a thread to open, so a real
+  // companion with FEWER turns still wins; read that function's own note before changing the rule.
+  const mostActiveCompanion = useMemo(
+    () => pickDefaultCompanion(
+      companions,
+      new Map((sessions.data ?? []).map((s) => [s.id, { ctxTurns: s.ctxTurns ?? 0, createdAt: s.createdAt }])),
+    ),
+    [companions, sessions.data],
+  );
 
   // COMMIT the resolved default into `selectedId` ONCE real activity data has loaded (Code Review CRITICAL
   // fix: the default was previously left VOLATILE — recomputed fresh every render from the polled
@@ -156,10 +176,13 @@ export default function Companion() {
   // fix exists to prevent). Waits for `sessions.data` to be DEFINED (not just `mostActiveCompanion`
   // truthy) so it never locks in the pre-load "everyone tied" fallback before real ctxTurns is known. Only
   // fires while `selectedId` is still null — an explicit pick (or a reset via onDeleted) always wins and
-  // is never overridden here.
+  // is never overridden here. ALSO waits on `provisionedLoaded` (review round 1): committing off a
+  // partially-populated list could lock the focus onto a row derived before the configs answered.
   useEffect(() => {
-    if (selectedId === null && sessions.data !== undefined && mostActiveCompanion) setSelectedId(mostActiveCompanion.sessionId);
-  }, [selectedId, sessions.data, mostActiveCompanion]);
+    if (selectedId === null && provisionedLoaded && sessions.data !== undefined && mostActiveCompanion) {
+      setSelectedId(mostActiveCompanion.sessionId);
+    }
+  }, [selectedId, provisionedLoaded, sessions.data, mostActiveCompanion]);
 
   // Resolve the focused companion: an explicit (or just-committed) `selectedId` sticks; otherwise fall
   // back to the history-bearing default above (or companions[0] if that's somehow unavailable) for THIS
@@ -227,13 +250,22 @@ function ClassicCompanionLayout({
               onSelect={onSelect}
               onNew={onNew}
             />
-            <CompanionDetail
-              key={selected.sessionId}
-              companion={selected}
-              label={companionDisplayName(selected.config)}
-              onChanged={onChanged}
-              onDeleted={onDeleted}
-            />
+            {isUnprovisionedCompanion(selected) ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <CompanionIdentity companion={selected} label={companionDisplayName(selected.config)} />
+                </div>
+                <UnprovisionedCompanionPanel key={selected.sessionId} companion={selected} onChanged={onChanged} onStopped={onDeleted} />
+              </>
+            ) : (
+              <CompanionDetail
+                key={selected.sessionId}
+                companion={selected}
+                label={companionDisplayName(selected.config)}
+                onChanged={onChanged}
+                onDeleted={onDeleted}
+              />
+            )}
           </div>
         ) : (
           <p style={{ color: color.textMuted, padding: 12 }}>Loading…</p>
@@ -278,13 +310,17 @@ function AtlasCompanionLayout({
               />
             </div>
           </div>
-          <AtlasCompanionDetail
-            key={selected.sessionId}
-            companion={selected}
-            label={companionDisplayName(selected.config)}
-            onChanged={onChanged}
-            onDeleted={onDeleted}
-          />
+          {isUnprovisionedCompanion(selected) ? (
+            <UnprovisionedCompanionPanel key={selected.sessionId} companion={selected} onChanged={onChanged} onStopped={onDeleted} />
+          ) : (
+            <AtlasCompanionDetail
+              key={selected.sessionId}
+              companion={selected}
+              label={companionDisplayName(selected.config)}
+              onChanged={onChanged}
+              onDeleted={onDeleted}
+            />
+          )}
         </>
       ) : (
         <p style={{ color: color.textMuted }}>Loading…</p>
@@ -726,7 +762,10 @@ function CompanionIdentity({ companion, label }: { companion: CompanionRow; labe
       <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</strong>
       {companion.config
         ? <Badge tone={companion.config.enabled ? "phosphor" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
-        : <Badge tone="cyan">binding only</Badge>}
+        : companion.bindings.length > 0
+          ? <Badge tone="cyan">binding only</Badge>
+          // Card ed49cef6: neither a config nor a binding — a live assistant session reachable by nothing.
+          : <Badge tone="amber">not provisioned</Badge>}
       {companion.config?.envPinned && <Badge tone="amber">pinned by env</Badge>}
       {companion.config && companion.bindings.length === 0 && <Badge tone="amber">not reachable — no binding</Badge>}
     </>
@@ -912,7 +951,45 @@ function CompanionTerminal({ sessionId }: { sessionId: string }) {
   );
 }
 
-function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onChanged: () => void }) {
+// ── Unprovisioned: a live assistant session with no config and no binding (card ed49cef6) ──────────────
+// It has no chat channel in or out, so Chat/Terminal have nothing useful to show — this panel reuses the
+// EXISTING create-config path verbatim (ConfigSection in create mode, which POSTs the existing human-only
+// POST /api/companion/config, option (b)'s "no new endpoint" instruction) plus a Stop action, the one
+// control this page otherwise withholds (CompanionTerminal passes lifecycle="none" deliberately).
+function UnprovisionedCompanionPanel({ companion, onChanged, onStopped }: {
+  companion: CompanionRow; onChanged: () => void; onStopped: () => void;
+}) {
+  const stop = useMutation({
+    meta: { inlineError: true },
+    mutationFn: () => api.stopSession(companion.sessionId, "graceful"),
+    onSuccess: onStopped,
+  });
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 520 }} data-testid="companion-unprovisioned-panel">
+      <p style={{ ...hint, margin: 0 }}>
+        This is a live assistant session (<code>{companion.sessionId.slice(0, 8)}</code>) with no companion
+        configuration and no chat binding — it has no channel in or out. Provisioning below writes its run
+        configuration (a bot token and the chat it messages, Telegram by default); it does <strong>not</strong>{" "}
+        add a chat binding, so the companion stays unreachable until one is added under Channels. Or stop it
+        if it isn't needed.
+      </p>
+      <ConfigSection companion={companion} onChanged={onChanged} createLabel="Provision" />
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button variant="danger" disabled={stop.isPending} onClick={() => stop.mutate()}>
+          {stop.isPending ? "Stopping…" : "Stop session"}
+        </Button>
+      </div>
+      {stop.error && <span style={errStyle}>{errorText(stop.error)}</span>}
+    </div>
+  );
+}
+
+function ConfigSection({ companion, onChanged, createLabel = "Configure" }: {
+  companion: CompanionRow; onChanged: () => void;
+  /** The create-mode button's label — "Provision" for the unprovisioned-session panel below, which reuses
+   *  this section verbatim; every other caller keeps the default. */
+  createLabel?: string;
+}) {
   const cfg = companion.config;
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<CompanionConfigForm>(() => (cfg ? formFromMasked(cfg) : emptyConfigForm(companion.sessionId)));
@@ -949,7 +1026,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
             {cfg.enabled ? "Disable" : "Enable"}
           </Button>
         )}
-        {!editing && <Button variant="primary" onClick={beginEdit}>{cfg ? "Edit" : "Configure"}</Button>}
+        {!editing && <Button variant="primary" onClick={beginEdit}>{cfg ? "Edit" : createLabel}</Button>}
       </div>
 
       {cfg?.envPinned && (
@@ -994,7 +1071,7 @@ function ConfigSection({ companion, onChanged }: { companion: CompanionRow; onCh
           </p>
         </>
       ) : (
-        <p style={hint}>No run config for this session yet — <strong style={{ color: color.text }}>Configure</strong> to set a bot token and cadence.</p>
+        <p style={hint}>No run config for this session yet — <strong style={{ color: color.text }}>{createLabel}</strong> to set a bot token and cadence.</p>
       )}
     </section>
   );
