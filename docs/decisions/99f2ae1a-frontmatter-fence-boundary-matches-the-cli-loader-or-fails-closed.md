@@ -136,7 +136,13 @@ raises this vector (enumerated, not hand-listed — see the test list below).
 - `packages/daemon/test/skill-permission-scan-createpty-wiring.mjs` — re-run as a regression spot-check
   (no new fixture needed — unrelated to this card's own vector).
 
-## Round 2 (Code Review of commit `15347451`, reviewer `8dc2be14`)
+## Round 2 (Code Review of pre-squash commit `15347451`, reviewer `8dc2be14`)
+
+`15347451` is a pre-squash worker-branch commit — it never lands on `main` (the whole branch
+squash-merges as one commit) and stops resolving once git GCs it (round 3 correction). Its eventual
+mainline landing is `27c3c773`, but that commit carries round 2's OWN fixes already baked in, so it
+cannot stand in for "the state round 2 reviewed" either — read this round's own fixture diffs below for
+what changed, not a `git show` of either sha.
 
 **MAJOR (item 1) — the cwd scan silently missed an evasion OPEN fence past the 4096-byte read cap.**
 `---<NBSP>\n…hooks:…description: <padding>\n---` (and the other four open-fence evasions), with its
@@ -159,6 +165,8 @@ itself (not just its closing fence) sits entirely past the 4096-byte read cap is
 undetected by `detectPermissionWidening` — exactly as a plain-open huge frontmatter already was before
 this card. The fix's whole effect is making that miss DISCLOSED (`truncated:"readBytes"`, named) rather
 than silent, for the evasion-open case too, never closing the underlying bounded-read tradeoff itself.
+**Round 3 (below) extends this same disclosure-not-detection parity to the case where the OPEN fence's
+own LINE straddles the cap, not just its close** — same residual, same acceptance.
 
 **Item 2 — the delivery path's withhold of a fence disagreement was never proven end-to-end.** See the
 new `skills-inject-permission-strip.mjs` PART (q) in the test list above.
@@ -184,11 +192,80 @@ fence-disagreement vector stops firing; a dedicated fixture (LF, CRLF, and a whi
 variant) proves this, plus a control proving the strip never masks a genuine disagreement further into
 the block.
 
-Both MAJOR (item 1) and item 5 were proven with `pnpm --filter @loom/daemon negative-control --ref
-8851cf97` (the real pre-fix commit, this card's own parent — never `HEAD`, which moves) PLUS a dedicated
-API-keeping mutant for each (`frontmatterReadIncomplete`'s widening reverted for item 1;
-`stripLeadingBlankLines` made a no-op for item 5) — each mutant turned exactly its own round-2 fixtures
-RED while leaving every other fixture green, then was reverted and the tree reconfirmed clean.
+MAJOR (item 1) was proven with `pnpm --filter @loom/daemon negative-control --ref 8851cf97` (the real
+pre-fix commit, this card's own parent — never `HEAD`, which moves) PLUS a dedicated API-keeping mutant
+(`frontmatterReadIncomplete`'s widening reverted). **Item 5's fix sits on code `8851cf97` never had at
+all** — `frontmatterFenceUnrecognized` itself didn't exist until this card's own round-1 work introduced
+it — so a structural revert to `8851cf97` proves only "the whole function is missing," never item 5's
+specific blank-line fix. **No reachable structural ref exists for item 5 either** (round 3 correction):
+the pre-squash round-1 commit that first added `frontmatterFenceUnrecognized` (without yet carrying item
+5's own `stripLeadingBlankLines` fix) never lands on `main` — a worker's whole branch squash-merges as
+ONE commit — and that commit stops resolving once git GCs it; this card's actual mainline landing,
+`27c3c773`, already carries item 5's fix baked in, so it cannot serve as a "pre-item-5" ref either. Item
+5's real (and ONLY) proof was always its dedicated API-keeping mutant alone (`stripLeadingBlankLines`
+made a no-op) — never cite a specific pre-squash sha for it. Both mutants turned exactly their own
+round-2 fixtures RED while leaving every other fixture green, then were reverted and the tree
+reconfirmed clean.
+
+## Round 3 (card `77571109`, from this card's own re-review, reviewer `299d1cd2`)
+
+**Finding 1 — the OPENING fence LINE itself can straddle the read cap, not just its close.** When the
+line following `---` is itself longer than `PERMISSION_SCAN_MAX_READ_BYTES` (e.g. `---` + 4200 spaces +
+`\n` + `hooks:…`, or the same padded with NBSP), the capped read never reaches a `\n` at all — neither
+`FRONTMATTER_OPEN_RE` nor `REAL_LOADER_FENCE_OPEN_RE` can match without one, so `opened` was `false` and
+`frontmatterReadIncomplete` returned `false` even though the fence plainly opened. Pre-fix:
+`scanCwdSkillsForPermissionFrontmatter` returned `findings:[]` AND `truncated:[]` for this exact shape —
+a silent miss with no signal anywhere, the same failure mode round 2's MAJOR fixed for a CLOSE sitting
+past the cap, now for an OPEN fence whose own first line does.
+
+Fixed by also treating a `body` that is only `---` plus whitespace to the end of the string as `opened`
+— plus an OPTIONAL single trailing U+FFFD (built via
+`String.fromCharCode(0xfffd)`, never a literal byte pasted into source, which this record's own
+drafting tripped over once already — see "Do not" below). That U+FFFD tolerance is load-bearing for a
+MULTI-BYTE whitespace char (NBSP is 2 bytes in UTF-8): the read cap can land exactly inside such a
+character's own byte pair, and `Buffer#toString("utf8")` renders that cut as one trailing U+FFFD —
+without tolerating it, the NBSP fixture (B4b below) would itself be a silent miss again, depending on
+exactly where the cap happened to fall relative to the NBSP run.
+
+Fixtures B4 (plain spaces) and B4b (NBSP) added to `skill-permission-frontmatter-scan.mjs` PART 1f,
+through the real byte-capped `scanCwdSkillsForPermissionFrontmatter`. RED-proved two ways: structurally,
+`pnpm --filter @loom/daemon negative-control --file packages/daemon/src/skills/permissionWidening.ts
+--test packages/daemon/test/skill-permission-frontmatter-scan.mjs --ref 10194943` (the real pre-fix
+commit on this card's own branch — `HEAD` before this fix landed); behaviourally, an API-keeping mutant
+forcing the new `openFenceLineTruncated` check to a bare `false` turned exactly the two new PART 1f
+checks RED while leaving every other check in the file green, then was reverted and the tree
+reconfirmed clean.
+
+**Item 2 (record nitpick) — `stripLeadingBlankLines(realBody)` in `frontmatterFenceUnrecognized` is a
+deliberate inert symmetry.** `REAL_LOADER_FENCE_OPEN_RE`'s own greedy `\s*` already swallows any leading
+blank/whitespace lines into the OPEN half, never into the capture — so the strip there is always a
+no-op; it is applied only for symmetry with `loomBody`, where `FRONTMATTER_OPEN_RE` consumes just ONE
+line terminator and the strip actually does real work. Noted with a one-line comment at the call site.
+
+No guard-lint mirror was needed: `skill-permission-widening-guard.mjs`'s own text copy has no
+`frontmatterReadIncomplete` equivalent (that function exists only for the byte-capped cwd scan; the
+bundled-asset guard-lint reads whole files), so there is nothing for this fix to drift out of lockstep
+with there.
+
+**Item 3 (CR fix, this round) — `skill-permission-frontmatter-scan.mjs`'s own `nbspPad` fixture used a
+LITERAL pasted NBSP byte**, not an escape. An editor (or an intermediate tool in a drafting pipeline)
+that normalizes NBSP to a plain ASCII space would silently turn the B4b fixture into a duplicate of B4,
+losing the one case the U+FFFD tolerance above actually exists to prove. Fixed by building it with
+`String.fromCharCode(0xa0)` instead (same discipline as the U+FFFD fix above, and the SAME class of trap
+— see the new "Do not" bullet below). Re-confirmed after the fix: B4b still lands mid-NBSP byte pair at
+the read cap (the tail bytes still split, still producing the trailing U+FFFD) and still dies under the
+drop-the-U+FFFD mutant.
+
+**Item 1 (CR, left as-is this round, optional) — the reviewer offered a smaller predicate,
+`/^---[^\n]*$/`, as a simplification** of `openFenceLineTruncated`'s own check (today built as
+`` new RegExp(`^---\\s*${replacementChar}?$`) ``). Not adopted this round — the review marked it
+optional, and the current `\s`-based form stays symmetric with the rest of this function's other
+`\s`-based regexes. **Recording it here as the preferred simplification if this predicate is ever
+touched again:** `[^\n]*` only needs to exclude the one character (`\n`) that would otherwise make the
+EXISTING `FRONTMATTER_OPEN_RE`/`REAL_LOADER_FENCE_OPEN_RE` checks already fire — it doesn't rely on
+`\s`'s own wide Unicode whitespace definition (which itself includes `\n`/`\r`/U+2028/U+2029, exactly
+what made "no line terminator anywhere" the wrong way to describe this check's own precondition, fixed
+elsewhere in this record this same round).
 
 ## Do not
 
@@ -216,3 +293,29 @@ RED while leaving every other fixture green, then was reverted and the tree reco
 - Do not re-verify any claim in this record by trusting it against a NEWER installed CLI build — re-run
   the same static byte-offset method against whatever `claude --version` reports, and update this record
   if anything has changed.
+- Do not drop `frontmatterReadIncomplete`'s `openFenceLineTruncated` check (round 3) — without it, an
+  opening fence LINE that itself straddles the read cap (no `\n` anywhere in the capped read) reads as
+  "never opened at all," the same silent-miss shape round 2's MAJOR fixed for the CLOSE side.
+- Do not drop the trailing-U+FFFD tolerance on that same check (round 3) — a byte cap can land inside a
+  multi-byte whitespace character's own byte pair (NBSP is 2 bytes in UTF-8), and `Buffer#toString`
+  renders that cut as one trailing U+FFFD; without the tolerance the NBSP evasion (B4b) becomes exactly
+  the silent miss this round exists to close.
+- Do not write U+FFFD (or any other non-ASCII fixture/source character — NBSP included, round 3's own
+  CR item 3) as a literal byte pasted into source or into THIS record. An editor, or an intermediate
+  tool in a drafting pipeline, that decodes a backslash-u-hex escape before the text lands, or that
+  normalizes a look-alike whitespace character to plain ASCII, silently changes the byte a reader or a
+  test fixture actually needs — confusable with the very decode artifact the U+FFFD tolerance exists to
+  catch, or (for NBSP) collapsing the B4b fixture into a duplicate of B4. Build any such character with
+  `String.fromCharCode(...)` instead (`0xfffd` for the tolerance, `0xa0` for the NBSP fixture) — round
+  3's own drafting tripped over this exact trap twice, in the source file, this record, AND the test
+  fixture, before being caught and fixed each time.
+- Do not treat round 3's fix as closing the bounded-read tradeoff either — same "Named residual" as round
+  2, now restated above: it makes an open-fence-line miss past the cap DISCLOSED, never detected.
+- Do not cite `--ref 8851cf97` for a negative-control proof of a fix whose own machinery postdates that
+  commit (round 2's item 5 nitpick, now corrected above) — check what the cited ref actually contains
+  before citing it as a RED proof.
+- Do not cite a pre-squash worker-branch commit (e.g. `15347451`) as a structural ref for anything —
+  it never lands on `main` and stops resolving once git GCs it. Cite the card's actual mainline landing
+  instead, and check with `git merge-base --is-ancestor <sha> main` first; but note that a squash
+  landing covers the WHOLE branch, so it may not represent any one intermediate round's own state either
+  (round 2's item 5 nitpick, round 3 correction, above).

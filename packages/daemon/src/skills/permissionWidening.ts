@@ -261,6 +261,7 @@ export function frontmatterFenceUnrecognized(content: string): boolean {
   const { body } = splitLeadingBom(content);
   const real = body.match(REAL_LOADER_FENCE_RE);
   if (!real) return false; // the real loader sees no live block here either — nothing to disagree about
+  // Inert here (REAL_LOADER_FENCE_OPEN_RE's own \s* already swallowed any leading blank lines) — kept for symmetry with loomBody below, which actually needs it.
   const realBody = stripLeadingBlankLines((real[1] ?? "").replace(/\r?\n$/, ""));
   const loom = body.match(FRONTMATTER_RE);
   const loomBody = stripLeadingBlankLines(loom?.[1] ?? "");
@@ -285,10 +286,19 @@ export function frontmatterFenceUnrecognized(content: string): boolean {
  *
  * @decision 015fdb23 — never report a byte-capped read as truncated merely because the FILE is larger
  * than the cap; only a frontmatter block that itself didn't close within what was read carries risk.
+ *
+ * @decision 99f2ae1a (round 3) — do not drop this `openFenceLineTruncated` check below: a body that's
+ * only `---` plus whitespace to the end of the string is the OPEN fence's own line straddling the read
+ * cap, and neither other OPEN regex can match without a `\n` to find.
  */
 export function frontmatterReadIncomplete(content: string): boolean {
   const { body } = splitLeadingBom(content);
-  const opened = FRONTMATTER_OPEN_RE.test(body) || REAL_LOADER_FENCE_OPEN_RE.test(body);
+  // replacementChar tolerates a multi-byte whitespace char (e.g. NBSP) cut in half right at the read
+  // cap — Buffer#toString("utf8") renders that cut as one trailing U+FFFD, which would otherwise fail
+  // the all-whitespace test for no reason but where the cap fell.
+  const replacementChar = String.fromCharCode(0xfffd);
+  const openFenceLineTruncated = new RegExp(`^---\\s*${replacementChar}?$`).test(body);
+  const opened = openFenceLineTruncated || FRONTMATTER_OPEN_RE.test(body) || REAL_LOADER_FENCE_OPEN_RE.test(body);
   const closed = FRONTMATTER_RE.test(body) || REAL_LOADER_FENCE_RE.test(body);
   return opened && !closed;
 }

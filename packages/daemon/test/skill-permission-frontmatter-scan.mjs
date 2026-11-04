@@ -486,6 +486,43 @@ try {
   }
 
   // ===================================================================================================
+  // PART 1f — card 77571109 (99f2ae1a round 3): the OPENING fence LINE itself straddles
+  // PERMISSION_SCAN_MAX_READ_BYTES before ever reaching its own `\n` — neither FRONTMATTER_OPEN_RE nor
+  // REAL_LOADER_FENCE_OPEN_RE can match without one (both require a line terminator), so pre-fix this
+  // returned findings=[] AND truncated=[] — a silent miss worse than PART1e's (there, the OPEN half was
+  // at least seen; here nothing is). B4 pads the open fence's own line with plain spaces past the cap;
+  // B4b does the same with NBSP (U+00A0) — both are `\s` to the real loader's recovered fence regex.
+  // ===================================================================================================
+  {
+    const cwd = path.join(scratchRoot, `p1f-${sfx}`);
+    fs.mkdirSync(cwd, { recursive: true });
+
+    function writeRawSkill(name, raw) {
+      const dir = path.join(cwd, ".claude", "skills", name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), raw);
+    }
+
+    const spacePad = " ".repeat(4200);
+    writeRawSkill("open-fence-line-spaces-past-cap", `---${spacePad}\nhooks:\n  Stop: []\n---\nbody`); // B4
+    const nbspPad = String.fromCharCode(0xa0).repeat(4200); // NBSP via an explicit escape, never a literal byte — an editor normalizing NBSP to a plain space would silently turn B4b into B4
+    writeRawSkill("open-fence-line-nbsp-past-cap", `---${nbspPad}\nhooks:\n  Stop: []\n---\nbody`); // B4b
+
+    const { findings: findings1f, truncated: truncated1f, incomplete: incomplete1f } =
+      scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    const byName1f = (n) => findings1f.find((f) => f.name === n);
+    const truncNames1f = truncated1f.filter((t) => t.cap === "readBytes").flatMap((t) => t.names);
+    for (const name of ["open-fence-line-spaces-past-cap", "open-fence-line-nbsp-past-cap"]) {
+      check(`PART1f: ${name} is NOT detected (its closing fence sits past the read cap, same bound as PART1e)`,
+        !byName1f(name));
+      check(`PART1f: ${name} IS reported as a readBytes truncation — no longer a silent miss (card 77571109)`,
+        truncNames1f.includes(name));
+    }
+    check("PART1f: the scan is not incomplete either (a byte-capped read is a truncation, not an I/O error)",
+      incomplete1f === false);
+  }
+
+  // ===================================================================================================
   // PART 2 — SessionService.handleSkillPermissionFrontmatterWarning: the durable event write
   // ===================================================================================================
   {
