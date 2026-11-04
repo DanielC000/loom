@@ -199,6 +199,9 @@ async function start(dirArg, portArg) {
     // outlive this launcher process either way. stdio fully ignored — never a pipe left dangling once
     // this launcher exits.
     detached: true,
+    // detached:true alone opens a new visible console window on Windows; windowsHide:true hides
+    // only that window (no-op on POSIX).
+    windowsHide: true,
     stdio: "ignore",
   });
   if (!child.pid) {

@@ -395,6 +395,9 @@ async function start(dir, cmdArgs) {
     // launcher process either way. `stdio: "ignore"` for the supervisor itself — it writes the real
     // command's output to logPath directly via fs (see SUPERVISOR_CODE), never through inherited stdio.
     detached: true,
+    // detached:true alone opens a new visible console window on Windows; windowsHide:true hides
+    // only that window (no-op on POSIX).
+    windowsHide: true,
     stdio: "ignore",
   });
   if (!child.pid) {
