@@ -11,6 +11,7 @@ import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
 import { canonicalGit, withTimeout } from "../git/bounded.js";
 import { comparisonKey } from "../projects/repos.js";
+import { writeJsonAtomic } from "../pty/claude-config.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
 // CR round 3 (card 31f997e7): a SEPARATE sidecar file, never merged into MANIFEST's own shape — keeps
@@ -18,6 +19,15 @@ const MANIFEST = ".loom-skills.json"; // records which skill names EACH session 
 // unaffected, and needs no legacy-format handling of its own (nothing pre-dates it). Absent (an old
 // worktree this version hasn't touched yet) ⇒ no fingerprints for anything in it, same as a parse error.
 const FINGERPRINTS_FILE = ".loom-skills-fingerprints.json";
+// card 4c2a0bfd: writeJsonAtomic's tmp name is `${filePath}.${pid}.${randomUUID()}.loom.tmp` — unique
+// EVERY call, unlike the old fixed `.tmp` suffix it replaces. A crash between its write and its rename
+// used to self-heal (the next successful write reused + overwrote the SAME fixed name); a unique name
+// never gets reused, so a crash-stranded one needs its own (globbed — the pid/uuid differ every call)
+// git-exclude entry below `hideFromGit`'s existing per-cwd `entries` array already carries bare
+// non-skill names (MANIFEST, FINGERPRINTS_FILE) through, or it accumulates as permanent untracked noise
+// in the worktree forever instead of the old scheme's at-most-one self-overwriting orphan.
+const MANIFEST_TMP_GLOB = `${MANIFEST}.*.loom.tmp`;
+const FINGERPRINTS_TMP_GLOB = `${FINGERPRINTS_FILE}.*.loom.tmp`;
 
 /**
  * DAEMON-SIDE placement fingerprints, keyed by `cwd` then skill name — never read from disk. The
@@ -1249,24 +1259,23 @@ export function injectSkills(
   }
 
   manifest.set(sessionId, placed); // record ONLY what I actually injected (never the repo's own / collisions)
-  // Atomic manifest write (tmp+rename, like store.ts): a torn write here corrupts the shared per-session
-  // record — readManifest then has to discard it, losing every concurrent session's claims. Writing to a
-  // tmp and renaming means a reader sees either the old whole map or the new whole map, never a half file.
+  // Atomic manifest write via the shared `writeJsonAtomic` (card 4c2a0bfd — reused from
+  // pty/claude-config.ts rather than hand-rolled): a torn write here corrupts the shared per-session
+  // record — readManifest then has to discard it, losing every concurrent session's claims — AND, unlike
+  // this file's own old fixed `.tmp` suffix, writeJsonAtomic's unique pid+random tmp name closes the
+  // cross-process same-tmp-name collision two daemons sharing one cwd could hit (see
+  // docs/decisions/31f997e7-*.md's "CARD 4c2a0bfd" section for the full analysis + accepted residuals).
   // `Object.fromEntries` on a `Map`, never a bracket-assignment loop (card f4272888) — see `Manifest`'s
-  // own doc for why.
-  const manifestTmp = `${manifestPath}.tmp`;
-  try {
-    fs.writeFileSync(manifestTmp, JSON.stringify(Object.fromEntries(manifest)));
-    fs.renameSync(manifestTmp, manifestPath);
-  } catch (e) {
-    console.log(`[skills] failed to write manifest ${manifestPath}: ${(e as Error).message}`);
-    try { fs.rmSync(manifestTmp, { force: true }); } catch { /* best effort */ }
-  }
+  // own doc for why. A write/rename failure is NON-FATAL, same policy as before this card —
+  // writeJsonAtomic already cleans up its own tmp on a terminal rename failure; this catch only keeps the
+  // pre-existing "log and continue" behavior, not a cleanup duty.
+  try { writeJsonAtomic(manifestPath, Object.fromEntries(manifest)); }
+  catch (e) { console.log(`[skills] failed to write manifest ${manifestPath}: ${(e as Error).message}`); }
 
   // The fingerprints sidecar (separate file, separate atomic write — see FINGERPRINTS_FILE's own doc for
-  // why it's never merged into MANIFEST's shape). Same tmp+rename discipline. `lastPlaced` was already
-  // mutated in place above (the want-loop's own `lastPlaced.set` on a successful placement) — nothing
-  // session-scoped to additionally replace here (card f4272888).
+  // why it's never merged into MANIFEST's shape). Same writeJsonAtomic discipline as the manifest write
+  // above. `lastPlaced` was already mutated in place above (the want-loop's own `lastPlaced.set` on a
+  // successful placement) — nothing session-scoped to additionally replace here (card f4272888).
   //
   // @decision f4e93dbf — `pendingWorking` (resolved entries removed, unresolved/carried-forward ones
   // kept, as computed above) is what gets persisted here; a worktree cwd never populated it, so it
@@ -1274,15 +1283,9 @@ export function injectSkills(
   const pendingOut: PendingReclaimMap = new Map();
   for (const [name, rec] of pendingWorking) pendingOut.set(name, { deadFingerprints: [...rec.deadFingerprints], firstSeenAt: rec.firstSeenAt });
   const fingerprintsOut = serializeFingerprintsFile(lastPlaced, pendingOut);
-  const fingerprintsTmp = `${fingerprintsPath}.tmp`;
-  try {
-    fs.writeFileSync(fingerprintsTmp, JSON.stringify(fingerprintsOut));
-    fs.renameSync(fingerprintsTmp, fingerprintsPath);
-  } catch (e) {
-    console.log(`[skills] failed to write fingerprints file ${fingerprintsPath}: ${(e as Error).message}`);
-    try { fs.rmSync(fingerprintsTmp, { force: true }); } catch { /* best effort */ }
-  }
-  hideFromGit(cwd, [...placed, MANIFEST, FINGERPRINTS_FILE]);
+  try { writeJsonAtomic(fingerprintsPath, fingerprintsOut); }
+  catch (e) { console.log(`[skills] failed to write fingerprints file ${fingerprintsPath}: ${(e as Error).message}`); }
+  hideFromGit(cwd, [...placed, MANIFEST, FINGERPRINTS_FILE, MANIFEST_TMP_GLOB, FINGERPRINTS_TMP_GLOB]);
 
   // Surface any copy that never landed (after persisting the manifest + git-hide for what DID land, so the
   // partial success is recorded and recoverable). The caller treats this as non-fatal but it's now VISIBLE
