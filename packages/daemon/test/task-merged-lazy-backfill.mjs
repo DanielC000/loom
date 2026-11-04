@@ -27,6 +27,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       for in the first place; sha/repoKey stay untouched, only verification is filled in.
 //   (6c) a TRAILERED card whose scan resolves a DIFFERENT sha than the one recorded (e.g. the same branch
 //       landed twice) writes NOTHING — never overwrites an existing, different mergedSha.
+//   (7) card 79090e65: a stored mergedSha in FULL (40-hex) form against the REAL resolveMergedInfo scan
+//       of the SAME commit (which always returns SHORT, 7-char form) writes NOTHING — proves the
+//       comparison's safe failure direction for a sha-form mismatch, a shape that never actually occurs
+//       in production (see that scenario's own comment for the writer-chokepoint evidence).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/task-merged-lazy-backfill.mjs
 import fs from "node:fs";
@@ -203,6 +207,23 @@ try {
   check("(6c) the response's mergedSha is UNCHANGED (never overwritten by the stale, differently-shaped commit)", res6c.json().mergedSha === "cafef00");
   check("(6c) the response's mergedVerification STAYS null (never backfilled from an unrelated commit's own tier)", res6c.json().mergedVerification == null);
   check("(6c) the PERSISTED column is also unchanged — no write happened at all", db.getTask(t6c.id)?.mergedSha === "cafef00");
+
+  // @decision 79090e65 — do not drop this scenario as redundant with (6b)/(6c): those seed their OWN
+  // expected sha via the SAME `.slice(0, 7)` the route applies, so they can't catch a short-vs-full
+  // mismatch the way a stored FULL-form sha against a real SHORT-form scan can.
+  const t7 = { id: `lazy-full-vs-short-${Date.now()}`, projectId: "pRepo", title: "full-form stored sha vs real short-form scan", body: "", columnKey: "done", position: 9, priority: "p2", createdAt: now, updatedAt: now };
+  db.insertTask(t7);
+  const branch7 = `loom/${taskKey(t7.id)}`;
+  git(repo, `-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(z): full-vs-short landing" -m "Loom-Worker-Branch: ${branch7}"`);
+  const landedSha7Full = git(repo, "log -1 --format=%H");
+  const landedSha7Short = landedSha7Full.slice(0, 7);
+  check("(7) setup: the full sha genuinely differs, as a STRING, from its own short prefix", landedSha7Full !== landedSha7Short);
+  db.updateTask(t7.id, { mergedSha: landedSha7Full, mergedRepoKey: null, mergedVerification: null });
+  const res7 = await app.inject({ method: "GET", url: `/api/tasks/${t7.id}` });
+  check("(7) GET 200s", res7.statusCode === 200);
+  check("(7) mergedSha is UNCHANGED (full form), never silently rewritten to the short form", res7.json().mergedSha === landedSha7Full);
+  check("(7) mergedVerification STAYS null — the real scan resolves the SAME commit, but in short form, so the strict-equality guard treats it as a mismatch and writes NOTHING (the safe direction: never a wrong write, but also no backfill for this unreachable shape)", res7.json().mergedVerification == null);
+  check("(7) the PERSISTED column is also unchanged — no write happened at all", db.getTask(t7.id)?.mergedSha === landedSha7Full);
 } finally {
   db.close();
   cleanupPathSync(tmpHome);
