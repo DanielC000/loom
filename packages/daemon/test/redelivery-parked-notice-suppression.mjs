@@ -237,9 +237,10 @@ try {
     const decision085Citations = citePrefixes.reduce((n, prefix) => n + (orchSrc.match(new RegExp(`${prefix} 085d9422\\b`, "g")) ?? []).length, 0);
     check("(4) RELOCATED: both relocations still cite this card, in a provenance comment", decision085Citations >= 2);
 
-    const descriptionBlocks = [...orchSrc.matchAll(/description:\s*"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
-    const descriptionCardIdLeak = descriptionBlocks.some((d) => /\b(?:card|@decision)\s+[0-9a-f]{8}\b/.test(d));
-    check("(4) RELOCATED: no card/decision id leaked into any agent-facing tool description", !descriptionCardIdLeak);
+    // Card 077b2289: a leak check used to live here, but it only regex-captured the FIRST double-quoted
+    // literal after `description:` — most orchestration.ts descriptions are built by "..." + "..."
+    // concatenation, so it passed vacuously on every later segment. platform-end-user-no-dogfood.mjs reads
+    // the REAL registered tool descriptions (concatenation included) and is the guard against this leak.
   }
 
   // ===== (5) ROUND 3's INTENT PRESERVED: a resend that auto-joins a root which has ALREADY parked still ==
