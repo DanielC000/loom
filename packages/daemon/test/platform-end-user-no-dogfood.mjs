@@ -543,7 +543,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const { seedSetupHome } = await import("../dist/setup/seed.js");
 const { seedGlobalSkills } = await import("../dist/skills/seed.js");
-const { injectSkills } = await import("../dist/skills/inject.js");
+const { injectSkills, CAPABILITY_BOUND_SKILLS } = await import("../dist/skills/inject.js");
 const { claudeSkillsDir } = await import("../dist/pty/claude-doctrine.js");
 const { resolvePlatformLeadResumeDocPath, platformLeadBaseResumeDocPath } = await import("../dist/sessions/platform-lead-prompt.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
@@ -672,6 +672,13 @@ main.db.close();
 // Derived structurally: call the REAL injectSkills() (role "platform", subset null — the Platform-lead
 // profile's actual shape, profiles/seed.ts) against the curated store above, then read back whichever
 // directory names actually landed — never a hand-picked "orchestrate, worker, …" list.
+//
+// This cwd is a plain tmp dir, not worktree-isolated, and no capability is granted — so `injectSkills`'s
+// own capability-bound-skill gate (the real `CAPABILITY_BOUND_SKILLS` export + `isWorktreeCwd`) correctly
+// WITHHOLDS every capability-bound skill here, same as it would for any non-worker, non-granted session.
+// The expected delivered set is therefore the curated set MINUS whichever capability-bound names the real
+// export carries — DERIVED from `CAPABILITY_BOUND_SKILLS` itself, never a hand-written name list, so a
+// future capability-bound skill addition (or removal) is reflected automatically.
 {
   const cwd = path.join(tmpHome, "skill-surface-cwd");
   fs.mkdirSync(cwd, { recursive: true });
@@ -679,10 +686,16 @@ main.db.close();
   const deliveredDir = claudeSkillsDir(cwd);
   check("(b) sanity: injectSkills actually delivered something to this cwd", fs.existsSync(deliveredDir));
   const deliveredNames = fs.readdirSync(deliveredDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
-  check(`(b) sanity: the Lead's locked-role/subset-null resolution delivers the FULL curated set, not a narrowed one (delivered: ${deliveredNames.length}, curated: ${curatedSkillNames.length})`,
-    deliveredNames.length === curatedSkillNames.length);
+  const capabilityBoundNamesInCuratedSet = Object.keys(CAPABILITY_BOUND_SKILLS).filter((n) => curatedSkillNames.includes(n));
+  const expectedDeliveredCount = curatedSkillNames.length - capabilityBoundNamesInCuratedSet.length;
+  check(`(b) sanity: the Lead's locked-role/subset-null resolution delivers the curated set MINUS the real capability-bound skills withheld for this ungranted, non-worktree cwd (delivered: ${deliveredNames.length}, curated: ${curatedSkillNames.length}, capability-bound: ${capabilityBoundNamesInCuratedSet.length})`,
+    deliveredNames.length === expectedDeliveredCount);
   check("(b) sanity: the dev-only skills are absent from the DELIVERED set too (never merely undelivered from an absent store)",
     !deliveredNames.includes("platform-audit") && !deliveredNames.includes("codescape") && !deliveredNames.includes("research"));
+  for (const boundName of capabilityBoundNamesInCuratedSet) {
+    check(`(b) sanity: capability-bound skill "${boundName}" is genuinely WITHHELD for this ungranted, non-worktree cwd (not merely absent from the store)`,
+      !deliveredNames.includes(boundName));
+  }
 
   function allFilesUnder(dir) {
     const out = [];

@@ -191,7 +191,7 @@ const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "loom-session-end"]);
  *
  *  @decision 31f997e7 — this gate is delivery hygiene, NOT a security boundary; never the only thing
  *  standing between an agent and a capability. See the decision record for the full mechanism. */
-const CAPABILITY_BOUND_SKILLS: Record<string, string> = Object.assign(Object.create(null), {
+export const CAPABILITY_BOUND_SKILLS: Record<string, string> = Object.assign(Object.create(null), {
   "loom-shadcn": "shadcn",
 });
 
