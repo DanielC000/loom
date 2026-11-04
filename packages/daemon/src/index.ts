@@ -18,7 +18,7 @@ import { runBootRecoveryPrefix } from "./sessions/boot-backstop.js";
 import { kickProjectsWorkRootUsageRefresh } from "./sessions/project-work-dir-usage.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
-import { seedDefaultCapabilities, migrateGithubCapabilityToBinary, migrateImageGenCapabilityToNpmPinned } from "./capabilities/seed.js";
+import { seedDefaultCapabilities, migrateGithubCapabilityToBinary, migrateImageGenCapabilityToNpmPinned, migrateImageGenNpmPinnedVersionBump } from "./capabilities/seed.js";
 import { prewarmNpmPinnedForProfilesAtBoot } from "./capabilities/prewarm.js";
 import { seedPlatformHome, migratePlatformPrompts, getPlatformHomePaths } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead } from "./setup/seed.js";
@@ -232,6 +232,15 @@ async function main(): Promise<void> {
     if (migrateImageGenCapabilityToNpmPinned(db)) console.log("[boot] migrated the 'image-gen' capability off the npx-resolved mcp-imagenate package to a Loom-managed npm-pinned install");
   } catch (err) {
     console.warn(`[boot] image-gen capability provisioning migration failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Card b7d6b7f3: bump an EXISTING install's "image-gen" row off the pre-bump mcp-imagenate pin (2 HIGH
+  // zod audit findings) onto the current one (a fresh install's seed above already lands the current pin
+  // directly). Narrow + idempotent (see migrateImageGenNpmPinnedVersionBump's doc). Best-effort: a throw
+  // here must never gate boot — the row just stays on its old (still-working, still-locked) pin.
+  try {
+    if (migrateImageGenNpmPinnedVersionBump(db)) console.log("[boot] bumped the 'image-gen' capability's pinned mcp-imagenate version to the current pin");
+  } catch (err) {
+    console.warn(`[boot] image-gen npm-pinned version bump migration failed (continuing boot): ${(err as Error).message}`);
   }
   // Card e7d6e43b, Code Review Minor: pre-warm every "npm-pinned" capability row at least one profile
   // grants, same posture as prewarmMarkitdownForProfilesAtBoot — so the first session that grants it

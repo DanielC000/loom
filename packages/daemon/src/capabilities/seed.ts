@@ -83,8 +83,39 @@ import { GITHUB_MCP_SERVER_VERSION } from "./github-binary.js";
  * `packages/daemon/assets/npm-pinned-locks/mcp-imagenate/<new-version>/package-lock.json` and re-reading
  * its `npm audit` output BEFORE committing the bump; see docs/decisions/66ab2bc0-npm-pinned-lockfile-pin.md
  * ("The bump ritual is extended, not duplicated") for the exact steps — not repeated here.
+ *
+ * Bumped 0.2.1 -> 0.9.0 by card `b7d6b7f3` to clear 2 HIGH `zod` audit findings. 0.9.0 also newly
+ * registers `generate_video`, powered by the SAME `GEMINI_API_KEY` this row injects — NOT inert, unlike
+ * the OpenAI/BFL/Reve providers (which stay inert, gated on keys this row never sets). Structurally
+ * blocked via `IMAGE_GEN_DISALLOWED_TOOLS` (pty/host.ts), not by the allowlist alone.
+ *
+ * @decision b7d6b7f3 — do not re-widen the seeded `toolAllowlistJson` to the bare `mcp__image-gen`
+ * wildcard, and do not remove `IMAGE_GEN_DISALLOWED_TOOLS`'s union into `--disallowedTools`, without
+ * first re-verifying every provider's key-gating line against the then-current mcp-imagenate release.
  */
-const MCP_IMAGENATE_VERSION = "0.2.1";
+const MCP_IMAGENATE_VERSION = "0.9.0";
+
+/**
+ * The ONE value `mcp-imagenate`'s pinned version constant above ever held back when the "image-gen" row
+ * was still on its archived `bundled`/npx form (card e7d6e43b, pre-dating the `npm-pinned` kind
+ * entirely) — frozen here, deliberately NEVER updated again, so {@link isLegacyNpxImageGenProvision}'s
+ * narrow match keeps recognizing that one historical shape even after {@link MCP_IMAGENATE_VERSION} moves
+ * on. Decoupling these two matters: before card `b7d6b7f3` bumped the live pin to 0.9.0, that legacy-shape
+ * check compared against the SAME mutable `MCP_IMAGENATE_VERSION` constant — so bumping it would have
+ * silently stopped the check from ever matching a real pre-e7d6e43b row again (every such row's stored
+ * `args` literally reads `mcp-imagenate@0.2.1`, never the new pin), stranding it on the dead npx package
+ * forever with the migration reporting a clean no-op instead of the rewrite it was meant to perform.
+ */
+const LEGACY_BUNDLED_MCP_IMAGENATE_VERSION = "0.2.1";
+
+/**
+ * The npm-pinned "image-gen" row's version immediately BEFORE card `b7d6b7f3`'s audit-driven bump —
+ * narrow-matched by {@link migrateImageGenNpmPinnedVersionBump} so an EXISTING install still carrying this
+ * exact, un-customized shape gets moved onto the new pin at boot, same as a brand-new install's seed
+ * already lands directly. An owner-customized row (any other package/version/bin/env shape) is left
+ * untouched — see that function's own doc for the full contract.
+ */
+const STALE_MCP_IMAGENATE_VERSION = "0.2.1";
 
 /**
  * The exact `shadcn` (npm) release the "shadcn" seed row is pinned to — the version card 5b1c19c0 actually
@@ -139,7 +170,14 @@ export function bundledCapabilities(): Omit<CapabilityDefRow, "id" | "createdAt"
         binRelativeToPackageJson: "dist/index.js",
         outputDirEnvVar: "NANO_BANANA_OUTPUT_DIR",
       }),
-      toolAllowlistJson: JSON.stringify(["mcp__image-gen"]),
+      // Narrowed from the whole-server wildcard to the single real tool name: the mounted server ALSO
+      // advertises `generate_video`, powered by the same GEMINI_API_KEY this row injects. The allowlist
+      // narrowing alone does not make it unreachable — the structural block is `IMAGE_GEN_DISALLOWED_TOOLS`
+      // in `pty/host.ts`, unioned into `--disallowedTools` whenever this MCP is mounted.
+      //
+      // @decision b7d6b7f3 — do not re-widen this to the bare `mcp__image-gen` wildcard without
+      // re-reading that decision's record first.
+      toolAllowlistJson: JSON.stringify(["mcp__image-gen__generate_image"]),
       wantsScratchDir: true,
       requiresConnection: true,
       secretEnvVar: "GEMINI_API_KEY",
@@ -236,7 +274,8 @@ function isLegacyNpxImageGenProvision(v: unknown): boolean {
   if (!v || typeof v !== "object") return false;
   const p = v as { kind?: unknown; command?: unknown; args?: unknown; outputDirEnvVar?: unknown };
   return p.kind === "bundled" && p.command === "npx" && p.outputDirEnvVar === "NANO_BANANA_OUTPUT_DIR"
-    && Array.isArray(p.args) && p.args.length === 2 && p.args[0] === "-y" && p.args[1] === `mcp-imagenate@${MCP_IMAGENATE_VERSION}`;
+    && Array.isArray(p.args) && p.args.length === 2 && p.args[0] === "-y"
+    && p.args[1] === `mcp-imagenate@${LEGACY_BUNDLED_MCP_IMAGENATE_VERSION}`;
 }
 
 /**
@@ -261,6 +300,45 @@ export function migrateImageGenCapabilityToNpmPinned(db: Db): boolean {
     return false; // malformed row — leave it alone, not this migration's job to repair
   }
   if (!isLegacyNpxImageGenProvision(provision)) return false; // owner-customized — leave it alone
+  db.updateCapabilityDefProvision(row.id, "npm-pinned", JSON.stringify({
+    kind: "npm-pinned", package: "mcp-imagenate", version: MCP_IMAGENATE_VERSION,
+    binRelativeToPackageJson: "dist/index.js", outputDirEnvVar: "NANO_BANANA_OUTPUT_DIR",
+  }));
+  return true;
+}
+
+/** The EXACT npm-pinned "image-gen" provisionJson shape a pre-`b7d6b7f3` install carries — narrow-matched
+ *  by {@link migrateImageGenNpmPinnedVersionBump} so an owner-customized row (a different package, bin
+ *  path, env var, OR a version this migration doesn't recognize — including one an owner already bumped
+ *  by hand) is never touched. */
+function isStaleNpmPinnedImageGenProvision(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const p = v as { kind?: unknown; package?: unknown; version?: unknown; binRelativeToPackageJson?: unknown; outputDirEnvVar?: unknown };
+  return p.kind === "npm-pinned" && p.package === "mcp-imagenate" && p.version === STALE_MCP_IMAGENATE_VERSION
+    && p.binRelativeToPackageJson === "dist/index.js" && p.outputDirEnvVar === "NANO_BANANA_OUTPUT_DIR";
+}
+
+/**
+ * Boot migration: bump an EXISTING install's "image-gen" `npm-pinned` row off the pre-`b7d6b7f3`
+ * {@link STALE_MCP_IMAGENATE_VERSION} pin onto the current {@link MCP_IMAGENATE_VERSION} — a version-only
+ * re-stamp (unlike {@link migrateImageGenCapabilityToNpmPinned} above, `kind` never changes). NARROW +
+ * IDEMPOTENT like the other migrations in this file: only an exact match for the stale shape is rewritten.
+ *
+ * @decision b7d6b7f3 — do not delete the {@link STALE_MCP_IMAGENATE_VERSION} lock asset (a
+ * not-yet-rebooted host still resolves against it), and note this never touches `toolAllowlistJson` —
+ * an already-migrated row's protection comes from the `--disallowedTools` union, not the allowlist.
+ */
+export function migrateImageGenNpmPinnedVersionBump(db: Db): boolean {
+  const row = db.getCapabilityDefBySlug("image-gen");
+  if (!row) return false;
+  if (row.kind !== "npm-pinned") return false;
+  let provision: unknown;
+  try {
+    provision = JSON.parse(row.provisionJson);
+  } catch {
+    return false; // malformed row — leave it alone, not this migration's job to repair
+  }
+  if (!isStaleNpmPinnedImageGenProvision(provision)) return false; // owner-customized or already current — leave it alone
   db.updateCapabilityDefProvision(row.id, "npm-pinned", JSON.stringify({
     kind: "npm-pinned", package: "mcp-imagenate", version: MCP_IMAGENATE_VERSION,
     binRelativeToPackageJson: "dist/index.js", outputDirEnvVar: "NANO_BANANA_OUTPUT_DIR",

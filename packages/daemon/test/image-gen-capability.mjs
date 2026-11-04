@@ -35,6 +35,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (g) a REAL child_process spawn (not a mocked exec call) of the resolved {command,args,env} proves the
 //       secret AND the scratch dir arrive through the OS process env, and the secret is ABSENT from the
 //       spawned process's own argv — the "throwaway echo-env MCP" the task's stub-verify path calls for.
+//   (h) card b7d6b7f3: the seeded allowlist is narrowed to ONLY "mcp__image-gen__generate_image" (never
+//       the whole-server wildcard, never generate_video), and generate_video — powered by the SAME
+//       GEMINI_API_KEY this row injects — is unioned into --disallowedTools whenever image-gen is
+//       mounted, proven both as an isolated array check and end-to-end through buildSpawnArgs against the
+//       REAL fixture-mounted server from (e2e).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/image-gen-capability.mjs
 import fs from "node:fs";
@@ -66,6 +71,7 @@ const { seedDefaultCapabilities, bundledCapabilities } = await import("../dist/c
 const { resolveCapabilityServer } = await import("../dist/capabilities/registry.js");
 const {
   buildMcpServers, buildSpawnArgs, collectMcpEnvSecrets, mcpConfigHasSecret, redactSecrets,
+  disallowedToolsForSpawn, IMAGE_GEN_DISALLOWED_TOOLS,
 } = await import("../dist/pty/host.js");
 const { writeSessionMcpConfig } = await import("../dist/pty/claude-settings.js");
 const { SETTINGS_DIR, sessionScratchDir } = await import("../dist/paths.js");
@@ -92,8 +98,16 @@ check("(seed) kind is 'npm-pinned' (installed once under LOOM_HOME, NOT a per-sp
 check("(seed) requiresConnection is true", igRow.requiresConnection === true);
 check("(seed) secretEnvVar is 'GEMINI_API_KEY'", igRow.secretEnvVar === "GEMINI_API_KEY");
 check("(seed) wantsScratchDir is true (images must land on disk, not in the agent's context)", igRow.wantsScratchDir === true);
-check("(seed) tool allowlist grants the whole 'mcp__image-gen' server (mirrors the mcp__github convention)",
-  JSON.parse(igRow.toolAllowlistJson).includes("mcp__image-gen"));
+// Card b7d6b7f3: narrowed from the whole-server wildcard to the single real tool name — the mounted
+// server ALSO advertises generate_video (powered by the same GEMINI_API_KEY this row injects, a video
+// spend surface nobody opted into). The allowlist alone is defense-in-depth, not the real block (see
+// the (disallow) section below for the structural lever) — but it must never silently re-widen either.
+check("(seed) tool allowlist grants ONLY the single 'mcp__image-gen__generate_image' tool, not the whole-server wildcard",
+  JSON.stringify(JSON.parse(igRow.toolAllowlistJson)) === JSON.stringify(["mcp__image-gen__generate_image"]));
+check("(seed) tool allowlist does NOT grant the bare whole-server wildcard",
+  !JSON.parse(igRow.toolAllowlistJson).includes("mcp__image-gen"));
+check("(seed) tool allowlist does NOT grant generate_video",
+  !JSON.parse(igRow.toolAllowlistJson).includes("mcp__image-gen__generate_video"));
 const igProvision = JSON.parse(igRow.provisionJson);
 check("(seed) provision kind is 'npm-pinned'", igProvision.kind === "npm-pinned");
 check("(seed) provision.package is 'mcp-imagenate'", igProvision.package === "mcp-imagenate");
@@ -209,10 +223,46 @@ check("(spawn) the REAL spawned subprocess's own argv does NOT contain the Gemin
 check("(spawn) the command line handed to the subprocess never embedded the secret either",
   !igServer.args.join(" ").includes(STUB_KEY) && !igServer.command.includes(STUB_KEY));
 
+// ===================== (h) security hardening (card b7d6b7f3): generate_video — powered by the SAME
+// Gemini key image-gen always injects (mcp-imagenate@0.9.0's omni-video provider gates on keys.google,
+// not a dedicated key) — is structurally unreachable, not merely un-allowlisted. An un-allowlisted-but-
+// MOUNTED MCP tool still triggers claude's ordinary permission-approval flow, which a Loom-driven role
+// can never answer (same hazard CODESCAPE_WRITE_TOOLS's own doc names), so the allowlist narrowing above
+// is NOT the real block — disallowedToolsForSpawn's union into --disallowedTools is. =====================
+check("(IMAGE_GEN_DISALLOWED_TOOLS) carries exactly the one video-generation tool name",
+  IMAGE_GEN_DISALLOWED_TOOLS.length === 1 && IMAGE_GEN_DISALLOWED_TOOLS[0] === "mcp__image-gen__generate_video");
+
+check("(disallow) imageGenMounted=false ⇒ disallowedToolsForSpawn does NOT include generate_video",
+  !disallowedToolsForSpawn("worker", false, false, false, false).includes("mcp__image-gen__generate_video"));
+check("(disallow) imageGenMounted=true ⇒ disallowedToolsForSpawn INCLUDES generate_video",
+  disallowedToolsForSpawn("worker", false, false, false, true).includes("mcp__image-gen__generate_video"));
+check("(disallow) imageGenMounted=true still keeps the role's own disallow list (union, not replace)",
+  ["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"].every((t) => disallowedToolsForSpawn("worker", false, false, false, true).includes(t)));
+check("(disallow) all flags off ⇒ byte-identical to disallowedToolsForSpawn(role) alone",
+  JSON.stringify(disallowedToolsForSpawn("worker", false, false, false, false)) === JSON.stringify(disallowedToolsForSpawn("worker")));
+
+// end-to-end through buildSpawnArgs, against the REAL fixture-mounted "image-gen" server from (e2e)
+// above: generate_video actually lands in --disallowedTools argv when image-gen is mounted, and is
+// absent when it isn't — proving the flag is emitted, not just the in-memory array.
+{
+  const mcpNoIg = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
+  const mcpWithIg = { ...mcpNoIg, "image-gen": withImageGenFixture["image-gen"] };
+  const argsWithout = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpNoIg, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, false, false, !!mcpNoIg["image-gen"]) });
+  const argsWith = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpWithIg, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, false, false, !!mcpWithIg["image-gen"]) });
+  check("(e2e-disallow) image-gen NOT mounted: generate_video absent from argv",
+    !argsWithout.includes("mcp__image-gen__generate_video"));
+  check("(e2e-disallow) image-gen MOUNTED: generate_video appears in --disallowedTools argv",
+    argsWith.includes("mcp__image-gen__generate_video"));
+  const d = argsWith.indexOf("--disallowedTools");
+  const strict = argsWith.indexOf("--strict-mcp-config");
+  check("(e2e-disallow) --disallowedTools is present and still precedes --strict-mcp-config (flag-ordering invariant preserved)",
+    d !== -1 && strict !== -1 && d < strict);
+}
+
 db.close();
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Image-generation capability (agent-tooling P4 follow-on b93cfd10, provider decided a4058e7a; migrated to npm-pinned by card e7d6e43b): seed-if-absent seeding of the Gemini/Imagen 'image-gen' row (npm-pinned, requiresConnection, GEMINI_API_KEY, wantsScratchDir, the spend-guard-gap description), generic resolveCapabilityServer/buildMcpServers dispatch, a REAL P1 connection's key injected ONLY into the mounted server's env, the outputDirEnvVar scratch-dir injection (opt-in, additive), secret-free claude argv + redacted spawn log, and a REAL child_process spawn proving OS-level env-only delivery of BOTH the secret and the scratch dir with an argv-free subprocess — claude-free, network-free."
+  ? "\n✅ ALL PASS — Image-generation capability (agent-tooling P4 follow-on b93cfd10, provider decided a4058e7a; migrated to npm-pinned by card e7d6e43b): seed-if-absent seeding of the Gemini/Imagen 'image-gen' row (npm-pinned, requiresConnection, GEMINI_API_KEY, wantsScratchDir, the spend-guard-gap description), generic resolveCapabilityServer/buildMcpServers dispatch, a REAL P1 connection's key injected ONLY into the mounted server's env, the outputDirEnvVar scratch-dir injection (opt-in, additive), secret-free claude argv + redacted spawn log, a REAL child_process spawn proving OS-level env-only delivery of BOTH the secret and the scratch dir with an argv-free subprocess, and (card b7d6b7f3) the generate_video spend-surface containment: the seeded allowlist is narrowed to generate_image only, and generate_video is unioned into --disallowedTools whenever image-gen mounts (byte-identical off, proven both as an isolated array and end-to-end through buildSpawnArgs) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

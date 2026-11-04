@@ -217,3 +217,24 @@ RED/GREEN proven against an API-keeping mutant (per lesson 298): the pre-round-3
 shape (permanent memo, caching `null`) was restored as a hand-patched `dist/capabilities/npm-pinned.js`
 mutant; against it, exactly the new lock-absent-then-added and in-place-overwrite assertions went RED,
 every other assertion in both affected test files stayed green, checksum-verified before/after.
+
+## Accepted audit findings (2026-11-04)
+
+Card `b7d6b7f3` re-ran `npm audit` against both committed locks and triaged every finding (table + full
+exploitability analysis in that card). Two `shadcn@4.23.0` findings are accepted and documented here
+rather than fixed; the third (`mcp-imagenate`'s 2 HIGH `zod` findings) was bumped — see `MCP_IMAGENATE_VERSION`
+in `capabilities/seed.ts`.
+
+- **`deepmerge` (2 LOW, GHSA-gcqx-w48m-w2h4, prototype poisoning).** No patched release exists at any
+  version — the advisory's own range (`>=4.2.0 <=4.3.1`) already covers deepmerge's own latest. Reachable
+  only through `@shadcn/registry`'s registry-tree resolver, which merges `tailwind`/`cssVars`/`css`/`envVars`
+  across a resolved item tree — never through the model's own tool-call args, which only ever name
+  registry NAMES already configured in a project's `components.json`. **Re-opens if:** deepmerge ships a
+  patch, Loom starts spawning `shadcn add`/`init` (today `mcp` only), or a project configures an untrusted
+  custom registry (an operational risk this row's design already discloses, not a code gap here).
+- **`minimatch` (4 MODERATE, GHSA-g3hv-75wg-m249, globstar DoS, via `ts-morph`/`@ts-morph/common`).**
+  Capped below the fix by `@ts-morph/common`'s own `minimatch: "^10.0.1"` dependency, itself pinned via
+  `ts-morph@^26.0.0`, which only an upstream shadcn release controls. Measured UNREACHABLE today: the
+  bundled `shadcn mcp` server's own registered-tools module never imports `ts-morph` — it only backs the
+  CLI `add`/transform code paths Loom never spawns. **Re-opens if:** Loom ever spawns `shadcn add`/`init`,
+  or a future shadcn release starts importing `ts-morph` from the MCP-reachable registry-resolution path.

@@ -2656,6 +2656,20 @@ export const ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
 ];
 
 /**
+ * `generate_video` is powered by the SAME Google key `image-gen`'s `GEMINI_API_KEY` always injects — an
+ * unintended spend surface, unioned into `--disallowedTools` whenever `image-gen` mounts (see
+ * {@link disallowedToolsForSpawn} and its call site), the same proven pattern as
+ * {@link PLAYWRIGHT_DISALLOWED_TOOLS}.
+ *
+ * @decision b7d6b7f3 — never remove this union, and never trust a "stays inert like its siblings" claim
+ * about a sibling provider/tool on a future `MCP_IMAGENATE_VERSION` bump without re-reading ITS OWN
+ * gating line against the real tarball — see the full investigation and the "Do not" list.
+ */
+export const IMAGE_GEN_DISALLOWED_TOOLS: readonly string[] = [
+  "mcp__image-gen__generate_video",
+];
+
+/**
  * The `--allowedTools` contribution from every resolved capability grant (agent-tooling P4) — the
  * `createPty` allow-list analog of `buildMcpServers`' mount loop. The two legacy slugs keep their exact
  * hardcoded allow entries; an owner-added capability contributes its own `toolAllowlist` from the catalog.
@@ -4401,20 +4415,25 @@ export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
  * `browser_run_code_unsafe` — see PLAYWRIGHT_DISALLOWED_TOOLS's doc), AND — ONLY when `role ===
  * "assistant"` — with {@link ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS} (the host-file-reading
  * file_upload/drop pair; role-scoped because worker rigs legitimately need them — see that const's
- * doc). When ALL of restrictedTools/codescapeMounted/playwrightMounted are off/falsy this returns
+ * doc), AND with {@link IMAGE_GEN_DISALLOWED_TOOLS} iff `imageGenMounted` is true (the mounted
+ * mcp-imagenate MCP's own `generate_video` tool is powered by the same Gemini key image-gen always
+ * injects — see that const's doc). When ALL of
+ * restrictedTools/codescapeMounted/playwrightMounted/imageGenMounted are off/falsy this returns
  * EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL to today (no
- * restricted/codescape/playwright tokens appended). Pure + exported so the spawn-args test asserts the
- * union + the byte-identical-off invariant with no real claude. (Companion blast-radius card; Codescape C2
- * hardening; card 7159466a Playwright hardening; card f1609e1a assistant file_upload/drop hardening.)
+ * restricted/codescape/playwright/image-gen tokens appended). Pure + exported so the spawn-args test
+ * asserts the union + the byte-identical-off invariant with no real claude. (Companion blast-radius
+ * card; Codescape C2 hardening; card 7159466a Playwright hardening; card f1609e1a assistant
+ * file_upload/drop hardening; card b7d6b7f3 image-gen generate_video hardening.)
  */
-export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean, playwrightMounted?: boolean): string[] {
+export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean, playwrightMounted?: boolean, imageGenMounted?: boolean): string[] {
   const base = disallowedToolsForRole(role);
-  if (!restrictedTools && !codescapeMounted && !playwrightMounted) return base; // OFF: exactly the role's disallow list (byte-identical to today)
+  if (!restrictedTools && !codescapeMounted && !playwrightMounted && !imageGenMounted) return base; // OFF: exactly the role's disallow list (byte-identical to today)
   const merged = [...base];
   if (restrictedTools) for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (codescapeMounted) for (const t of CODESCAPE_WRITE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (playwrightMounted) for (const t of PLAYWRIGHT_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (playwrightMounted && role === "assistant") for (const t of ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped — role-scoped
+  if (imageGenMounted) for (const t of IMAGE_GEN_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   return merged;
 }
 
@@ -9022,12 +9041,14 @@ export class PtyHost {
     // Loom-driven role can never answer — see CODESCAPE_WRITE_TOOLS), AND with browser_run_code_unsafe when
     // the mcpServers map actually carries a "playwright" entry (its --allowedTools grant is the whole-server
     // wildcard — see PLAYWRIGHT_DISALLOWED_TOOLS), AND — ONLY for the untrusted-chat-facing "assistant" role
-    // — with the host-file-reading file_upload/drop pair (see ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS).
+    // — with the host-file-reading file_upload/drop pair (see ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS), AND
+    // with generate_video when the mcpServers map actually carries an "image-gen" entry (that tool is
+    // powered by the SAME Gemini key image-gen always injects — see IMAGE_GEN_DISALLOWED_TOOLS).
     // Computed from the session role + pinned flags at the
     // single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot) inherits it; with
-    // restrictedTools off and codescape/playwright unmounted this is exactly disallowedToolsForRole(role) ⇒
-    // byte-identical argv. See disallowedToolsForSpawn.
-    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape, !!mcpServers.playwright);
+    // restrictedTools off and codescape/playwright/image-gen unmounted this is exactly
+    // disallowedToolsForRole(role) ⇒ byte-identical argv. See disallowedToolsForSpawn.
+    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape, !!mcpServers.playwright, !!mcpServers["image-gen"]);
     // Card f9b47cd1: gate `-n <name>` on the installed claude version HERE (the single spawn chokepoint),
     // NOT in the caller — an older claude REJECTS the unknown flag and would break EVERY spawn (the
     // load-bearing gate-free recipe). getCachedClaudeVersion() is a NON-BLOCKING read (see its doc) —
