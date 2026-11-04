@@ -998,6 +998,65 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
 // @decision fa359824 — never merge `recentTimeoutStreak` into the semaphore's own phase/queuePosition
 // belief (a second, independent signal, surfaced side by side); never read a queued row's `since` as
 // `gate_status`'s `admittedAt` — they are different clocks.
+//
+// Field-provenance pointers for the description below, relocated out of the agent-facing text (an
+// end-user agent can't resolve a card/decision id). Entries with a matching docs/decisions record use
+// @decision; a bare `card <id>` line has no such record and is a plain provenance citation.
+//
+// @decision 3ab5c540 — this tool measures semaphore admissions only, never host load; a peer's own live
+// trace caught it reading `activeCount:0` while the box was genuinely busy.
+//
+// @decision 8d585277 — the older, separate per-worktree admission guard `repoContended` does NOT report
+// on.
+//
+// @decision 92e960d1 — the per-repo merge-admission guard a queued `merge`/`worker` entry's
+// `repoContended` reflects.
+//
+// @decision 567b8724 — cross-project gate fairness: a project can hold its fair share of `cap` while a
+// different project's admissible waiter still jumps ahead.
+//
+// card cffa71e6 — a queued entry's `since` is only approximately queue-entry time, and re-bases again
+// once the entry is admitted; three non-interchangeable timestamps across one op's life.
+//
+// @decision 80d54122 — the four-field cross-project omission (`taskId`/`branch`/`workerLabel`/
+// `fallbackOfBatchOpId`), and the bare `recentTimeoutStreak` integer's own redaction scope.
+//
+// card 1cf0ced1 — the exact four-field cross-project omission list, corrected from an earlier
+// undercounted "project + gate kind + age" description.
+//
+// @decision e4701333 — `repoContended` widened to cover a queued `worker`-kind entry too, not just
+// `merge`.
+//
+// @decision eb491463 — a waiting merge blocks every not-yet-admitted same-repo worker, so worker
+// self-checks cannot starve it.
+//
+// @decision 68155573 — a single-file/transient-kill retry continues its original admission as a link of
+// the SAME chain; it is never re-queued.
+//
+// @decision 99a1cf6f — `attempt`/`priorAttemptMs`/`attemptStartedAt` distinguish a retry re-admission
+// from a first wait.
+//
+// @decision 7ad12202 — `attempt:3` resumes whatever step(s) a prior short-circuited gate never ran, after
+// its single-file retry already passed.
+//
+// @decision b9e07a4a — `repoGuardOnly`: an inert-diff-skip merge holding or waiting on a same-repo
+// sibling's per-repo guard without ever admitting through the ordinary cap/registry.
+//
+// @decision db9b0130 — the inert-diff proof an inert-diff-skip merge's `repoGuardOnly` entry rests on.
+//
+// card 61aa6f1d — the `redacted: true` marker on a foreign `repoGuardOnly`/`squashing` entry, matching
+// `running`/`queued`'s own redaction shape.
+//
+// card 93b568e6 — `squashing`: a merge op whose gate command already finished but whose squash is still
+// in flight, previously enumerated nowhere in this tool's result.
+//
+// @decision a5d1ae04 — `declarations`: a manager's own advisory "I intend to fire a gate" declaration;
+// never registered on the worker surface.
+//
+// @decision e50600d2 — the `run_gate` worker self-check `waitingOnSelfCheck` names.
+//
+// @decision 59986602 — `waitingOnSelfCheck`: a merge op still parked inside its own pre-admission wait
+// for a worker's `run_gate` self-check.
 function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, sessionId: string): void {
   server.registerTool(
     "gate_queue",
@@ -1007,7 +1066,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "every gate run currently `running` or `queued` (merge/deploy/worker-self-check alike), so you can " +
         "answer 'why is my gate queued, who holds the slot, how deep am I' from ONE read instead of " +
         "guessing or polling gate_status per-opId, or firing `run_gate` blind to find out. " +
-        "⚠️ THIS MEASURES SEMAPHORE ADMISSIONS, NEVER HOST LOAD (card 3ab5c540, the Codescape peer's own " +
+        "⚠️ THIS MEASURES SEMAPHORE ADMISSIONS, NEVER HOST LOAD (a peer's own " +
         "live trace: a sibling worktree hand-running `tsx --test`, 6+ node children, was CONFIRMED " +
         "consuming the box while this tool read `activeCount:0` — that alone proves the instrument is " +
         "blind, no comparison needed, since that load never went through `run_gate` and so never touched " +
@@ -1041,8 +1100,8 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "order, NOT a promise of GRANT order: the semaphore skips a head-of-line waiter that isn't " +
         "admissible right now and grants the next one that is, so a later-positioned entry can be " +
         "admitted before an earlier one. Three independent reasons a queued entry can be skipped this " +
-        "way: its own worktree is still held by a running entry (card 8d585277); its own repoPath is " +
-        "still guarded (card 92e960d1/e4701333 — see `repoContended` below); or (card 567b8724) its " +
+        "way: its own worktree is still held by a running entry; its own repoPath is " +
+        "still guarded (see `repoContended` below); or its " +
         "project already holds its fair share of `cap` while a DIFFERENT project has an ADMISSIBLE " +
         "queued waiter — which can let a foreign LOW-tier (worker self-check) waiter be granted ahead of " +
         "THIS project's own HIGH-tier (merge/deploy) waiter. Tier priority stays fully preserved WITHIN " +
@@ -1052,7 +1111,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
         "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
         "SAME entry RE-BASES to admission time and they measure time RUNNING instead. " +
-        "⚠️ Card cffa71e6: a QUEUED entry's `since` is only APPROXIMATELY queue-entry time — do not read it " +
+        "⚠️ A QUEUED entry's `since` is only APPROXIMATELY queue-entry time — do not read it " +
         "as, and never substitute it for, `gate_status`'s `admittedAt` (that field is MINT time, stamped " +
         "when the op's durable record is first created, and measured running a couple of SECONDS ahead of " +
         "this entry's `since` — whatever setup work, e.g. worktree prep, happens between minting the op and " +
@@ -1086,8 +1145,8 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "carries {taskId, branch, workerLabel, fallbackOfBatchOpId} (\"<agent> · <short task title>\"); " +
         "an entry from a " +
         "DIFFERENT project omits those four fields entirely (never redacted-to-null) and instead carries " +
-        "`redacted: true` (card 80d54122) so the omission reads as deliberate rather than an ambiguous " +
-        "gap. Card 1cf0ced1: WHAT IS OMITTED cross-project is EXACTLY {taskId, branch, workerLabel, " +
+        "`redacted: true` so the omission reads as deliberate rather than an ambiguous " +
+        "gap. WHAT IS OMITTED cross-project is EXACTLY {taskId, branch, workerLabel, " +
         "fallbackOfBatchOpId} — " +
         "everything else in the enumeration above (`opId` in FULL, chainable into `gate_status` same as " +
         "for an own-project entry; `gateType`/`projectId`/`projectName`; the phase-scoped `since`/" +
@@ -1098,28 +1157,28 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "legitimately holds the slot' apart from 'this looks leaked' without exposing another project's " +
         "task/branch identity, or which of its own batch merges a per-branch fallback row descends from. " +
         "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`- or `worker`-kind entry " +
-        "blocked by the per-repo admission guard (card 92e960d1, widened to `worker` by card e4701333) — " +
+        "blocked by the per-repo admission guard — " +
         "ASYMMETRIC: a queued `merge` is contended by ANY other holder of its repo (another `merge` OR a " +
         "`worker`), so two same-repo merges never race to squash and a same-repo merge/worker pair never " +
         "races a shared cross-process resource; a queued `worker` is contended ONLY by an active `merge` " +
-        "holder OR by ANY same-repo `merge` currently QUEUED, whichever arrived first (card eb491463: a " +
+        "holder OR by ANY same-repo `merge` currently QUEUED, whichever arrived first (a " +
         "waiting merge blocks every not-yet-admitted same-repo worker so worker self-checks cannot starve " +
         "it) — TWO workers on the " +
         "same repo with no merge waiting never contend each other and both show `false` while " +
         "running fully concurrently. A queued entry can show this `true` even while `cap` has a free " +
         "lane, which is expected, not a bug: it's waiting on the REPO, not the cap. `false` " +
         "means this specific guard isn't why it's queued (still possibly `cap`, or the older, separate " +
-        "per-worktree guard from card 8d585277, which this field does NOT report on). Always `false` " +
+        "per-worktree guard, which this field does NOT report on). Always `false` " +
         "while `running`, or for a `deploy`/other non-guarded entry. It's a LIVE read, recomputed on " +
         "every call — it can flip on a still-queued entry as sibling ops settle. " +
-        "`attempt`/`priorAttemptMs`/`attemptStartedAt` (cards 99a1cf6f, 68155573; `attempt`/`priorAttemptMs` are `merge`-kind only, " +
+        "`attempt`/`priorAttemptMs`/`attemptStartedAt` (`attempt`/`priorAttemptMs` are `merge`-kind only, " +
         "`null`/`null` on a first admission; `attemptStartedAt` is set for EVERY running entry, of any gate type) describe a RETRY of the same op: `confirmWorkerMerge`'s own " +
         "single-file retry (after a genuine failure narrows to a small re-runnable set) and its transient-kill " +
-        "retry (after a timeout/kill) CONTINUE the SAME admission (card 68155573) — the cap slot and the per-repo " +
+        "retry (after a timeout/kill) CONTINUE the SAME admission — the cap slot and the per-repo " +
         "guard are held straight through the fail->retry gap and the retry is NEVER re-queued, so a retry reads " +
         "`running` with `attempt:2`, not `queued`. `since` keeps the ORIGINAL admission time; `attemptStartedAt` " +
         "(ISO; `null` while queued) is when the CURRENT attempt began, and `priorAttemptMs` is how long the attempts " +
-        "before it ran. `attempt:3` (card 7ad12202, both the solo AND batch merge paths) is a further link of the " +
+        "before it ran. `attempt:3` (both the solo AND batch merge paths) is a further link of the " +
         "same admission: the single-file retry above already passed, but the original gate had short-circuited on a " +
         "non-final step, so this is resuming whatever step(s) never ran before a pass can be reported. An " +
         "`attempt>=2` entry can therefore only be QUEUED for a reason other than its own retry (none exists today); " +
@@ -1128,7 +1187,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
         "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
         "dying, leaving an orphan the registry no longer tracks. So EVERY entry with a `branch` — OWN- " +
-        "project AND cross-project alike (card 80d54122: unlike taskId/branch/workerLabel, this bare " +
+        "project AND cross-project alike (unlike taskId/branch/workerLabel, this bare " +
         "integer carries no task/branch identity, and the orphan hazard is cross-project by nature) — " +
         "ALSO carries `recentTimeoutStreak` (an integer ≥0) — how many consecutive timeouts that branch " +
         "has recorded, from an INDEPENDENT tracker that survives exactly the eviction the live registry " +
@@ -1139,20 +1198,20 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "`run_gate`/`worker_merge_confirm` to confirm a lane is actually free instead of firing blind into " +
         "a saturated cap, and again right after either comes back `pending` to see the full picture instead " +
         "of only your own op's state. " +
-        "ALSO returns `repoGuardOnly` (card b9e07a4a) - a SEPARATE array, not folded into `running`/" +
-        "`queued`: an inert-diff-skip merge (db9b0130) holding or waiting on a same-repo sibling's per-repo " +
+        "ALSO returns `repoGuardOnly` - a SEPARATE array, not folded into `running`/" +
+        "`queued`: an inert-diff-skip merge holding or waiting on a same-repo sibling's per-repo " +
         "guard without ever admitting through the ordinary cap/registry above. Each entry is " +
         "{id, phase:\"holding\"|\"queued\", since, elapsedMs, queuePosition, opId, projectId, " +
         "projectName, repoPath?, taskId?, branch?, workerLabel?, redacted?} - `repoPath`/`taskId`/`branch`/" +
         "`workerLabel` are OWN-PROJECT ONLY (never redacted-to-null - simply absent for a foreign entry, " +
         "same as `running`/`queued`'s own redaction; `repoPath` is an absolute host filesystem path, never " +
-        "disclosed cross-project); a foreign entry ALSO carries `redacted: true` (card 61aa6f1d, matching " +
+        "disclosed cross-project); a foreign entry ALSO carries `redacted: true` (matching " +
         "`running`/`queued`'s own `redacted` field) so that four-field omission reads as deliberate rather " +
         "than an ambiguous gap — never present (let alone `false`) on the caller's own entries. Explains a " +
         "queued `merge`-kind entry above reporting " +
         "`repoContended:true` while `activeCount`/`running` shows zero running merges on that repo: the " +
         "contending holder is here, not there. " +
-        "ALSO returns `squashing` (card 93b568e6) — a THIRD, independent array, separate from BOTH " +
+        "ALSO returns `squashing` — a THIRD, independent array, separate from BOTH " +
         "`running`/`queued` AND `repoGuardOnly`: a `merge`-kind op that has already finished its own gate " +
         "command (so its registry entry above is gone) but is still holding its per-repo merge-admission " +
         "guard while its squash (the actual git merge/commit) is in flight. Before this array existed, " +
@@ -1163,13 +1222,13 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "redacted?} — " +
         "same cross-project redaction as `repoGuardOnly` (`repoPath`/`taskId`/`branch`/`workerLabel` " +
         "own-project only, never redacted-to-null, simply absent for a foreign entry; a foreign entry ALSO " +
-        "carries `redacted: true`, card 61aa6f1d, same as `repoGuardOnly` above). `since`/`elapsedMs` " +
+        "carries `redacted: true`, same as `repoGuardOnly` above). `since`/`elapsedMs` " +
         "measure from the instant the gate command settled (NOT from admission — see `gate_status`'s " +
         "`admittedAt` for that), i.e. how long the squash itself has been running. A repo appearing here " +
         "explains a queued `merge`-kind entry above reporting `repoContended:true` with NO matching " +
         "`running` entry for that repo at all: the contending holder is here, not there — the SAME shape " +
         "`repoGuardOnly` already covers for its own resource, now covered for THIS one too. " +
-        "ALSO returns `declarations` (card a5d1ae04) — a FOURTH, independent array: a manager's own " +
+        "ALSO returns `declarations` — a FOURTH, independent array: a manager's own " +
         "structured \"I intend to fire a gate at ~T\" advisory, declared via `gate_intent_declare` and " +
         "withdrawn via `gate_intent_withdraw`. ⛔ ADVISORY DISCLOSURE ONLY — nothing here was ever admitted " +
         "through, or even seen by, the GateSemaphore that governs `running`/`queued`/`repoGuardOnly` above; " +
@@ -1193,7 +1252,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "(never redacted-to-null) and carries `redacted: true` instead — `gateType` stays visible either " +
         "way, since gate KIND is already part of the sanctioned cross-project set above, this isn't a new " +
         "boundary. " +
-        "⛔ WHAT THIS TOOL STOPS BEING ABLE TO TELL YOU THE MOMENT A ROW LEAVES `queued` (card cffa71e6): " +
+        "⛔ WHAT THIS TOOL STOPS BEING ABLE TO TELL YOU THE MOMENT A ROW LEAVES `queued`: " +
         "once an entry is admitted (or has already settled and dropped out of this snapshot entirely), " +
         "NOTHING here recovers how long it actually waited — queue wait is only ever legible from the " +
         "queued side, and only approximately (see the `since` caveat above). For a settled op's real span, " +
@@ -1211,9 +1270,9 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "never-queued op's envelope is small enough that its whole-op and command tiers nearly coincide, so " +
         "a wrong-tier reading can pass undetected on exactly that op (n=1, a named gap from this same " +
         "card's own investigation — not promoted to a general rule). " +
-        "ALSO returns `waitingOnSelfCheck` (card 59986602) — a FIFTH, independent array: a `merge`-kind op " +
+        "ALSO returns `waitingOnSelfCheck` — a FIFTH, independent array: a `merge`-kind op " +
         "that has NOT YET reached its own gate admission at all — it's still parked inside its own pre-" +
-        "admission wait for its worker's `run_gate` self-check (the e50600d2 reuse check), so it appears in " +
+        "admission wait for its worker's `run_gate` self-check, so it appears in " +
         "NONE of `running`/`queued`/`repoGuardOnly`/`squashing` above (none of those are backed by anything " +
         "this op has touched yet). Each entry is {opId, blockingOpId, since, elapsedMs, projectId, " +
         "projectName, taskId?, branch?, workerLabel?, redacted?} — `opId` is the MERGE's own opId (pass " +
@@ -5308,6 +5367,76 @@ export class OrchestrationMcpRouter {
     //
     // @decision bb134d3e — never add `gate_history` to the worker tool surface; a worker resolves an opId
     // it already holds via the self-scoped `gate_status` — this is a manager-only concern, decided twice.
+    //
+    // Field-provenance pointers for the description below, relocated out of the agent-facing text (an
+    // end-user agent can't resolve a card/decision id). Entries with a matching docs/decisions record use
+    // @decision; a bare `card <id>` line has no such record and is a plain provenance citation.
+    //
+    // card 55cd3538 — `fallbackOfBatchOpId`, the durable, post-hoc counterpart to `gate_queue`'s live-only
+    // field of the same name.
+    //
+    // @decision 19256231 — the live `fallbackOfBatchOpId` this durable field is the post-hoc counterpart
+    // to.
+    //
+    // @decision 6ca4b1a0 — `emitCompareReduced`: a duration series built from this table must bucket on
+    // this field before comparing durations; the reduced/full populations differ by an order of
+    // magnitude or more.
+    //
+    // @decision 2db8a3dd — `notApplicable` and "ran the full suite" are distinct terminal states; the
+    // first one reached wins, which is why `emitCompareReduced` can read `false` on a repo this
+    // predicate can't evaluate.
+    //
+    // @decision fd0d34da — `emitCompareNotApplicableKind` is a coarse, path-free CATEGORY, never a path
+    // or filename.
+    //
+    // card edbf9bd1 — the `[loom:merge-done]` nudge wording this field's selected-test-files arm mirrors.
+    //
+    // @decision 344ce950 — the bounded single-file retry's cost, and why a pass-after-retry is weaker
+    // evidence than an ordinary clean pass.
+    //
+    // @decision 67030bb9 — `retryDeclineReason`/`retryWarning`'s three cases, corrected to be present on
+    // a fail too; also backs the bounded multi-file retry and its batch-row extension.
+    //
+    // @decision 318ac7b2 — a single-file retry cancelled while still queued never loses attempt 1; this
+    // shape is HISTORICAL since `attempt`/`priorAttemptMs` stopped re-queuing a retry.
+    //
+    // @decision 68155573 — a retry continues its original admission as a link of the SAME chain, never a
+    // second one; the `durationMs`/`gateCap`/`concurrentGates` triple's pre- vs post- this change reading.
+    //
+    // @decision 3a6f04cc — `"cancelled"` is a distinct outcome, never a rejection; before this, a
+    // cancelled `"worker"` row silently fell through to `outcome:"reject"`.
+    //
+    // @decision 518e7ff6 — the transient-kill retry's own cancel-while-queued case leaves a SEPARATE
+    // `build_gate_retry` row, never reclassifying attempt 1's already-written row.
+    //
+    // @decision a0d1165c — `transientRetried` names which row is the retry, derived from the row's own
+    // underlying event kind, never a stored detail field.
+    //
+    // @decision db9b0130 — `"skipped"` is also a distinct non-verdict, never a `"pass"`: an inert
+    // (docs-only) branch never spawns a gate at all.
+    //
+    // @decision a228dfb5 — `gate_status(opId)` now also reports `"skipped"` for this exact row's `opId`,
+    // where it used to collapse the same settled op into `outcome:"pass"`.
+    //
+    // @decision 3aec1df6 — this tool is the INDEX, not the full-detail surface; a merge row's
+    // `failingTest` is not unconditionally `null`.
+    //
+    // @decision eb9348b0 — the correction to 3aec1df6: `failingTest` also reads the settled verdict
+    // payload as a fallback, widening which rejections are diagnosable from this table alone.
+    //
+    // card 67c54f48 — the default page size, sized to fit an unprojected page inline under the
+    // tool-result cap (the old default of 100 overflowed outright).
+    //
+    // card 40f4cae9 — `fields:[...]`, the same projection contract as `tasks_list`'s own `fields`.
+    //
+    // card eb62d585 — `countsOnly:true`, the same short-circuit contract as `tasks_list`'s own
+    // `countsOnly`.
+    //
+    // @decision bd9a483b — the ungated-landing safety-net check this tool's `byGateType` tallies
+    // separately as `"landingCheck"`, never folded into the `"worker"` bucket.
+    //
+    // @decision cee17efe — the automatic post-ungated-landing dist-importer advisory this tool's
+    // `byGateType`/`byOutcome` tally separately as `"distImporterCheck"`/`"error"`.
     server.registerTool(
       "gate_history",
       {
@@ -5326,8 +5455,8 @@ export class OrchestrationMcpRouter {
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
           "sessionId, projectId, projectName, retriedFile, retryPassed, retryDeclineReason, transientRetried, " +
           "emitCompareReduced, emitCompareNotApplicableKind, emitCompareIdenticalCount, emitCompareTestFiles, fallbackOfBatchOpId}. " +
-          "⭐ CARD 55cd3538 — `fallbackOfBatchOpId` is the DURABLE, post-hoc counterpart to `gate_queue`'s " +
-          "LIVE-ONLY `fallbackOfBatchOpId` (card 19256231): non-null ONLY on a row from one of " +
+          "⭐ `fallbackOfBatchOpId` is the DURABLE, post-hoc counterpart to `gate_queue`'s " +
+          "LIVE-ONLY `fallbackOfBatchOpId`: non-null ONLY on a row from one of " +
           "`merge_batch`'s own automatic per-branch fallback confirms, naming the batch op's `opId` it fell " +
           "back FROM — the SAME id `gate_queue` shows only while that row is still live, stamped here so it " +
           "survives long after the row drains. `null` on the batch's OWN gate row (that one self-identifies " +
@@ -5335,22 +5464,22 @@ export class OrchestrationMcpRouter {
           "every ordinary solo merge, and `null` on any row recorded before this field shipped (never " +
           "backfilled). ⛔ Do NOT re-derive this from `gate_queue` — that instrument only ever shows a LIVE " +
           "op; this field exists precisely to answer the question after that row is gone. " +
-          "⚠️ CARD 6ca4b1a0 — `emitCompareReduced`: a duration series built from this table MUST bucket on " +
+          "⚠️ `emitCompareReduced`: a duration series built from this table MUST bucket on " +
           "this field before comparing durations — a `\"merge\"` row's gate can run REDUCED (build + static " +
           "guards, ± the selected test files — seconds, not minutes) instead of the full daemon test suite, " +
           "and the two populations differ by an order of magnitude or more. TRI-STATE: `true` = this gate " +
           "genuinely ran reduced; `false` = a real gate spawned and was PROVEN not reduced (a genuine full " +
           "run — the positive control, never read as \"nothing to report\"); `null` = no gate spawned for " +
-          "this op, this row predates card 6ca4b1a0, this is a `\"worker\"`/`\"deploy\"` row (the " +
-          "reduction feature is MERGE-ONLY), OR (card 2db8a3dd) a real gate spawned and ran the FULL suite " +
+          "this op, this row predates this field, this is a `\"worker\"`/`\"deploy\"` row (the " +
+          "reduction feature is MERGE-ONLY), OR a real gate spawned and ran the FULL suite " +
           "on a repo whose layout the reduction predicate can never evaluate at all — structurally, `false` " +
           "is reachable ONLY on a project shaped like Loom's own daemon package; on every other project " +
           "this reads `null`, not by coincidence. NEVER pool a `null` row with a `false` row as if both were " +
           "known full runs — `null` means \"not determinable\", not \"known full run\". " +
-          "`emitCompareNotApplicableKind` (card fd0d34da) is the coarse, PATH-FREE reason `emitCompareReduced` " +
+          "`emitCompareNotApplicableKind` is the coarse, PATH-FREE reason `emitCompareReduced` " +
           "reads `null` FOR THIS ROW specifically because the predicate said `notApplicable:true` — " +
-          "`null` for every OTHER cause of a `null` `emitCompareReduced` (no gate spawned, a pre-fd0d34da " +
-          "row, a `\"worker\"`/`\"deploy\"` row, or a genuine `false`). One of `\"repo-out-of-domain\"` " +
+          "`null` for every OTHER cause of a `null` `emitCompareReduced` (no gate spawned, a row predating " +
+          "this field, a `\"worker\"`/`\"deploy\"` row, or a genuine `false`). One of `\"repo-out-of-domain\"` " +
           "(a REPO-LEVEL fact, checked via a dedicated `git ls-tree` against the repo's own tree rather than " +
           "inferred from this diff alone — NONE of the four scope directories exist anywhere in this repo, " +
           "so the predicate could never decide ANY diff on it) or `\"path-out-of-scope\"` (covers BOTH " +
@@ -5371,23 +5500,23 @@ export class OrchestrationMcpRouter {
           "an EMPTY `emitCompareTestFiles` it means the emit-identity arm, fully informative (zero test " +
           "files ran — build + static guards only). The cheapest way to tell the two arms apart WITHOUT " +
           "reading either field is the `[loom:merge-done]` nudge text this mirrors: \"…+ N selected test " +
-          "file(s)\" names the selected-test-files arm (card edbf9bd1 — N is the already-widened count, " +
+          "file(s)\" names the selected-test-files arm (N is the already-widened count, " +
           "changed files plus any pulled in by import/scanner rules, never a literal changed-file count); " +
           "\"…static guards only, skipped the full daemon test " +
           "suite\" (no test-file clause) names the emit-identity arm. " +
-          "Card 344ce950 (single-file) / 67030bb9 (bounded multi-file, AND — since 67030bb9 — a batch row, " +
+          "The bounded single-file retry / the bounded multi-file retry (AND — a batch row, " +
           "`detail.batched === true`, not just a solo one) — `retriedFile`/`retryPassed`: a " +
           "`gateType:\"merge\"` row whose test step named UP TO `MULTI_FILE_RETRY_MAX` identifiable, " +
           "re-runnable files retried together, once, before this row's verdict — `retriedFile` is a " +
           "comma-joined list of the retried name(s) (a bare single name for the N=1 case, byte-identical " +
-          "to before card 67030bb9), `null` on the overwhelming majority of rows (nothing retried). A " +
+          "to before the multi-file widening), `null` on the overwhelming majority of rows (nothing retried). A " +
           "`\"pass\"` row " +
           "carrying a non-null `retriedFile` is WEAKER evidence than an ordinary clean pass (the first " +
           "attempt failed for real; only the isolated re-run came back green — the exact shape an " +
           "order-dependent/cross-test-pollution bug can produce) — never read it as an ordinary green. " +
           "`retryPassed:false` alongside a non-null `retriedFile` means the retry ALSO failed and this row " +
           "rejected exactly as it would have with no retry mechanism at all. " +
-          "`retryDeclineReason` (card 67030bb9) is present ONLY when a genuine gate failure was eligible " +
+          "`retryDeclineReason` is present ONLY when a genuine gate failure was eligible " +
           "for this retry mechanism to even CONSIDER (never on a `\"kill\"`/`\"timeout\"` attempt 1, which " +
           "the sibling TRANSIENT-KILL retry owns instead) but `identifyRetriableTestFiles` declined it — " +
           "one of its own decline-reason strings (`\"no-fail-tier-match\"`, `\"count-mismatch\"`, " +
@@ -5399,30 +5528,30 @@ export class OrchestrationMcpRouter {
           "rows — either `identifyRetriableTestFiles` was never even called (the outer genuine-failure " +
           "guard was already false) or this row predates the field; never read `undefined` as \"eligible\". " +
           "⚠️ THIS FIELD HAS NO `gate_status(opId)` EQUIVALENT — it is durable ONLY here. " +
-          "⚠️ CARD 318ac7b2 EXCEPTION TO THAT PAIRING: `retriedFile` can now be non-null with " +
+          "⚠️ EXCEPTION TO THAT PAIRING: `retriedFile` can now be non-null with " +
           "`retryPassed: null` (never `true`/`false`) — this is a single-file retry that was IDENTIFIED and " +
-          "attempted, then had its OWN admission cancelled while still queued (HISTORICAL — rows written before card 68155573, when a retry could still queue), before it ever ran to a " +
+          "attempted, then had its OWN admission cancelled while still queued (HISTORICAL — rows written before a retry stopped re-queuing, when a retry could still queue), before it ever ran to a " +
           "verdict; the row's `outcome` reads `\"cancelled\"` in this shape (see below), never `\"pass\"`/" +
           "`\"reject\"`. Every OTHER non-null `retriedFile` row still pairs it with a real `true`/`false`. " +
           "⚠️ ON A NON-NULL `retriedFile` ROW, `durationMs` AND THE `gateCap`/`concurrentGates`/" +
-          "`concurrentGatesMax` TRIPLE — SINCE CARD 68155573 both describe the SAME single admission: a retry is a link " +
+          "`concurrentGatesMax` TRIPLE — both describe the SAME single admission: a retry is a link " +
           "of attempt 1's own admission, never a second one. `durationMs` is still attempt 1's own run time ALONE " +
           "(bounded to the failure that triggered the retry); `concurrentGates` is attempt 1's admission snapshot and " +
           "`concurrentGatesMax` the max across the whole chain, while `passed` is the final (retry-inclusive) verdict. " +
-          "HISTORICAL (rows written BEFORE 68155573): the triple described the RETRY's separate, later admission, so " +
-          "`durationMs` and the triple described two different admissions — except on the 318ac7b2 cancelled-retry " +
+          "HISTORICAL (older rows, before a retry stopped re-queuing): the triple described the RETRY's separate, later admission, so " +
+          "`durationMs` and the triple described two different admissions — except on the cancelled-retry " +
           "shape, where the retry never ran and both described attempt 1's. " +
           "On every other row (`retriedFile` null) both describe the same, single admission as usual. " +
-          "⚠️ CARD 3a6f04cc — `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
+          "⚠️ `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
           "(`gate_cancel`, queued or running) reached NO VERDICT — it was neither a pass nor a failure. " +
-          "Before card 3a6f04cc a cancelled `\"worker\"` row (the only gate type whose cancel shared the " +
+          "Before this, a cancelled `\"worker\"` row (the only gate type whose cancel shared the " +
           "plain `worker_gate` event kind with a real run — a cancelled MERGE gate emitted a separate " +
           "excluded event kind and never reached this table at all) silently fell through to " +
-          "`outcome:\"reject\"`. CARD 318ac7b2 (HISTORICAL — rows written before 68155573; a retry can no longer queue, so this shape is no longer produced): a cancelled MERGE gate COULD also reach this " +
+          "`outcome:\"reject\"`. HISTORICAL — rows written before a retry stopped re-queuing (a retry can no longer queue, so this shape is no longer produced): a cancelled MERGE gate COULD also reach this " +
           "table, in ONE specific shape — the single-file-retry-cancellation just described above, where " +
           "attempt 1 already genuinely ran and failed before the retry's own (withdrawn) admission — so " +
           "that real run is recorded as `outcome:\"cancelled\"` instead of vanishing. " +
-          "⚠️ CARD 518e7ff6 (HISTORICAL — rows written before 68155573) — THE SIBLING SHAPE, HANDLED DIFFERENTLY: the transient-kill auto-retry's own " +
+          "⚠️ (HISTORICAL — rows written before a retry stopped re-queuing) — THE SIBLING SHAPE, HANDLED DIFFERENTLY: the transient-kill auto-retry's own " +
           "cancel-while-queued case ALSO now leaves a distinguishable record, but not by reclassifying " +
           "attempt 1's row — that `build_gate` row was already written, unconditionally, BEFORE this " +
           "retry ever starts, and stays a real, unmodified `outcome:\"reject\"` (a true, measured fact: " +
@@ -5444,7 +5573,7 @@ export class OrchestrationMcpRouter {
           "`\"cancelled\"` retroactively, not just going forward. A trend spanning the boundary is still " +
           "SAFE to compare on `outcome` for this reason — unlike `concurrentGatesMax` below, there is no " +
           "old-encoding-vs-new-encoding mix to account for here. " +
-          "⭐ CARD a0d1165c — `transientRetried` NAMES WHICH ROW IS THE RETRY, so you don't have to infer it " +
+          "⭐ `transientRetried` NAMES WHICH ROW IS THE RETRY, so you don't have to infer it " +
           "from the pairing alone: DERIVED from the row's own underlying event kind (never a stored detail " +
           "field), `true` iff this row IS the transient-kill retry's own `build_gate_retry` row just " +
           "described (its own `outcome`/`passed` already say whether THAT retry passed or failed); `false` " +
@@ -5455,7 +5584,7 @@ export class OrchestrationMcpRouter {
           "⚠️ `gate_status(opId).transientRetried` means something DIFFERENT: there `true` DOES mean the " +
           "op's merged verdict was reached via the retry (a weaker pass) — don't carry this field's " +
           "meaning across surfaces. " +
-          "⚠️ CARD db9b0130 — `\"skipped\"` IS ALSO A DISTINCT NON-VERDICT, NEVER A `\"pass\"`: a `gateType:" +
+          "⚠️ `\"skipped\"` IS ALSO A DISTINCT NON-VERDICT, NEVER A `\"pass\"`: a `gateType:" +
           "\"merge\"` row whose branch's ENTIRE changed-path set was proven inert (docs-only) never spawns a " +
           "gate at all — the row still stamps `detail.passed:true` (so the merge could proceed to squash), " +
           "but `outcome` reads `\"skipped\"` here (checked BEFORE `passed`), never `\"pass\"`, and `passed` " +
@@ -5465,12 +5594,12 @@ export class OrchestrationMcpRouter {
           "above. Always paired with `gateRan:false` (see just below) — but distinct from a REUSED self-check " +
           "(also `gateRan:false`): a reuse is a REAL prior verdict and stays `outcome:\"pass\"`; only a " +
           "genuine skip reads `\"skipped\"`. This is the SAME fact `gate_status(opId)` now ALSO reports for " +
-          "this exact row's `opId` (card a228dfb5 — before that card `gate_status` collapsed this into " +
+          "this exact row's `opId` — before that, `gate_status` collapsed this into " +
           "`outcome:\"pass\"`/`passed:true`, disagreeing with THIS tool's own `\"skipped\"` for the identical " +
           "settled op). " +
-          "`gateRan` (card 3a6f04cc) answers \"did a gate PROCESS actually spawn for this row\" — `false` " +
+          "`gateRan` answers \"did a gate PROCESS actually spawn for this row\" — `false` " +
           "for a merge that REUSED an already-green worker self-check (no process spawned at merge time), a " +
-          "merge whose gate was SKIPPED as inert (card db9b0130, just above), or " +
+          "merge whose gate was SKIPPED as inert (just above), or " +
           "a worker self-check cancelled BEFORE it was ever admitted past the queue; `true` for every other " +
           "row, INCLUDING one cancelled WHILE running that DID spawn a step. Use this to exclude non-runs " +
           "from a duration series without a per-row pivot to `gate_status(opId)` — a non-run's `durationMs` " +
@@ -5482,8 +5611,7 @@ export class OrchestrationMcpRouter {
           "`durationMs` presence) — admission is not proof a process spawned (a cancel landing between " +
           "admission and the gate runner's own first-step check settles with zero steps despite a real " +
           "`durationMs`), so treat that fallback case as reliable, not guaranteed. " +
-          "⚠️ THIS TOOL IS THE INDEX, NOT THE FULL-DETAIL SURFACE (card 3aec1df6, corrected by card " +
-          "eb9348b0): a `gateType:\"merge\"` row's own `build_gate`/`build_gate_retry` event never carries " +
+          "⚠️ THIS TOOL IS THE INDEX, NOT THE FULL-DETAIL SURFACE: a `gateType:\"merge\"` row's own `build_gate`/`build_gate_retry` event never carries " +
           "`failingTest` inline, by construction — but this row's `failingTest` is NOT unconditionally " +
           "`null` any more. The mapper also reads the SAME `pending_gate_ops.verdict_payload_json` this " +
           "tool already LEFT JOINs in for `emitCompareReduced` (below), pulling its `gateDetail.failingTest` " +
@@ -5517,7 +5645,7 @@ export class OrchestrationMcpRouter {
           "assume the others share it. Never null for a REJECTED row once the field in question is being " +
           "stamped at all — a rejection carries the same fields a pass does. `limit`/`offset` paginate " +
           "(default " + DEFAULT_GATE_HISTORY_PAGE + ", clamped to " + MAX_GATE_HISTORY_PAGE + "). The " +
-          "default is sized to fit an UNPROJECTED page inline (card 67c54f48) — an un-projected row is " +
+          "default is sized to fit an UNPROJECTED page inline — an un-projected row is " +
           "~900 chars, so " + DEFAULT_GATE_HISTORY_PAGE + " rows stays comfortably under the tool-result " +
           "cap with headroom; the OLD default of 100 did not (it overflowed outright — that failure is " +
           "the original evidence this default was sized against). Passing an explicit `limit` still opts " +
@@ -5534,21 +5662,21 @@ export class OrchestrationMcpRouter {
           "request another project's rows through any input this tool accepts, and a foreign-project row " +
           "is never returned at all (not merely redacted), so this cannot expose anything `gate_queue`'s " +
           "own cross-project redaction doesn't already allow. Reuses `db.listGateEvents` verbatim — no " +
-          "duplicate query logic. `fields:[...]` (card 40f4cae9, same contract as `tasks_list`'s own " +
+          "duplicate query logic. `fields:[...]` (same contract as `tasks_list`'s own " +
           "`fields`) projects each returned row down to ONLY the given top-level key names, e.g. " +
           "fields:[\"outcome\",\"durationMs\",\"endedAt\"] for a duration trend read that doesn't need the " +
           "full diagnostic set — an un-asked-for field is genuinely ABSENT from every row, not merely a " +
           "smaller preview, and an unmatched/unknown field name is silently ignored rather than erroring. " +
           "`id` is NOT auto-added. " +
-          "`countsOnly:true` (card eb62d585, same contract as `tasks_list`'s own `countsOnly`) SHORT-" +
+          "`countsOnly:true` (same contract as `tasks_list`'s own `countsOnly`) SHORT-" +
           "CIRCUITS before any row fetch, JOIN-enrichment, or `fields` projection and returns " +
           "{total, byGateType, byOutcome} instead of {items,...} — `byGateType` breaks down by " +
           "\"merge\"|\"worker\"|\"deploy\"|\"landingCheck\"|\"distImporterCheck\" (the last two are the " +
-          "ungated-landing safety-net check, card bd9a483b, and the automatic post-ungated-landing " +
-          "dist-importer advisory, card cee17efe — neither is a real gate, both tallied separately so " +
+          "ungated-landing safety-net check, and the automatic post-ungated-landing " +
+          "dist-importer advisory — neither is a real gate, both tallied separately so " +
           "they never inflate the \"worker\" bucket), `byOutcome` by " +
           "\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"|\"skipped\"|\"error\" (\"error\" is " +
-          "card cee17efe's own mechanism-failure shape — the dist-importer check's scan/build/run " +
+          "the dist-importer check's own mechanism-failure shape — that check's scan/build/run " +
           "machinery itself broke, never a real test red; see the outcome caveats above — a rejection-" +
           "rate reader must still pair a \"reject\" with an immediately-following cancelled retry, same " +
           "rule as scanning `items` directly, and must never fold \"error\" into that rate either). " +
@@ -6018,6 +6146,64 @@ export class OrchestrationMcpRouter {
     // proves the NEW web build actually went live — null if the dist isn't built/found), this daemon
     // process's uptime, and a cross-project live-session count (a coarse "the fleet is still here"
     // sanity check, not a per-project breakdown — worker_list/worker_status already cover that scoped view).
+    //
+    // Field-provenance pointers for the description below, relocated out of the agent-facing text (an
+    // end-user agent can't resolve a card/decision id). Entries with a matching docs/decisions record use
+    // @decision; a bare `card <id>` line has no such record and is a plain provenance citation.
+    //
+    // @decision 5e30c4bd — `version`/`webBundle` are BOTH byte-identical before/after a daemon-src-only
+    // deploy; never use either as a staleness proxy.
+    //
+    // @decision 3d7dccb9 — a sha mismatch alone is not an authoritative "did my deploy land" signal;
+    // `builtContentMatchesHead` is the fix, and `deploySignatureMismatch` can ALSO be the same cry-wolf
+    // case rather than a genuine cache-replay.
+    //
+    // @decision 404bfc75 — the ancestor-path content check backing `builtContentMatchesHead`'s
+    // behavioural-equivalence sub-case, and why a `commitsBehind > 0` reading alongside `stale:false` is
+    // a legitimate combination once it proves every commit inert.
+    //
+    // card 7a44e7a1 — `stale`/`commitsBehind` reading clean while `processBuiltShaMatchesHead` reads
+    // false is the deliberate cry-wolf control case, not a contradiction.
+    //
+    // @decision 9aa4e2c9 — `processStartedAt` reads `performance.timeOrigin` once at process start, unlike
+    // the mtime/git-derived fields that legitimately differ read to read.
+    //
+    // @decision e8697dd3 — bundled skills are excluded from `stale`/`commitsBehind`'s restart-relevant
+    // scoping; `skillStoreStaleness` is the separate signal for that subtree.
+    //
+    // @decision d3d4d432 — `reasonKind` splits "not applicable" (no `.git`) from "could not measure" (a
+    // reachable check that failed); the two are not interchangeable.
+    //
+    // @decision 13965c93 — neither `pendingRestart` nor `pendingAdopt` means "every agent now has it";
+    // splits the store/session-copy/agent-has-opened-it facts apart.
+    //
+    // @decision bb76b8d8 — `skillStoreStaleness` never consults git; `skillAssetsGitStatus` is the
+    // missing git-aware half (an uncommitted shipped-asset edit reads as a clean bill otherwise).
+    //
+    // card 9775559c — `scratchRootBytes`/`scratchRootOverCeiling`, the shared per-session scratch root's
+    // WARN-only footprint signal.
+    //
+    // card 1a686bad — `scratchGcSweep`, the boot GC's own last-sweep outcome as a four-state record.
+    //
+    // card 0e701396 — `scratchLargestDirs`, naming which dir is actually driving the scratch-root total.
+    //
+    // @decision 5eace211 — `projectsWorkRootBytes`/`projectsWorkRootOverCeiling`/`projectsWorkRootTruncated`,
+    // the analogous fleet-wide figure for the per-project work root.
+    //
+    // @decision ad34efb5 — `staleWorktreeLeftovers` is deliberately count-only on this hot path; the byte
+    // total lives behind a separate, explicitly-called REST route.
+    //
+    // @decision 3b65028c — `orphanedProjectWorkDirs`: visibility only, nothing here is ever auto-deleted.
+    //
+    // @decision f26339d7 — the baked-sha fields are the POSITIVE signal, split from the derived clock
+    // fields they disagree with when a rebuild lands with no restart.
+    //
+    // @decision c3ce92ea — `webStale`/`webCommitsBehind` is a separate, independent signal from the
+    // daemon's own `stale`; a web-only staleness reading means rebuild web, never restart the daemon.
+    //
+    // @decision 8ff7ccde — `distBuiltAt` is an on-disk artifact clock that can be NEWER than the code
+    // this process is actually executing; `stale`/`commitsBehind` are computed against `runningCodeBuiltAt`
+    // instead, never the raw `distBuiltAt`.
     server.registerTool(
       "served_status",
       {
@@ -6027,7 +6213,7 @@ export class OrchestrationMcpRouter {
           "webBundle (the served assets/index-<hash>.js filename, or null if the web dist isn't built/found " +
           "— a changed hash after a restart proves the new web build is live), uptimeSeconds (this process's), " +
           "liveSessionCount (ACROSS ALL projects — a coarse sanity signal; use worker_list for your own " +
-          "fleet), deployStaleness, skillStoreStaleness}. ⚠️ Card 5e30c4bd, measured first-hand across a " +
+          "fleet), deployStaleness, skillStoreStaleness}. ⚠️ Measured first-hand across a " +
           "real deploy: `version` and `webBundle` are BOTH byte-identical before/after a daemon-`src`-only " +
           "deploy (no package bump, no web rebuild) — do NOT use either as a staleness proxy. " +
           "`deployStaleness` is the real signal for THE DAEMON PROCESS: " +
@@ -6035,7 +6221,7 @@ export class OrchestrationMcpRouter {
           "distAheadOfProcess, mainlineHeadSha, mainlineHeadDate, webStale, webCommitsBehind, webDistBuiltAt, " +
           "distBuiltSha, distBuiltDirty, processBuiltSha, processBuiltDirty, distBuiltShaDiffersFromProcess, " +
           "processBuiltShaMatchesHead, deploySignatureMismatch, builtContentMatchesHead, webBuiltSha, " +
-          "webBuiltDirty, reason?}. ⛔ Card 3d7dccb9: `processBuiltSha`/`mainlineHeadSha` are NOT, on their " +
+          "webBuiltDirty, reason?}. ⛔ `processBuiltSha`/`mainlineHeadSha` are NOT, on their " +
           "own, an authoritative \"did my deploy land\" pair — a sha MISMATCH (`processBuiltShaMatchesHead:" +
           "false`, even `deploySignatureMismatch:true`) can be a FALSE ALARM: a different, non-ancestor " +
           "commit (e.g. a worker worktree's own union-forward merge commit) whose SHIPPED TREE is byte-" +
@@ -6043,7 +6229,7 @@ export class OrchestrationMcpRouter {
           "live on a genuinely-current daemon. `builtContentMatchesHead` is the fix, computed via ONE OF " +
           "TWO comparisons depending on ancestry: (a) `processBuiltSha` NOT an ancestor of `mainlineHeadSha` " +
           "— `true` means a BYTE diff (scoped to the shipped paths) came back empty, the mismatch is " +
-          "cosmetic; (b, card 404bfc75) `processBuiltSha` IS an ancestor AND `stale` is already `true` — a " +
+          "cosmetic; (b) `processBuiltSha` IS an ancestor AND `stale` is already `true` — a " +
           "byte diff there would trivially be non-empty, so this instead proves BEHAVIOURAL equivalence " +
           "(a transpile-identity comparison of every changed restart-relevant `.ts` file) — `true` means a " +
           "comment-only (or otherwise inert) restart-relevant diff, genuinely NOT stale despite " +
@@ -6055,8 +6241,8 @@ export class OrchestrationMcpRouter {
           "sub-case applies to (ancestor AND `stale` already `false`) — the existing `stale`/" +
           "`processBuiltShaMatchesHead` signals already answer that case correctly and no extra check ran. " +
           "When `processBuiltShaMatchesHead` " +
-          "is `false`, check `builtContentMatchesHead` before concluding the deploy is actually stale. Card " +
-          "f26339d7: every field above this point is DERIVED (a clock, or a live git read) — the last eight " +
+          "is `false`, check `builtContentMatchesHead` before concluding the deploy is actually stale. " +
+          "Every field above this point is DERIVED (a clock, or a live git read) — the last eight " +
           "are the BAKED signal, split into TWO questions on purpose: `distBuiltSha`/`distBuiltDirty` are a " +
           "FRESH read of `dist/build-info.json` on EVERY call (\"what's on disk right now\" — a rebuild " +
           "changes it immediately, even with no restart); `processBuiltSha`/`processBuiltDirty` are " +
@@ -6074,7 +6260,7 @@ export class OrchestrationMcpRouter {
           "which infers the same fact from clocks and can be fooled by a cache-replay's mtime bump. " +
           "`processBuiltShaMatchesHead` is \"is `processBuiltSha` a provably-clean match for " +
           "`mainlineHeadSha`\" — often `false` in ordinary healthy operation (mainline moves on unrelated " +
-          "docs/web/assets commits constantly), so it is NOT itself a staleness signal. Card 7a44e7a1: " +
+          "docs/web/assets commits constantly), so it is NOT itself a staleness signal. " +
           "`stale`/`commitsBehind` reading CLEAN (`false`/`0`) in the SAME response where " +
           "`processBuiltShaMatchesHead` reads `false` is NOT a contradiction — the two answer DIFFERENT " +
           "questions (restart-relevant paths only, vs. an exact sha match on ANY file) and are not required " +
@@ -6085,35 +6271,35 @@ export class OrchestrationMcpRouter {
           "(deliberately, not `distBuiltSha` — the question is what THIS PROCESS is running): the date-" +
           "based clock claims `stale:false` (caught up) BUT `processBuiltSha`'s own real commit date " +
           "proves a restart-relevant commit landed after it — i.e. the mtime clock and the baked-sha " +
-          "ground truth disagree. Card 3d7dccb9: this can ALSO be the cry-wolf case above (a non-ancestor " +
+          "ground truth disagree. This can ALSO be the cry-wolf case above (a non-ancestor " +
           "commit with an identical shipped tree) rather than a genuine cache-replay — check " +
           "`builtContentMatchesHead` before treating a `true` here as confirmed staleness. `webBuiltSha`/" +
           "`webBuiltDirty` are the WEB analogue of " +
           "`distBuiltSha`/`distBuiltDirty` (fresh every call, no process/dist split — the served web UI bundle " +
           "is already served live with no " +
-          "restart needed) — informational only, no mismatch detector for web in this card. ⭐ This same " +
+          "restart needed) — informational only, no mismatch detector for web. ⭐ This same " +
           "payload is ALSO reachable from OUTSIDE any agent session, on the plain unprivileged loopback " +
           "`GET /api/deploy-status` — useful specifically when the daemon itself is what's under " +
           "suspicion and you can't trust a signal that only an agent inside it can read. " +
           "DERIVED fields are fresh on every call (stat this daemon's own built entry + `git log` mainline, " +
           "never cached/persisted) — `processBuiltSha`/`processBuiltDirty` alone are captured once at " +
-          "process start by design (never a fresh read; see their own field docs). Card 9aa4e2c9: " +
+          "process start by design (never a fresh read; see their own field docs). " +
           "`processStartedAt` is a SIMILAR, deliberate exception — it reads `performance.timeOrigin`, a " +
           "value the runtime fixes once at process start, so it is STABLE and safely comparable/joinable " +
           "across separate reads of the same boot (unlike the mtime/git-derived fields above, which " +
           "legitimately differ read to read as the tree changes). `stale`/`commitsBehind` are scoped to ONLY this daemon's own " +
           "backend/shared-contract source commits — this is CORRECT and DELIBERATE for what it answers (\"does the " +
           "daemon PROCESS need a restart\"), and an assets/docs/vault-only merge correctly never counts " +
-          "toward it. ⛔ Card e8697dd3: do NOT read that as \"an assets-only merge never needs a restart\" " +
+          "toward it. ⛔ Do NOT read that as \"an assets-only merge never needs a restart\" " +
           "— see `skillStoreStaleness` below, a SEPARATE signal for exactly the assets subtree where that's " +
           "false. `stale:true` means mainline HEAD carries `commitsBehind` daemon-src/shared commit(s) " +
           "this running process was not built with AND `builtContentMatchesHead` did not prove them " +
           "behaviourally inert — a restart (via `daemon_restart` where your surface has it, or " +
-          "a human relaunch of the daemon otherwise) is needed before they take effect, for every project this daemon serves. Card 404bfc75: " +
+          "a human relaunch of the daemon otherwise) is needed before they take effect, for every project this daemon serves. " +
           "a `commitsBehind > 0` reading alongside `stale:false` is a LEGITIMATE, expected combination, not " +
           "a contradiction — it means `builtContentMatchesHead:true` already proved every one of those " +
           "commits behaviourally inert (e.g. a comment-only `@decision`-anchor addition); the daemon " +
-          "genuinely does not need a restart despite the non-zero count. Card 8ff7ccde: " +
+          "genuinely does not need a restart despite the non-zero count. " +
           "`distBuiltAt` is an ON-DISK ARTIFACT clock (newest dist mtime) and can be NEWER than the code " +
           "this process is actually executing — a rebuild that lands without a restart advances it while " +
           "the process keeps running whatever it loaded at its own start. `stale`/`commitsBehind` are " +
@@ -6122,21 +6308,20 @@ export class OrchestrationMcpRouter {
           "your own staleness from `distBuiltAt` alone, it can UNDERSTATE it. `distAheadOfProcess:true` " +
           "means the on-disk artifact has been rebuilt since this process started and it hasn't picked that " +
           "rebuild up yet (a restart would additionally pick it up), surfaced as its own field so it's " +
-          "legible even when `commitsBehind` itself still reads 0. `webStale`/`webCommitsBehind` (card " +
-          "c3ce92ea) are the SEPARATE web signal — " +
+          "legible even when `commitsBehind` itself still reads 0. `webStale`/`webCommitsBehind` are the SEPARATE web signal — " +
           "this daemon's own web-UI source commits not yet reflected in the served web UI bundle. `webStale:true` " +
           "means REBUILD web, NOT restart the daemon: the daemon serves the web UI bundle live from disk, " +
           "so a rebuilt file is served on the very next request — do not advise a restart for a " +
           "web-only staleness reading; that drops every live session across ALL projects for no reason. " +
           "`available:false` (with `reason`) means this daemon isn't running from a Loom source checkout " +
           "(e.g. a packaged `loomctl` install) or the check failed — not a claim of freshness either way. " +
-          "Card d3d4d432: `reasonKind` discriminates WHICH of those two — `\"not-applicable\"` (no `.git`, " +
+          "`reasonKind` discriminates WHICH of those two — `\"not-applicable\"` (no `.git`, " +
           "e.g. a packaged install — this signal is never meaningful here) vs `\"could-not-measure\"` (the " +
           "check was reachable in principle but a step failed, e.g. a build race or a git error); the two " +
           "are NOT interchangeable — only the first means staying silent is forever correct. " +
           "It applies to BOTH deployStaleness signals together (never one without the other; " +
           "`skillStoreStaleness` is unaffected — it never touches git or dist, so it degrades independently). " +
-          "`skillStoreStaleness` (card e8697dd3) is the THIRD, INDEPENDENT signal `deployStaleness` cannot " +
+          "`skillStoreStaleness` is the THIRD, INDEPENDENT signal `deployStaleness` cannot " +
           "give you: {stale, pendingRestart, pendingAdopt}. A bundled skill is delivered to sessions from " +
           "the Loom-owned STORE (`<LOOM_HOME>/skills/<name>/SKILL.md`), never read live from `assets/` — " +
           "the store only re-syncs from a merged change to its bundled skill assets on daemon " +
@@ -6147,13 +6332,13 @@ export class OrchestrationMcpRouter {
           "these IN THE STORE. `pendingAdopt` names every CUSTOMIZED bundled skill (the user has edited their " +
           "store copy) with a shipped update — a restart will NOT advance these by design (protecting the " +
           "user's edit); each needs an explicit adopt (Skills UI or `POST /api/skills/<name>/adopt`) " +
-          "regardless of restarts. ⚠️ Card 13965c93: neither list is \"every agent now has it\" — a session " +
+          "regardless of restarts. ⚠️ Neither list is \"every agent now has it\" — a session " +
           "already live across the restart only reflects the store's new content on ITS OWN next resume " +
           "(`skills/inject.ts` refreshes on every resume/fork/recycle, not just first spawn), and `SKILL.md` " +
           "is read ambiently while `references/**` is read on demand — being current in the store (or a " +
           "session's own injected copy) doesn't mean any agent has opened a changed reference file. " +
           "`stale` is true whenever EITHER list is non-empty. Computed fresh on every call, never cached. " +
-          "Card bb76b8d8: `skillStoreStaleness` itself never consults git — it compares the store against " +
+          "`skillStoreStaleness` itself never consults git — it compares the store against " +
           "the shipped asset's WORKING-TREE content, so a live, UNCOMMITTED edit to a shipped SKILL.md " +
           "(synced into the store some other way — a manual copy, a publish) makes store/base/shipped all " +
           "agree and reads as a fully clean bill, even though the edit exists in no commit and would be " +
@@ -6167,15 +6352,15 @@ export class OrchestrationMcpRouter {
           "store itself needs a restart/adopt, checked first), `\"uncommitted\"` (store is in sync but the " +
           "shipped asset it synced from is NOT committed — the exact gap this card closes), `\"clean\"` (in " +
           "sync and committed), or `\"undetermined\"` (git status couldn't be read — never read as clean). " +
-          "`scratchRootBytes`/`scratchRootOverCeiling` (card 9775559c) are the shared per-session scratch " +
+          "`scratchRootBytes`/`scratchRootOverCeiling` are the shared per-session scratch " +
           "root's (`~/.loom/tmp/scratch`) total on-disk footprint and whether it exceeds the WARN-only " +
           "ceiling in `sessions/scratch-gc.ts` — nothing is ever evicted on account of either, and it's a " +
           "fresh, uncached recursive walk on every call (this surface is called on-demand, never polled " +
-          "on a fixed interval). `scratchGcSweep` (card 1a686bad) is the boot GC's own last-sweep outcome " +
+          "on a fixed interval). `scratchGcSweep` is the boot GC's own last-sweep outcome " +
           "as a four-state record (`not-started`/`in-progress`/`completed`/`failed`, with `scanned`/" +
           "`reaped`/`wedged` counts once settled) — lets you tell a sweep that scanned everything and " +
           "genuinely reaped 0 apart from one that threw and was silently swallowed, previously " +
-          "indistinguishable. `scratchLargestDirs` (card 0e701396) names the largest individual scratch " +
+          "indistinguishable. `scratchLargestDirs` names the largest individual scratch " +
           "dirs (`sessions/scratch-largest-dirs.ts` for the count) — the missing half `scratchRootBytes`/" +
           "`scratchRootOverCeiling` can't give you: WHICH dir is driving it. Each entry carries `{id, " +
           "bytes, ageDays, resumability}`; `resumability` is the SAME classification the real GC sweep " +
@@ -6185,21 +6370,21 @@ export class OrchestrationMcpRouter {
           "throttle (never a fresh walk on THIS read, unlike `scratchRootBytes` above) — may read `[]` " +
           "before the first background refresh has landed, an honest \"not computed yet\", never " +
           "fabricated. `projectsWorkRootBytes`/`projectsWorkRootOverCeiling`/`projectsWorkRootTruncated` " +
-          "(card 5eace211) are the analogous fleet-wide figure for the Loom-managed PER-PROJECT work root " +
+          "are the analogous fleet-wide figure for the Loom-managed PER-PROJECT work root " +
           "— summed across every KNOWN project's own work dir (active and archived), scoped away from an " +
           "unrelated bystander directory under the same root. `overCeiling` is PER-PROJECT (any single " +
           "project exceeding its own ceiling), not a check on the summed total; `truncated:true` means " +
           "the walk hit its own entry/time bound for at least one project, so the figure is a genuine " +
           "partial sum, never the complete one. Like `scratchLargestDirs`, this is a cached, background-" +
           "refreshed figure (never a fresh walk on this read) — may read `0`/`false` before the first " +
-          "refresh has landed. `staleWorktreeLeftovers` (card ad34efb5) counts renamed-aside stale " +
+          "refresh has landed. `staleWorktreeLeftovers` counts renamed-aside stale " +
           "worktree dirs (`<path>.stale-<ts>`) under `WORKTREES_DIR` that were never auto-deleted and " +
           "that no session row names, so nothing else would surface them — `{count, oldestStaleSinceMs}` " +
           "(`oldestStaleSinceMs` is `null` when `count` is 0). COUNT-ONLY, deliberately: this field is " +
           "read on every call, so it never measures byte totals — see `GET /api/worktrees/stale-" +
           "leftovers` for that, called deliberately rather than on this hot path. `orphanedProjectWorkDirs` " +
-          "(card 3b65028c) is the analogous visibility fix for `PROJECTS_WORK_ROOT` itself: `{count, " +
-          "entries, truncated}` where `entries` is a BOUNDED list of `{dirName}` (card 3b65028c's own " +
+          "is the analogous visibility fix for `PROJECTS_WORK_ROOT` itself: `{count, " +
+          "entries, truncated}` where `entries` is a BOUNDED list of `{dirName}` (this field's own " +
           "`ORPHANED_PROJECT_WORK_DIRS_LIST_MAX`) for a top-level directory under `PROJECTS_WORK_ROOT` whose " +
           "name matches NO real project row (active OR archived) — e.g. a permanent project delete whose " +
           "work-dir removal failed and was never revisited. `count` is the TRUE total and can exceed " +

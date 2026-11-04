@@ -165,15 +165,13 @@ const SKILL_SURFACE_ALLOWLIST = [
 // in), and so does a DECREASE (the stale-entry check — see positive control (ii) below) until the number
 // here is lowered to match a real landed cleanup.
 //
-// SetupMcpRouter, OperatorMcpRouter, RunMcpRouter and PlatformMcpRouter carry NO entries below — all four
-// are fully clean; any citation appearing on any of them now is a REAL regression, not backlog, and fails
-// against an implicit expectedCount of 0.
-const ROUTER_ID_CITATION_ALLOWLIST = [
-  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_queue", expectedCount: 21 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_history", expectedCount: 30 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "served_status", expectedCount: 22 },
-  { surface: "OrchestrationMcpRouter(worker)", tool: "gate_queue", expectedCount: 21 },
-];
+// EMPTY — every shipped, end-user-reachable MCP router this file scans (OrchestrationMcpRouter,
+// TaskMcpRouter, SetupMcpRouter, OperatorMcpRouter, RunMcpRouter, WorkspaceAuditMcpRouter,
+// PlatformMcpRouter) is now fully clean of the "decision/card id citation" pattern; any citation
+// appearing on any of them from here on is a REAL regression, not backlog, and fails against an implicit
+// expectedCount of 0. Positive control (ii) below plants a SYNTHETIC baseline rather than retargeting to
+// a real tool, since there is no longer a nonzero-baselined entry here to retarget to.
+const ROUTER_ID_CITATION_ALLOWLIST = [];
 
 function idCitationCount(text) {
   return [...text.matchAll(new RegExp(ID_CITATION_RE_SOURCE, "gi"))].length;
@@ -1065,37 +1063,38 @@ function walkTsFiles(dir) {
 // ===================== (e) POSITIVE CONTROL (ii) — the STALE-ENTRY check: a tool's REAL count DROPS below
 // =====================     its baselined expectedCount without the baseline being lowered to match — this
 // =====================     must ALSO trip the ratchet, not silently pass through a too-generous stale
-// =====================     baseline. Plant by wrapping registerTool to strip ONE real citation out of the
-// =====================     REAL gate_queue description (a genuine decrease at the source, re-rendered
-// =====================     through the real client — never a hand-built string copy). Target tool chosen
-// =====================     to have a real, nonzero baseline at authoring time (card 6927a53f's own cleanup
-// =====================     pass retargeted this from gate_cancel to worker_list to gate_status, each
-// =====================     cleaned to 0 in turn, retargeting again here to gate_queue) — re-target again
-// =====================     to any still-nonzero-baselined tool if this one too is ever fully cleaned. =====
+// =====================     baseline. SYNTHETIC, not a real-source strip: prior cleanup passes retargeted
+// =====================     this control from gate_cancel to worker_list to gate_status to gate_queue, each
+// =====================     cleaned to 0 in turn — the cleanup that removed gate_queue/gate_history/
+// =====================     served_status from the allowlist leaves NO nonzero-baselined entry anywhere
+// =====================     left to retarget to next, so instead of stripping a real citation out of some
+// =====================     still-dirty tool's description, this plants a TEMPORARY allowlist entry against
+// =====================     a REAL rendered tool's MEASURED citation count + 1 (never a hand-assumed
+// =====================     count, so it can never silently stop proving anything as the real corpus
+// =====================     changes), through the exact same ratchetVerdict/idCitationExpected/
+// =====================     scanSurfaceRatchet functions the live check uses — never a separately
+// =====================     reimplemented comparison — then restores the allowlist unconditionally so no
+// =====================     synthetic entry survives into any other check in this file. ===================
 {
   const fx = freshNonDevLeadFixture("e-plant-stale");
   const sid = insertFakeSessionForRole(fx, "manager");
-  const origRegisterTool = McpServer.prototype.registerTool;
-  let strippedOne = false;
-  McpServer.prototype.registerTool = function (name, config, handler) {
-    if (name === "gate_queue" && config?.description) {
-      const stripped = config.description.replace(new RegExp(ID_CITATION_RE_SOURCE, "i"), "");
-      if (stripped !== config.description) { strippedOne = true; config = { ...config, description: stripped }; }
-    }
-    return origRegisterTool.call(this, name, config, handler);
-  };
-  let tools;
+  const router = new OrchestrationMcpRouter(fx.db, fx.svc, {});
+  const tools = await renderToolsViaRealClient(router.buildServer(sid, "manager"));
+  const target = tools.find((t) => t.name === "idle_report");
+  check("(e positive control ii) sanity: the target tool actually rendered", !!target);
+  const realCount = idCitationCount(target?.description ?? "");
+  const syntheticExpected = realCount + 1; // always exactly one above whatever the real count measures as
+  ROUTER_ID_CITATION_ALLOWLIST.push({ surface: "OrchestrationMcpRouter(manager)", tool: "idle_report", expectedCount: syntheticExpected });
   try {
-    const router = new OrchestrationMcpRouter(fx.db, fx.svc, {});
-    tools = await renderToolsViaRealClient(router.buildServer(sid, "manager"));
+    // Goes through the SAME scanSurfaceRatchet function the live check uses (see control (i)'s own note).
+    const verdict = scanSurfaceRatchet("OrchestrationMcpRouter(manager)", tools).find((v) => v.tool === "idle_report");
+    check(`(e positive control ii) sanity: the planted SYNTHETIC baseline (measured real count + 1) genuinely exceeds the measured real count (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && verdict.real < verdict.expected);
+    check(`(e positive control ii) the stale-entry check trips the ratchet on a DECREASE too — RED (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && !verdict.ok);
   } finally {
-    McpServer.prototype.registerTool = origRegisterTool;
+    // Restore unconditionally, even on a thrown check — never leave the synthetic entry in the real table.
+    const idx = ROUTER_ID_CITATION_ALLOWLIST.findIndex((e) => e.surface === "OrchestrationMcpRouter(manager)" && e.tool === "idle_report");
+    if (idx !== -1) ROUTER_ID_CITATION_ALLOWLIST.splice(idx, 1);
   }
-  check("(e positive control ii) sanity: the plant actually stripped a real citation out of gate_queue", strippedOne);
-  // Goes through the SAME scanSurfaceRatchet function the live check uses (see control (i)'s own note).
-  const verdict = scanSurfaceRatchet("OrchestrationMcpRouter(manager)", tools).find((v) => v.tool === "gate_queue");
-  check(`(e positive control ii) sanity: the real count genuinely dropped below the stale baseline (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && verdict.real < verdict.expected);
-  check(`(e positive control ii) the stale-entry check trips the ratchet on a DECREASE too — RED (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && !verdict.ok);
   fx.db.close();
 }
 
