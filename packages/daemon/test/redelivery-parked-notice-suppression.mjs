@@ -223,13 +223,23 @@ try {
     // Card 36afbbdd: NOT comment-stripped, deliberately. The first three checks are PRESENCE checks on
     // documentation prose that is itself the relocation destination (a real tool `description:` string) —
     // a comment-only diff can only ADD a spurious match, never remove the real one, so it can't flip
-    // pass→fail. The fourth is a LOWER-BOUND count (`>= 2`, not `=== 2`) — a comment-only diff can only
-    // raise the count, never drop it below 2, so it's immune for the same reason.
+    // pass→fail.
     const orchSrc = fs.readFileSync(path.join(fileURLToPath(new URL("../src/mcp/orchestration.ts", import.meta.url))), "utf8");
     check("(4) RELOCATED: worker_message's description now carries resend-join caveat (a)", orchSrc.includes("embeds YOUR OWN session id"));
     check("(4) RELOCATED: worker_message's description now carries resend-join caveat (b)", orchSrc.includes("join window closes the instant Loom itself confirms"));
     check("(4) RELOCATED: worker_list's parkedDirective doc now carries the three-state hedge", orchSrc.includes("is NOT proof the directive was never received"));
-    check("(4) RELOCATED: both relocations cite this card", (orchSrc.match(/card 085d9422/g) ?? []).length >= 2);
+
+    // Card 6927a53f moved this card's own citation out of the two agent-facing descriptions above and
+    // into a provenance comment over each registerTool call, in two different citation prefixes — the
+    // old bare `card`-prefix-only count went stale the moment one citation was renamed to the other
+    // prefix. Accept either prefix, and separately prove neither description regained an id (below).
+    const citePrefixes = ["@decision", "card"];
+    const decision085Citations = citePrefixes.reduce((n, prefix) => n + (orchSrc.match(new RegExp(`${prefix} 085d9422\\b`, "g")) ?? []).length, 0);
+    check("(4) RELOCATED: both relocations still cite this card, in a provenance comment", decision085Citations >= 2);
+
+    const descriptionBlocks = [...orchSrc.matchAll(/description:\s*"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+    const descriptionCardIdLeak = descriptionBlocks.some((d) => /\b(?:card|@decision)\s+[0-9a-f]{8}\b/.test(d));
+    check("(4) RELOCATED: no card/decision id leaked into any agent-facing tool description", !descriptionCardIdLeak);
   }
 
   // ===== (5) ROUND 3's INTENT PRESERVED: a resend that auto-joins a root which has ALREADY parked still ==

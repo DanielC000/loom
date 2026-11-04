@@ -95,9 +95,26 @@ async function runEpisode(sid, cfg, hookResetOffsetSec) {
     // re-caps almost immediately. Scheduled (not called inline) so RateLimitWatcher.resume() finishes its
     // OWN bookkeeping (recordRateLimitResume) before this fires, exactly mirroring how a real StopFailure
     // arrives asynchronously, on a later turn, after the resume's own turn has already started.
+    //
+    // THE RACE THIS GUARDS (reproduced deterministically in isolation, outside this suite, before this
+    // fix landed): RateLimitWatcher.resume() clears the park and schedules this recap via a bare
+    // setTimeout. If that resume itself lands late enough relative to the episode's fixed deadline, the
+    // watcher's own next tick can bail the episode WHILE this timer is still pending — and the timer then
+    // fires AFTERWARD, on a session that has ALREADY bailed (its breaker state just cleared), re-arming a
+    // brand-new, non-null rateLimitedUntil/rateLimitDeadline. Measured live (40 solo runs, no induced
+    // load): ~2.5% of runs hit this even at the test's own nominal margins, matching the card's real
+    // failure under a loaded full gate (more scheduling jitter, not a different mechanism). Retiring the
+    // timer from the OUTSIDE once a bail is observed is NOT sufficient — the stale fire can land before
+    // the caller's own poll even notices the bail (measured directly). The fix has to live HERE, at the
+    // one place the race actually resolves: check synchronously, at fire time, whether the episode has
+    // already ended, before acting on it — deterministic regardless of how ticks/timers interleave.
     resumeAfterRateLimit: (id) => {
       db.setBusy(id, true); // the resumed turn is "in flight" until the StopFailure below clears it
-      setTimeout(() => { db.setBusy(id, false); fireCap(); }, QUICK_RECAP_DELAY_MS);
+      setTimeout(() => {
+        db.setBusy(id, false);
+        if (db.getSession(id)?.rateLimitBailedAt) return; // the episode already ended — this late "StopFailure" is moot
+        fireCap();
+      }, QUICK_RECAP_DELAY_MS);
       return true;
     },
   };
