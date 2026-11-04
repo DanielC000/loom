@@ -462,6 +462,36 @@ check("deriveContextExhaustedAlerts: a session with no matching row at all (not 
 // none of them touch attention.ts's own call site at all. Can't be removed as a type-level choice (both
 // `all` and `managers` are the SAME `SessionListItem[]` shape to the compiler) — so per this card's own
 // fallback instruction, this is a source-scan pinning the call site's actual second argument.
+// Card da8b2fc6 (item 3): the line-comment filter below (`//`-only) left a BLOCK-comment line (a
+// `/** ... */` JSDoc line, including a ` * ...` continuation) unfiltered — a `.trim().startsWith("//")`
+// check never matches a `*`-prefixed continuation line, so a JSDoc example mentioning this call in
+// parenthesized form ahead of the real call site would still silently shadow it, exactly the hazard the
+// comment-filtering was meant to close for `//` lines. Extracted as its own function so it can be unit-
+// tested directly against a synthetic fixture, independent of attention.ts's own current content.
+const stripCommentOnlyLines = (src) => src.split("\n").filter((line) => {
+  const t = line.trim();
+  return !(t.startsWith("//") || t.startsWith("/*") || t.startsWith("*"));
+}).join("\n");
+
+check("stripCommentOnlyLines: a JSDoc block-comment line mentioning the call in parenthesized form does not shadow the real call site", () => {
+  const synthetic = [
+    "/**",
+    " * e.g. deriveContextExhaustedAlerts(events, managers) would be the bug this guards against.",
+    " */",
+    "deriveContextExhaustedAlerts(events, all)",
+  ].join("\n");
+  // Negative control, run against the OLD (`//`-only) filter — proves the fixture itself is a genuine
+  // shadowing hazard for a filter that only strips `//` lines, not a vacuous setup.
+  const oldFilterCodeOnly = synthetic.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+  const oldMatch = oldFilterCodeOnly.match(/deriveContextExhaustedAlerts\(\s*[^,]+,\s*([A-Za-z0-9_]+)\s*\)/);
+  assert.equal(oldMatch?.[1], "managers", "the OLD //-only filter should still be shadowed by the JSDoc line — if this fails, the fixture no longer exercises the bug this fix closes");
+
+  const codeOnly = stripCommentOnlyLines(synthetic);
+  const m = codeOnly.match(/deriveContextExhaustedAlerts\(\s*[^,]+,\s*([A-Za-z0-9_]+)\s*\)/);
+  assert.ok(m, "deriveContextExhaustedAlerts(...) call site not found after stripping comment-only lines");
+  assert.equal(m[1], "all", `THE FIX: expected the real call site's 'all' argument, found '${m[1]}' instead — the JSDoc block-comment line was not correctly skipped`);
+});
+
 check("attention.ts's own deriveContextExhaustedAlerts(...) call site passes the role-INCLUSIVE `all` list, never the role:\"manager\"-only `managers` subset", () => {
   const attentionPath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "attention.ts");
   const src = readFileSync(attentionPath, "utf8");
@@ -469,7 +499,9 @@ check("attention.ts's own deriveContextExhaustedAlerts(...) call site passes the
   // future doc comment mentioning this call in parenthesized form (e.g. illustrating the exact bug this
   // scan guards against) would otherwise silently shadow the actual call a few lines below it, since a
   // plain (non-global) `.match` always returns the FIRST hit in the whole file regardless of context.
-  const codeOnly = src.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+  // Card da8b2fc6 (item 3): now also skips BLOCK-comment lines (`/*`, `*/`, a ` * ...` continuation),
+  // not just `//` lines — see `stripCommentOnlyLines`'s own doc above for why.
+  const codeOnly = stripCommentOnlyLines(src);
   const m = codeOnly.match(/deriveContextExhaustedAlerts\(\s*[^,]+,\s*([A-Za-z0-9_]+)\s*\)/);
   assert.ok(m, "deriveContextExhaustedAlerts(...) call site not found in attention.ts (comment-only lines excluded) — update this scan's regex if the call shape changed");
   assert.equal(m[1], "all", `expected the second argument to be the role-inclusive 'all' list, found '${m[1]}' instead — this would silently drop a non-manager session's (e.g. the platform Lead's) exhaustion alert, exactly the round-3 bug item 3 closed`);

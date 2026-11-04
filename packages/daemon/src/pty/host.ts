@@ -10947,7 +10947,12 @@ export class PtyHost {
     // stayed set, so the composer message — the one write that can actually clear the mark — never ran
     // either. Scoped tightly to `live.contextExhausted`: outside that state the conjunct above still
     // applies byte-identically.
-    const composerRecoveryBypassesQueue = live.contextExhausted && !this.exhaustionHoldAppliesTo(senderId);
+    //
+    // @decision da8b2fc6 — do not drop `olderComposerEntryQueued`: without it, a brand-new composer
+    // arrival bypasses an OLDER, independently-eligible composer entry already queued, delivering the
+    // newer human turn before the older one.
+    const olderComposerEntryQueued = live.pending.some((m) => !this.exhaustionHoldAppliesTo(m.senderId));
+    const composerRecoveryBypassesQueue = live.contextExhausted && !this.exhaustionHoldAppliesTo(senderId) && !olderComposerEntryQueued;
     if (idleEligible && (live.pending.length === 0 || composerRecoveryBypassesQueue)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
@@ -13435,8 +13440,9 @@ export class PtyHost {
   }
 
   /**
-   * @decision 5f825506 (item 2) — SHARED by both exhaustion-hold gates (`enqueueStdin`'s immediate
-   * path AND `drainPending`'s bail), the same sibling-pair shape as `isHumanSubmitHeld` just above.
+   * @decision 5f825506 (item 2) — SHARED by `enqueueStdin`'s immediate path AND `drainPending`'s own
+   * composer-eligibility SCAN (not a bare head-only bail since card da8b2fc6/5f825506 round 3), the
+   * same sibling-pair shape as `isHumanSubmitHeld` just above.
    */
   private exhaustionHoldAppliesTo(senderId: string | null | undefined): boolean {
     return senderId !== HUMAN_COMPOSER_SENDER_ID;

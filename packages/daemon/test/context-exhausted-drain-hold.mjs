@@ -38,6 +38,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (never a fake/stub) is correctly accepted/rejected as `detectContextExhaustionInTail`'s own
 //       stale-marker cutoff — the real stamp is read off `PtyHost.busySinceMs` and fed DIRECTLY to that
 //       function; this does not itself exercise the full watcher-tick → checkContextExhaustion wiring.
+//   (14) card da8b2fc6 — COMPOSER-TO-COMPOSER FIFO: an older composer entry (A) held ONLY by a
+//       DIFFERENT idleEligible conjunct (isHumanSubmitHeld) that clears BEFORE a newer composer entry
+//       (B) arrives, with NO reconcile()/drainPending call made anywhere in the test — asserts A's
+//       write is observed strictly before B's, with no manual drain kick: `enqueueStdin`'s own
+//       `olderComposerEntryQueued` guard refuses the bypass for B, and its existing
+//       `if (idleEligible) { this.drainPending(...) }` held-path branch (unconditional, pre-existing)
+//       drains A synchronously inside B's OWN enqueue call.
+//   (15) card da8b2fc6 — the GIVE-UP-HOLD variant of (14): A is injected directly into `live.pending`
+//       as an ALREADY-EXPIRED give-up hold (`giveUpGen`/`giveUpHeldUntil` — the established injection
+//       pattern test (12) uses), never driven through the real give-up timeout. Same assertion: A's
+//       write precedes B's, no manual reconcile() anywhere.
 //
 // Run: 1) build (turbo builds shared first), 2) node packages/daemon/test/context-exhausted-drain-hold.mjs
 import fs from "node:fs";
@@ -573,6 +584,83 @@ try {
     check("(13) the second composer entry now drains too, once its own turn comes (depth back to 0)", host.getPendingQueueDepth(SID13) === 0);
     check("(13) the second composer's text WAS eventually written", writes.some((w) => w.sessionId === SID13 && typeof w.data === "string" && w.data.includes("COMPOSER_SECOND_13")));
   }
+
+  // ===== (14) card da8b2fc6 — COMPOSER-TO-COMPOSER FIFO: A is held by isHumanSubmitHeld (a DIFFERENT
+  // conjunct than the exhaustion bail), that hold clears, then B arrives — with NO reconcile() call
+  // made anywhere in this block. Pre-fix, `composerRecoveryBypassesQueue` ignored `live.pending`
+  // entirely and B would bypass straight past A. =====
+  {
+    const SID14 = "wkr-composer-fifo-olderqueued";
+    spawnReady(SID14);
+    host.enqueueStdin(SID14, "T14_FIRST_TURN"); // delivers immediately; busy=true
+    check("(14) setup: markContextExhausted succeeds", host.markContextExhausted(SID14) === true);
+
+    host.writeStdin(SID14, "unrelated raw keystrokes\r"); // arms isHumanSubmitHeld
+    const a14 = host.enqueueStdin(SID14, "COMPOSER_A_OLDER_14", "human", undefined, undefined, "agent", undefined, "COMPOSER_A_OLDER_14", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(14) setup: A is HELD (isHumanSubmitHeld blocks it), not delivered", a14.delivered === false);
+    check("(14) setup: pendingQueueDepth is 1", host.getPendingQueueDepth(SID14) === 1);
+
+    // Let A's OTHER hold (isHumanSubmitHeld) expire — NO reconcile()/drainPending call here. A just
+    // sits in live.pending, now genuinely eligible, untouched.
+    await new Promise((r) => setTimeout(r, HUMAN_SUBMIT_HOLD_TEST_MS + 40));
+    check("(14) setup: still depth 1 after waiting out A's hold — nothing has drained it yet", host.getPendingQueueDepth(SID14) === 1);
+    check("(14) setup: neither A nor any write has happened yet",
+      !writes.some((w) => w.sessionId === SID14 && typeof w.data === "string" && w.data.includes("COMPOSER_A_OLDER_14")));
+
+    // B arrives. THE FIX: `olderComposerEntryQueued` refuses the bypass (A is still a composer-sender
+    // entry in the queue), so B falls to the ordinary held push — whose own PRE-EXISTING
+    // `if (idleEligible) { this.drainPending(...) }` branch (unconditional, not new) then drains A
+    // SYNCHRONOUSLY, inside this SAME enqueueStdin(B) call. No reconcile(), no timer.
+    const b14 = host.enqueueStdin(SID14, "COMPOSER_B_NEWER_14", "human", undefined, undefined, "agent", undefined, "COMPOSER_B_NEWER_14", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(14) THE FIX: B is HELD (queued FIFO-behind A), never an immediate bypass", b14.delivered === false);
+
+    const aIdx14 = writes.findIndex((w) => w.sessionId === SID14 && typeof w.data === "string" && w.data.includes("COMPOSER_A_OLDER_14"));
+    const bIdx14 = writes.findIndex((w) => w.sessionId === SID14 && typeof w.data === "string" && w.data.includes("COMPOSER_B_NEWER_14"));
+    check("(14) THE FIX, THE ASSERTION THAT GOES RED WITHOUT IT: A's write was observed (drained inside B's OWN enqueueStdin call — no external event)", aIdx14 !== -1);
+    check("(14) B's text was NOT written yet (still queued behind A)", bIdx14 === -1);
+    check("(14) pendingQueueDepth is 1 (B alone, queued — A already drained)", host.getPendingQueueDepth(SID14) === 1);
+
+    // B drains normally once A's own turn ends — not lost, just FIFO-ordered behind A.
+    host.deliverHook(SID14, { hook_event_name: "Stop" });
+    check("(14) B drains normally once A's turn completes (depth back to 0)", host.getPendingQueueDepth(SID14) === 0);
+    const bIdx14b = writes.findIndex((w) => w.sessionId === SID14 && typeof w.data === "string" && w.data.includes("COMPOSER_B_NEWER_14"));
+    check("(14) B's text WAS eventually written, and strictly AFTER A's own write", bIdx14b !== -1 && bIdx14b > aIdx14);
+  }
+
+  // ===== (15) card da8b2fc6 — the GIVE-UP-HOLD variant of (14): A is injected directly as an
+  // ALREADY-EXPIRED give-up hold (the established pattern from test (12)), never driven through the
+  // real give-up timeout. Same assertion: A's write precedes B's, with NO reconcile() anywhere. =====
+  {
+    const SID15 = "wkr-composer-fifo-giveup-olderqueued";
+    spawnReady(SID15);
+    host.enqueueStdin(SID15, "T15_FIRST_TURN"); // delivers immediately; busy=true
+    check("(15) setup: markContextExhausted succeeds", host.markContextExhausted(SID15) === true);
+    check("(15) setup: pending queue is empty right after marking", host.getPendingQueueDepth(SID15) === 0);
+
+    const live15 = host.live.get(SID15);
+    const composerA15Id = "gc-15";
+    live15.pending.push({
+      id: composerA15Id, text: "COMPOSER_A_GIVEUP_15", source: "human", kind: "agent", logicalId: composerA15Id,
+      ownerText: "COMPOSER_A_GIVEUP_15", senderId: HUMAN_COMPOSER_SENDER_ID,
+      giveUpGen: 1, giveUpHeldUntil: Date.now() - 1, // ALREADY expired — eligible right now
+    });
+    check("(15) setup: pendingQueueDepth is 1 (A injected, give-up hold already expired)", host.getPendingQueueDepth(SID15) === 1);
+
+    // B arrives — NO reconcile() call anywhere in this block.
+    const b15 = host.enqueueStdin(SID15, "COMPOSER_B_NEWER_15", "human", undefined, undefined, "agent", undefined, "COMPOSER_B_NEWER_15", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(15) THE FIX: B is HELD (queued FIFO-behind A), never an immediate bypass", b15.delivered === false);
+
+    const aIdx15 = writes.findIndex((w) => w.sessionId === SID15 && typeof w.data === "string" && w.data.includes("COMPOSER_A_GIVEUP_15"));
+    const bIdx15 = writes.findIndex((w) => w.sessionId === SID15 && typeof w.data === "string" && w.data.includes("COMPOSER_B_NEWER_15"));
+    check("(15) THE FIX, THE ASSERTION THAT GOES RED WITHOUT IT: A's write was observed (drained inside B's OWN enqueueStdin call — no external event)", aIdx15 !== -1);
+    check("(15) B's text was NOT written yet (still queued behind A)", bIdx15 === -1);
+    check("(15) pendingQueueDepth is 1 (B alone, queued — A already drained)", host.getPendingQueueDepth(SID15) === 1);
+
+    host.deliverHook(SID15, { hook_event_name: "Stop" });
+    check("(15) B drains normally once A's turn completes (depth back to 0)", host.getPendingQueueDepth(SID15) === 0);
+    const bIdx15b = writes.findIndex((w) => w.sessionId === SID15 && typeof w.data === "string" && w.data.includes("COMPOSER_B_NEWER_15"));
+    check("(15) B's text WAS eventually written, and strictly AFTER A's own write", bIdx15b !== -1 && bIdx15b > aIdx15);
+  }
 } finally {
   try { host.stop?.("wkr-drain-hold"); } catch { /* best-effort */ }
   try { host.stop?.("wkr-ordinary-drain"); } catch { /* best-effort */ }
@@ -587,6 +675,8 @@ try {
   try { host.stop?.("wkr-composer-head-coalesce-off"); } catch { /* best-effort */ }
   try { host.stop?.("wkr-giveupheld-composer-skip"); } catch { /* best-effort */ }
   try { host.stop?.("wkr-two-composer-fifo"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-composer-fifo-olderqueued"); } catch { /* best-effort */ }
+  try { host.stop?.("wkr-composer-fifo-giveup-olderqueued"); } catch { /* best-effort */ }
 }
 
 // ===== (5) DB-level clear: stamped, then cleared via the REAL rising-edge chokepoint
