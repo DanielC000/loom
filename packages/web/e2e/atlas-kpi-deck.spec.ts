@@ -7,21 +7,37 @@
 // 1156px of deck, five 223px columns, tile six at a second offsetTop). `.loom-kpideck` now declares
 // its count instead, 6 → 3 → 2, so no width can produce a part-row.
 //
+// 🔴 THE DECK HAS ONE MOUNT NOW (card 269f46ef). It used to be on both home nodes; the owner then
+// removed it from the PROJECT node along with the board and the band, and that node's readings are
+// a briefing line instead (`pages/ProjectHome.tsx`, `components/atlasProjectOverview.tsx`). Every
+// leg below that used to run twice now runs on `/home`, and the project node appears here only as
+// the ABSENCE assertion in leg 1 — which is also what keeps this spec honest about the removal
+// rather than silently narrowing its own scope.
+//
 // How each claim is measured, and why each could actually fail:
-//   1. ONE ROW AT 1440, both home nodes, tree expanded. Six tiles, one shared offsetTop, six
+//   1. ONE ROW AT 1440 on the Workspace node, tree expanded. Six tiles, one shared offsetTop, six
 //      DISTINCT lefts, and a deck exactly one tile tall. Equal-top alone is vacuous on a deck that
-//      lost tiles, so the count and the distinct lefts are what make it mean "six across".
+//      lost tiles, so the count and the distinct lefts are what make it mean "six across". Then the
+//      project node, at the same viewport, with NO deck at all — the workspace count directly above
+//      is that absence's positive control.
 //   2. THE CONTROL FOR (1): the same measurement at 1280, below the deck's declared first fold,
 //      must report TWO rows. Without it, "they all share a top" is a claim this spec could not have
 //      falsified in the same run — a measurement that can only ever come out one way.
-//   3. THE METER. The context tile renders a track whose fill is the SEEDED occupancy, and a tile
-//      with no natural ceiling renders none — so "a meter" cannot be satisfied by a meter on every
-//      tile, which would be a different (and wrong) design.
-//   4. TONE ORDER. A seeded 96% context reads RED. Ordered amber-first, `>= 95` was unreachable and
-//      the fill under it could never leave phosphor/amber.
-//   5. SWITCH OFF: the classic Overview renders its own layout and the deck this card restyled does
+//   3. SWITCH OFF: the classic Overview renders its own layout and the deck this card restyled does
 //      not exist in that document at all — with the switch-ON count as the positive control that
 //      the absence check is capable of returning non-zero.
+//
+// ⛔ TWO LEGS LEFT THIS FILE WITH THE PROJECT NODE'S DECK (card 269f46ef), neither of them dropped:
+//   · "the context tile renders a meter reading its seeded occupancy" — the meter it measured was
+//     the project `context` tile's. `KpiTile`'s own `fill` rendering is still asserted at its ONE
+//     remaining mount, the Workspace `plan` tile, by `workspace-plan-window.spec.ts` (which route-
+//     intercepts `/api/usage/limits` and reads `.loom-kpi-fill` directly) — so moving a second copy
+//     here would need that same interception and would assert nothing new. The "a tile with no
+//     ceiling has no meter" half is kept, re-pointed at the Workspace deck, in leg 1.
+//   · "a context above the red threshold reads red, not amber" — that ordering is still live and
+//     still the thing worth pinning; it moved WITH the reading it describes, to
+//     `atlas-project-overview.spec.ts`, which asserts it on the briefing line's `worst context`
+//     figure AND on the roster row's own context track (two renderings of one expression).
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
@@ -57,9 +73,6 @@ const FOLDED = { width: 1280, height: 1000 };
 // so a seeded token count IS the percentage the tile must read — no magic number on either side.
 const CTX_WINDOW = 1_000_000;
 const WARM_PCT = 42;
-const RED_PCT = 96;
-
-const TONE_RED = "rgb(255, 92, 92)"; // --loom-red #ff5c5c
 
 /** The six tiles each node declares, by the `key` its testid is built from (components/atlasHome.tsx). */
 const WORKSPACE_KPIS = ["projects", "live", "needs", "gates", "plan", "merged"];
@@ -112,38 +125,42 @@ async function expectTreeExpanded(page: Page) {
 }
 
 test.describe("Atlas KPI deck row (card 14e48890)", () => {
-  test("switch ON at 1440: six tiles on one row on both home nodes, with the tree expanded", async ({ page, loomDaemon }) => {
+  test("switch ON at 1440: six tiles on one row on the Workspace node, and no deck on the project node", async ({ page, loomDaemon }) => {
     const seeded = await seedProject(loomDaemon, WARM_PCT);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
 
-    // ── The PROJECT node.
-    await page.goto(loomDaemon.baseURL + "/project");
-    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
-    // Fixture identity: this is MY corpus, not a sibling daemon's. Settles the board read too.
-    await expect(page.getByTestId("atlas-board-embed").getByText(seeded.sentinel, { exact: true })).toBeVisible();
-    await expectTreeExpanded(page);
-    for (const key of PROJECT_KPIS) await expect(page.getByTestId(`atlas-kpi-${key}`)).toBeVisible();
-
-    const proj = (await deckRows(page))!;
-    expect(proj.tiles, "all six tiles are present — equal tops over a shrunken deck would be vacuous").toBe(6);
-    expect(proj.tops, "all six share one offsetTop").toHaveLength(1);
-    expect(proj.lefts, "…at six distinct x positions, so that is one row of six and not a stack").toHaveLength(6);
-    expect(proj.deckHeight, "the deck is exactly one tile tall").toBe(proj.tallestTile);
-
-    // ── The WORKSPACE node, same viewport, same assertions.
+    // ── The WORKSPACE node — the deck's one remaining mount (card 269f46ef).
     await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    // Fixture identity: this is MY corpus, not a sibling daemon's.
     await expect(page.getByText(seeded.project.name, { exact: false }).first()).toBeVisible();
     await expectTreeExpanded(page);
     for (const key of WORKSPACE_KPIS) await expect(page.getByTestId(`atlas-kpi-${key}`)).toBeVisible();
 
     const root = (await deckRows(page))!;
-    expect(root.tiles).toBe(6);
-    expect(root.tops, "the workspace deck shares one offsetTop too").toHaveLength(1);
-    expect(root.lefts).toHaveLength(6);
-    expect(root.deckHeight).toBe(root.tallestTile);
+    expect(root.tiles, "all six tiles are present — equal tops over a shrunken deck would be vacuous").toBe(6);
+    expect(root.tops, "all six share one offsetTop").toHaveLength(1);
+    expect(root.lefts, "…at six distinct x positions, so that is one row of six and not a stack").toHaveLength(6);
+    expect(root.deckHeight, "the deck is exactly one tile tall").toBe(root.tallestTile);
+
+    // A figure with no natural ceiling carries NO meter — so "the deck renders meters" can never be
+    // satisfied by a deck that put one under every tile. (The one tile that DOES carry a meter here,
+    // `plan`, is asserted with its real fill geometry in workspace-plan-window.spec.ts, which route-
+    // intercepts the usage payload this hermetic daemon cannot produce.)
+    await expect(page.getByTestId("atlas-kpi-projects").locator(".loom-kpi-track")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-kpi-needs").locator(".loom-kpi-track")).toHaveCount(0);
+
+    // ── The PROJECT node, same viewport: the owner removed the deck from it entirely. Asserted
+    // AFTER the workspace count above, which is this absence's positive control — a zero here with
+    // nothing proving the locator can be non-zero would pass against a broken testid.
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-overview-roster"),
+      "the project node's own primary surface, so this is a loaded page and not a blank one").toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
+    await expect(page.locator(".loom-kpi")).toHaveCount(0);
+    for (const key of PROJECT_KPIS) await expect(page.getByTestId(`atlas-kpi-${key}`)).toHaveCount(0);
   });
 
   test("switch ON: the one-row measurement reports TWO rows below the fold (the control)", async ({ page, loomDaemon }) => {
@@ -154,67 +171,15 @@ test.describe("Atlas KPI deck row (card 14e48890)", () => {
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(FOLDED);
 
-    await page.goto(loomDaemon.baseURL + "/project");
+    await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
-    await expect(page.getByTestId("atlas-board-embed").getByText(seeded.sentinel, { exact: true })).toBeVisible();
+    await expect(page.getByText(seeded.project.name, { exact: false }).first()).toBeVisible();
 
     const folded = (await deckRows(page))!;
     expect(folded.tiles, "the same six tiles").toBe(6);
     expect(folded.tops, "two rows at 1280 — the same probe that read one row at 1440").toHaveLength(2);
     expect(folded.lefts, "…three columns, so the fold is 3+3 and never an orphaned tail").toHaveLength(3);
     expect(folded.deckHeight, "and the deck really is taller than one tile here").toBeGreaterThan(folded.tallestTile);
-  });
-
-  test("switch ON: the context tile renders a meter reading its seeded occupancy; a tile without a ceiling has none", async ({ page, loomDaemon }) => {
-    const seeded = await seedProject(loomDaemon, WARM_PCT);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
-    await page.setViewportSize(WIDE);
-    await page.goto(loomDaemon.baseURL + "/project");
-
-    const context = page.getByTestId("atlas-kpi-context");
-    await expect(context.locator(".loom-kpi-value")).toHaveText(`${WARM_PCT}%`);
-    const track = context.locator(".loom-kpi-track");
-    await expect(track).toBeVisible();
-
-    // The fill is the SEEDED ratio, not merely a bar: a track with a 0-width (or full-width) fill
-    // would render identically to a reader and mean nothing.
-    const fill = context.locator(".loom-kpi-fill");
-    const geom = await fill.evaluate((el) => {
-      const own = el.getBoundingClientRect().width;
-      const parent = (el.parentElement as HTMLElement).getBoundingClientRect().width;
-      return { pct: Math.round((own / parent) * 100), spansTile: Math.round(parent) };
-    });
-    expect(geom.pct, "the fill is the seeded occupancy").toBe(WARM_PCT);
-    // Full-tile-width, as the approved mockup draws it (atlas.css `.kpitile .meter`), not a fixed stub.
-    const tileInner = await context.evaluate((el) => {
-      // `clientWidth`, not the bounding box: the tile carries a 1px border on each side and the
-      // track is laid out inside it, so a box-width comparison is off by exactly those 2px.
-      const cs = getComputedStyle(el);
-      return Math.round(el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
-    });
-    expect(geom.spansTile).toBe(tileInner);
-
-    // A figure with no natural ceiling carries no meter — "renders a meter" must not be satisfiable
-    // by a deck that put one under every tile.
-    await expect(page.getByTestId("atlas-kpi-cards").locator(".loom-kpi-track")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-kpi-needs").locator(".loom-kpi-track")).toHaveCount(0);
-  });
-
-  test("switch ON: a context above the red threshold reads red, not amber", async ({ page, loomDaemon }) => {
-    // Ordered amber-first (`>= 80 ? amber : >= 95 ? red`) the red branch is unreachable, because
-    // every value at 95 is also at 80 — so the tile and the meter fill under it could never show
-    // the one state the tile exists to surface.
-    const seeded = await seedProject(loomDaemon, RED_PCT);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
-    await page.setViewportSize(WIDE);
-    await page.goto(loomDaemon.baseURL + "/project");
-
-    const context = page.getByTestId("atlas-kpi-context");
-    await expect(context.locator(".loom-kpi-value")).toHaveText(`${RED_PCT}%`);
-    await expect(context.locator(".loom-kpi-value")).toHaveCSS("color", TONE_RED);
-    await expect(context.locator(".loom-kpi-fill")).toHaveCSS("background-color", TONE_RED);
   });
 
   test("switch OFF: the classic Overview renders its own layout and no KPI deck exists at all", async ({ page, loomDaemon }) => {
@@ -240,10 +205,15 @@ test.describe("Atlas KPI deck row (card 14e48890)", () => {
 
     // POSITIVE CONTROL for that absence: the same locators are non-zero with the switch on, so a
     // zero above is the classic page's real shape and not a selector that matches nothing anywhere.
+    // On `/home`, the deck's one remaining mount since card 269f46ef — `/project` would now report
+    // zero for the opposite reason and could not discriminate anything.
     await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/project");
+    await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.locator(".loom-kpideck")).toHaveCount(1);
     await expect(page.locator(".loom-kpi")).toHaveCount(6);
-    await expect(page.locator(".loom-kpi-track")).toHaveCount(1);
+    // The `plan` tile is the Workspace deck's one meter. It renders a track only once the usage
+    // payload resolves AVAILABLE, which this hermetic daemon never does (no OAuth credentials), so
+    // the count here is 0 — the live-payload case is workspace-plan-window.spec.ts's.
+    await expect(page.locator(".loom-kpi-track")).toHaveCount(0);
   });
 });

@@ -597,12 +597,19 @@ export function BandPanel({ label, count, action, children, style, testId }: {
   return (
     <Panel data-testid={testId} className="loom-bandpanel" style={style}>
       <div className="loom-bandhead">
-        {/* nowrap on both: a band column is NARROW — MEASURED at 1440, the five tracks are 283.9 /
-            244.7 / 195.8 / 195.8 / 195.8 px (card 102bc915), so three of the five are under 200px.
-            This comment used to say "~250px", a figure taken at 1600; don't size anything to a
-            remembered number, re-measure at the width you care about. A label allowed to wrap inside
-            the head pushes the row to two lines for a reason the reader cannot see. Keep the LABEL
-            short instead — the head wrapping is the safety net, not the plan. */}
+        {/* nowrap on both: a band column is NARROW — MEASURED at 1440 on a 1156px content column,
+            the five tracks are 287 / 220 / 152 / 135 / 321 px, so three of the five are under
+            225px and two are under 160px. Card 102bc915 recorded 283.9 / 244.7 / 195.8 / 195.8 /
+            195.8 for the same five-track rule; that was BEFORE card b4442d27 re-weighted it to
+            `1.7 / 1.3 / 0.9 / 0.8 / minmax(300px, 1.9)fr`, which is where the current figures come
+            from — they are re-derivable from that template by arithmetic and were confirmed by
+            measurement. Don't size anything to a remembered number from either set; re-measure at
+            the width you care about. A label allowed to wrap inside the head pushes the row to two
+            lines for a reason the reader cannot see. Keep the LABEL short instead — the head
+            wrapping is the safety net, not the plan.
+
+            Only the WORKSPACE node still draws this band: card 269f46ef replaced the project
+            node's with a stack of full-width cards, so these tracks describe one node now. */}
         <SectionLabel style={{ margin: 0, whiteSpace: "nowrap" }}>{label}</SectionLabel>
         {count !== undefined && <span className="loom-bandcount">{count}</span>}
         <span style={{ flex: 1 }} />

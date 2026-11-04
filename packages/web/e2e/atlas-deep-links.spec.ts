@@ -15,8 +15,11 @@
 //
 // Surfaces covered, and why each one:
 //   1. `/board?task=`                      the Board node — the address the classic link already used.
-//   2. `/project?task=`                    the project node (ATLAS-ONLY, card fd99b2d7) — its Overview
-//                                          tab embeds the whole <Board>, so the link must land here too.
+//   2. `/project?task=`                    the project node (ATLAS-ONLY, card fd99b2d7). Its Overview
+//                                          tab embedded the whole <Board> until card 269f46ef removed
+//                                          it on the owner's instruction, so the link now NORMALIZES
+//                                          onto the node's Board tab rather than opening in place —
+//                                          same shape as leg 4b, and the deep link still resolves.
 //   3. `/project?tab=deck&task=`           a LEGACY tab param plus the card param on one URL.
 //                                          (The Workspace node's own `?tab=deck` went the same way
 //                                          one card later — see atlas-home.spec.ts, card 4a0ad464.)
@@ -169,19 +172,33 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     await page.setViewportSize(VIEWPORT);
 
     // ── Overview tab (the node's default, no tab param at all) ──
+    //
+    // 🔴 THE LINK NO LONGER LANDS WHERE IT IS ISSUED, AND THAT IS THE NEW CLAIM. Card 269f46ef
+    // removed the embedded board from this tab on the owner's own instruction, so `/project?task=`
+    // has nothing on the Overview that can show a card dialog. `ProjectHome` normalizes the ADDRESS
+    // onto the node's Board tab instead — the same move, for the same reason, as the Platform
+    // node's own normalization in leg 4b (card 260fb29a): rewrite the address rather than derive a
+    // tab, because `Board` clears the param it consumes. The deep link still WORKS, which is what
+    // this leg has always been for; where it ends up is what changed.
     await page.goto(`${loomDaemon.baseURL}/project?task=${encodeURIComponent(target.id)}`);
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await expect(page.getByTestId("atlas-board-embed"), "the project node's embedded board").toBeVisible();
     await assertDialogIsCard(page, target, decoy);
-    await expect(page).toHaveURL(/\/project$/);
+    await expect(page, "the card link normalized onto the node's Board tab").toHaveURL(/\/board$/);
     expect(page.url()).not.toContain("task=");
-    // The CONTROL for the readout check below: Overview is identified by the 26px `.loom-kpideck`,
-    // and `.loom-kpistrip` — the compact readout the removed Deck tab owned, and which card 4a0ad464
-    // then deleted outright, from every tab of every node — is what must be absent. Asserted here
-    // too, on an address that was never in doubt, so neither locator can be one that is simply
-    // always present or simply always missing.
-    await expect(page.locator(".loom-kpideck"), "the Overview tab's own readout").toBeVisible();
+    // The frame is still on the PROJECT node — a normalization that navigated out of the node (or
+    // into another project) would satisfy the dialog check above and be a different bug.
+    await expect(page.getByTestId("atlas-breadcrumb")).toContainText(project.name);
+
+    // …and the Overview it bounced off really does render, with no board of its own. Asserted on a
+    // clean load of the same address without the param, so this is the tab's own shape and not a
+    // mid-normalization frame. `.loom-ovbrief` is the Overview's own readout since card 269f46ef,
+    // and `.loom-kpistrip` — the compact readout the removed Deck tab owned, which card 4a0ad464
+    // then deleted from every tab of every node — is what must be absent; neither locator can be
+    // one that is simply always present or simply always missing.
+    await page.goto(`${loomDaemon.baseURL}/project`);
+    await expect(page.locator(".loom-ovbrief"), "the Overview tab's own readout").toBeVisible();
     await expect(page.locator(".loom-kpistrip")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-board-embed")).toHaveCount(0);
 
     // ── A LEGACY `?tab=deck` on the node, carrying a card param too ──
     // A fresh document load, not a tab click, so the two params arrive together exactly as a pasted
@@ -192,19 +209,15 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     await assertDialogIsCard(page, target, decoy);
 
     // Two things at once, and BOTH matter. (1) The dead tab param does not break the deep link: the
-    // card's dialog opened anyway, asserted above. (2) `task` is gone from the URL and `tab=deck` is
-    // NOT — Board clears only its own key with `p.delete("task")`, where a `setSearchParams({})` that
-    // rebuilt the query would have taken every other param with it. That delete is still what keeps a
-    // LIVE node tab (the Platform node's, leg 4 below) alive across a card param being consumed; this
-    // leg can no longer witness that on the project node, because the node has one home tab now.
-    await expect(page).toHaveURL(/\/project\?tab=deck$/);
+    // card's dialog opened anyway, asserted above. (2) The normalization DROPS `tab` and keeps
+    // everything else — `tab` is this node's own home-tab key and means nothing at `/board`, which
+    // is a re-homed tab with an address of its own. `task` is then gone because `Board` consumed and
+    // cleared it with `p.delete("task")`; that delete is still what keeps a LIVE node tab (the
+    // Platform node's, leg 4) alive across a card param being consumed.
+    await expect(page).toHaveURL(/\/board$/);
     expect(page.url()).not.toContain("task=");
-    // …and the unrecognised tab resolved to Overview rather than rendering nothing. The pair is
-    // asserted in this order (present first, absent second) so a mid-render page cannot satisfy it:
-    // the 26px `.loom-kpideck` is Overview's own readout, and `.loom-kpistrip` — which the Deck tab
-    // owned — is on no tab of any node any more (card 4a0ad464).
-    await expect(page.locator(".loom-kpideck"), "a legacy ?tab=deck resolved to the unified Overview").toBeVisible();
-    await expect(page.locator(".loom-kpistrip")).toHaveCount(0);
+    expect(page.url(), "the node's own tab key rode along to an address that has no use for it")
+      .not.toContain("tab=");
   });
 
   // ── 4. The Platform node — the other `?tab=` owner, and the always-mounted one ───────────────────

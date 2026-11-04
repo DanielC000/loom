@@ -9,11 +9,14 @@
 // each surface really does get the real `Set`-based filters — a different claim from "they share an
 // import", and the only one worth asserting.
 //
-//   1. the project node's Overview tab   `/project?tab=overview`  (ProjectHome.tsx)
-//   2. the SAME tab with its dashboard FOLDED (card 44f725fe) — the board sits ~320px higher.
-//      This was the project node's separate Deck tab until that card unified the two.
-//   3. the Board node                    `/board`                 (nav.tsx NAV_PAGES)
-//   4. the Platform node's Board tab     `/platform?tab=board`    (PlatformView.tsx)
+//   1. the Board node                    `/board`                 (nav.tsx NAV_PAGES)
+//   2. the Platform node's Board tab     `/platform?tab=board`    (PlatformView.tsx)
+//
+// ⛔ THERE USED TO BE TWO MORE, AND BOTH WERE ONE SURFACE: the project node's Overview tab, with
+// its dashboard unfolded and folded. Card 269f46ef removed the board from that tab on the owner's
+// instruction ("Remove Board."), so there is no filter bar there to assert. Nothing is left
+// uncovered — under Atlas `/board` IS the project node's Board tab, mounting the same
+// `<Board projectId>`, so surface 1 below is that node's board surface now.
 //
 // WHAT MAKES EACH LEG DISCRIMINATING — the mockup's single-select chip is the known-bad state every one
 // of these is shaped to fail against, so none of them can pass for the wrong reason:
@@ -271,33 +274,7 @@ async function assertMultiSelectFilters(
 }
 
 test.describe("the Board's multi-select filters on every Atlas board surface (card 5dcb5ae9)", () => {
-  // ── 1 + 2. The project node's home tab, in both of its geometries ───────────────────────────────
-  test("switch ON: the project node's Overview carries the real multi-select filters, dashboard unfolded and folded", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(uniq("atlasfilt-project"));
-    const cards = await seedCards(loomDaemon, project.id);
-
-    await seedAtlasOn(page);
-    await pinProject(page, project.id);
-    await page.setViewportSize(VIEWPORT);
-
-    const embed = page.getByTestId("atlas-board-embed");
-
-    await page.goto(`${loomDaemon.baseURL}/project?tab=overview`);
-    await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await assertMultiSelectFilters(embed, cards, "project node · Overview", SEED.length);
-
-    // Folding the dashboard away (card 44f725fe) is the board-FIRST read of the same node — what the
-    // Deck tab used to be, now a control rather than an address. The board is the SAME mount either
-    // way now (it used to be a second one), so what this half proves has changed with it: not that a
-    // second mount got its own filters, but that the one mount keeps its filters WORKING once the
-    // page has reflowed around it — asserted from scratch, since the sequence above left it clean.
-    await page.getByTestId("atlas-banddisc-bar").click();
-    await expect(page.getByTestId("atlas-banddisc-bar")).toHaveAttribute("aria-expanded", "false");
-    await expect(page.getByTestId("atlas-dashboard-band")).toBeHidden();
-    await assertMultiSelectFilters(embed, cards, "project node · Overview, dashboard folded", SEED.length);
-  });
-
-  // ── 3. The Board node ───────────────────────────────────────────────────────────────────────────
+  // ── 1. The Board node — which under Atlas IS the project node's Board tab ───────────────────────
   test("switch ON: the Board node carries the real multi-select filters", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasfilt-boardnode"));
     const cards = await seedCards(loomDaemon, project.id);
@@ -311,7 +288,7 @@ test.describe("the Board's multi-select filters on every Atlas board surface (ca
     await assertMultiSelectFilters(page.locator("main"), cards, "Board node", SEED.length);
   });
 
-  // ── 4. The Platform node's own Board tab ────────────────────────────────────────────────────────
+  // ── 2. The Platform node's own Board tab ────────────────────────────────────────────────────────
   test("switch ON: the Platform node's Board tab carries the real multi-select filters", async ({ page, loomDaemon }) => {
     // The Platform node's board is the reserved home's, never the active project's (card fa3bb729) —
     // so the cards have to be seeded THERE, and removed after: that board is shared with every other

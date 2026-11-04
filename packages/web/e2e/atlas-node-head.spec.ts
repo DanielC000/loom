@@ -115,7 +115,9 @@ async function seedFleet(loomDaemon: LoomDaemon, project: { id: string; name: st
   const mgr = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: uniq("Conductor"), busy: true });
   await loomDaemon.seedLiveSession({ project, role: "worker", agentName: uniq("Hauler"), busy: true, parentSessionId: mgr.sessionId });
   await loomDaemon.seedLiveSession({ project, role: "worker", agentName: uniq("Idler"), busy: false, parentSessionId: mgr.sessionId });
-  return { working: 2, live: 3, fleetTile: "1/2", managerSessionId: mgr.sessionId };
+  // `fleetTile` ("1/2", the removed `mgr · workers` deck tile's own figure) went with that tile —
+  // card 269f46ef. The briefing line's `fleet` reading is the LIVE count, i.e. `live` below.
+  return { working: 2, live: 3, managerSessionId: mgr.sessionId };
 }
 
 /**
@@ -199,12 +201,18 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     await expect(page.getByTestId("atlas-nodehead-pill-working")).toHaveText(`${fleet.working} working`);
     await expect(page.getByTestId("atlas-nodehead-pill-head")).toHaveText(`${proj.branch} ${proj.sha8}`);
 
-    // ⭐ NOT A KPI, MEASURED: the working pill and the `mgr · workers` tile are different numbers on
-    // one screen, and neither is the live count. A pill wired to either live figure reads `1/2` or
-    // `3` here and fails. (Overview carries the DECK, so the tile is read off the deck's own tile.)
-    await expect(page.getByTestId("atlas-kpi-fleet").locator(".loom-kpi-value")).toHaveText(fleet.fleetTile);
-    expect(String(fleet.working)).not.toBe(fleet.fleetTile);
-    expect(fleet.working).not.toBe(fleet.live);
+    // ⭐ NOT A KPI, MEASURED: the working pill is a BUSY count, and it is a different number from
+    // the fleet readout beside it on the same screen. A pill wired to the live figure instead reads
+    // `3` here and fails.
+    //
+    // The readout it is compared against moved with card 269f46ef: the Overview carried a
+    // `mgr · workers` deck tile reading `1/2`, and now carries a briefing line whose `fleet` reading
+    // is the live count itself. That makes the comparison SHARPER, not weaker — the pill must now
+    // differ from a figure printed ~60px away rather than from a derived pair.
+    await expect(page.getByTestId("atlas-brief-fleet").locator(".loom-ovbrief-n"))
+      .toHaveText(String(fleet.live));
+    expect(fleet.working, "the seeded busy count and live count must differ, or the pill claim is vacuous")
+      .not.toBe(fleet.live);
 
     const keys = await renderedTabKeys(page);
     // The node is the many-tab one card 25c08fba built, not a remnant of it — otherwise "on every tab"

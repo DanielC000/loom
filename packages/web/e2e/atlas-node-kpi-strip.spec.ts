@@ -148,14 +148,16 @@ test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
       await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
 
       if (key === "overview") {
-        // The node's readout lives HERE and nowhere else now. `toHaveText` retries, so this doubles
-        // as the settle for the board query behind the figure — and it is the positive control for
-        // every absence in this loop: the figures are real, they are just not on the tab row.
-        await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
-        await expect(page.getByTestId("atlas-kpi-cards").locator(".loom-kpi-value"))
+        // The node's readout lives HERE and nowhere else now — a BRIEFING LINE since card 269f46ef,
+        // where it was a six-tile deck before. `toHaveText` retries, so this doubles as the settle
+        // for the board query behind the figure — and it is the positive control for every absence
+        // in this loop: the figures are real, they are just not on the tab row.
+        await expect(page.getByTestId("atlas-overview-brief")).toBeVisible();
+        await expect(page.getByTestId("atlas-brief-cards").locator(".loom-ovbrief-n"))
           .toHaveText(String(seeded.open));
-        const deck = await deckFigures(page);
-        if (deck.cards !== String(seeded.open)) offenders.push(`${key}: deck cards=${deck.cards}`);
+        // …and the thing this spec forbids is not merely off the TAB ROW, it is off the node: the
+        // deck's own container is gone from this node entirely (its remaining mount is `/home`).
+        await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
       }
 
       const readout = await tabRowReadout(page);
@@ -226,8 +228,10 @@ test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
       const isOverviewTab = await page.getByTestId("atlas-tab-overview").getAttribute("aria-selected") === "true";
       if (isOverviewTab) {
         // The ONE address whose body still states the node's figures, and the positive control for
-        // every absence collected here — the readout exists, it has simply left the tab row.
-        await expect(page.getByTestId("atlas-kpi-cards").locator(".loom-kpi-value")).toHaveText(String(seeded.open));
+        // every absence collected here — the readout exists, it has simply left the tab row. Since
+        // card 269f46ef that readout is the briefing line, not the deck.
+        await expect(page.getByTestId("atlas-brief-cards").locator(".loom-ovbrief-n"))
+          .toHaveText(String(seeded.open));
       }
       const readout = await tabRowReadout(page);
       if (!noReadout(readout)) offenders.push(`${path}: ${JSON.stringify(readout)}`);

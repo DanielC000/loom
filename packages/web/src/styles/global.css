@@ -2681,6 +2681,369 @@ button.loom-kpi.is-open {
   width: auto;
 }
 
+/* ── The PROJECT node's Overview (card 269f46ef) ─────────────────────────────────────────
+   The owner's "C · Roster" pick: a briefing line, then Needs-you full width (his own
+   amendment), then the work-in-flight roster as the page's primary surface, then the board
+   lanes, then Pulse. Every rule below is reached only from components/atlasProjectOverview.tsx,
+   which only pages/ProjectHome.tsx mounts — the WORKSPACE node keeps `.loom-kpideck`,
+   `.loom-atlas-band` and `.loom-bandpanel` exactly as they are and is untouched by this block.
+
+   The one fold is at 1180px, the SAME breakpoint `.loom-atlas-band` already folds at, so the
+   two Atlas home nodes still change shape together rather than at two widths nobody can
+   predict. At 1180px the content column is ~896px (viewport minus the 244px tree and the
+   40px gutters), which is where the roster's fixed cells stop leaving the Card column a
+   readable share.
+
+   @decision 269f46ef — the roster row's stacked form must keep all seven cells in the same
+   order; never drop a column at narrow width, which is the failure the fixed-height band had.
+   ───────────────────────────────────────────────────────────────────────────────────────── */
+.loom-ovbrief {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  background: var(--loom-panel);
+  border: 1px solid var(--loom-border);
+  border-radius: var(--loom-radius);
+}
+/* The divider lives on the CHILD, not on the cell, because a cell with a pop-over is wrapped in
+   its own positioned slot — so `:first-child` has to resolve against whichever of the two it is. */
+/* `flex-grow: 1` on EVERY child, not only on the trailing chart cell: MEASURED at 1440 with the
+   chart cell alone taking the slack, the four readings sat at their natural 233 / 175 / 147 / 121px
+   and the chart's cell ran to 480px, leaving a ~175px hole between the last reading and it. Spread
+   evenly instead, each reading gains ~35px of breathing room and the line reads as one instrument. */
+.loom-ovbrief > * {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  border-left: 1px solid var(--loom-border);
+}
+.loom-ovbrief > :first-child {
+  border-left: 0;
+}
+.loom-ovbrief-slot {
+  position: relative;
+}
+.loom-ovbrief-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 16px;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  transition: background 80ms linear;
+}
+button.loom-ovbrief-cell {
+  cursor: pointer;
+}
+button.loom-ovbrief-cell:hover {
+  background: var(--loom-panel-2);
+}
+button.loom-ovbrief-cell:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
+}
+/* The open reading keeps its own light while its breakdown shows — the same affordance
+   `button.loom-kpi.is-open` gives a tile, drawn as an inset edge because these cells share one
+   border rather than each carrying their own. */
+button.loom-ovbrief-cell.is-open {
+  background: var(--loom-panel-2);
+  box-shadow: inset 0 2px 0 var(--loom-phosphor);
+}
+.loom-ovbrief-l {
+  font-family: var(--loom-font-head);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--loom-text-muted);
+  white-space: nowrap;
+}
+.loom-ovbrief-v {
+  font-family: var(--loom-font-mono);
+  font-size: 15px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.loom-ovbrief-v em {
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--loom-text-muted);
+  margin-left: 6px;
+}
+.loom-ovbrief-trail {
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 9px 16px;
+}
+.loom-ovbrief-trailtext {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+  min-width: 0;
+}
+.loom-ovbrief-chart {
+  display: block;
+  flex: 0 1 170px;
+  min-width: 56px;
+}
+.loom-ovbrief-chart .loom-daybars {
+  height: 26px;
+}
+
+/* A full-width Overview card. The band's head/body grammar without `.loom-bandpanel`'s fixed
+   320px height — the same split the Workspace Sessions card makes, and for the same reason. */
+.loom-ovcard {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 10px 12px 12px;
+}
+.loom-ovcard > .loom-bandbody {
+  flex: 0 1 auto;
+}
+.loom-ovcard-foot {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--loom-border);
+  font-family: var(--loom-font-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--loom-text-muted);
+}
+
+/* The work-in-flight roster. Fixed cells for every column whose content has a KNOWN natural
+   width (a pill, a branch, a meter, an event name) and ONE flexible cell for the Card, which is
+   the only genuinely unbounded one — a proportional template instead gives the pill column slack
+   it cannot use and squeezes the one cell that could spend it. */
+.loom-ovroster {
+  display: flex;
+  flex-direction: column;
+}
+.loom-ovroster-head,
+.loom-ovroster-row {
+  display: grid;
+  /* `Last event` is 186px because the longest real event kind plus its relative time —
+     `worker_dispatched just now` — measures ~179px in the row's own 11.5px mono. Sized to the
+     content, not to a round number; the Card cell takes whatever is left (316px at 1440). */
+  grid-template-columns: 188px 76px minmax(0, 1fr) 118px 126px 186px 74px;
+  align-items: center;
+  column-gap: 12px;
+}
+.loom-ovroster-head {
+  padding: 0 0 7px;
+  border-bottom: 1px solid var(--loom-border);
+  font-family: var(--loom-font-head);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--loom-text-muted);
+}
+.loom-ovroster-row {
+  padding: 9px 0;
+  border-bottom: 1px solid var(--loom-border);
+}
+.loom-ovroster-row:last-child {
+  border-bottom: 0;
+}
+.loom-ovroster-row:hover {
+  background: var(--loom-panel-2);
+}
+/* The table's ONE level of indent: a worker under the manager that owns it. */
+.loom-ovroster-row.is-child > .loom-ovroster-agent {
+  margin-left: 3px;
+  padding-left: 14px;
+  border-left: 1px solid var(--loom-border);
+}
+.loom-ovroster-agent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.loom-ovroster-agent b {
+  font-family: var(--loom-font-mono);
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--loom-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.loom-ovroster-agent i {
+  flex: none;
+  font-style: normal;
+  font-family: var(--loom-font-head);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--loom-text-muted);
+}
+.loom-ovroster-state {
+  min-width: 0;
+}
+.loom-ovroster-cell {
+  display: block;
+  min-width: 0;
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  color: var(--loom-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.loom-ovroster-ctx {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  color: var(--loom-text-dim);
+}
+.loom-ovroster-track {
+  flex: 1 1 auto;
+  min-width: 24px;
+  height: 4px;
+  border-radius: var(--loom-radius-sm);
+  background: var(--loom-border);
+  overflow: hidden;
+}
+.loom-ovroster-track > span {
+  display: block;
+  height: 100%;
+}
+.loom-ovroster-pct {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.loom-ovroster-open {
+  justify-self: end;
+}
+/* Present in the DOM at EVERY width and hidden here: it is what lets the stacked row below name
+   all seven facts without a second render path, and a screen reader keeps it either way. */
+.loom-ovroster-lbl {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The board's lanes as label+count chips under the bar — the whole board signal in one strip. */
+.loom-ovlanes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 16px;
+  margin-top: 10px;
+}
+.loom-ovlane {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--loom-font-mono);
+  font-size: 11.5px;
+  color: var(--loom-text-dim);
+}
+.loom-ovlane-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.loom-ovlane-n {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The fold. A roster row becomes a labelled stacked block — the SAME seven cells in the SAME
+   order, each gaining its own label rather than any of them being dropped. */
+@media (max-width: 1180px) {
+  .loom-ovbrief {
+    flex-wrap: wrap;
+  }
+  .loom-ovbrief > * {
+    flex: 1 1 44%;
+  }
+  .loom-ovbrief > :nth-child(odd) {
+    border-left: 0;
+  }
+  .loom-ovbrief > :nth-child(n + 3) {
+    border-top: 1px solid var(--loom-border);
+  }
+  .loom-ovbrief-trail {
+    flex: 1 1 100%;
+    border-left: 0;
+    border-top: 1px solid var(--loom-border);
+    justify-content: space-between;
+  }
+  .loom-ovbrief-chart {
+    /* Grows, but capped: a 14-bar series drawn across a whole 616px row is 14 dashes with holes
+       between them, not a chart. */
+    flex: 1 1 auto;
+    max-width: 320px;
+  }
+  /* The header row has nothing to head once the cells stack. */
+  .loom-ovroster-head {
+    display: none;
+  }
+  .loom-ovroster-lbl {
+    position: static;
+    width: 68px;
+    height: auto;
+    margin: 0;
+    overflow: visible;
+    clip-path: none;
+    display: inline-block;
+    flex: none;
+    font-family: var(--loom-font-head);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--loom-text-muted);
+  }
+  .loom-ovroster-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 5px;
+    padding: 11px 0;
+  }
+  .loom-ovroster-row > .loom-ovroster-agent,
+  .loom-ovroster-row > .is-last {
+    grid-column: 1;
+  }
+  .loom-ovroster-row > .loom-ovroster-state,
+  .loom-ovroster-row > .loom-ovroster-open {
+    grid-column: 2;
+    justify-self: end;
+  }
+  .loom-ovroster-row > .is-card,
+  .loom-ovroster-row > .is-branch,
+  .loom-ovroster-row > .loom-ovroster-ctx {
+    grid-column: 1 / -1;
+  }
+  /* A 10% fill drawn across the whole row is a worse reading than the same fill across 200px —
+     the eye compares the BAR, and a bar that long turns every value into "almost nothing". */
+  .loom-ovroster-row > .loom-ovroster-ctx .loom-ovroster-track {
+    flex: 0 1 200px;
+  }
+}
+
 /* The Replay tab: two full-width sections stacked at the node's own rhythm (card ff6123de). The
    tab's panel wrapper is a plain div, so the gap lives here rather than on .loom-atlas-home. */
 .loom-atlas-replay {
@@ -3519,6 +3882,8 @@ button.loom-kpi.is-open {
   /* The Atlas home nodes' own hover fades (card fd99b2d7) — the KPI tiles and the project cards. */
   .loom-kpi,
   .loom-projcard,
+  /* The project Overview's briefing readings (card 269f46ef) — the same hover fade, same rule. */
+  .loom-ovbrief-cell,
   /* The Atlas tree's quick-spawn `＋` (card c6160c7d). */
   .loom-atlas-plus,
   /* The Workspace Sessions card (card 9b6be377): its row's hover fade and its twist's rotation —

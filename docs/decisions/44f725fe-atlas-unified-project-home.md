@@ -41,9 +41,9 @@ MEASURED control (rule removed, rebuilt): 2 of the spec's 3 legs go red at `toBe
 ## Do not
 
 - **Do not re-add a second HOME tab to `PROJECT_NODE_TABS`,** `deck` least of all. The two were one component with one data set; a second reading of one node belongs behind a control, not an address.
-- **Do not park this band with an inline `display`, and do not drop `.loom-atlas-band[hidden]` from `global.css`.** `hidden` alone loses to the band's `display: grid`, and the failure is silent in every assertion except a geometry one.
+- **Do not park this band with an inline `display`, and do not drop `.loom-atlas-band[hidden]` from `global.css`.** `hidden` alone loses to the band's `display: grid`, and the failure is silent in every assertion except a geometry one. (Still live: card `269f46ef` took the band off the PROJECT node, and `pages/WorkspaceHome.tsx` still mounts the same `BandDisclosure` over the same `.loom-atlas-band`.)
 - **Do not add a `LEGACY_REDIRECTS` row for `?tab=deck`.** Both shells mount that table from one declaration; `projectNodeTabAt`'s fallback already handles it.
-- **Do not shrink, summarize or gate the embedded `<Board/>`,** in either state. Standing owner directive (card `c6bdf358`): it is the primary board surface. Mount it ONCE — the fold changes the board's position, never its content.
+- ⚠️ **SUPERSEDED FOR THIS NODE by card `269f46ef` — see "The board left this tab" below.** It read: *"Do not shrink, summarize or gate the embedded `<Board/>`, in either state. Standing owner directive (card `c6bdf358`): it is the primary board surface. Mount it ONCE — the fold changes the board's position, never its content."* The owner later removed the embed outright, by his own instruction. What survives verbatim, and is still in force: the directive itself, on the surface it was written about — `pages/Overview.tsx`, the CLASSIC Overview's board embed, which card `269f46ef` does not touch (project memory `overview-board-embed-position-is-owner-ruled`). And the mount-ONCE half still binds wherever a board IS mounted on this node: its Board tab draws the real `<Board/>`, whole, and nothing on this node may draw a second or a summarised one.
 - **Do not change the first-visit default to COLLAPSED without the owner.** Expanded is a deliberate ruling: it keeps a first visit identical to what shipped before, so nobody loses a panel they never chose to fold.
 - **Do not make `nodeTabShowsKpiStrip` return true for `overview`,** and do not strip the re-homed tabs of their own readout. See `7874e8c2`.
 
@@ -89,3 +89,21 @@ instruction; see the superseding section appended to `7874e8c2`'s record.
   it; a pill for either is the duplication the fold is supposed to avoid, not a completeness win.
 - **Do not split the two nodes' fold state onto separate storage keys** without a reason the owner
   has actually asked for.
+
+## The board left this tab (card `269f46ef`, 2026-11-04)
+
+The owner's next round of feedback on this very page removed the thing this record was built around. Verbatim, under Projects › tab "Overview": *"Remove Board."* and *"Dashboard cards too cluttered on narrower page width. Remove 'AGENTS' card. Rework and Expand the rest of the cards now that the board is gone. Improve them."* He then picked direction **C · Roster** from three rendered mockups on request `891ed41f`, with one amendment, also verbatim: *"Overview C: 'Needs you' should be on top in its own row so it has enough space."*
+
+So the project node's Overview no longer embeds `<Board/>`, no longer mounts `KpiDeck`, and no longer mounts `BandDisclosure` or the five band panels at all. The node's board is its Board tab, which is unchanged. The full reasoning, the composition that replaced them, and what each removed panel's capability moved to: `docs/decisions/269f46ef-atlas-project-overview-roster.md`.
+
+**What in THIS record survives that, and what does not:**
+
+| claim | status |
+|---|---|
+| One home tab, not two; `deck` must not return | **Holds, untouched.** Nine tabs; `overview` is still the only home tab at the node's bare path. |
+| `?tab=deck` needs no `LEGACY_REDIRECTS` row | **Holds.** `projectNodeTabAt`'s fallback is still what resolves it, and `269f46ef` did not add a row. |
+| The disclosure, its storage key, and the first-visit-OPEN default | **Dead on the project node, live on the Workspace node.** `useDashboardOpen` and `DASHBOARD_OPEN_STORAGE_KEY` now have exactly one consumer (`pages/WorkspaceHome.tsx`). The shared-key prohibition below is therefore inert rather than wrong — there is nothing left to split. |
+| `.loom-atlas-band[hidden]` must stay in `global.css` | **Holds** — the Workspace node's band is the same element behind the same `hidden`. |
+| The `LaneBar` on the board head is what made removing the Deck tab lossless | **Holds, re-homed.** The project Overview draws the same `LaneBar` in its own Board card, now with its lanes named and counted under it instead of only in a hover title. |
+| `nodeTabShowsKpiStrip` and the eight re-homed tabs' readouts are untouched | **Holds.** `269f46ef` changed only the home tab's body. |
+| The measured fold table above (board top 670 → 386 → 710) | **Historical.** It describes a composition that no longer exists on this node. Kept because it is the evidence for the D1 ruling, not a live figure — do not re-measure against it. |

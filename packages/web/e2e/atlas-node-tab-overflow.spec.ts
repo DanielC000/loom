@@ -180,7 +180,11 @@ async function declaredTabKeys(page: Page, loomDaemon: LoomDaemon, homePath: str
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.goto(loomDaemon.baseURL + homePath);
   await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
-  await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+  // The settle: the home tab's BODY has rendered, so the tab row below is the settled one. The two
+  // nodes no longer share a marker for that — card 269f46ef replaced the project node's KPI deck
+  // with its own briefing line, and the Workspace node kept its deck. Keyed off the path rather
+  // than an `or` of the two, so a node rendering the WRONG body would still fail here.
+  await expect(page.getByTestId(homePath === "/home" ? "atlas-kpi-deck" : "atlas-overview-brief")).toBeVisible();
   await expect(page.getByTestId("atlas-node-tabs-more")).toHaveCount(0);
   return (await blockGeometry(page)).tabKeys.slice().sort();
 }

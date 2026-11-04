@@ -191,10 +191,14 @@ test.describe("Atlas inline merge actions (card c2968651)", () => {
     await pinProject(page, mgr.projectId);
     await page.goto(loomDaemon.baseURL + "/project");
 
-    const tile = page.getByTestId("atlas-kpi-context");
+    // The reading that carries this breakdown. It was the `worst context` KPI tile until card
+    // 269f46ef replaced the project node's deck with a briefing line; the pop-over itself is the
+    // SAME `ContextList`, rendered in the same `.loom-kpi-pop` chrome, so every assertion below is
+    // unchanged — only the trigger moved.
+    const tile = page.getByTestId("atlas-brief-context");
     await expect(tile).toBeVisible();
     await tile.click();
-    const pop = page.getByTestId("atlas-kpi-pop-context");
+    const pop = page.getByTestId("atlas-brief-pop-context");
     await expect(pop).toBeVisible();
 
     // THE ROW'S EXIT — the agent's name is now the link to the session that owns the real controls.

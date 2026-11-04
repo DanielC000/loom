@@ -1,5 +1,5 @@
 import { useMemo, useRef, type ReactNode } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { contextWindowForModel, resolveConfig, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
@@ -9,7 +9,7 @@ import {
   GLOBAL_ACTIVITY_CAP, PULSE_EXITED_REFETCH_MS, attentionItemInProject, pulseExitedManagers,
 } from "../lib/fleet";
 import { bySessionActivity, byCreatedStable } from "../lib/sessions";
-import { EventRow, FleetRow, worstContext } from "../components/fleet";
+import { EventRow, FleetRow, sessionStatus, worstContext } from "../components/fleet";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import Board from "./Board";
 import Terminals from "./Terminals";
@@ -22,17 +22,21 @@ import ProjectUsage from "./ProjectUsage";
 import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
-  AtlasNodeHead, BandDisclosure, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiPill,
-  LaneBar, MeterRow, NodeTabs, useDashboardOpen,
-  type KpiItem, type NodeHeadPill,
+  AtlasNodeHead, BandEmpty, BandFoot, DataRow, DayBars, LaneBar, MeterRow, NodeTabs,
+  type NodeHeadPill,
 } from "../components/atlasHome";
-import { AgentRosterRow, AgentsQuickSpawn, RosterEmpty, WorkersDispatchedNote } from "../components/atlasAgents";
+import {
+  BriefLine, BriefTrailing, LaneChips, OverviewCard, RosterTable,
+  type BriefReading, type RosterCell,
+} from "../components/atlasProjectOverview";
+import { AgentsQuickSpawn } from "../components/atlasAgents";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
 import { splitRoster } from "../lib/atlasAgents";
 import {
   boardRollup, gateLanes, isLiveSession, mergeThroughput, plural, relativeTime,
   useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
+import { lastEventBySession, rosterCardLabel, rosterRows, taskTitlesById } from "../lib/atlasProjectOverview";
 import { PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt } from "../nav";
 import { color, font } from "../theme";
 
@@ -44,20 +48,27 @@ import { color, font } from "../theme";
 // reading of this file: "What is the need to have an overview tab, and a deck tab? Feels redundant
 // to me. Unify the pages to one."). He was right at the level of the code: Overview and Deck were
 // never two pages, just two `return` branches over ONE `kpis` array and ONE set of five band-panel
-// variables, differing only in how they spent the viewport — Overview bought the board 1316px of
-// width and spent 670px of height on the band; Deck bought the height and spent 330px of width on a
-// rail. Folding the band behind a disclosure gives the board BOTH (1316px starting at y 386), which
-// is strictly more board than either tab ever offered, and it costs no content: the Gates panel
-// survives here, where the Deck tab dropped it outright.
+// variables, differing only in how they spent the viewport.
 //
 // The tab SET and each tab's address are declared once, in src/nav.tsx's PROJECT_NODE_TABS — read
 // there for why a re-homed tab keeps the path it already had rather than becoming a `?tab=`. This
 // file owns only what the declaration cannot: each tab's COUNT, and its BODY.
 //
-// ⭐ OWNER-RULED (card c6bdf358, restated on fd99b2d7 and again on 25c08fba): the board embedded in
-// the Overview tab is the owner's PRIMARY board surface. It is the real <Board/>, whole — all its
-// lanes, filters, drag and the centred card dialog — never a summary, a trimmed view or a link to
-// one. The Board TAB is a second, full-bleed mount of the same component, not a replacement for it.
+// 🔴 THE OVERVIEW NO LONGER EMBEDS THE BOARD, AND NO LONGER MOUNTS THE KPI DECK OR THE FIVE-PANEL
+// BAND — card 269f46ef, the owner's own later instruction on this page, verbatim: "Remove Board." /
+// "Dashboard cards too cluttered on narrower page width. Remove 'AGENTS' card. Rework and Expand
+// the rest of the cards now that the board is gone. Improve them." He then picked direction C ·
+// Roster from three rendered mockups, with one amendment, also verbatim: "Overview C: 'Needs you'
+// should be on top in its own row so it has enough space."
+//
+// That OVERRIDES the standing directive this comment used to restate (card c6bdf358, restated on
+// fd99b2d7, 25c08fba and 44f725fe) that the embedded board is the owner's primary board surface. It
+// is overridden ONLY here, on the Atlas project node: the CLASSIC pages/Overview.tsx board embed is
+// a different surface, is still the owner's primary board, and this card does not touch it. The
+// project node's Board TAB is now the node's only board, mounted whole and unchanged.
+//
+// @decision 269f46ef — do not re-embed <Board/> in this tab, and do not re-add the KpiDeck or the
+// BandDisclosure here. Both were removed on the owner's own instruction, not as a tidy-up.
 //
 // 🔴 A TAB BODY IS MOUNTED ON FIRST VISIT AND NEVER UNMOUNTED AFTER (card 25c08fba). An inactive
 // body stays in the tree with `hidden`, exactly as the Platform node's five panels do (card
@@ -90,11 +101,6 @@ export default function ProjectHome() {
   // that had no project pinned yet, which is why half the suite stayed green through it.
   const visited = useRef<Set<string>>(new Set());
   visited.current.add(tab);
-  // The dashboard disclosure's persisted state (card 44f725fe). 🔴 DECLARED HERE, above the
-  // `!projectId` early return, with every other hook — for the same measured reason the ref above
-  // is: a hook below it makes the no-project render path call one FEWER hook than the resolved one,
-  // and the first resolve of the active project then throws React error #310 and blanks the app.
-  const [dashOpen, setDashOpen] = useDashboardOpen();
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
 
@@ -201,40 +207,40 @@ export default function ProjectHome() {
     );
   }
 
-  const kpis: KpiItem[] = [
+  // A `?task=<id>` card deep link arriving on any tab but Board normalizes the ADDRESS onto the
+  // Board tab, which is the only surface on this node that can show the dialog it asks for. Until
+  // card 269f46ef the Overview embedded a whole <Board/> and consumed the param itself; with the
+  // embed gone the link would otherwise land on a page that cannot answer it and leave `task=`
+  // sitting in the URL. Same shape, and the same reasoning, as the Platform node's own
+  // normalization (pages/PlatformView.tsx) — rewrite the address, never merely derive a tab, since
+  // Board CLEARS the param it consumes.
+  //
+  // `tab` is dropped rather than carried: it is this node's own home-tab key and means nothing at
+  // `/board`, which is a re-homed tab with an address of its own. Every other incoming key rides
+  // along.
+  //
+  // @decision 269f46ef — a card deep link on this node must still reach a board. Never remove this
+  // normalization without putting a <Board/> back on whichever tab the link lands on.
+  const taskParam = new URLSearchParams(search).get("task");
+  if (taskParam && tab !== "board") {
+    const next = new URLSearchParams(search);
+    next.delete("tab");
+    return <Navigate to={`/board?${next.toString()}`} replace />;
+  }
+
+  // ── The briefing line (card 269f46ef) ────────────────────────────────────────────────────────
+  // Five readings where the deck had six tiles, each keeping the breakdown its tile owned.
+  //
+  // ⛔ `needs you` is NOT among them: it is the full-width card directly below, whose own head
+  // carries the count. And neither `working` nor the repo head is here either — both are node-head
+  // pills (card 5968d7e0), which render on EVERY tab, so restating one ~40px under itself is the
+  // same-number-twice shape card 939922ee was filed against. The mockup this was built from drew
+  // `HEAD main <sha>` in both places; that is the one thing in it not reproduced, deliberately.
+  const briefReadings: BriefReading[] = [
     {
-      key: "needs", label: "needs you", value: projAttention.length,
-      tone: projAttention.length > 0 ? "amber" : "muted",
-      sub: projAttention.length > 0 ? projAttention.slice(0, 3).map((a) => a.kind.toLowerCase()).join(" · ") : "nothing waiting",
-      popover: <AttentionList items={projAttention} cap={8} />,
-    },
-    {
-      key: "fleet", label: "mgr · workers", value: `${liveManagers.length}/${workers.filter(isLiveSession).length}`,
-      tone: liveManagers.length > 0 ? "phosphor" : "muted",
-      sub: `${live.length} live · ${roster.spawnable.length} spawnable`,
-      popover: <FleetList managers={managers} workers={workers} />,
-    },
-    {
-      key: "context", label: "worst context", value: wc.ctx > 0 ? `${ctxPct}%` : "—",
-      // Highest band FIRST. Tested amber-before-red, `>= 95` was unreachable — anything at 95 is also
-      // at 80 — so neither the figure nor the meter fill under it could ever go red, which is the one
-      // state the tile exists to surface. The workspace node's `plan` tile already orders it this way;
-      // these two are the only meter tiles in the deck and they now read the same.
-      tone: ctxPct >= 95 ? "red" : ctxPct >= 80 ? "amber" : "phosphor",
-      sub: worstSession ? `${worstSession.agentName} · ${plural(worstSession.ctxTurns ?? 0, "turn")}` : "no session reports context",
-      fill: wc.ctx > 0 ? wc.ratio : undefined,
-      popover: <ContextList sessions={live} recycleAt={recycleAt} />,
-    },
-    {
-      key: "gates", label: "gate run·queued", value: `${lanes.running}·${lanes.queued}`,
-      tone: lanes.queued > 0 ? "amber" : lanes.running > 0 ? "phosphor" : "muted",
-      sub: `cap ${lanes.cap} · daemon-wide`,
-      popover: <GateLaneList lanes={lanes} />,
-    },
-    {
-      key: "cards", label: "open cards", value: board.open,
+      key: "cards", label: "board", value: board.open, sub: `open · ${board.inReview} review · ${board.waiting} waiting`,
       tone: board.open > 0 ? "cyan" : "muted",
-      sub: `${board.inReview} in review · ${board.waiting} waiting on you`,
+      title: `${plural(board.total, "card")} on the board, ${board.open} of them open`,
       popover: (
         <>
           {board.lanes.map((l) => <DataRow key={l.key} label={l.label} value={l.count} tone={l.count > 0 ? "cyan" : "muted"} />)}
@@ -243,95 +249,49 @@ export default function ProjectHome() {
       ),
     },
     {
-      key: "merged", label: "merged today", value: merges.branches,
-      tone: merges.branches > 0 ? "phosphor" : "muted",
-      sub: merges.branches > 0 ? `last ${relativeTime(merges.lastEndedAt)}` : "nothing landed yet",
-      popover: (
-        <>
-          <DayBars series={merges.byDay} label="branches landed per day" />
-          <BandFoot>Branches landed per day, last 14. A batched merge counts every branch it landed.</BandFoot>
-        </>
-      ),
+      key: "fleet", label: "fleet", value: live.length, sub: `live · ${roster.spawnable.length} spawnable`,
+      tone: liveManagers.length > 0 ? "phosphor" : "muted",
+      title: `${liveManagers.length} live manager(s) and ${workers.filter(isLiveSession).length} live worker(s) in this project`,
+      popover: <FleetList managers={managers} workers={workers} />,
+    },
+    {
+      key: "context", label: "worst context", value: wc.ctx > 0 ? `${ctxPct}%` : "—",
+      // Highest band FIRST. Tested amber-before-red, `>= 95` was unreachable — anything at 95 is also
+      // at 80 — so the figure could never go red, which is the one state this reading exists to
+      // surface. The workspace node's `plan` tile orders it the same way.
+      tone: ctxPct >= 95 ? "red" : ctxPct >= 80 ? "amber" : "phosphor",
+      sub: worstSession ? worstSession.agentName : "no session reports context",
+      title: worstSession ? `${worstSession.agentName} · ${plural(worstSession.ctxTurns ?? 0, "turn")}` : undefined,
+      popover: <ContextList sessions={live} recycleAt={recycleAt} />,
+    },
+    {
+      key: "gates", label: "gate lanes", value: `${lanes.running}·${lanes.queued}`, sub: `of cap ${lanes.cap}`,
+      tone: lanes.queued > 0 ? "amber" : lanes.running > 0 ? "phosphor" : "muted",
+      title: `${lanes.running} running · ${lanes.queued} queued, daemon-wide (cap ${lanes.cap})`,
+      popover: <GateLaneList lanes={lanes} />,
     },
   ];
 
-  const needsPanel = (
-    <BandPanel label="Needs you" count={projAttention.length} action={{ to: "/inbox", label: "Inbox" }} testId="atlas-band-needs">
-      <AttentionList items={projAttention} cap={6} />
-    </BandPanel>
-  );
-  // THE ANSWER TO "how are the spawnable agents spawned for projects?" (card 939922ee, round 4) —
-  // the spawn controls are ON the page you land on, second in the band, not behind a navigation.
-  // Same rows, same guard, same split button as the Agents node and the tree's quick-spawn: one
-  // roster component (components/atlasAgents.tsx) renders all three.
-  const agentsPanel = (
-    <BandPanel label="Agents" count={roster.spawnable.length}
-      action={{ to: "/agents", label: "All" }} testId="atlas-band-agents">
-      {roster.spawnable.length === 0
-        ? <RosterEmpty workers={roster.workers} />
-        : roster.spawnable.map((entry) => <AgentRosterRow key={entry.agent.id} entry={entry} />)}
-      <WorkersDispatchedNote workers={roster.workers} />
-    </BandPanel>
-  );
-  const fleetPanel = (
-    <BandPanel label="Fleet" count={`${live.length} live`}
-      action={{ to: "/terminals", label: "Terminals" }} testId="atlas-band-fleet">
-      <FleetList managers={managers} workers={workers} />
-    </BandPanel>
-  );
-  const gatePanel = (
-    // "Gates", not "Gates & throughput": this column is NARROW and the longer label wraps inside its
-    // own head. The sparkline below carries its own caption, so the shorter name loses nothing.
-    // MEASURED at 1440 (card 102bc915): the band's five tracks are 283.9 / 244.7 / 195.8 / 195.8 /
-    // 195.8 px, so Gates is 195.8 — not the "~250px" this comment used to claim, which was taken at
-    // 1600. Re-measure at the width you care about before sizing anything to it; the tracks are a
-    // fixed fr template, so every one of them is a function of the content column.
-    <BandPanel label="Gates" count={`cap ${lanes.cap}`} action={{ to: "/gates", label: "All" }} testId="atlas-band-gates">
-      <GateLaneList lanes={lanes} />
-      <div style={{ marginTop: 10 }}>
-        <DayBars series={merges.byDay} label="branches landed per day" />
-        <BandFoot>Merges · last 14 days</BandFoot>
-      </div>
-    </BandPanel>
-  );
-  const pulsePanel = (
-    <BandPanel label="Pulse" count="last 24h" action={{ to: "/runs", label: "Runs" }} testId="atlas-band-pulse">
-      {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}
-      {/* `GLOBAL_ACTIVITY_CAP` (lib/fleet.ts) — the SAME constant the classic Overview's Activity
-          section, Mission Control's Activity column and the workspace node's own Pulse all read, so
-          the four cannot disagree about how deep "recent activity" goes. It was a local 40 here.
-          MEASURED at 1440 before raising it: this panel is a fixed 320px box with its own scrolling
-          body, so going 6 → 100 rows moved the band height, the board's top, the board's width and
-          the document height by exactly 0px. The cap buys depth, never page space. */}
-      {events.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} />)}
-    </BandPanel>
-  );
-
-  // What the disclosure bar keeps saying while the five panels above are folded away (card
-  // 44f725fe). One figure per panel the fold hides, so folding costs the DETAIL and never the
-  // SIGNAL — that is the whole argument for the fold, and this row is where it is honoured or not.
-  //
-  // ⛔ These are NOT the `kpis` array: that would restate the full-size deck's own six figures ~40px
-  // under it, which is the shape card 939922ee's owner rejection names. `needs you` is the one
-  // overlap and it is deliberate — it is the panel whose whole point is that it is waiting on you.
-  // `spawnable` and `last event` appear nowhere else on the page once the band is folded.
-  const lastEvent = events[0];
-  const dashSummary = (
-    <>
-      <KpiPill value={projAttention.length} label="needs you" testId="atlas-banddisc-pill-needs"
-        tone={projAttention.length > 0 ? "amber" : "muted"} title="Attention items waiting on you in this project" />
-      <KpiPill value={roster.spawnable.length} label="spawnable" testId="atlas-banddisc-pill-spawnable"
-        tone={roster.spawnable.length > 0 ? "cyan" : "muted"} title="Agents in this project with no live session, ready to spawn" />
-      <KpiPill value={`${lanes.running}·${lanes.queued}`} label="gates" testId="atlas-banddisc-pill-gates"
-        tone={lanes.queued > 0 ? "amber" : lanes.running > 0 ? "phosphor" : "muted"}
-        title={`${lanes.running} running · ${lanes.queued} queued, daemon-wide (cap ${lanes.cap})`} />
-      {/* The event KIND, not its time: "what just happened" is the signal a folded Pulse feed
-          stops showing, and the time is one hover away rather than the figure itself. */}
-      <KpiPill value={lastEvent?.kind ?? "—"} label="last event" testId="atlas-banddisc-pill-event"
-        tone={lastEvent ? "cyan" : "muted"}
-        title={lastEvent ? `${lastEvent.kind} · ${relativeTime(lastEvent.ts)}` : "No orchestration events yet"} />
-    </>
-  );
+  // The roster table's rows and the two facts that are NEW to this page — which card a session is
+  // holding, and when it last said anything. Both come off reads this page already makes; see
+  // lib/atlasProjectOverview.ts for why a manager and a worker resolve "last event" differently.
+  const taskTitles = taskTitlesById(boardQ.data?.tasks);
+  const lastEvents = lastEventBySession(events);
+  const rows = rosterRows(managers, workers);
+  const cellFor: (row: { session: SessionListItem }) => RosterCell = ({ session: s }) => {
+    const ctx = s.ctxInputTokens ?? 0;
+    const ratio = ctx > 0 ? ctx / contextWindowForModel(s.model) : 0;
+    const e = lastEvents.get(s.id);
+    return {
+      state: sessionStatus(s),
+      card: rosterCardLabel(s, taskTitles),
+      branch: s.branch ?? null,
+      context: ctx > 0
+        ? { ratio, pct: Math.round(ratio * 100), tone: ratio >= 0.95 ? "red" : ratio >= 0.8 ? "amber" : "phosphor" }
+        : null,
+      lastEvent: e ? { kind: e.kind, at: relativeTime(e.ts) } : null,
+    };
+  };
 
   // One count per tab, keyed by the declaration's own `key`. A tab with no entry here renders no
   // count — Repository and Settings have no natural figure, and the approved design gives them none.
@@ -386,7 +346,11 @@ export default function ProjectHome() {
   // god-eye by design and already supports being "reached per-project by pre-selecting the filter",
   // so the project node hands it this project's name and the body matches the tab's own count.
   const tabBodies: Record<string, ReactNode> = {
-    board: <Board projectId={projectId} />,
+    // `deepLinks` only while the Board tab is the VISIBLE one. A re-homed body stays mounted after
+    // its first visit, parked with `hidden` — and a mounted-but-hidden board that consumed `?task=`
+    // would open its dialog where nobody can see it and clear the param on the way out, which is
+    // exactly what the normalization above is routing the link here to avoid (card 260fb29a).
+    board: <Board projectId={projectId} deepLinks={tab === "board"} />,
     // Both halves of the pre-selection: the NAME drives its project filter, the ID is what its
     // quick-start reads a roster by (card f3b18f27). The god-eye classic mount still passes neither.
     sessions: <Terminals projectId={projectId} projectName={project?.name} />,
@@ -428,34 +392,66 @@ export default function ProjectHome() {
           ) : null
         ))}
 
-        {/* THE node's one home tab. Rendered only while it is the selected tab — unlike the
-            re-homed bodies above, it is not parked with `hidden`, because it holds no input of its
-            own to protect (the disclosure's own folded/unfolded choice is persisted, so it survives
-            the remount that a parked body would exist to avoid) and it carries a full <Board/>,
-            which is not worth keeping mounted behind eight other tabs. */}
+        {/* THE node's one home tab (card 269f46ef — direction C · Roster). Rendered only while it
+            is the selected tab, unlike the re-homed bodies above: it holds no input of its own to
+            protect, so there is nothing for a park to save.
+
+            The ORDER is the owner's. C put Needs-you in a two-up footer beside Pulse; his amendment
+            — "'Needs you' should be on top in its own row so it has enough space" — hoists it to the
+            first card at full width, which leaves Pulse the footer on its own. That is not only a
+            move: it is also what finally pays Pulse the width card b4442d27 measured it needing
+            (479px for its four columns at natural width, against 135px inside the band it used to
+            share with four other panels). */}
         {tab === "overview" ? (
           <>
-            <KpiDeck items={kpis} />
-            <BandDisclosure open={dashOpen} onToggle={() => setDashOpen(!dashOpen)} summary={dashSummary}>
-              {needsPanel}
-              {agentsPanel}
-              {fleetPanel}
-              {gatePanel}
-              {pulsePanel}
-            </BandDisclosure>
-            <section className="loom-atlas-primary" data-testid="atlas-board-embed">
-              <div className="loom-atlas-primaryhead">
-                <span className="loom-atlas-primarylbl">Board</span>
-                <span className="loom-bandcount">{board.open}</span>
-                <span style={{ flex: 1 }} />
-                {/* The LaneBar is the board head's trim at every width now. It was Deck-only, which
-                    was the one thing genuinely unique to that tab and worth keeping: a cards-per-lane
-                    reading is a real figure, where the sentence it replaces ("the same board, whole")
-                    only restated what the whole board sitting underneath it already shows. */}
-                <LaneBar lanes={board.lanes} />
-              </div>
-              <Board projectId={projectId} />
-            </section>
+            <BriefLine readings={briefReadings} trailing={
+              <BriefTrailing label="landed" value={merges.branches} testId="atlas-brief-merged"
+                tone={merges.branches > 0 ? "phosphor" : "muted"}
+                sub={merges.branches > 0 ? `today · last ${relativeTime(merges.lastEndedAt)}` : "today"}>
+                {/* The series IS the breakdown, so this reading is a readout and not a fifth button:
+                    a pop-over would open the same 14 bars already drawn beside the figure. */}
+                <DayBars series={merges.byDay} label="branches landed per day" />
+              </BriefTrailing>
+            } />
+
+            <OverviewCard label="Needs you" count={projAttention.length}
+              action={{ to: "/inbox", label: "Inbox" }} testId="atlas-band-needs">
+              {/* The SAME list the `needs you` breakdown renders at both node levels, so the card and
+                  the Inbox cannot disagree about what is waiting. `cap` is higher than the band's 6
+                  because this card is now a full-width row with the page's whole width to spend. */}
+              <AttentionList items={projAttention} cap={10} />
+            </OverviewCard>
+
+            <OverviewCard label="Work in flight" count={`${live.length} live · ${working} working`}
+              action={{ to: "/terminals", label: "Sessions" }} testId="atlas-overview-roster"
+              footer={<>
+                Context is measured against each session's own model window
+                {recycleAt > 0 ? <>; a manager is nudged to hand off at {Math.round(recycleAt * 100)}%</> : null}.
+                An idle worker is live and waiting on its manager, not stopped, and an exited session
+                stays listed here until it is archived.
+              </>}>
+              {rows.length === 0
+                ? <BandEmpty>No sessions in this project.</BandEmpty>
+                : <RosterTable rows={rows} cellFor={cellFor} />}
+            </OverviewCard>
+
+            <OverviewCard label="Board" count={`${board.open} open · ${board.total} total`}
+              action={{ to: "/board", label: "Board" }} testId="atlas-overview-board">
+              {/* The whole board signal in one strip: the SAME LaneBar the board head wore, now with
+                  its lanes named and counted under it rather than only on a hover title. */}
+              <LaneBar lanes={board.lanes} />
+              <LaneChips lanes={board.lanes} />
+            </OverviewCard>
+
+            <OverviewCard label="Pulse" count="last 24h" action={{ to: "/runs", label: "Runs" }}
+              testId="atlas-band-pulse" bodyMaxHeight={300}>
+              {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}
+              {/* `GLOBAL_ACTIVITY_CAP` (lib/fleet.ts) — the SAME constant the classic Overview's
+                  Activity section, Mission Control's Activity column and the workspace node's own
+                  Pulse all read, so the four cannot disagree about how deep "recent activity" goes.
+                  The card's own body scrolls, so the cap buys depth and never page length. */}
+              {events.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} />)}
+            </OverviewCard>
           </>
         ) : null}
 

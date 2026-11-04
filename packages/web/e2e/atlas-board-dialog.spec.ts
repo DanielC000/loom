@@ -7,11 +7,17 @@
 // witness that each surface really does get that one shape, which is a different claim from "they
 // share an import" and is the only one worth asserting.
 //
-//   1. the project node's Overview tab   `/project?tab=overview`  (ProjectHome.tsx)
-//   2. the SAME tab with its dashboard FOLDED (card 44f725fe) — the board sits ~320px higher.
-//      This was the project node's separate Deck tab until that card unified the two.
-//   3. the Board node                    `/board`                 (nav.tsx NAV_PAGES)
-//   4. the Platform node's Board tab     `/platform?tab=board`    (PlatformView.tsx)
+//   1. the Board node                    `/board`                 (nav.tsx NAV_PAGES)
+//   2. the Platform node's Board tab     `/platform?tab=board`    (PlatformView.tsx)
+//
+// ⛔ THERE USED TO BE TWO MORE, AND BOTH WERE THE SAME SURFACE: the project node's Overview tab
+// (`/project?tab=overview`), unfolded and with its dashboard folded. Card 269f46ef removed the
+// board from that tab outright, on the owner's own instruction ("Remove Board."), so neither has a
+// board to open a dialog from. Nothing is left uncovered by dropping them — under Atlas `/board` IS
+// the project node's Board tab (`PROJECT_NODE_TABS`), mounting the same `<Board projectId>` the
+// Overview used to, so surface 1 below is that node's board surface now. Its ABSENCE from the
+// Overview is asserted in `atlas-dashboard-disclosure.spec.ts` and `atlas-home.spec.ts`; a third
+// copy here would be a zero with no board on the page to control it.
 //
 // What each surface is measured on, and why that measurement can fail:
 //   · NEVER A DRAWER — the two side margins of the panel are EQUAL. A right-anchored slide-over has
@@ -214,32 +220,7 @@ async function seedCard(loomDaemon: LoomDaemon, projectId: string) {
 }
 
 test.describe("Atlas board cards open the centred dialog (card a6d7a102)", () => {
-  // ── 1 + 2. The project node's home tab, in both of its geometries ───────────────────────────────
-  test("switch ON: the project node's Overview opens the centred dialog, dashboard unfolded and folded", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(uniq("atlasdlg-overview"));
-    const task = await seedCard(loomDaemon, project.id);
-
-    await seedAtlasOn(page);
-    await pinProject(page, project.id);
-    await page.setViewportSize(VIEWPORT);
-
-    const embed = page.getByTestId("atlas-board-embed");
-
-    await page.goto(`${loomDaemon.baseURL}/project?tab=overview`);
-    await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await assertSurfaceOpensCentredDialog(page, embed, task, "project node · Overview");
-
-    // Folding the dashboard away (card 44f725fe) is the board-FIRST read of the same node — what the
-    // Deck tab used to be, now a control rather than an address. It moves the board ~320px up the
-    // page, so the board's own geometry differs between the two states exactly as it used to differ
-    // between the two tabs, which is why this captures its own baseline rather than sharing one.
-    await page.getByTestId("atlas-banddisc-bar").click();
-    await expect(page.getByTestId("atlas-banddisc-bar")).toHaveAttribute("aria-expanded", "false");
-    await expect(page.getByTestId("atlas-dashboard-band")).toBeHidden();
-    await assertSurfaceOpensCentredDialog(page, embed, task, "project node · Overview, dashboard folded");
-  });
-
-  // ── 3. The Board node, plus the keyboard path ───────────────────────────────────────────────────
+  // ── 1. The Board node — which under Atlas IS the project node's Board tab — plus the keyboard path ─
   test("switch ON: the Board node opens the centred dialog, and the keyboard path opens and returns focus", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasdlg-boardnode"));
     const task = await seedCard(loomDaemon, project.id);
@@ -288,7 +269,7 @@ test.describe("Atlas board cards open the centred dialog (card a6d7a102)", () =>
     await expect(lanesIn(main)).toHaveCount(DEFAULT_LANES);
   });
 
-  // ── 4. The Platform node's own Board tab ────────────────────────────────────────────────────────
+  // ── 2. The Platform node's own Board tab ────────────────────────────────────────────────────────
   test("switch ON: the Platform node's Board tab opens its own card in the centred dialog", async ({ page, loomDaemon }) => {
     // The Platform node's board is the reserved home's, never the active project's (card fa3bb729) —
     // so the card has to be seeded THERE, and removed after: that board is shared with every other

@@ -277,7 +277,18 @@ test.describe("Atlas dashboard band track budget (card b4442d27)", () => {
       "one-row assertions above are falsifiable").toBeGreaterThan(1);
   });
 
-  test("switch ON: the project node's band gets the same Pulse budget — one grid, two nodes", async ({ page, loomDaemon }) => {
+  // 🔴 THE PROJECT NODE HAS NO BAND, AND ITS PULSE IS NOW PAID IN FULL. This leg used to assert
+  // that the project node's band gave Pulse the same budgeted track the Workspace node's does —
+  // "one grid, two nodes". Card 269f46ef removed that band on the owner's instruction and made
+  // Pulse a FULL-WIDTH card there, so the claim's subject is gone and its premise with it.
+  //
+  // It is replaced rather than deleted, because the replacement is the stronger reading: this
+  // record's own central measurement is that `EventRow` needs 479px for all four columns at natural
+  // width and the band could only budget it 321px at 1440. A full-width card is the first
+  // composition that clears that number, so the leg asserts the thing the budget was a compromise
+  // FOR — every column at its natural width, no shrink anywhere — rather than re-checking a
+  // compromise the node no longer makes.
+  test("switch ON: the project node's Pulse is a full-width card, so no EventRow column is short at all", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedPulseRows(loomDaemon);
     await seedAtlasOn(page);
@@ -286,21 +297,55 @@ test.describe("Atlas dashboard band track budget (card b4442d27)", () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/project");
 
-    // The project node folds its band behind a disclosure (card 44f725fe) and it opens by default;
-    // unfold it if this fixture's stored state has it shut, so the leg measures the band either way.
-    const bar = page.getByTestId("atlas-banddisc-bar");
-    await expect(bar).toBeVisible();
-    if ((await bar.getAttribute("aria-expanded")) !== "true") await bar.click();
-    await expect(page.getByTestId("atlas-dashboard-band")).toBeVisible();
+    // Presence of the node's own primary surface first, so the band's absence below is a loaded
+    // page's real shape rather than one that has not rendered.
+    await expect(page.getByTestId("atlas-overview-roster")).toBeVisible();
+    await expect(page.getByTestId("atlas-banddisc-bar")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-dashboard-band")).toHaveCount(0);
 
     const pulse = page.getByTestId("atlas-band-pulse");
     await expect(pulse).toBeVisible();
     await expect(pulse.getByTestId("activity-event").first()).toBeVisible();
 
-    const m = await settledBand(page, seeded.ownRow, "#atlas-dashboard-band", "project node @1440px");
-    // No chip on this node — the feed is project-scoped. The KIND is what this leg carries over.
-    assertPulseIsReadable(m, "project node @1440px", false);
-    expect.soft(m.rows, "project node @1440px: the band must stay one line").toBe(1);
+    // The card really is the content column's full width — the comparison that makes "full-width"
+    // a measurement and not a label. Against the roster above it, which is the same single-column
+    // row rhythm; a Pulse that had quietly gone back into a two-up footer would be ~half of it.
+    const widths = await page.evaluate(() => {
+      const of = (id: string) => {
+        const el = document.querySelector(`[data-testid="${id}"]`);
+        return el ? Math.round(el.getBoundingClientRect().width) : -1;
+      };
+      return { pulse: of("atlas-band-pulse"), roster: of("atlas-overview-roster") };
+    });
+    expect(widths.pulse, `pulse ${widths.pulse}px vs roster ${widths.roster}px`).toBe(widths.roster);
+    expect(widths.pulse, "the content column at 1440 inside the Atlas frame").toBeGreaterThan(1000);
+
+    // …and with that width, NO column of the event row is short of its natural text — not the kind
+    // (which the band left 1/32px short at every width, this record's own §"the kind still loses
+    // its last glyph"), and not the detail (151px short at 1440 in the band, 22px at 1920). This is
+    // the first composition in the app where that is true, and it is why the leg is worth keeping.
+    const shortfalls = await page.evaluate(() => {
+      const row = document.querySelector('[data-testid="atlas-band-pulse"] [data-testid="activity-event"]');
+      if (!row) return null;
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      const out: { text: string; box: number; natural: number }[] = [];
+      for (const el of Array.from(row.children) as HTMLElement[]) {
+        const text = (el.textContent ?? "").trim();
+        if (!text) continue;
+        const cs = getComputedStyle(el);
+        ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        const box = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+        out.push({ text, box, natural: ctx.measureText(text).width });
+      }
+      return out;
+    });
+    expect(shortfalls, "no event row to measure").not.toBeNull();
+    expect(shortfalls!.length, "the event row's own columns").toBeGreaterThan(1);
+    const tooNarrow = shortfalls!.filter((c) => c.natural - c.box > 0.5)
+      .map((c) => `${JSON.stringify(c.text)}: ${c.box.toFixed(2)}px box vs ${c.natural.toFixed(2)}px natural`);
+    expect(tooNarrow, "a Pulse column is still short of its natural width at full card width").toEqual([]);
   });
 
   test("switch OFF: the classic Overview renders no dashboard band at all, so the budget cannot have leaked into it", async ({ page, loomDaemon }) => {

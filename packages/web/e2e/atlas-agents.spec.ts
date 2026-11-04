@@ -98,10 +98,13 @@ async function seedRoster(loomDaemon: LoomDaemon) {
   return { project, manager, plain, worker };
 }
 
-/** The spawn split-button's primary, for ONE row. Scoped through the row's own test id so a second
- *  agent's control can never satisfy an assertion about this one. */
-const spawnPrimary = (page: Page, agentId: string) =>
-  page.getByTestId(`atlas-agent-row-${agentId}`).locator('button[title^="Spawn from profile"]');
+/** The spawn split-button's primary, for ONE roster entry. Scoped through the entry's own test id
+ *  so a second agent's control can never satisfy an assertion about this one.
+ *
+ *  `atlas-agent-row-*` is the COMPACT `AgentRosterRow`, which since card 269f46ef has exactly one
+ *  mount left — the tree's quick-spawn dialog (the project Overview's Agents panel, its other
+ *  mount, was removed on the owner's instruction). `atlas-agent-card-*` is the full-size
+ *  `AgentRosterCard` on the Agents node. Both render the SAME `AgentActions`. */
 const spawnCard = (page: Page, agentId: string) =>
   page.getByTestId(`atlas-agent-card-${agentId}`).locator('button[title^="Spawn from profile"]');
 
@@ -123,38 +126,54 @@ async function captureSpawns(page: Page): Promise<{ bodies: unknown[]; paths: st
 }
 
 test.describe("Atlas agents (card c6160c7d)", () => {
-  test("switch ON: the band panel is the derived roster, not the agent list", async ({ page, loomDaemon }) => {
+  // 🔴 THIS LEG MOVED FROM THE OVERVIEW'S BAND PANEL TO THE AGENTS NODE (card 269f46ef). The owner
+  // removed the Agents panel from the project Overview by name ("Remove 'AGENTS' card."), so the
+  // panel this leg was written against no longer exists. NOTHING about the roster changed: the same
+  // `splitRoster` derivation feeds the same `AgentActions` controls, and the Agents node renders
+  // them as `AgentRosterCard` (`atlas-agent-card-*`) rather than the band's compact
+  // `AgentRosterRow`. Every assertion below is the one it always made, re-pointed at that card —
+  // plus a new one, at the end, that the removed panel really is gone.
+  test("switch ON: the Agents node is the derived roster, not the agent list", async ({ page, loomDaemon }) => {
     const seeded = await seedRoster(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.goto(loomDaemon.baseURL + "/project");
+    await page.goto(loomDaemon.baseURL + "/agents");
 
-    // The panel replaced P2-1's placeholder — presence of the real thing first, and only then the
-    // absence of the slot it filled, so a half-loaded page cannot satisfy this pair.
-    const panel = page.getByTestId("atlas-band-agents");
+    // The node's own body first, so a half-loaded page cannot satisfy the absences below. P2-1's
+    // placeholder slot was the band's; it is gone with the panel, and asserted as such at the end.
+    const panel = page.getByTestId("atlas-agents-node");
     await expect(panel).toBeVisible();
-    await expect(page.getByTestId("atlas-slot-agents")).toHaveCount(0);
 
     // (1) THE TWO SPAWNABLE AGENTS ARE THERE, each with a real spawn control.
-    await expect(panel.getByTestId(`atlas-agent-row-${seeded.manager.id}`)).toBeVisible();
-    await expect(panel.getByTestId(`atlas-agent-row-${seeded.plain.id}`)).toBeVisible();
-    await expect(spawnPrimary(page, seeded.manager.id)).toBeVisible();
-    await expect(spawnPrimary(page, seeded.plain.id)).toBeVisible();
+    await expect(panel.getByTestId(`atlas-agent-card-${seeded.manager.id}`)).toBeVisible();
+    await expect(panel.getByTestId(`atlas-agent-card-${seeded.plain.id}`)).toBeVisible();
+    await expect(spawnCard(page, seeded.manager.id)).toBeVisible();
+    await expect(spawnCard(page, seeded.plain.id)).toBeVisible();
     // The primary SAYS which role it will apply — that is the whole point of the label.
-    await expect(spawnPrimary(page, seeded.manager.id)).toHaveText(/manager/i);
+    await expect(spawnCard(page, seeded.manager.id)).toHaveText(/manager/i);
 
     // (2) THE WORKER IS ABSENT FROM THE CONTROLS…
-    await expect(panel.getByTestId(`atlas-agent-row-${seeded.worker.id}`)).toHaveCount(0);
-    // …AND NAMED IN THE LINE THAT EXPLAINS WHY. Both halves, because a panel that simply dropped
+    await expect(panel.getByTestId(`atlas-agent-card-${seeded.worker.id}`)).toHaveCount(0);
+    // …AND NAMED IN THE LINE THAT EXPLAINS WHY. Both halves, because a roster that simply dropped
     // the worker would pass the first on its own, and that is the round-3 bug this replaced.
     const note = panel.getByTestId("atlas-agents-worker-note");
     await expect(note).toBeVisible();
     await expect(note).toContainText(seeded.worker.name);
     await expect(note).toContainText(/dispatched/i);
 
-    // (3) THE KPI TILE AGREES WITH THE PANEL. One derivation feeds both, so a tile reading a
-    // different number than the rows beside it would mean two.
-    await expect(page.getByTestId("atlas-kpi-fleet").locator(".loom-kpi-sub")).toHaveText(/\b2 spawnable\b/);
+    // (3) THE OVERVIEW'S OWN READOUT AGREES WITH THE ROSTER. One derivation (`splitRoster`) feeds
+    // both, so a figure reading differently from the rows would mean two. It used to be the
+    // `mgr · workers` KPI tile's sub-line; card 269f46ef put it on the briefing line's `fleet`
+    // reading, which is the same `roster.spawnable.length`.
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-brief-fleet")).toBeVisible();
+    await expect(page.getByTestId("atlas-brief-fleet").locator(".loom-ovbrief-v em")).toHaveText(/\b2 spawnable\b/);
+
+    // (4) …AND THE PANEL THE OWNER REMOVED IS NOT ON THAT PAGE. Asserted after the reading above,
+    // which is this zero's positive control: the roster derivation is demonstrably live here.
+    await expect(page.getByTestId("atlas-band-agents")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-slot-agents")).toHaveCount(0);
+    await expect(page.getByTestId(`atlas-agent-row-${seeded.plain.id}`)).toHaveCount(0);
   });
 
   test("switch ON: the go-live guard holds the live manager, releases it, and never touches its neighbour", async ({ page, loomDaemon }) => {
@@ -178,7 +197,10 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     );
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.goto(loomDaemon.baseURL + "/project");
+    // The Agents node, not the Overview's band panel — card 269f46ef removed that panel (see the
+    // first leg's own note). `AgentActions` is the SAME component at both mounts, so the guard this
+    // leg exercises is unchanged; only which page renders it is.
+    await page.goto(loomDaemon.baseURL + "/agents");
 
     // BEFORE: the guard is holding. Presence of the guard pair first, then the absence of the
     // control it replaced.
@@ -187,13 +209,13 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     await expect(guardLive).toBeVisible();
     await expect(guardLive).toBeDisabled();
     await expect(guardStop).toBeVisible();
-    await expect(spawnPrimary(page, seeded.manager.id)).toHaveCount(0);
+    await expect(spawnCard(page, seeded.manager.id)).toHaveCount(0);
 
     // THE CONTRAST CASE, at the same moment on the same page: the PLAIN agent's spawn is still
-    // enabled. Without it, "the guard fired" is equally satisfied by a panel that lost every
+    // enabled. Without it, "the guard fired" is equally satisfied by a roster that lost every
     // control — and the guard's real claim is that it is scoped to one row.
-    await expect(spawnPrimary(page, seeded.plain.id)).toBeVisible();
-    await expect(spawnPrimary(page, seeded.plain.id)).toBeEnabled();
+    await expect(spawnCard(page, seeded.plain.id)).toBeVisible();
+    await expect(spawnCard(page, seeded.plain.id)).toBeEnabled();
 
     // ACT: the Stop is a real control. Its pending label is the observable; the captured request is
     // the assertion — it must name THIS session and ask for the graceful mode.
@@ -208,7 +230,7 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     // this is the same observable the guard actually keys on.
     await loomDaemon.archiveSeededSessions();
     await page.reload();
-    await expect(spawnPrimary(page, seeded.manager.id)).toBeVisible();
+    await expect(spawnCard(page, seeded.manager.id)).toBeVisible();
     await expect(page.getByTestId(`atlas-agent-live-${seeded.manager.id}`)).toHaveCount(0);
     await expect(page.getByTestId(`atlas-agent-stop-${seeded.manager.id}`)).toHaveCount(0);
   });
@@ -224,13 +246,14 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
-    await page.goto(loomDaemon.baseURL + "/project");
+    // The Agents node, for the reason the first leg's own note gives (card 269f46ef).
+    await page.goto(loomDaemon.baseURL + "/agents");
 
-    const row = page.getByTestId(`atlas-agent-row-${seeded.plain.id}`);
+    const row = page.getByTestId(`atlas-agent-card-${seeded.plain.id}`);
     await expect(row).toBeVisible();
 
     // (a) The PRIMARY spawns from the rig — no role override in the body.
-    await spawnPrimary(page, seeded.plain.id).click();
+    await spawnCard(page, seeded.plain.id).click();
     await expect.poll(() => spawns.bodies.length, { message: "the primary never reached the network" }).toBe(1);
     expect(spawns.paths[0], "the primary must address the agent whose row it sits in")
       .toBe(`/api/agents/${seeded.plain.id}/sessions`);

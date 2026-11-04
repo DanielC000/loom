@@ -3,14 +3,19 @@
 //
 // The card's claims, and how each is measured against SEEDED data rather than against "something
 // rendered":
-//   1. The KPI deck shows REAL values. The sentinel is the project's own open-card count, derived
-//      from cards this spec seeded into named lanes — a figure that can only be right if the tile
-//      actually read the board, and that no amount of chrome rendering can satisfy by accident.
-//   2. The embedded board is the WHOLE board: all 7 default lanes and a seeded card inside the
-//      lane it was seeded into. (Owner-ruled: this embed is the primary board surface — it is never
-//      a summary. See ProjectHome.tsx's own note and card c6bdf358.)
+//   1. The node's readout shows REAL values. The sentinel is the project's own open-card count,
+//      derived from cards this spec seeded into named lanes — a figure that can only be right if
+//      the readout actually read the board, and that no chrome rendering can satisfy by accident.
+//      🔴 Card 269f46ef moved that readout: the project node's KPI deck is gone (with the board
+//      embed and the band) and a BRIEFING LINE carries its figures. The sentinel is the same
+//      derivation, read off `atlas-brief-cards`.
+//   2. The WHOLE board — all 7 default lanes and a seeded card inside the lane it was seeded into —
+//      is on the node's Board TAB. It used to be embedded in the Overview under a standing owner
+//      directive (card c6bdf358); the owner then instructed "Remove Board." on card 269f46ef, so
+//      this leg asserts BOTH halves: no board on the home tab, and the whole board one tab over.
 //   3. Each KPI pop-over opens AND closes, asserted on both sides of each action, so neither a
-//      pop-over that never opened nor one that never closes can pass.
+//      pop-over that never opened nor one that never closes can pass. Workspace node only now; the
+//      project node's briefing pop-overs get the same treatment in atlas-project-overview.spec.ts.
 //   4. BOTH nodes have exactly ONE home tab — card 44f725fe unified the project node's Overview and
 //      Deck, card 4a0ad464 the Workspace node's. Each gets its own leg (same shape, different
 //      content): the Deck tab is gone, no tab-row KPI strip exists, and a legacy `?tab=deck` lands
@@ -49,11 +54,12 @@ const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.rand
 // assume the stored form carries no regex metacharacter (card e47df20a).
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// The six tiles each node declares, by the `key` its testid is built from (components/atlasHome.tsx
-// › KpiDeck). Listed here because the pop-over leg must exercise EVERY one of them — a loop over
-// whatever happens to be on screen would silently shrink with the deck.
+// The six tiles the WORKSPACE node declares, by the `key` its testid is built from
+// (components/atlasHome.tsx › KpiDeck). Listed here because the pop-over leg must exercise EVERY
+// one of them — a loop over whatever happens to be on screen would silently shrink with the deck.
+// (The project node declared six of its own until card 269f46ef removed its deck; its readings are
+// a briefing line now, exercised in atlas-project-overview.spec.ts.)
 const WORKSPACE_KPIS = ["projects", "live", "needs", "gates", "plan", "merged"];
-const PROJECT_KPIS = ["needs", "fleet", "context", "gates", "cards", "merged"];
 
 /**
  * A project whose board carries a KNOWN open-card count. Three cards in three different non-terminal
@@ -77,7 +83,7 @@ async function seedProjectWithBoard(loomDaemon: LoomDaemon) {
 const lanes = (page: Page) => page.locator(".loom-board-grid > .loom-grid");
 
 test.describe("Atlas home nodes (card fd99b2d7)", () => {
-  test("switch ON: the project node's KPI deck reads the real board, and embeds the whole board", async ({ page, loomDaemon }) => {
+  test("switch ON: the project node's briefing line reads the real board, and the board itself is on its own tab", async ({ page, loomDaemon }) => {
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
@@ -88,46 +94,61 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(page.locator(".loom-atlas-nodehead h1")).toHaveText(new RegExp(escapeRe(seeded.project.name)));
     await expect(page.getByTestId("atlas-breadcrumb")).toContainText(seeded.project.name);
 
-    // ── (1) THE SENTINEL. The open-card tile reads 3 — the three non-terminal cards this spec
-    //        seeded — and not 4, which is what a tile that merely counted the board's rows would
+    // ── (1) THE SENTINEL, unchanged in substance and re-pointed at the reading that carries it
+    //        since card 269f46ef. The board reading says 3 — the three non-terminal cards this spec
+    //        seeded — and not 4, which is what a readout that merely counted the board's rows would
     //        say. `toHaveText` retries, so this is also the settle: the figure cannot be read until
     //        the board query has actually landed.
-    const cards = page.getByTestId("atlas-kpi-cards");
-    await expect(cards.locator(".loom-kpi-value")).toHaveText(String(seeded.open));
-    await expect(cards.locator(".loom-kpi-sub")).toHaveText(new RegExp(`${seeded.inReview} in review`));
-    // The deck is the FULL-SIZE one, not the Deck tab's compact strip — the distinction round 3's
-    // own diagnosis turned on (card 939922ee: size is what made the page read as an overview).
-    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    const boardReading = page.getByTestId("atlas-brief-cards");
+    await expect(boardReading.locator(".loom-ovbrief-n")).toHaveText(String(seeded.open));
+    await expect(boardReading.locator(".loom-ovbrief-v em")).toHaveText(new RegExp(`${seeded.inReview} review`));
+    // …and the lane strip states the same board a second way, per lane, so the reading above cannot
+    // be a hardcoded figure: the Review lane's chip carries the count the sub-line just claimed.
+    await expect(page.getByTestId("atlas-overview-lane-review")).toContainText(String(seeded.inReview));
+
+    // ── (2) THE DECK AND THE EMBED ARE BOTH GONE FROM THIS TAB (card 269f46ef — the owner's own
+    //        instruction, "Remove Board." plus the direction-C pick). Presence first: the node's new
+    //        primary surface is on screen, so these zeros are a loaded page's real shape.
+    await expect(page.getByTestId("atlas-overview-roster")).toBeVisible();
+    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
     await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
-    // Every declared tile is present, so a deck that quietly lost one cannot pass the pop-over loop
-    // below by simply having fewer tiles to exercise.
-    for (const key of PROJECT_KPIS) await expect(page.getByTestId(`atlas-kpi-${key}`)).toBeVisible();
+    await expect(page.getByTestId("atlas-board-embed")).toHaveCount(0);
+    await expect(page.getByTestId("atlas-dashboard-band")).toHaveCount(0);
+    await expect(lanes(page), "no board grid is mounted on the home tab at all").toHaveCount(0);
 
-    // ── (2) THE WHOLE BOARD, embedded. All 7 default lanes, and a seeded card inside the lane it
-    //        was seeded into — so this is the real board with its real grouping, not a card list.
-    const embed = page.getByTestId("atlas-board-embed");
-    await expect(embed.getByText(seeded.inboxCard, { exact: true })).toBeVisible();
+    // ── (3) THE WHOLE BOARD IS STILL THERE, on the node's Board tab — the claim this leg always
+    //        made, now asserted where it lives. All 7 default lanes and a seeded card inside the
+    //        lane it was seeded into, so this is the real board with its real grouping; it is also
+    //        the positive control for the `lanes(page) === 0` above.
+    await page.goto(loomDaemon.baseURL + "/board");
+    await expect(page.getByText(seeded.inboxCard, { exact: true })).toBeVisible();
     await expect(lanes(page)).toHaveCount(7);
-    await expect(embed.locator(".loom-grid").filter({ hasText: "Inbox" }).getByText(seeded.inboxCard, { exact: true })).toBeVisible();
+    await expect(page.locator(".loom-grid").filter({ hasText: "Inbox" })
+      .getByText(seeded.inboxCard, { exact: true })).toBeVisible();
 
-    // ── The band's second column is REAL, not a declared slot. P2-1 put a placeholder here so the
-    //        owner comparing Atlas against the live app could tell "not built yet" from
-    //        "deliberately dropped"; card c6160c7d filled it, so the placeholder's absence is now
-    //        the correct state and the panel's presence is what this row asserts. (The other
-    //        placeholder, P2-3's fleet-controls bar, lives on the WORKSPACE node — asserted the
-    //        same way in the workspace-node test below, now that card 7b893d54 has filled it.)
-    await expect(page.getByTestId("atlas-band-agents")).toBeVisible();
+    // ── (4) THE AGENTS PANEL IS GONE from the home tab, and its placeholder has not come back in
+    //        its place. P2-1 put a placeholder here so the owner could tell "not built yet" from
+    //        "deliberately dropped"; card c6160c7d filled it with the real roster, and card
+    //        269f46ef removed the panel on the owner's instruction — the roster rows themselves are
+    //        unchanged on the Agents tab, which `atlas-agents.spec.ts` asserts.
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-overview-roster")).toBeVisible();
+    await expect(page.getByTestId("atlas-band-agents")).toHaveCount(0);
     await expect(page.getByTestId("atlas-slot-agents")).toHaveCount(0);
   });
 
-  test("switch ON: every KPI pop-over opens and closes, at both levels", async ({ page, loomDaemon }) => {
-    // 12 tiles × (open + assert + close + assert), across two node loads, is past the 30s default.
+  // ⚠️ ONE LEVEL NOW, NOT TWO (card 269f46ef): the project node's deck is gone, so this loop runs
+  // on the Workspace node alone. The project node's own readings are a briefing line whose
+  // pop-overs are opened and closed by the same before/after pairs in
+  // `atlas-project-overview.spec.ts` — the claim moved with the rendering, it was not dropped.
+  test("switch ON: every KPI pop-over opens and closes on the Workspace node", async ({ page, loomDaemon }) => {
+    // 6 tiles × (open + assert + close + assert) is past the 30s default.
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
     await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
 
-    for (const [path, keys] of [["/project", PROJECT_KPIS], ["/home", WORKSPACE_KPIS]] as const) {
+    for (const [path, keys] of [["/home", WORKSPACE_KPIS]] as const) {
       await page.goto(loomDaemon.baseURL + path);
       await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
 
@@ -219,9 +240,10 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await page.goto(loomDaemon.baseURL + "/project");
     await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
 
-    // Overview is the node's only home tab, and the full-size deck is its readout.
+    // Overview is the node's only home tab. Its readout was the full-size deck until card 269f46ef
+    // replaced the whole composition; the briefing line plus the roster identify the tab now.
     await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(page.getByTestId("atlas-overview-brief")).toBeVisible();
     // The Deck tab is GONE — asserted AFTER a locator that must be present, so a page that merely
     // has not rendered its tab row yet cannot satisfy it. The row holds every tab at this width
     // (card 44f725fe took one off a row that already fit ten), so there is no More menu hiding it;
@@ -232,14 +254,20 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(page.getByTestId("atlas-tab-deck")).toHaveCount(0);
 
     // A bookmarked or pasted `?tab=deck` is an unrecognised home tab now, and the node resolves it
-    // to Overview rather than rendering a blank body — the full deck is showing, the compact strip
-    // (which the Deck tab used to own) is not, and the whole board is still there.
+    // to Overview rather than rendering a blank body — the briefing line and the roster are
+    // showing, and the compact strip (which the Deck tab used to own) is not.
+    //
+    // ⚠️ The board is no longer part of this assertion, because it is no longer part of this tab
+    // (card 269f46ef). That is a real reduction in what this leg witnesses: it used to prove the
+    // fallback landed on a tab with the WHOLE board on it. The fallback itself — `projectNodeTabAt`
+    // resolving an unrecognised key to `PROJECT_NODE_TABS[0]` — is what the leg is for, and it is
+    // still asserted by `aria-selected` plus the two surfaces only the Overview renders.
     await page.goto(loomDaemon.baseURL + "/project?tab=deck");
     await expect(page.getByTestId("atlas-tab-overview")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
+    await expect(page.getByTestId("atlas-overview-brief")).toBeVisible();
+    await expect(page.getByTestId("atlas-overview-roster")).toBeVisible();
     await expect(page.getByTestId("atlas-kpi-strip")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-board-embed").getByText(seeded.inboxCard, { exact: true })).toBeVisible();
-    await expect(lanes(page)).toHaveCount(7);
+    await expect(lanes(page)).toHaveCount(0);
   });
 
   test("switch ON: both home nodes are reachable from the tree, and the workspace grid names the project", async ({ page, loomDaemon }) => {
