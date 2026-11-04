@@ -2,21 +2,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // STANDING GUARD (card 3c4a19cb) — makes card 0e5b2045's accepted design structural, not merely disciplined.
 //
 // THE BUG SHAPE: 0e5b2045 decoupled `failingTest` (the diagnostic-winning line `gateDetail`/nudges display)
-// from `failTierTest` (the FAIL-tier-isolated line `identifyRetriableTestFile` — gate-runner.ts — actually
-// reads to drive the merge gate's single-file retry). In REAL production code both are always computed
+// from `failTierTest` (the FAIL-tier-isolated line `identifyRetriableTestFiles` — gate-runner.ts — actually
+// reads to drive the merge gate's bounded multi-file retry). In REAL production code both are always computed
 // together, from the SAME `createFailingTestTracker` on every settle (`runGateStep`'s `done()`/`onTimeout`
 // in gate-runner.ts), and `done()`'s own `Omit<>` makes TypeScript enforce that every real `GateStepResult`/
 // `GateSequentialResult` carries both keys. A hand-written test double that constructs a
 // `GateSequentialResult`-shaped object literal and sets only `failingTest`/`failingTestCount` — because it
 // was written or copy-pasted before the decoupling, or just misses the field — silently loses retry: `!
-// failTierTest` short-circuits `identifyRetriableTestFile` to `undefined` with no signal anything is wrong.
+// failTierTest` short-circuits `identifyRetriableTestFiles` to `undefined` with no signal anything is wrong.
 // This bit TWICE, hours apart, both fixed by commit a995d7bc: `merge-gate-single-file-retry.mjs` (5
 // fixtures, caught by the worker's own targeted run) and `merge-gate-opid-attribution.mjs` (caught only by
 // the MERGE GATE itself, after a ~14.5-minute rejection — see this guard's own positive control below for
 // the exact pre-fix literal reconstructed from that commit's parent).
 //
 // ✅ NOT A CORRECTION OF 0e5b2045's DESIGN. A fallback deriving `failTierTest` from a FAIL-shaped
-// `failingTest` was proposed and REJECTED (duplicates the FAIL-shape regex `identifyRetriableTestFile`
+// `failingTest` was proposed and REJECTED (duplicates the FAIL-shape regex `identifyRetriableTestFiles`
 // already owns, and trades a loud/greppable/deterministic gap for a quiet, data-dependent one). This guard
 // adds NO production code and NO fallback — it only makes the ALREADY-ACCEPTED discipline
 // (`grep -rln "failingTest" packages/daemon/test/*.mjs`, classify, run all) structural, per project memory
@@ -28,16 +28,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // wide, genuinely legitimate population that already exists in this corpus today:
 //   - `gate-history.mjs`/`pending-gate-ops.mjs` — `db.appendEvent`/`db.settlePendingGateOp` DURABLE EVENT
 //     PAYLOADS (`detail:`/`gateDetail:`), typed against the persisted `GateHistoryVerdictPayload` shape
-//     (db.ts) which has NO `failTierTest` field AT ALL — it never reaches `identifyRetriableTestFile`.
+//     (db.ts) which has NO `failTierTest` field AT ALL — it never reaches `identifyRetriableTestFiles`.
 //   - `gate-history.mjs`'s OWN `richFailGate`/`richCancelGate` `runGate` stubs, `gate-status.mjs`, and
 //     `worker-run-gate.mjs` — real `GateSequentialResult`-shaped doubles, but ones that never claim a
 //     precise failure COUNT (no `failingTestCount:` at all).
 //   - `merge-gate-single-file-retry.mjs`'s own scenario (D) — `failingTest: "AssertionError: ..."` with NO
 //     count at all, deliberately proving the "no identifiable file ⇒ no retry attempt" path.
 // What every one of THOSE has in common, and what every REAL bug instance (both commit-a995d7bc fixture
-// sites, reconstructed below) does NOT have in common: `identifyRetriableTestFile` gates retry on
-// `failTierTestCount === 1` — a double that never sets `failingTestCount` at all can *never* have been
-// trying to exercise "retry fires because the count is 1", so its missing `failTierTest` can never silently
+// sites, reconstructed below) does NOT have in common: `identifyRetriableTestFiles` gates retry on
+// `failTierTestCount` being within `[1, MULTI_FILE_RETRY_MAX]` — a double that never sets `failingTestCount`
+// at all can *never* have been trying to exercise "retry fires because the count is in bounds", so its
+// missing `failTierTest` can never silently
 // break anything. The moment a double DOES commit to a precise `failingTestCount:` — claiming to be a
 // complete, countable `GateSequentialResult` account — it has entered exactly the shape the real bug lived
 // in, and MUST also carry `failTierTest`/`failTierTestCount` (DoD-1's "and correspondingly for the …Count
@@ -363,13 +364,13 @@ function classify(rawText, fileName) {
 
   // Legitimate exclusion #1 (DoD-2): a bare `failingTest:` with NO count at all — merge-gate-single-file-
   // retry.mjs's own scenario (D), and gate-history.mjs's richFailGate/richCancelGate stubs — never claims a
-  // precise count, so it can never have been relying on failTierTestCount === 1 to retry.
+  // precise count, so it can never have been relying on failTierTestCount being in bounds to retry.
   const BARE_NO_COUNT = 'const richFailGate = async () => ({ passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL  real_path_test.mjs", failingTest: "real_path_test.mjs", steps: [] });';
   const bareGood = classify(BARE_NO_COUNT, "gate-history.mjs");
   check("(A) GREEN: a bare failingTest: with no failingTestCount: at all is NOT flagged (never claims a precise, retry-eligible count)", bareGood.parseError === null && bareGood.violations.length === 0);
 
   // Legitimate exclusion #2 (DoD-2): a durable event `detail:`/`gateDetail:` payload — same key name,
-  // different (persisted) type, never reaches identifyRetriableTestFile.
+  // different (persisted) type, never reaches identifyRetriableTestFiles.
   const EVENT_PAYLOAD = 'db.appendEvent({ id: "e1", kind: "worker_gate", detail: { passed: false, durationMs: 9999, gateCap: 1, concurrentGates: 0, concurrentGatesMax: 0, failingTest: "some.mjs" } });';
   const eventGood = classify(EVENT_PAYLOAD, "gate-history.mjs");
   check("(A) GREEN: a durable db.appendEvent detail payload with no count is NOT flagged", eventGood.parseError === null && eventGood.violations.length === 0);

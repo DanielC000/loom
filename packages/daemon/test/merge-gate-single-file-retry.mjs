@@ -5,7 +5,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // HERMETIC, no daemon — mirrors merge-gate-retry.mjs's in-process style: REAL git + an INJECTED `runGate`
 // seam (this daemon's own test suite is far too heavy to actually spawn here), with dummy
 // `packages/daemon/scripts/test-daemon.mjs` + `packages/daemon/test/<name>.mjs` files planted in the
-// worktree so `identifyRetriableTestFile`'s real `fs.existsSync` checks resolve exactly as they would
+// worktree so `identifyRetriableTestFiles`'s real `fs.existsSync` checks resolve exactly as they would
 // against this daemon's own real tree.
 //
 // Proves (DoD-3, MANDATORY, both directions):
@@ -18,7 +18,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       no `retriedFile` anywhere, no `build_gate_single_file_retry` event.
 //   (D) NO IDENTIFIABLE FILE — a genuine failure whose `failingTest` doesn't match this daemon's own bare
 //       `FAIL <name>` convention (a generic AssertionError line): no retry fires, rejects exactly as today.
-//   (E) `identifyRetriableTestFile` unit coverage — undefined input, a candidate whose files don't exist on
+//   (E) `identifyRetriableTestFiles` unit coverage — undefined input, a candidate whose files don't exist on
 //       disk (fail-closed), a real match, an unsafe/path-shaped name (Jest-style `FAIL src/foo.test.js`)
 //       correctly refused by the bare-identifier guard.
 //   (G) THE GUARD IS HELD THROUGH THE RETRY (Code Review CRITICAL, card b9e07a4a; now structural, card 68155573):
@@ -89,7 +89,7 @@ function makeRepo(p) {
   commitAll(p.repo, "init", GIT_ID);
 }
 
-// Plants the two files `identifyRetriableTestFile` looks for, relative to the worktree root — the real
+// Plants the two files `identifyRetriableTestFiles` looks for, relative to the worktree root — the real
 // production shape (`packages/daemon/scripts/test-daemon.mjs` + `packages/daemon/test/<name>.mjs`).
 // Content is irrelevant: the injected `runGate` below intercepts everything, nothing here is ever spawned.
 function plantTestFile(worktreePath, name) {
@@ -158,11 +158,11 @@ try {
   // ── (J) THE DECOUPLING, END-TO-END (manager review, card 0e5b2045): `failingTest` (the diagnostic-
   //        winning field — an UNCAUGHT-idiom line can now outrank a bare FAIL <name> summary there, see
   //        gate-runner.ts's FAILING_TEST_PATTERNS doc) and `failTierTest` (the FAIL-tier-ISOLATED field
-  //        `identifyRetriableTestFile` actually reads) DIVERGE on this run — mirrors exactly what a real
+  //        `identifyRetriableTestFiles` actually reads) DIVERGE on this run — mirrors exactly what a real
   //        UNCAUGHT-idiom failure now produces from `runGateSequential`. confirmWorkerMerge must still
   //        retry using `failTierTest`'s name, completely ignoring the differing diagnostic `failingTest`,
   //        proving the decoupling holds through the REAL service.ts call site, not just the tracker/
-  //        identifyRetriableTestFile unit level already covered in gate-runner-failing-test-truncation.mjs. ──
+  //        identifyRetriableTestFiles unit level already covered in gate-runner-failing-test-truncation.mjs. ──
   {
     const J = mk("j", "feature-j.txt");
     makeRepo(J);
@@ -423,7 +423,7 @@ try {
   }
 
   // ── (F) BOUNDED MULTI-FILE RETRY (card 67030bb9 — the OLD test here, "manager review #128", proved the
-  //        OLD design refused ANY multi-file failure outright via `identifyRetriableTestFile`'s `!== 1`
+  //        OLD design refused ANY multi-file failure outright via the old single-file-only check's `!== 1`
   //        gate. THIS test proves the NEW, manager-approved design instead: alpha AND beta, two REAL
   //        distinct failing files, retry TOGETHER via ONE `--only=alpha,beta` call and — when that retry
   //        passes — the merge proceeds with BOTH names recorded, not silently refused the way the old
@@ -583,7 +583,7 @@ try {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     // Deliberately NO plantTestFile() call — and even if there were, "AssertionError: ..." never matches
-    // the bare `FAIL <name>` shape identifyRetriableTestFile looks for.
+    // the bare `FAIL <name>` shape identifyRetriableTestFiles looks for.
     fs.writeFileSync(path.join(worktreePath, D.file), "work for D\n");
     commitAll(worktreePath, `${D.file}`, GIT_ID);
     seed(db, D, "pnpm gate");
@@ -651,7 +651,7 @@ try {
       calls++;
       // Would ordinarily be IDENTICAL to (A)'s fakeGate — a real, identifiable single-file failure — with
       // exactly one difference: harnessNotExecutedDetected:true. If this test regresses to calling
-      // identifyRetriableTestFile without this field wired through, `calls` would reach 2 (the retry
+      // identifyRetriableTestFiles without this field wired through, `calls` would reach 2 (the retry
       // would fire) and the second call's `passed:true` would merge — this fakeGate NEVER returns
       // passed:true, so a regression here would surface as an unhandled rejection, not a silent pass.
       return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-l", failingTestCount: 1, failTierTest: "FAIL  flaky-l", failTierTestCount: 1, failTierAll: ["FAIL  flaky-l"], harnessNotExecutedDetected: true };

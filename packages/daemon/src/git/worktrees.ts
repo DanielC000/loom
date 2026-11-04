@@ -5551,7 +5551,7 @@ export const STATIC_GUARD_REPO_PATHS = [
   "packages/daemon/test/exit-code-verdict-guard.mjs",
   // Card 3c4a19cb: a corpus-wide source-text scan asserting that any `packages/daemon/test/*.mjs` object
   // literal setting `failingTestCount:` also sets `failTierTest:`/`failTierTestCount:` — omitting them
-  // silently loses the merge gate's single-file retry (`identifyRetriableTestFile`, gate-runner.ts reads
+  // silently loses the merge gate's bounded multi-file retry (`identifyRetriableTestFiles`, gate-runner.ts reads
   // ONLY `failTierTest*`, never `failingTest*`; see card 0e5b2045's decoupling). This bit twice, hours
   // apart, fixed by commit a995d7bc. Belongs here on the same ground as its corpus-wide-scan siblings
   // above: a source-TEXT property the reduced/emit-compare path cannot reason about — a diff that ADDS a
@@ -7164,7 +7164,7 @@ export async function computeEmitCompareGate(
       // sits, not WHICH CHARACTERS it contains. A committed filename carrying shell metacharacters (a
       // narrow but real vector — this repo's own gateCommand trust model already treats a committed
       // filename as untrusted-until-checked, see `--no-renames`'s doc above) must fail closed here, not
-      // reach the shell string at all. Mirrors sibling card 344ce950's `identifyRetriableTestFile`, which
+      // reach the shell string at all. Mirrors sibling card 344ce950's `identifyRetriableTestFiles`, which
       // guards the analogous interpolation with an explicit allowlist before building its own command
       // string — same subsystem, same posture.
       if (!TEST_PATH_SHELL_SAFE_RE.test(p)) return notReducible(`test file path contains a character outside the shell-safe allowlist: ${p}`);

@@ -9,7 +9,7 @@ a small set of identifiable, re-runnable test files that then pass together in i
 a full second run of the WHOLE suite — the manager's only alternative was to re-fire
 `worker_merge_confirm` by hand instead of the daemon retrying the narrow failure itself. Per card
 67030bb9's own investigation, a MULTI-file failure used to be refused this retry OUTRIGHT, regardless
-of whether every file in it would pass alone — the old `identifyRetriableTestFile` required exactly
+of whether every file in it would pass alone — the old single-file-only check required exactly
 one failing file.
 
 THE NON-NEGOTIABLE PART (card 344ce950 §3): a pass-after-retry is WEAKER evidence than a clean pass —

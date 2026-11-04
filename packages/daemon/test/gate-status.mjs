@@ -827,7 +827,7 @@ try {
     db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
-    // Plants the two files `identifyRetriableTestFile`'s real `fs.existsSync` checks look for — mirrors
+    // Plants the two files `identifyRetriableTestFiles`'s real `fs.existsSync` checks look for — mirrors
     // merge-gate-single-file-retry.mjs's own `plantTestFile` exactly, so the retry actually identifies
     // "flaky-gst" instead of refusing (fail-closed) for want of a real file on disk.
     fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "scripts"), { recursive: true });

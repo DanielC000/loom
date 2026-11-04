@@ -11,7 +11,7 @@ Card 67030bb9 (CORRECTED, card 4ad6ccfd — the previous version of this doc, "p
 
 ### Narrative
 
-`identifyRetriableTestFiles` (card 344ce950 single-file / 67030bb9 bounded multi-file, manager-approved — REPLACES the old exactly-one-file `identifyRetriableTestFile`) identifies UP TO `maxFiles` distinct test files this daemon's own hermetic suite can re-run TOGETHER in isolation via its `--only=<name>[,<name>...]` flag (card 6185fbfc), so a merge gate can retry a small failing SET instead of the whole ~650-file suite before declaring a rejection.
+`identifyRetriableTestFiles` (card 344ce950 single-file / 67030bb9 bounded multi-file, manager-approved — REPLACES the old exactly-one-file, same-named-but-singular predecessor function) identifies UP TO `maxFiles` distinct test files this daemon's own hermetic suite can re-run TOGETHER in isolation via its `--only=<name>[,<name>...]` flag (card 6185fbfc), so a merge gate can retry a small failing SET instead of the whole ~650-file suite before declaring a rejection.
 
 DELIBERATELY NARROW AND FAIL-CLOSED, PER NAME: recognizes ONLY this daemon's own `FAIL  <name>` convention (a bare identifier — letters/digits/hyphen/underscore, no path/extension), never the sibling Jest/AVA/tap/`AssertionError`/`error TSxxxx`/`UNCAUGHT` shapes, and NEVER via a second parser. EVERY name is confirmed against the REAL filesystem before being reported identifiable — a single name that merely LOOKS like one of ours but doesn't correspond to a real file declines the WHOLE set (never a partial candidate).
 

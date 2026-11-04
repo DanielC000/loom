@@ -180,7 +180,7 @@ function isUnverifiableBareFailToken(line: string, cwd: string): boolean {
 
 /**
  * The ONLY line shape {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` — and therefore
- * {@link identifyRetriableTestFile} — may ever count: `test-daemon.mjs`'s own `runLane` wrapper line,
+ * {@link identifyRetriableTestFiles} — may ever count: `test-daemon.mjs`'s own `runLane` wrapper line,
  * verbatim, printed UNINDENTED exactly once per failing file. Anchored on BOTH (1) NO leading whitespace and
  * (2) a trailing `  (exit ` suffix — the two properties ONLY this wrapper line has; a `check()`-printed
  * per-assertion `FAIL` line (indented when re-echoed by the `FAILURES:` epilogue, or printed bare by a
@@ -248,7 +248,7 @@ export function createFailingTestTracker(cwd?: string): {
   // than one matched and only the last survived". PURELY DIAGNOSTIC now (card 6c84b87b): this pair backs
   // `result()`/`matchCount()` display only — a "LINE count" that can inflate on a SINGLE genuinely-failing
   // file (its own multiple echoed assertion lines can all match one tier), not a "FAILING FILE count".
-  // {@link identifyRetriableTestFile}'s own multi-file ambiguity guard reads the SEPARATE
+  // {@link identifyRetriableTestFiles}'s own multi-file ambiguity guard reads the SEPARATE
   // `lastHarnessWrapper`/`harnessWrapperCount` tracking below instead, which counts real per-file wrapper
   // lines and so doesn't conflate "many lines" with "many files" the way this pair structurally can.
   const lastByPattern: (string | undefined)[] = new Array(FAILING_TEST_PATTERNS.length).fill(undefined);
@@ -325,7 +325,7 @@ export function createFailingTestTracker(cwd?: string): {
     /** How many lines matched the SAME tier {@link result} reports (i.e. the winning, highest-priority
      *  tier that has ANY match) — `0` when nothing matched at all (mirrors `result()`'s own `undefined`).
      *  PURELY DIAGNOSTIC alongside `result()` (card 0e5b2045 decoupled retry onto `failTierMatchCount()`
-     *  below — this is no longer what {@link identifyRetriableTestFile} reads). Deliberately NOT deduped by
+     *  below — this is no longer what {@link identifyRetriableTestFiles} reads). Deliberately NOT deduped by
      *  exact line content: a tier that matched N times, even if some of those lines are textually
      *  identical, reports N. */
     matchCount(): number {
@@ -335,8 +335,9 @@ export function createFailingTestTracker(cwd?: string): {
     },
     /** Card 0e5b2045 (retargeted onto {@link HARNESS_FAIL_WRAPPER_RE} by card 6c84b87b): `test-daemon.mjs`'s
      *  own per-FILE `runLane` wrapper line, independent of whichever tier {@link result} picked for display —
-     *  the single-file merge retry ({@link identifyRetriableTestFile}) reads THIS, never `result()`, so a
-     *  higher-priority diagnostic tier (e.g. `UNCAUGHT`) winning `result()` never silently changes which
+     *  the bounded multi-file merge retry ({@link identifyRetriableTestFiles}, up to `MULTI_FILE_RETRY_MAX`
+     *  files, used by both the solo `confirmWorkerMerge` and the batch `mergeBatchTracked` paths) reads THIS,
+     *  never `result()`, so a higher-priority diagnostic tier (e.g. `UNCAUGHT`) winning `result()` never silently changes which
      *  failure the retry targets. ⚠️ NOT the same match set as `result()`'s own FAIL/not-ok tier — see
      *  `HARNESS_FAIL_WRAPPER_RE`'s own doc for exactly what distinguishes the two and why the difference is
      *  the fix, not a bug. `undefined` when no harness wrapper line was ever seen in this step's output at
@@ -345,10 +346,11 @@ export function createFailingTestTracker(cwd?: string): {
       flushCarryOnce();
       return lastHarnessWrapper;
     },
-    /** How many lines matched {@link HARNESS_FAIL_WRAPPER_RE} — the count {@link identifyRetriableTestFile}
-     *  actually gates its `=== 1` check on. `0` when `failTierResult()` is `undefined`. Deliberately NOT
+    /** How many lines matched {@link HARNESS_FAIL_WRAPPER_RE} — the count {@link identifyRetriableTestFiles}
+     *  actually gates its over-cap check on (eligible only up to `MULTI_FILE_RETRY_MAX` files). `0` when
+     *  `failTierResult()` is `undefined`. Deliberately NOT
      *  deduped by exact line content, same as `matchCount()` — over-counting only ever SUPPRESSES a retry
-     *  (the safe direction; see {@link identifyRetriableTestFile}'s own doc), never wrongly permits one. As
+     *  (the safe direction; see {@link identifyRetriableTestFiles}'s own doc), never wrongly permits one. As
      *  of card 6c84b87b, `> 1` here means what it always should have: genuinely MULTIPLE distinct failing
      *  files each printed their own wrapper line in this run — not an assertion failure's own `check()`
      *  output getting counted a second time via `test-daemon.mjs`'s later `FAILURES:` echo of it. */
@@ -366,7 +368,7 @@ export function createFailingTestTracker(cwd?: string): {
     },
     /** Card 2a79a74c #5: true iff a line matching {@link HARNESS_NOT_EXECUTED_RE} was seen anywhere in
      *  this step's output — `test-daemon.mjs`'s own structural "some selected file(s) were never
-     *  executed" failure. {@link identifyRetriableTestFile} refuses to identify ANY retry candidate when
+     *  executed" failure. {@link identifyRetriableTestFiles} refuses to identify ANY retry candidate when
      *  this is true, regardless of `failTierMatchCount()` — see that regex's own doc for why a
      *  co-occurring genuine test failure's own wrapper line is not by itself a sufficient signal that
      *  this run is safe to retry piecemeal. */
@@ -523,13 +525,14 @@ export interface GateStepResult {
    *  checking this is exactly `1` first. */
   failingTestCount?: number;
   /** Card 0e5b2045: the FAIL/not-ok tier's OWN line (see {@link createFailingTestTracker.failTierResult}),
-   *  independent of whichever tier `failingTest` above was drawn from — {@link identifyRetriableTestFile}
+   *  independent of whichever tier `failingTest` above was drawn from — {@link identifyRetriableTestFiles}
    *  reads THIS field, never `failingTest`, so a higher-priority diagnostic tier (e.g. an `UNCAUGHT` idiom)
-   *  winning `failingTest` never silently changes which failure the single-file merge retry targets.
+   *  winning `failingTest` never silently changes which failure the bounded multi-file merge retry targets.
    *  `undefined` when no FAIL/not-ok-shaped line was seen in this step's output at all. */
   failTierTest?: string;
   /** See {@link createFailingTestTracker.failTierMatchCount} — forwarded alongside `failTierTest`, the
-   *  count {@link identifyRetriableTestFile} actually gates its `=== 1` check on. `undefined` iff
+   *  count {@link identifyRetriableTestFiles} actually gates its over-cap check on (eligible only up to
+   *  `MULTI_FILE_RETRY_MAX` files). `undefined` iff
    *  `failTierTest` is `undefined`. */
   failTierTestCount?: number;
   /** Card 67030bb9: see {@link createFailingTestTracker.failTierAllResults} — every {@link
