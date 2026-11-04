@@ -1379,6 +1379,15 @@ export const api = {
     provision: unknown; toolAllowlist: string[]; wantsScratchDir?: boolean; requiresConnection?: boolean; secretEnvVar?: string;
   }) => postErr<CapabilitySummary>("/api/capabilities", b),
   deleteCapability: (id: string) => delErr<{ ok: boolean }>(`/api/capabilities/${encodeURIComponent(id)}`),
+  // Card fafae623's ONE post-create-editable field, surfaced by card dec4959a's Settings editor. There is
+  // deliberately no general "edit a capability" route to hang this off — every other field is
+  // create-time-only — so this is its own narrow call, not a partial-update of the create body.
+  // `patch` (not `patchProject`) because the daemon answers a rejected name with a readable `{ error }`
+  // the editor shows verbatim: the client-side mirror in lib/passEnv.ts is a convenience, never the gate.
+  // Always sends the `passEnv` key explicitly — the route's own `requirePassEnvKey` 400s a body that
+  // omits it, so `[]` is how you clear the list, never `{}`.
+  updateCapabilityPassEnv: (id: string, passEnv: string[]) =>
+    patch<CapabilitySummary>(`/api/capabilities/${encodeURIComponent(id)}`, { passEnv }),
 
   // --- Owner-declared project links (board card 2349d90c): a symmetric link between two projects — the
   // sole gate for the manager↔manager `peer_message` cross-project channel. HUMAN-only loopback REST —

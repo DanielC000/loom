@@ -18,6 +18,7 @@ import {
   type OAuthProviderSlug,
   type PollJob,
   type CapabilityProvisionKind,
+  type CapabilitySummary,
   type MsBounds,
   GOOGLE_ANALYTICS_SCOPE_PRESETS,
   ORCHESTRATION_TIMEOUT_MS_BOUNDS,
@@ -59,6 +60,7 @@ import { type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
 import { color, font, tone, type Tone } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
+import { PASS_ENV_MAX_KEYS, duplicatePassEnvIndexes, passEnvEntryError, validatePassEnv } from "../lib/passEnv";
 
 // ── The section list ───────────────────────────────────────────────────────────────────────────
 //
@@ -3488,6 +3490,10 @@ const CAPABILITY_KINDS: CapabilityProvisionKind[] = ["node-package", "python-ven
 function CapabilitiesPanel() {
   const qc = useQueryClient();
   const [adding, setAdding] = useState(false);
+  // Which row's ambient-env editor is open, by slug — at most one. An accordion, not a per-row toggle:
+  // the editor is several rows tall, and two open at once turns a scannable catalog into a wall of
+  // inputs with no way to tell which capability you are widening.
+  const [openPassEnv, setOpenPassEnv] = useState<string | null>(null);
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["capabilities"],
     queryFn: () => api.capabilities(),
@@ -3537,26 +3543,205 @@ function CapabilitiesPanel() {
           {rows.length === 0 && !adding && !isLoading && (
             <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No capabilities yet.</span>
           )}
-          {/* flexWrap + the description's minWidth:0 keep each row inside the panel at phone width: a
-              nowrap ellipsised flex item defaults to `min-width: auto`, so it refuses to shrink below
-              its FULL text width and pushes the row (and the page) sideways instead of ellipsising. */}
-          {rows.map((c) => (
-            <div key={c.slug} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
-              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{c.kind}</span>
-              {c.builtin && <Badge tone="muted">builtin</Badge>}
-              {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
-              <span style={{ flex: 1, minWidth: 0, color: color.textMuted, fontSize: 12, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.description}</span>
-              {!c.builtin && c.id && (
-                <Button variant="danger" disabled={remove.isPending}
-                  onClick={() => { if (window.confirm(`Delete capability "${c.name}"? Any Profile granting it will simply skip mounting it.`)) remove.mutate(c.id!); }}>
-                  Delete
-                </Button>
-              )}
-            </div>
-          ))}
+          {rows.map((c) => {
+            // A builtin is not a `capability_defs` row, so it has no id to PATCH and no `passEnv` concept
+            // at all (capabilities/registry.ts › BUILTIN_CAPABILITY_SUMMARIES carries neither field). The
+            // editor is therefore WITHHELD rather than shown disabled: there is no stored value to edit
+            // and no route that would accept one, so a disabled control would imply a setting exists.
+            // The row says so in words instead — see the `env n/a` badge below.
+            const editable = !c.builtin && !!c.id;
+            const names = c.passEnv ?? [];
+            const open = openPassEnv === c.slug;
+            return (
+              <div key={c.slug} style={{ background: color.panel2, border: `1px solid ${open ? color.borderStrong : color.border}`, borderRadius: 6 }}>
+                {/* flexWrap + the description's minWidth:0 keep each row inside the panel at phone width: a
+                    nowrap ellipsised flex item defaults to `min-width: auto`, so it refuses to shrink below
+                    its FULL text width and pushes the row (and the page) sideways instead of ellipsising. */}
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, padding: "8px 10px" }}>
+                  <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
+                  <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{c.kind}</span>
+                  {/* The title carries the one thing a reader might wonder about the missing env control
+                      below — cheaper than a second badge saying "n/a" on every builtin row forever. */}
+                  {c.builtin && (
+                    <Badge tone="muted" data-testid={`capability-builtin-${c.slug}`}
+                      title="A builtin isn't a catalog row, so it has no ambient-env allowlist to widen.">
+                      builtin
+                    </Badge>
+                  )}
+                  {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
+                  {/* Amber, and present on the ROW rather than only inside the editor: a non-empty list
+                      widens this capability's env isolation, so it has to be legible while scanning the
+                      catalog, not just while editing the one row you already opened. */}
+                  {editable && names.length > 0 && (
+                    <Badge tone="amber" data-testid={`capability-passenv-badge-${c.slug}`}>
+                      ambient env · {names.length}
+                    </Badge>
+                  )}
+                  <span style={{ flex: 1, minWidth: 0, color: color.textMuted, fontSize: 12, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.description}</span>
+                  {editable && (
+                    <Button variant={open ? "primary" : "default"} data-testid={`capability-passenv-toggle-${c.slug}`}
+                      aria-expanded={open} title={`Edit which ambient env vars reach ${c.name}`}
+                      onClick={() => setOpenPassEnv(open ? null : c.slug)}>
+                      {open ? "Close env" : "Ambient env"}
+                    </Button>
+                  )}
+                  {editable && (
+                    <Button variant="danger" disabled={remove.isPending}
+                      onClick={() => { if (window.confirm(`Delete capability "${c.name}"? Any Profile granting it will simply skip mounting it.`)) remove.mutate(c.id!); }}>
+                      Delete
+                    </Button>
+                  )}
+                </div>
+                {open && editable && (
+                  <PassEnvEditor capability={c} onSaved={invalidate} onClose={() => setOpenPassEnv(null)} />
+                )}
+              </div>
+            );
+          })}
         </div>
       </Panel>
+    </div>
+  );
+}
+
+/**
+ * The per-capability `passEnv` editor — card fafae623's human-only escape hatch, surfaced (card
+ * dec4959a) so it no longer needs a hand-written `PATCH /api/capabilities/:id`.
+ *
+ * ⛔ Scope is ONE field. `passEnv` is the only post-create-editable thing on a capability; every other
+ * field is create-time-only, and there is no general edit route to grow this into.
+ * ⛔ The list holds env var NAMES, never values — the copy says so twice, because the failure it
+ * prevents is pasting a secret into a field readable by every session granted this capability.
+ *
+ * Row idiom matches SessionEnvEditor / RotationMarkersEditor above so the three list editors read as
+ * one control. Removal is immediate, not staged, and Save uses its own mutation rather than the shared
+ * config PATCH — this list is not part of the big form, and a dropped name is retyped in seconds.
+ */
+function PassEnvEditor({ capability, onSaved, onClose }: {
+  capability: CapabilitySummary; onSaved: () => void; onClose: () => void;
+}) {
+  const stored = capability.passEnv ?? [];
+  const [rows, setRows] = useState<string[]>(stored);
+  const [preflight, setPreflight] = useState<string | null>(null);
+
+  const save = useMutation({
+    // Rendered inline below (`save.error`), so the global mutation alert would be a second copy of the
+    // same sentence — see components/agentEditor.tsx's note on the inverse hazard.
+    meta: { inlineError: true },
+    mutationFn: (passEnv: string[]) => api.updateCapabilityPassEnv(capability.id!, passEnv),
+    onSuccess: () => { onSaved(); onClose(); },
+  });
+
+  // What would actually be sent: blanks are unfinished rows, not entries. Trimmed because a trailing
+  // space is invisible in the input and would otherwise fail the server's charset check with a message
+  // that looks wrong ("'PROXY ' is not a valid env var name" over a field that reads `PROXY`).
+  const trimmed = rows.map((r) => r.trim());
+  const payload = trimmed.filter(Boolean);
+  // Indexed over `trimmed`, NOT `payload` — the two diverge the moment any row is blank, and a set of
+  // payload indexes read against a row index silently marks the wrong row.
+  const dupes = duplicatePassEnvIndexes(trimmed);
+  const rowErrors = trimmed.map((r) => passEnvEntryError(r));
+  const blocked = rowErrors.some(Boolean);
+  const dirty = payload.join("\u0000") !== stored.join("\u0000");
+
+  const edit = (i: number, v: string) => {
+    setRows(rows.map((r, j) => (j === i ? v : r)));
+    setPreflight(null);
+    save.reset();
+  };
+  const submit = () => {
+    // The mirror runs here as a last pre-flight, not just per row: it is the only place the
+    // whole-array rules (the count cap) are checked, and its message is the server's own wording.
+    const v = validatePassEnv(payload);
+    if (!v.ok) { setPreflight(v.error); return; }
+    setPreflight(null);
+    save.mutate(v.value);
+  };
+
+  return (
+    <div data-testid={`capability-passenv-editor-${capability.slug}`}
+      style={{ padding: "10px 10px 12px", borderTop: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+      <SectionLabel style={{ margin: 0 }}>Ambient env for {capability.name}</SectionLabel>
+      {/* No `maxWidth` here, deliberately: the panel's own intro copy above spans its full width, and a
+          narrower measure for these two reads as a ragged half-column beside full-width inputs. */}
+      <Hint style={{ lineHeight: 1.5 }}>
+        This capability launches with an isolated environment. Name any extra variables it needs — a proxy
+        (<code>HTTPS_PROXY</code>), a private registry (<code>npm_config_registry</code>) — and Loom
+        forwards each one&apos;s value from the daemon&apos;s own environment.
+      </Hint>
+      {/* Kept to two lines on purpose: this is the one sentence that must actually get read, and a
+          seven-line block of amber is skipped exactly like a wall of grey. */}
+      <Hint style={{ color: color.amber, lineHeight: 1.5 }}>
+        Names only, never values — type <code>HTTPS_PROXY</code>, not the URL. Every session granted this
+        capability can read what you name here, so don&apos;t name a variable holding a secret.
+      </Hint>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
+        {rows.length === 0 ? (
+          <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>
+            No extra variables — this capability launches with the base allowlist only.
+          </span>
+        ) : (
+          rows.map((r, i) => {
+            const err = rowErrors[i];
+            const dupe = dupes.has(i);
+            return (
+              <div key={i} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                {/* nowrap, unlike the sibling list editors above: those wrap a THREE-field row where a
+                    reflow still reads correctly, but this row is one input plus its own ✕. Allowed to
+                    wrap at phone width the ✕ orphans onto its own line under the field, and with several
+                    rows open it stops being obvious which input each stray ✕ belongs to. */}
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "nowrap" }}>
+                  <Input placeholder="HTTPS_PROXY" value={r} spellCheck={false} autoComplete="off"
+                    data-testid={`passenv-name-${capability.slug}-${i}`}
+                    aria-label={`Ambient env var ${i + 1} name`}
+                    aria-invalid={err ? true : undefined}
+                    onChange={(e) => edit(i, e.target.value)}
+                    style={{ flex: 1, minWidth: 0, ...(err ? { borderColor: color.red } : null) }} />
+                  <Button variant="ghost" data-testid={`passenv-remove-${capability.slug}-${i}`}
+                    title="Remove this variable" aria-label={`Remove ambient env var ${i + 1}`}
+                    onClick={() => { setRows(rows.filter((_, j) => j !== i)); setPreflight(null); save.reset(); }}
+                    style={{ padding: "4px 9px" }}>✕</Button>
+                </div>
+                {err && (
+                  <span data-testid={`passenv-error-${capability.slug}-${i}`} role="alert"
+                    style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4 }}>{err}</span>
+                )}
+                {/* Not an error: the daemon ACCEPTS a repeat and silently collapses it. Said out loud so a
+                    row doesn't just disappear on save with nothing having explained why. */}
+                {!err && dupe && (
+                  <span data-testid={`passenv-dupe-${capability.slug}-${i}`}
+                    style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.4 }}>
+                    Already listed above — saving keeps one copy.
+                  </span>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 2 }}>
+        <Button data-testid={`passenv-add-${capability.slug}`} disabled={rows.length >= PASS_ENV_MAX_KEYS}
+          title={rows.length >= PASS_ENV_MAX_KEYS ? `At most ${PASS_ENV_MAX_KEYS} variables` : undefined}
+          onClick={() => { setRows([...rows, ""]); setPreflight(null); save.reset(); }}>＋ Add variable</Button>
+        <span style={{ flex: 1 }} />
+        <Button data-testid={`passenv-cancel-${capability.slug}`} variant="ghost"
+          onClick={() => { setRows(stored); setPreflight(null); save.reset(); onClose(); }}>Cancel</Button>
+        <Button variant="primary" data-testid={`passenv-save-${capability.slug}`}
+          disabled={blocked || !dirty || save.isPending} onClick={submit}>
+          {save.isPending ? "Saving…" : "Save ambient env"}
+        </Button>
+      </div>
+
+      {/* The server is authoritative: its own `{ error }` text is shown verbatim, never re-worded, so a
+          rule the mirror above has drifted from still reads correctly. */}
+      {(preflight || save.error) && (
+        <span data-testid={`passenv-save-error-${capability.slug}`} role="alert"
+          style={{ fontFamily: font.mono, fontSize: 12, color: color.red, lineHeight: 1.5 }}>
+          {preflight ?? errorText(save.error)}
+        </span>
+      )}
     </div>
   );
 }

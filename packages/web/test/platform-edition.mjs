@@ -724,10 +724,13 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
 // `capabilityProvisioning` (a bare `get<...>`) and `retryCapabilityProvisioning` (a `post<...>`) — and
 // REMOVED no member: the retired markitdown-only widget took two local TYPE aliases with it, not api
 // members, so the python pair at the same routes is untouched. 216→218 total, 94→95 reads, 122→123 writes.
-check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read and card cd9a78bc's capability-provisioning read+write pair (95 reads / 123 writes / 218 members)", () => {
-  assert.equal(API_MEMBERS.total, 218, `api.ts now has ${API_MEMBERS.total} members, not 218`);
+// Card dec4959a added one new WRITE member (`updateCapabilityPassEnv`, a `patch<...>` call to the
+// human-only PATCH /api/capabilities/:id route behind the Settings ambient-env editor) —
+// 218→219 total, 123→124 writes, reads unchanged at 95.
+check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair and card dec4959a's updateCapabilityPassEnv write (95 reads / 124 writes / 219 members)", () => {
+  assert.equal(API_MEMBERS.total, 219, `api.ts now has ${API_MEMBERS.total} members, not 219`);
   assert.equal(API_MEMBERS.reads.size, 95, `api.ts now has ${API_MEMBERS.reads.size} reads, not 95`);
-  assert.equal(API_MEMBERS.writes.size, 123, `api.ts now has ${API_MEMBERS.writes.size} writes, not 123`);
+  assert.equal(API_MEMBERS.writes.size, 124, `api.ts now has ${API_MEMBERS.writes.size} writes, not 124`);
   // Pinned by name, not just by the count above: this member must stay a READ. If it ever starts
   // classifying as a write, the route or its helper changed shape and the Tier-1 allowlisting of
   // GET /api/web-bundle (gateway/trust-tier.ts) needs re-reviewing, not just this number bumping.
@@ -737,6 +740,11 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   // route's own trust posture needs re-reviewing, not just the counts above.
   assert.ok(API_MEMBERS.reads.has("capabilityProvisioning"), "api.capabilityProvisioning must classify as a READ");
   assert.ok(API_MEMBERS.writes.has("retryCapabilityProvisioning"), "api.retryCapabilityProvisioning must classify as a WRITE");
+  // Same discipline again for the ambient-env write: PATCH /api/capabilities/:id widens a capability's
+  // env-isolation allowlist, so it is HUMAN-only loopback REST with no MCP path. A READ verdict here
+  // would mean the member stopped going through a write helper — re-review the route's trust posture
+  // (gateway/trust-tier.ts) rather than bumping the counts above.
+  assert.ok(API_MEMBERS.writes.has("updateCapabilityPassEnv"), "api.updateCapabilityPassEnv must classify as a WRITE");
 });
 
 // ── card 66b9e590 — planted negative controls proving the "other calls" side is now fail-closed. ─────
