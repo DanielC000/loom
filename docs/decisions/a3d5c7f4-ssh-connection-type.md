@@ -77,6 +77,14 @@ against the ORIGINAL parsed key's public half (`original.verify(nonce, candidate
 catches a corrupted private field because the resulting signature then fails to verify, which a
 public-bytes compare cannot. Refuses to store (never silently falls back) on any sign/verify failure.
 
+## Exec core (child 2, `f6647205`)
+
+`connections/ssh.ts` mirrors this design one level down: one bounded timer covers connect+exec+read; stdout/stderr are each capped mid-stream, never buffered past the cap, and the channel drains to its real exit rather than being killed on cap; a connect/parse failure maps to a fixed, generic error, never ssh2's own error text as-is.
+
+`settleSsh2Client` guards two different failure modes, not one: a permanent no-op `'error'` sink (the CRASH guard — ssh2's own internal `readyTimeout` fires a LATE `'error'` on every pre-handshake timeout, in the same timers pass we may already have settled in, so without a listener that late error is uncaught and crashes the daemon) and a direct `_sock.destroy()` bypassing ssh2's own `isWritable()` guard (the LEAK guard — `end()` alone can leave the real socket open if the peer never closes its side; `destroy()`'s own `'close'` event is asynchronous, so this does not itself prevent the crash the sink already guards against).
+
+`test/ssh-exec-core.mjs`'s section 8 tests the crash guard in isolation from whether the real code forwards `readyTimeout` at all (section 8d pins that separately): it wraps `ssh2.Client.prototype.connect` to FORCE a short, test-controlled internal `readyTimeout` (900ms, deliberately longer than the test's own 500ms external bound) regardless of what the real `connect()` call passes. That decoupling is why the reproduction only needs to wait ~1.5s instead of the ~20.7s a real, unforced `readyTimeout` default would take — removing the sink alone (mutant A: sink and `readyTimeout`-forwarding both removed, i.e. the real pre-fix state) still reddens it, just fast.
+
 ## Do not
 
 - Do not place the private key, or any derived credential, in an agent-reachable env var, argv, or file — it is decrypted only inside the daemon process, only for the duration of one `ssh_exec` call. The agent gets a tool call, never a socket, cert, or key.
