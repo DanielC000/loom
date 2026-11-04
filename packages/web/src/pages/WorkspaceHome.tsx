@@ -9,7 +9,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { useOpenRequest } from "../components/requests";
 import { AttentionRow, EventRow } from "../components/fleet";
-import { Badge, Button, Dot, Panel, StatusPill } from "../components/ui";
+import { Badge, Button, Dot, Panel, SectionLabel, StatusPill } from "../components/ui";
 import {
   AtlasNodeHead, BandDisclosure, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiPill,
   LaneBar, MeterRow, NodeTabs, PlanUsageDetail, relativeResets, useDashboardOpen, type KpiItem,
@@ -24,7 +24,12 @@ import {
 } from "../lib/atlasHome";
 import { GLOBAL_ACTIVITY_CAP, PULSE_EXITED_REFETCH_MS, pulseExitedManagers } from "../lib/fleet";
 import { WorkspaceReplay } from "../components/workspaceReplay";
-import { isCompanionSession } from "../lib/sessions";
+import { goLiveSessionPill, isCompanionSession } from "../lib/sessions";
+import {
+  canMountTerminal, liveExpandedSession, toggleExpandedSession, workspaceRunningSessions,
+  workspaceSessionsSummary,
+} from "../lib/workspaceSessions";
+import { TerminalCard } from "../components/TerminalCard";
 import { color, font, type Tone } from "../theme";
 import { useNavigate } from "react-router-dom";
 
@@ -402,6 +407,12 @@ export default function WorkspaceHome() {
             </BandPanel>
             {pulsePanel}
           </BandDisclosure>
+          {/* The owner's Sessions card (card 9b6be377). It sits OUTSIDE the disclosure and above the
+              grid: the band's panels are a fixed-height five-track line (card b4442d27's budget) and
+              a terminal does not fit one, and folding the dashboard away is a request for the project
+              grid — not for losing sight of what is running. `live` is the population, the same set
+              the `live sessions` tile above it counts, so the two can never disagree on one screen. */}
+          <WorkspaceSessions sessions={live} />
           <section className="loom-atlas-primary">
             <div className="loom-atlas-primaryhead">
               <span className="loom-atlas-primarylbl">Projects</span>
@@ -621,6 +632,147 @@ export function GateLaneList({ lanes }: { lanes: ReturnType<typeof gateLanes> })
           title={g.workerLabel ?? g.branch ?? undefined} />
       ))}
     </>
+  );
+}
+
+// ── The Sessions card ──────────────────────────────────────────────────────────────────────────
+// Card 9b6be377, the owner's Atlas feedback verbatim: `"Workspace": Add "Sessions" card with all
+// running session terminals.` The workspace tier had no cross-project terminal surface at all —
+// under Atlas `/terminals` is the PROJECT node's Sessions tab (card 25c08fba).
+//
+// @decision 9b6be377 — ONE mounted terminal, and NOTHING at rest. Never render a second
+// TerminalCard here, never pre-expand a row, and never pass `resizable` for a claude session (pty
+// geometry is pinned daemon-side).
+
+/** The expanded terminal's HUG cap. `TerminalCard` hugs its real content up to this, so a short
+ *  session's card does not pad out to a fixed box — the same model the Terminals-page tiles use at
+ *  540 and the project Overview's at 520; a little shorter because this one sits inside a card that
+ *  already spent height on its own head and row list. */
+const SESSION_TERMINAL_HEIGHT = 460;
+
+/** The `aria-controls` target — one region, because there is only ever one mount. */
+const SESSION_TERMINAL_REGION = "atlas-workspace-session-terminal";
+
+function WorkspaceSessions({ sessions }: { sessions: SessionListItem[] }) {
+  const rows = useMemo(() => workspaceRunningSessions(sessions), [sessions]);
+  // `wanted` is what the reader last asked for; the MOUNT is re-derived through
+  // `liveExpandedSession` on every render, so an expansion can never outlive its row (a session that
+  // exits, is stopped, or is archived while its terminal is open takes the mount with it).
+  const [wanted, setWanted] = useState<string | null>(null);
+  const expandedId = liveExpandedSession(wanted, rows);
+  const expanded = rows.find((s) => s.id === expandedId) ?? null;
+
+  return (
+    <Panel className="loom-wsessions" data-testid="atlas-sessions-card">
+      <div className="loom-bandhead">
+        <SectionLabel style={{ margin: 0, whiteSpace: "nowrap" }}>Sessions</SectionLabel>
+        <span className="loom-bandcount" data-testid="atlas-sessions-count">{rows.length}</span>
+        <span style={{ flex: 1 }} />
+        {/* States the card's own cost model where a reader meets it, rather than leaving "why is
+            nothing showing a terminal" to be discovered. Withheld on an empty card, where it would
+            promise an affordance that has no subject. */}
+        {rows.length > 0 && <span className="loom-bandcount">one terminal at a time</span>}
+      </div>
+      {rows.length === 0 ? (
+        <div className="loom-bandbody">
+          <BandEmpty>Nothing is running.</BandEmpty>
+          <BandFoot>
+            A manager is started from its project's Agents tab, and it dispatches its own workers.
+            Standing operators live on <Link to="/platform" className="loom-inlinelink">Platform</Link> and{" "}
+            <Link to="/companion" className="loom-inlinelink">Companion</Link>.
+          </BandFoot>
+        </div>
+      ) : (
+        <>
+          <div className="loom-wsessions-list" data-testid="atlas-sessions-list">
+            {rows.map((s) => (
+              <SessionRow key={s.id} s={s} open={s.id === expandedId}
+                onToggle={() => setWanted(toggleExpandedSession(expandedId, s.id))} />
+            ))}
+          </div>
+          {expanded && (
+            <div className="loom-wsession-term" id={SESSION_TERMINAL_REGION} data-testid="atlas-sessions-terminal">
+              {canMountTerminal(expanded) ? (
+                // Deliberately NOT `TerminalTile`: that variant carries Fork + Stop, and this node is
+                // a readout of the fleet rather than a second place to end a session — the reasoning
+                // card c6160c7d's own record gives the Operators panel above. Lifecycle is one click
+                // away on the row's `Open ↗`, which lands on the session node's full tile. The
+                // Composer stays: watching without being able to steer is the half of a terminal
+                // that is not worth mounting.
+                <TerminalCard session={expanded} height={SESSION_TERMINAL_HEIGHT} showProject
+                  lifecycle="none" maximizable
+                  subPanels={{ taskCard: true, queue: true, wakes: true }} />
+              ) : (
+                <BandEmpty>
+                  {expanded.agentName} is still starting. Its terminal appears once the session is live.
+                </BandEmpty>
+              )}
+            </div>
+          )}
+          <BandFoot>
+            {workspaceSessionsSummary(rows)} Companions are driven from their own chat surface and are not listed.
+          </BandFoot>
+        </>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * One running session as a single dense line: state · role · project · agent · short id · uptime.
+ *
+ * The state pill is `goLiveSessionPill` (lib/sessions.ts), NOT `TileTitle`'s own — `TileTitle` reads
+ * `busy` alone, so it prints "idle" over a `starting` row, which is exactly the misreport that
+ * resolver exists to prevent (card 318b5a21). Everything else is kit: `RoleBadge` for the role and
+ * the mono identity grammar `TileTitle` uses, so a session reads the same here as on its own node.
+ *
+ * The row's expand target is a `<button>` and the `Open ↗` link is its SIBLING, never nested: an
+ * anchor inside a button is invalid and unreachable by keyboard — the same trap `.loom-atlas-noderow`
+ * exists to avoid in the tree.
+ */
+function SessionRow({ s, open, onToggle }: { s: SessionListItem; open: boolean; onToggle: () => void }) {
+  const pill = goLiveSessionPill(s);
+  const uptime = relativeTime(s.createdAt).replace(" ago", "");
+  // `data-atlas-wsession` carries the session id as a VALUE rather than baked into the testid, so a
+  // spec can address the row set as ONE locator and read each row's identity off it — a testid stem
+  // can only be matched an id at a time, which cannot assert an ORDER.
+  return (
+    <div className={`loom-wsessionrow${open ? " is-expanded" : ""}`} data-atlas-wsession={s.id}
+      data-testid={`atlas-session-row-${s.id}`}>
+      <button type="button" className="loom-wsessionbtn" onClick={onToggle}
+        aria-expanded={open} aria-controls={open ? SESSION_TERMINAL_REGION : undefined}
+        data-testid={`atlas-session-expand-${s.id}`}
+        title={open ? `Hide ${s.agentName}'s terminal` : `Show ${s.agentName}'s terminal`}>
+        <span aria-hidden className={`loom-wsession-twist${open ? " is-expanded" : ""}`}>▶</span>
+        {/* State and role travel as ONE fixed-width cluster so every row's identity text starts at
+            the SAME x. Both are variable-width ("busy" vs "starting", "Lead" vs "Operator"), and
+            left to themselves they gave five rows five different label origins — the ragged edge
+            card 3b563642 kept the tree's own entity tier off. `min-width`, never a fixed `width`: a
+            longer badge then pushes its own row by a pixel or two instead of being clipped. */}
+        <span className="loom-wsession-state">
+          <StatusPill tone={pill.pending ? "amber" : "phosphor"} glow={pill.pending} label={pill.label} />
+          <RoleBadge role={s.role ?? null} />
+        </span>
+        {/* The AGENT carries the weight, not the project. Rows are already project-major, so a
+            project's rows are adjacent and its name reads as the block's own dim boundary — given
+            the weight instead it repeats at full strength on every row of the block and buries the
+            one token that actually tells two rows of that block apart. */}
+        <span className="loom-wsession-id" title={`${s.projectName} · ${s.agentName} · ${s.id}`}>
+          <span className="loom-wsession-proj">{s.projectName} · </span>
+          <span className="loom-wsession-agent">{s.agentName}</span>
+          <span className="loom-wsession-short">{` · ${s.id.slice(0, 8)}`}</span>
+        </span>
+        <span style={{ flex: 1 }} />
+        <span className="loom-wsession-up" title={`Started ${relativeTime(s.createdAt)} · last activity ${relativeTime(s.lastActivity)}`}>
+          {uptime}
+        </span>
+      </button>
+      <Link to={`/session/${s.id}`} className="loom-inlinelink loom-wsession-open"
+        data-testid={`atlas-session-open-${s.id}`}
+        title={`Open ${s.agentName} on its own session node`}>
+        Open <span aria-hidden>↗</span>
+      </Link>
+    </div>
   );
 }
 

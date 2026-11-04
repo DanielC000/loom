@@ -2690,6 +2690,149 @@ button.loom-kpi.is-open {
   min-width: 0;
 }
 
+/* ── The Workspace node's Sessions card (card 9b6be377) ────────────────────────────────────
+   A Panel wearing the band's own `.loom-bandhead`, but deliberately NOT `.loom-bandpanel`: that
+   class pins a 320px height so the band's five tracks sit on one line, and this card has to hold
+   a terminal. Its height is its content instead — head, then one line per running session, then
+   the one expanded terminal if a reader asked for one. */
+.loom-wsessions {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 10px 12px 12px;
+}
+/* Bounded scroll for the same reason a band panel owns one: N running sessions change this card's
+   SCROLL DEPTH, never the page's layout. ~8 rows visible, which is past the live-session count on
+   a busy host — a deeper fleet scrolls rather than pushing the project grid off the page. */
+.loom-wsessions-list {
+  max-height: 272px;
+  overflow-y: auto;
+  padding-top: 4px;
+}
+.loom-wsessionrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-bottom: 1px solid var(--loom-border);
+}
+.loom-wsessionrow:last-child {
+  border-bottom: none;
+}
+/* The expanded row is the terminal's label — the mounted card sits BELOW the scroll track, so
+   without a mark on the row the pair reads as unrelated. A left edge rather than a fill: the row
+   is still a row, and a filled row competes with the project cards two sections down. */
+.loom-wsessionrow.is-expanded {
+  box-shadow: inset 2px 0 0 0 var(--loom-phosphor);
+}
+.loom-wsessionbtn {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--loom-radius-sm);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 80ms linear;
+}
+/* Fixed-size FACTS (the state pill, the role badge, the uptime) never give up width — only the
+   identity text ellipsises. Same rule, and the same reason, as `.loom-agentrow-head`'s: a ~600px
+   content column otherwise wraps "◆ MANAGER" onto a second line and doubles every row's height. */
+.loom-wsessionbtn > span:not(.loom-wsession-id) {
+  flex: none;
+  white-space: nowrap;
+}
+.loom-wsessionbtn:hover {
+  background: var(--loom-panel-2);
+}
+/* INSET, because the list above is an `overflow-y: auto` track: a positive offset is clipped on the
+   first and last row, which is how a focus ring goes missing on exactly the two rows a keyboard
+   reader reaches first. */
+.loom-wsessionbtn:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
+}
+.loom-wsession-twist {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--loom-text-muted);
+  transition:
+    transform 110ms cubic-bezier(0.2, 0, 0, 1),
+    color 80ms linear;
+}
+.loom-wsession-twist.is-expanded {
+  transform: rotate(90deg);
+  color: var(--loom-phosphor);
+}
+/* State + role as ONE cluster of fixed minimum width, so every row's identity text starts at the
+   same x. `min-width` rather than `width`: a longer badge pushes its own row a pixel or two instead
+   of being clipped, and the widest real pair ("STARTING" + "★ OPERATOR") still fits inside it. */
+.loom-wsession-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  min-width: 168px;
+}
+.loom-wsession-id {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--loom-font-mono);
+  font-size: 12px;
+}
+/* The AGENT carries the weight and the project trails behind it, dim. The rows are project-major,
+   so a project's rows are already adjacent and its name only has to mark that block's boundary —
+   given the readable weight it repeats at full strength on every row and buries the one token that
+   tells two rows of the same block apart. */
+.loom-wsession-proj {
+  color: var(--loom-text-muted);
+}
+.loom-wsession-agent {
+  color: var(--loom-text);
+  font-weight: 600;
+}
+.loom-wsession-short {
+  color: var(--loom-text-muted);
+  /* Flex items are blockified and a block box strips a leading space at the start of its line —
+     the same fix `TileTitle` needs for its own " · " prefix. */
+  white-space: pre;
+}
+.loom-wsession-up {
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  color: var(--loom-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.loom-wsession-open {
+  padding-right: 4px;
+}
+.loom-wsession-term {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--loom-border);
+}
+/* Below Atlas's own 820px breakpoint (where the tree rail becomes a drawer and hands the content
+   column its width back) the shared label origin stops being worth what it costs: at 600px the
+   cluster was 28% of the row and the agent name — the one token that tells two rows apart — was
+   ellipsised before the project name it trails. Alignment yields to legibility, in that order. */
+@media (max-width: 820px) {
+  .loom-wsession-state {
+    min-width: 0;
+  }
+}
+
 /* ── Project cards (the Workspace node's primary surface) ──────────────────────────────── */
 .loom-projgrid {
   display: grid;
@@ -3090,6 +3233,10 @@ button.loom-kpi.is-open {
   .loom-projcard,
   /* The Atlas tree's quick-spawn `＋` (card c6160c7d). */
   .loom-atlas-plus,
+  /* The Workspace Sessions card (card 9b6be377): its row's hover fade and its twist's rotation —
+     the same two cosmetic transitions, so the same rule. */
+  .loom-wsessionbtn,
+  .loom-wsession-twist,
   /* The overflow menu's rows (card d4350286). The trigger itself needs no entry — it wears
      `.loom-navtab`, which is already the second selector in this list. */
   .loom-atlas-tabmenu-item {
