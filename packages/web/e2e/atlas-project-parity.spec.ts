@@ -4,7 +4,7 @@
 //
 // @decision 102bc915 — never assert a Pulse sentinel as `detail` text, nor on the sentinel's own text
 // node: EventRow renders no part of `detail`, and its detail span is squeezed to zero width in a
-// 195.8px band column, so either shape fails against a perfectly working feed.
+// band column narrower than the row wants, so either shape fails against a perfectly working feed.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
@@ -242,10 +242,12 @@ test.describe("the project node's Pulse reaches an exited manager's events (card
     await expect(pulse).toBeVisible();
 
     // ⚠️ ASSERT THE ROW, NOT THE SENTINEL TEXT NODE. `EventRow`'s detail span is `flexShrink: 100000`
-    // with an ellipsis, and a Pulse band column is only 195.8px at 1440 — so the span that CARRIES the
-    // sentinel is routinely squeezed to ZERO WIDTH and Playwright reports it `hidden` even though the
-    // feed is working perfectly. Measured: `toHaveCount(1)` passes on the very render where
-    // `toBeVisible()` on that same span fails. The ROW is the thing that is genuinely on screen.
+    // with an ellipsis, and Pulse's band column is narrower than the row wants (195.8px when card
+    // 102bc915 measured it; 321px under card b4442d27's weights, still short of the ~479px an
+    // `EventRow` needs) — so the span that CARRIES the sentinel is routinely squeezed to ZERO WIDTH
+    // and Playwright reports it `hidden` even though the feed is working perfectly. Measured:
+    // `toHaveCount(1)` passes on the very render where `toBeVisible()` on that same span fails. The
+    // ROW is the thing that is genuinely on screen.
     const rowFor = (tag: string) => pulse.locator('[data-testid="activity-event"]')
       .filter({ has: page.locator(`[data-testid="activity-event-detail"]:text-is("w:${tag}")`) });
 

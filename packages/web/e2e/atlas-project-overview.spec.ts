@@ -1,15 +1,8 @@
 // The Atlas project node's reworked Overview — card 269f46ef, the owner's "C · Roster" pick.
 //
-// His instruction on this tab, verbatim: "Remove Board." and "Dashboard cards too cluttered on
-// narrower page width. Remove 'AGENTS' card. Rework and Expand the rest of the cards now that the
-// board is gone. Improve them." He picked direction C from three rendered mockups on request
-// 891ed41f, with one amendment, also verbatim: "Overview C: 'Needs you' should be on top in its own
-// row so it has enough space." Record: docs/decisions/269f46ef-atlas-project-overview-roster.md.
-//
-// The REMOVALS (no deck, no band, no disclosure, no board embed, no Agents panel) are asserted by
-// the specs those surfaces belonged to — atlas-dashboard-disclosure, atlas-home, atlas-kpi-deck and
-// atlas-agents each state the absence beside the claim it replaced, which is where a reader looking
-// for "where did it go" will actually be. This file is the POSITIVE coverage for what was built.
+// @decision 269f46ef — this file is the POSITIVE coverage for what was built; do not add the
+// removals (no deck, band, disclosure, board embed or Agents panel) here. Each is asserted by the
+// spec its surface belonged to, beside the claim it replaced, where a reader will look for it.
 //
 // What each leg measures, and why it can fail:
 //   1. THE ROSTER READS REAL SEEDED STATE. Every one of the seven cells, against a value this spec

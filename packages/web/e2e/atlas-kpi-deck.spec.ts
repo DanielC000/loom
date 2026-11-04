@@ -1,18 +1,12 @@
 // The Atlas KPI deck's row (card 14e48890 — gap-audit item 10).
 //
 // The deck is six readouts and the ROW is the readout: a tile pushed onto a second row stops being
-// part of it. Inside the Atlas frame the content column is the viewport minus the 244px tree and
-// 40px of padding, and the old width-derived `repeat(auto-fit, minmax(190px, 1fr))` track list
-// resolved that to FIVE columns at 1440 — orphaning the sixth tile on a row of its own (measured:
-// 1156px of deck, five 223px columns, tile six at a second offsetTop). `.loom-kpideck` now declares
-// its count instead, 6 → 3 → 2, so no width can produce a part-row.
+// part of it. `.loom-kpideck` declares its count (6 → 3 → 2) rather than deriving tracks from width
+// — the old `repeat(auto-fit, minmax(190px, 1fr))` resolved to five columns in the Atlas frame's
+// 1156px content column and orphaned the sixth tile on a row of its own.
 //
-// 🔴 THE DECK HAS ONE MOUNT NOW (card 269f46ef). It used to be on both home nodes; the owner then
-// removed it from the PROJECT node along with the board and the band, and that node's readings are
-// a briefing line instead (`pages/ProjectHome.tsx`, `components/atlasProjectOverview.tsx`). Every
-// leg below that used to run twice now runs on `/home`, and the project node appears here only as
-// the ABSENCE assertion in leg 1 — which is also what keeps this spec honest about the removal
-// rather than silently narrowing its own scope.
+// @decision 269f46ef — do not re-point this file's deck legs at the project node. The deck has ONE
+// mount (`/home`); the project node's readings are a briefing line, and leg 1 asserts that absence.
 //
 // How each claim is measured, and why each could actually fail:
 //   1. ONE ROW AT 1440 on the Workspace node, tree expanded. Six tiles, one shared offsetTop, six
@@ -27,17 +21,11 @@
 //      not exist in that document at all — with the switch-ON count as the positive control that
 //      the absence check is capable of returning non-zero.
 //
-// ⛔ TWO LEGS LEFT THIS FILE WITH THE PROJECT NODE'S DECK (card 269f46ef), neither of them dropped:
-//   · "the context tile renders a meter reading its seeded occupancy" — the meter it measured was
-//     the project `context` tile's. `KpiTile`'s own `fill` rendering is still asserted at its ONE
-//     remaining mount, the Workspace `plan` tile, by `workspace-plan-window.spec.ts` (which route-
-//     intercepts `/api/usage/limits` and reads `.loom-kpi-fill` directly) — so moving a second copy
-//     here would need that same interception and would assert nothing new. The "a tile with no
-//     ceiling has no meter" half is kept, re-pointed at the Workspace deck, in leg 1.
-//   · "a context above the red threshold reads red, not amber" — that ordering is still live and
-//     still the thing worth pinning; it moved WITH the reading it describes, to
-//     `atlas-project-overview.spec.ts`, which asserts it on the briefing line's `worst context`
-//     figure AND on the roster row's own context track (two renderings of one expression).
+// Two legs moved out with the project node's deck, neither dropped: `KpiTile`'s `fill` rendering is
+// asserted at its one remaining mount (the Workspace `plan` tile) by `workspace-plan-window.spec.ts`;
+// the red-before-amber context ordering moved to `atlas-project-overview.spec.ts`, on the briefing
+// line's `worst context` figure and the roster row's context track. Leg 1 keeps the "a tile with no
+// ceiling has no meter" half, re-pointed at the Workspace deck.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project

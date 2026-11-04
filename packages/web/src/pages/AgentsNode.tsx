@@ -143,9 +143,9 @@ export default function AgentsNode() {
           that no Atlas project-node tab did. It lands HERE rather than in a band panel or a tab of
           its own for two reasons. A Schedule is keyed to an AGENT (`s.agentId`), so this node is
           already the surface that owns the things it is about; and the band is a FIXED five-column
-          grid whose tracks measure 283.9 / 244.7 / 195.8 / 195.8 / 195.8 px at 1440 — a sixth panel
-          is not additive, it shrinks all five (to 239.3 / 206.3 / 165.1 ×3, measured). So the home
-          tab is untouched and nothing the owner sees there moves.
+          grid — a sixth panel shrinks all five rather than adding one. Its tracks at 1440 are
+          287 / 220 / 152 / 135 / 321 px (re-weighted by card b4442d27; 102bc915's own 195.8 ×3
+          predates it), and only the WORKSPACE node still draws the band at all (card 269f46ef).
 
           The id set is the roster union, NOT a second api.agents read: `useAgentRoster` partitions
           every one of this project's agents into exactly these two lists, so the union IS the set
