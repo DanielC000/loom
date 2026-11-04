@@ -1625,16 +1625,26 @@ CREATE TABLE IF NOT EXISTS mainline_landed_commits (
 -- this index for that lookup. Round 5 (card c13666c6) measured via EXPLAIN QUERY PLAN that
 -- getGoneBranchLedgerRowsByTips' own (project_id, repo_key) + "tip IN (...)" query does NOT use this
 -- index -- its WHERE clause leaves the branch column unconstrained, and this repo's DB never runs
--- ANALYZE, so without gathered stats the planner instead picks idx_mainline_landed_commits_branch_id
--- below as a plain (project_id, repo_key) scope scan; see that index's own comment.
+-- ANALYZE, so without gathered stats the planner instead picks a DIFFERENT (project_id, repo_key)-prefixed
+-- index as a plain (project_id, repo_key) scope scan -- see idx_mainline_landed_commits_branch_id's own
+-- comment below for which one, and why that answer has already changed once.
 CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_tip ON mainline_landed_commits(project_id, repo_key, branch, tip);
 -- Card c13666c6 round 3: served the old per-branch prune, removed in round 2 (see docs/decisions/c13666c6-*.md
--- section 2). Round 5 measured (EXPLAIN QUERY PLAN, no ANALYZE run -- this DB never runs one) that this is
--- actually what getGoneBranchLedgerRowsByTips' own (project_id, repo_key) scope scan uses today, as a side
--- effect of being usable with the branch column unconstrained -- NOT dead as round 3 claimed, and NOT a
--- correctness concern either way (round 5 made that query's own call-site cost bounded regardless of
--- which index or scan shape answers it -- see git/worktrees.ts's classifyAgainstLedgerUncached). Kept
--- rather than dropped, to avoid a migration for it.
+-- section 2). NOT dead, despite round 3's own claim: this repo's DB never runs ANALYZE, so a bare
+-- (project_id, repo_key) scope scan with no further column constrained can land on EITHER this index or
+-- any other (project_id, repo_key)-prefixed index on this table -- an unstats'd-planner tie-break, not a
+-- correctness fact, and it has already shifted once. Round 5 measured getGoneBranchLedgerRowsByTips' own
+-- scope scan landing HERE. Card eaa057d5 then added a second (project_id, repo_key)-prefixed index,
+-- idx_mainline_landed_commits_worker_branch -- and re-measuring post-eaa057d5 (EXPLAIN QUERY PLAN, no
+-- ANALYZE) shows getGoneBranchLedgerRowsByTips now lands on THAT index instead. What still keeps THIS
+-- index alive today (re-measured the same way): Db.resolveGoneBranchLedgerBoundary's bare
+-- "ORDER BY id ASC LIMIT 1" scope query and Db.getGoneBranchLedgerMaxRowId's "MAX(id)" scope query both
+-- still pick this index specifically -- neither lands on idx_mainline_landed_commits_worker_branch, which
+-- carries no id column to serve either. Either way the cost is the same bounded (project_id, repo_key)
+-- scope scan (round 5 made the call site's own cost bounded regardless of which index or scan shape
+-- answers it -- see git/worktrees.ts's classifyAgainstLedgerUncached); don't hardcode "which index serves
+-- which scope-only query" from this comment without re-measuring -- it is a planner artifact, not a
+-- schema guarantee, and it has already drifted once.
 CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_branch_id ON mainline_landed_commits(project_id, repo_key, branch, id);
 
 -- @decision e8d4fdc3 -- a SEPARATE, trust-walk-INERT per-branch batch-landing record; the batch-side twin
@@ -2939,6 +2949,13 @@ function toPendingGateOp(r: PendingGateOpRow): PendingGateOp {
 
 export class Db {
   private db: Database.Database;
+  /** Card eaa057d5 — hoisted so {@link Db.getWorkerTipLedgerFacts}'s `hasAnyForBranch` closure (called
+   *  once per boot-reconcile residual session) doesn't re-prepare this statement on every call. Assigned
+   *  in the constructor, after `migrateMainlineLandedCommits()` has guaranteed the `worker_branch` column
+   *  exists on both a fresh and an upgraded DB. */
+  private hasAnyForBranchStmt: Database.Statement;
+  /** Card eaa057d5 — same hoisting as {@link Db.hasAnyForBranchStmt}, for {@link Db.getLandedCommitByWorkerTip}. */
+  private getLandedCommitByWorkerTipStmt: Database.Statement;
   /**
    * Optional post-write listener for appended orchestration events — the chokepoint the outbound
    * alert-webhook emitter hooks (wired at boot). Invoked in a try/catch, so a listener fault NEVER
@@ -2977,6 +2994,12 @@ export class Db {
     this.migrateProfiles();
     this.migrateTasks();
     this.migrateMainlineLandedCommits();
+    this.hasAnyForBranchStmt = this.db.prepare(
+      "SELECT 1 FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip IS NOT NULL LIMIT 1",
+    );
+    this.getLandedCommitByWorkerTipStmt = this.db.prepare(
+      "SELECT tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip = ?",
+    );
     this.migrateSchedules();
     this.migrateRuns();
     this.migrateCompanionConfig();
@@ -3058,12 +3081,14 @@ export class Db {
    * Idempotent additive migration: ADD COLUMN `worker_landed_tip` on `mainline_landed_commits` for an
    * existing DB (fresh installs already have it via CREATE TABLE). No DEFAULT clause, so SQLite
    * backfills every pre-existing row to NULL, read as "absent" by {@link Db.getVerifiedLandedTip}.
-   * @decision 5958c149 — never add an index on this column here; every lookup matches the table's
-   * existing `(project_id, repo_key, branch, tip)` index, and SCHEMA's index statements run before any
-   * migrate*(), so one referencing a migration-added column would throw on every existing install's boot.
-   * @decision e8d4fdc3 round 2 — ADD COLUMN `worker_branch` the same way, same NULL-backfill posture, same
-   * no-index-here rule; a legacy row's NULL branch can never equality-match a real branch name, so the
-   * migration alone makes it fail closed (see {@link Db.getLandedCommitByWorkerTip}).
+   * @decision 5958c149 — do not index this column in SCHEMA or anywhere that runs before this migration
+   * (ordering, not a blanket ban — `worker_branch` below IS indexed, correctly, right here). No index
+   * needed here: every lookup matches the existing `(project_id, repo_key, branch, tip)` index.
+   * @decision e8d4fdc3 round 2 — ADD COLUMN `worker_branch` the same way, same NULL-backfill posture.
+   *
+   * Unlike `worker_landed_tip` above, `worker_branch` DOES get an index (card eaa057d5) — created HERE,
+   * right after its own ADD COLUMN, never in SCHEMA (same 5958c149 ordering rule: a SCHEMA index on a
+   * migration-added column throws on every existing install's boot).
    */
   private migrateMainlineLandedCommits(): void {
     const have = new Set(
@@ -3071,6 +3096,9 @@ export class Db {
     );
     if (!have.has("worker_landed_tip")) this.db.exec("ALTER TABLE mainline_landed_commits ADD COLUMN worker_landed_tip TEXT");
     if (!have.has("worker_branch")) this.db.exec("ALTER TABLE mainline_landed_commits ADD COLUMN worker_branch TEXT");
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_mainline_landed_commits_worker_branch ON mainline_landed_commits(project_id, repo_key, worker_branch, worker_landed_tip)",
+    );
   }
 
   /**
@@ -4323,8 +4351,7 @@ export class Db {
    *  review fork sharing a landed branch's own tip (without being that branch) must not match. A legacy
    *  row's NULL `worker_branch` can never equality-match a real name, so it fails closed for free. */
   getLandedCommitByWorkerTip(projectId: string, repoKey: string, branch: string, workerLandedTip: string): string | null {
-    const rows = this.db.prepare("SELECT tip FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip = ?")
-      .all(projectId, repoKey, branch, workerLandedTip) as { tip: string }[];
+    const rows = this.getLandedCommitByWorkerTipStmt.all(projectId, repoKey, branch, workerLandedTip) as { tip: string }[];
     const distinct = new Set(rows.map((r) => r.tip));
     return distinct.size === 1 ? [...distinct][0]! : null;
   }
@@ -4373,8 +4400,7 @@ export class Db {
   getWorkerTipLedgerFacts(projectId: string, repoKey: string): WorkerTipLedgerFacts {
     return {
       hasAnyForBranch: (branch: string) => {
-        const solo = this.db.prepare("SELECT 1 FROM mainline_landed_commits WHERE project_id = ? AND repo_key = ? AND worker_branch = ? AND worker_landed_tip IS NOT NULL LIMIT 1")
-          .get(projectId, repoKey, branch);
+        const solo = this.hasAnyForBranchStmt.get(projectId, repoKey, branch);
         if (solo !== undefined) return true;
         const batch = this.db.prepare("SELECT 1 FROM batch_landed_worker_tips WHERE project_id = ? AND repo_key = ? AND worker_branch = ? LIMIT 1")
           .get(projectId, repoKey, branch);
@@ -4427,9 +4453,14 @@ export class Db {
    *  **Round 5 correction:** this was previously documented as using `idx_mainline_landed_commits_tip` —
    *  FALSE, measured via `EXPLAIN QUERY PLAN`: with `branch` unconstrained in this query's WHERE clause,
    *  and with no `ANALYZE` ever run against this DB (so the planner has no gathered stats to justify a
-   *  skip-scan), SQLite instead picks `idx_mainline_landed_commits_branch_id` as a plain `(project_id,
-   *  repo_key)` scope scan, then filters `tip IN (...)` row-by-row — never a WHOLE-table scan, but also
-   *  never the indexed point lookup this doc previously claimed. `tips` is caller-bounded (round 5 caps
+   *  skip-scan), SQLite instead picks whichever `(project_id, repo_key)`-prefixed index the planner's own
+   *  tie-break favors as a plain `(project_id, repo_key)` scope scan, then filters `tip IN (...)`
+   *  row-by-row — never a WHOLE-table scan, but also never the indexed point lookup this doc previously
+   *  claimed. (Round 5 measured `idx_mainline_landed_commits_branch_id`; card eaa057d5 added a SECOND
+   *  `(project_id, repo_key)`-prefixed index, `idx_mainline_landed_commits_worker_branch`, and
+   *  re-measuring post-eaa057d5 shows THIS query now lands on that one instead — an unstats'd-planner
+   *  tie-break between two equally-eligible indices, not a schema guarantee; don't hardcode either name
+   *  here again.) `tips` is caller-bounded (round 5 caps
    *  the git layer's own candidate-row spawn count on top, independent of this query's own cost); this
    *  method applies no cap of its own. */
   getGoneBranchLedgerRowsByTips(projectId: string, repoKey: string, tips: readonly string[]): { base: string; tip: string }[] {
