@@ -38,7 +38,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const {
   FRONTMATTER_RE, FRONTMATTER_KEY_LINE_RE, FLOW_MAPPING_KEY_RE, INLINE_SHELL_RE, FENCED_SHELL_RE,
   PLAIN_TOP_LEVEL_KEY_LINE_RE, SEQUENCE_ITEM_RE, FRONTMATTER_VALUE_START_FORBIDDEN_RE,
-  frontmatterUnrecognizedSyntax,
+  REAL_LOADER_FENCE_RE, frontmatterUnrecognizedSyntax, frontmatterFenceUnrecognized,
 } = await import("../dist/skills/permissionWidening.js");
 
 const guardSrc = fs.readFileSync(GUARD_PATH, "utf8");
@@ -76,6 +76,7 @@ check("FRONTMATTER_RE: guard's text copy .flags matches the real module export",
   guardFrontmatterRe.flags === FRONTMATTER_RE.flags);
 
 const pairs = [
+  ["REAL_LOADER_FENCE_RE", extractConstRegex("REAL_LOADER_FENCE_RE"), REAL_LOADER_FENCE_RE],
   ["FLOW_MAPPING_KEY_RE", extractConstRegex("FLOW_MAPPING_KEY_RE"), FLOW_MAPPING_KEY_RE],
   ["INLINE_SHELL_RE", extractConstRegex("INLINE_SHELL_RE"), INLINE_SHELL_RE],
   ["FENCED_SHELL_RE", extractConstRegex("FENCED_SHELL_RE"), FENCED_SHELL_RE],
@@ -105,6 +106,16 @@ check("[control] the comparison genuinely discriminates: FRONTMATTER_RE does NOT
 // function source VERBATIM (never re-authored here) and run it, closed over the guard's own already-
 // extracted regex-literal constants, side by side with the real module's own export.
 // =====================================================================================================
+
+/** Extracts the string-literal text assigned to `const <name> = "...";` in `guardSrc` and parses it with
+ *  `new Function` (never a hand-typed copy) — the string-constant sibling of `extractConstRegex` above,
+ *  for a plain string constant like the guard's own `BOM`. */
+function extractConstString(name) {
+  const m = guardSrc.match(new RegExp(`const ${name} = ("(?:\\\\.|[^"\\\\])*");`));
+  if (!m) throw new Error(`skill-permission-widening-guard.mjs: no "const ${name} = \\"...\\";" line found`);
+  // eslint-disable-next-line no-new-func -- parsing a string literal's own text, not arbitrary code
+  return new Function(`return ${m[1]};`)();
+}
 
 /** Extracts a `function <name>(...) { ... }` block's exact source text from `guardSrc`. The closing
  *  brace of every helper in this file sits at column 0, so the non-greedy `[\s\S]*?\n\}` can never stop
@@ -169,6 +180,51 @@ for (const [i, fixture] of DIFFERENTIAL_FIXTURES.entries()) {
 }
 check("[diff][control] the corpus is non-vacuous — at least one fixture is clean and at least one is unrecognized under the REAL classifier",
   DIFFERENTIAL_FIXTURES.some((f) => realClassify(f) === false) && DIFFERENTIAL_FIXTURES.some((f) => realClassify(f) === true));
+
+// =====================================================================================================
+// card 99f2ae1a — the SAME differential discipline, for the guard's own `frontmatterFenceUnrecognized`.
+// =====================================================================================================
+
+// Closed over the GUARD's OWN extracted copies (REAL_LOADER_FENCE_RE, `guardFrontmatterRe` — the
+// guard's own FRONTMATTER_RE, already extracted above — and, card 99f2ae1a round 2 item 4, its own BOM
+// string + `splitLeadingBom` helper, since frontmatterFenceUnrecognized now calls that first) — never the
+// real module's exports — same discipline as `guardClassify` above. The guard's trailing `\r?\n?` suffix
+// sits OUTSIDE capture group 1, so it never changes what body text ends up compared, but closing over the
+// guard's OWN copy, not the real module's, is what actually proves the GUARD FILE's own runtime behavior.
+const guardFenceClassify = new Function(
+  "REAL_LOADER_FENCE_RE", "FRONTMATTER_RE", "BOM",
+  `${extractFunctionSource("splitLeadingBom")}\n${extractFunctionSource("stripLeadingBlankLines")}\n` +
+    `${extractFunctionSource("frontmatterFenceUnrecognized")}\nreturn frontmatterFenceUnrecognized;`,
+)(extractConstRegex("REAL_LOADER_FENCE_RE"), guardFrontmatterRe, extractConstString("BOM"));
+
+const realFenceClassify = (raw) => frontmatterFenceUnrecognized(raw);
+
+// Full file content, exactly as either classifier is called with in production. Every evasion fixture
+// this card found live to the real loader, the accepted value-contains-`---` over-match, and a spread of
+// the SAME benign fixtures above (no fence disagreement expected for any of them).
+const FENCE_DIFFERENTIAL_FIXTURES = [
+  ...DIFFERENTIAL_FIXTURES,
+  "---\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody", // close-mid-line
+  "--- \nhooks:\n  Stop: []\n---\nbody", // open NBSP
+  "---\r\r\nhooks:\n  Stop: []\n---\nbody", // open repeated CR
+  "---﻿\nhooks:\n  Stop: []\n---\nbody", // open second BOM
+  "---\u000B\nhooks:\n  Stop: []\n---\nbody", // open vertical tab
+  "---\nname: a---b\nhooks: y\n---\nbody", // accepted over-match: a value containing ---
+  "---\nhooks:\n  Stop: []\n---\nbody", // ordinary boring fence — must NOT disagree
+  "﻿---\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody", // card 99f2ae1a round 2: file-start BOM + mid-line close
+  "﻿---\nhooks:\n  Stop: []\n---\nbody", // file-start BOM + an ordinary boring fence — must NOT disagree
+  "---\n\nhooks:\n  Stop: []\n---\nbody\n", // card 99f2ae1a round 2, false positive (a): blank line after open
+  "---\n\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody", // blank line must NOT mask a genuine disagreement further in
+];
+
+for (const [i, fixture] of FENCE_DIFFERENTIAL_FIXTURES.entries()) {
+  const real = realFenceClassify(fixture);
+  const guard = guardFenceClassify(fixture);
+  check(`[fence-diff ${i}] real frontmatterFenceUnrecognized and the guard's own extracted copy agree on ${JSON.stringify(fixture)}`,
+    real === guard);
+}
+check("[fence-diff][control] the corpus is non-vacuous — at least one fixture disagrees (fence-unrecognized) and at least one does not, under the REAL classifier",
+  FENCE_DIFFERENTIAL_FIXTURES.some((f) => realFenceClassify(f) === false) && FENCE_DIFFERENTIAL_FIXTURES.some((f) => realFenceClassify(f) === true));
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — skill-permission-widening-guard.mjs's own text-copy regexes are byte-for-byte in lockstep with skills/permissionWidening.ts's real exports, and its frontmatterUnrecognizedSyntax LOGIC agrees with the real module's export across the shared differential fixture corpus."

@@ -54,6 +54,7 @@ export const SKILL_PERMISSION_FIELD_LABEL: Record<SkillPermissionField, string> 
   "allowed-tools": "allowed-tools:",
   hooks: "hooks:",
   "frontmatter-unrecognized": "unrecognized frontmatter syntax",
+  "frontmatter-fence-unrecognized": "frontmatter fence the CLI's own loader parses differently",
 };
 
 export interface SkillPermissionFinding {

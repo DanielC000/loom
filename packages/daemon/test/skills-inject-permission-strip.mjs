@@ -547,6 +547,49 @@ try {
   const flowMapFp = JSON.parse(fs.readFileSync(flowMapFpPath, "utf8"));
   check("(p) no fingerprint was recorded for the withheld skill",
     flowMapFp["sess-flowmap"]?.["agent-flowmap-hazard"] === undefined);
+
+  // =====================================================================================================
+  // (q) card 99f2ae1a, Code Review round 2 item 2: a REAL fence-shape disagreement — same proof shape as
+  // (p) above (no fault injection needed; `stripPermissionWidening` withholds unassisted), but isolating
+  // `frontmatter-fence-unrecognized` specifically. Before this fixture existed, a mutant forcing
+  // `frontmatterFenceUnrecognized` to always return `false` left this ENTIRE test file green — none of
+  // the existing fixtures are withheld FOR that reason alone, so the delivery path's own withhold of a
+  // fence disagreement was never actually proven end-to-end, only at the unit/detector level.
+  // =====================================================================================================
+  const cwdFence = path.join(root, "fence-cwd");
+  fs.mkdirSync(cwdFence, { recursive: true });
+  const fenceHazard = `---\nname: agent-fence-hazard\nhooks:\n  Stop: []\ndescription: x---\nbody\n`;
+  writeSkill("agent-fence-hazard", fenceHazard, "agent");
+  check("(q) precondition: the fixture's ONLY vector is frontmatter-fence-unrecognized — isolates the "
+      + "mutant this fixture exists to kill (no hooks/allowed-tools label, no frontmatter-unrecognized)",
+    JSON.stringify(detectPermissionWidening(fenceHazard)) === JSON.stringify(["frontmatter-fence-unrecognized"]));
+
+  let thrownFence;
+  try {
+    injectSkills(cwdFence, "sess-fence", null, "worker");
+  } catch (e) { thrownFence = e; }
+
+  check("(q) injectSkills surfaces the withhold (throws, naming the skill)",
+    thrownFence instanceof Error && /agent-fence-hazard/.test(thrownFence.message));
+  check("(q) the withheld skill is NOT delivered at ALL",
+    !fs.existsSync(path.join(cwdFence, ".claude", "skills", "agent-fence-hazard")));
+  check("(q) the STORE copy is completely untouched",
+    readStoreFile("agent-fence-hazard") === fenceHazard);
+  check("(q) a sibling fixture in the SAME call still lands normally (control — only the fence-disagreeing "
+      + "fixture is withheld)",
+    fs.existsSync(path.join(cwdFence, ".claude", "skills", "agent-clean", "SKILL.md")));
+
+  const fenceManifestPath = path.join(cwdFence, ".claude", "skills", ".loom-skills.json");
+  const fenceManifest = JSON.parse(fs.readFileSync(fenceManifestPath, "utf8"));
+  check("(q) the withheld skill is NOT recorded as placed in the manifest",
+    !(fenceManifest["sess-fence"] ?? []).includes("agent-fence-hazard"));
+  check("(q) the sibling that succeeded IS recorded as placed (control)",
+    (fenceManifest["sess-fence"] ?? []).includes("agent-clean"));
+
+  const fenceFpPath = path.join(cwdFence, ".claude", "skills", ".loom-skills-fingerprints.json");
+  const fenceFp = JSON.parse(fs.readFileSync(fenceFpPath, "utf8"));
+  check("(q) no fingerprint was recorded for the withheld skill",
+    fenceFp["sess-fence"]?.["agent-fence-hazard"] === undefined);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

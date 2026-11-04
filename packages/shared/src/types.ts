@@ -4395,6 +4395,15 @@ export interface SkillSummary {
  *                     merge key, an anchor/alias/tag value, …) — any of these COULD hide a grant from
  *                     this module's own per-key scan, so it is reported, refused, and withheld fail
  *                     closed regardless of whether a specific hazardous key was also matched.
+ *  - `frontmatter-fence-unrecognized` — card 99f2ae1a: the installed CLI's own loader (a literal port
+ *                     of its recovered `bk` regex, re-verified by a static read of the binary) sees a
+ *                     live frontmatter block in this content that this module's own OPEN/CLOSE fence
+ *                     patterns either miss entirely or capture a DIFFERENT body for — e.g. a closing
+ *                     `---` that doesn't start its own line, or an opening fence followed by whitespace
+ *                     this module's own (deliberately narrower) tolerance doesn't admit (NBSP, a second
+ *                     BOM, a vertical tab, a repeated CR, …). Reported, refused, and withheld fail
+ *                     closed, same posture as `frontmatter-unrecognized` — the fence boundary itself can
+ *                     hide a grant from every other check just as easily as an unrecognized key line can.
  *  - `shell-inline`   a body inline `` !`cmd` `` — runs a shell command when the skill renders,
  *                     before any model turn.
  *  - `shell-fenced`   a body fenced ` ```! ` block — the block form of the same render-time execution.
@@ -4403,6 +4412,7 @@ export type SkillPermissionVector =
   | "allowed-tools"
   | "hooks"
   | "frontmatter-unrecognized"
+  | "frontmatter-fence-unrecognized"
   | "shell-inline"
   | "shell-fenced";
 

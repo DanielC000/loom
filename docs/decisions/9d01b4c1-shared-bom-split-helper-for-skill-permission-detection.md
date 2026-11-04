@@ -103,8 +103,13 @@ to that card's own standard; noted there as a pointer, not a substitute for its 
   only separates a BOM from the body so every existing detector keeps scanning from the real start of the
   frontmatter, it rejects nothing itself.
 - Do not make `splitLeadingBom` strip more than one leading BOM (recursively or otherwise) to "fully fix"
-  the double-BOM case — round 3's static-scan finding is that the real loader strips exactly one too;
-  widening Loom's strip would make Loom MORE permissive than the loader, not more consistent with it.
+  the double-BOM case — round 3's static-scan finding is that the real loader strips exactly one too.
+  **Correction (card 99f2ae1a): the original wording here said this would make Loom "MORE permissive
+  than the loader" — backwards.** Stripping a SECOND BOM would make Loom reach a clean `^---` and treat
+  the content as LIVE frontmatter; the real loader's own single strip leaves its leftover BOM blocking
+  that same `^---` test, so it treats the identical content as INERT. Widening the strip would make Loom
+  MORE STRICT than the loader — flagging/refusing/withholding a file the real loader never actually
+  honours as frontmatter at all — not more permissive and not more consistent with it either way.
 - Do not re-verify the loader finding above by trusting this scan's conclusions against a NEWER installed
   CLI build — re-run the same static byte-offset method (see `712148f1`'s "Method" section) and update
   this record if anything has changed.

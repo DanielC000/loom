@@ -191,6 +191,11 @@ const PERMISSION_VECTORS: Record<SkillPermissionVector, { code: string; where: s
     where: "in the frontmatter",
     does: "uses a YAML form this scan can't confidently read (a quoted key, a flow mapping, an anchor/alias/tag, …), so it can't rule out a hidden grant",
   },
+  "frontmatter-fence-unrecognized": {
+    code: "(unrecognized fence)",
+    where: "in the frontmatter",
+    does: "opens or closes its frontmatter block in a way the installed CLI's own loader reads differently than this scan does, so it can't rule out a hidden grant",
+  },
   "shell-inline": {
     code: "!`cmd`",
     where: "in the body",

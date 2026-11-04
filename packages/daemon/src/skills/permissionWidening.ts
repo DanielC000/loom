@@ -138,6 +138,26 @@ export const SEQUENCE_ITEM_RE = /^-(?:[ \t]|$)/;
  *  checked only once a line has already matched `PLAIN_TOP_LEVEL_KEY_LINE_RE`'s own key/colon shape. */
 export const FRONTMATTER_VALUE_START_FORBIDDEN_RE = /^[&*!]/;
 
+/**
+ * Just the OPENING half of the installed CLI's own recovered frontmatter-fence regex (`bk`) — authored
+ * as its own primary regex (same reason `FRONTMATTER_OPEN_RE` above is: `REAL_LOADER_FENCE_RE` below is
+ * BUILT FROM this constant, never derived by fragile slicing). Exported so `frontmatterReadIncomplete`
+ * can ask "did ANYTHING that could be live to the real loader open here", independently of whether a
+ * close was ever found — see that function's own doc (card 99f2ae1a round 2).
+ */
+export const REAL_LOADER_FENCE_OPEN_RE = /^---\s*\n/;
+
+/**
+ * The installed CLI's own recovered frontmatter-fence regex (`bk`) — used ONLY to ask "does the real
+ * loader see a live frontmatter block here, and with what body", never as a replacement for
+ * `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` below. See `frontmatterFenceUnrecognized`'s own doc for how.
+ *
+ * @decision 99f2ae1a — this is WIDER than `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` on both fences (NBSP,
+ * a vertical tab, a repeated CR, a second BOM after the dashes; an unanchored mid-line close) — do not
+ * widen this module's own fence patterns to match it; re-verify against a CLI upgrade before trusting it.
+ */
+export const REAL_LOADER_FENCE_RE = new RegExp(`${REAL_LOADER_FENCE_OPEN_RE.source}([\\s\\S]*?)---\\s*\\n?`);
+
 /** A leading UTF-8 BOM (U+FEFF). */
 export const BOM = "﻿";
 
@@ -210,22 +230,67 @@ export function frontmatterUnrecognizedSyntax(content: string): boolean {
 }
 
 /**
- * True when `content` OPENS a frontmatter block (`---` at the very start, after a leading BOM is split
- * off — see `splitLeadingBom`, called internally, card 9d01b4c1 round 2) but its own CLOSING fence is
- * not found anywhere in `content` — i.e. a reader that only has `content` (e.g. a byte-capped read)
- * cannot be sure it saw the whole block. False for a file with no frontmatter at all (nothing to miss)
- * AND for a file whose frontmatter closes well within `content` even if the file continues on with an
+ * True when the installed CLI's own loader (`REAL_LOADER_FENCE_RE`, a literal port of its recovered
+ * `bk`) sees a live frontmatter block in `content` that this module's own `FRONTMATTER_RE` either
+ * misses entirely, or captures a DIFFERENT body for — i.e. the fence boundary itself, not a key line
+ * inside an already-agreed block, is what the two readers disagree about. False when the real loader
+ * sees no live block at all (nothing to disagree about — `frontmatterReadIncomplete`/a plain "no
+ * frontmatter" cover that case already) or when both readers agree on the exact same body.
+ *
+ * The two regexes bound their capture group differently even when they agree on WHERE the block ends:
+ * `REAL_LOADER_FENCE_RE`'s lazy `([\s\S]*?)---` captures through to (but not past) the literal closing
+ * `---`, so an ordinary block's capture ends in a trailing line terminator; `FRONTMATTER_RE`'s own
+ * `([\s\S]*?)\r?\n` consumes that same terminator OUTSIDE the group. Comparing the two raw captures
+ * would therefore disagree on every ordinary, boring skill — stripping exactly one trailing `\r?\n`
+ * off the real loader's capture before comparing is what makes the comparison agree on the boring case
+ * and disagree only on a genuine fence-shape mismatch.
+ *
+ * @decision 99f2ae1a — a value containing the literal substring `---` makes the real loader truncate
+ * its own parse there, so Loom's own longer capture past it legitimately disagrees and this function
+ * fires; withholding is the accepted, safe-direction outcome there too — see the behavioural fixture.
+ *
+ * @decision 99f2ae1a (round 2, false positive (a)) — a blank/whitespace-only line right after the
+ * opening fence is NOT a real disagreement (only `REAL_LOADER_FENCE_RE`'s open swallows it); strip it
+ * from both bodies before comparing, never widen `FRONTMATTER_OPEN_RE` itself to also swallow it.
+ */
+function stripLeadingBlankLines(s: string): string {
+  return s.replace(/^(?:[ \t]*\r?\n)+/, "");
+}
+
+export function frontmatterFenceUnrecognized(content: string): boolean {
+  const { body } = splitLeadingBom(content);
+  const real = body.match(REAL_LOADER_FENCE_RE);
+  if (!real) return false; // the real loader sees no live block here either — nothing to disagree about
+  const realBody = stripLeadingBlankLines((real[1] ?? "").replace(/\r?\n$/, ""));
+  const loom = body.match(FRONTMATTER_RE);
+  const loomBody = stripLeadingBlankLines(loom?.[1] ?? "");
+  return loom == null || realBody !== loomBody;
+}
+
+/**
+ * True when `content` OPENS a frontmatter block — by EITHER this module's own `FRONTMATTER_OPEN_RE` or
+ * the real loader's own wider `REAL_LOADER_FENCE_OPEN_RE` (card 99f2ae1a round 2; see below for why) —
+ * after a leading BOM is split off (`splitLeadingBom`, called internally, card 9d01b4c1 round 2), but
+ * its own CLOSING fence is not found anywhere in `content` by EITHER this module's `FRONTMATTER_RE` or
+ * the real loader's `REAL_LOADER_FENCE_RE` — i.e. a reader that only has `content` (e.g. a byte-capped
+ * read) cannot be sure it saw the whole block, under ANY reading of what "the block" even is. False for
+ * a file with no frontmatter at all under EITHER reading (nothing to miss) AND for a file whose
+ * frontmatter closes well within `content` under EITHER reading, even if the file continues on with an
  * arbitrarily large, unrelated body afterward — only the block's OWN completeness matters here, not the
  * file's total size.
  *
- * Reuses this module's own `FRONTMATTER_RE` — never a second hand-rolled fence pattern (card 87a51903).
+ * @decision 99f2ae1a (round 2) — do not narrow either check back to this module's own patterns alone:
+ * an evasion open fence whose real-loader-visible close sits past the read cap must still report
+ * incomplete, or a byte-capped scan silently reads it as clean with no signal anywhere.
  *
  * @decision 015fdb23 — never report a byte-capped read as truncated merely because the FILE is larger
  * than the cap; only a frontmatter block that itself didn't close within what was read carries risk.
  */
 export function frontmatterReadIncomplete(content: string): boolean {
   const { body } = splitLeadingBom(content);
-  return FRONTMATTER_OPEN_RE.test(body) && !FRONTMATTER_RE.test(body);
+  const opened = FRONTMATTER_OPEN_RE.test(body) || REAL_LOADER_FENCE_OPEN_RE.test(body);
+  const closed = FRONTMATTER_RE.test(body) || REAL_LOADER_FENCE_RE.test(body);
+  return opened && !closed;
 }
 
 /**
@@ -268,6 +333,9 @@ export function detectPermissionWidening(content: string): SkillPermissionVector
   // double-BOM input, disagreeing with the `topLevelFrontmatterKeys`/`flowMappingFrontmatterKeys` checks
   // just above (which never self-split and so only ever see the ONE strip done here).
   if (frontmatterUnrecognizedSyntax(content)) found.push("frontmatter-unrecognized");
+  // Same self-splitting discipline as frontmatterUnrecognizedSyntax just above — frontmatterFenceUnrecognized
+  // splits internally too, so it also takes the ORIGINAL `content`, never the already-split `body`.
+  if (frontmatterFenceUnrecognized(content)) found.push("frontmatter-fence-unrecognized");
   if (INLINE_SHELL_RE.test(body)) found.push("shell-inline");
   if (FENCED_SHELL_RE.test(body)) found.push("shell-fenced");
   return found;

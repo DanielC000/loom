@@ -27,6 +27,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
 
@@ -50,8 +51,10 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;    // Windows
 process.env.HOME = sandboxHome;           // POSIX
 
-const { detectPermissionWidening, permissionWideningField, frontmatterReadIncomplete, frontmatterUnrecognizedSyntax } =
-  await import("../dist/skills/permissionWidening.js");
+const {
+  detectPermissionWidening, permissionWideningField, frontmatterReadIncomplete, frontmatterUnrecognizedSyntax,
+  frontmatterFenceUnrecognized,
+} = await import("../dist/skills/permissionWidening.js");
 const { listSkills, writeSkill } = await import("../dist/skills/store.js");
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
@@ -189,6 +192,95 @@ try {
       + "nested keys under one that already exists)",
     same(detectPermissionWidening('---\nname: x\ncapabilities:\n  hooks: not-the-same-field\n---\nbody\n'), []));
 
+  // --- card 99f2ae1a: the installed CLI's own loader (`REAL_LOADER_FENCE_RE`, a literal port of its
+  // recovered `bk`, static byte-offset verified against claude.exe 2.1.317) is WIDER than this module's
+  // own fence patterns on BOTH fences. Each of these five was LIVE to the real loader but CLEAN to every
+  // Loom path (detect/refuse/strip/cwd-scan/guard-lint) before this card — see
+  // docs/decisions/99f2ae1a-*.md for the evidence. All five must now report `frontmatter-fence-unrecognized`.
+  check("[99f2ae1a] a closing --- that doesn't start its own line (mid-line close) is caught",
+    same(detectPermissionWidening("---\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody"), ["frontmatter-fence-unrecognized"]));
+  // No "hooks" alongside the fence vector for these four: Loom's own FRONTMATTER_OPEN_RE fails to match
+  // the open fence at all in every one, so FRONTMATTER_RE never finds a block and the normal per-key scan
+  // (topLevelFrontmatterKeys) never independently sees "hooks:" either — the fence check is the ONLY
+  // signal. (Contrast the close-mid-line and accepted-over-match fixtures above/below, where Loom's OWN
+  // open fence IS plain and so a block IS found — in the over-match case, one that includes "hooks".)
+  check("[99f2ae1a] an opening fence followed by NBSP (U+00A0) is caught, with no independent hooks: finding",
+    same(detectPermissionWidening("--- \nhooks:\n  Stop: []\n---\nbody"), ["frontmatter-fence-unrecognized"]));
+  check("[99f2ae1a] an opening fence followed by a repeated CR (\\r\\r) is caught, with no independent hooks: finding",
+    same(detectPermissionWidening("---\r\r\nhooks:\n  Stop: []\n---\nbody"), ["frontmatter-fence-unrecognized"]));
+  check("[99f2ae1a] an opening fence followed by a SECOND BOM (U+FEFF right after the dashes, not at file "
+      + "start) is caught, with no independent hooks: finding",
+    same(detectPermissionWidening("---﻿\nhooks:\n  Stop: []\n---\nbody"), ["frontmatter-fence-unrecognized"]));
+  check("[99f2ae1a] an opening fence followed by a vertical tab (\\v) is caught, with no independent hooks: finding",
+    same(detectPermissionWidening("---\u000B\nhooks:\n  Stop: []\n---\nbody"), ["frontmatter-fence-unrecognized"]));
+  // Accepted over-match (manager sign-off): a VALUE containing the literal `---` makes the real loader
+  // truncate ITS OWN parse there too (its close has no line-start requirement), so whatever follows —
+  // here, the `hooks:` line — was never actually live to the real loader either. Loom's own
+  // line-oriented FRONTMATTER_RE correctly continues past the embedded `---` to the TRUE closing fence,
+  // so the two captures disagree and this is withheld. Safe-direction false positive, not a miss: the
+  // content isn't hazardous to the real loader, but Loom cannot tell that from the fence shape alone.
+  check("[99f2ae1a][accepted-over-match] a frontmatter VALUE containing a literal --- is caught as an "
+      + "unrecognized fence, even though the real loader itself never reaches the hooks: line past it",
+    same(detectPermissionWidening("---\nname: a---b\nhooks: y\n---\nbody"), ["hooks", "frontmatter-fence-unrecognized"]));
+  // Negative control: the new check must not newly flag ordinary, boring fences it already passed.
+  check("[99f2ae1a][trap] an ordinary boring fence with a real hooks: key reports ONLY ['hooks'] — no "
+      + "fence disagreement for a shape both readers already agree on",
+    same(detectPermissionWidening('---\nname: x\nhooks:\n  Stop:\n    - type: command\n      command: node x.js\n---\nbody\n'), ["hooks"]));
+  check("[99f2ae1a][trap] a realistic clean SKILL.md is NOT flagged for its fence shape",
+    same(detectPermissionWidening(FM + "# Example\n\nFollow the repo's `CLAUDE.md` and run `pnpm build` before you report done.\n"), []));
+  // Mutant (lesson 298): a RED that fails only because frontmatterFenceUnrecognized doesn't exist yet
+  // proves nothing — prove it via a fixture no OTHER check in this module can independently explain.
+  // "---<NBSP>\n---\n" has NO hooks/allowed-tools key, NO unrecognized YAML line (frontmatterUnrecognizedSyntax
+  // never even sees a block, since Loom's own FRONTMATTER_OPEN_RE doesn't match the NBSP-led open fence),
+  // and NO shell trigger — detectPermissionWidening() `[]` elsewhere always implicates ONLY this one path.
+  check("[99f2ae1a][mutant-isolation] an empty-bodied NBSP-opened block with NO hazardous key is caught "
+      + "SOLELY by the fence check — no other vector in this module could explain a non-empty result here",
+    same(detectPermissionWidening("--- \n---\n"), ["frontmatter-fence-unrecognized"]));
+  check("[99f2ae1a][mutant-isolation] frontmatterFenceUnrecognized itself: true for the isolation fixture above",
+    frontmatterFenceUnrecognized("--- \n---\n") === true);
+  check("[99f2ae1a][mutant-isolation] frontmatterFenceUnrecognized itself: false for an ordinary boring fence",
+    frontmatterFenceUnrecognized("---\nname: x\n---\nbody\n") === false);
+
+  // --- card 99f2ae1a round 2 (Code Review false positive (a)): a BLANK LINE directly after the opening
+  // fence makes REAL_LOADER_FENCE_RE's own open tolerance swallow it whole while FRONTMATTER_RE's own
+  // capture keeps it as a leading line — same YAML, no real disagreement. Before this fix, this fixture
+  // wrongly raised frontmatter-fence-unrecognized ALONGSIDE the correctly-detected hooks: key.
+  check("[99f2ae1a][r2][fp-a] a blank line directly after the opening fence, hiding a real hooks: key, is "
+      + "STILL DETECTED as ['hooks'] — the leading-blank-line normalization stops the fence vector from "
+      + "firing, but does not stop the normal per-key scan from finding the real hazard underneath",
+    same(detectPermissionWidening("---\n\nhooks:\n  Stop: []\n---\nbody\n"), ["hooks"]));
+  check("[99f2ae1a][r2][fp-a] frontmatterFenceUnrecognized itself: false for the blank-line-then-hooks fixture",
+    frontmatterFenceUnrecognized("---\n\nhooks:\n  Stop: []\n---\nbody\n") === false);
+  // The same shape under CRLF, and with a whitespace-only (not fully blank) line.
+  check("[99f2ae1a][r2][fp-a][CRLF] the same shape under CRLF line endings is ALSO not a fence disagreement",
+    frontmatterFenceUnrecognized("---\r\n\r\nhooks:\r\n  Stop: []\r\n---\r\nbody\r\n") === false);
+  check("[99f2ae1a][r2][fp-a] a WHITESPACE-ONLY (not fully blank) line after the open is ALSO not a fence disagreement",
+    frontmatterFenceUnrecognized("---\n   \nhooks:\n  Stop: []\n---\nbody\n") === false);
+  // Negative control: the normalization must not swallow a REAL fence disagreement that happens to also
+  // start with a blank line — the close-mid-line evasion, now with a leading blank line added, must
+  // still fire (the blank-line strip only ever removes a LEADING run, never masks a genuine mismatch
+  // further in).
+  check("[99f2ae1a][r2][fp-a][control] a blank line does NOT mask a genuine fence disagreement further in "
+      + "the block (close-mid-line evasion, with a leading blank line added)",
+    frontmatterFenceUnrecognized("---\n\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody") === true);
+
+  // --- card 99f2ae1a: EVERY shipped skill's real SKILL.md must raise no fence vector — a legitimate,
+  // reviewed skill must never be withheld by this new check. Enumerates the dir rather than hand-listing.
+  const BUNDLED_SKILLS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "skills");
+  const bundledSkillMdFiles = fs.readdirSync(BUNDLED_SKILLS_DIR, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => path.join(BUNDLED_SKILLS_DIR, e.name, "SKILL.md"))
+    .filter((p) => fs.existsSync(p));
+  check(`[99f2ae1a][false-positive-control] the scan is non-vacuous: found at least 10 bundled SKILL.md files `
+      + `(found ${bundledSkillMdFiles.length})`,
+    bundledSkillMdFiles.length >= 10);
+  const bundledFenceHits = bundledSkillMdFiles
+    .map((p) => [p, detectPermissionWidening(fs.readFileSync(p, "utf8"))])
+    .filter(([, vectors]) => vectors.includes("frontmatter-fence-unrecognized"));
+  check(`[99f2ae1a][false-positive-control] no bundled SKILL.md raises frontmatter-fence-unrecognized`
+      + (bundledFenceHits.length ? ` — FOUND: ${bundledFenceHits.map(([p]) => p).join(", ")}` : ""),
+    bundledFenceHits.length === 0);
+
   // --- frontmatterReadIncomplete: MINOR 3 — a truncated read whose OPEN fence itself carries the
   // confirmed-accepted trailing-whitespace widening must still be recognized as "opened" -------------
   check("[712148f1][r2][MINOR3] a read truncated mid-frontmatter, opening fence with trailing whitespace",
@@ -201,6 +293,21 @@ try {
     frontmatterReadIncomplete('---\nname: x\n---\nbody\n') === false);
   check("frontmatterReadIncomplete: a block that never closes anywhere in content IS incomplete",
     frontmatterReadIncomplete('---\nname: x\nallowed-tools: Bash(*)\n') === true);
+
+  // --- card 99f2ae1a round 2 (Code Review MAJOR): a READ TRUNCATED mid-frontmatter whose OPEN fence is
+  // an evasion Loom's own FRONTMATTER_OPEN_RE never matches at all — before the fix, this unit returned
+  // `false` (not incomplete) for every one of these, because the "opened" half never saw the evasion open.
+  check("[99f2ae1a][r2] a read truncated mid-frontmatter, opening fence followed by NBSP, IS incomplete "
+      + "(Loom's own FRONTMATTER_OPEN_RE never saw this open at all — before the fix this was a silent miss)",
+    frontmatterReadIncomplete("--- \nname: x\nhooks: {}\n") === true);
+  check("[99f2ae1a][r2] a read truncated mid-frontmatter, opening fence followed by a repeated CR, IS incomplete",
+    frontmatterReadIncomplete("---\r\r\nname: x\nhooks: {}\n") === true);
+  // Negative control: the SAME evasion open, but closed WELL WITHIN content — NOT incomplete. The fence
+  // shape disagreement is still real (frontmatterFenceUnrecognized flags it elsewhere), but completeness
+  // is a different question: this reader DID see the whole block, under either regex's own close.
+  check("[99f2ae1a][r2] ...negative control, the same evasion open CLOSED within content is NOT incomplete "
+      + "(fully read — frontmatterFenceUnrecognized is the right place for the shape disagreement, not here)",
+    frontmatterReadIncomplete("--- \nname: x\nhooks: {}\n---\nbody\n") === false);
 
   // --- card 9d01b4c1 round 2: frontmatterReadIncomplete's OWN internal BOM split, exercised DIRECTLY
   // with NO caller pre-split — `scanCwdSkillsForPermissionFrontmatter` (the only real caller) already

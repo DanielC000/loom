@@ -38,7 +38,7 @@ process was ever started; `claude --version` (metadata only, not a model turn) w
 
 | Form | Verdict | Evidence |
 |---|---|---|
-| Opening fence trailing whitespace (`"--- \n"`) | **CONFIRMED ACCEPTED** | `---[ \t]*\r?\n` found in 3 independent implementations (skill module, `propose_skills` tool, markdown search indexer) |
+| Opening fence trailing whitespace (`"--- \n"`) | **CONFIRMED ACCEPTED** | `---[ \t]*\r?\n` found in 3 independent implementations (skill module, `propose_skills` tool, markdown search indexer). **This row covers only `[ \t]*` — see "Round 4" below for `bk`'s own, much wider `\s*` open tolerance (NBSP, a vertical tab, a repeated CR, a second BOM) and its unanchored mid-line close, which this table never covered at all.** |
 | `...` as a closing fence | **CONFIRMED NOT ACCEPTED** | every frontmatter-boundary regex found requires literal `---` to close; a combined `\n(?:---|\.\.\.)` search has 0 hits anywhere in the whole binary |
 | Leading BOM | tolerated by at least one real implementation | `\uFEFF?` prefix in the `propose_skills` tool's own boundary regex |
 | `~~~!` tilde fence | **CONFIRMED NOT RECOGNIZED** | 0 hits for the literal anywhere in the binary; the one real fenced-shell regex found requires literal triple-backtick |
@@ -369,6 +369,28 @@ miss costs the whole point" posture — but neither was previously named anywher
   hazardous `hooks` field anyway, and `stripFrontmatterKeys` then removes it as if it carried a real
   grant — a successful strip of a line that was never actually dangerous.
 
+## Round 4 (card 99f2ae1a) — the FENCE BOUNDARY itself, not just a key line inside an already-agreed
+block, is wider on the real loader's side than `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` admit
+
+Card `22813c50`'s round 3 (folded into `9d01b4c1`'s own record) found the real loader's frontmatter
+reader (`ud`, via `cw` then `bk = /^---\s*\n([\s\S]*?)---\s*\n?/`) and used that finding only for the
+BOM-strip-count question. This round re-verified the SAME `bk` literal (re-confirmed byte-for-byte at the
+installed `claude.exe` 2.1.317, same binary and offsets this record's own table is pinned to) and found
+it is WIDER than `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` on BOTH fences, independent of the BOM question:
+
+- **Open fence**: `bk`'s `\s*` is JS `\s`, which is WhiteSpace-production-inclusive of NBSP (U+00A0), a
+  vertical tab, a repeated CR, and — distinct from the file-start BOM `cw` already strips — a SECOND
+  U+FEFF sitting right after the opening `---` (not at file start). `FRONTMATTER_OPEN_RE`'s `[ \t]*\r?\n`
+  admits none of these.
+- **Close fence**: `bk`'s close is a lazy, UNANCHORED `([\s\S]*?)---` — no `\r?\n` required before it, so
+  a closing `---` that doesn't start its own line (mid-line, e.g. a value like `description: x---`) is
+  live to the real loader. `FRONTMATTER_RE` requires `\r?\n` immediately before the closing `---`.
+
+Each of the five evasion forms above was LIVE to the real loader but reported CLEAN by every Loom path
+(badge/refuse/strip/cwd-scan/guard-lint) before this card — see `docs/decisions/99f2ae1a-*.md` for the
+full fixture table and the fix (a new `frontmatter-fence-unrecognized` vector, fail-closed, never an
+alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
+
 ## Do not
 
 - Do not re-derive the per-form verdicts in the table above by re-grepping the CLI binary from scratch
@@ -433,3 +455,8 @@ miss costs the whole point" posture — but neither was previously named anywher
   not just their constants.
 - Do not "fix" the two NIT 5 over-matches (`metadata: {hooks: y}`; `hooks:{}`) — both are accepted,
   fail-closed residuals, not bugs; see "Round 3 — NIT 5" above for why each one is safe to leave as is.
+- Do not widen `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves to match `bk`'s own fence tolerance
+  (round 4, card `99f2ae1a`) — the strip side's line-oriented rewrite logic isn't proven safe against
+  `bk`'s lazier/wider semantics (a body that can end mid-line, or legitimately swallow blank lines).
+  `REAL_LOADER_FENCE_RE` (a literal, separately-maintained port of `bk`) exists ONLY to ask "does the
+  real loader see a live block here, and with what body" — see `docs/decisions/99f2ae1a-*.md`.

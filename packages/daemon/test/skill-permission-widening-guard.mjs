@@ -124,6 +124,48 @@ function frontmatterUnrecognizedSyntax(block) {
   return false;
 }
 
+// card 99f2ae1a — a literal port of the installed CLI's own recovered `bk` regex (static byte-offset
+// scan of claude.exe), mirroring skills/permissionWidening.ts's own REAL_LOADER_FENCE_RE IN LOCKSTEP.
+// Used ONLY to ask "does the real loader see a live frontmatter block here, and with what body" — it is
+// WIDER than FRONTMATTER_RE above on both fences (JS `\s*` on the open admits NBSP/VT/a repeated CR/a
+// second BOM after the dashes; the close has no line-start requirement at all).
+const REAL_LOADER_FENCE_RE = /^---\s*\n([\s\S]*?)---\s*\n?/;
+
+// card 99f2ae1a round 2 (Code Review item 4) — mirrors permissionWidening.ts's own BOM constant +
+// splitLeadingBom helper IN LOCKSTEP (this file deliberately never imports that module, per its own
+// header, so it keeps its own copy — card 9d01b4c1's shared-helper discipline, mirrored here). Before
+// this fix, the guard's own frontmatterFenceUnrecognized below never split a leading BOM at all, so it
+// disagreed with the real module on a BOM-prefixed evasion fixture.
+const BOM = "﻿";
+function splitLeadingBom(content) {
+  return content.startsWith(BOM) ? content.slice(BOM.length) : content;
+}
+
+// card 99f2ae1a round 2 (Code Review false positive (a)) — mirrors permissionWidening.ts's own
+// stripLeadingBlankLines IN LOCKSTEP: a blank/whitespace-only line right after the opening fence is NOT
+// a real disagreement (only REAL_LOADER_FENCE_RE's own open tolerance swallows it), so it is stripped
+// from BOTH bodies before comparing.
+function stripLeadingBlankLines(s) {
+  return s.replace(/^(?:[ \t]*\r?\n)+/, "");
+}
+
+/** True when the real loader's own fence regex sees a live block this file's own FRONTMATTER_RE either
+ *  misses entirely or captures a DIFFERENT body for — mirrors permissionWidening.ts's own
+ *  frontmatterFenceUnrecognized IN LOCKSTEP. Operates on the RAW content (self-splitting one leading BOM
+ *  internally, same as the real module), not `frontmatterBlockOf`'s already-extracted block, since it
+ *  needs both regexes' own capture to disagree about. The trailing `\r?\n` stripped off the real capture
+ *  before comparing is the same group-boundary normalization that function's own doc explains (the two
+ *  regexes bound an ordinary, boring block's capture differently even when they agree on where it ends). */
+function frontmatterFenceUnrecognized(raw) {
+  const body = splitLeadingBom(raw);
+  const real = body.match(REAL_LOADER_FENCE_RE);
+  if (!real) return false; // the real loader sees no live block here either — nothing to disagree about
+  const realBody = stripLeadingBlankLines((real[1] ?? "").replace(/\r?\n$/, ""));
+  const loom = body.match(FRONTMATTER_RE);
+  const loomBody = stripLeadingBlankLines(loom?.[1] ?? "");
+  return loom == null || realBody !== loomBody;
+}
+
 // Body injection forms, per card 28b2ca6f's probes (P1/P2, P8/P9) and the Claude Code skills docs it
 // quotes: an inline `!` immediately followed by a backtick-delimited command, or a fenced code block
 // whose info string is bare `!`. Both run at RENDER time.
@@ -153,6 +195,9 @@ function scanContent(raw) {
     // recognized YAML shapes too, regardless of whether a specific hazardous key is also matched.
     if (frontmatterUnrecognizedSyntax(block)) violations.push("frontmatter (unrecognized YAML syntax)");
   }
+  // card 99f2ae1a — runs regardless of whether `block` was found above: the whole point of this check is
+  // the case where the real loader sees a live block that this file's own FRONTMATTER_RE missed entirely.
+  if (frontmatterFenceUnrecognized(raw)) violations.push("frontmatter (unrecognized fence shape)");
   if (INLINE_SHELL_RE.test(raw)) violations.push("inline shell injection (!`cmd`)");
   if (FENCED_SHELL_RE.test(raw)) violations.push("fenced shell injection (```!)");
   return violations;
@@ -205,6 +250,51 @@ check("(self) [MAJOR1] a comment then an indented quoted key with NO preceding t
   scanContent('---\n# c\n  "hook\\x73": {}\n---').includes("frontmatter (unrecognized YAML syntax)"));
 check("(self) [MAJOR1] an indented explicit-key pair with NO preceding top-level key is flagged unrecognized",
   scanContent('---\n ? allowed-tools\n : Bash\n---').includes("frontmatter (unrecognized YAML syntax)"));
+
+// card 99f2ae1a — the real loader's bk vs. this file's own FRONTMATTER_RE fence-shape evasions: each one
+// is LIVE to the installed claude.exe (static byte-offset verified, docs/decisions/99f2ae1a-*.md) but
+// was CLEAN to every Loom path before this card. All five must now be flagged.
+check("(self) [99f2ae1a] a closing --- that doesn't start its own line is flagged as an unrecognized fence",
+  scanContent("---\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody").includes("frontmatter (unrecognized fence shape)"));
+check("(self) [99f2ae1a] an opening fence followed by NBSP is flagged as an unrecognized fence",
+  scanContent("--- \nhooks:\n  Stop: []\n---\nbody").includes("frontmatter (unrecognized fence shape)"));
+check("(self) [99f2ae1a] an opening fence followed by a repeated CR is flagged as an unrecognized fence",
+  scanContent("---\r\r\nhooks:\n  Stop: []\n---\nbody").includes("frontmatter (unrecognized fence shape)"));
+check("(self) [99f2ae1a] an opening fence followed by a second BOM is flagged as an unrecognized fence",
+  scanContent("---﻿\nhooks:\n  Stop: []\n---\nbody").includes("frontmatter (unrecognized fence shape)"));
+check("(self) [99f2ae1a] an opening fence followed by a vertical tab is flagged as an unrecognized fence",
+  scanContent("---\u000B\nhooks:\n  Stop: []\n---\nbody").includes("frontmatter (unrecognized fence shape)"));
+// Accepted over-match, named per the manager's explicit sign-off: a VALUE containing the literal `---`
+// makes the real loader truncate ITS OWN parse there too (its close has no line-start requirement), so
+// whatever follows (here, the `hooks:` line) was never actually live to the real loader either — but
+// Loom's own line-oriented FRONTMATTER_RE correctly continues past it to the true closing fence, so the
+// two captures disagree and this is withheld. Safe-direction false positive, not a miss.
+check("(self) [99f2ae1a] a value containing a literal --- is flagged as an unrecognized fence "
+    + "(accepted over-match — the real loader truncates its own parse there too, so nothing past the "
+    + "embedded --- was ever live to it either, but Loom's wider capture disagrees and withholds)",
+  scanContent("---\nname: a---b\nhooks: y\n---\nbody").includes("frontmatter (unrecognized fence shape)"));
+// card 99f2ae1a round 2 (Code Review item 4): a leading BOM at the very START of the file (position 0,
+// before the `---`), combined with a mid-line close evasion — before this fix, frontmatterFenceUnrecognized
+// never split this BOM at all, so it disagreed with the real module (which already self-splits).
+check("(self) [99f2ae1a][r2] a file-start BOM combined with a mid-line-close evasion is STILL flagged as "
+    + "an unrecognized fence (the guard's own copy now splits one leading BOM, same as the real module)",
+  scanContent("﻿---\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody")
+    .includes("frontmatter (unrecognized fence shape)"));
+// card 99f2ae1a round 2 (false positive (a)): a blank line directly after the opening fence is NOT a
+// real disagreement — before this fix, this fixture wrongly raised the fence vector too.
+check("(self) [99f2ae1a][r2][fp-a] a blank line directly after the opening fence, hiding a real hooks: "
+    + "key, is NOT flagged for its fence shape (the hooks: key itself is still flagged separately)",
+  !scanContent("---\n\nhooks:\n  Stop: []\n---\nbody\n").includes("frontmatter (unrecognized fence shape)")
+    && scanContent("---\n\nhooks:\n  Stop: []\n---\nbody\n").includes("frontmatter 'hooks:'"));
+// Negative control: the fence check must not newly flag ordinary, boring content it already passed.
+check("(self) [99f2ae1a] an ordinary boring fence with a real hooks: key is NOT flagged for its fence shape "
+    + "(only for the hooks: key itself, via the pre-existing check)",
+  !scanContent("---\nname: x\nhooks:\n  Stop: []\n---\nbody\n").includes("frontmatter (unrecognized fence shape)"));
+check("(self) [99f2ae1a] a clean, realistic SKILL.md-shaped fixture is NOT flagged for its fence shape",
+  !scanContent(
+    "---\nname: example\ndescription: An ordinary doctrine skill with no permission-widening frontmatter.\n---\n\n"
+      + "# Example\n\nFollow the repo's `CLAUDE.md` and run `pnpm build` before you report done.\n",
+  ).includes("frontmatter (unrecognized fence shape)"));
 
 // ── The real scan: every packages/daemon/assets/skills/<name>/SKILL.md + references/** file ──────────
 

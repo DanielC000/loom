@@ -405,6 +405,87 @@ try {
   }
 
   // ===================================================================================================
+  // PART 1d — card 99f2ae1a: the installed CLI's own loader sees a live frontmatter block this scan's
+  // own detector (via FRONTMATTER_OPEN_RE/FRONTMATTER_RE) either misses entirely or captures a different
+  // body for. Written directly (not via `writeSkill`, which always emits a plain opening fence) so each
+  // fixture's exact evasion shape lands byte-for-byte.
+  // ===================================================================================================
+  {
+    const cwd = path.join(scratchRoot, `p1d-${sfx}`);
+    fs.mkdirSync(cwd, { recursive: true });
+
+    function writeRawSkill(name, raw) {
+      const dir = path.join(cwd, ".claude", "skills", name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), raw);
+    }
+
+    writeRawSkill("fence-close-midline", "---\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody");
+    writeRawSkill("fence-open-nbsp", "--- \nname: x\nhooks:\n  Stop: []\n---\nbody");
+    writeRawSkill("fence-open-crcr", "---\r\r\nname: x\nhooks:\n  Stop: []\n---\nbody");
+    writeRawSkill("fence-open-second-bom", "---﻿\nname: x\nhooks:\n  Stop: []\n---\nbody");
+    writeRawSkill("fence-open-vtab", "---\u000B\nname: x\nhooks:\n  Stop: []\n---\nbody");
+    // Negative control: an ordinary, boring fence the scan already caught before this card — proves the
+    // new check doesn't newly flag a shape it already handled correctly.
+    writeSkill(cwd, "fence-ordinary-hooks", "name: fence-ordinary-hooks\nhooks:\n  Stop: []\n");
+
+    const { findings: findings1d, truncated: truncated1d, incomplete: incomplete1d } =
+      scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    const byName1d = (n) => findings1d.find((f) => f.name === n);
+    for (const name of ["fence-close-midline", "fence-open-nbsp", "fence-open-crcr", "fence-open-second-bom", "fence-open-vtab"]) {
+      check(`PART1d: ${name} IS flagged with frontmatter-fence-unrecognized`,
+        byName1d(name)?.fields?.includes("frontmatter-fence-unrecognized"));
+    }
+    check("PART1d: the ordinary boring fence is flagged for its real hooks: key, NOT for its fence shape",
+      byName1d("fence-ordinary-hooks")?.fields?.length === 1 && byName1d("fence-ordinary-hooks").fields[0] === "hooks");
+    check("PART1d: none of the six fixtures trips a truncation or marks the scan incomplete",
+      truncated1d.length === 0 && incomplete1d === false);
+  }
+
+  // ===================================================================================================
+  // PART 1e — card 99f2ae1a, Code Review round 2 MAJOR: an evasion OPEN fence whose real-loader-visible
+  // CLOSE sits past PERMISSION_SCAN_MAX_READ_BYTES used to report findings=[] AND truncated=[] — a
+  // silent miss with NO signal anywhere, because `frontmatterFenceUnrecognized` never found a close
+  // within the truncated head (nothing to disagree about) AND `frontmatterReadIncomplete` never saw the
+  // evasion open at all (Loom's own narrower FRONTMATTER_OPEN_RE doesn't match it). Fixed by widening
+  // `frontmatterReadIncomplete` itself — this PART proves the fix through the REAL scan, byte-capped read
+  // included, not just the unit-level function.
+  // ===================================================================================================
+  {
+    const cwd = path.join(scratchRoot, `p1e-${sfx}`);
+    fs.mkdirSync(cwd, { recursive: true });
+
+    function writeRawSkill(name, raw) {
+      const dir = path.join(cwd, ".claude", "skills", name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), raw);
+    }
+
+    // Padding well past PERMISSION_SCAN_MAX_READ_BYTES (4096) before the closing fence, so the real read
+    // head never reaches it — mirrors the huge-frontmatter-skill fixture's own padding shape above.
+    const padding = "x".repeat(6000);
+    writeRawSkill("fence-open-nbsp-past-cap", `--- \nname: a\nhooks:\n  Stop: []\ndescription: ${padding}\n---\nbody`);
+    writeRawSkill("fence-open-crcr-past-cap", `---\r\r\nname: a\nhooks:\n  Stop: []\ndescription: ${padding}\n---\nbody`);
+    // Negative control: the SAME padding shape with a PLAIN open fence already reports correctly before
+    // this fix (PART1-9b/9c above) — proves the padding/cap shape itself is fine and isolates the evasion
+    // open as the only variable.
+    writeRawSkill("fence-open-plain-past-cap", `---\nname: a\nhooks:\n  Stop: []\ndescription: ${padding}\n---\nbody`);
+
+    const { findings: findings1e, truncated: truncated1e, incomplete: incomplete1e } =
+      scanCwdSkillsForPermissionFrontmatter(cwd, []);
+    const byName1e = (n) => findings1e.find((f) => f.name === n);
+    const truncNames1e = truncated1e.filter((t) => t.cap === "readBytes").flatMap((t) => t.names);
+    for (const name of ["fence-open-nbsp-past-cap", "fence-open-crcr-past-cap", "fence-open-plain-past-cap"]) {
+      check(`PART1e: ${name} is NOT detected (its closing fence sits past the read cap, same bound as PART1-9b)`,
+        !byName1e(name));
+      check(`PART1e: ${name} IS reported as a readBytes truncation — no longer a silent miss`,
+        truncNames1e.includes(name));
+    }
+    check("PART1e: the scan is not incomplete either (a byte-capped read is a truncation, not an I/O error)",
+      incomplete1e === false);
+  }
+
+  // ===================================================================================================
   // PART 2 — SessionService.handleSkillPermissionFrontmatterWarning: the durable event write
   // ===================================================================================================
   {

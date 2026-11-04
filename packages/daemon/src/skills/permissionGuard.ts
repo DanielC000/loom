@@ -2,6 +2,7 @@ import type { SkillPermissionVector } from "@loom/shared";
 import {
   detectPermissionWidening,
   frontmatterUnrecognizedSyntax,
+  frontmatterFenceUnrecognized,
   FRONTMATTER_RE,
   FRONTMATTER_KEY_LINE_RE,
   INLINE_SHELL_RE,
@@ -39,6 +40,8 @@ const VECTOR_LABEL: Record<SkillPermissionVector, string> = {
   hooks: "a frontmatter `hooks:` registration",
   "frontmatter-unrecognized": "frontmatter syntax this detector cannot confidently parse (e.g. a quoted "
     + "key, a flow mapping, an anchor/alias/tag value, an explicit/tagged/merge key)",
+  "frontmatter-fence-unrecognized": "a frontmatter fence shape the installed CLI's own loader parses "
+    + "differently than this detector does",
   "shell-inline": "an inline `` !`cmd` `` shell injection",
   "shell-fenced": "a fenced ` ```! ` shell block",
 };
@@ -182,11 +185,16 @@ const STRIP_FIXPOINT_MAX_PASSES = 16;
  * @decision 9d01b4c1 (round 2) — a caller-side pre-split here, on top of the self-split, would strip a
  * SECOND BOM for a double-BOM input — inert to the real loader (that round's static-scan finding) —
  * and wrongly flag it as live.
+ *
+ * @decision 99f2ae1a — `frontmatterFenceUnrecognized` is checked in the SAME early position as
+ * `frontmatterUnrecognizedSyntax` below: a disputed fence has no safely-rewritable block to hand
+ * `stripFrontmatterKeys` — withhold the whole file, never attempt a surgical strip on it.
  */
 export function stripPermissionWidening(content: string): string | null {
   const { body, hasBom } = splitLeadingBom(content);
   if (detectPermissionWidening(content).length === 0) return content;
   if (frontmatterUnrecognizedSyntax(content)) return null;
+  if (frontmatterFenceUnrecognized(content)) return null;
   let current = body;
   for (let i = 0; i < STRIP_FIXPOINT_MAX_PASSES; i++) {
     const next = stripShellTriggers(stripFrontmatterKeys(current));

@@ -401,6 +401,40 @@ try {
     detectPermissionWidening(crlfIndentedRoot).includes("frontmatter-unrecognized"));
   check("[E][r3][MAJOR1][CRLF] ...and still withholds rather than strip",
     stripPermissionWidening(crlfIndentedRoot) === null);
+
+  // ===================================================================================================
+  // PART F — card 99f2ae1a: the installed CLI's own loader sees a live frontmatter block that this
+  // module's own fence patterns either miss entirely or capture a DIFFERENT body for. Same withhold
+  // discipline as PART E above, but on the FENCE boundary itself rather than a key line inside an
+  // already-agreed block — `frontmatter-fence-unrecognized`, not `frontmatter-unrecognized`.
+  // ===================================================================================================
+  const FENCE_WITHHELD_FIXTURES = {
+    "hooks (closing fence doesn't start its own line)": "---\nname: a\nhooks:\n  Stop: []\ndescription: x---\nbody",
+    "hooks (opening fence followed by NBSP)": "--- \nhooks:\n  Stop: []\n---\nbody",
+    "hooks (opening fence followed by a repeated CR)": "---\r\r\nhooks:\n  Stop: []\n---\nbody",
+    "hooks (opening fence followed by a second BOM)": "---﻿\nhooks:\n  Stop: []\n---\nbody",
+    "hooks (opening fence followed by a vertical tab)": "---\u000B\nhooks:\n  Stop: []\n---\nbody",
+    // Accepted over-match (manager sign-off): the real loader truncates its own parse at the embedded
+    // `---`, so the `hooks:` line past it was never actually live to it either — but Loom's own
+    // line-oriented capture legitimately extends further and disagrees, so this withholds too.
+    "hooks (value contains a literal ---, accepted over-match)": "---\nname: a---b\nhooks: y\n---\nbody",
+  };
+  for (const [label, content] of Object.entries(FENCE_WITHHELD_FIXTURES)) {
+    check(`[F][99f2ae1a] ${label}: detectPermissionWidening carries frontmatter-fence-unrecognized`,
+      detectPermissionWidening(content).includes("frontmatter-fence-unrecognized"));
+    const err = permissionWideningRefusalError(content);
+    check(`[F][99f2ae1a] ${label}: refused with a non-empty error`, typeof err === "string" && err.length > 0);
+    const stripped = stripPermissionWidening(content);
+    check(`[F][99f2ae1a] ${label}: stripPermissionWidening withholds (returns null), no attempt to strip a fence shape only the real loader's own boundary semantics agree is live`,
+      stripped === null);
+    check(`[F][99f2ae1a] ${label}: the withhold is stable under a second call (idempotent null)`,
+      stripPermissionWidening(content) === null);
+  }
+  // Negative control: an ordinary, boring fence carrying a real hooks: key strips cleanly — the new
+  // check must not newly withhold a shape the strip side already handled correctly before this card.
+  const ordinaryHooks = "---\nname: x\nhooks:\n  Stop:\n    - type: command\n      command: node x.js\n---\nbody\n";
+  check("[F][99f2ae1a] negative control: an ordinary boring fence with a real hooks: key still strips (not withheld for its fence shape)",
+    stripPermissionWidening(ordinaryHooks) !== null && !/hooks:/.test(stripPermissionWidening(ordinaryHooks)));
 } finally {
   // nothing left to clean up HERE — PART D' already removed its own throwaway mutant files in its own
   // try/finally above; no LOOM_HOME or other temp dir is used anywhere in this file.
