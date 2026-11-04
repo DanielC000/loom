@@ -460,3 +460,18 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
   `bk`'s lazier/wider semantics (a body that can end mid-line, or legitimately swallow blank lines).
   `REAL_LOADER_FENCE_RE` (a literal, separately-maintained port of `bk`) exists ONLY to ask "does the
   real loader see a live block here, and with what body" — see `docs/decisions/99f2ae1a-*.md`.
+
+## Round 5 (card `84893cab`) — SUPERSEDED: the guard's text-copy regexes are gone, and so is the lockstep test
+
+Card `84893cab` deleted `skill-permission-widening-guard.mjs`'s own text-copy regexes entirely — it now
+dynamic-imports `permissionWidening.ts`'s compiled export (`detectPermissionWidening`) and calls it
+directly, per `87a51903`'s "no second copy of these patterns may exist" rule. `skill-permission-widening-
+lockstep.mjs` was deleted in the same change: its whole job was proving the guard's copy stayed
+byte-identical to the real module's exports, and once the copy no longer exists there is nothing left to
+compare, in either direction.
+
+**Every "Do not" bullet above that instructs you to keep the guard's own copy "in lockstep" with
+`permissionWidening.ts`, or to trust `skill-permission-widening-lockstep.mjs` as proof of agreement, is
+superseded by this round** — not because the underlying caution was wrong, but because its premise (a
+second copy exists to drift) no longer holds. Do not resurrect either the copy or the lockstep test; see
+`docs/decisions/36101180-skill-permission-widening-bundled-asset-lint.md` for the current rule and why.

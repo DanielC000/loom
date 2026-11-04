@@ -319,3 +319,9 @@ elsewhere in this record this same round).
   instead, and check with `git merge-base --is-ancestor <sha> main` first; but note that a squash
   landing covers the WHOLE branch, so it may not represent any one intermediate round's own state either
   (round 2's item 5 nitpick, round 3 correction, above).
+- **SUPERSEDED by card `84893cab`** — do not rely on any bullet above that points at
+  `skill-permission-widening-lockstep.mjs` (e.g. the `REAL_LOADER_FENCE_RE`/`frontmatterFenceUnrecognized`/
+  `BOM`/`splitLeadingBom`/`stripLeadingBlankLines` lockstep bullets) as live guidance — the guard's own
+  text-copy regexes this card widened were later deleted entirely, the guard now calls
+  `permissionWidening.ts`'s real export directly, and the lockstep test was deleted with them (nothing
+  left to compare). See `docs/decisions/36101180-skill-permission-widening-bundled-asset-lint.md`.

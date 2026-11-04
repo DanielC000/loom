@@ -5849,9 +5849,16 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   // Card 36101180 (from investigate-first card 28b2ca6f): a direct reader (route (1)) of every real
   // SKILL.md and references/** file under this tree, flagging a permission-widening frontmatter key
   // (`allowed-tools:`/`hooks:`) or body shell-injection form (inline `` !`cmd` ``/fenced ` ```! `).
-  // Unlike codescape-privacy-guard.mjs (STATIC_GUARD_REPO_PATHS above), this guard's ONLY invalidator is
-  // real asset CONTENT under this tree — it reads no dist/web-bundle output and no other skill-doctrine
-  // text — so it belongs on THIS conditional list, not the unconditional one.
+  // Unlike codescape-privacy-guard.mjs (STATIC_GUARD_REPO_PATHS above), this guard's PRIMARY invalidator
+  // is still real asset CONTENT under this tree — so it belongs on THIS conditional list, not the
+  // unconditional one. Card 84893cab: it now ALSO dynamic-imports the compiled detector
+  // (../dist/skills/permissionWidening.js — decision record 87a51903's "no second copy" rule; it used
+  // to carry its own text-copy regexes instead), but that doesn't move its membership here: a real
+  // `permissionWidening.ts` edit already fails `computeEmitCompareGate`'s transpile-identity check and
+  // forces the FULL gate (where this guard runs anyway via the corpus walk — the SAME
+  // `STATIC_GUARD_REPO_PATHS` ground `codescape-privacy-guard.mjs` already documents), and every member
+  // of THIS list already runs after `pnpm build` in `buildReducedGateCommand`'s own step order below, so
+  // the new dist import needs no extra step here either.
   "packages/daemon/test/skill-permission-widening-guard.mjs",
   "packages/daemon/test/skills-codescape-reconcile.mjs",
   "packages/daemon/test/skills-conditional.mjs",
