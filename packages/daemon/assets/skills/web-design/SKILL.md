@@ -123,6 +123,12 @@ brief is an *aesthetic* (glassmorphism, bento, brutalist, editorial) rather than
 official package — build it with native CSS and be honest about what's borrowed inspiration vs. official
 material. If nothing fits, build restrained native CSS on the fundamentals above.
 
+The same principle covers a component-library toolkit that copies primitives into the project rather than
+shipping as a dependency (e.g. shadcn/ui): when one is already present, compose its primitives and
+retheme its tokens rather than hand-rolling new ones or overriding its per-component styles piecemeal —
+its default theme is itself a recognizable "default look," so retheming (not fighting) it is what keeps
+the anti-AI-default goal intact.
+
 ## Output modes
 
 - **Build / enhance** — apply the rules directly to the work.
