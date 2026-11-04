@@ -51,6 +51,12 @@ type TaskEditPatch = {
 const byRecentlyDone = (a: BoardTask, b: BoardTask) =>
   a.updatedAt === b.updatedAt ? (a.position - b.position || (a.id < b.id ? -1 : 1)) : (a.updatedAt > b.updatedAt ? -1 : 1);
 
+// ── Done-lane render cap ──────────────────────────────────────────────────────
+// @decision 7da27eb5 — cap only the TERMINAL lane, and only AFTER filtering (capping first searches
+// just the newest page and silently loses an older match). The lane header's count is the full
+// filtered length, never the sliced one.
+const DONE_LANE_PAGE = 50;
+
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
 // Scoped to the header's active project by default; an explicit `projectId` prop points it at a
@@ -255,7 +261,10 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                   — so the board degrades gracefully instead of crushing every lane. */}
               <div className="loom-board-grid">
                 {board.data.columns.map((col) => (
-                  <Column key={col.key} col={col}
+                  // The project id rides in the key ON PURPOSE (card 7da27eb5): it keeps Column's
+                  // done-lane reveal state alive across the 4s poll (same key ⇒ re-render, not remount)
+                  // while a project switch remounts the lane and collapses it back to one page.
+                  <Column key={`${projectId}:${col.key}`} col={col}
                     tasks={shownTasks.filter((t) => t.columnKey === col.key)
                       .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
                     filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
@@ -341,6 +350,17 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
   { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void; multiRepo: boolean;
     repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
+  const doneLane = isDoneColumn(col);
+  // Reveal state for DONE_LANE_PAGE, held HERE rather than in Board so it is genuinely per-lane. It
+  // survives the board's 4s refetch because Column's key is stable across a poll (the poll re-renders
+  // this component, it does not remount it) — and that key carries the project id, so switching project
+  // DOES remount the lane and collapse it back to one page.
+  const [expanded, setExpanded] = useState(false);
+  // `tasks` arrives already filtered (Board's search/priority/column filter) and already sorted, so
+  // slicing here caps only what is RENDERED — a search that matches an old done card has already pulled
+  // it out of the full set by the time we get here, and it lands inside the first page.
+  const visible = doneLane && !expanded ? tasks.slice(0, DONE_LANE_PAGE) : tasks;
+  const hidden = tasks.length - visible.length;
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
   // bar, neutral AA-safe label, neutral hairline card border.
@@ -386,7 +406,19 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
         )}
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={isDoneColumn(col)} onOpen={() => onOpen(task.id)} />)}
+        {visible.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
+        {/* The reveal for the done-lane cap. Sits INSIDE the lane's own scroll region (so it trails the
+            last rendered card rather than pinning to the lane footer) and is full-width so it reads as
+            the continuation of the list it extends, not as a card. One-way: revealing the rest is not a
+            state the user then has to undo, and a collapse control would only re-hide what they asked
+            for. Absent entirely when nothing is hidden, so an un-capped lane is byte-identical. */}
+        {hidden > 0 && (
+          <Button variant="ghost" onClick={() => setExpanded(true)}
+            aria-label={`Show ${hidden} more card${hidden === 1 ? "" : "s"} in ${col.label}`}
+            style={{ width: "100%", marginTop: 2, color: color.textDim, border: `1px dashed ${color.border}` }}>
+            Show {hidden} more
+          </Button>
+        )}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
         {tasks.length === 0 && filterActive && (
           <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
