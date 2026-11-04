@@ -5,14 +5,26 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { engineTranscriptPath } from "../dist/sessions/transcript.js";
-import { readContextStats } from "../dist/sessions/context.js";
-import { contextWindowForModel } from "../../shared/dist/index.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// Unique temp cwd → collision-free transcript dir under the real ~/.claude/projects.
+// @decision 668bc52c — sandbox HOME/USERPROFILE before importing dist; never write engineTranscriptPath's
+// fixture under the real os.homedir(). This also converts the prior static dist imports (hoisted, so no
+// override here could ever precede them) to dynamic ones, placed after the sandbox.
+const sandboxHome = path.join(os.tmpdir(), `loom-ctx-sbhome-${Date.now()}-${process.pid}`);
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
+
+const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { readContextStats } = await import("../dist/sessions/context.js");
+const { contextWindowForModel } = await import("../../shared/dist/index.js");
+
+// Unique temp cwd → collision-free transcript dir under the sandboxed home.
 const cwd = path.join(os.tmpdir(), `loom-ctx-${Date.now()}-${process.pid}`);
 const dir = path.dirname(engineTranscriptPath(cwd, "seed"));
 fs.mkdirSync(dir, { recursive: true });
@@ -102,6 +114,7 @@ try {
   }
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
+  try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0

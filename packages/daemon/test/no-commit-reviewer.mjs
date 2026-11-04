@@ -51,6 +51,17 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // bound actually elapse, so a generous value here just means a slower (never flaky) fallback check.
 process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_MS = "5000";
 
+// @decision 668bc52c — sandbox HOME/USERPROFILE to a managed temp dir BEFORE importing dist; this test
+// writes real transcript fixtures via engineTranscriptPath() below, which must never land under the
+// real os.homedir().
+const sandboxHome = path.join(os.tmpdir(), `loom-ncr-sbhome-${Date.now()}-${process.pid}`);
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
+
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -244,6 +255,7 @@ try {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
+  try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0

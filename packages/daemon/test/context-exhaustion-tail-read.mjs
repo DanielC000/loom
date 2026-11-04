@@ -5,10 +5,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // path — see pty/claude-transcript.ts's own "Do not construct a ~/.claude/projects/... literal
 // anywhere outside this file" decision record).
 //
-// engineTranscriptPath resolves under the REAL os.homedir(), not a hermetic LOOM_HOME (card 7c1fc117's
-// own established, accepted pattern — see engine-session-rotation.mjs) — every id here is suffixed
-// with a run-unique RUN_SUFFIX so a leftover from a skipped cleanup (a SIGKILL, an EPERM/EBUSY) can
-// never collide with a later run, and the fixture directory is removed in a `finally` block.
+// engineTranscriptPath resolves under os.homedir(), which this file sandboxes to a managed temp dir
+// (card 668bc52c), never the owner's real ~/.claude/projects — every id here is also suffixed with a
+// run-unique RUN_SUFFIX so a leftover from a skipped cleanup (a SIGKILL, an EPERM/EBUSY) can never
+// collide with a later run, and the fixture directory is removed in a `finally` block.
 //
 // Run: 1) build (turbo builds shared first), 2) node packages/daemon/test/context-exhaustion-tail-read.mjs
 import fs from "node:fs";
@@ -18,10 +18,22 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+const RUN_SUFFIX = `${Date.now()}-${process.pid}`;
+
+// @decision 668bc52c — sandbox HOME/USERPROFILE to a managed temp dir BEFORE importing dist; never
+// write a transcript fixture under the real os.homedir(), and never import dist after the sandbox is
+// set but let a module-load-time os.homedir() read slip in before it.
+const sandboxHome = path.join(os.tmpdir(), `loom-ctxexh-home-${RUN_SUFFIX}`);
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
+
 const { checkContextExhaustion, CONTEXT_EXHAUSTION_TAIL_BYTES } = await import("../dist/orchestration/context-exhaustion.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
-const RUN_SUFFIX = `${Date.now()}-${process.pid}`;
 const cwd = path.join(os.tmpdir(), `loom-ctxexh-${RUN_SUFFIX}`);
 const engineId = `eng-ctxexh-${RUN_SUFFIX}`;
 const file = engineTranscriptPath(cwd, engineId);
@@ -103,9 +115,10 @@ try {
     check("(5) a codex-harness call returns null (no matching rollout file at the claude-encoded path)", result === null);
   }
 } finally {
-  // Cleanup the REAL ~/.claude/projects fixture directory this run created (card 7c1fc117's own
-  // established pattern) — never the whole projects root, only this run's own uniquely-suffixed dir.
+  // Cleanup the sandboxed-home fixture directory this run created (card 7c1fc117's own established
+  // pattern) — never the whole projects root, only this run's own uniquely-suffixed dir.
   try { fs.rmSync(path.dirname(file), { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0

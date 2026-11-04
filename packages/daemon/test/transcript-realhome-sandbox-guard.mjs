@@ -5,10 +5,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // text sitting inside a comment or a string, and a naive "does the file sandbox HOME somewhere" check
 // can't tell whether that sandbox actually runs BEFORE the dist import it needs to precede.
 //
-// WHAT COUNTS AS A HIT: a CallExpression whose callee is a bare Identifier named
-// `engineTranscriptPath`/`resolveTranscriptFile`/`engineTranscriptExists`/`listAllTranscriptIds` (the
-// four transcript-path functions `pty/claude-transcript.ts` exports) — EXCLUDING two shapes that can
-// share one of these names while reaching a DIFFERENT resolver than the one this guard polices:
+// WHAT COUNTS AS A HIT: a CallExpression reaching one of the four transcript-path functions
+// `pty/claude-transcript.ts` exports — `engineTranscriptPath`/`resolveTranscriptFile`/
+// `engineTranscriptExists`/`listAllTranscriptIds` — whether called as a bare identifier (including an
+// ALIASED destructure, `{ engineTranscriptPath: etp }` then `etp(...)`) or as a NAMESPACE property
+// access off a whole-module binding (`t.engineTranscriptPath(...)`). Resolution is lexically
+// scope-aware (card ad3e193c triage item iv) — never a single whole-file last-seen-wins map, which can
+// misattribute a call to a same-named binding declared in an unrelated, later-in-source scope —
+// EXCLUDING two shapes that can share one of these names while reaching a DIFFERENT resolver than the
+// one this guard polices:
 //   - the binding is imported from `../dist/pty/codex-transcript.js` — that module's OWN
 //     `resolveTranscriptFile` collides in NAME with claude's, but resolves under `realCodexHome()`
 //     (its own doc comment: "rather than a second, independently-hardcoded os.homedir()" call that
@@ -36,12 +41,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 //           (`pty/claude-transcript.ts`) is a FUNCTION, read fresh per call via `claudeConfigHome()` (card
 //           `a92a0913`) — it is NOT a module-level constant captured once at import — but this guard still
 //           refuses a static import rather than trust every transitively-imported dist module to be
-//           equally lazy; convert to a dynamic `await import()` placed after the sandbox instead.
+//           equally lazy; convert to a dynamic `await import()` placed after the sandbox instead. A
+//           static import of a LOCAL HELPER module that itself statically imports dist is the SAME
+//           hazard one level removed (triage item v) — that helper's own hoisted import still runs at
+//           its own module-load time, before anything in THIS file's body, however correctly this
+//           file's own sandbox is ordered; `findTransitiveStaticDistImport` reads the helper's own text
+//           (one level deep) to catch it.
 //       (2) it carries a `process.env.HOME = <non-empty>` assignment AND a `process.env.USERPROFILE =
-//           <non-empty>` assignment (real `=` syntax, never `==`/`===`/a comment/a string) that BOTH
-//           appear, in source order, strictly BEFORE the file's FIRST dynamic `import("...dist/...")`
-//           call — the only shape that can actually precede a dist import's own load time.
-//       (3) it ALSO carries a `delete process.env.CLAUDE_CONFIG_DIR;` or a non-empty
+//           <non-empty>` assignment (real `=` syntax, never `==`/`===`/a comment/a string) that are each
+//           a genuinely TOP-LEVEL statement (never sitting inside a function body this guard has no way
+//           to prove is ever actually CALLED — triage item iii) and BOTH appear, in source order,
+//           strictly BEFORE the file's FIRST dynamic `import("...dist/...")` call — the only shape that
+//           can actually precede a dist import's own load time.
+//       (3) it ALSO carries a TOP-LEVEL `delete process.env.CLAUDE_CONFIG_DIR;` or a non-empty
 //           `process.env.CLAUDE_CONFIG_DIR = <redirect>;` assignment, strictly before that SAME first
 //           dynamic dist import — `claudeConfigHome()` (`pty/claude-config.ts`) reads `CLAUDE_CONFIG_DIR`
 //           ahead of `os.homedir()` (card `a92a0913`), so a sandboxed HOME/USERPROFILE alone is not
@@ -60,6 +72,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // `process.env.HOME =` assignment from the same text in a comment/string/`==` comparison, and would
 // both false-positive and false-negative on this exact corpus.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -79,20 +92,8 @@ const TRANSCRIPT_FN_NAMES = new Set([
 // write is deliberate AND already carries its own enumerated cleanup; it is pre-existing debt this card
 // was not asked to fix, not a shape this guard should treat as safe going forward.
 const NON_SANDBOXED_ALLOWLIST = {
-  "context-stats.mjs": "pre-existing real-home write with its own dedicated per-call cleanup (fs.rmSync(dir,...) in a finally block) — not sandboxed; out of card 668bc52c's scope.",
-  "paste-placeholder-tripwire.mjs": "pre-existing real-home write with its own dedicated per-call cleanup (fs.rmSync(transcriptDir,...) in a finally block) — not sandboxed; out of card 668bc52c's scope.",
-  "usage-limit-weekly-sentinel.mjs": "pre-existing real-home write with its own dedicated per-call cleanup (fs.rmSync(transcriptDir,...) in a finally block) — not sandboxed; out of card 668bc52c's scope.",
-  // The next seven were found BY THIS GUARD (not in card 668bc52c's own named list) — real, pre-existing
-  // real-home writes with best-effort (non-guaranteed) cleanup, each confirmed by reading the file, not
-  // copied from any prior memory note on trust. Reported up as a discovery for a follow-up card; out of
-  // THIS card's scope to fix.
-  "assistant-role.mjs": "real-home write with its own best-effort per-case cleanup (fs.rmSync(transcriptDir,...), try/catch) — not sandboxed.",
-  "context-exhaustion-tail-read.mjs": "real-home write with its own best-effort cleanup (fs.rmSync(path.dirname(file),...), try/catch) — not sandboxed.",
-  "crash-orphaned-workers.mjs": "real-home write with its own best-effort cleanup (fs.rmSync(dir,...), try/catch) — not sandboxed.",
-  "mainline-watch-boot-reader.mjs": "real-home write registered with the shared registerForCleanup() registry (best-effort, not a guaranteed-throw-on-survival check) — not sandboxed.",
-  "no-commit-reviewer.mjs": "real-home write with its own best-effort cleanup (fs.rmSync(dir,...), try/catch) — not sandboxed.",
-  "paste-length-loss.mjs": "real-home write with its own best-effort cleanup (fs.rmSync(transcriptDir,...)/(transcriptDir2,...), try/catch) — not sandboxed.",
-  "restart-fleet.mjs": "real-home write with its own best-effort cleanup (fs.rmSync(dir,...), try/catch) — not sandboxed.",
+  // Every file card ad3e193c was dispatched to convert (the seven found BY THIS GUARD plus the three
+  // known-debt files card 668bc52c itself allowlisted) is now sandboxed and removed from this list.
   "worktrees.mjs": "calls engineTranscriptPath(...) ONLY to compare two computed path STRINGS (a pure function of its cwd argument) — never writes a file via it, so there is nothing to sandbox against.",
   "_probe-paste-stranded-resume.mjs": "a REAL-CLAUDE STANDALONE PROBE (its own header: \"NOT hermetic CI — needs a logged-in claude\"), never run as part of the hermetic suite/guards — out of scope for this hermeticity convention by design.",
   // Card a92a0913 round 2: a deliberately DIFFERENT (per-scenario, not once-before-import) sandbox shape
@@ -112,53 +113,126 @@ function lineOf(sf, node) {
   return sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
 }
 
-/** Every local binding name -> module specifier it was imported from, covering both a static named
- *  import (`import { X } from "spec"`) and the dynamic destructure shape every hermetic test in this
- *  corpus actually uses (`const { X } = await import("spec")`, or the unawaited `import("spec")` form).
- *  An identifier bound more than once (shadowed/reassigned) keeps its LAST-seen source — rare enough in
- *  this corpus that a more careful scope analysis isn't warranted. */
-function findImportBindingSources(sf) {
-  const bindings = new Map();
-  function importCallSpec(node) {
-    if (!ts.isCallExpression(node) || node.expression.kind !== ts.SyntaxKind.ImportKeyword) return null;
-    const arg = node.arguments[0];
-    return arg && ts.isStringLiteralLike(arg) ? arg.text : null;
-  }
-  function visit(node) {
-    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)
-      && node.importClause && node.importClause.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
-      for (const spec of node.importClause.namedBindings.elements) {
-        bindings.set(spec.name.text, node.moduleSpecifier.text);
+/** The raw `import("<spec>")` CallExpression's own string-literal spec, or null. Shared by the static
+ *  and dynamic binding collectors below. */
+function importCallSpec(node) {
+  if (!node || !ts.isCallExpression(node) || node.expression.kind !== ts.SyntaxKind.ImportKeyword) return null;
+  const arg = node.arguments[0];
+  return arg && ts.isStringLiteralLike(arg) ? arg.text : null;
+}
+
+/** Every import binding DECLARED DIRECTLY inside `scope`'s own statement list (never a deeper-nested
+ *  one — that is a DIFFERENT scope, resolved separately by the caller) — covering a static named import
+ *  (`import { X [as Y] } from "spec"`), a static namespace import (`import * as T from "spec"`), and the
+ *  dynamic destructure/namespace shape every hermetic test in this corpus actually uses (`const { X [:
+ *  Y] } = await import("spec")` / `const T = await import("spec")`, awaited or not). Each entry is
+ *  `{name, realName, spec, pos}` — `name` is the LOCAL binding identifier actually referenced at a call
+ *  site; `realName` is the ORIGINAL exported name (`propertyName ?? name` for a named/destructured
+ *  binding — equal to `name` when there's no alias; `null` for a whole-module namespace binding, which
+ *  has no single "real name" of its own); `pos` is the declaring STATEMENT's own start offset, used by
+ *  the caller to pick the nearest PRECEDING declaration within this same scope (card ad3e193c triage
+ *  item iv — never a single whole-file last-seen-wins map, which can misattribute a call to a binding
+ *  that is lexically out of scope for it, or that is declared AFTER it). */
+function directBindingDeclsInScope(scope) {
+  const decls = [];
+  for (const stmt of scope.statements) {
+    if (ts.isImportDeclaration(stmt) && ts.isStringLiteralLike(stmt.moduleSpecifier) && stmt.importClause) {
+      const nb = stmt.importClause.namedBindings;
+      if (nb && ts.isNamedImports(nb)) {
+        for (const el of nb.elements) {
+          decls.push({ name: el.name.text, realName: (el.propertyName ?? el.name).text, spec: stmt.moduleSpecifier.text, pos: stmt.getStart() });
+        }
+      } else if (nb && ts.isNamespaceImport(nb)) {
+        decls.push({ name: nb.name.text, realName: null, spec: stmt.moduleSpecifier.text, pos: stmt.getStart() });
       }
     }
-    if (ts.isVariableDeclaration(node) && node.name && ts.isObjectBindingPattern(node.name) && node.initializer) {
-      const init = ts.isAwaitExpression(node.initializer) ? node.initializer.expression : node.initializer;
-      const spec = importCallSpec(init);
-      if (spec) {
-        for (const el of node.name.elements) {
-          if (ts.isIdentifier(el.name)) bindings.set(el.name.text, spec);
+    if (ts.isVariableStatement(stmt)) {
+      for (const declNode of stmt.declarationList.declarations) {
+        if (!declNode.initializer) continue;
+        const init = ts.isAwaitExpression(declNode.initializer) ? declNode.initializer.expression : declNode.initializer;
+        const spec = importCallSpec(init);
+        if (!spec) continue;
+        if (ts.isObjectBindingPattern(declNode.name)) {
+          for (const el of declNode.name.elements) {
+            if (ts.isIdentifier(el.name)) decls.push({ name: el.name.text, realName: (el.propertyName ?? el.name).text, spec, pos: stmt.getStart() });
+          }
+        } else if (ts.isIdentifier(declNode.name)) {
+          decls.push({ name: declNode.name.text, realName: null, spec, pos: stmt.getStart() });
         }
       }
     }
-    ts.forEachChild(node, visit);
   }
-  visit(sf);
-  return bindings;
+  return decls;
 }
 
-/** Every transcript-fn call-site hit in `sf`, as `{name, line}` — excluding a binding sourced from
- *  codex-transcript.js, and excluding a call whose third argument is the literal `"codex"` (see the
- *  header's "WHAT COUNTS AS A HIT" for why both are never a real-homedir reach). */
+/** The nearest enclosing lexical-scope boundary (a Block or the SourceFile itself) strictly ABOVE
+ *  `node` — i.e. starts the walk from `node.parent`, never `node` itself. */
+function findEnclosingScope(node) {
+  let cur = node.parent;
+  while (cur) {
+    if (ts.isSourceFile(cur) || ts.isBlock(cur)) return cur;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+/** Resolve the binding `localName` refers to AT `fromNode` — walks outward through `fromNode`'s own
+ *  enclosing-scope chain (innermost Block first, then each Block/SourceFile above it), and within each
+ *  scope picks the declaration with the LARGEST `pos` that still precedes `fromNode`'s own start (the
+ *  closest PRECEDING declaration actually in scope there) — never a single global last-seen-wins map.
+ *  Returns the matching decl `{name, realName, spec, pos}`, or `null` if no in-scope, preceding
+ *  declaration of that name exists anywhere up the chain. */
+function resolveBinding(fromNode, localName) {
+  const fromPos = fromNode.getStart();
+  let node = fromNode;
+  while (true) {
+    const scope = findEnclosingScope(node);
+    if (!scope) return null;
+    const decls = directBindingDeclsInScope(scope).filter((d) => d.name === localName && d.pos < fromPos);
+    if (decls.length) {
+      decls.sort((a, b) => b.pos - a.pos);
+      return decls[0];
+    }
+    node = scope;
+    if (ts.isSourceFile(scope)) return null; // already at the top — nowhere further to climb
+  }
+}
+
+/** Every transcript-fn call-site hit in `sf`, as `{name, line}` — covers a bare-identifier call
+ *  (`engineTranscriptPath(...)`, including an ALIASED destructure like `{ engineTranscriptPath: etp }`
+ *  then `etp(...)` — card ad3e193c triage item i) and a NAMESPACE call (`t.engineTranscriptPath(...)`
+ *  off a whole-module binding — triage item ii). Excludes a binding scope-resolved to
+ *  codex-transcript.js, and a call whose third argument is the literal `"codex"` (see the header's
+ *  "WHAT COUNTS AS A HIT" for why both are never a real-homedir reach). When a bare identifier's own
+ *  name literally matches a TRANSCRIPT_FN_NAME but no import binding resolves at all (e.g. a same-named
+ *  local helper with no traceable import), it still counts as a hit — fails CLOSED, never silently
+ *  excluded just because resolution came up empty. */
 function findTranscriptFnHits(sf) {
-  const bindings = findImportBindingSources(sf);
   const hits = [];
   function visit(node) {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && TRANSCRIPT_FN_NAMES.has(node.expression.text)) {
-      const source = bindings.get(node.expression.text);
-      const isCodexBound = typeof source === "string" && source.includes("codex-transcript");
-      const thirdArg = node.arguments[2];
-      const isCodexCall = thirdArg && ts.isStringLiteralLike(thirdArg) && thirdArg.text === "codex";
-      if (!isCodexBound && !isCodexCall) hits.push({ name: node.expression.text, line: lineOf(sf, node) });
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      let matchedName = null;
+      let source; // resolved module spec used for the codex exclusion, or undefined if unresolved
+      if (ts.isIdentifier(callee)) {
+        const decl = resolveBinding(callee, callee.text);
+        if (decl && TRANSCRIPT_FN_NAMES.has(decl.realName)) {
+          matchedName = decl.realName;
+          source = decl.spec;
+        } else if (!decl && TRANSCRIPT_FN_NAMES.has(callee.text)) {
+          matchedName = callee.text; // unresolved — fail closed, source stays undefined (never codex-excluded)
+        }
+      } else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)
+        && TRANSCRIPT_FN_NAMES.has(callee.name.text)) {
+        matchedName = callee.name.text;
+        source = resolveBinding(callee.expression, callee.expression.text)?.spec;
+      }
+      if (matchedName) {
+        const isCodexBound = typeof source === "string" && source.includes("codex-transcript");
+        const thirdArg = node.arguments[2];
+        const isCodexCall = thirdArg && ts.isStringLiteralLike(thirdArg) && thirdArg.text === "codex";
+        if (!isCodexBound && !isCodexCall) hits.push({ name: matchedName, line: lineOf(sf, node) });
+      }
     }
     ts.forEachChild(node, visit);
   }
@@ -195,6 +269,23 @@ function findDynamicDistImports(sf) {
   return hits;
 }
 
+const FUNCTION_LIKE_KINDS = new Set([
+  ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.FunctionExpression, ts.SyntaxKind.ArrowFunction,
+  ts.SyntaxKind.MethodDeclaration, ts.SyntaxKind.Constructor, ts.SyntaxKind.GetAccessor, ts.SyntaxKind.SetAccessor,
+]);
+/** True if `node` sits inside any function/method/accessor body. Used to require a HOME/USERPROFILE/
+ *  CLAUDE_CONFIG_DIR override to be a genuinely TOP-LEVEL, unconditionally-executed statement — this
+ *  guard compares source line ORDER, not execution, so an override sitting inside a function this guard
+ *  has no way to prove is ever actually CALLED must never count (card ad3e193c triage item iii). */
+function isInsideFunctionLike(node) {
+  let cur = node.parent;
+  while (cur) {
+    if (FUNCTION_LIKE_KINDS.has(cur.kind)) return true;
+    cur = cur.parent;
+  }
+  return false;
+}
+
 /** Is `node` the AST shape `process.env.HOME` / `process.env.USERPROFILE`? Returns "HOME"/"USERPROFILE"/null. */
 function processEnvHomeTarget(node) {
   if (!ts.isPropertyAccessExpression(node)) return null;
@@ -207,10 +298,11 @@ function processEnvHomeTarget(node) {
   return null;
 }
 
-/** Every `process.env.HOME = <non-empty>` / `process.env.USERPROFILE = <non-empty>` assignment in `sf`,
- *  as `{ target: "HOME"|"USERPROFILE", line }` — real `=` syntax only, never `==`/`===`, and never an
- *  empty-string RHS (which would be a no-op override, same reasoning as the real-engine guard's own
- *  LOOM_CLAUDE_BIN check). */
+/** Every TOP-LEVEL `process.env.HOME = <non-empty>` / `process.env.USERPROFILE = <non-empty>`
+ *  assignment in `sf`, as `{ target: "HOME"|"USERPROFILE", line }` — real `=` syntax only, never
+ *  `==`/`===`, never an empty-string RHS (a no-op override, same reasoning as the real-engine guard's
+ *  own LOOM_CLAUDE_BIN check), and never one sitting inside a function body (triage item iii — see
+ *  `isInsideFunctionLike`'s own doc). */
 function findHomeOverrideAssignments(sf) {
   const hits = [];
   function visit(node) {
@@ -219,7 +311,7 @@ function findHomeOverrideAssignments(sf) {
       if (target) {
         const rhs = node.right;
         const rhsIsEmptyString = ts.isStringLiteralLike(rhs) && rhs.text === "";
-        if (!rhsIsEmptyString) hits.push({ target, line: lineOf(sf, node) });
+        if (!rhsIsEmptyString && !isInsideFunctionLike(node)) hits.push({ target, line: lineOf(sf, node) });
       }
     }
     ts.forEachChild(node, visit);
@@ -236,19 +328,20 @@ function isProcessEnvConfigDir(node) {
     && ts.isIdentifier(inner.expression) && inner.expression.text === "process";
 }
 
-/** Every line in `sf` that either DELETES `process.env.CLAUDE_CONFIG_DIR` or ASSIGNS it a non-empty
- *  value (real `delete`/`=` syntax only).
+/** Every TOP-LEVEL line in `sf` that either DELETES `process.env.CLAUDE_CONFIG_DIR` or ASSIGNS it a
+ *  non-empty value (real `delete`/`=` syntax only) — never one sitting inside a function body (triage
+ *  item iii, same reasoning as `findHomeOverrideAssignments`).
  *  @decision a92a0913 — HOME/USERPROFILE alone isn't enough; claudeConfigHome() reads this var first. */
 function findConfigDirHandling(sf) {
   const hits = [];
   function visit(node) {
-    if (ts.isDeleteExpression(node) && isProcessEnvConfigDir(node.expression)) {
+    if (ts.isDeleteExpression(node) && isProcessEnvConfigDir(node.expression) && !isInsideFunctionLike(node)) {
       hits.push({ line: lineOf(sf, node) });
     }
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && isProcessEnvConfigDir(node.left)) {
       const rhs = node.right;
       const rhsIsEmptyString = ts.isStringLiteralLike(rhs) && rhs.text === "";
-      if (!rhsIsEmptyString) hits.push({ line: lineOf(sf, node) });
+      if (!rhsIsEmptyString && !isInsideFunctionLike(node)) hits.push({ line: lineOf(sf, node) });
     }
     ts.forEachChild(node, visit);
   }
@@ -286,13 +379,60 @@ function importsSharedFixtureHelper(sf) {
   return found;
 }
 
+/** Cheap substring prefilter: none of the four TRANSCRIPT_FN_NAMES appears ANYWHERE in `text` (as plain
+ *  text, before any parse) means there is no possible way a call to one of them — aliased, namespaced,
+ *  or bare — could exist in this file, since even an ALIASED destructure (`{ engineTranscriptPath: etp
+ *  }`) still carries the real name as literal text in its own import clause. Skips `parseSource` + the
+ *  AST walk entirely for a file that can't possibly hit (perf: triage item, ~96% of this corpus). */
+function mentionsAnyTranscriptFnName(text) {
+  for (const name of TRANSCRIPT_FN_NAMES) if (text.includes(name)) return true;
+  return false;
+}
+
+/** Every static `import ... from "<spec>"` in `sf` whose spec is a LOCAL relative helper (starts with
+ *  "./" or "../", excluding "../dist/..." itself — findStaticDistImports already covers that directly —
+ *  and excluding `_transcript-fixture.mjs`, marker A's own helper, already handled by
+ *  `importsSharedFixtureHelper`) that ITSELF, read from disk relative to `baseDir`, carries a static
+ *  import of something under "dist/" — a ONE-LEVEL-DEEP transitive hoisted dist import reached via a
+ *  local wrapper/re-export helper (card ad3e193c triage item v). A HOISTED static import inside that
+ *  helper still runs at the helper's own module-load time, before anything in THIS file's body — HOME/
+ *  USERPROFILE/CLAUDE_CONFIG_DIR sandboxed correctly and ordered correctly in THIS file is still too
+ *  late. Returns `{spec, line, transitiveSpec}` for the first offending helper found, or `null`. An
+ *  unreadable/unresolvable helper path is silently skipped — this check's job is to catch a transitive
+ *  hazard it CAN see, never to validate every relative import path resolves. */
+function findTransitiveStaticDistImport(sf, baseDir) {
+  const localHelperImports = [];
+  function visit(node) {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      const spec = node.moduleSpecifier.text;
+      const isLocalHelper = (spec.startsWith("./") || spec.startsWith("../")) && !spec.includes("dist/")
+        && !spec.endsWith("_transcript-fixture.mjs");
+      if (isLocalHelper) localHelperImports.push({ spec, line: lineOf(sf, node) });
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sf);
+  for (const helperImport of localHelperImports) {
+    let helperText;
+    try { helperText = fs.readFileSync(path.join(baseDir, helperImport.spec), "utf8"); } catch { continue; }
+    const helperStaticDist = findStaticDistImports(parseSource(helperText));
+    if (helperStaticDist.length > 0) {
+      return { spec: helperImport.spec, line: helperImport.line, transitiveSpec: helperStaticDist[0].spec };
+    }
+  }
+  return null;
+}
+
 /** Classifies one file's text: `{ hasHit, isSafe, code, reason }`. `reason` is a short diagnostic
  *  string, always set (even when safe), so a violation report can explain itself without re-deriving it.
  *  `code` is a STABLE, machine-checkable discriminant for WHY a hit is unsafe (or how it's safe) — see
  *  "Card a92a0913 round 3" below for why this exists: `reason` alone is free text, too loose to gate an
  *  allowlist exemption on "is this UNSAFE FOR THE SPECIFIC REASON THE ALLOWLIST ENTRY WAS WRITTEN FOR",
  *  as opposed to "is this unsafe for ANY reason at all". */
-function classify(text) {
+function classify(text, baseDir = TEST_DIR) {
+  if (!mentionsAnyTranscriptFnName(text)) {
+    return { hasHit: false, isSafe: true, code: "no-hit", reason: "no transcript-fn name present as text (prefilter)" };
+  }
   const sf = parseSource(text);
   const fnHits = findTranscriptFnHits(sf);
   if (fnHits.length === 0) return { hasHit: false, isSafe: true, code: "no-hit", reason: "no transcript-fn call" };
@@ -307,6 +447,16 @@ function classify(text) {
       hasHit: true, isSafe: false, code: "static-import",
       reason: `static import of ${JSON.stringify(staticDist[0].spec)} at line ${staticDist[0].line} — ` +
         `hoisted, so no override in this file can ever precede it; convert to a dynamic await import() after the sandbox`,
+    };
+  }
+
+  const transitive = findTransitiveStaticDistImport(sf, baseDir);
+  if (transitive) {
+    return {
+      hasHit: true, isSafe: false, code: "transitive-static-import",
+      reason: `static import of local helper ${JSON.stringify(transitive.spec)} at line ${transitive.line} itself ` +
+        `statically imports ${JSON.stringify(transitive.transitiveSpec)} — hoisted transitively, so no override in ` +
+        `this file can ever precede it`,
     };
   }
 
@@ -456,6 +606,124 @@ check(
   findConfigDirHandling(parseSource('delete process.env.HOME;')).length === 0,
 );
 
+// --- Card ad3e193c triage: the five fail-open shapes closed this round, each RED-first ---
+
+check(
+  "RED PROOF (i): an ALIASED destructure call (`{ engineTranscriptPath: etp }` then `etp(...)`) IS still detected as a hit",
+  findTranscriptFnHits(parseSource(
+    'const { engineTranscriptPath: etp } = await import("../dist/sessions/transcript.js");\netp(cwd, id);',
+  )).length === 1,
+);
+check(
+  "sanity (i): the SAME aliased shape, bound from codex-transcript.js, is still excluded (codex-scoped, not this guard's hazard)",
+  findTranscriptFnHits(parseSource(
+    'const { resolveTranscriptFile: rtf } = await import("../dist/pty/codex-transcript.js");\nrtf(cwd, id);',
+  )).length === 0,
+);
+check(
+  "RED PROOF (ii): a NAMESPACE call (`const t = await import(...); t.engineTranscriptPath(...)`) IS detected as a hit",
+  findTranscriptFnHits(parseSource(
+    'const t = await import("../dist/sessions/transcript.js");\nt.engineTranscriptPath(cwd, id);',
+  )).length === 1,
+);
+check(
+  "sanity (ii): the SAME namespace shape, bound from codex-transcript.js, is still excluded",
+  findTranscriptFnHits(parseSource(
+    'const t = await import("../dist/pty/codex-transcript.js");\nt.resolveTranscriptFile(cwd, id);',
+  )).length === 0,
+);
+check(
+  "ITEM (iii): a HOME override sitting inside a function body is NOT a top-level override (never-called-function fail-open)",
+  findHomeOverrideAssignments(parseSource('function neverCalled() { process.env.HOME = x; }')).length === 0,
+);
+check(
+  "ITEM (iii): the SAME shape inside an ARROW function body is also NOT a top-level override",
+  findHomeOverrideAssignments(parseSource('const neverCalled = () => { process.env.HOME = x; };')).length === 0,
+);
+check(
+  "ITEM (iii): a CLAUDE_CONFIG_DIR delete sitting inside a function body is NOT a top-level handling either",
+  findConfigDirHandling(parseSource('function neverCalled() { delete process.env.CLAUDE_CONFIG_DIR; }')).length === 0,
+);
+check(
+  "sanity (iii): a genuinely TOP-LEVEL override (not inside any function) IS still detected",
+  findHomeOverrideAssignments(parseSource('process.env.HOME = x;')).length === 1,
+);
+check(
+  "RED PROOF (iii): a full fixture whose HOME/USERPROFILE override sits inside a NEVER-CALLED function is still flagged unsafe end to end",
+  classify(
+    'function neverCalled() {\n  process.env.HOME = sandboxHome;\n  process.env.USERPROFILE = sandboxHome;\n}\n' +
+    'const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");\nengineTranscriptPath(cwd, id);',
+  ).isSafe === false,
+);
+{
+  // (iv) a LATER, BLOCK-SCOPED codex-bound re-declaration of the SAME local name must not retroactively
+  // un-flag an EARLIER, module-scope claude-bound call — the old whole-file last-seen-wins map conflated
+  // both call sites onto whichever declaration of "engineTranscriptPath" was visited LAST in the tree
+  // walk (the block's own, later in source), silently excluding the real, module-scope claude hit too.
+  const SHADOW_FIXTURE =
+    'const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");\n' +
+    'engineTranscriptPath(cwd, claudeId);\n' + // real, module-scope claude hit — must still fire
+    '{\n' +
+    '  const { engineTranscriptPath } = await import("../dist/pty/codex-transcript.js");\n' +
+    '  engineTranscriptPath(cwd, codexId);\n' + // block-scoped codex binding — correctly excluded
+    '}\n';
+  const shadowHits = findTranscriptFnHits(parseSource(SHADOW_FIXTURE));
+  check(
+    "RED PROOF (iv): a later block-scoped codex re-declaration of the SAME name does not retroactively un-flag the earlier module-scope claude call",
+    shadowHits.length === 1,
+  );
+  check("sanity (iv): the one surviving hit is the FIRST (module-scope, claude) call, not the block-scoped one",
+    shadowHits[0]?.line === 2);
+}
+{
+  // (v) a static import of a LOCAL HELPER that itself statically imports dist is a hoisted transitive
+  // hazard this file's own correctly-placed, correctly-ordered sandbox can never precede.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "trsg-transitive-"));
+  try {
+    fs.writeFileSync(
+      path.join(tmpDir, "_wraps-dist.mjs"),
+      'import { engineTranscriptPath } from "../dist/sessions/transcript.js";\n' +
+        'export function wrapped(cwd, id) { return engineTranscriptPath(cwd, id); }\n',
+    );
+    fs.writeFileSync(path.join(tmpDir, "_no-dist.mjs"), 'export function helperFn() { return 1; }\n');
+
+    const UNSAFE_TRANSITIVE =
+      'import { wrapped } from "./_wraps-dist.mjs";\n' + // this helper's OWN static dist import already ran
+      'process.env.HOME = sandboxHome;\nprocess.env.USERPROFILE = sandboxHome;\ndelete process.env.CLAUDE_CONFIG_DIR;\n' +
+      'const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");\n' +
+      'engineTranscriptPath(cwd, id);\nwrapped(cwd, id);';
+    check(
+      "RED PROOF (v): a static import of a local helper that itself statically imports dist IS flagged unsafe, even though THIS file's own direct dynamic import is correctly sandboxed",
+      classify(UNSAFE_TRANSITIVE, tmpDir).isSafe === false,
+    );
+    check("sanity (v): the REAL classify() codes it as transitive-static-import specifically",
+      classify(UNSAFE_TRANSITIVE, tmpDir).code === "transitive-static-import");
+
+    const SAFE_NONTRANSITIVE =
+      'import { helperFn } from "./_no-dist.mjs";\n' +
+      'process.env.HOME = sandboxHome;\nprocess.env.USERPROFILE = sandboxHome;\ndelete process.env.CLAUDE_CONFIG_DIR;\n' +
+      'const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");\nengineTranscriptPath(cwd, id);';
+    check(
+      "GREEN (v): a static import of a local helper that does NOT itself import dist is not flagged by the transitive check",
+      classify(SAFE_NONTRANSITIVE, tmpDir).isSafe === true,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+check(
+  "sanity (v): a static import of ./_transcript-fixture.mjs ITSELF is excluded from the transitive check (it's marker A's own helper — that static dist import is a KNOWN, already-handled hazard, not a NEW one)",
+  findTransitiveStaticDistImport(parseSource('import { withEngineTranscriptFixture } from "./_transcript-fixture.mjs";'), TEST_DIR) === null,
+);
+check(
+  "sanity: the text.includes() prefilter correctly finds NO hit for a file mentioning none of the four names",
+  classify('console.log("nothing transcript-shaped here");').hasHit === false,
+);
+check(
+  "sanity: the prefilter does not FALSE-NEGATIVE a real hit (still parses + detects when the name IS present)",
+  classify('const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");\nengineTranscriptPath(cwd, id);').hasHit === true,
+);
+
 // --- RED PROOF (must be able to fail) before trusting a real-corpus zero ---
 
 {
@@ -518,10 +786,11 @@ check(
   const mutatedSource = classifySource.replace(CONFIGDIR_BRANCH_CONDITION, "if (false) {");
   check("sanity: the mutation actually changed classify()'s source text", mutatedSource !== classifySource);
   const classifyMutant = new Function(
-    "parseSource", "findTranscriptFnHits", "importsSharedFixtureHelper", "findStaticDistImports",
-    "findDynamicDistImports", "findHomeOverrideAssignments", "findConfigDirHandling",
+    "TEST_DIR", "mentionsAnyTranscriptFnName", "parseSource", "findTranscriptFnHits", "importsSharedFixtureHelper",
+    "findStaticDistImports", "findTransitiveStaticDistImport", "findDynamicDistImports",
+    "findHomeOverrideAssignments", "findConfigDirHandling",
     `return (${mutatedSource});`,
-  )(parseSource, findTranscriptFnHits, importsSharedFixtureHelper, findStaticDistImports, findDynamicDistImports, findHomeOverrideAssignments, findConfigDirHandling);
+  )(TEST_DIR, mentionsAnyTranscriptFnName, parseSource, findTranscriptFnHits, importsSharedFixtureHelper, findStaticDistImports, findTransitiveStaticDistImport, findDynamicDistImports, findHomeOverrideAssignments, findConfigDirHandling);
 
   const mutantResult = classifyMutant(UNSAFE_NO_CONFIGDIR_HANDLING);
   check("RED PROOF: the mutant (configdir-missing branch disabled) no longer codes the bad fixture as configdir-missing — proves the mutation actually took",

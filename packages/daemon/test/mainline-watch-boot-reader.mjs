@@ -25,6 +25,16 @@ import { registerForCleanup, useOwnLoomHome } from "./_tmp-fixture.mjs";
 process.env.LOOM_CODEX_BIN = path.join(os.tmpdir(), "loom-no-such-codex-bin");
 useOwnLoomHome("loom-mw-rd-home-");
 
+// @decision 668bc52c — sandbox HOME/USERPROFILE before importing dist; never write engineTranscriptPath's
+// fixture under the real os.homedir(). Registered via registerForCleanup (this file's cleanup idiom).
+const sandboxHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-mw-rd-sbhome-"));
+registerForCleanup(sandboxHome);
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
+
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");

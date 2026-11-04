@@ -28,6 +28,16 @@ const tmpHome = path.join(os.tmpdir(), `loom-asst-${Date.now()}-${process.pid}`)
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
+// @decision 668bc52c — sandbox HOME/USERPROFILE to a managed temp dir BEFORE importing dist; this test
+// resolves an engineTranscriptPath() fixture below, which must never land under the real os.homedir().
+const sandboxHome = path.join(os.tmpdir(), `loom-asst-home-${Date.now()}-${process.pid}`);
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+// @decision a92a0913 — also delete an ambient CLAUDE_CONFIG_DIR: claudeConfigHome() reads it ahead of
+// os.homedir(), so an inherited value would bypass the HOME/USERPROFILE override above entirely.
+delete process.env.CLAUDE_CONFIG_DIR;
+
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildSpawnArgs, buildMcpServers, disallowedToolsForRole, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -263,6 +273,7 @@ try {
   try { if (typeof transcriptDir === "string") fs.rmSync(transcriptDir, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
