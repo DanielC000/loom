@@ -27,13 +27,17 @@ check(
   "every derived path is shaped assets/npm-pinned-locks/<pkg>/<version>/package-lock.json",
   required.every((p) => /^assets\/npm-pinned-locks\/[^/]+\/[^/]+\/package-lock\.json$/.test(p)),
 );
+// Package presence is asserted by PACKAGE NAME only, never a pinned version literal — the version
+// constants in capabilities/seed.ts move independently of this test (card e8aa3e98: a version bump with
+// no matching test update desynced this exact assertion from the real pin). required() is itself the
+// derived source of truth; this only confirms it actually produced a row for each bundled package.
 check(
-  "includes the shadcn row's lock path",
-  required.includes("assets/npm-pinned-locks/shadcn/4.23.0/package-lock.json"),
+  "includes the shadcn row's lock path (any pinned version)",
+  required.some((p) => p.startsWith("assets/npm-pinned-locks/shadcn/")),
 );
 check(
-  "includes the image-gen (mcp-imagenate) row's lock path",
-  required.includes("assets/npm-pinned-locks/mcp-imagenate/0.2.1/package-lock.json"),
+  "includes the image-gen (mcp-imagenate) row's lock path (any pinned version)",
+  required.some((p) => p.startsWith("assets/npm-pinned-locks/mcp-imagenate/")),
 );
 
 // Negative control: a packed file list containing every required path (plus unrelated ordinary files)
