@@ -9452,11 +9452,14 @@ export async function resolveWorkerBranchInfo(
 
 /** @decision e8d4fdc3 round 4 — a PRESENT branch defers to the tip-keyed {@link
  *  tryWorkerTipLedgerFallback}, never the branch-only lookup below, which alone can't tell "still landed"
- *  apart from "re-cut, live again" (see that record's "Round 4" section). */
+ *  apart from "re-cut, live again" (see that record's "Round 4" section).
+ *  @decision b5f01208 — `hasAnyForBranch` is consulted FIRST, before any git call, same as {@link
+ *  tryWorkerTipLedgerFallback} already does for its own tip-keyed call — see that record for why. */
 async function tryWorkerTipLedgerBranchFallback(
   repoPath: string, branch: string, base: string, deps: BoundedGitDeps,
 ): Promise<MergedCommitInfo | null> {
   if (!deps.workerTipLedger) return null;
+  if (!deps.workerTipLedger.hasAnyForBranch(branch)) return null;
   try {
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const branchPresent = (await withTimeout(
