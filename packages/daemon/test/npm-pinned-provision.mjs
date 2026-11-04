@@ -27,6 +27,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (8) the ATOMIC install: a fake "succeeded but wrote no bin" child never leaves a partial tree visible
 //       at the final path; a stale `<version>.tmp-*` dir from a crashed attempt is never mistaken for
 //       ready; a concurrent resolve while genuinely in-flight returns null under the atomic flow too.
+//   (9) a WARM npm-pinned row driven through the REAL buildMcpServers (not resolveCapabilityServer
+//       directly): it comes out wrapped exactly once by the env-isolating launcher (card fafae623), with
+//       realArgs = [<resolved bin path>] — no extra wrap layer, no stray args.
 //
 // Run: 1) build, 2) node test/npm-pinned-provision.mjs
 import fs from "node:fs";
@@ -46,6 +49,7 @@ const {
 } = await import("../dist/capabilities/registry.js");
 const { buildMcpServers } = await import("../dist/pty/host.js");
 const { loomNpmPinnedBin, loomNpmPinnedDir, ensureNpmPinnedAsync, __setSpawnForTest, __setKillTreeForTest, sweepStaleTmpInstallDirs } = await import("../dist/capabilities/npm-pinned.js");
+const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 
 const PKG = "mcp-imagenate";
 const VERSION = "0.2.1";
@@ -98,6 +102,19 @@ const warmServer = resolveCapabilityServer(npmRow, {});
 check("(5) mount shape: command is process.execPath", warmServer?.command === process.execPath);
 check("(5) mount shape: args is [<resolved bin path>]", JSON.stringify(warmServer?.args) === JSON.stringify([READY_BIN]));
 check("(5) mount shape: no hardcoded --output-dir flag", !warmServer?.args?.includes("--output-dir"));
+
+// ===================== (9) card 48bdb8ad: a WARM npm-pinned row through the REAL buildMcpServers =====================
+// (5) above calls resolveCapabilityServer directly, bypassing buildMcpServers' own env-isolation wrap
+// (card fafae623). Drive the SAME now-warm row through the real buildMcpServers chokepoint and assert
+// it comes out wrapped exactly ONCE — command is the launcher (process.execPath + the launcher script),
+// never double-wrapped, and the REAL target's own args are exactly [bin] (image-gen has no provision.args,
+// unlike shadcn — see shadcn-capability.mjs for that sibling case).
+const warmMounted = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", capabilities: [{ slug: "image-gen" }], capabilityCatalog: [npmRow] });
+const warmUnwrapped = unwrapLauncherMount(warmMounted["image-gen"]);
+check("(9) a warm npm-pinned row mounts wrapped by the launcher (command is process.execPath)", warmMounted["image-gen"]?.command === process.execPath);
+check("(9) unwrapLauncherMount recognizes it as wrapped exactly once (not null, not double-wrapped)", warmUnwrapped !== null);
+check("(9) the real target's command is the resolved npm-pinned bin's own node runtime", warmUnwrapped?.realCommand === process.execPath);
+check("(9) realArgs is exactly [<resolved bin path>] — no extra wrap layer, no stray args", JSON.stringify(warmUnwrapped?.realArgs) === JSON.stringify([READY_BIN]));
 
 // ===================== (4) classified outcomes (each on its OWN slug, so prior 'ready' state never leaks) =====================
 // Card e7d6e43b, Code Review follow-up: version must be a REAL exact semver (never the slug string
@@ -421,6 +438,6 @@ function rowFor(slug) {
 try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort — the harness registry also sweeps this */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — npm-pinned capability provisioning: the spawn hot path is fs.existsSync-fast when cold, the mounted map stays byte-identical to an ungranted spawn while cold, concurrent resolves dedupe to one in-flight job, a terminal failure is retryable, every classified outcome (invalid-spec/install-failed/timeout/disabled) maps onto the status model with reason+errorTail, and the warm mount shape is {command: process.execPath, args:[bin]} with no hardcoded --output-dir flag."
+  ? "\n✅ ALL PASS — npm-pinned capability provisioning: the spawn hot path is fs.existsSync-fast when cold, the mounted map stays byte-identical to an ungranted spawn while cold, concurrent resolves dedupe to one in-flight job, a terminal failure is retryable, every classified outcome (invalid-spec/install-failed/timeout/disabled) maps onto the status model with reason+errorTail, the warm mount shape is {command: process.execPath, args:[bin]} with no hardcoded --output-dir flag, and a warm row driven through the REAL buildMcpServers comes out wrapped exactly once by the env-isolating launcher with realArgs=[bin]."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -108,8 +108,9 @@ path — same trust posture as the existing create/delete routes); no Settings-U
 - **The algorithm that survived every measured case (`escapeWindowsCmdArgument`)**: wrap the whole
   argument in ONE literal, NEVER-escaped pair of quotes; represent an embedded literal quote by DOUBLING
   it (`""` — cmd's own in-quote escape convention); double a run of backslashes immediately before the
-  argument's own end (the standard `CommandLineToArgvW` convention, so the literal closing quote this
-  function appends is never swallowed by the downstream program's own argv parser); wrap the WHOLE joined
+  argument's own end (the probe target here is node itself, whose argv parsing follows the MSVCRT/UCRT
+  backslash-doubling convention, so the literal closing quote this function appends is never swallowed
+  by node's own argv parser); wrap the WHOLE joined
   `command + args` line in one MORE literal quote pair (`buildWindowsCmdInvocation`, mirroring Node's own
   `shell:true` wrapping — required so cmd's `/S`-mode "strip exactly the first char if a quote, and the
   last quote anywhere in the line" rule has only that one outermost pair to strip, leaving every quote
@@ -121,9 +122,10 @@ path — same trust posture as the existing create/delete routes); no Settings-U
   (every reviewer-measured string, plus trailing-backslash/double-backslash/space-in-path/caret edge
   cases) RED-before-GREEN against each fix attempt.
 - **Code Review round 2 (reviewer `7b1b9aa0`), BLOCKER: a backslash run immediately before an embedded
-  quote was previously left untouched while only the quote itself got doubled** — on the downstream
-  `CommandLineToArgvW` convention, this SPLIT the target's argv instead of surviving as one argument
-  (measured: `a\" b` arrived at the target as two separate args, `["a\"","b"]`, not one). **Fixed**:
+  quote was previously left untouched while only the quote itself got doubled** — under the probe
+  target's (node's) own MSVCRT/UCRT argv-parsing convention, this SPLIT the target's argv instead of
+  surviving as one argument (measured: `a\" b` arrived at the target as two separate args,
+  `["a\"","b"]`, not one). **Fixed**:
   `escapeWindowsCmdArgument` now doubles any backslash run that immediately precedes a quote, THEN
   doubles the quote itself (`s.replace(/(\\*)"/g,(m,b)=>b+b+'""')`), on top of the pre-existing
   trailing-backslash-at-end-of-string rule — measured 8/8 byte-intact through a real cmd.exe spawn, 0
@@ -149,10 +151,15 @@ path — same trust posture as the existing create/delete routes); no Settings-U
   descendant of a `cmd.exe`-spawned tree break away from the job rather than genuinely sharing one
   console with the launcher the way a DIRECT target does — this is an inference from the asymmetric
   measurement (direct dies, path-B survives), not something independently confirmed against libuv's own
-  internals. Path B (which includes the npx/github-binary seed path) relies on the MCP server itself
-  exiting on stdin EOF as its real termination mechanism, not on the launcher's own death cascading to
-  it. **No containment fix is attempted in this card** — tracked as a disclosed residual for a future
-  card, not this one.
+  internals. Path B (and its orphan-on-launcher-kill residual) is reachable ONLY by an owner-typed
+  bundled/command row that resolves to a non-cmd-shim `.cmd`/`.bat` (e.g. a bare `"npx"` ⇒ `npx.cmd`) —
+  **no seed reaches it today**: github resolves to a direct `.exe` (`kind:"github-binary"`,
+  `resolveGithubBinary`/`loomGithubMcpBin`, `registry.ts`'s `"github-binary"` branch), and image-gen
+  resolves to `node <absolute .js>` directly (`kind:"npm-pinned"`, `resolveNpmPinned`, `registry.ts`'s
+  `"npm-pinned"` branch) — neither goes through `cmd.exe`. Relies on the MCP server itself exiting on
+  stdin EOF as its real termination mechanism, not on the launcher's own death cascading to it. **No
+  containment fix is attempted in this card** — tracked as a disclosed residual for a future card, not
+  this one.
 
 ## Proxy credentials (card `188d6a8c`)
 

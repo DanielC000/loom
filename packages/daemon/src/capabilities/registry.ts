@@ -615,7 +615,7 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
     if (bin) server = { command: bin, args: [] };
   } else if (provision.kind === "bundled" || provision.kind === "command") {
     // bundled: a Loom-curated recipe — `command` may be an ALREADY-ABSOLUTE path, or a BARE PATH-searched
-    // name (e.g. "npx", the github capability seed) that must self-heal like the hardcoded builtins
+    // name (e.g. an owner-typed "npx" row — no seed reaches this branch today; see seed.ts) that must self-heal like the hardcoded builtins
     // (Playwright/markitdown) already do, each re-resolving live at every spawn. CODE-REVIEW FIX: a
     // bare command must NOT be resolved once and frozen (a stripped-PATH boot would never mount it again
     // even after the real binary becomes installed; a moved fnm/nvm/volta shim would 404 silently forever;

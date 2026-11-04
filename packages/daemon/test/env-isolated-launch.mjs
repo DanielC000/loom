@@ -15,6 +15,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       script on POSIX) — the shape every REAL stdio mount (Playwright/markitdown/image-gen/github) uses
 //       today; a real npx (if present on this host's PATH) runs `--version` through the launcher as a
 //       best-effort "does real-world npm-ecosystem cold start survive the launcher" smoke.
+//   (e) (win32-only) the real end-to-end cmd.exe-metacharacter-injection matrix: a REAL spawn of the
+//       launcher targeting a trivial .cmd probe (path B / buildWindowsCmdInvocation, never the npm-cmd-shim
+//       fast path) with every reviewer-measured attack string — &|<>, quote-breakout, %-expansion
+//       (refused outright), caret-collapse, and the round-2 backslash-before-quote family — asserting
+//       byte-for-byte survival and that no injected command ever ran.
+//   (f) (win32-only) /v:off: a positive control forces DelayedExpansion ON via cmd.exe's own `/v:on`
+//       switch to prove a `!VAR!`-shaped argument IS expandable when the switch is set (never a vacuous
+//       control), then the real production invocation (which bakes in `/v:off` unconditionally) is proven
+//       to leave the same `!VAR!`-shaped argument literal, regardless of this host's own ambient registry
+//       DelayedExpansion default.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/env-isolated-launch.mjs
 import fs from "node:fs";
@@ -306,6 +316,8 @@ check("(escape) a '%' anywhere in the argument is refused, not just a matched %.
     const realDumped = JSON.parse(fs.readFileSync(outFileReal, "utf8"));
     check("(v:off) the real /v:off invocation leaves a !VAR!-shaped argument literal, never expanded",
       realDumped[realDumped.length - 1] === bangArg);
+
+    try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
   } else {
     console.log("SKIP  (metachar) the cmd.exe-metacharacter-injection matrix is win32-only (no cmd.exe elsewhere)");
   }
@@ -383,6 +395,6 @@ check("(shim) a non-.cmd command is never routed through the shim parser", winCm
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the env-isolating launcher (card fafae623): parseLauncherArgv's --allow/--  contract (incl. malformed shapes), buildIsolatedEnv's pure base-allowlist + named---allow-key isolation (case-insensitive, every other inherited var absent by construction), a REAL child_process spawn proving the isolation + exit-code propagation end to end, and the launcher correctly re-spawning an absolute non-.mjs binary (incl. a best-effort real-npx .cmd-shim smoke on win32) — claude-free."
+  ? "\n✅ ALL PASS — the env-isolating launcher (card fafae623): parseLauncherArgv's --allow/--  contract (incl. malformed shapes), buildIsolatedEnv's pure base-allowlist + named---allow-key isolation (case-insensitive, every other inherited var absent by construction), a REAL child_process spawn proving the isolation + exit-code propagation end to end, the launcher correctly re-spawning an absolute non-.mjs binary (incl. a best-effort real-npx .cmd-shim smoke on win32), the real end-to-end cmd.exe-metacharacter-injection matrix (win32-only), and the /v:off DelayedExpansion control + real-invocation proof (win32-only) — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
