@@ -76,6 +76,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import {
+  parseSource, lineOf, resolveBinding, findStaticDistImports, findDynamicDistImports,
+  isInsideFunctionLike, findTransitiveStaticDistImport,
+} from "./_realhome-sandbox-ast.mjs";
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const OWN_BASENAME = path.basename(fileURLToPath(import.meta.url));
@@ -103,100 +107,6 @@ const NON_SANDBOXED_ALLOWLIST = {
   // a per-scenario pattern — see card a92a0913's own decision record and that file's own header comment.
   "claude-config-dir-shared-resolver.mjs": "sandboxes HOME/USERPROFILE/CLAUDE_CONFIG_DIR per-scenario (deliberately — it tests the CLAUDE_CONFIG_DIR override itself), always before that scenario's own use, never once before the module's top-level dist import.",
 };
-
-/** Parse `text` into a TS SourceFile. */
-function parseSource(text) {
-  return ts.createSourceFile("x.mjs", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-}
-
-function lineOf(sf, node) {
-  return sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-}
-
-/** The raw `import("<spec>")` CallExpression's own string-literal spec, or null. Shared by the static
- *  and dynamic binding collectors below. */
-function importCallSpec(node) {
-  if (!node || !ts.isCallExpression(node) || node.expression.kind !== ts.SyntaxKind.ImportKeyword) return null;
-  const arg = node.arguments[0];
-  return arg && ts.isStringLiteralLike(arg) ? arg.text : null;
-}
-
-/** Every import binding DECLARED DIRECTLY inside `scope`'s own statement list (never a deeper-nested
- *  one — that is a DIFFERENT scope, resolved separately by the caller) — covering a static named import
- *  (`import { X [as Y] } from "spec"`), a static namespace import (`import * as T from "spec"`), and the
- *  dynamic destructure/namespace shape every hermetic test in this corpus actually uses (`const { X [:
- *  Y] } = await import("spec")` / `const T = await import("spec")`, awaited or not). Each entry is
- *  `{name, realName, spec, pos}` — `name` is the LOCAL binding identifier actually referenced at a call
- *  site; `realName` is the ORIGINAL exported name (`propertyName ?? name` for a named/destructured
- *  binding — equal to `name` when there's no alias; `null` for a whole-module namespace binding, which
- *  has no single "real name" of its own); `pos` is the declaring STATEMENT's own start offset, used by
- *  the caller to pick the nearest PRECEDING declaration within this same scope (card ad3e193c triage
- *  item iv — never a single whole-file last-seen-wins map, which can misattribute a call to a binding
- *  that is lexically out of scope for it, or that is declared AFTER it). */
-function directBindingDeclsInScope(scope) {
-  const decls = [];
-  for (const stmt of scope.statements) {
-    if (ts.isImportDeclaration(stmt) && ts.isStringLiteralLike(stmt.moduleSpecifier) && stmt.importClause) {
-      const nb = stmt.importClause.namedBindings;
-      if (nb && ts.isNamedImports(nb)) {
-        for (const el of nb.elements) {
-          decls.push({ name: el.name.text, realName: (el.propertyName ?? el.name).text, spec: stmt.moduleSpecifier.text, pos: stmt.getStart() });
-        }
-      } else if (nb && ts.isNamespaceImport(nb)) {
-        decls.push({ name: nb.name.text, realName: null, spec: stmt.moduleSpecifier.text, pos: stmt.getStart() });
-      }
-    }
-    if (ts.isVariableStatement(stmt)) {
-      for (const declNode of stmt.declarationList.declarations) {
-        if (!declNode.initializer) continue;
-        const init = ts.isAwaitExpression(declNode.initializer) ? declNode.initializer.expression : declNode.initializer;
-        const spec = importCallSpec(init);
-        if (!spec) continue;
-        if (ts.isObjectBindingPattern(declNode.name)) {
-          for (const el of declNode.name.elements) {
-            if (ts.isIdentifier(el.name)) decls.push({ name: el.name.text, realName: (el.propertyName ?? el.name).text, spec, pos: stmt.getStart() });
-          }
-        } else if (ts.isIdentifier(declNode.name)) {
-          decls.push({ name: declNode.name.text, realName: null, spec, pos: stmt.getStart() });
-        }
-      }
-    }
-  }
-  return decls;
-}
-
-/** The nearest enclosing lexical-scope boundary (a Block or the SourceFile itself) strictly ABOVE
- *  `node` — i.e. starts the walk from `node.parent`, never `node` itself. */
-function findEnclosingScope(node) {
-  let cur = node.parent;
-  while (cur) {
-    if (ts.isSourceFile(cur) || ts.isBlock(cur)) return cur;
-    cur = cur.parent;
-  }
-  return null;
-}
-
-/** Resolve the binding `localName` refers to AT `fromNode` — walks outward through `fromNode`'s own
- *  enclosing-scope chain (innermost Block first, then each Block/SourceFile above it), and within each
- *  scope picks the declaration with the LARGEST `pos` that still precedes `fromNode`'s own start (the
- *  closest PRECEDING declaration actually in scope there) — never a single global last-seen-wins map.
- *  Returns the matching decl `{name, realName, spec, pos}`, or `null` if no in-scope, preceding
- *  declaration of that name exists anywhere up the chain. */
-function resolveBinding(fromNode, localName) {
-  const fromPos = fromNode.getStart();
-  let node = fromNode;
-  while (true) {
-    const scope = findEnclosingScope(node);
-    if (!scope) return null;
-    const decls = directBindingDeclsInScope(scope).filter((d) => d.name === localName && d.pos < fromPos);
-    if (decls.length) {
-      decls.sort((a, b) => b.pos - a.pos);
-      return decls[0];
-    }
-    node = scope;
-    if (ts.isSourceFile(scope)) return null; // already at the top — nowhere further to climb
-  }
-}
 
 /** Every transcript-fn call-site hit in `sf`, as `{name, line}` — covers a bare-identifier call
  *  (`engineTranscriptPath(...)`, including an ALIASED destructure like `{ engineTranscriptPath: etp }`
@@ -238,52 +148,6 @@ function findTranscriptFnHits(sf) {
   }
   visit(sf);
   return hits;
-}
-
-/** Every static `import ... from "<spec>"` whose spec contains "dist/", as `{spec, line}`. */
-function findStaticDistImports(sf) {
-  const hits = [];
-  function visit(node) {
-    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier) && node.moduleSpecifier.text.includes("dist/")) {
-      hits.push({ spec: node.moduleSpecifier.text, line: lineOf(sf, node) });
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(sf);
-  return hits;
-}
-
-/** Every dynamic `import("<spec>")` call whose spec contains "dist/", as `{spec, line}`. */
-function findDynamicDistImports(sf) {
-  const hits = [];
-  function visit(node) {
-    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      const arg = node.arguments[0];
-      if (arg && ts.isStringLiteralLike(arg) && arg.text.includes("dist/")) {
-        hits.push({ spec: arg.text, line: lineOf(sf, node) });
-      }
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(sf);
-  return hits;
-}
-
-const FUNCTION_LIKE_KINDS = new Set([
-  ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.FunctionExpression, ts.SyntaxKind.ArrowFunction,
-  ts.SyntaxKind.MethodDeclaration, ts.SyntaxKind.Constructor, ts.SyntaxKind.GetAccessor, ts.SyntaxKind.SetAccessor,
-]);
-/** True if `node` sits inside any function/method/accessor body. Used to require a HOME/USERPROFILE/
- *  CLAUDE_CONFIG_DIR override to be a genuinely TOP-LEVEL, unconditionally-executed statement — this
- *  guard compares source line ORDER, not execution, so an override sitting inside a function this guard
- *  has no way to prove is ever actually CALLED must never count (card ad3e193c triage item iii). */
-function isInsideFunctionLike(node) {
-  let cur = node.parent;
-  while (cur) {
-    if (FUNCTION_LIKE_KINDS.has(cur.kind)) return true;
-    cur = cur.parent;
-  }
-  return false;
 }
 
 /** Is `node` the AST shape `process.env.HOME` / `process.env.USERPROFILE`? Returns "HOME"/"USERPROFILE"/null. */
@@ -389,39 +253,11 @@ function mentionsAnyTranscriptFnName(text) {
   return false;
 }
 
-/** Every static `import ... from "<spec>"` in `sf` whose spec is a LOCAL relative helper (starts with
- *  "./" or "../", excluding "../dist/..." itself — findStaticDistImports already covers that directly —
- *  and excluding `_transcript-fixture.mjs`, marker A's own helper, already handled by
- *  `importsSharedFixtureHelper`) that ITSELF, read from disk relative to `baseDir`, carries a static
- *  import of something under "dist/" — a ONE-LEVEL-DEEP transitive hoisted dist import reached via a
- *  local wrapper/re-export helper (card ad3e193c triage item v). A HOISTED static import inside that
- *  helper still runs at the helper's own module-load time, before anything in THIS file's body — HOME/
- *  USERPROFILE/CLAUDE_CONFIG_DIR sandboxed correctly and ordered correctly in THIS file is still too
- *  late. Returns `{spec, line, transitiveSpec}` for the first offending helper found, or `null`. An
- *  unreadable/unresolvable helper path is silently skipped — this check's job is to catch a transitive
- *  hazard it CAN see, never to validate every relative import path resolves. */
-function findTransitiveStaticDistImport(sf, baseDir) {
-  const localHelperImports = [];
-  function visit(node) {
-    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
-      const spec = node.moduleSpecifier.text;
-      const isLocalHelper = (spec.startsWith("./") || spec.startsWith("../")) && !spec.includes("dist/")
-        && !spec.endsWith("_transcript-fixture.mjs");
-      if (isLocalHelper) localHelperImports.push({ spec, line: lineOf(sf, node) });
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(sf);
-  for (const helperImport of localHelperImports) {
-    let helperText;
-    try { helperText = fs.readFileSync(path.join(baseDir, helperImport.spec), "utf8"); } catch { continue; }
-    const helperStaticDist = findStaticDistImports(parseSource(helperText));
-    if (helperStaticDist.length > 0) {
-      return { spec: helperImport.spec, line: helperImport.line, transitiveSpec: helperStaticDist[0].spec };
-    }
-  }
-  return null;
-}
+// The one-level-deep transitive static-dist-import check (card ad3e193c triage item v) is the shared
+// {@link findTransitiveStaticDistImport} (`_realhome-sandbox-ast.mjs`) — this guard passes
+// `_transcript-fixture.mjs` (marker A's own helper, already handled by `importsSharedFixtureHelper`
+// above) as its exclude-list, since that helper's own static dist import is a KNOWN, already-handled
+// hazard, not a NEW one this check should also flag.
 
 /** Classifies one file's text: `{ hasHit, isSafe, code, reason }`. `reason` is a short diagnostic
  *  string, always set (even when safe), so a violation report can explain itself without re-deriving it.
@@ -450,7 +286,7 @@ function classify(text, baseDir = TEST_DIR) {
     };
   }
 
-  const transitive = findTransitiveStaticDistImport(sf, baseDir);
+  const transitive = findTransitiveStaticDistImport(sf, baseDir, ["_transcript-fixture.mjs"]);
   if (transitive) {
     return {
       hasHit: true, isSafe: false, code: "transitive-static-import",
@@ -713,7 +549,7 @@ check(
 }
 check(
   "sanity (v): a static import of ./_transcript-fixture.mjs ITSELF is excluded from the transitive check (it's marker A's own helper — that static dist import is a KNOWN, already-handled hazard, not a NEW one)",
-  findTransitiveStaticDistImport(parseSource('import { withEngineTranscriptFixture } from "./_transcript-fixture.mjs";'), TEST_DIR) === null,
+  findTransitiveStaticDistImport(parseSource('import { withEngineTranscriptFixture } from "./_transcript-fixture.mjs";'), TEST_DIR, ["_transcript-fixture.mjs"]) === null,
 );
 check(
   "sanity: the text.includes() prefilter correctly finds NO hit for a file mentioning none of the four names",

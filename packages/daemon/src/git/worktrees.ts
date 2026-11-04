@@ -5735,6 +5735,15 @@ export const STATIC_GUARD_REPO_PATHS = [
   // ground as real-home-scope-guard.mjs above: a NEW test file is a source-TEXT property neither the
   // reduced gate nor the emit-compare transpile-identity check can see.
   "packages/daemon/test/transcript-realhome-sandbox-guard.mjs",
+  // Card 7f2263fd (a discovered follow-up of card 668bc52c above, deliberately scoped out of that
+  // guard): the SAME AST scan, for CODEX_HOME instead of HOME/USERPROFILE — asserting every file calling
+  // a codex transcript/rollout-archive fn (resolveTranscriptFile/transcriptExists/readTranscript/
+  // snapshotTranscript/findConversationIdForSpawn/snapshotExistingConversationIdsForSpawn/
+  // describeRolloutCandidatesForDiagnostic/archiveOldCodexRollouts/restoreArchivedCodexRollout)
+  // sandboxes CODEX_HOME before its first dist import, or carries a reasoned allowlist entry — same
+  // ground as transcript-realhome-sandbox-guard.mjs immediately above: a NEW test file is a source-TEXT
+  // property neither the reduced gate nor the emit-compare transpile-identity check can see.
+  "packages/daemon/test/codex-transcript-realhome-sandbox-guard.mjs",
   // Card dd6e713d: a corpus-wide reverse sweep (plus a forward check over a curated basename list) that a
   // test/*.mjs file capable of launching a real claude/codex engine carries the structural opt-in refusal
   // (test/_real-engine-opt-in.mjs). Belongs here on the SAME ground as fixed-wait-witness-guard.mjs above:

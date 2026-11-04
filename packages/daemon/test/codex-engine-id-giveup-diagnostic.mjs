@@ -20,6 +20,11 @@ const check = (label, cond, diag) => {
 };
 
 process.env.LOOM_HOME = mkdtempManaged("loom-codex-giveup-loomhome-");
+// Throwaway sandbox so CODEX_HOME is never ambient/real from the very first import onward — every
+// scenario below sets its own value before its own use anyway, but codex-transcript-realhome-sandbox-
+// guard.mjs (card 7f2263fd) enforces the same before-first-dist-import convention claude's own
+// transcript-realhome-sandbox-guard.mjs uses, for robustness against a future import-time change.
+process.env.CODEX_HOME = mkdtempManaged("loom-codex-giveup-codexhome-placeholder-");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { ensureDirs } = await import("../dist/paths.js");
 ensureDirs(); // LOOM_HOME logs dir, else every spawn logs a misleading log-stream ENOENT
