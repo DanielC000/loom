@@ -16,12 +16,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { AgentEditor, AgentForm, useAgentWrites } from "./agentEditor";
 import { SpawnControls } from "./SpawnControls";
-import { Button, Panel, SectionLabel, StatusPill } from "./ui";
+import { Button, Panel, SectionLabel, Select, StatusPill } from "./ui";
 import { RoleBadge } from "../lib/roleDisplay";
 import { errorText } from "../lib/loopbackCredential";
 import { useActiveProject } from "../lib/activeProject";
 import { goLiveHeldControl, goLiveSessionPill } from "../lib/sessions";
-import { sessionVitals, useAgentRoster, type RosterAgent } from "../lib/atlasAgents";
+import {
+  resolveSpawnPick, sessionVitals, spawnPickLabel, useAgentRoster, type RosterAgent,
+} from "../lib/atlasAgents";
 import { color, radius } from "../theme";
 
 /**
@@ -171,10 +173,17 @@ export function WorkersDispatchedNote({ workers }: { workers: RosterAgent[] }) {
 }
 
 /** A roster with nothing in it says which of the two reasons applies, because they need different
- *  answers: define an agent, or dispatch a worker from a manager. */
-export function RosterEmpty({ workers, projectName }: { workers: RosterAgent[]; projectName?: string }) {
+ *  answers: define an agent, or dispatch a worker from a manager.
+ *
+ *  `testId` is defaulted so every pre-existing mount keeps the id it already had. The Sessions tab's
+ *  quick-start (below) passes its own: the Atlas project node parks every VISITED tab body in the DOM
+ *  with `hidden` rather than unmounting it, so the Agents tab's own empty line and this one can be in
+ *  one document at once — and a shared id would resolve both and trip strict mode in any spec that
+ *  addresses either. */
+export function RosterEmpty({ workers, projectName, testId = "atlas-agents-empty" }:
+  { workers: RosterAgent[]; projectName?: string; testId?: string }) {
   return (
-    <p className="loom-bandempty" data-testid="atlas-agents-empty">
+    <p className="loom-bandempty" data-testid={testId}>
       {workers.length > 0
         ? `Every agent${projectName ? ` in ${projectName}` : ""} is a worker rig, and a manager dispatches those. Nothing to spawn by hand.`
         : `No agents defined${projectName ? ` in ${projectName}` : ""} yet.`}
@@ -301,6 +310,63 @@ function QuickSpawnDialog({ projectId, title, testId, onClose }: {
       </div>
       <WorkersDispatchedNote workers={roster.workers} />
     </AtlasAgentDialog>
+  );
+}
+
+// ── The inline quick-start (card f3b18f27) ─────────────────────────────────────────────────────
+
+/**
+ * Start a session for one of this project's agents without opening anything — a picker and the
+ * roster's own spawn controls, on one line, beside the sessions already running.
+ *
+ * @decision f3b18f27 — never give this surface a spawn call, a guard or a spawnable-list rule of its
+ * own. The picker is the only new thing here; every control below it is `AgentActions` verbatim.
+ */
+export function AgentQuickStart({ projectId, projectName, testId = "atlas-quickstart" }: {
+  projectId: string;
+  projectName?: string;
+  /** The testid STEM for the picker, the rig line and the empty note (`<stem>-agent` / `-rig` /
+   *  `-empty`). Defaulted for the one mount there is; a prop so a second one can never collide. */
+  testId?: string;
+}) {
+  const { roster, isLoading } = useAgentRoster(projectId);
+  // The REQUEST, not the answer: `null` means "nothing chosen yet" and resolves to the first
+  // spawnable agent. Storing the resolved entry instead would freeze a row that the next roster
+  // settle may have changed (a session started elsewhere flips `managerLive`, and the control's own
+  // shape depends on it).
+  const [wanted, setWanted] = useState<string | null>(null);
+  const pick = resolveSpawnPick(roster.spawnable, wanted);
+  return (
+    <div className="loom-quickstart" data-testid={testId}>
+      {isLoading && <span className="loom-agentrow-meta">Reading the roster…</span>}
+      {!isLoading && !pick && (
+        <RosterEmpty workers={roster.workers} projectName={projectName} testId={`${testId}-empty`} />
+      )}
+      {!isLoading && pick && (
+        <>
+          {/* `value` is the RESOLVED pick, never `wanted` — so a chosen agent that left the roster
+              re-points the control at an agent that is really there, instead of leaving the select
+              showing the first option while the buttons act on a stale id. */}
+          <Select value={pick.agent.id} data-testid={`${testId}-agent`}
+            aria-label="Which agent to start a session for"
+            onChange={(e) => setWanted(e.target.value)}>
+            {roster.spawnable.map((entry) => (
+              <option key={entry.agent.id} value={entry.agent.id}>{spawnPickLabel(entry)}</option>
+            ))}
+          </Select>
+          {/* "What will this button actually start" — the one line `rigLine` exists for, and the
+              reason a bare agent name is not enough beside a Spawn button. */}
+          <span className="loom-agentrow-meta" data-testid={`${testId}-rig`} title={rigLine(pick)}>
+            {rigLine(pick)}
+          </span>
+          {/* `key` is the pick: a fresh `AgentActions` per agent, so its own mutation state cannot
+              outlive the agent it belongs to — otherwise a refusal raised for one agent stays
+              printed under the next one the reader picks, blaming it for a failure that was not
+              its own. */}
+          <AgentActions key={pick.agent.id} entry={pick} />
+        </>
+      )}
+    </div>
   );
 }
 

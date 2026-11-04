@@ -3041,6 +3041,63 @@ button.loom-kpi.is-open {
   color: var(--loom-text-dim);
 }
 
+/* The Sessions tab's controls bar — the project filter, and (project-scoped mounts only) the inline
+   quick-start. `column-gap` is twice the row gap deliberately: the two groups are separate controls
+   and need to read as such on one line, while a WRAPPED bar must not open a 20px hole between a
+   group and the one below it. */
+.loom-sessionbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+  margin-bottom: 12px;
+}
+/* BASELINE, not `center`. The quick-start wraps internally once its picker, rig line and split
+   button stop fitting (which depends on how long the project's rig and agent names are, so it is not
+   a width a media query could name) — and against a two-line group, a centred label floats down into
+   the gap between the two rows and reads as belonging to neither. Baseline keeps it on the first row
+   at every width, with no breakpoint to keep in step. */
+.loom-sessionbar-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.loom-sessionbar-group > span {
+  flex: none;
+  white-space: nowrap;
+}
+/* The quick-start's own row: picker · rig line · spawn controls. It wraps INSIDE its group so the
+   spawn button drops under the picker at narrow widths rather than being pushed off the bar. */
+.loom-quickstart {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* The rig line is the ONE part of this row that may give up width — it has `text-overflow` of its
+   own (`.loom-agentrow-meta`), but that needs a shrinkable box to act on, and a flex item's floor is
+   its content width until `min-width: 0` says otherwise. The cap keeps a long "rig · browser ·
+   documents" line from taking the whole bar on a wide screen, where the control it describes should
+   still sit near the picker it belongs to. */
+.loom-quickstart > .loom-agentrow-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 240px;
+}
+/* A deliberate one-step lift off the `--loom-text-muted` both of these classes carry by default,
+   which measures 3.2:1 on `--loom-bg` — under the 4.5:1 floor at 11px. Muted is right for their
+   usual job (a passive subtitle inside a card or a band panel, read once that panel already has your
+   attention); here the same two lines are the live answer to "what is this button about to start" /
+   "why is there no button", in a row where everything else is interactive and nothing else is dim.
+   `--loom-text-dim` measures 6.3:1. Scoped to this one mount on purpose — re-toning either shared
+   class is a design-system call, not this row's. */
+.loom-quickstart > .loom-agentrow-meta,
+.loom-quickstart > .loom-bandempty {
+  color: var(--loom-text-dim);
+}
+
 /* The Agents node's own full-size roster. */
 .loom-agentgrid {
   display: grid;

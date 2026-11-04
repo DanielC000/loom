@@ -127,6 +127,44 @@ export function sessionVitals(s: SessionListItem): string {
   ].filter(Boolean).join(" · ");
 }
 
+// ── The inline quick-start's picker (card f3b18f27) ────────────────────────────────────────────
+// The Sessions tab starts a session from a `<select>` rather than a dialog, so it needs one thing no
+// other spawn surface does: a rule for WHICH agent the picker is pointed at when nothing has been
+// chosen yet, or when what WAS chosen is no longer spawnable. Both pure, both here rather than in the
+// component, for the same reason `splitRoster` is.
+
+/**
+ * The spawnable agent a picker is pointed at: the one asked for while it is still spawnable, else the
+ * first in the project's own agent order, else nothing.
+ *
+ * ⚠️ The fallback is the load-bearing half, not the happy path. `roster.spawnable` is re-derived on
+ * every `["agents"]`/`["profiles"]`/`["allSessions"]` settle, so the chosen agent can leave the list
+ * under a reader who is still looking at it — deleted from the Agents tab, or re-bound to a worker
+ * rig, which drops it from `spawnable` outright. Holding the stale id would leave the control pointed
+ * at an agent the picker no longer offers: a Spawn button that posts a 404, with the `<select>`
+ * showing some other agent's name (a `value` no `<option>` carries renders as the first option).
+ */
+export function resolveSpawnPick(
+  spawnable: readonly RosterAgent[],
+  wanted: string | null,
+): RosterAgent | null {
+  return spawnable.find((e) => e.agent.id === wanted) ?? spawnable[0] ?? null;
+}
+
+/**
+ * One picker option's label: the agent's name, and `· live` when it already holds its go-live slot.
+ *
+ * The marker is there because the control CHANGES SHAPE on a live pick — `AgentActions` draws the
+ * held control plus a Stop instead of a Spawn (the go-live guard) — and a picker that read as a flat
+ * list of startable agents would make that look like a broken button rather than a guard. `live` is
+ * `holdsGoLiveSlot`'s answer for EVERY role, not just a manager's, so the marker is honest on a row
+ * whose Spawn stays enabled too: it says "this one is already running", which is worth knowing
+ * either way.
+ */
+export function spawnPickLabel(entry: RosterAgent): string {
+  return entry.live ? `${entry.agent.name} · live` : entry.agent.name;
+}
+
 // ── The standing operators (the Workspace root's own roster) ───────────────────────────────────
 // The project tier's roster is "which agents may I start here"; the workspace tier's is "which
 // cross-project operators are standing right now". Different question, different shape — these are

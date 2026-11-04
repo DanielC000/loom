@@ -386,7 +386,9 @@ export default function ProjectHome() {
   // so the project node hands it this project's name and the body matches the tab's own count.
   const tabBodies: Record<string, ReactNode> = {
     board: <Board projectId={projectId} />,
-    sessions: <Terminals projectName={project?.name} />,
+    // Both halves of the pre-selection: the NAME drives its project filter, the ID is what its
+    // quick-start reads a roster by (card f3b18f27). The god-eye classic mount still passes neither.
+    sessions: <Terminals projectId={projectId} projectName={project?.name} />,
     agents: <AgentsNode />,
     repository: <Repository />,
     memory: <Memory />,

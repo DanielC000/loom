@@ -9,6 +9,7 @@ import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard } from "../components/TerminalCard";
 import { useSessionQueuesBulk, useSessionWakesBulk, useInvalidateSessionQueueWakesBulk } from "../lib/useSessionQueueWakesBulk";
 import { Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
+import { AgentQuickStart } from "../components/atlasAgents";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import { color, font } from "../theme";
 
@@ -16,6 +17,16 @@ import { color, font } from "../theme";
 // each tile hugs its own content up to its cap rather than being stretched to the tallest tile in the row
 // (which padded a bare card out below its composer). Content-dynamic per-card height is the intended shape.
 const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
+
+// The micro-label on each group in the controls bar. Hoisted out of the one call site it used to
+// have (the project filter) so every group in that bar reads at the same weight and tracking — two
+// controls side by side under labels that differed by a font-weight would look like two unrelated
+// widgets rather than one bar. Deliberately NOT `SectionLabel`: that kit primitive is a BLOCK heading
+// at weight 700, which is a louder voice than a field label beside its own field wants, and adopting
+// it here would also silently re-weight the filter label the classic shell has always drawn.
+const barLabelStyle: CSSProperties = {
+  fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim,
+};
 
 // One rendered row of the Claude-sessions grid. A "manager" row = its manager tile first then the
 // workers it parented; "orphans"/"standalone" are the trailing catch-all rows. The grouping itself
@@ -29,7 +40,14 @@ type SessionRow = SessionRowGroup<SessionListItem>;
 // mount this page as its "Sessions" tab at project depth. The classic shell passes nothing, so its
 // filter still starts at "" (= all) and the page is byte-identical there. The filter control itself
 // stays — a reader who pre-selected a project may still widen it, and every tile carries its project.
-export default function Terminals({ projectName }: { projectName?: string } = {}) {
+//
+// `projectId` (card f3b18f27) is the SECOND half of that same pre-selection, and the one the quick-
+// start needs: a roster is read by project id, never by name. It is what gates the control rather
+// than a separate flag — the god-eye mount has no single project to start a session IN, so passing
+// nothing is both the classic shell's state and the honest answer, and the page stays byte-identical
+// there. Both props are optional and independent on purpose: a host that knows only the name still
+// gets the filter pre-selection it got before this card.
+export default function Terminals({ projectId, projectName }: { projectId?: string; projectName?: string } = {}) {
   const [filter, setFilter] = useState<string>(projectName ?? "");  // projectName filter ("" = all)
   // Re-sync when the host changes which project it is showing — the Atlas tab stays MOUNTED across a
   // project switch (it is parked with `hidden`, never unmounted), so a mount-time initial value alone
@@ -87,12 +105,27 @@ export default function Terminals({ projectName }: { projectName?: string } = {}
     <HarnessMixProvider sessions={shown}>
     <div>
       <ShellsSection />
-      <div style={{ marginBottom: 12, display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Project</span>
-        <Select value={filter} onChange={(e) => setFilter(e.target.value)}>
-          <option value="">All ({live.length})</option>
-          {projectNames.map((n) => <option key={n} value={n}>{n}</option>)}
-        </Select>
+      {/* ONE bar for every control that acts on the grid below, so the next one added here has a
+          declared home rather than a fresh row of its own (card ac0cfe91 adds ordering + gridding
+          to this same tab). It wraps at narrow widths and each group keeps its label with its
+          control, so a wrapped bar never leaves a label stranded above the wrong field. */}
+      <div className="loom-sessionbar" data-testid="sessions-bar">
+        <div className="loom-sessionbar-group">
+          <span style={barLabelStyle}>Project</span>
+          <Select value={filter} onChange={(e) => setFilter(e.target.value)}>
+            <option value="">All ({live.length})</option>
+            {projectNames.map((n) => <option key={n} value={n}>{n}</option>)}
+          </Select>
+        </div>
+        {/* Only where there IS one project to start in — see the `projectId` note on the signature.
+            The label lives here, with the filter's own, so the bar's two groups are typographically
+            one row; the component owns the roster and the controls, never the chrome around them. */}
+        {projectId && (
+          <div className="loom-sessionbar-group">
+            <span style={barLabelStyle}>Start a session</span>
+            <AgentQuickStart projectId={projectId} projectName={projectName} />
+          </div>
+        )}
       </div>
       {shown.length === 0 && <p style={{ color: color.textMuted }}>No running sessions.</p>}
       {rows.map((row) => (
