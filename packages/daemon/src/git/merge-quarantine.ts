@@ -2965,10 +2965,20 @@ function consumeMatchedPendingsIntoArmedEntry(
         } else {
           // @decision 59e758e5 (round 3) — never unlink here: this write was not proven secured
           // elsewhere (the round-1 "strict subset" reasoning was retracted — see the decision record).
-          // Keep the stranded tmp; boot's own tmp-recovery pass re-arms it as a fail-closed duplicate.
+          // @decision bdb09095 — track the stranded tmp's basename into orphanLatchFiles (never the
+          // absolute path, never unlink — 59e758e5 still stands) so a later full lift's own sweep finds
+          // and cleans it; boot's tmp-recovery pass is now a backstop only, not the expected outcome.
+          if (written.strandedTmp) {
+            const trackedForeignUnion: MergeQuarantineEntry = {
+              ...foreignUnion,
+              orphanLatchFiles: [...new Set([...(foreignUnion.orphanLatchFiles ?? []), path.basename(written.strandedTmp)])],
+            };
+            replaceEntryEverywhere(activeQuarantines, foreignUnion, trackedForeignUnion);
+            foreignUnion = trackedForeignUnion;
+          }
           pendingUnresolvedQuarantines.push({ entry: foreignUnion, sourceFile: base.sourceFile });
           // eslint-disable-next-line no-console
-          console.error(`[merge-quarantine] could not durably persist a merged sibling pending latch for ${foreignUnion.repoPath} at ${base.sourceFile} after an unrelated raise's own divert — the PRE-EXISTING durable state there is left UNTOUCHED (still enforced in THIS process).`);
+          console.error(`[merge-quarantine] could not durably persist a merged sibling pending latch for ${foreignUnion.repoPath} at ${base.sourceFile} after an unrelated raise's own divert — tracked its stranded tmp into orphanLatchFiles so a later clear's own sweep can still find and clean it; the PRE-EXISTING durable state there is left UNTOUCHED (still enforced in THIS process).`);
         }
       }
       return { armed: raiserUnion, matched, writeSucceeded: true, diverted: true };
