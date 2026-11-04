@@ -85,6 +85,26 @@ public-bytes compare cannot. Refuses to store (never silently falls back) on any
 
 `test/ssh-exec-core.mjs`'s section 8 tests the crash guard in isolation from whether the real code forwards `readyTimeout` at all (section 8d pins that separately): it wraps `ssh2.Client.prototype.connect` to FORCE a short, test-controlled internal `readyTimeout` (900ms, deliberately longer than the test's own 500ms external bound) regardless of what the real `connect()` call passes. That decoupling is why the reproduction only needs to wait ~1.5s instead of the ~20.7s a real, unforced `readyTimeout` default would take — removing the sink alone (mutant A: sink and `readyTimeout`-forwarding both removed, i.e. the real pre-fix state) still reddens it, just fast.
 
+## Dev/test exercises the pure-JS cipher path; a real install can exercise the native one (card `fcf2d7e6`, measured 2026-11-04)
+
+Loom's dev root excludes `ssh2` (and its optional `cpu-features`) from `pnpm.onlyBuiltDependencies`, so a
+contributor's `pnpm install` never runs either package's `install` script — `ssh2` never builds its own
+bundled native crypto addon (`lib/protocol/crypto/build/Release/sshcrypto.node`, compiled by `ssh2`'s own
+`install.js` against `lib/protocol/crypto/binding.gyp` — a *different* native addon than `cpu-features`),
+so dev/test always exercise `ssh2`'s pure-JS `GenericCipher`/`AESGCMCipher`/`ChaChaPolyCipher`
+implementations. A real end-user `npm i -g` install does run that script. Measured directly (isolated
+scratch install, no other deps): on a host with a working build toolchain (VS2022 Build Tools + Python),
+the addon builds successfully and `ssh2` switches to its native implementation instead — confirmed via a
+`require()` probe against the freshly-built install. This is only an **implementation** difference, never
+a **protocol** one — both paths speak the same SSH2 wire protocol and the same cipher suite list; the only
+other place `cpu-features` (a separate, also install-time-built, package) matters is purely cosmetic: it
+detects AES-NI support and only reorders which cipher `ssh2` *offers first* during negotiation, never which
+implementation actually runs. The **no-build-tools case is unmeasured** — this host always had a real
+toolchain reachable regardless of how the probe tried to hide it, so whether `ssh2`'s pure-JS fallback is
+what a toolchain-less end user silently gets (the expected, documented behavior) was not independently
+confirmed by a real failure-to-build repro; don't treat it as verified. See `docs/releasing.md`'s
+"`ssh2` (+ its optional `cpu-features`) at `npm i -g` time" note for the install-script behavior itself.
+
 ## Do not
 
 - Do not place the private key, or any derived credential, in an agent-reachable env var, argv, or file — it is decrypted only inside the daemon process, only for the duration of one `ssh_exec` call. The agent gets a tool call, never a socket, cert, or key.
