@@ -9,22 +9,19 @@ This card closes that gap with a sibling guard, sharing AST machinery via a new
 `_realhome-sandbox-ast.mjs` helper module rather than duplicating it.
 
 **Conservative rule despite fresh-per-call reads.** `codexSessionsRoot()`/`codexRolloutArchiveRoot()`
-read `CODEX_HOME`/`LOOM_HOME` fresh on every call, never cached at module load — so the real contract is
-"sandbox before the first CALL," not "before import." This guard enforces the stricter "before the
-first dynamic dist import" rule anyway, same ground the claude guard already uses for its own
-(also fresh-per-call) `claudeProjectsRoot()`: a simple line-order check that stays correct even if a
-future change adds import-time side effects.
+read `CODEX_HOME`/`LOOM_HOME` fresh on every call, never cached at module load — the real contract is
+"sandbox before the first CALL," not "before import." This guard enforces the stricter "before the first
+dynamic dist import" rule anyway, same ground the claude guard uses for its own `claudeProjectsRoot()`.
 
 **Two real bugs found only against the real corpus, not synthetic fixtures.** (1)
 `resolveTranscriptFile`/`readTranscript`/`snapshotTranscript` collide between codex-transcript.ts's
 direct export (no harness param) and `sessions/transcript.ts`'s dispatcher (same args + an optional
-trailing `harness`, routed through `transcriptOpsFor`). The harness param sits at a DIFFERENT index per
-function (3rd for resolve/read, 5th for snapshot) — disambiguated by the LAST argument + a per-function
-min-argc map, never a hardcoded index. (2) `transcriptExists` has no dispatcher entry (that name there is
-`engineTranscriptExists`) but IS a `HarnessAdapter` interface method implemented identically (always 2
-args, no harness to read) by `claudeAdapter.transcriptExists` — arg-count can't disambiguate it, only the
-resolved import SOURCE can. This false-positived on `harness-adapter-conformance.mjs`/
-`harness-adapter-delegates.mjs`, both calling `claudeAdapter.transcriptExists(cwd, id)`.
+trailing `harness`). The harness param sits at a DIFFERENT index per function (3rd for resolve/read, 5th
+for snapshot) — disambiguated by the LAST argument + a per-function min-argc map, never a fixed index.
+(2) `transcriptExists` has no dispatcher entry but IS a `HarnessAdapter` interface method implemented
+identically (2 args, no harness) by `claudeAdapter.transcriptExists` — arg-count can't disambiguate it,
+only the resolved import SOURCE can. False-positived on `harness-adapter-conformance.mjs`/
+`harness-adapter-delegates.mjs`.
 
 **`_transcript-fixture.mjs` exclusion.** Claude's marker-A fixture helper statically imports
 `dist/sessions/transcript.js` — irrelevant to CODEX_HOME, but it trips the "local helper that itself
@@ -44,13 +41,22 @@ name-collision exclusions, and no codex equivalent of marker-A exists — foldin
 claude guard's `classify()`/allowlist would couple two independently-evolving fn-name sets behind one
 function. Only the generic AST plumbing is shared.
 
-**The disclosed `PtyHost.spawn` blind spot, concretely.** `codex-giveup-screen-tail.mjs` reaches
-`findConversationIdForSpawn`/`snapshotExistingConversationIdsForSpawn` only via
-`host.spawn({harness:"codex"})`'s internal `captureCodexEngineSessionId` call, never importing
-`codex-transcript.js` itself — invisible to this guard's name-based detection. It already sandboxes
-`CODEX_HOME` correctly before that call (not currently exploitable), but this guard would not have
-caught it otherwise. Card `7664f6b3` tracks auditing every such call site (85 files spawn with
-`harness:"codex"` corpus-wide; only this one was spot-checked here) and extending detection if warranted.
+**The disclosed `PtyHost.spawn` blind spot.** `codex-giveup-screen-tail.mjs` reached
+`findConversationIdForSpawn` only via `host.spawn({harness:"codex"})`'s own internal call, invisible to
+this guard's name-based detection. Card `7664f6b3` sandboxed the 16 files that needed it; card `21174cef`
+(below) closes the detection gap itself.
+
+## Card 21174cef — a SEPARATE hit set for `.spawn(`/`host.spawn(` call sites
+
+`classifySpawnHits` (not `classify`) flags any such call carrying a literal `harness: "codex"` (fails
+closed on a non-literal), excluding direct `createCodexPty`-only calls and the `*-real-spawn.mjs` family
+(via `CODEX_REAL_SPAWN_SET`, the single source of truth — never a second hand-copied list). Ordering is
+EXECUTION order, not line order: `effectiveSpawnLine` walks a call wrapped in a named helper out to that
+helper's own call site(s) (recursively) — a function only runs when CALLED, never at its definition line
+(`codex-engine-id-giveup-diagnostic.mjs`'s `giveUp` is the worked example). The real-corpus scan surfaced
+3 files that looked unsandboxed by `CODEX_HOME` alone but sandbox `HOME`+`USERPROFILE` instead (a
+pre-existing pattern for an unrelated reason) — equivalent, since `os.homedir()` reads a different one of
+those two per platform; `findHomeAndUserprofileOverrideLine` now accepts that pair too.
 
 ## Do not
 
@@ -64,7 +70,7 @@ caught it otherwise. Card `7664f6b3` tracks auditing every such call site (85 fi
   real caller in this corpus sandboxes it regardless of whether a given call passes deps.
 - Do not add a new real-codex-spawn test to `NON_SANDBOXED_ALLOWLIST` without checking whether it reaches
   codex via a direct import OR via `sessions/transcript.ts`'s dispatch — both shapes are real here.
-- Do not read this guard as covering indirect reach via `PtyHost.spawn({harness:"codex"})`'s own
-  `captureCodexEngineSessionId` call without a direct `codex-transcript.js` import — a disclosed,
-  deliberate scope limitation (mirrors the claude guard's identical one for `harness:"claude"`), tracked
-  by card `7664f6b3` rather than silently widened here.
+- (Card `21174cef` closes this) Do not resolve a `.spawn(` call wrapped in a named helper by its own
+  textual line — a function only runs when something CALLS it; walk out to the call site(s) instead
+  (recursively), never the definition line. Do not treat `HOME`/`USERPROFILE` set ALONE as equivalent
+  to a `CODEX_HOME` override — `os.homedir()` reads a DIFFERENT var per platform, so BOTH are required.
