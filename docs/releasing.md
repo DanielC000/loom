@@ -132,6 +132,8 @@ pnpm pack:npm        # → loomctl-X.Y.Z.tgz at the repo root
 
 Native deps (`better-sqlite3`, `node-pty`) and the runtime-resolved `@playwright/mcp` stay **real `dependencies`**, so a plain `npm install` fetches their prebuilt binaries. **pnpm is a contributor tool only** — end users need just Node 22+.
 
+`scripts/build-npm-package.mjs` also refuses the build outright (loud, exit 1) on three packaging regressions, each checked at the point its own input is actually ready — never a silent strip: an **orphaned web bundle** (a stale content-hashed asset not referenced by Vite's own build manifest), a **stray dist-patch test shim** (a leftover `graceful-teardown.clockshim-*`/`graceful-teardown.winrace-*.js` sibling in `packages/daemon/dist`), and — against the **actual packed tarball contents**, via `npm pack --dry-run --json` on the assembled `dist-npm/` staging dir, not just the source `assets/` tree — a **missing npm-pinned lock asset** for any bundled "npm-pinned" capability row (shadcn, image-gen): the required set is derived from `bundledCapabilities()` (`dist/capabilities/seed.js`) + `npmPinnedLockAssetPath()` (`dist/capabilities/npm-pinned.js`), never hardcoded, so a future npm-pinned row is covered automatically. See `docs/decisions/1ebbf523-npm-pinned-lock-pack-assertion.md` for why a source-only check (which `build-npm-package.mjs` also still runs, as a cheap "built inputs exist" precondition) isn't enough on its own: npm's own pack-time file-inclusion logic can drop a nested `package-lock.json`, and that earlier check only verified a single representative lock, not every seeded row.
+
 ### The dev-only remainder of the Platform layer
 
 Card `f437d4e9` shipped most of Loom's **Platform layer** — the `platform` role/router, the Lead agent/

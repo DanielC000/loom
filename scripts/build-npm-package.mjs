@@ -23,7 +23,7 @@
 //     node_modules/@loom/shared/  bundled workspace package (real dir → bundledDependencies)
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { curateSkillDirs, DEV_ONLY_SKILLS } from "./curate-release-skills.mjs";
 
@@ -60,6 +60,29 @@ export function findStrayDistShims(daemonDistDir) {
   return names.filter((name) => /^graceful-teardown\.(clockshim|winrace)-/.test(name));
 }
 
+// @decision 1ebbf523 — never hardcode this set; derive it from bundledCapabilities()/
+// npmPinnedLockAssetPath(), and verify it against npm's own packed file list, never source presence alone.
+export async function requiredNpmPinnedLockPackedPaths(daemonDistDir) {
+  const { bundledCapabilities } = await import(pathToFileURL(path.join(daemonDistDir, "capabilities", "seed.js")).href);
+  const { npmPinnedLockAssetPath } = await import(pathToFileURL(path.join(daemonDistDir, "capabilities", "npm-pinned.js")).href);
+  const assetsRoot = path.join(daemonDistDir, "..", "assets");
+  return bundledCapabilities()
+    .filter((c) => c.kind === "npm-pinned")
+    .map((c) => JSON.parse(c.provisionJson))
+    .map((p) => {
+      const absLockPath = npmPinnedLockAssetPath(p.package, p.version);
+      const relLockPath = path.relative(assetsRoot, absLockPath).split(path.sep).join("/");
+      return path.posix.join("assets", relLockPath);
+    });
+}
+
+// Pure diff against npm's OWN `npm pack --dry-run --json` file list (`files[].path`, paths relative to
+// the package root) — the actual packed contents, not an assumption about what "should" be there.
+export function missingPackedPaths(requiredPaths, packedPaths) {
+  const packedSet = new Set(packedPaths);
+  return requiredPaths.filter((p) => !packedSet.has(p));
+}
+
 // Everything below is the actual packaging side effects (build/verify/stage/pack) — guarded so this
 // module can be IMPORTED (for PACKAGED_ROOTS above) without running any of it. Only fires when this
 // file is executed directly (`node scripts/build-npm-package.mjs`), never on import.
@@ -77,6 +100,18 @@ function run(cmd, cmdArgs, opts = {}) {
     console.error(`[pack:npm] command failed (exit ${r.status}): ${cmd} ${cmdArgs.join(" ")}`);
     process.exit(r.status ?? 1);
   }
+}
+
+// Same contract as run() but CAPTURES stdout instead of inheriting it — needed for `npm pack --dry-run
+// --json`, whose stdout IS the result this script parses (stderr still surfaces to the real console).
+function runCapture(cmd, cmdArgs, opts = {}) {
+  const r = spawnSync(cmd, cmdArgs, { shell: process.platform === "win32", cwd: repoRoot, encoding: "utf8", ...opts });
+  if (r.stderr) process.stderr.write(r.stderr);
+  if (r.status !== 0) {
+    console.error(`[pack:npm] command failed (exit ${r.status}): ${cmd} ${cmdArgs.join(" ")}`);
+    process.exit(r.status ?? 1);
+  }
+  return r.stdout;
 }
 
 // 1. Build the workspace (shared → daemon → web) unless told to skip.
@@ -276,6 +311,41 @@ const pkg = {
 };
 fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
 log(`wrote staging package.json (loomctl@${pkg.version})`);
+
+// 5b. Verify every seeded npm-pinned row's committed lock asset survives npm's OWN pack logic against
+// the ACTUAL packed contents (card 1ebbf523 — see docs/decisions/1ebbf523-npm-pinned-lock-pack-assertion.md),
+// not just the source assets dir step 2's firstNpmPinnedLockAsset() already checked. `npm pack --dry-run
+// --json` never touches the network and never writes a tarball — safe to run on every invocation,
+// including --no-pack.
+{
+  const dryRunOut = runCapture("npm", ["pack", "--dry-run", "--json"], { cwd: stage });
+  let packResult;
+  try {
+    packResult = JSON.parse(dryRunOut)[0];
+  } catch (e) {
+    console.error(`[pack:npm] could not parse \`npm pack --dry-run --json\` output: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+  const packedPaths = (packResult?.files ?? []).map((f) => f.path);
+  const required = await requiredNpmPinnedLockPackedPaths(daemonDist);
+  if (required.length === 0) {
+    console.error("[pack:npm] derived ZERO required npm-pinned lock paths from bundledCapabilities() — this " +
+      "likely means the seed import failed silently; refusing rather than passing a vacuous check.");
+    process.exit(1);
+  }
+  const missing = missingPackedPaths(required, packedPaths);
+  if (missing.length > 0) {
+    console.error(
+      `[pack:npm] refusing to package — npm's own packed file list is MISSING the committed npm-pinned ` +
+        `lock asset(s) for: ${missing.join(", ")}. These exist in the staged assets dir but npm's own \`npm ` +
+        `pack\` file-inclusion logic dropped them — a fresh install of the affected row(s) would fail closed ` +
+        `(lock-missing) on every real end-user host. Required set derived from bundledCapabilities() ` +
+        `(dist/capabilities/seed.js) + npmPinnedLockAssetPath() (dist/capabilities/npm-pinned.js).`,
+    );
+    process.exit(1);
+  }
+  log(`verified ${required.length} npm-pinned lock asset(s) survive npm pack: ${required.join(", ")}`);
+}
 
 // 6. npm pack → tarball at the repo root (unless --no-pack).
 if (noPack) {
