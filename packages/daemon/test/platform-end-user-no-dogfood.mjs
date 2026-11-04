@@ -173,32 +173,6 @@ const ROUTER_ID_CITATION_ALLOWLIST = [
   { surface: "OrchestrationMcpRouter(manager)", tool: "gate_history", expectedCount: 30 },
   { surface: "OrchestrationMcpRouter(manager)", tool: "served_status", expectedCount: 22 },
   { surface: "OrchestrationMcpRouter(worker)", tool: "gate_queue", expectedCount: 21 },
-  { surface: "TaskMcpRouter(worker)", tool: "tasks_list", expectedCount: 6 },
-  { surface: "TaskMcpRouter(worker)", tool: "tasks_get", expectedCount: 6 },
-  { surface: "TaskMcpRouter(worker)", tool: "tasks_create", expectedCount: 4 },
-  { surface: "TaskMcpRouter(worker)", tool: "tasks_update", expectedCount: 17 },
-  { surface: "TaskMcpRouter(worker)", tool: "tasks_defer_item", expectedCount: 1 },
-  { surface: "TaskMcpRouter(worker)", tool: "tasks_defer_item_ack", expectedCount: 1 },
-  { surface: "TaskMcpRouter(worker)", tool: "memory_write", expectedCount: 4 },
-  { surface: "TaskMcpRouter(worker)", tool: "memory_forget", expectedCount: 2 },
-  { surface: "TaskMcpRouter(worker)", tool: "memory_list", expectedCount: 1 },
-  { surface: "TaskMcpRouter(worker)", tool: "memory_read", expectedCount: 1 },
-  { surface: "TaskMcpRouter(worker)", tool: "decisions_for", expectedCount: 3 },
-  { surface: "TaskMcpRouter(manager)", tool: "tasks_list", expectedCount: 6 },
-  { surface: "TaskMcpRouter(manager)", tool: "tasks_get", expectedCount: 6 },
-  { surface: "TaskMcpRouter(manager)", tool: "tasks_create", expectedCount: 4 },
-  { surface: "TaskMcpRouter(manager)", tool: "tasks_update", expectedCount: 17 },
-  { surface: "TaskMcpRouter(manager)", tool: "tasks_defer_item", expectedCount: 1 },
-  { surface: "TaskMcpRouter(manager)", tool: "tasks_defer_item_ack", expectedCount: 1 },
-  { surface: "TaskMcpRouter(manager)", tool: "memory_write", expectedCount: 4 },
-  { surface: "TaskMcpRouter(manager)", tool: "memory_forget", expectedCount: 2 },
-  { surface: "TaskMcpRouter(manager)", tool: "memory_list", expectedCount: 1 },
-  { surface: "TaskMcpRouter(manager)", tool: "memory_read", expectedCount: 1 },
-  { surface: "TaskMcpRouter(manager)", tool: "decisions_for", expectedCount: 3 },
-  // Card 0018c8ab: both counts LOWERED by a real landed cleanup (the "@loom/shared" pointer that carried
-  // one of each tool's id citations was dropped alongside it) — list_sessions 3→2, transcript_read 1→0
-  // (dropped: "no entry ⇒ hard zero-tolerance" already covers 0 correctly).
-  { surface: "WorkspaceAuditMcpRouter", tool: "list_sessions", expectedCount: 2 },
 ];
 
 function idCitationCount(text) {

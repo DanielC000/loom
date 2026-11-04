@@ -548,13 +548,21 @@ function realRoot(root: string): string {
  * registration) so a project's `repoPath` edit is picked up immediately — mirrors `loomRepoRoot()`'s own
  * per-call re-read in repo-read.ts.
  */
+// Field-provenance pointers for `decisions_for`'s description below, relocated out of the agent-facing
+// text (an end-user agent can't resolve a card/decision id) — all three already have abundant plain
+// `card <id>` comments elsewhere in this same file, so no new decision record is added here:
+// Card 969b0e1c — the `sha:<id>` namespace + verified-commit anchor shape; see `looksLikeId`/`parseIdQuery`
+// and `ANCHOR_RE`'s own doc comments above in this file.
+// Card 2b2d9a47 — `skippedFiles`/`skippedForSize`/`MAX_FILE_BYTES`; see this file's own comments on those.
+// Card 2c387896 — `orphan:true` means "not anchored+recorded in THIS project's repoPath", not a global
+// absence claim; see this file's own comment on that return shape.
 export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => string | null | undefined): void {
   server.registerTool(
     "decisions_for",
     {
       description:
-        "The index over this project's `@decision <id>` (card) and `@decision sha:<id>` (verified commit, " +
-        "card 969b0e1c) source anchors and their out-of-band decision records (docs/adr/, docs/decisions/, " +
+        "The index over this project's `@decision <id>` (card) and `@decision sha:<id>` (verified commit) " +
+        "source anchors and their out-of-band decision records (docs/adr/, docs/decisions/, " +
         "docs/investigations/<id>-*/findings.md) — an ESCAPE HATCH for questions the on-Read injection hook " +
         "can't answer positionally, not the primary way to read a record (a plain Read whose range covers " +
         "an anchor line already surfaces that record's title + its 'Do not' section(s) — or an explicit " +
@@ -566,9 +574,9 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
         "silently treated as resolved) — either form returns {ns, id, record, anchoredIn: [{file,line}...], " +
         "orphan, skippedFiles, scopeNote?} (orphan:true if nothing cites this id, OR if the id has no " +
         "resolvable record but IS cited somewhere — check both `record` and `anchoredIn` to tell which; " +
-        "skippedFiles names every file this call could NOT scan for size — card 2b2d9a47 — a non-empty " +
+        "skippedFiles names every file this call could NOT scan for size — a non-empty " +
         "list means `orphan` is NOT a proven absence, only \"not found in what was scanned\": double-check " +
-        "with `git grep` before trusting orphan:true when skippedFiles is non-empty; card 2c387896: this " +
+        "with `git grep` before trusting orphan:true when skippedFiles is non-empty; this " +
         "call ONLY ever searches THIS project's own repoPath, never another project's — orphan:true present " +
         "alongside `scopeNote` means the id is not anchored+recorded HERE, which is not proof it doesn't " +
         "exist in a different Loom project); " +

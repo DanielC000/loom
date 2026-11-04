@@ -36,6 +36,8 @@ export function registerTranscriptReadTools(
   db: Db,
   opts: { agentPromptToolName?: string } = {},
 ): void {
+  // Card 2fb68e76 — the scope/state axis divergence between this tool and the Lead's/setup operator's own
+  // list_all_sessions; see mcp/platform.ts's and mcp/setup.ts's own comments on that same divergence.
   // --- cross-project reads (the audit input) ---
   server.registerTool(
     "list_sessions",
@@ -51,9 +53,9 @@ export function registerTranscriptReadTools(
         "ARCHIVED rows are the auditor's intended history and " +
         "are ALWAYS kept regardless of state. ⚠️ ONLY `state` mirrors — the SCOPE (archive-visibility) axis " +
         "does NOT: this tool defaults scope to \"all\" (archived included); the Lead's list_all_sessions " +
-        "carries its OWN `scope` param defaulting to \"live\" (archived excluded, opt in explicitly — card " +
-        "2fb68e76); the setup operator's list_all_sessions has no `scope` param at all and can NEVER see " +
-        "archived rows (a deliberate least-privilege choice, card 2fb68e76 DoD-3). NOTE: short-lived WORKER sessions usually EXIT once their task lands, so the default state:\"live\" " +
+        "carries its OWN `scope` param defaulting to \"live\" (archived excluded, opt in explicitly); " +
+        "the setup operator's list_all_sessions has no `scope` param at all and can NEVER see " +
+        "archived rows (a deliberate least-privilege choice). NOTE: short-lived WORKER sessions usually EXIT once their task lands, so the default state:\"live\" " +
         "feed shows mostly managers/operators — pass state:\"all\" (or scope:\"all\") to include finished workers " +
         "when auditing worker behavior. Optional projectId narrows to one project. DEFAULT returns a lightweight " +
         "SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, " +
