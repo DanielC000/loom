@@ -12,9 +12,11 @@
 //   (3) PLATFORM_MS_BOUNDS carries the values the daemon's zod schema enforced BEFORE card 0a5d61c9 moved
 //       the literals into it. The expected table below is a hand-authored copy of those pre-move literals,
 //       so a typo during the relocation fails here rather than silently retuning a platform-wide bound.
-//   (4) Two source scans: every GLOBAL_FIELDS entry in Settings.tsx has a bound (a missing one renders a
-//       silently unbounded field, since MsField simply drops the hint when `bounds` is undefined), and no
-//       bare `Number(...) * UNIT_MS` conversion has crept back in anywhere under src/.
+//   (4) Three source scans: every GLOBAL_FIELDS entry in Settings.tsx has a bound (a missing one renders
+//       a silently unbounded field, since MsField simply drops the hint when `bounds` is undefined);
+//       every entry's display unit renders BOTH halves of that bound as a short, readable figure (card
+//       7663eeb4 — hours cannot state a sub-hour floor: 60_000ms is 0.016666666666666666h); and no bare
+//       `Number(...) * UNIT_MS` conversion has crept back in anywhere under src/.
 //   (5) Card 826483a7: the four rate-limit loop-breaker fields are actually RENDERED (card dfef375f
 //       landed them REST-only), each ms one in a unit that renders its shared bound whole, and their one
 //       cross-field invariant (backoff base vs ceiling) behaves as the resolve-time CLAMP it is rather
@@ -252,6 +254,20 @@ check("a unitless platform field is deliberately ABSENT from the ms table", () =
 
 const settingsSrc = readFileSync(join(srcDir, "pages", "Settings.tsx"), "utf8");
 
+/** The GLOBAL_FIELDS table as Settings.tsx literally declares it: key -> {grp, sub, label, unit}. Read
+ *  from the source literal rather than imported, because importing the .tsx would pull React in. */
+function globalFieldsTable() {
+  const block = settingsSrc.slice(
+    settingsSrc.indexOf("const GLOBAL_FIELDS: GlobalFieldDesc[] = ["),
+    settingsSrc.indexOf("// Loads /api/platform/config then mounts the form"),
+  );
+  const out = new Map();
+  for (const m of block.matchAll(
+    /\{\s*grp:\s*"(\w+)",\s*(?:sub:\s*"(\w+)",\s*)?key:\s*"(\w+)",\s*label:\s*"([^"]*)",\s*unit:\s*"(\w+)"/g,
+  )) out.set(m[3], { grp: m[1], sub: m[2], label: m[4], unit: m[5] });
+  return out;
+}
+
 check("every GLOBAL_FIELDS entry in Settings.tsx has a PLATFORM_MS_BOUNDS entry", () => {
   // MsField silently renders no range hint and no inline error when `bounds` is undefined, so a global ms
   // field added without a bound fails OPEN — invisible in a render-only eyeball. This scan is what makes
@@ -275,6 +291,62 @@ check("every GLOBAL_FIELDS entry in Settings.tsx has a PLATFORM_MS_BOUNDS entry"
   }
 });
 
+/** A bound figure MsField actually renders: `ms / UNIT_MS[unit]`, stringified. "Legible" = a whole number
+ *  or at most two decimals, so `0.5s` stays a perfectly good way to state a 500ms floor while
+ *  `0.016666666666666666h` does not. Exponential notation (`1e-7`) fails too, by the same reading. */
+const LEGIBLE_FIGURE = /^\d+(\.\d{1,2})?$/;
+const figureIn = (ms, unit) => String(ms / UNIT_MS[unit]);
+
+check("every GLOBAL_FIELDS entry renders BOTH halves of its bound as a legible figure in its own unit", () => {
+  // Card 7663eeb4. The per-field version of this rule arrived with card 826483a7's three loop-breaker
+  // fields (section 5 below, which pins their tighter whole-number choice); it is corpus-wide here
+  // because the two fields that actually shipped the defect — "Default backoff" and "Deadline, no reset",
+  // both in hours over a sub-hour floor — predate that card and no check could see them. A unit is not a
+  // per-card aesthetic decision: it decides whether this field's own policy bound is statable at all.
+  //
+  // ⚠️ KNOWN GAP, deliberately not papered over: this covers the GLOBAL_FIELDS *table* only. Settings.tsx
+  // also has hand-written MsField call sites that declare their unit and bounds inline (the connections
+  // and telemetry/update rows), and they are invisible here. One of them is currently illegible by this
+  // same rule — Connections → "Rate limit window (m)", floor 1000ms → "min 0.016666666666666666m" — found
+  // by the e2e absence assertion in e2e/settings-rate-limit-units.spec.ts, reported up rather than fixed
+  // under card 7663eeb4. Widening this scan means first giving those call sites a table to be read from.
+  const table = globalFieldsTable();
+  // Second exact count, on a SEPARATE regex from the scan above: both must see the whole table, so a
+  // future property inserted between `grp` and `key` cannot silently empty one of them (card 826483a7
+  // shipped exactly that fail-open, caught only by a count).
+  assert.equal(table.size, 24, `expected 24 parsed GLOBAL_FIELDS entries, got ${table.size}`);
+  for (const [key, { grp, unit, label }] of table) {
+    const b = PLATFORM_MS_BOUNDS[grp][key];
+    // msRangeHint drops the max half only at the raw Node timer ceiling — but the inline out-of-range
+    // ERROR states both halves regardless, so both are checked whenever that ceiling is not in play.
+    for (const half of b.max === MAX_TIMER_DELAY_MS ? ["min"] : ["min", "max"]) {
+      const fig = figureIn(b[half], unit);
+      assert.ok(
+        LEGIBLE_FIGURE.test(fig),
+        `${label} (${grp}.${key}) in "${unit}" renders its ${half} bound as ${fig}${unit} — pick a unit whose bound reads as a short figure`,
+      );
+    }
+  }
+  // Discriminating controls on the RULE, so the sweep above cannot pass merely by matching anything.
+  // Hours over these two floors is a real option the table could pick (it is what it picked until this
+  // card) and is exactly what the rule rejects:
+  assert.equal(LEGIBLE_FIGURE.test(figureIn(PLATFORM_MS_BOUNDS.rateLimit.defaultBackoffMs.min, "h")), false);
+  assert.equal(LEGIBLE_FIGURE.test(figureIn(PLATFORM_MS_BOUNDS.rateLimit.deadlineNoResetMs.min, "h")), false);
+  // ...while a sub-unit bound that still reads cleanly must NOT be rejected — the rule is legibility,
+  // not whole numbers (a stricter integer rule here would forbid a legitimate "0.5s" floor).
+  assert.equal(LEGIBLE_FIGURE.test(figureIn(500, "s")), true);
+  assert.equal(LEGIBLE_FIGURE.test(figureIn(0, "h")), true);
+  // And the figures the page really prints come from msInUnit/msRangeHint, not from this test's own
+  // arithmetic — asserted through the helper, at whatever unit the table currently declares, so changing
+  // either field's unit back fails HERE with the rendered string rather than only in the sweep.
+  for (const [key, expected] of [
+    ["defaultBackoffMs", "min 1m · max 1440m"],
+    ["deadlineNoResetMs", "min 10m · max 2880m"],
+  ]) {
+    assert.equal(msRangeHint(PLATFORM_MS_BOUNDS.rateLimit[key], table.get(key).unit), expected, key);
+  }
+});
+
 // ── (5) The rate-limit loop-breaker fields are actually rendered, in units that read whole ───────────
 //
 // Card 826483a7. Card dfef375f landed four platform fields that no control rendered — REST-only, so the
@@ -282,19 +354,6 @@ check("every GLOBAL_FIELDS entry in Settings.tsx has a PLATFORM_MS_BOUNDS entry"
 // that each ms one is displayed in the unit whose shared bound is a WHOLE number: `loopBreakerQuickGapMs`
 // has a deliberately-seconds floor (1s), and both backoff fields' floor is 60_000 — shown in hours that
 // renders "min 0.016666666666666666h", which reads as a broken hint rather than a policy minimum.
-
-/** The GLOBAL_FIELDS table as Settings.tsx literally declares it: key -> {grp, unit}. */
-function globalFieldsTable() {
-  const block = settingsSrc.slice(
-    settingsSrc.indexOf("const GLOBAL_FIELDS: GlobalFieldDesc[] = ["),
-    settingsSrc.indexOf("// Loads /api/platform/config then mounts the form"),
-  );
-  const out = new Map();
-  for (const m of block.matchAll(
-    /\{\s*grp:\s*"(\w+)",\s*(?:sub:\s*"(\w+)",\s*)?key:\s*"(\w+)",\s*label:\s*"([^"]*)",\s*unit:\s*"(\w+)"/g,
-  )) out.set(m[3], { grp: m[1], sub: m[2], label: m[4], unit: m[5] });
-  return out;
-}
 
 check("the three loop-breaker ms fields are rendered by Settings.tsx, under the loopBreaker sub-panel", () => {
   const table = globalFieldsTable();

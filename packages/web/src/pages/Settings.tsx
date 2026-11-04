@@ -1394,8 +1394,17 @@ function ConfigEditor({ project }: { project: Project }) {
 // --- Global / Daemon config (NOT project-scoped) ------------------------------------------------
 
 // The Tier-1 platform tuning fields, grouped into the three sub-panels. Each maps a canonical-ms key
-// to a human display unit. Keys are unique ACROSS groups, so the form holds one flat string dict. Units
-// follow the epic: rate-limit backoff/deadlines/windows in h/m, buffers + cadences + timeouts in s.
+// to a human display unit. Keys are unique ACROSS groups, so the form holds one flat string dict.
+//
+// A field's `unit` is NOT a free aesthetic choice: MsField renders BOTH halves of the field's shared
+// PLATFORM_MS_BOUNDS entry in it, twice (the always-on range hint, and the inline out-of-range error),
+// so the unit has to be one those two figures read legibly in. That rules hours out for any field whose
+// floor is sub-hour — 60_000ms in `h` is 0.016666666666666666, which reads as a broken hint rather than
+// a policy minimum (card 7663eeb4; it shipped that way on two fields before anyone looked at the
+// rendered page). Pick the coarsest unit in which both bounds still render as short figures, and prefer
+// the unit a related field already uses so the two stay comparable at a glance. test/ms-units.mjs
+// asserts this over the whole table, so a new entry in the wrong unit fails the build rather than the
+// eyeball.
 type Grp = "rateLimit" | "watchers" | "timeouts";
 /** `grp` is the CONFIG group (it drives both the PATCH body and the bounds lookup, so it must stay the
  *  real key name). `sub` is a purely PRESENTATIONAL second axis: a coherent sub-mechanism that earns its
@@ -1409,10 +1418,15 @@ interface GlobalFieldDesc { grp: Grp; sub?: GlobalFieldSub; key: string; label: 
 const globalBounds = (f: GlobalFieldDesc): MsBounds =>
   (PLATFORM_MS_BOUNDS[f.grp] as unknown as Record<string, MsBounds>)[f.key] as MsBounds;
 const GLOBAL_FIELDS: GlobalFieldDesc[] = [
-  // Rate Limits
-  { grp: "rateLimit", key: "defaultBackoffMs", label: "Default backoff (h)", unit: "h" },
+  // Rate Limits. The two backoff/deadline fields read in MINUTES, not hours (card 7663eeb4): their
+  // floors are 1 minute and 10 minutes, which hours cannot state legibly, and minutes also makes
+  // "Deadline after reset" / "Deadline, no reset" one comparable pair instead of two units. Recency
+  // window keeps hours — its 0..24h bounds render whole either way, and the span it describes is read in
+  // hours. Defaults are hours-scale, so these two show as 300m / 360m: deliberately traded, since the
+  // placeholder and `effective:` hint both carry the resolved figure in the same unit as the bound.
+  { grp: "rateLimit", key: "defaultBackoffMs", label: "Default backoff (m)", unit: "m" },
   { grp: "rateLimit", key: "deadlineAfterResetMs", label: "Deadline after reset (m)", unit: "m" },
-  { grp: "rateLimit", key: "deadlineNoResetMs", label: "Deadline, no reset (h)", unit: "h" },
+  { grp: "rateLimit", key: "deadlineNoResetMs", label: "Deadline, no reset (m)", unit: "m" },
   { grp: "rateLimit", key: "recencyWindowMs", label: "Recency window (h)", unit: "h" },
   { grp: "rateLimit", key: "resetBufferMs", label: "Reset buffer (s)", unit: "s" },
   // Rate-limit Loop Breaker (card dfef375f's fields, surfaced by card 826483a7). Each unit is the one
