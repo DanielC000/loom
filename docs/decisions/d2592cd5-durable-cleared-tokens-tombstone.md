@@ -314,6 +314,32 @@ classification could itself go stale between a token's write and a later read) i
 general question about the mechanism as a whole — this card touches only WHAT gets persisted, never the
 literal-gate classification itself, so it is unchanged, and out of scope, here.
 
+## Follow-up (card `6bdd2e87`) — the READDIR-failure branch, a different branch than the Round 2 mutants above
+
+The Round 2 mutants above killed the per-file `readFileSync` unreadable-file branch (`return
+true`→`continue`) in both gates. Neither gate's OWN FIRST fs call — `fs.readdirSync(MERGE_QUARANTINE_DIR)`
+itself, `catch { return true; }`, before either function ever looks at a single file — was ever exercised
+by any scenario in this file; a `return false` mutant there survived the full corpus clean (99/99 green).
+
+Closed with two new scenarios in `merge-quarantine-d2592cd5-reboot-between-clears.mjs`: Scenario K
+(`identityHasAnyPhysicalRecordHoldingToken`, at `clearTokenFromPendingIndices`'s reduce branch — the same
+AE shape as Scenario H) and Scenario L (`identityHasAnyPhysicalRecordOnDisk`, at
+`tryClearMergeQuarantineByOwnIdentity`'s pending-sweep branch via `clearMergeQuarantineByRecordedPath` —
+the same shape as Scenario D). Both plant an untracked AE stray holding the token BEFORE the clear, then
+fault `fs.readdirSync` for `MERGE_QUARANTINE_DIR` only (a new `injectReaddirFaultAt` helper, same shape as
+this file's own `injectRenameFaultAt`/`injectUnlinkFaultAt`) around the clear call, restoring it before
+reboot. Every OTHER `fs.readdirSync(MERGE_QUARANTINE_DIR)` call this module makes during a clear (the
+tmp-residue sweeps) already fails SOFT on its own catch, so faulting the real `fs.readdirSync` for the
+whole clear call never breaks the clear's own write — verified: the tracked copy still narrows/lifts
+correctly under the fault in both scenarios.
+
+Mutation-tested, each independently: `identityHasAnyPhysicalRecordOnDisk`'s readdir catch → `return
+false` turned exactly Scenario L's own "THE FIX" assertion RED (110/111, nothing else); the identical
+mutant on `identityHasAnyPhysicalRecordHoldingToken` turned exactly Scenario K's own assertion RED
+(110/111, nothing else) — confirming each readdir-failure branch is independently load-bearing and the
+two new scenarios don't overlap with any pre-existing one. Dist restored byte-identically after each
+mutant (`tsconfig.tsbuildinfo` deleted before rebuild, `cmp` confirmed against a pre-mutant backup).
+
 ## Do not
 
 - Do not move the tombstone sidecar back inside `MERGE_QUARANTINE_DIR` — a test or production sweep that

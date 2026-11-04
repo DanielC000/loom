@@ -137,6 +137,28 @@ function injectReadFaultAt(targetPath) {
   return { restore: () => { fs.readFileSync = realReadFileSync; }, hits: () => hits };
 }
 
+// Card 6bdd2e87 — faults every readdirSync call whose target is exactly `targetDir` (MERGE_QUARANTINE_DIR
+// for both call sites below) — simulates a transient directory-listing failure (EMFILE) on
+// `identityHasAnyPhysicalRecordHoldingToken`'s / `identityHasAnyPhysicalRecordOnDisk`'s own FIRST fs
+// call (the readdir itself, before either function ever gets to look at a single file) — a different
+// branch than Scenario M3/M2's per-file readFileSync EACCES above, which only fires once the readdir
+// has already succeeded. Every OTHER `fs.readdirSync(MERGE_QUARANTINE_DIR)` call this module makes
+// during a clear (the tmp-residue sweeps) already fails SOFT on its own catch (an empty/safe default,
+// never a re-thrown error it would need to survive), so faulting the real `fs.readdirSync` for the
+// whole clear call never breaks the clear's own writes.
+function injectReaddirFaultAt(targetDir, code = "EMFILE") {
+  const realReaddirSync = fs.readdirSync;
+  let hits = 0;
+  fs.readdirSync = (p, ...rest) => {
+    if (p === targetDir) {
+      hits++;
+      throw Object.assign(new Error(`${code}: simulated readdir failure`), { code });
+    }
+    return realReaddirSync(p, ...rest);
+  };
+  return { restore: () => { fs.readdirSync = realReaddirSync; }, hits: () => hits };
+}
+
 function readTokensOnDisk(basename) {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, basename), "utf8"));
@@ -805,6 +827,85 @@ async function rebootSim() {
   check("*** KILLS MUTANT 4b (clearMergeQuarantineLatchFile matched-pending !pendingAnyKept) *** the sidecar never durably tombstones t1 while a foreign orphan was content-kept", sidecarM6b[t1b] === undefined);
 
   fs.rmSync(path.join(MERGE_QUARANTINE_DIR, orphanBasenameM6b), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO K (card 6bdd2e87) — `identityHasAnyPhysicalRecordHoldingToken`'s own READDIR-failure branch
+// (`catch { return true; }` on the function's FIRST fs call, before any per-file read even runs — a
+// different branch than Scenario M3's per-file-read EACCES, which only fires once the readdir itself
+// has already succeeded). Same AE shape as Scenario H (`clearTokenFromPendingIndices`'s reduce branch,
+// a PENDING-only, unresolvable identity holding two tokens, an untracked stray sibling holding the
+// token about to be cleared) — but this time `fs.readdirSync(MERGE_QUARANTINE_DIR)` itself throws
+// (EMFILE) during the clear, so the gate never even gets to look at the stray's content. The real,
+// fail-closed code must still withhold the durable tombstone (treat "could not check" as "might still
+// be there"); an API-keeping mutant that turns the catch into `return false` would wrongly durably
+// tombstone t1 even though the untracked stray still holds it.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const k = path.join(os.tmpdir(), `loom-mqd2592cd5-k-never-exists-${freshSfx()}`);
+  const t1 = enterMergeQuarantine(k, "loom/6bdd2e87-k-1", "6bdd2e87-k: raise 1 (t1)");
+  const t2 = enterMergeQuarantine(k, "loom/6bdd2e87-k-2", "6bdd2e87-k: raise 2 (t2)");
+
+  const sourceFile = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f.endsWith(".json") && sameTokenSet(readTokensOnDisk(f), [t1, t2]));
+  check("(k precondition) found the tracked pending latch file on disk holding t1+t2", typeof sourceFile === "string");
+
+  const strayPath = path.join(MERGE_QUARANTINE_DIR, `stray-k-${freshSfx()}.json`);
+  fs.writeFileSync(strayPath, JSON.stringify({
+    repoPath: k, branch: "loom/6bdd2e87-k-stray", reason: "AE-shaped untracked sibling (never in orphanLatchFiles)",
+    enteredAt: Date.now(), tokens: [t1],
+  }, null, 2) + "\n", "utf8");
+  check("(k precondition) the untracked stray sibling genuinely holds t1 on disk", sameTokenSet(readTokensOnDisk(path.basename(strayPath)), [t1]));
+
+  const injectReaddirK = injectReaddirFaultAt(MERGE_QUARANTINE_DIR);
+  try { clearMergeQuarantineByToken(k, t1); } finally { injectReaddirK.restore(); }
+  check("(k precondition) MERGE_QUARANTINE_DIR's own readdir was forced to fail at least once during the clear", injectReaddirK.hits() > 0);
+  check("(k precondition) the tracked copy durably narrowed to just t2 — the clear's own write still succeeded under the readdir fault", sameTokenSet(readTokensOnDisk(sourceFile), [t2]));
+  check("(k precondition) k still reads blocked, by t2, right after the clear", stillBlockedEntryFor(k)?.tokens.includes(t2) === true);
+
+  const rb = await rebootSim();
+  rb.reenterMergeQuarantinesAtBoot([k]);
+  // `stillBlockedEntryFor`'s first-match read is not enough here — mirrors Scenario H's own reasoning:
+  // k's identity now has TWO independent on-disk records (the tracked [t2] copy and the untracked [t1]
+  // stray) — union across every boot-time record for k instead.
+  const listedAfterBootK = rb.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(k));
+  check("*** THE FIX (identityHasAnyPhysicalRecordHoldingToken readdir-failure fail-closed) *** some boot-time record for k still carries t1 — the untracked stray was never tombstoned away despite the readdir fault", listedAfterBootK.some((e) => e.tokens.includes(t1)));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO L (card 6bdd2e87) — `identityHasAnyPhysicalRecordOnDisk`'s own READDIR-failure branch
+// (`catch { return true; }` on the function's FIRST fs call) — the FULL identity-wide twin of Scenario
+// K, at `tryClearMergeQuarantineByOwnIdentity`'s own pending-sweep branch (reached via the exported,
+// identity-wide `clearMergeQuarantineByRecordedPath`, same site as Scenario D/M2/M6a). An untracked
+// stray sibling for the SAME identity, holding the only outstanding token, sits on disk BEFORE the
+// clear runs; `fs.readdirSync(MERGE_QUARANTINE_DIR)` itself throws (EMFILE) during the clear, so the
+// gate can never discover it by content. The real code must still withhold the durable tombstone; an
+// API-keeping mutant (`return false`) would wrongly write it even though the stray still holds t1.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const l = path.join(os.tmpdir(), `loom-mqd2592cd5-l-never-exists-${freshSfx()}`);
+  const t1 = enterMergeQuarantine(l, "loom/6bdd2e87-l-1", "6bdd2e87-l: raise 1 (t1)");
+
+  const sourceFile = fs.readdirSync(MERGE_QUARANTINE_DIR).find((f) => f.endsWith(".json") && sameTokenSet(readTokensOnDisk(f), [t1]));
+  check("(l precondition) found the pending latch file on disk holding t1 alone", typeof sourceFile === "string");
+
+  const strayPath = path.join(MERGE_QUARANTINE_DIR, `stray-l-${freshSfx()}.json`);
+  fs.writeFileSync(strayPath, JSON.stringify({
+    repoPath: l, branch: "loom/6bdd2e87-l-stray", reason: "AE-shaped untracked sibling (never in orphanLatchFiles)",
+    enteredAt: Date.now(), tokens: [t1],
+  }, null, 2) + "\n", "utf8");
+  check("(l precondition) the untracked stray sibling genuinely holds t1 on disk", sameTokenSet(readTokensOnDisk(path.basename(strayPath)), [t1]));
+
+  const injectReaddirL = injectReaddirFaultAt(MERGE_QUARANTINE_DIR);
+  let clearResultL;
+  try { clearResultL = clearMergeQuarantineByRecordedPath(l); } finally { injectReaddirL.restore(); }
+  check("(l precondition) MERGE_QUARANTINE_DIR's own readdir was forced to fail at least once during the clear", injectReaddirL.hits() > 0);
+  check("(l precondition) the broad identity-wide clear reports nothing kept — its own write still succeeded under the readdir fault", !clearResultL.latchKept);
+  check("(l precondition) l reads fully unblocked right after the clear (in-memory)", stillBlockedEntryFor(l) === undefined);
+
+  const rb = await rebootSim();
+  rb.reenterMergeQuarantinesAtBoot([l]);
+  const listedAfterBootL = rb.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(l));
+  check("*** THE FIX (identityHasAnyPhysicalRecordOnDisk readdir-failure fail-closed) *** some boot-time record for l still carries t1 — the untracked stray was never tombstoned away despite the readdir fault", listedAfterBootL.some((e) => e.tokens.includes(t1)));
 }
 
 console.log(failures === 0
