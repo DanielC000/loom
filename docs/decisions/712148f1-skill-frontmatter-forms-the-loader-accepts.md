@@ -45,10 +45,16 @@ process was ever started; `claude --version` (metadata only, not a model turn) w
 | `~~~!` tilde fence | **CONFIRMED NOT RECOGNIZED** | 0 hits for the literal anywhere in the binary; the one real fenced-shell regex found requires literal triple-backtick |
 | Fenced trigger (` ```! `) anchored to a line start | **CONFIRMED NOT ANCHORED in the real loader** | `` ```!\s*\n?([\s\S]*?)\n?``` `` and its boolean-test twin (immediately followed by the literal string `"[shell command execution disabled by policy]"`) carry no `^`, no leading-whitespace bound, no multiline flag |
 | Inline trigger (`` !`cmd` ``) backtick-lookbehind (the triage note's case) | **RESOLVED — NOT a bypass** | real regex is `(?<=^|\s)!`([^`]+)`` ` — requires the `!` be preceded by start-of-string/content or whitespace. See "Triage-note resolution" below |
-| Quoted frontmatter key (`"allowed-tools": Bash`, `'hooks': {}`) | UNCONFIRMED loader acceptance — round 2: fail-closed as unrecognized syntax (withheld whole), not merely a labeled vector | no key/value-interpretation regex found near any of the 3 boundary-regex call sites |
-| Whitespace before the colon (`allowed-tools : Bash`) | UNCONFIRMED loader acceptance — ALLOWLISTED (still a plain top-level line; strips normally) | same gap as above |
-| Flow-mapping frontmatter (`{name: x, allowed-tools: Bash}`, any line, single- or multi-line) | UNCONFIRMED loader acceptance — round 2: fail-closed as unrecognized syntax (withheld whole) | same gap as above |
-| Explicit key (`? allowed-tools` / `: Bash`), tagged key (`!!str allowed-tools: Bash`), merge key (`<<: *a`), escaped-character quoted key (`"allowed\x2dtools": Bash`), an anchor/alias/tag VALUE (`base: &a`, `ref: *a`, `kind: !!str x`) | round 2: fail-closed as unrecognized syntax, by DESIGN — never evaluated against the loader (the allowlist rejects the SHAPE regardless of whether the real loader would honor it; see "Round 2" below) | n/a — the allowlist posture makes per-form loader acceptance irrelevant for anything it doesn't recognize |
+| Quoted frontmatter key (`"allowed-tools": Bash`, `'hooks': {}`) | **MEASURED-VIA-PROXY ACCEPTED** (card `6ee2f9dd`, round 7) — round 2: fail-closed as unrecognized syntax (withheld whole) either way | real local Bun 1.3.10's `Bun.YAML.parse` resolves both to a live top-level key; `frontmatterUnrecognizedSyntax` independently flags both too |
+| Whitespace before the colon (`allowed-tools : Bash`) | **MEASURED-VIA-PROXY ACCEPTED** (card `6ee2f9dd`, round 7) — ALLOWLISTED (still a plain top-level line; strips normally) | `Bun.YAML.parse("allowed-tools : Bash\n")` => `{"allowed-tools":"Bash"}` |
+| Flow-mapping frontmatter (`{name: x, allowed-tools: Bash}`, as the WHOLE frontmatter doc, single- or multi-line) | **MEASURED-VIA-PROXY ACCEPTED** (card `6ee2f9dd`, round 7) — round 2: fail-closed as unrecognized syntax (withheld whole) either way | `Bun.YAML.parse` resolves both shapes to a live top-level `allowed-tools` key. A DIFFERENT shape — the SAME flow mapping as the VALUE of an unrelated key on a non-whole-doc line (e.g. `other: {name: x, allowed-tools: Bash}`) — is confirmed INERT: Bun nests `allowed-tools` under `other`, never promoting it to the top level; this is the pre-existing NIT 5 over-label, not a new form |
+| Explicit key (`? allowed-tools` / `: Bash`), tagged key (`!!str allowed-tools: Bash`), merge key (`<<: *a`), escaped-character quoted key (`"allowed\x2dtools": Bash`), an anchor/alias/tag VALUE (`base: &a`, `ref: *a`, `kind: !!str x`) | **MEASURED-VIA-PROXY ACCEPTED, every one** (card `6ee2f9dd`, round 7) — still fail-closed as unrecognized syntax, by DESIGN (the allowlist rejects the SHAPE, not a recognition of what it means) | real Bun resolves every one to a genuinely live top-level key, including the merge-key case (the merge itself resolves `allowed-tools` live at the top level) — but the allowlist's own catch is STRUCTURAL in both the merge-key and quoted-key cases (`<<:`/a leading quote can never match `PLAIN_TOP_LEVEL_KEY_LINE_RE`'s key charclass), never a recognition of merge or escape semantics; see round 7 below |
+
+**Every "MEASURED-VIA-PROXY" verdict above is from card `6ee2f9dd` (round 7, below): a real LOCAL Bun
+1.3.10's own `Bun.YAML.parse`, never the installed `claude.exe` build itself** (round 6's own
+342,408,352 B / mtime `2026-11-04T01:00:05` build — no recoverable semver, so never cite a version number
+for it) — a strong proxy for the real loader given round 6's own confirmation that the loader calls
+`Bun.YAML.parse` directly, but not a byte-identical measurement of that build's own bundled Bun runtime.
 
 ## Triage-note resolution: the backtick-lookbehind case is NOT a bypass
 
@@ -405,12 +411,12 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
   loader; see the table.
 - Do not add a backtick-lookbehind-removal "fix" to `INLINE_SHELL_RE` on the premise that the triage note
   found a real bypass — it didn't; see "Triage-note resolution" above.
-- Do not treat the quoted-key/space-before-colon/flow-mapping forms as confirmed loader behaviour —
-  loader acceptance is still UNCONFIRMED for all of them, same posture as the BOM handling in
-  `51a2462a`/`87a51903`. (Round 2 changed how UNCONFIRMED-but-exotic syntax is HANDLED — fail-closed via
-  the allowlist rather than labeled via a denylist widening — not whether the underlying loader question
-  is confirmed; it still isn't.) If a future static read of a newer CLI build settles the question either
-  way, update this table and this "Do not" bullet, not just the code.
+- Do not treat card `6ee2f9dd`'s MEASURED-VIA-PROXY verdicts (real local Bun 1.3.10, never the installed
+  `claude.exe` build's own bundled runtime) as a byte-identical measurement of that build — every
+  quoted-key/space-before-colon/flow-mapping/explicit-tagged-merge-key/anchor-alias-tag-value form is now
+  confirmed ACCEPTED by that proxy (see the table), still fail-closed either way. If a future static read
+  of the installed build's own bundled Bun source settles the loader identity byte-for-byte, update this
+  table and this bullet again, not just the code.
 - Do not go back to enumerating YAML key syntax (a denylist) in `detectPermissionWidening`/
   `topLevelFrontmatterKeys`/`flowMappingFrontmatterKeys` to catch a new exotic form — round 2 replaced
   that approach specifically because it cannot converge (see "Round 2" above: an explicit key, a tagged
@@ -421,10 +427,6 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
   `stripFrontmatterKeys`/`stripShellTriggers` fixpoint loop — `stripFrontmatterKeys`'s own quote-tolerant
   key match would DELETE a quoted hazard line first, defeating round 2's "no attempt to strip a
   non-allowlisted line" requirement by making the deletion look like a successful surgical strip.
-- Do not let `skill-permission-widening-guard.mjs`'s round-2 allowlist copy
-  (`PLAIN_TOP_LEVEL_KEY_LINE_RE`/`SEQUENCE_ITEM_RE`/`FRONTMATTER_VALUE_START_FORBIDDEN_RE`/its own
-  `frontmatterUnrecognizedSyntax`) drift from `permissionWidening.ts`'s real exports — widen both
-  together, and let `skill-permission-widening-lockstep.mjs` prove they still match on every change.
 - Do not give `stripFrontmatterKeys` flow-mapping-aware surgical removal logic — the manager's explicit
   call: refuse-at-write + withhold-at-delivery is the accepted outcome for this one exotic form; a
   surgical rewrite would be a second, harder-to-verify code path for a case the existing fail-closed
@@ -432,8 +434,6 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
 - Do not remove the `{`-presence gate on `flowMappingFrontmatterKeys`/`flowMappingKeysOf` — without it, an
   ordinary frontmatter line whose plain scalar value merely contains a comma false-positives with no flow
   mapping present anywhere in the block (measured, not theoretical — this is what the gate was added to fix).
-- Do not let `skill-permission-widening-guard.mjs`'s own copy of these patterns drift from
-  `permissionWidening.ts`'s real ones — widen both together, every time either changes.
 - Do not re-verify any of the per-form verdicts in this record by trusting an EARLIER scan's conclusions
   against a NEWER installed CLI build. Re-run the static-scan method (or a successor to it) against
   whatever `claude --version` reports at the time, and update this record's version line + table if
@@ -441,7 +441,7 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
 - Do not revert `frontmatterUnrecognizedSyntax`'s indentation rule back to an unconditional "any indented
   line is neutral" (round 3, MAJOR 1) — a frontmatter block's ROOT can itself be indented in real YAML,
   and the fix (gate indentation-is-neutral on `seenTopLevelKey`) is load-bearing for the four repros named
-  above. Keep both copies (`permissionWidening.ts`, `skill-permission-widening-guard.mjs`) in lockstep.
+  above.
 - Do not go back to an INCLUDE-shaped `SkillPermissionField`/scan filter in `permission-scan.ts` (round 3,
   MAJOR 2) — `isScannedPermissionField`'s EXCLUDE shape (naming only the two shell forms
   `disableSkillShellExecution` already neutralizes) is what keeps a future `SkillPermissionVector` member
@@ -450,11 +450,6 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
 - Do not render or log `findings[].fields` anywhere (e.g. a future `pty/host.ts` consumer) without routing
   each id through `SKILL_PERMISSION_FIELD_LABEL` — its `Record<SkillPermissionField, string>` shape is
   what makes a future vector a compile error here until it's given a label.
-- Do not trust `skill-permission-widening-lockstep.mjs`'s regex-literal-only checks as proof the guard's
-  own `frontmatterUnrecognizedSyntax` LOGIC still agrees with the real module (round 3, MINOR 3) — only
-  the DIFFERENTIAL check (extracting and running the guard's real function source side by side with the
-  real module's export) proves that; keep it in lockstep with any future change to either copy's logic,
-  not just their constants.
 - Do not "fix" the two NIT 5 over-matches (`metadata: {hooks: y}`; `hooks:{}`) — both are accepted,
   fail-closed residuals, not bugs; see "Round 3 — NIT 5" above for why each one is safe to leave as is.
 - Do not widen `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves to match `bk`'s own fence tolerance
@@ -465,10 +460,9 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
 - Do not cite the old "consistent with a lenient, non-full-YAML frontmatter reader" conclusion (round 6,
   card `12bb342b`) — the real loader parses the extracted body with `Bun.YAML.parse`, a full YAML parser;
   that conclusion was wrong, not merely superseded.
-- Do not treat `Bun.YAML.parse`'s discovery (round 6) as itself confirming any of the quoted-key /
-  space-before-colon / flow-mapping / explicit-tagged-merge-key / anchor-alias-tag-value rows above as
-  loader-accepted — Bun's own per-shape YAML conformance is unchecked; that re-check is carded `6ee2f9dd`,
-  not this record.
+- Do not cite `Bun.YAML.parse`'s discovery (round 6) ALONE as confirming the quoted-key /
+  space-before-colon / flow-mapping / explicit-tagged-merge-key / anchor-alias-tag-value rows above —
+  card `6ee2f9dd` (round 7) is what settled them, via a local-Bun proxy, not this discovery by itself.
 
 ## Round 5 (card `84893cab`) — SUPERSEDED: the guard's text-copy regexes are gone, and so is the lockstep test
 
@@ -552,3 +546,33 @@ flow-mapping / explicit-tagged-merge-key forms) were NOT re-verified by direct r
 see the corrected "YAML parser identification" note above and card `6ee2f9dd` for why a regex-search
 method can no longer settle them, and don't conflate "not re-verified this round" with "unconfirmed for
 the same reason as before."
+
+## Round 7 (card `6ee2f9dd`) — the rows 7-10 re-check round 6 deferred, settled via a real local Bun proxy
+
+Round 6 confirmed the loader calls `Bun.YAML.parse` directly but explicitly deferred checking Bun's own
+per-shape conformance for the table's remaining UNCONFIRMED rows to this card. **Method**: a local `bun`
+binary (1.3.10, already on PATH — never installed for this card, and the `yaml` npm package was checked
+and was NOT already in `node_modules`, so no reference parser was used) ran `Bun.YAML.parse` directly
+against 13 fixtures, one per row-shape (including the merge-key case, which needs a real anchor+alias
+pair to construct, and the any-line nested-flow-mapping-as-value variant the table's "any line" wording
+implies but round 1/2 never separately tested). The exact same fixtures, wrapped as full skill files,
+were run through the REAL compiled `detectPermissionWidening` (rebuilt fresh from this repo's current
+`permissionWidening.ts`) to confirm Loom's own round-2 allowlist still fails closed on every one. Both
+positive (a plain `allowed-tools:` line) and negative (a genuinely boring skill) controls were run first
+to confirm each instrument discriminates rather than vacuously always-firing or always-clean.
+
+**Result: Bun.YAML.parse ACCEPTS every one of the 13 shapes — the dangerous key genuinely resolves live
+in the parsed object in every case except the any-line nested-flow-mapping-as-value variant, where it is
+confirmed NESTED (inert, never promoted to the top level).** Loom's round-2 allowlist independently fails
+closed on all 13 regardless — via a direct per-key label, the generic `frontmatter-unrecognized` vector,
+or both — **zero under-detection gaps**, confirming round 2's own design expectation rather than
+refuting it. Two mechanisms worth naming precisely rather than just "it's caught": the merge-key catch
+(`<<: *a`) and the quoted-key catch are both STRUCTURAL — the `<<:`/leading-quote line can never match
+`PLAIN_TOP_LEVEL_KEY_LINE_RE`'s own `[A-Za-z0-9_-]+` key charclass, regardless of where or how any
+anchor was defined — never a semantic understanding of merge or string-escape resolution. Full per-fixture
+table, every measured Bun result, and the exact fixtures: `packages/daemon/test/skill-permission-widening-yaml-shapes.mjs`.
+
+**Caveat carried into the table above and repeated here because it bounds every verdict in this round**:
+local Bun 1.3.10 is a proxy for, never a byte-identical measurement of, the Bun runtime actually bundled
+into the installed `claude.exe` build (round 6's own 342,408,352 B / mtime `2026-11-04T01:00:05` build —
+no recoverable semver). Treat every "MEASURED-VIA-PROXY ACCEPTED" verdict accordingly.
