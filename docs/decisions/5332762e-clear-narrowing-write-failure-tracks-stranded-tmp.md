@@ -71,10 +71,13 @@ LATER clear's own `rewriteOrphanLatchFilesAfterPartialClear`/`sweepOrphanLatchFi
 narrow or sweep, exactly as `8d80b736`'s own Scenario A already demonstrates for the analogous raise-site
 shape.
 
-This ordering rule is currently PROSE-ONLY — no test in this card's own suite exercises the
-tracked-before-the-helper-call ordering directly, since a test for it would depend on how card
-`e1572b69` resolves the nested-tmp shape; that test is tracked on `e1572b69`, not here (Code Review of
-this card, round 1).
+**UPDATE (card `e1572b69`):** this ordering rule is now tested — not in this card's own suite, but in
+`merge-quarantine-e1572b69-nested-orphan-tmp.mjs`'s Scenario B, via an exact stranded-file-count
+assertion. A reorder mutant (track the OUTER write's own stranded tmp BEFORE calling
+`rewriteOrphanLatchFilesAfterPartialClear`) no longer produces nested debris on its own — `e1572b69`'s own
+fix (b) prevents nesting regardless of ordering — so the test asserts the exact COUNT of newly-stranded
+files instead (2 under correct ordering, 3 under the reorder, since the reorder causes one redundant
+extra write attempt). See that card's own decision record for the full detail.
 
 ## Verification
 
@@ -88,7 +91,7 @@ packages/daemon/test/merge-quarantine-5332762e-clear-narrowing-tmp-loss.mjs --re
 silently no-op once this fix is committed) — RED against that sha, GREEN against the fix, working tree
 restored.
 
-## Site B (confirmed, OPEN, different shape — out of scope here)
+## Site B (CLOSED by card `e1572b69`)
 
 `rewriteOrphanLatchFilesAfterPartialClear`'s own per-orphan-file write-failure branch (the sibling site
 `8d80b736`'s own record named as "untested") was investigated during this card's checkpoint and DOES
@@ -97,9 +100,11 @@ itself already `.tmp-`-shaped (the ordinary case once `8d80b736`'s own fix, or t
 one), a failed rewrite there produces a doubly-`.tmp-`-suffixed stranded tmp that matches no residue
 regex in this module, so it is NEVER picked up by boot's tmp-recovery pass — it simply leaks forever as
 untracked, unrecognized disk debris, contradicting that site's own inline comment ("boot's recovery pass
-re-arms it as a duplicate"). Tracked as its own card, `e1572b69`, deliberately NOT fixed here — see this
-card's own "Ordering" section above for why that card's defect shape is directly relevant to this card's
-own fix even though its fix is out of scope.
+re-arms it as a duplicate"). Fixed by card `e1572b69` (track the stranded tmp there too, AND stage onto a
+clean `.json` base so a stranded name is never nested in the first place) — see that card's own decision
+record, `docs/decisions/e1572b69-nested-orphan-tmp-track-and-prevent.md`, including why its own fix also
+changed this ordering rule's test coverage (the reorder mutant below no longer produces nesting on its
+own, so `e1572b69`'s own test catches it via an exact stranded-file-count assertion instead).
 
 ## Do not
 

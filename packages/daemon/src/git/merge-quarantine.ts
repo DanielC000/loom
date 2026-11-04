@@ -3126,6 +3126,27 @@ function unlinkStrandedTmpBestEffort(tmp: string): void {
 }
 
 /**
+ * Recovers the "clean" `<prefix>.json` base a staging tmp name should be suffixed onto, so a rename
+ * failure never NESTS a second `.tmp-<pid>-<hex>` suffix onto a `target` that is already `.tmp-`-shaped
+ * (an orphan tmp being narrowed in place — {@link rewriteOrphanLatchFilesAfterPartialClear} is the one
+ * caller that can pass such a `target`). A nested stranded name matches none of this module's residue
+ * regexes (`PENDING_DIVERT_TMP_RE`/`TMP_RESIDUE_FILENAME_RE`/`SAFETY_TMP_RE`, all anchored on the suffix
+ * immediately following `.json`) and leaks forever, unrecognized by any sweep or boot-recovery pass.
+ * Returns `undefined` when `target` does not contain EXACTLY ONE `.json` substring — every filename this
+ * module ever produces does (a final, a collision name, or any `.tmp-`/`.tmp-safety-` residue of one), so
+ * this is a never-expected degenerate case; the caller then falls back to the pre-existing
+ * append-onto-`target` construction rather than risk mis-slicing a shape this was never designed for.
+ *
+ * @decision e1572b69 — see the decision record for the nested-tmp defect this closes.
+ */
+function cleanJsonDivertBase(target: string): string | undefined {
+  const firstIdx = target.indexOf(".json");
+  if (firstIdx === -1) return undefined;
+  if (target.indexOf(".json", firstIdx + 1) !== -1) return undefined;
+  return target.slice(0, firstIdx + 5);
+}
+
+/**
  * @decision 59e758e5 (B1) — on a failed rename, never unlink the stranded tmp here (reverts 0a9fc7fc's
  * own unconditional unlink) — it can be the ONLY durable copy of `toWrite` left anywhere, and unlinking
  * it before a caller's own fallback secures that content elsewhere is a real data-loss fail-open.
@@ -3187,7 +3208,12 @@ function writePendingDivertFile(filename: string, entry: MergeQuarantineEntry, d
   }
   let fd: number | undefined;
   const final = path.join(MERGE_QUARANTINE_DIR, target);
-  const tmp = `${final}.tmp-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+  // @decision e1572b69 — stage onto the CLEAN `.json` base (see {@link cleanJsonDivertBase}), never onto
+  // `final` directly: `target` can already be `.tmp-`-shaped, and nesting a second suffix onto it strands
+  // an unrecognized residue name on a rename failure. See the decision record.
+  const cleanBase = cleanJsonDivertBase(target);
+  const tmpBase = cleanBase !== undefined ? path.join(MERGE_QUARANTINE_DIR, cleanBase) : final;
+  const tmp = `${tmpBase}.tmp-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
   try {
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
     fd = fs.openSync(tmp, "w");
@@ -4756,9 +4782,16 @@ function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuara
  * threaded through to {@link orphanRewriteOwnershipConfirmed}'s own layer (b) — see the decision record.
  *
  * @decision eedf16f5 — `droppedTokens` is the FULL set this call drops, passed ONCE, never once per token.
+ *
+ * @decision e1572b69 — returns the (possibly stranded-tmp-tracking-replaced) entry; EVERY call site must
+ * use the return value for anything it does with its own `updated`/`live.entry`/etc. afterward, never the
+ * local it passed in — see the decision record.
  */
-function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry, skip: Set<string>, droppedTokens: ReadonlySet<string>): void {
-  for (const orphanFile of updated.orphanLatchFiles ?? []) {
+function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry, skip: Set<string>, droppedTokens: ReadonlySet<string>): MergeQuarantineEntry {
+  // @decision e1572b69 — iterate a SNAPSHOT, never the live `orphanLatchFiles` field, DEFENSIVELY:
+  // today's own tracking below always builds a fresh array/object, so nothing re-visits it this call —
+  // but a future in-place push onto the live array would. See the decision record.
+  for (const orphanFile of [...(updated.orphanLatchFiles ?? [])]) {
     if (skip.has(orphanFile)) continue;
     if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, orphanFile))) continue;
     if (!orphanRewriteOwnershipConfirmed(orphanFile, updated, droppedTokens)) {
@@ -4771,11 +4804,21 @@ function rewriteOrphanLatchFilesAfterPartialClear(updated: MergeQuarantineEntry,
     const writtenOrphan = writePendingDivertFile(orphanFile, updated, droppedTokens);
     if (!writtenOrphan.ok) {
       // @decision 59e758e5 (round 3) — never unlink: a redirect (keptUnreadable) can leave `orphanFile`
-      // not holding this narrowing. Keep the tmp; boot's recovery pass re-arms it as a duplicate.
+      // not holding this narrowing; keep the tmp.
+      //
+      // @decision e1572b69 — ALSO track this write's own newly-stranded tmp (below) into
+      // `orphanLatchFiles`, so a later clear/sweep finds and reconciles it. See the decision record.
       // eslint-disable-next-line no-console
-      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${updated.repoPath} into its own folded orphan latch file ${orphanFile} after a partial clear — that file's own PRE-EXISTING (un-reduced) bytes are left UNTOUCHED, so a restart before this is fixed may re-arm the just-cleared token from it.`);
+      console.error(`[merge-quarantine] could not durably persist the reduced token set for ${updated.repoPath} into its own folded orphan latch file ${orphanFile} after a partial clear — that file's own PRE-EXISTING (un-reduced) bytes are left UNTOUCHED, so a restart before this is fixed re-arms the just-cleared token from it (fail-closed; never a false lift).`);
+      if (writtenOrphan.strandedTmp) {
+        const strandedTmpBasename = path.basename(writtenOrphan.strandedTmp);
+        const withStrandedTmp: MergeQuarantineEntry = { ...updated, orphanLatchFiles: [...new Set([...(updated.orphanLatchFiles ?? []), strandedTmpBasename])] };
+        replaceEntryEverywhere(activeQuarantines, updated, withStrandedTmp);
+        updated = withStrandedTmp;
+      }
     }
   }
+  return updated;
 }
 
 /**
@@ -4977,14 +5020,20 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // @decision 9c681680 — same in-place mutation as above, no index lookup needed.
       live.entry = written.entry;
       live.sourceFile = written.filename;
-      rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
+      // @decision e1572b69 — capture the return: rewriteOrphanLatchFilesAfterPartialClear can itself
+      // replace `written.entry` with a stranded-tmp-tracking object; `live.entry` must never go stale.
+      live.entry = rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
     } else {
       writeFailed = true;
       // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere (round-1's "subset"
       // reasoning was retracted). Keep the tmp; boot's recovery pass re-arms it as a duplicate.
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${live.entry.repoPath}'s own pending-divert latch after a partial clear — the PRE-EXISTING durable state is left UNTOUCHED, so a restart before this is fixed re-arms with the just-cleared token still counted as outstanding (delays the eventual full lift; never a false lift).`);
-      rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
+      // @decision e1572b69 — capture the return BEFORE the strandedTmp block below, which compares
+      // `updated` by reference via `replaceEntryEverywhere`: a stale local here would make that block a
+      // silent no-op whenever this call's own internal tracking already replaced the object.
+      updated = rewriteOrphanLatchFilesAfterPartialClear(updated, writtenBasenames, new Set([token]));
+      live.entry = updated;
       // @decision 5332762e — track the stranded tmp's basename in orphanLatchFiles, AFTER (never
       // before) the rewriteOrphanLatchFilesAfterPartialClear call just above — tracking first would make
       // it re-narrow the tmp THIS SAME call just minted. See the decision record.
@@ -5174,7 +5223,9 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       console.error(`[merge-quarantine] could not durably persist the reduced token set for ${entry.repoPath}'s own dual-tracked pending twin at ${pending.sourceFile} after a partial clear — the PRE-EXISTING durable state there is left UNTOUCHED, so a restart before this is fixed may re-union the just-cleared token back in.`);
     }
   }
-  rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames, new Set([token]));
+  // @decision e1572b69 — capture the return: a stranded-tmp-tracking replacement must reach the log
+  // spread below (and any future reader of `updated`), never a stale pre-replaceEntryEverywhere local.
+  updated = rewriteOrphanLatchFilesAfterPartialClear(updated, writtenFinalBasenames, new Set([token]));
   // @decision 55939b88 (round 2/3) — same shared formatter as `clearTokenFromPendingIndices`'s own
   // reduce branch, but the LOG-ONLY `loggedTokens`/`loggedContributors` union (round 3), never `updated`
   // directly — `updated` itself stays exactly what was actually written/stored.
@@ -6558,7 +6609,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // @decision 9c681680 — pass `writtenTwin.entry` when truthy, never the stale pre-union `updated`,
       // mirroring the sibling clearTokenFromPendingIndices's own equivalent call — else an orphan file
       // only `writtenTwin.entry`'s own disk-unioned `orphanLatchFiles` names is never narrowed.
-      if (overlapTokens.length > 0) rewriteOrphanLatchFilesAfterPartialClear(writtenTwin.ok ? writtenTwin.entry : updated, writtenBasenames, new Set(overlapTokens));
+      // @decision e1572b69 — capture the return (even though this iteration makes no further use of it):
+      // `p.entry` itself self-heals via this call's own internal `replaceEntryEverywhere` scan of
+      // `pendingUnresolvedQuarantines`, but `updated` must never be left pointing at a stale object either.
+      if (overlapTokens.length > 0) updated = rewriteOrphanLatchFilesAfterPartialClear(writtenTwin.ok ? writtenTwin.entry : updated, writtenBasenames, new Set(overlapTokens));
       candidateTokens.push(...overlapTokens);
       continue; // keep P, reduced — its armedKeys/activeQuarantines presence is untouched; nothing to splice
     }
