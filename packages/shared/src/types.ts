@@ -3593,8 +3593,47 @@ export interface CompanionReplyStatus {
   homeRouteRefused: boolean;
 }
 
-/** Auth scheme a stored Connection uses. `oauth2` added in agent-tooling P5a (authorization-code + PKCE). */
-export type ConnectionAuthScheme = "api-key" | "bearer" | "oauth2";
+/** Auth scheme a stored Connection uses. `oauth2` added in agent-tooling P5a (authorization-code + PKCE).
+ *  `ssh` added by design record a3d5c7f4 (SSH connection type) — see `SshCommandRule` below. */
+export type ConnectionAuthScheme = "api-key" | "bearer" | "oauth2" | "ssh";
+
+/** Kind of command-match rule used by an `ssh` connection's command allowlist and risky-command pattern
+ *  list (design record a3d5c7f4) — the SAME shape for both, since they're just two differently-purposed
+ *  lists of the same rule type: "exact" matches the whole trimmed command string; "prefix" matches when
+ *  the command starts with `pattern`; "regex" compiles `pattern` as a `RegExp` and tests it. */
+export type SshCommandRuleKind = "exact" | "prefix" | "regex";
+
+/** One command-match rule (design record a3d5c7f4). Reused for BOTH a connection's command allowlist
+ *  (gates dispatch — enforced by the exec core, card f6647205) and its risky-command pattern list (routes
+ *  to owner approval instead of executing — card f7d70f75). Non-secret; safe to surface in `ConnectionMetadata`. */
+export interface SshCommandRule {
+  kind: SshCommandRuleKind;
+  pattern: string;
+}
+
+/** The shipped, owner-editable default risky-command pattern list for a NEW `ssh` connection (design
+ *  record a3d5c7f4, open question #4 — a sane default the owner can edit per connection rather than being
+ *  required to write one from scratch). Prefix-matched against the trimmed command text. Deliberately
+ *  conservative — these flag likely-destructive/disruptive verbs for owner confirmation; they are NOT the
+ *  connection's security boundary (the command allowlist, when the owner sets one, is). */
+export const DEFAULT_SSH_RISKY_COMMAND_PATTERNS: readonly SshCommandRule[] = [
+  { kind: "prefix", pattern: "rm " },
+  { kind: "prefix", pattern: "rm -" },
+  { kind: "prefix", pattern: "reboot" },
+  { kind: "prefix", pattern: "shutdown" },
+  { kind: "prefix", pattern: "poweroff" },
+  { kind: "prefix", pattern: "systemctl" },
+  { kind: "prefix", pattern: "service " },
+  { kind: "prefix", pattern: "docker compose down" },
+  { kind: "prefix", pattern: "docker compose up" },
+  { kind: "prefix", pattern: "docker rm" },
+  { kind: "prefix", pattern: "docker kill" },
+  { kind: "prefix", pattern: "docker system prune" },
+  { kind: "prefix", pattern: "mkfs" },
+  { kind: "prefix", pattern: "dd " },
+  { kind: "prefix", pattern: "kill " },
+  { kind: "prefix", pattern: "pkill" },
+];
 
 /** OAuth2 provider template slug (agent-tooling P5a). "custom" = human supplies auth/token URLs + scopes directly. */
 export type OAuthProviderSlug = "google" | "github" | "custom";
@@ -3690,6 +3729,23 @@ export interface ConnectionMetadata {
    * hand-created connection, byte-identical to before this field existed.
    */
   autoProvisioned?: boolean;
+  /** `ssh` rows only — the remote port (default 22 at create time). */
+  port?: number;
+  /** `ssh` rows only — the remote username the connection authenticates as. */
+  user?: string;
+  /**
+   * `ssh` rows only — the host-key fingerprint ("SHA256:<43-char base64 digest>") captured and
+   * human-confirmed at connection-create time. This is a STORED pin, never re-derived here — the actual
+   * connect-time compare-and-refuse-on-mismatch belongs to the exec core (card f6647205).
+   */
+  hostKeyFingerprint?: string;
+  /** `ssh` rows only — true = read-only (default ON at create time; the owner unticks it per connection). */
+  readOnly?: boolean;
+  /** `ssh` rows only — the owner-set command allowlist. Empty means no allowlist restriction beyond `readOnly`. */
+  commandAllowlist?: SshCommandRule[];
+  /** `ssh` rows only — the risky-command pattern list (the shipped default at create time unless the owner
+   *  overrides it; editable thereafter via the connection's update route). */
+  riskyCommandPatterns?: SshCommandRule[];
 }
 
 /**

@@ -17,8 +17,10 @@
  * from an agent.
  */
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
+import { stripSshKeyPassphrase } from "./sshKey.js";
 import type { ConnectionRow } from "../db.js";
-import type { ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug } from "@loom/shared";
+import { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } from "@loom/shared";
+import type { ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug, SshCommandRule } from "@loom/shared";
 
 /** The narrow db surface this module needs (mirrors CompanionConfigStore's shape in companion/store.ts). */
 export interface ConnectionsDbStore {
@@ -30,16 +32,43 @@ export interface ConnectionsDbStore {
     name: string; host: string; authScheme: ConnectionAuthScheme; secretBlob: string;
     provider?: string | null; clientId?: string | null; authUrl?: string | null; tokenUrl?: string | null; scopes?: string | null;
     projectId?: string | null;
+    sshPort?: number | null; sshUser?: string | null; sshHostKeyFingerprint?: string | null;
+    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
   }): ConnectionRow;
   deleteConnection(id: string): void;
   updateConnectionTokens(id: string, patch: { secretBlob: string; tokenExpiresAt: string | null }): void;
   /** Rotate an api-key/bearer connection's secret in place (card 193de09e's re-provisioning path). */
   updateConnectionSecret(id: string, secretBlob: string): void;
   markConnectionNeedsReauth(id: string): void;
+  /** Update an `ssh` connection's editable config (design record a3d5c7f4) — see `Db`'s own doc. */
+  updateSshConnectionConfig(id: string, patch: { readOnly: boolean; commandAllowlist: string; riskyPatterns: string }): void;
+}
+
+/** Parse an `ssh_command_allowlist`/`ssh_risky_patterns` column back to a rule list. Every writer in this
+ *  module only ever persists output from `validateSshCommandRuleList` below, so this never actually sees
+ *  malformed JSON in practice — the try/catch is a defensive floor for a display path, not a validator. */
+function parseSshRuleListColumn(json: string): SshCommandRule[] {
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? (v as SshCommandRule[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 function toMetadata(row: ConnectionRow): ConnectionMetadata {
   const base: ConnectionMetadata = { id: row.id, name: row.name, host: row.host, authScheme: row.authScheme, projectId: row.projectId, createdAt: row.createdAt };
+  if (row.authScheme === "ssh") {
+    return {
+      ...base,
+      port: row.sshPort ?? undefined,
+      user: row.sshUser ?? undefined,
+      hostKeyFingerprint: row.sshHostKeyFingerprint ?? undefined,
+      readOnly: row.sshReadOnly,
+      commandAllowlist: parseSshRuleListColumn(row.sshCommandAllowlist),
+      riskyCommandPatterns: parseSshRuleListColumn(row.sshRiskyPatterns),
+    };
+  }
   if (row.authScheme !== "oauth2") return base;
   return {
     ...base,
@@ -64,14 +93,62 @@ export const CONNECTION_HOST_MAX = 300;
 export const CONNECTION_SECRET_MAX = 8192;
 export const CONNECTION_URL_MAX = 2000;
 /** The full auth-scheme enum (REST scheme-guards, the web scheme dropdown, docs). */
-export const CONNECTION_AUTH_SCHEMES: readonly ConnectionAuthScheme[] = ["api-key", "bearer", "oauth2"];
-/** `createConnection`'s OWN restricted subset — `oauth2` registration has a structurally different field
- *  set (provider/client id+secret/auth+token URLs, no single opaque `secret`) and goes through
- *  `createOAuthConnection` instead. */
+export const CONNECTION_AUTH_SCHEMES: readonly ConnectionAuthScheme[] = ["api-key", "bearer", "oauth2", "ssh"];
+/** `createConnection`'s OWN restricted subset — `oauth2`/`ssh` registration each has a structurally
+ *  different field set and goes through its own dedicated `create*Connection` function instead. */
 const CREATE_CONNECTION_SCHEMES: readonly ConnectionAuthScheme[] = ["api-key", "bearer"];
+
+// --- ssh connection type (design record a3d5c7f4) — bounds + the SAME CONNECTION_SECRET_MAX cap above
+// bounds the private key (it's stored in the same secret_blob column every other scheme uses). ---------
+export const SSH_USER_MAX = 256;
+export const SSH_PORT_MIN = 1;
+export const SSH_PORT_MAX = 65535;
+export const SSH_DEFAULT_PORT = 22;
+/** The exact form `ssh-keygen -l` prints: "SHA256:" + the 32-byte digest's base64, padding stripped (43
+ *  chars) — verified against a real `ssh-keygen -lf` output in the design investigation. */
+export const SSH_HOST_KEY_FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/]{43}$/;
+/** A single command-rule's `pattern` string length cap — generous for a realistic shell command/prefix/
+ *  regex, small enough to block pathological input. */
+export const SSH_COMMAND_PATTERN_MAX = 500;
+/** Cap on a command allowlist's or risky-pattern list's entry COUNT — an abuse/sanity guard, not expected
+ *  to bind any real owner-authored list. */
+export const SSH_COMMAND_RULE_MAX_COUNT = 100;
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
+}
+
+function isValidSshCommandRule(v: unknown): v is SshCommandRule {
+  if (!v || typeof v !== "object") return false;
+  const r = v as Record<string, unknown>;
+  if (r.kind !== "exact" && r.kind !== "prefix" && r.kind !== "regex") return false;
+  if (typeof r.pattern !== "string" || r.pattern.length === 0 || r.pattern.length > SSH_COMMAND_PATTERN_MAX) return false;
+  if (r.kind === "regex") {
+    try {
+      new RegExp(r.pattern);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Validate a command-rule list input (a connection's `commandAllowlist` or `riskyCommandPatterns`).
+ *  `undefined` means "caller omitted it" — resolves to an empty list; the CALLER decides whether that
+ *  means "no restriction" (allowlist) or "fall back to the shipped default" (risky patterns) — this
+ *  function only ever validates a list that's actually present. */
+function validateSshCommandRuleList(v: unknown, label: string): { ok: true; value: SshCommandRule[] } | { ok: false; error: string } {
+  if (v === undefined) return { ok: true, value: [] };
+  if (!Array.isArray(v) || v.length > SSH_COMMAND_RULE_MAX_COUNT) {
+    return { ok: false, error: `${label} must be an array of at most ${SSH_COMMAND_RULE_MAX_COUNT} rules` };
+  }
+  if (!v.every(isValidSshCommandRule)) {
+    return {
+      ok: false,
+      error: `${label} entries must be {kind:"exact"|"prefix"|"regex", pattern:<non-empty string, at most ${SSH_COMMAND_PATTERN_MAX} chars>} (a "regex" pattern must compile)`,
+    };
+  }
+  return { ok: true, value: v as SshCommandRule[] };
 }
 
 /**
@@ -108,6 +185,55 @@ export function validateConnectionInput(input: {
     return { ok: false, error: `secret must be a non-empty string of at most ${CONNECTION_SECRET_MAX} characters` };
   }
   return { ok: true };
+}
+
+/**
+ * Validate `createSshConnection`'s input (design record a3d5c7f4). Non-throwing, mirrors
+ * `validateConnectionInput`'s shape. Does NOT parse/decrypt the private key itself — that's
+ * `stripSshKeyPassphrase`'s job (`createSshConnection` calls it separately, AFTER this passes), so the
+ * "oversize key" and "encrypted key without passphrase" DoD cases are checked by two different layers:
+ * this function catches a key over `CONNECTION_SECRET_MAX` before ever touching the parser; a key that's
+ * small enough but genuinely encrypted-without-a-passphrase is caught by `stripSshKeyPassphrase` instead.
+ */
+export function validateSshConnectionInput(input: {
+  name?: unknown; host?: unknown; port?: unknown; user?: unknown; privateKey?: unknown; passphrase?: unknown;
+  hostKeyFingerprint?: unknown; readOnly?: unknown; commandAllowlist?: unknown; riskyCommandPatterns?: unknown;
+}):
+  | { ok: true; port: number; readOnly: boolean; commandAllowlist: SshCommandRule[]; riskyCommandPatterns: SshCommandRule[] }
+  | { ok: false; error: string } {
+  if (!isNonBlankStr(input.name, CONNECTION_NAME_MAX)) {
+    return { ok: false, error: `name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters` };
+  }
+  if (!isNonBlankStr(input.host, CONNECTION_HOST_MAX)) {
+    return { ok: false, error: `host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters` };
+  }
+  const port = input.port === undefined ? SSH_DEFAULT_PORT : input.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < SSH_PORT_MIN || port > SSH_PORT_MAX) {
+    return { ok: false, error: `port must be an integer between ${SSH_PORT_MIN} and ${SSH_PORT_MAX}` };
+  }
+  if (!isNonBlankStr(input.user, SSH_USER_MAX)) {
+    return { ok: false, error: `user must be a non-empty string of at most ${SSH_USER_MAX} characters` };
+  }
+  if (!isNonBlankStr(input.privateKey, CONNECTION_SECRET_MAX)) {
+    return { ok: false, error: `privateKey must be a non-empty string of at most ${CONNECTION_SECRET_MAX} characters` };
+  }
+  if (input.passphrase !== undefined && typeof input.passphrase !== "string") {
+    return { ok: false, error: "passphrase, when given, must be a string" };
+  }
+  if (typeof input.hostKeyFingerprint !== "string" || !SSH_HOST_KEY_FINGERPRINT_RE.test(input.hostKeyFingerprint)) {
+    return { ok: false, error: 'hostKeyFingerprint must match "SHA256:<43-char base64 digest>" (the exact form `ssh-keygen -l` prints)' };
+  }
+  const readOnly = input.readOnly === undefined ? true : input.readOnly;
+  if (typeof readOnly !== "boolean") {
+    return { ok: false, error: "readOnly, when given, must be a boolean" };
+  }
+  const allow = validateSshCommandRuleList(input.commandAllowlist, "commandAllowlist");
+  if (!allow.ok) return allow;
+  const risky = input.riskyCommandPatterns === undefined
+    ? { ok: true as const, value: [...DEFAULT_SSH_RISKY_COMMAND_PATTERNS] }
+    : validateSshCommandRuleList(input.riskyCommandPatterns, "riskyCommandPatterns");
+  if (!risky.ok) return risky;
+  return { ok: true, port, readOnly, commandAllowlist: allow.value, riskyCommandPatterns: risky.value };
 }
 
 /** List every stored connection as metadata only — never the secret. */
@@ -154,6 +280,85 @@ export function deleteConnection(db: ConnectionsDbStore, id: string): void {
 }
 
 /**
+ * Create a new `ssh` connection (design record a3d5c7f4). VALIDATES (`validateSshConnectionInput`) and
+ * THROWS a descriptive Error on an invalid input — the structural backstop, same posture as
+ * `createConnection`. The submitted `privateKey` is parsed via `stripSshKeyPassphrase` (owner decision 5:
+ * strip the passphrase at create time, in memory, and never store it) — a key that's encrypted with no
+ * (or a wrong) passphrase THROWS here rather than storing something still-encrypted. Only the resulting
+ * PASSPHRASE-FREE PEM is ever passed to `encryptSecret` — the original `passphrase` string is never
+ * persisted in any form. `keyPath` overrides the envelope key file (test seam only).
+ */
+export function createSshConnection(
+  db: ConnectionsDbStore,
+  input: {
+    name: string; host: string; port?: number; user: string; privateKey: string; passphrase?: string;
+    hostKeyFingerprint: string; readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
+    projectId?: string | null;
+  },
+  keyPath?: string,
+): ConnectionMetadata {
+  const v = validateSshConnectionInput(input);
+  if (!v.ok) throw new Error(v.error);
+  const stripped = stripSshKeyPassphrase(input.privateKey, input.passphrase);
+  if (!stripped.ok) throw new Error(stripped.error);
+  const row = db.createConnection({
+    name: input.name.trim(),
+    host: input.host.trim(),
+    authScheme: "ssh",
+    secretBlob: encryptSecret(stripped.privateKeyPem, keyPath),
+    projectId: input.projectId ?? null,
+    sshPort: v.port,
+    sshUser: input.user.trim(),
+    sshHostKeyFingerprint: input.hostKeyFingerprint.trim(),
+    sshReadOnly: v.readOnly,
+    sshCommandAllowlist: JSON.stringify(v.commandAllowlist),
+    sshRiskyPatterns: JSON.stringify(v.riskyCommandPatterns),
+  });
+  return toMetadata(row);
+}
+
+/**
+ * Decrypt an `ssh` connection's private key for use — mirrors `getSecretForUse`, for the passphrase-free
+ * PEM an `ssh` row's secret_blob holds. Never call over REST/MCP; the exec core (card f6647205) is the
+ * ONLY intended caller. Returns undefined for an unknown id or a non-ssh row; throws if the stored blob
+ * fails to decrypt (corrupt/wrong key), mirroring `decryptSecret`.
+ */
+export function getSshPrivateKeyForUse(db: ConnectionsDbStore, id: string, keyPath?: string): string | undefined {
+  const row = db.getConnection(id);
+  if (!row || row.authScheme !== "ssh") return undefined;
+  return decryptSecret(row.secretBlob, keyPath);
+}
+
+/**
+ * Update an `ssh` connection's EDITABLE config — `readOnly` / `commandAllowlist` / `riskyCommandPatterns`
+ * only (design record a3d5c7f4: the risky-pattern list and allowlist are owner-editable per connection).
+ * Deliberately does NOT touch host/port/user/the private key/the host-key fingerprint — those identify or
+ * authenticate the connection, not how it's used, and rotating them is a separate (not-yet-built)
+ * operation. THROWS if `id` doesn't resolve to an `ssh` row, or on an invalid patch field. Any field
+ * omitted from `patch` keeps its current stored value.
+ */
+export function updateSshConnectionConfig(
+  db: ConnectionsDbStore,
+  id: string,
+  patch: { readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[] },
+): ConnectionMetadata {
+  const row = db.getConnection(id);
+  if (!row || row.authScheme !== "ssh") throw new Error("no ssh connection with that id");
+  const readOnly = patch.readOnly === undefined ? row.sshReadOnly : patch.readOnly;
+  if (typeof readOnly !== "boolean") throw new Error("readOnly, when given, must be a boolean");
+  const allow = patch.commandAllowlist === undefined
+    ? { ok: true as const, value: parseSshRuleListColumn(row.sshCommandAllowlist) }
+    : validateSshCommandRuleList(patch.commandAllowlist, "commandAllowlist");
+  if (!allow.ok) throw new Error(allow.error);
+  const risky = patch.riskyCommandPatterns === undefined
+    ? { ok: true as const, value: parseSshRuleListColumn(row.sshRiskyPatterns) }
+    : validateSshCommandRuleList(patch.riskyCommandPatterns, "riskyCommandPatterns");
+  if (!risky.ok) throw new Error(risky.error);
+  db.updateSshConnectionConfig(id, { readOnly, commandAllowlist: JSON.stringify(allow.value), riskyPatterns: JSON.stringify(risky.value) });
+  return getConnectionMetadata(db, id)!;
+}
+
+/**
  * CREATE-ONLY: provision a named api-key/bearer Connection with a plaintext secret — credential
  * auto-provisioning v1's core write (card 193de09e), called ONLY from the human-only answer boundary
  * (`POST /api/questions/:id/answer`'s credential branch in `gateway/server.ts`), never from an agent path.
@@ -194,13 +399,24 @@ export function provisionConnection(
   return createConnection(db, { name: input.name, host: input.host, authScheme: "api-key", secret: input.secret, projectId: input.projectId ?? null }, keyPath);
 }
 
+/** The ONLY auth schemes `getSecretForUse` will ever decrypt — an ALLOWLIST, not a denylist of the
+ *  schemes known to need their own seam instead. A denylist fails OPEN the moment a new scheme is added
+ *  and nobody remembers to add it here too; this allowlist fails CLOSED for that same future scheme by
+ *  construction (card f9972a3d, Code Review round 2). */
+const RAW_SECRET_AUTH_SCHEMES: readonly ConnectionAuthScheme[] = ["api-key", "bearer"];
+
 /**
- * Decrypt a connection's secret for use. Returns the raw plaintext secret for api-key/bearer rows; the
- * seam the P2 authenticated-request tool calls, server-side only, to inject the secret into an outbound
- * request. Never expose this function's return value over REST or to an agent. Returns undefined for an
- * unknown id OR an `oauth2` row (its secret_blob is a JSON token bundle, not a raw secret — callers that
- * need an oauth2 access token must go through `ensureFreshOAuthToken`, which also handles refresh); throws
- * if the stored blob fails to decrypt (corrupt / wrong key), mirroring `decryptSecret`.
+ * Decrypt a connection's secret for use. Returns the raw plaintext secret for api-key/bearer rows ONLY
+ * (see `RAW_SECRET_AUTH_SCHEMES` above) — the seam the P2 authenticated-request tool calls, server-side
+ * only, to inject the secret into an outbound request. Never expose this function's return value over
+ * REST or to an agent. Returns undefined for an unknown id, an `oauth2` row (its secret_blob is a JSON
+ * token bundle, not a raw secret — callers that need an oauth2 access token must go through
+ * `ensureFreshOAuthToken`, which also handles refresh), an `ssh` row, or any OTHER/future scheme.
+ *
+ * @decision a3d5c7f4 — never let an `ssh` row's secret_blob (the private key) reach this function's
+ * return value; `getSshPrivateKeyForUse` is the dedicated seam for it instead.
+ *
+ * Throws if the stored blob fails to decrypt (corrupt / wrong key), mirroring `decryptSecret`.
  *
  * P4↔P5a interaction: this is also the seam `index.ts`'s `resolveConnectionSecret` calls for a P4
  * capability grant's static env injection — the `undefined` returned for an `oauth2` row here is what
@@ -210,7 +426,7 @@ export function provisionConnection(
  */
 export function getSecretForUse(db: ConnectionsDbStore, id: string, keyPath?: string): string | undefined {
   const row = db.getConnection(id);
-  if (!row || row.authScheme === "oauth2") return undefined;
+  if (!row || !RAW_SECRET_AUTH_SCHEMES.includes(row.authScheme)) return undefined;
   return decryptSecret(row.secretBlob, keyPath);
 }
 
@@ -247,6 +463,11 @@ export interface UsableConnectionSummary {
  * the exact leak `connections/request.ts`'s own "connection not found" (never scope-specific) wording is
  * already careful not to cause. A revoked/unresolvable id (metadata missing) is silently dropped, same as
  * `resolveScopedConnectionSecret`'s own fail-closed posture.
+ *
+ * An `ssh` connection is excluded too (Code Review round 2, card f9972a3d): `authenticated_request` never
+ * dispatches one (`getSecretForUse` fails closed for it — see `RAW_SECRET_AUTH_SCHEMES` above), so
+ * listing it here would advertise a connection this tool can only ever refuse with an uninformative
+ * "connection not found" — never advertise what you can't actually serve.
  */
 export function resolveUsableConnections(
   db: ConnectionsDbStore,
@@ -257,6 +478,7 @@ export function resolveUsableConnections(
   for (const id of sessionConnections) {
     const meta = getConnectionMetadata(db, id);
     if (!meta) continue;
+    if (meta.authScheme === "ssh") continue;
     if (!isConnectionUsableByProject(meta.projectId, callerProjectId ?? null)) continue;
     out.push({ id: meta.id, name: meta.name, host: meta.host });
   }

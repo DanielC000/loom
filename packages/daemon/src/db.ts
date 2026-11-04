@@ -259,6 +259,22 @@ export interface ConnectionRow {
   oauthNeedsReauth: boolean;
   /** Project scope (card f2abce7e): null = global (every pre-f2abce7e row), else bound to one project. */
   projectId: string | null;
+  /** `ssh` rows only (design record a3d5c7f4) — NON-SECRET remote port (default 22 at create time). NULL
+   *  on every pre-ssh row. */
+  sshPort: number | null;
+  /** `ssh` rows only — NON-SECRET remote username. NULL on every pre-ssh row. */
+  sshUser: string | null;
+  /** `ssh` rows only — NON-SECRET SHA256 host-key fingerprint ("SHA256:<base64>"), captured and
+   *  human-confirmed at create time (a stored pin, never re-derived at this layer). NULL on every pre-ssh row. */
+  sshHostKeyFingerprint: string | null;
+  /** `ssh` rows only — true = read-only (default ON at create time). Meaningless on a non-ssh row (always
+   *  reads true there via the column's own NOT NULL DEFAULT — never consulted for one). */
+  sshReadOnly: boolean;
+  /** `ssh` rows only — NON-SECRET JSON-encoded `SshCommandRule[]` command allowlist. `'[]'` on a non-ssh row. */
+  sshCommandAllowlist: string;
+  /** `ssh` rows only — NON-SECRET JSON-encoded `SshCommandRule[]` risky-command pattern list (the shipped
+   *  default at create time, owner-editable thereafter). `'[]'` on a non-ssh row. */
+  sshRiskyPatterns: string;
 }
 
 /**
@@ -1283,7 +1299,19 @@ CREATE TABLE IF NOT EXISTS connections (
   -- migrateConnections() below (fresh installs already have it via this CREATE TABLE). No FK (matches
   -- companion_capability_grants.project_id) — a deleted project simply orphans its scoped connections as
   -- unreachable rather than needing a cascade.
-  project_id TEXT
+  project_id TEXT,
+  -- SSH connection type (design record a3d5c7f4) — NON-SECRET columns only; an 'ssh' row's secret_blob
+  -- holds the envelope-encrypted, PASSPHRASE-FREE private key (the same column every other scheme's
+  -- secret/token-bundle already uses — no new secret column). NULL/0/'[]' on every pre-ssh row (unused by
+  -- api-key/bearer/oauth2). Added to existing DBs by migrateConnections() below (fresh installs already
+  -- have them via this CREATE TABLE). No index on any of these — see CLAUDE.md's "no base-schema index
+  -- may reference a migration-added column" rule.
+  ssh_port INTEGER,
+  ssh_user TEXT,
+  ssh_host_key_fingerprint TEXT,
+  ssh_read_only INTEGER NOT NULL DEFAULT 1,
+  ssh_command_allowlist TEXT NOT NULL DEFAULT '[]',
+  ssh_risky_patterns TEXT NOT NULL DEFAULT '[]'
 );
 -- Owner-added capability catalog rows (agent-tooling epic P4). The two BUILTIN capabilities
 -- (browser-testing/document-conversion) are NOT rows here — they stay special-cased in buildMcpServers,
@@ -2607,6 +2635,14 @@ const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
   token_expires_at: "TEXT",
   oauth_needs_reauth: "INTEGER NOT NULL DEFAULT 0",
   project_id: "TEXT",
+  // SSH connection type (design record a3d5c7f4) — see the CREATE TABLE connections block's own doc for
+  // why these are non-secret/NULL-or-default on every pre-ssh row.
+  ssh_port: "INTEGER",
+  ssh_user: "TEXT",
+  ssh_host_key_fingerprint: "TEXT",
+  ssh_read_only: "INTEGER NOT NULL DEFAULT 1",
+  ssh_command_allowlist: "TEXT NOT NULL DEFAULT '[]'",
+  ssh_risky_patterns: "TEXT NOT NULL DEFAULT '[]'",
 };
 
 /** Column added to `delivered_credentials` by card f44cc187; applied to existing DBs by
@@ -5979,6 +6015,10 @@ export class Db {
     provider?: string | null; clientId?: string | null; authUrl?: string | null; tokenUrl?: string | null; scopes?: string | null;
     /** Project scope (card f2abce7e); omitted/null = global (today's default behavior). */
     projectId?: string | null;
+    /** `ssh` rows only (design record a3d5c7f4) — see `ConnectionRow`'s own doc for each field. Omitted on
+     *  every non-ssh create, exactly as before this phase existed. */
+    sshPort?: number | null; sshUser?: string | null; sshHostKeyFingerprint?: string | null;
+    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
   }): ConnectionRow {
     const row: ConnectionRow = {
       id: randomUUID(), name: input.name, host: input.host, authScheme: input.authScheme,
@@ -5986,11 +6026,13 @@ export class Db {
       provider: input.provider ?? null, clientId: input.clientId ?? null, authUrl: input.authUrl ?? null,
       tokenUrl: input.tokenUrl ?? null, scopes: input.scopes ?? null, tokenExpiresAt: null, oauthNeedsReauth: false,
       projectId: input.projectId ?? null,
+      sshPort: input.sshPort ?? null, sshUser: input.sshUser ?? null, sshHostKeyFingerprint: input.sshHostKeyFingerprint ?? null,
+      sshReadOnly: input.sshReadOnly ?? true, sshCommandAllowlist: input.sshCommandAllowlist ?? "[]", sshRiskyPatterns: input.sshRiskyPatterns ?? "[]",
     };
     this.db.prepare(
-      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth, project_id)
-       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth, @projectId)`,
-    ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0 });
+      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth, project_id, ssh_port, ssh_user, ssh_host_key_fingerprint, ssh_read_only, ssh_command_allowlist, ssh_risky_patterns)
+       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth, @projectId, @sshPort, @sshUser, @sshHostKeyFingerprint, @sshReadOnly, @sshCommandAllowlist, @sshRiskyPatterns)`,
+    ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0, sshReadOnly: row.sshReadOnly ? 1 : 0 });
     return row;
   }
   /** Delete a connection by id (idempotent — a missing id matches nothing). */
@@ -6022,6 +6064,18 @@ export class Db {
   /** Mark an `oauth2` connection as needing re-authentication (a refresh attempt failed — revoked/invalid). */
   markConnectionNeedsReauth(id: string): void {
     this.db.prepare("UPDATE connections SET oauth_needs_reauth = 1 WHERE id = ?").run(id);
+  }
+  /**
+   * Update an `ssh` connection's EDITABLE config (design record a3d5c7f4) — readOnly / commandAllowlist /
+   * riskyPatterns only. Never touches host/port/user/the private key/the host-key fingerprint — rotating
+   * those is a separate (not-yet-built) operation, since they change what the connection authenticates as
+   * or trusts, not how it's used. `commandAllowlist`/`riskyPatterns` are ALREADY-VALIDATED JSON strings
+   * (this layer never parses/validates — `connections/store.ts`'s `updateSshConnectionConfig` does).
+   */
+  updateSshConnectionConfig(id: string, patch: { readOnly: boolean; commandAllowlist: string; riskyPatterns: string }): void {
+    this.db.prepare(
+      "UPDATE connections SET ssh_read_only = @readOnly, ssh_command_allowlist = @commandAllowlist, ssh_risky_patterns = @riskyPatterns WHERE id = @id",
+    ).run({ id, readOnly: patch.readOnly ? 1 : 0, commandAllowlist: patch.commandAllowlist, riskyPatterns: patch.riskyPatterns });
   }
 
   // --- capability_defs (owner-added registry-capability catalog rows, agent-tooling epic P4) ---
@@ -12401,6 +12455,14 @@ function toConnectionRow(r0: unknown): ConnectionRow {
     tokenExpiresAt: (r.token_expires_at as string | null) ?? null,
     oauthNeedsReauth: (r.oauth_needs_reauth as number | null) === 1,
     projectId: (r.project_id as string | null) ?? null,
+    sshPort: (r.ssh_port as number | null) ?? null,
+    sshUser: (r.ssh_user as string | null) ?? null,
+    sshHostKeyFingerprint: (r.ssh_host_key_fingerprint as string | null) ?? null,
+    // Fail CLOSED on an unexpected NULL (read-only), never fail open — `=== 1` would decode a NULL as
+    // false (read-write); `!== 0` decodes NULL/1 as true and only an explicit 0 as false.
+    sshReadOnly: (r.ssh_read_only as number | null) !== 0,
+    sshCommandAllowlist: (r.ssh_command_allowlist as string | null) ?? "[]",
+    sshRiskyPatterns: (r.ssh_risky_patterns as string | null) ?? "[]",
   };
 }
 /** Canonical (lexicographically smaller-id-first) ordering for a symmetric project_links pair. */

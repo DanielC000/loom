@@ -53,7 +53,8 @@ const { resolveProfile } = await import("@loom/shared");
 const { seedDefaultProfiles, BUNDLED_PROFILES } = await import("../dist/profiles/seed.js");
 const { validateProfile, capabilityGrantBindingError } = await import("../dist/profiles/validate.js");
 const { createCapabilityDef } = await import("../dist/capabilities/registry.js");
-const { createConnection, createOAuthConnection } = await import("../dist/connections/store.js");
+const { createConnection, createOAuthConnection, createSshConnection, getSecretForUse } = await import("../dist/connections/store.js");
+const sshDefault = (await import("ssh2")).default;
 
 const db = new Db(); // uses LOOM_HOME/loom.db
 
@@ -444,6 +445,34 @@ check("(guard) an oauth2 connection bound to a NON-requiresConnection grant is u
   capabilityGrantBindingError([{ slug: "guard-test-nocred", connectionId: oauthConn.id }], db3) === null);
 check("(guard) an oauth2 connection bound to an unknown slug is unaffected (unknown-slug handling belongs to buildMcpServers, not this guard)",
   capabilityGrantBindingError([{ slug: "no-such-slug", connectionId: oauthConn.id }], db3) === null);
+
+// --- (guard) design record a3d5c7f4: capabilityGrantBindingError rejects an `ssh` connection bound to a
+// requiresConnection capability grant too — same reasoning as the oauth2 case above: the secret is never a
+// header-injectable static value, so a static env injection would either silently inject the private key
+// (never-echo violation) or (pre-fix) nothing at all. ------------------------------------------------
+const sshKey = sshDefault.utils.generateKeyPairSync("ed25519");
+const sshConn = createSshConnection(db3, {
+  name: "Guard SSH", host: "10.0.0.20", user: "loom", privateKey: sshKey.private, hostKeyFingerprint: "SHA256:" + "C".repeat(43),
+});
+const sshBoundError = capabilityGrantBindingError([{ slug: "guard-test-cap", connectionId: sshConn.id }], db3);
+check("(guard) an ssh connection bound to a requiresConnection grant is rejected", sshBoundError !== null);
+check("(guard) the ssh rejection never names a nonexistent 'ssh_exec' tool (not yet built)",
+  typeof sshBoundError === "string" && !sshBoundError.includes("ssh_exec"));
+check("(guard) the ssh rejection still explains it can't be a static env var",
+  typeof sshBoundError === "string" && sshBoundError.includes("static env var"));
+check("(guard) an ssh connection bound to a NON-requiresConnection grant is unaffected",
+  capabilityGrantBindingError([{ slug: "guard-test-nocred", connectionId: sshConn.id }], db3) === null);
+
+// --- (guard) card f9972a3d fix round: getSecretForUse/capabilityGrantBindingError are now ALLOWLISTS
+// (api-key|bearer), not denylists of the schemes known today — a hypothetical FUTURE auth scheme must
+// fail closed on both without anyone needing to remember to add it here too. Simulated via a raw
+// db3.createConnection call (store.ts's own createConnection only ever persists "api-key"/"bearer", so
+// there is no supported way to create an unknown scheme through the real API — this bypasses that
+// validation on purpose, mirroring how the migration tests fabricate a pre-migration shape). ----------
+const futureSchemeConn = db3.createConnection({ name: "Future Scheme", host: "example.com", authScheme: "webhook-hmac", secretBlob: "v1:AAAA:BBBB:CCCC" });
+check("(guard) getSecretForUse refuses an unknown/future auth scheme (allowlist, not denylist)", getSecretForUse(db3, futureSchemeConn.id) === undefined);
+const futureBoundError = capabilityGrantBindingError([{ slug: "guard-test-cap", connectionId: futureSchemeConn.id }], db3);
+check("(guard) capabilityGrantBindingError refuses an unknown/future auth scheme too", futureBoundError !== null);
 
 db3.close(); // free the WAL file handle before removing the temp dir (Windows)
 try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort */ }

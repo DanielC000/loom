@@ -2370,9 +2370,11 @@ function ConnectionsPanel() {
                 </span>
                 <Badge tone={c.projectId ? "cyan" : "phosphor"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
                 {c.autoProvisioned && <Badge tone="cyan">Auto-provisioned</Badge>}
-                {/* Bound/unbound (api-key/bearer): an oauth2 row's status is its own connectedness, so the
-                    allowlist-binding badge only reads for the secret-injection schemes. */}
-                {c.authScheme !== "oauth2" && (
+                {/* Bound/unbound (api-key/bearer ALLOWLIST, matching the server's RAW_SECRET_AUTH_SCHEMES
+                    in connections/store.ts): an oauth2 row shows its own connectedness instead, and an ssh
+                    row's secret is never resolvable through this static-injection seam either — the
+                    allowlist-binding badge only reads for the two schemes it can actually describe. */}
+                {(c.authScheme === "api-key" || c.authScheme === "bearer") && (
                   boundConnectionIds.has(c.id)
                     ? <Badge tone="phosphor">Bound</Badge>
                     : <Badge tone="amber">Unbound</Badge>

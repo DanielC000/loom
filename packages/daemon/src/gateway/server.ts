@@ -51,7 +51,7 @@ import { reconcileCompanionBindingRoutes, companionRouteBlockReason } from "../c
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
-import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
+import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnectionConfig } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, updateCapabilityDefPassEnv, requirePassEnvKey, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
@@ -2825,6 +2825,51 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.delete("/api/connections/:id", async (req) => {
     deleteConnection(deps.db, (req.params as { id: string }).id);
     return { ok: true };
+  });
+
+  // --- SSH connections (design record a3d5c7f4) — a DEDICATED route (not the generic POST /api/connections
+  // above), same precedent as the oauth2 route below: the field shape (port/user/privateKey/passphrase/
+  // hostKeyFingerprint/readOnly/commandAllowlist/riskyCommandPatterns) is structurally different from
+  // api-key/bearer's single opaque `secret`. Human-only loopback, same trust posture as every connection
+  // write — no MCP path. The private key never appears in this route's response (createSshConnection
+  // returns ConnectionMetadata only). ---
+  app.post("/api/connections/ssh", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof b.name !== "string" || typeof b.host !== "string" || typeof b.user !== "string" || typeof b.privateKey !== "string" || typeof b.hostKeyFingerprint !== "string") {
+      return reply.code(400).send({ error: "name, host, user, privateKey, and hostKeyFingerprint must be strings" });
+    }
+    const scope = resolveScopeProjectId(b, reply);
+    if (!scope.ok) return;
+    try {
+      const created = createSshConnection(deps.db, {
+        name: b.name, host: b.host, port: b.port as number | undefined, user: b.user,
+        privateKey: b.privateKey, passphrase: b.passphrase as string | undefined,
+        hostKeyFingerprint: b.hostKeyFingerprint, readOnly: b.readOnly as boolean | undefined,
+        commandAllowlist: b.commandAllowlist as never, riskyCommandPatterns: b.riskyCommandPatterns as never,
+        projectId: scope.projectId,
+      });
+      return reply.code(201).send(created);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  // Update an EXISTING ssh connection's editable config only (readOnly / commandAllowlist /
+  // riskyCommandPatterns) — never host/port/user/the key/the fingerprint (see updateSshConnectionConfig's
+  // own doc for why). A field omitted from the body keeps its current stored value.
+  app.put("/api/connections/:id/ssh", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    try {
+      const updated = updateSshConnectionConfig(deps.db, id, {
+        readOnly: b.readOnly as boolean | undefined,
+        commandAllowlist: b.commandAllowlist as never,
+        riskyCommandPatterns: b.riskyCommandPatterns as never,
+      });
+      return reply.code(200).send(updated);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
   });
 
   // Card 1e8e9b1e (SonarQube connection preset, DoD-1): a live pre-save probe, never persisting anything —

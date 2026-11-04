@@ -769,16 +769,20 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
                       style={{ marginTop: 4, maxWidth: 260 }}
                     >
                       <option value="">— pick a connection —</option>
-                      {/* oauth2 connections are excluded here (and rejected server-side if forced via a raw
-                          PUT): a requiresConnection grant statically injects a secret at spawn, which oauth2
-                          doesn't support — it refreshes on use via the authenticated_request tool instead. */}
-                      {availableConnections.filter((conn) => conn.authScheme !== "oauth2").map((conn) => (
+                      {/* An api-key/bearer ALLOWLIST (matching the server's own RAW_SECRET_AUTH_SCHEMES in
+                          connections/store.ts), not an oauth2-only denylist: a requiresConnection grant
+                          statically injects a secret at spawn, which only api-key/bearer support — oauth2
+                          refreshes on use via the authenticated_request tool instead, and ssh's secret is
+                          never resolvable through this static-injection seam at all (getSecretForUse fails
+                          closed for it). Listing either here would offer a connection the daemon can only
+                          ever refuse to inject. */}
+                      {availableConnections.filter((conn) => conn.authScheme === "api-key" || conn.authScheme === "bearer").map((conn) => (
                         <option key={conn.id} value={conn.id}>{conn.name}</option>
                       ))}
                     </Select>
-                    {availableConnections.some((conn) => conn.authScheme === "oauth2") && (
+                    {availableConnections.some((conn) => conn.authScheme !== "api-key" && conn.authScheme !== "bearer") && (
                       <span style={{ fontSize: 11, color: color.textMuted, fontFamily: font.mono }}>
-                        oauth2 connections aren't listed — they can't be statically injected here. Use the authenticated_request tool for oauth2 access instead.
+                        oauth2/ssh connections aren't listed — they can't be statically injected here. Use the authenticated_request tool instead.
                       </span>
                     )}
                   </>

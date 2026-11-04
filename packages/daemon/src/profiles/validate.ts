@@ -410,6 +410,12 @@ export interface CapabilityGrantBindingDbStore {
  * surface POST/PUT /api/profiles, gateway/server.ts), never an agent-writable path. Returns an error
  * string for the FIRST offending grant, or null when every grant's binding is sound.
  */
+/** The ONLY auth schemes a `requiresConnection` capability grant may bind to — an ALLOWLIST, mirroring
+ *  `connections/store.ts`'s `RAW_SECRET_AUTH_SCHEMES` (card f9972a3d, Code Review round 2): a denylist of
+ *  the schemes known to need their own seam fails OPEN the moment a new scheme is added and nobody
+ *  remembers to add it here too; this allowlist fails CLOSED for that same future scheme by construction. */
+const STATICALLY_INJECTABLE_AUTH_SCHEMES = new Set(["api-key", "bearer"]);
+
 export function capabilityGrantBindingError(
   grants: { slug: string; connectionId?: string }[],
   db: CapabilityGrantBindingDbStore,
@@ -419,9 +425,16 @@ export function capabilityGrantBindingError(
     const def = db.getCapabilityDefBySlug(g.slug);
     if (!def?.requiresConnection) continue; // unknown slug / no static-injection grant ⇒ not this guard's concern
     const conn = db.getConnection(g.connectionId);
-    if (conn?.authScheme === "oauth2") {
+    if (!conn || STATICALLY_INJECTABLE_AUTH_SCHEMES.has(conn.authScheme)) continue;
+    if (conn.authScheme === "oauth2") {
       return `capability '${g.slug}' is bound to an oauth2 connection, which can't be statically injected at spawn — oauth2 connections refresh on use via the authenticated_request tool instead. Bind an api-key/bearer connection here, or drop the connectionId and use authenticated_request for oauth2 access.`;
     }
+    // @decision a3d5c7f4 — an ssh connection's secret is a private key, never a header-injectable static
+    // secret; binding one here would try to inject it into a spawned process's env (never-echo violation).
+    if (conn.authScheme === "ssh") {
+      return `capability '${g.slug}' is bound to an ssh connection, which can't be statically injected at spawn — ssh connections are dispatched by Loom itself at call time, never a static env var. Bind an api-key/bearer connection here, or drop the connectionId.`;
+    }
+    return `capability '${g.slug}' is bound to a connection whose auth scheme ('${conn.authScheme}') can't be statically injected at spawn. Bind an api-key/bearer connection here, or drop the connectionId.`;
   }
   return null;
 }
