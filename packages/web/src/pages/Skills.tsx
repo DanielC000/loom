@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SkillPermissionVector } from "@loom/shared";
 import { api, type SkillMergePreview, type SkillFileState } from "../lib/api";
+import { LineDiff } from "../components/LineDiff";
 import { Panel, Button, Input, SectionLabel, Badge } from "../components/ui";
 import { color, font, radius, type Tone } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
@@ -727,27 +728,10 @@ function HunkSide({ label, tone, active, lines, onPick }: { label: string; tone:
   );
 }
 
-// "What shipped changed": a computed line diff of base → shipped (green additions / red removals). Long
-// unchanged runs collapse to a fold so the eye lands on the change. SKILL.md files are small, so the
-// O(n·m) LCS is fine.
-function LineDiff({ base, shipped }: { base: string; shipped: string }) {
-  const rows = useMemo(() => collapse(diffLines(base, shipped)), [base, shipped]);
-  if (rows.every((r) => r.t === " " || r.t === "fold")) {
-    return <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No textual change.</span>;
-  }
-  return (
-    <pre style={{ margin: 0, maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
-      fontFamily: font.mono, fontSize: 12, lineHeight: 1.5,
-      background: color.panel, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8 }}>
-      {rows.map((r, i) => {
-        if (r.t === "fold") return <div key={i} style={{ color: color.textMuted }}>{`  ⋯ ${r.n} unchanged ${r.n === 1 ? "line" : "lines"}`}</div>;
-        const c = r.t === "+" ? color.phosphor : r.t === "-" ? color.red : color.textDim;
-        const text = r.text.replace(/\r$/, "");
-        return <div key={i} style={{ color: c }}>{`${r.t} ${text}`}</div>;
-      })}
-    </pre>
-  );
-}
+// `LineDiff` (the base → shipped line diff this page renders in every compare block above) and its LCS
+// now live in components/LineDiff.tsx + lib/lineDiff.ts — card 75ea3f73 moved them, unchanged, so the
+// released-skill panel renders its on-disk-vs-store diff through the SAME component rather than a
+// second copy that could drift from this one.
 
 // --- merge / diff helpers (pure) ----------------------------------------------------------------
 
@@ -792,46 +776,5 @@ function assemble(parts: Part[], choices: ("mine" | "shipped")[]): string {
   return out.join("\n");
 }
 
-type DLine = { t: "+" | "-" | " "; text: string };
-// Line-level LCS diff. Backtracks a forward DP so equal lines are " ", base-only "-", shipped-only "+".
-// Comparison strips a trailing \r so a CRLF/LF skew between base and shipped doesn't read as whole-file
-// churn (mirrors the daemon's normalizeForCompare tolerance); display keeps the raw text (`text`).
-function diffLines(a: string, b: string): DLine[] {
-  const A = a.split("\n"), B = b.split("\n");
-  const An = A.map((l) => l.replace(/\r$/, "")), Bn = B.map((l) => l.replace(/\r$/, ""));
-  const n = A.length, m = B.length;
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--)
-    for (let j = m - 1; j >= 0; j--)
-      dp[i]![j] = An[i] === Bn[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
-  const out: DLine[] = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (An[i] === Bn[j]) { out.push({ t: " ", text: A[i]! }); i++; j++; }
-    else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) { out.push({ t: "-", text: A[i]! }); i++; }
-    else { out.push({ t: "+", text: B[j]! }); j++; }
-  }
-  while (i < n) out.push({ t: "-", text: A[i++]! });
-  while (j < m) out.push({ t: "+", text: B[j++]! });
-  return out;
-}
-
-type DiffRow = DLine | { t: "fold"; n: number };
-// Collapse runs of >CONTEXT unchanged lines into a fold marker, keeping CONTEXT lines around each change.
-function collapse(lines: DLine[], context = 3): DiffRow[] {
-  const keep = new Array<boolean>(lines.length).fill(false);
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i]!.t !== " ") {
-      for (let k = Math.max(0, i - context); k <= Math.min(lines.length - 1, i + context); k++) keep[k] = true;
-    }
-  }
-  const out: DiffRow[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (keep[i]) { out.push(lines[i]!); i++; continue; }
-    let n = 0;
-    while (i < lines.length && !keep[i]) { n++; i++; }
-    out.push({ t: "fold", n });
-  }
-  return out;
-}
+// `diffLines` / `collapse` moved to lib/lineDiff.ts, unchanged (card 75ea3f73) — a `.ts` module so
+// test/lineDiff.mjs can import them under Node's type stripping, which a `.tsx` page cannot offer.

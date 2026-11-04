@@ -51,6 +51,7 @@ import {
   UNIT_MS, msFromUnit, msInUnit, msRangeError, msRangeErrors, msRangeHint, msStr, type Unit,
 } from "../lib/msUnits";
 import { MergeGateCadencePanel, CommitMessagePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
+import { ReleasedSkillsPanel } from "../components/releasedSkills";
 // The project lifecycle controls (rename / vaultPath / reference repos / registered repos / archive /
 // permanent delete), the archived-projects tier (restore / permanent delete) and their four writes —
 // ONE implementation, shared with the classic Projects page.
@@ -136,6 +137,18 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   {
     key: "project-lifecycle", label: "Project Lifecycle", scope: "project", atlasOnly: true,
     render: (project) => <ProjectLifecyclePanel project={project} />,
+  },
+
+  // Skills Loom stopped managing at THIS project's shared doctrine dir (`<repoPath>/.claude/skills`),
+  // with a diff and a confirm-to-re-adopt (cards 8b38b920 / 75ea3f73). PROJECT-scoped by row 2's rule
+  // and not a judgement call: all three routes are `/api/projects/:id/skills/...` and the records are
+  // keyed to the active project's own `repoPath`. The Skills page reads the daemon-GLOBAL store and has
+  // no project dimension at all, which is why this cannot live there; see the decision record. Declared
+  // here — after the project rows, before the daemon-global ones — because the classic page renders in
+  // declaration order and this is project housekeeping, not workspace tuning.
+  {
+    key: "released-skills", label: "Released skills", scope: "project",
+    render: (project) => <ReleasedSkillsPanel project={project} />,
   },
 
   // Daemon-global tuning — NOT keyed to the active project (one shared daemon).

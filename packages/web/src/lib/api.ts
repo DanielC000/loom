@@ -137,6 +137,33 @@ export interface SkillMergeConflict { mine: string; base: string; shipped: strin
 export type SkillMergePreview =
   | { clean: true; merged: string }
   | { clean: false; merged: string; conflicts: SkillMergeConflict[] };
+
+// --- Released (Loom-stopped-managing) skill copies at a PROJECT's shared doctrine dir (card 8b38b920;
+// surfaced by card 75ea3f73). PROJECT-scoped, unlike every skills read above: these describe one
+// project's own `.claude/skills` dir, not the daemon-global store.
+//
+// MIRRORS the daemon's own `ReleaseReason` / `GitTrackedState` / `ReleasedSkillSummary` /
+// `ReleasedSkillDiffSummary` / `ReleasedSkillDiffFileContent` (packages/daemon/src/skills/inject.ts) — a
+// hand-copy across the package boundary, not an import, so these must be updated by hand when those
+// change. The UI never switches exhaustively on `reason`, so a reason added there renders here (with a
+// generic gloss) instead of blanking the panel; see lib/releasedSkills.ts.
+/** Why Loom stopped managing a copy. `abandoned` is NOT a claim that anything was edited — see the gloss. */
+export type ReleaseReason = "modified" | "unverifiable-legacy" | "abandoned";
+/** Tri-state on purpose: `unknown` means the git check could not be completed, never "no tracked file". */
+export type GitTrackedState = "tracked" | "untracked" | "unknown";
+export interface ReleasedSkill { name: string; reason: ReleaseReason; firstSeenAt: number; tracked: GitTrackedState; }
+export interface ReleasedSkillDiffFile { path: string; differs: boolean; }
+export interface ReleasedSkillDiff {
+  name: string; reason: ReleaseReason; firstSeenAt: number;
+  /** The on-disk fingerprint AS OF THIS READ. The re-adopt POST requires it back, and the server refuses
+   *  (409) if the copy has changed since — so a caller must send the one it actually SHOWED the human,
+   *  never a freshly refetched one. */
+  currentFingerprint: string | null;
+  tracked: GitTrackedState;
+  /** Content-free summary tier; one file's two sides come from `releasedSkillDiffFile` on demand. */
+  files: ReleasedSkillDiffFile[];
+}
+export interface ReleasedSkillFileContent { path: string; onDisk: string | null; store: string | null; }
 // Epic 2c-2 — the daemon's npm "update available" status (GET /api/update-status). The banner shows ONLY
 // when `packaged && updateAvailable`; a from-source daemon reports packaged:false → no banner ever.
 export interface UpdateStatus {
@@ -1045,6 +1072,29 @@ export const api = {
   // and no content was supplied, or there's no update to adopt.
   adoptSkill: (name: string, content?: string) =>
     postErr<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/adopt`, content !== undefined ? { content } : undefined),
+
+  // --- Released skill copies at ONE PROJECT's shared doctrine dir (cards 8b38b920 / 75ea3f73). ---
+  // The list. A project with no repoPath has no doctrine dir and always answers `{released:[]}` — the
+  // panel distinguishes that from a genuinely empty list off the project row, not off this response.
+  releasedSkills: (projectId: string) =>
+    get<{ released: ReleasedSkill[] }>(`/api/projects/${encodeURIComponent(projectId)}/skills/released`),
+  // The summary tier: reason, age, the live fingerprint to send back, and the content-free file list.
+  // `getErr` so the server's own 404 reason ("not currently released at this project") is shown verbatim
+  // rather than an opaque "-> 404" — a name CAN stop being released between the list and this read.
+  releasedSkillDiff: (projectId: string, name: string) =>
+    getErr<ReleasedSkillDiff>(`/api/projects/${encodeURIComponent(projectId)}/skills/${encodeURIComponent(name)}/released-diff`),
+  // One file's two sides, fetched only when that file's row is expanded.
+  releasedSkillDiffFile: (projectId: string, name: string, path: string) =>
+    getErr<ReleasedSkillFileContent>(
+      `/api/projects/${encodeURIComponent(projectId)}/skills/${encodeURIComponent(name)}/released-diff?path=${encodeURIComponent(path)}`),
+  // Overwrite the released copy with the current store copy and hand management back to Loom.
+  // ⛔ `fingerprint` MUST be the one from the diff the human actually reviewed — NEVER a value refetched
+  // at click time, which would defeat the server's whole TOCTOU guard and silently discard a hand edit
+  // made in between. `postErr` so every refusal (409 stale fingerprint / git-tracked / unverifiable
+  // tracked state, 404 no longer released, 500 copy failed) reaches the panel as readable text.
+  readoptSkill: (projectId: string, name: string, fingerprint: string) =>
+    postErr<{ ok: true }>(
+      `/api/projects/${encodeURIComponent(projectId)}/skills/${encodeURIComponent(name)}/readopt`, { fingerprint }),
 
   // --- Profiles (platform-level rig: role + allow/skills/model/icon + a UI-only description; the
   // injected prompt comes from the agent). HUMAN-managed only — there is no agent-writable MCP

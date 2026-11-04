@@ -727,10 +727,18 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
 // Card dec4959a added one new WRITE member (`updateCapabilityPassEnv`, a `patch<...>` call to the
 // human-only PATCH /api/capabilities/:id route behind the Settings ambient-env editor) —
 // 218→219 total, 123→124 writes, reads unchanged at 95.
-check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair and card dec4959a's updateCapabilityPassEnv write (95 reads / 124 writes / 219 members)", () => {
-  assert.equal(API_MEMBERS.total, 219, `api.ts now has ${API_MEMBERS.total} members, not 219`);
-  assert.equal(API_MEMBERS.reads.size, 95, `api.ts now has ${API_MEMBERS.reads.size} reads, not 95`);
-  assert.equal(API_MEMBERS.writes.size, 124, `api.ts now has ${API_MEMBERS.writes.size} writes, not 124`);
+// Card 75ea3f73 added FOUR members for the released-skill panel over card 8b38b920's three human-only
+// project-scoped routes — three READS (`releasedSkills`, a bare `get<...>`; `releasedSkillDiff` and
+// `releasedSkillDiffFile`, both `getErr<...>` so the server's own 404 reason shows verbatim) and one
+// WRITE (`readoptSkill`, a `postErr<...>` that OVERWRITES a project's on-disk skill copy). 219→223
+// total, 95→98 reads, 124→125 writes. Each verdict was checked against the route it calls, not inferred
+// from the count: the three GETs read a project's doctrine dir, and the POST is a human-only loopback
+// write with no MCP path at all (docs/decisions/8b38b920-*.md is explicit that no agent surface exposes
+// it), which is why it is also pinned by name below.
+check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair, card dec4959a's updateCapabilityPassEnv write and card 75ea3f73's released-skill three reads + one write (98 reads / 125 writes / 223 members)", () => {
+  assert.equal(API_MEMBERS.total, 223, `api.ts now has ${API_MEMBERS.total} members, not 223`);
+  assert.equal(API_MEMBERS.reads.size, 98, `api.ts now has ${API_MEMBERS.reads.size} reads, not 98`);
+  assert.equal(API_MEMBERS.writes.size, 125, `api.ts now has ${API_MEMBERS.writes.size} writes, not 125`);
   // Pinned by name, not just by the count above: this member must stay a READ. If it ever starts
   // classifying as a write, the route or its helper changed shape and the Tier-1 allowlisting of
   // GET /api/web-bundle (gateway/trust-tier.ts) needs re-reviewing, not just this number bumping.
@@ -745,6 +753,17 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   // would mean the member stopped going through a write helper — re-review the route's trust posture
   // (gateway/trust-tier.ts) rather than bumping the counts above.
   assert.ok(API_MEMBERS.writes.has("updateCapabilityPassEnv"), "api.updateCapabilityPassEnv must classify as a WRITE");
+  // Card 75ea3f73. `readoptSkill` OVERWRITES a project's on-disk skill copy from the Loom store, behind
+  // the fingerprint guard card 8b38b920 built for exactly that reason — human-only loopback REST, no MCP
+  // path anywhere. A READ verdict here would mean the member stopped going through a write helper, which
+  // means re-reviewing the route's trust posture (gateway/trust-tier.ts), not bumping the counts above.
+  assert.ok(API_MEMBERS.writes.has("readoptSkill"), "api.readoptSkill must classify as a WRITE");
+  // Its three siblings read one project's doctrine dir and must stay READS; `releasedSkillDiff`/
+  // `releasedSkillDiffFile` go through `getErr` deliberately (the server's 404 reason is shown verbatim),
+  // and `getErr` is a read helper — if either flips to a write, that helper's shape changed.
+  for (const r of ["releasedSkills", "releasedSkillDiff", "releasedSkillDiffFile"]) {
+    assert.ok(API_MEMBERS.reads.has(r), `api.${r} must classify as a READ`);
+  }
 });
 
 // ── card 66b9e590 — planted negative controls proving the "other calls" side is now fail-closed. ─────
