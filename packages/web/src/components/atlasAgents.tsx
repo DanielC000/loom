@@ -17,12 +17,13 @@ import { api } from "../lib/api";
 import { AgentEditor, AgentForm, useAgentWrites } from "./agentEditor";
 import { SpawnControls } from "./SpawnControls";
 import { Button, Panel, SectionLabel, Select, StatusPill } from "./ui";
-import { RoleBadge } from "../lib/roleDisplay";
+import { RoleBadge, roleColor, roleDisplay } from "../lib/roleDisplay";
 import { errorText } from "../lib/loopbackCredential";
 import { useActiveProject } from "../lib/activeProject";
 import { goLiveHeldControl, goLiveSessionPill } from "../lib/sessions";
 import {
-  resolveSpawnPick, sessionVitals, spawnPickLabel, useAgentRoster, type RosterAgent,
+  engineLine, grantChips, missionLine, resolveSpawnPick, sessionVitalParts, sessionVitals,
+  spawnPickLabel, useAgentRoster, type RosterAgent,
 } from "../lib/atlasAgents";
 import { color, radius } from "../theme";
 
@@ -62,7 +63,7 @@ function useSpawnActions(agentId: string) {
  * Overview and the Workspace sessions header drive, so the primary's "Spawn · <role>" label, the ▾
  * role override's three labels and its left anchoring (card 74915cad) are the same everywhere.
  */
-export function AgentActions({ entry, onEdit }: { entry: RosterAgent; onEdit?: () => void }) {
+export function AgentActions({ entry }: { entry: RosterAgent }) {
   const { spawn, stop } = useSpawnActions(entry.agent.id);
   return (
     <div className="loom-agentrow-actions" data-testid={`atlas-agent-actions-${entry.agent.id}`}>
@@ -82,18 +83,30 @@ export function AgentActions({ entry, onEdit }: { entry: RosterAgent; onEdit?: (
             title="Stop this session — graceful Ctrl-C, clean and resumable"
             onClick={() => stop.mutate(entry.session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
-        {/* ALWAYS enabled, including behind the go-live guard: editing an agent's DEFINITION is not a
-            lifecycle action, and a running manager is exactly the one whose prompt you most often
-            want to correct. The delete inside the editor is what carries the live-session guard. */}
-        {onEdit && (
-          <Button variant="ghost" data-testid={`atlas-agent-edit-${entry.agent.id}`}
-            title={`Edit ${entry.agent.name} — its rig, startup prompt, or delete it`}
-            onClick={onEdit}>Edit</Button>
-        )}
       </div>
       {spawn.isError && <span className="loom-agentrow-err">{errorText(spawn.error)}</span>}
       {stop.isError && <span className="loom-agentrow-err">{errorText(stop.error)}</span>}
     </div>
+  );
+}
+
+/**
+ * The one Edit button, for BOTH card weights — a spawnable agent's and a worker rig's.
+ *
+ * ALWAYS enabled, including behind the go-live guard: editing an agent's DEFINITION is not a
+ * lifecycle action, and a running manager is exactly the one whose prompt you most often want to
+ * correct. The delete inside the editor is what carries the live-session guard.
+ *
+ * It sits OUTSIDE `AgentActions` (card 699fe92a) because a worker rig has an Edit and deliberately
+ * no spawn and no stop — it is the one control the two weights share, and a dispatched rig must
+ * never reach the spawn cluster to get it (card 318b5a21 put the Edit there; this only moves where
+ * the button is declared, never which rows carry one).
+ */
+function AgentEditButton({ entry, onEdit }: { entry: RosterAgent; onEdit: () => void }) {
+  return (
+    <Button variant="ghost" data-testid={`atlas-agent-edit-${entry.agent.id}`}
+      title={`Edit ${entry.agent.name} — its rig, startup prompt, or delete it`}
+      onClick={onEdit}>Edit</Button>
   );
 }
 
@@ -142,16 +155,109 @@ export function AgentRosterRow({ entry }: { entry: RosterAgent }) {
   );
 }
 
-/** The full-size roster card — the Agents node page, where there is room for the rig line AND the
- *  agent's own description of what it is for. `onEdit` is the node's editor hook; the band row and
- *  the quick-spawn dialog deliberately pass none (a 250px column has no room, and a spawn pop-over
- *  is not where a definition gets rewritten). */
-export function AgentRosterCard({ entry, onEdit }: { entry: RosterAgent; onEdit?: () => void }) {
+/**
+ * THE LAUNCH BAY CARD — the Agents node's full-size agent. ONE card, two weights: the agent you
+ * spawn, and the worker rig your manager dispatches.
+ *
+ * @decision 699fe92a — `dispatched` is a WEIGHT, never a capability switch: `splitRoster`'s
+ * partition is still the only reason a rig has no spawn, so never reach for this prop to hide a
+ * control on a spawnable agent.
+ *
+ * `testId` defaults to the spawnable id every spec already addresses; a dispatched card passes the
+ * worker rig's own (`atlas-worker-rig-<id>`), so "the worker is not in the spawnable roster" stays
+ * sayable.
+ */
+export function AgentRosterCard({ entry, onEdit, dispatched = false, cron = [], testId }: {
+  entry: RosterAgent;
+  onEdit: () => void;
+  /** Draw this as a manager-dispatched worker rig: lower weight, dispatch stamp, no lifecycle. */
+  dispatched?: boolean;
+  /** This agent's own cron expressions, if the project schedules it. Read from the SAME
+   *  `["schedules"]` key the Schedules strip below the bay reads — never a second request. */
+  cron?: string[];
+  testId?: string;
+}) {
+  const role = roleDisplay(entry.role);
+  const pill = entry.session ? goLiveSessionPill(entry.session) : null;
+  const vitals = entry.session ? sessionVitalParts(entry.session) : null;
+  const grants = grantChips(entry);
+  // THE LEADING EDGE — liveness, answerable peripherally without reading a single pill, plus the
+  // dashed subordinate weight for a rig. It rides `Panel`'s own `style` prop, NOT a class, and so do
+  // the two properties below it: `Panel` writes `background` / `border` / `padding` as INLINE
+  // styles and spreads `style` LAST, so a stylesheet rule for any of the three is silently INERT.
+  // Measured on the first eyeball of this card — the dashed edge, the muted rig surface and
+  // `padding: 0` were all written as CSS, all three did nothing, and the card still looked close
+  // enough to the mockup to pass a glance.
+  const edge = pill ? (pill.pending ? color.amber : color.phosphor) : color.borderStrong;
+  const classes = `loom-baycard${dispatched ? " is-dispatched" : ""}`;
   return (
-    <Panel className="loom-agentcard" data-testid={`atlas-agent-card-${entry.agent.id}`}>
-      <AgentIdentity entry={entry} />
-      {entry.session && <span className="loom-agentrow-meta">{rigLine(entry)}</span>}
-      <AgentActions entry={entry} onEdit={onEdit} />
+    <Panel className={classes} data-testid={testId ?? `atlas-agent-card-${entry.agent.id}`}
+      style={{
+        padding: 0,
+        borderLeft: `2px ${dispatched ? "dashed" : "solid"} ${edge}`,
+        ...(dispatched ? { background: color.panel2 } : null),
+      }}>
+      <div className="loom-baycard-head">
+        {/* The role's own sigil from the ONE presentation map, at a size you can read, in the role's
+            own signal colour. The role IDENTIFIER is untouched — this is the legibility layer on top
+            of it, exactly as `RoleBadge` is, and it is `aria-hidden` because the label beside it
+            already says the same thing in words. */}
+        <span className="loom-baysigil" style={{ color: roleColor(entry.role) }} aria-hidden>{role.sigil}</span>
+        <span className="loom-baycard-id">
+          <strong className="loom-baycard-name" title={entry.agent.name}>{entry.agent.name}</strong>
+          {/* The tier is dropped when it only repeats the label — "Companion · companion" states
+              one fact twice, which is the defect this whole card is about, at 9.5px. */}
+          <span className="loom-baycard-role" style={{ color: roleColor(entry.role) }}>
+            {role.label}
+            {role.tierLabel.toLowerCase() !== role.label.toLowerCase() &&
+              <span className="loom-baycard-tier"> · {role.tierLabel}</span>}
+          </span>
+        </span>
+        {pill && <StatusPill tone={pill.pending ? "amber" : "phosphor"} glow={pill.pending} label={pill.label} />}
+      </div>
+
+      <p className="loom-baymission">{missionLine(entry.agent.startupPrompt, role.description)}</p>
+
+      <dl className="loom-bayfacts">
+        <dt>Rig</dt>
+        <dd>
+          {entry.profileName
+            ? <span className="loom-bayfact">{entry.profileName}</span>
+            : <span className="loom-baychip is-none">no rig · plain session</span>}
+        </dd>
+        <dt>Engine</dt>
+        <dd><span className="loom-bayfact">{engineLine(entry)}</span></dd>
+        {grants.length > 0 && <>
+          <dt>Grants</dt>
+          <dd>{grants.map((g) => (
+            <span key={g.label} className={`loom-baychip${g.kind === "capability" ? " is-cap" : ""}`}>{g.label}</span>
+          ))}</dd>
+        </>}
+        {cron.length > 0 && <>
+          <dt>Cron</dt>
+          <dd>{cron.map((c) => <span key={c} className="loom-baychip is-cron">{c}</span>)}</dd>
+        </>}
+      </dl>
+
+      {/* Vitals exist only while something is running, so they are their own strip rather than an
+          empty row on every idle card. The counters can legitimately be empty on a session that has
+          not taken a turn yet — the strip still draws, because the pill above already said it is
+          starting and a vanishing strip would read as the session having stopped. */}
+      {vitals && (
+        <div className="loom-bayvitals" data-testid={`atlas-agent-vitals-${entry.agent.id}`}>
+          <span>{vitals.counters || pill!.label}</span>
+          <span style={{ flex: 1 }} />
+          {vitals.context && <span>{vitals.context}</span>}
+        </div>
+      )}
+
+      <div className="loom-baycard-bar">
+        {dispatched
+          ? <span className="loom-baystamp">Manager-dispatched</span>
+          : <AgentActions entry={entry} />}
+        <span style={{ flex: 1 }} />
+        <AgentEditButton entry={entry} onEdit={onEdit} />
+      </div>
     </Panel>
   );
 }
@@ -442,16 +548,6 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
         )}
       </div>
     </AtlasAgentDialog>
-  );
-}
-
-/** A labelled pair for the "what a spawn does" panel — a term and the sentence that defines it. */
-export function SpawnTermRow({ term, children }: { term: string; children: ReactNode }) {
-  return (
-    <div className="loom-spawnterm">
-      <span className="loom-spawnterm-t">{term}</span>
-      <span className="loom-spawnterm-d">{children}</span>
-    </div>
   );
 }
 

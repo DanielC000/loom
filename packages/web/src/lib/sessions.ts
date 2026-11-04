@@ -258,3 +258,18 @@ export const COMPANION_ROLE = "assistant";
 export function isCompanionSession(s: { role?: SessionRole | null } | null | undefined): boolean {
   return s?.role === COMPANION_ROLE;
 }
+
+/**
+ * A model id as a reader wants it: `"claude-opus-4-8[1m]"` → `"opus-4-8[1m]"`. Drops the vendor
+ * prefix only — the tail is the part that distinguishes one model from another, and a window
+ * suffix is part of it.
+ *
+ * It lives HERE, in the shared session lib, rather than beside either of its two readers, because
+ * both answer the same question in two places — pages/Usage.tsx's per-session table, and the Atlas
+ * Agents card's `ENGINE` fact (card 699fe92a). Two copies of one `replace` is exactly how a display
+ * rule drifts silently; this one is three lines, so there is no reason for a second.
+ */
+export function shortModel(model?: string | null): string {
+  if (!model) return "—";
+  return model.replace(/^claude-/i, "");
+}

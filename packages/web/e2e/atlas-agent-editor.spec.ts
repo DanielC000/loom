@@ -130,7 +130,10 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     const node = page.getByTestId("atlas-agents-node");
     await expect(node).toBeVisible();
     const count = page.getByTestId("atlas-agents-count");
-    await expect(count).toContainText(new RegExp(`2 agents in ${escapeRe(seeded.project.name)}`));
+    // The reconciling tally (card 699fe92a) — total, spawnable, dispatched. This spec reads it
+    // again after a create and after a delete, so it is the derivation's own before/after witness.
+    await expect(count).toContainText(
+      new RegExp(`3 agents in ${escapeRe(seeded.project.name)} — 2 you spawn, 1 your manager dispatches`));
 
     // ── (a) CREATE. The ＋ in the head opens the shared create form; the daemon really makes the
     //        agent; the ROSTER — a separate derivation — is what proves it landed.
@@ -153,18 +156,20 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await expect(dialog).toHaveCount(0);
     // BEFORE→AFTER on the roster itself: a third card, and the head's own count agrees with it.
     await expect(node.getByTestId(`atlas-agent-card-${freshId}`)).toBeVisible();
-    await expect(count).toContainText(new RegExp(`3 agents in ${escapeRe(seeded.project.name)}`));
+    await expect(count).toContainText(
+      new RegExp(`4 agents in ${escapeRe(seeded.project.name)} — 3 you spawn, 1 your manager dispatches`));
 
-    // ── (b) RE-PROFILE. The card's rig line reads "no rig · plain session" before, and names the rig
-    //        after — the roster derives that line from the agent→profile join, so it can only change
-    //        if the PATCH landed.
+    // ── (b) RE-PROFILE. The card's RIG fact reads "no rig · plain session" before, and names the rig
+    //        after — the roster derives it from the agent→profile join, so it can only change if the
+    //        PATCH landed. The rig moved out of the one grey `.loom-agentrow-meta` line into its own
+    //        labelled fact (card 699fe92a); it is the same join, read where the card now draws it.
     const freshCard = node.getByTestId(`atlas-agent-card-${freshId}`);
-    await expect(freshCard.locator(".loom-agentrow-meta")).toContainText("no rig");
+    await expect(freshCard.locator(".loom-bayfacts")).toContainText("no rig");
     await freshCard.getByTestId(`atlas-agent-edit-${freshId}`).click();
     await expect(dialog).toBeVisible();
     await dialog.getByTestId(`agent-profile-${freshId}`).selectOption({ value: seeded.spareRig.id });
-    await expect.poll(async () => (await freshCard.locator(".loom-agentrow-meta").innerText()).trim(),
-      { message: "the roster's rig line never picked up the profile assignment" })
+    await expect.poll(async () => (await freshCard.locator(".loom-bayfacts").innerText()).trim(),
+      { message: "the roster's rig fact never picked up the profile assignment" })
       .toContain(seeded.spareRig.name);
 
     // ── (c) RE-PROMPT. Save is held until the text actually differs (the useFormSync `dirty` gate),
@@ -186,7 +191,8 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await dialog.getByTestId(`agent-delete-${freshId}`).click();
     expect(dialogs.length, "the delete must be behind a confirm").toBeGreaterThan(confirmsBefore);
     await expect(dialog).toHaveCount(0); // onDeleted closes it
-    await expect(count).toContainText(new RegExp(`2 agents in ${escapeRe(seeded.project.name)}`));
+    await expect(count).toContainText(
+      new RegExp(`3 agents in ${escapeRe(seeded.project.name)} — 2 you spawn, 1 your manager dispatches`));
     await expect(node.getByTestId(`atlas-agent-card-${freshId}`)).toHaveCount(0);
     // The two agents that were always there are untouched — a delete that took the roster with it
     // would pass every assertion above.
@@ -344,9 +350,13 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await expect(spawnIn(page.getByTestId(`atlas-agent-card-${seeded.plain.id}`))).toBeEnabled();
     // And the pill does not call a starting session live. Scoped to the identity HEAD, not the whole
     // card — the held button below it also says "Starting…", so a card-wide text match would pass on
-    // the button alone and prove nothing about the pill.
-    await expect(mgrAtlasCard.locator(".loom-agentrow-head")).toContainText(/starting/i);
-    await expect(mgrAtlasCard.locator(".loom-agentrow-head")).not.toContainText(/\blive\b/i);
+    // the button alone and prove nothing about the pill. The head is `.loom-baycard-head` since card
+    // 699fe92a rebuilt this card; same element, same claim, same reason for scoping it.
+    const mgrAtlasHead = mgrAtlasCard.locator(".loom-baycard-head");
+    await expect(mgrAtlasHead, "the card's identity head must exist, or the scoping below is vacuous")
+      .toHaveCount(1);
+    await expect(mgrAtlasHead).toContainText(/starting/i);
+    await expect(mgrAtlasHead).not.toContainText(/\blive\b/i);
 
     // ── RELEASE. Driven through the daemon's own archive write (the row leaves GET /api/sessions,
     //    which is what the guard reads), not by faking the session list.

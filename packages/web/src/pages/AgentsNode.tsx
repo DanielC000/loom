@@ -1,13 +1,12 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useActiveProject } from "../lib/activeProject";
-import { useAgentRoster } from "../lib/atlasAgents";
-import { AgentEditDialog, AgentRosterCard, RosterEmpty, SpawnTermRow, WorkersDispatchedNote } from "../components/atlasAgents";
+import { rosterTally, useAgentRoster, type RosterAgent } from "../lib/atlasAgents";
+import { AgentEditDialog, AgentRosterCard, RosterEmpty } from "../components/atlasAgents";
 import { ProjectSchedules } from "../components/projectSchedules";
-import { Badge, Button, Panel, SectionLabel, StatusPill } from "../components/ui";
-import { RoleBadge } from "../lib/roleDisplay";
-import { plural } from "../lib/atlasHome";
-import { goLiveSessionPill } from "../lib/sessions";
+import { Button, Panel, SectionLabel } from "../components/ui";
+import { api } from "../lib/api";
 import { color, font } from "../theme";
 
 // THE AGENTS NODE — card c6160c7d (Atlas P2-2), the project tier's roster at full size.
@@ -25,6 +24,14 @@ import { color, font } from "../theme";
 // Atlas no agent-definition surface: it had already left.
 //
 // @decision 318b5a21 — never build a second editor here. Mount components/agentEditor.tsx's.
+//
+// THE LAUNCH BAY (card 699fe92a, owner pick direction B via request 891ed41f) rebuilt the page's own
+// layout: two labelled GROUPS of one card kind, rather than a card grid plus a rows panel plus a
+// static explainer.
+//
+// @decision 699fe92a — the static "What a spawn does" panel is REMOVED at the owner's instruction;
+// do not reinstate a generic explainer here. Its four facts live on the card and on the controls
+// that perform them.
 
 export default function AgentsNode() {
   const { projectId, projects } = useActiveProject();
@@ -37,6 +44,13 @@ export default function AgentsNode() {
   // below filters the god-eye schedule list down to. Declared ABOVE the `!projectId` early return
   // with the other hooks' results, so both render paths read the same roster.
   const scheduleAgents = [...roster.spawnable, ...roster.workers].map((entry) => entry.agent);
+  // The SAME `["schedules"]` cache entry the Schedules strip at the foot of the page already reads,
+  // so a card's own `CRON` fact costs no second request and cannot disagree with the strip. The two
+  // are deliberately not the same statement: the fact says "this agent is on a clock", the strip
+  // says when it next fires, whether it is on, and where it is managed from.
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const cronFor = (entry: RosterAgent): string[] =>
+    (schedules.data ?? []).filter((s) => s.agentId === entry.agent.id).map((s) => s.cron);
 
   if (!projectId) {
     return (
@@ -52,16 +66,21 @@ export default function AgentsNode() {
   return (
     <div className="loom-atlas-home" data-testid="atlas-agents-node">
       <section className="loom-atlas-primary">
-        <div className="loom-atlas-primaryhead">
-          <span className="loom-atlas-primarylbl">Spawnable agents</span>
-          {/* Its own class, not the band's shared `loom-bandcount`: that one is `nowrap` because
-              every other use of it is a bare number, and this one carries a project name that can
-              be arbitrarily long — on a phone it pushed the head's own button off the column. */}
+        <div className="loom-atlas-primaryhead loom-bayhead">
+          <span className="loom-atlas-primarylbl">Launch bay</span>
+          {/* ONE sentence that reconciles the two counts this tab used to state without ever
+              relating them — the tab badge counts every agent, this used to count only the
+              spawnable ones, and nothing on screen said why they differed. Its own class, not the
+              band's shared `loom-bandcount`: that one is `nowrap` because every other use of it is
+              a bare number, and this one carries a project name that can be arbitrarily long. */}
           <span className="loom-bandcount loom-agentscount" data-testid="atlas-agents-count">
-            {isLoading ? "…" : plural(roster.spawnable.length, "agent")}
-            {project ? ` in ${project.name}` : ""}
+            {isLoading ? "…" : rosterTally(roster, project?.name)}
           </span>
           <span style={{ flex: 1 }} />
+          {/* ONE wrapper, so the two head actions WRAP TOGETHER. Without it the tally's own wrap
+              point split them across two lines — "＋ New agent" right-aligned on the first, the exit
+              orphaned at the left of the second (measured at 900px). */}
+          <span className="loom-bayhead-acts">
           {/* Define an agent HERE now, on the node that lists them (card 318b5a21). The primary, so
               it reads ahead of the exit beside it: creating an agent is the action, leaving is not. */}
           <Button variant="primary" className="loom-bandlink" data-testid="atlas-agents-new"
@@ -78,25 +97,47 @@ export default function AgentsNode() {
             data-testid="atlas-agents-define" title="See every project on the Workspace node">
             All projects <span aria-hidden>↗</span>
           </Link>
+          </span>
         </div>
 
-        {roster.spawnable.length === 0
-          ? <RosterEmpty workers={roster.workers} projectName={project?.name} />
-          : (
-            <div className="loom-agentgrid" data-testid="atlas-agent-grid">
-              {roster.spawnable.map((entry) => (
-                <AgentRosterCard key={entry.agent.id} entry={entry}
+        {/* TWO GROUPS, ONE CARD KIND. The split used to be two visual languages for one entity —
+            spawnable agents as cards, worker rigs as rows in a panel with different type, different
+            spacing and a different status treatment — so a reader had to learn the tab twice. Now
+            the only difference is the group it is in and the weight it is drawn at, and each group
+            bar states WHY its members are there, which is where the orphan "…are dispatched by a
+            manager" line and the rigs panel's own footer (the same sentence, said twice, 150px
+            apart) both ended up. */}
+        <BayGroup label="You spawn these" why="press Spawn and a session starts under this project"
+          count={roster.spawnable.length}>
+          {roster.spawnable.length === 0
+            ? <RosterEmpty workers={roster.workers} projectName={project?.name} />
+            : (
+              <div className="loom-agentgrid" data-testid="atlas-agent-grid">
+                {roster.spawnable.map((entry) => (
+                  <AgentRosterCard key={entry.agent.id} entry={entry} cron={cronFor(entry)}
+                    onEdit={() => setEditing({ agentId: entry.agent.id })} />
+                ))}
+              </div>
+            )}
+        </BayGroup>
+
+        {/* The rigs group draws ONLY when there is a rig to draw. An empty group bar would be a
+            heading over nothing — and the sentence it carries is about rigs this project HAS, so on
+            a project with none it would be answering a question nobody could have asked. */}
+        {roster.workers.length > 0 && (
+          <BayGroup label="Your manager dispatches these" count={roster.workers.length}
+            why="each lands on its own worktree branch — edit the rig here, dispatch it from the manager"
+            whyTestId="atlas-agents-worker-note">
+            <div className="loom-agentgrid" data-testid="atlas-worker-rigs">
+              {roster.workers.map((entry) => (
+                <AgentRosterCard key={entry.agent.id} entry={entry} dispatched cron={cronFor(entry)}
+                  testId={`atlas-worker-rig-${entry.agent.id}`}
                   onEdit={() => setEditing({ agentId: entry.agent.id })} />
               ))}
             </div>
-          )}
-        <WorkersDispatchedNote workers={roster.workers} />
+          </BayGroup>
+        )}
       </section>
-
-      <div className="loom-agentsplit">
-        <WorkerRigs roster={roster} onEdit={(id) => setEditing({ agentId: id })} />
-        <WhatASpawnDoes />
-      </div>
 
       {/* This project's cron schedules (card 102bc915) — the one surface classic /overview carried
           that no Atlas project-node tab did. It lands HERE rather than in a band panel or a tab of
@@ -109,10 +150,13 @@ export default function AgentsNode() {
           The id set is the roster union, NOT a second api.agents read: `useAgentRoster` partitions
           every one of this project's agents into exactly these two lists, so the union IS the set
           Overview builds from `agents.data` — same membership, no extra request, and it cannot drift
-          from the roster rendered directly above it. */}
-      <ProjectSchedules
-        agentIds={new Set(scheduleAgents.map((a) => a.id))}
-        agentName={(id) => scheduleAgents.find((a) => a.id === id)?.name ?? id.slice(0, 8)} />
+          from the roster rendered directly above it. The strip around it is a visual HOME (card
+          699fe92a: it used to float belonging to nothing), never a second implementation. */}
+      <div className="loom-baysched" data-testid="atlas-agents-schedules">
+        <ProjectSchedules
+          agentIds={new Set(scheduleAgents.map((a) => a.id))}
+          agentName={(id) => scheduleAgents.find((a) => a.id === id)?.name ?? id.slice(0, 8)} />
+      </div>
 
       {editing && (
         <AgentEditDialog projectId={projectId} agentId={editing.agentId} onClose={() => setEditing(null)} />
@@ -121,82 +165,31 @@ export default function AgentsNode() {
   );
 }
 
-/** The worker rigs, as DEFINITIONS. They carry a live pill because a dispatched worker is a real
- *  running thing worth seeing from here — and, since card 318b5a21, an Edit, because the footer has
- *  always said "edit the rig here" and a worker rig is an agent like any other. Still no SPAWN and no
- *  STOP: a hand-spawned worker gets a branch nobody is reviewing, which is the lifecycle control
- *  nothing a human presses here would make correct. */
-function WorkerRigs({ roster, onEdit }: {
-  roster: ReturnType<typeof useAgentRoster>["roster"];
-  onEdit: (agentId: string) => void;
+/**
+ * One labelled group of the bay: who dispatches these, why, and how many.
+ *
+ * The `why` is the group's own reason for existing, which is where the two sentences the tab used to
+ * say 150px apart ended up — the orphan "…are dispatched by a manager, never spawned here" line and
+ * the worker-rigs panel's own footer were the same fact, stated twice because neither group had a
+ * place to carry it. `whyTestId` keeps the rigs group's copy addressable under the id that sentence
+ * has always had.
+ */
+function BayGroup({ label, why, count, whyTestId, children }: {
+  label: string;
+  why: string;
+  count: number;
+  whyTestId?: string;
+  children: ReactNode;
 }) {
   return (
-    <Panel style={{ padding: "10px 12px 12px" }} data-testid="atlas-worker-rigs">
-      <div className="loom-bandhead">
-        <SectionLabel style={{ margin: 0, whiteSpace: "nowrap" }}>Worker rigs</SectionLabel>
-        <span className="loom-bandcount">manager-dispatched</span>
+    <section className="loom-baygroup">
+      <div className="loom-baygroup-bar">
+        <SectionLabel style={{ margin: 0, whiteSpace: "nowrap" }}>{label}</SectionLabel>
+        <span className="loom-baygroup-why" data-testid={whyTestId}>{why}</span>
+        <span style={{ flex: 1 }} />
+        <span className="loom-baygroup-n">{count}</span>
       </div>
-      <div style={{ paddingTop: 8 }}>
-        {roster.workers.length === 0 && (
-          <p className="loom-bandempty">No worker rigs defined in this project.</p>
-        )}
-        {roster.workers.map((w) => (
-          <div key={w.agent.id} className="loom-workerrig" data-testid={`atlas-worker-rig-${w.agent.id}`}>
-            <RoleBadge role={w.role} />
-            <strong className="loom-agentrow-name">{w.agent.name}</strong>
-            <span className="loom-workerrig-rig">
-              {[w.profileName, ...w.capabilities].filter(Boolean).join(" · ")}
-            </span>
-            <span style={{ flex: 1 }} />
-            {w.session
-              ? <WorkerRigPill session={w.session} />
-              : <Badge tone="muted">idle</Badge>}
-            <Button variant="ghost" data-testid={`atlas-agent-edit-${w.agent.id}`}
-              title={`Edit ${w.agent.name} — its rig, startup prompt, or delete it`}
-              onClick={() => onEdit(w.agent.id)}>Edit</Button>
-          </div>
-        ))}
-        <p className="loom-bandfoot" style={{ fontFamily: font.mono }}>
-          A manager dispatches a worker onto its own worktree branch. Edit the rig here; dispatch it
-          from the manager.
-        </p>
-      </div>
-    </Panel>
-  );
-}
-
-/** A dispatched worker's pill, through the SAME `goLiveSessionPill` every other agent readout uses —
- *  so a worker mid-startup reads "starting", not a settled "live" (card 318b5a21). */
-function WorkerRigPill({ session }: { session: NonNullable<ReturnType<typeof useAgentRoster>["roster"]["workers"][number]["session"]> }) {
-  const pill = goLiveSessionPill(session);
-  return <StatusPill tone={pill.pending ? "amber" : "phosphor"} glow={pill.pending} label={pill.label} />;
-}
-
-/** What pressing the button does, in the product's own terms. Static copy, deliberately: it states
- *  the spawn contract (profile role applies server-side, the override is per-spawn, the guard keys
- *  off liveness) that the controls themselves can only imply. */
-function WhatASpawnDoes() {
-  return (
-    <Panel style={{ padding: "10px 12px 12px" }} data-testid="atlas-spawn-explainer">
-      <div className="loom-bandhead">
-        <SectionLabel style={{ margin: 0, whiteSpace: "nowrap" }}>What a spawn does</SectionLabel>
-      </div>
-      <div style={{ paddingTop: 8 }}>
-        <SpawnTermRow term="Primary">
-          Spawns from the agent's <strong>rig</strong> — the rig's role is what applies server-side.
-        </SpawnTermRow>
-        <SpawnTermRow term="Override">
-          The ▾ picks a role for <em>this spawn only</em>: from profile, manager, or plain. It never
-          edits the rig.
-        </SpawnTermRow>
-        <SpawnTermRow term="Guard">
-          A manager that is already live <em>or still starting</em> shows <strong>Stop</strong>, never a
-          second spawn.
-        </SpawnTermRow>
-        <SpawnTermRow term="Then">
-          A session starts under this project and joins the fleet.
-        </SpawnTermRow>
-      </div>
-    </Panel>
+      {children}
+    </section>
   );
 }

@@ -14,7 +14,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { contextPercentFor, type Agent, type ProfileSummary, type SessionListItem, type SessionRole } from "@loom/shared";
 import { api } from "./api";
-import { holdsGoLiveSlot } from "./sessions";
+import { holdsGoLiveSlot, shortModel } from "./sessions";
+import { plural } from "./atlasHome";
 
 /** One agent, with everything a spawn control needs to render and gate itself. */
 export interface RosterAgent {
@@ -25,6 +26,13 @@ export interface RosterAgent {
   profileName: string | null;
   /** The rig's opt-in capabilities, already worded for display (never raw field names). */
   capabilities: string[];
+  /**
+   * The bound rig itself (card 699fe92a). The card states a rig as labelled FACTS — engine, grants
+   * — rather than one run-together grey string, and those read fields `profileName`/`capabilities`
+   * never carried. Carried as the WHOLE row rather than three more flattened fields so the next
+   * fact the card needs is a derivation here, not another field on every mount.
+   */
+  profile: ProfileSummary | null;
   /** This agent's live session, if it has one. */
   session: SessionListItem | null;
   live: boolean;
@@ -71,6 +79,7 @@ export function rosterAgent(
     role,
     profileName: profile?.name ?? null,
     capabilities: rigCapabilities(profile),
+    profile,
     session,
     live,
     managerLive: role === "manager" && live,
@@ -125,6 +134,82 @@ export function sessionVitals(s: SessionListItem): string {
     s.ctxTurns ? `${s.ctxTurns} turns` : null,
     pct === null ? null : `${pct}%`,
   ].filter(Boolean).join(" · ");
+}
+
+// ── The Launch Bay card's facts (card 699fe92a) ────────────────────────────────────────────────
+// The Agents node's card used to hold a badge, a name, one grey line and two buttons — nothing on
+// it answered "which one do I want". These are the facts that now do, each derived from a field the
+// page ALREADY fetched and had been throwing away (the agent's own startup prompt; the rig's model,
+// harness and skill subset). No new `api.ts` member was added for any of them, which is the same
+// hard rule the roster itself was built under.
+
+/** A live session's vitals, split where the card draws them: the counters on the left, the context
+ *  reading on the right. `sessionVitals` stays the one-line form the band row and the quick-spawn
+ *  dialog use — this is the SAME three facts laid out for a wider surface, not a second rule. */
+export function sessionVitalParts(s: SessionListItem): { counters: string; context: string | null } {
+  const pct = contextPercentFor(s.ctxInputTokens, s.model);
+  return {
+    counters: [s.gen ? `gen ${s.gen}` : null, s.ctxTurns ? plural(s.ctxTurns, "turn") : null]
+      .filter(Boolean).join(" · "),
+    context: pct === null ? null : `${pct}% context`,
+  };
+}
+
+/** What this agent will spawn ON — `"claude · opus-4-8"`, or `"claude · default"` for a rig that
+ *  pins no model. A plain agent (no rig at all) still spawns on the default engine, so it reads the
+ *  same way rather than leaving the fact blank and the question open. */
+export function engineLine(entry: RosterAgent): string {
+  const p = entry.profile;
+  return `${p?.harness ?? "claude"} · ${p?.model ? shortModel(p.model) : "default"}`;
+}
+
+/** One `GRANTS` chip. `capability` is an opt-in host capability the rig confers (browser, documents);
+ *  `skills` is the rig's skill subset, which every rig has — so the two are toned apart. */
+export interface GrantChip { label: string; kind: "capability" | "skills" }
+
+/** The rig's grants as chips. A plain agent has no rig and therefore no grants to state — an empty
+ *  list, so the card omits the row rather than printing "none" on every plain agent. */
+export function grantChips(entry: RosterAgent): GrantChip[] {
+  const p = entry.profile;
+  if (!p) return [];
+  const chips: GrantChip[] = entry.capabilities.map((label) => ({ label, kind: "capability" }));
+  // `skills: null` is "deliver every skill", NOT "no skills" — the two are opposite facts and the
+  // nullable field reads as the wrong one if it is counted rather than branched on.
+  chips.push({ label: p.skills === null ? "all skills" : plural(p.skills.length, "skill"), kind: "skills" });
+  return chips;
+}
+
+/**
+ * The agent's own mission, in its own words — the first real paragraph of the startup prompt it
+ * injects, which the product stores on every agent and has never shown anywhere.
+ *
+ * A prompt that opens with a markdown heading is naming the agent, which the card's name line
+ * already says one row above; the first paragraph that is NOT a heading is the one that states what
+ * the agent is for. With no prompt at all there is no mission to state, so it says so and falls back
+ * to the role's own description — the copy `lib/roleDisplay.tsx` already ships, passed in rather than
+ * imported so this stays a pure string function with no component dependency.
+ */
+export function missionLine(startupPrompt: string, roleDescription: string): string {
+  const paragraphs = startupPrompt.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const body = paragraphs.find((p) => !/^#{1,6}\s/.test(p)) ?? paragraphs[0];
+  return body ? body.replace(/\s+/g, " ") : `No startup prompt — ${roleDescription}`;
+}
+
+/**
+ * The one sentence that reconciles the two counts this tab used to state without ever relating them:
+ * the tab badge counts EVERY agent, the roster head counted only the spawnable ones, and nothing on
+ * screen said why they differed (defect 6 of the card's own measured list).
+ *
+ * Both halves are named, so the badge's number is accounted for. The one-sided cases say so in words
+ * rather than printing a `0` beside a group the page does not even draw.
+ */
+export function rosterTally(roster: AgentRoster, projectName?: string): string {
+  const where = projectName ? ` in ${projectName}` : "";
+  const { spawnable, workers } = roster;
+  if (spawnable.length === 0 && workers.length === 0) return `No agents${where} yet`;
+  if (workers.length === 0) return `${plural(spawnable.length, "agent")}${where} — all spawned by you`;
+  if (spawnable.length === 0) return `${plural(workers.length, "agent")}${where} — all dispatched by your manager`;
+  return `${plural(spawnable.length + workers.length, "agent")}${where} — ${spawnable.length} you spawn, ${workers.length} your manager dispatches`;
 }
 
 // ── The inline quick-start's picker (card f3b18f27) ────────────────────────────────────────────

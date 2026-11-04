@@ -85,8 +85,19 @@ test.describe("the project node's Agents tab carries this project's schedules (c
     await expect(page.getByTestId("atlas-agents-node")).toBeVisible();
     // The row, AND its agent attribution — the half that fails if the id set were built from the wrong
     // roster (e.g. spawnable only, dropping every worker rig's schedule).
-    await expect(page.getByText(cron, { exact: true })).toBeVisible();
-    await expect(page.getByText(agentName, { exact: true }).first()).toBeVisible();
+    //
+    // SCOPED to the schedules readout itself (card 699fe92a). It used to be a page-wide text match,
+    // which this card's new per-agent CRON chip makes ambiguous — and which was always the weaker
+    // claim, since any occurrence of the string anywhere on the page satisfied it.
+    const strip = page.getByTestId("atlas-agents-schedules");
+    await expect(strip).toBeVisible();
+    await expect(strip.getByText(cron, { exact: true })).toBeVisible();
+    await expect(strip.getByText(agentName, { exact: true }).first()).toBeVisible();
+    // And the agent's own card says it is on a clock — a DIFFERENT statement in a different place
+    // (which agents are scheduled, at a glance), not this readout rendered twice. Both are asserted
+    // so the pair stays deliberate: a future reader sees two intended sites, not one duplicate.
+    await expect(page.getByTestId(`atlas-agent-card-${agent.id}`).locator(".loom-baychip.is-cron"))
+      .toHaveText(cron);
     // ...and only NOW the absence: the pointer is gone because the section un-collapsed.
     await expect(page.getByRole("button", { name: /add one on the Automation page/i })).toHaveCount(0);
   });

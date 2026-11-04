@@ -4,7 +4,7 @@ import type { SessionListItem, UsageHistory, UsageHistoryTotals, UsageHistoryAge
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
+import { bySessionActivity, mostRecentActivity, shortModel } from "../lib/sessions";
 import { isRateLimited } from "../lib/attention";
 import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Select } from "../components/ui";
 // The SHARED usage kit (card 30266229): the token/cost/ratio formatting, the four historical windows and
@@ -76,11 +76,6 @@ function occupancyTone(s: SessionListItem): Tone {
   return occupancy(s) > CONTEXT_WARN_RATIO ? "amber" : "phosphor";
 }
 
-// "claude-opus-4-8[1m]" → "opus-4-8[1m]" — drop the vendor prefix, keep the meaningful tail.
-function shortModel(model?: string | null): string {
-  if (!model) return "—";
-  return model.replace(/^claude-/i, "");
-}
 // Total throughput across a run-usage row: every billed token class summed. The interactive-session
 // twin (`sessionTotalTokens`) is in the shared kit; this runs-plane one stays here, where its plane is.
 function totalTokens(t: UsageHistoryTotals): number {

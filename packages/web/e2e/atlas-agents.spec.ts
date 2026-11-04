@@ -288,7 +288,12 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     await expect(page.getByTestId(`atlas-agent-card-${seeded.plain.id}`)).toBeVisible();
     await expect(spawnCard(page, seeded.plain.id)).toBeVisible();
     await expect(page.getByTestId(`atlas-agent-card-${seeded.worker.id}`)).toHaveCount(0);
-    await expect(page.getByTestId("atlas-agents-count")).toContainText(new RegExp(`2 agents in ${escapeRe(seeded.project.name)}`));
+    // THE TALLY RECONCILES THE TWO COUNTS (card 699fe92a). The tab badge counts every agent in the
+    // project, this head used to count only the spawnable ones, and nothing on screen related them.
+    // It is the same `2 spawnable` claim the old assertion made — now with the total and the
+    // dispatched count it used to leave unstated, so all three numbers are pinned, not one.
+    await expect(page.getByTestId("atlas-agents-count")).toContainText(
+      new RegExp(`3 agents in ${escapeRe(seeded.project.name)} — 2 you spawn, 1 your manager dispatches`));
 
     // … and names the worker rig as a DEFINITION, with no control on it. Both halves: a page that
     // simply listed every agent would pass the first.
@@ -302,7 +307,15 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     // that Edit's own behaviour; this pair stays the lifecycle absence.
     await expect(rig.locator('button[title^="Spawn from profile"]')).toHaveCount(0);
     await expect(rig.locator("button.loom-btn-danger")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-spawn-explainer")).toBeVisible();
+    // …and it says WHY, where the control would be. The old assertion here was that the static
+    // "What a spawn does" panel is visible; the owner asked for that panel to be removed (card
+    // 699fe92a), so the claim it was making — "this page explains itself, it is not just buttons" —
+    // moves to the two surfaces that now carry it for THIS agent rather than in the abstract: the
+    // dispatch stamp in the slot the spawn controls occupy on a spawnable card, and the group's own
+    // reason for existing. Asserting the panel's ABSENCE too, so a revert cannot pass this quietly.
+    await expect(page.getByTestId("atlas-spawn-explainer")).toHaveCount(0);
+    await expect(rig).toContainText(/manager-dispatched/i);
+    await expect(page.getByTestId("atlas-agents-worker-note")).toContainText(/dispatch it from the manager/i);
   });
 
   test("switch ON: the tree's quick-spawn opens the roster without navigating, and closes", async ({ page, loomDaemon }) => {

@@ -24,6 +24,16 @@ import { color, font, radius, tone, type Tone } from "../../theme";
 // Forwards any other native div prop (data-*, aria-*, id, ...) via `rest` — an
 // unrecognized/misspelled prop still fails loudly at compile time (excess-property
 // check on the declared members), it's only real DOM attributes that pass through.
+//
+// ⛔ `background`, `border` and `padding` are written below as INLINE styles, and `style` is
+// spread LAST — so for a `<Panel className="x">`, a stylesheet rule setting any of those three
+// on `.x` is SILENTLY INERT. No error, no warning, and on a dark theme the render can still
+// look close enough to pass a glance: card 699fe92a wrote a card's padding, its muted variant
+// surface and its whole 2px leading edge as CSS, shipped a screenshot that looked right, and
+// found all three dead only by probing `getComputedStyle`. Set them via the `style` prop (it
+// wins), or render a plain <div> with your own class.
+//
+// @decision 699fe92a — a Panel's padding/background/border come from `style`, never a class.
 type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children"> & {
   children: ReactNode;
   selected?: boolean;
