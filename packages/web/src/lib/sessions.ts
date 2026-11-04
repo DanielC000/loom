@@ -175,12 +175,12 @@ export type SessionRowGroup<T> = { key: string; kind: "manager" | "orphans" | "s
  * orphan workers (parent absent from the input — a recycled/stopped manager) and standalone sessions
  * (no role / no parent — plain human sessions, platform leads).
  *
- * COMPANION EXCLUSION (load-bearing security invariant): assistant-role (companion) sessions are
- * dropped HERE, at the grouping source, so a companion can never surface as a pty tile + STDIN
- * Composer in ANY sub-list (manager row, orphan, or standalone). A companion is driven ONLY through
- * its chat surface (/companion). The Terminals page ALSO excludes them upstream at `live` (so they
- * stay out of the project dropdown + counts); this in-function guard is the belt to that suspenders —
- * feed this a companion and it still emits no row for it.
+ * COMPANION EXCLUSION (keep it — but it is NOT the security boundary): assistant-role (companion)
+ * sessions are dropped HERE, at the grouping source, so a companion never surfaces as a pty tile +
+ * STDIN Composer in ANY sub-list (manager row, orphan, standalone) — driven ONLY through /companion.
+ * pages/Terminals ALSO excludes them upstream at `live` (keeping them out of the dropdown + counts);
+ * this is the belt to that suspenders. What it buys is a UI that doesn't offer a surface the server
+ * would refuse: the daemon's own role check on both stdin paths holds that line (anchor below).
  */
 export function groupSessionRows<T extends SessionRowMember>(sessions: readonly T[]): SessionRowGroup<T>[] {
   const shown = sessions.filter((s) => !isCompanionSession(s)).slice().sort(byManagerThenCreated);
@@ -236,15 +236,31 @@ export function projectFilterOptions(
 /**
  * The COMPANION role. A companion (assistant-role) session is driven ONLY through its chat surface
  * (/companion) — never a raw pty tile + STDIN Composer. See groupSessionRows above, which drops them at
- * the Terminals grouping source, and the two client layers that enforce it on a rendered terminal
+ * the Terminals grouping source, and the two client layers that MIRROR that rule on a rendered terminal
  * (TerminalPane's `disableStdin`/stdin-frame suppression, TerminalCard withholding the Composer).
+ *
+ * MIRROR, not boundary: these client layers are a UX truth, not the enforcement. The daemon refuses an
+ * assistant-role stdin write itself, on BOTH inbound surfaces, and that server check is what actually
+ * closes the hole — see isCompanionSession's note below.
  */
 export const COMPANION_ROLE = "assistant";
 
 /**
  * THE single companion test — every surface that must treat a companion differently reads it from here
  * rather than hand-rolling `role === "assistant"`, so the four historical spellings of this check can't
- * drift apart (card 5c87f4b6).
+ * drift apart (card 5c87f4b6). EIGHT call sites today: seven outside this file (components/Sidebar,
+ * components/TerminalCard, lib/atlasHome, lib/companionGuard, lib/workspaceSessions, pages/Terminals,
+ * pages/WorkspaceHome) plus `groupSessionRows` ABOVE in this same file — a grep run outside lib/sessions
+ * misses that eighth one, so don't take a seven-site count from such a sweep as complete (card f899381b).
+ *
+ * THE ASSISTANT ROLE *IS* THE COMPANION IDENTITY — server-enforced, not a client-side proxy for some
+ * narrower "is it chat-bound" fact: the daemon composes the companion base brief into every assistant
+ * spawn AND resume, refuses stdin on BOTH inbound surfaces, and gates the companion MCP levers on that
+ * same role. There is no supported "assistant-role but not a companion" session for this to tell apart,
+ * and a chat BINDING is a narrower question (is it reachable yet), never a different identity.
+ * @decision 018ce1db — never treat this client-side exclusion as the security boundary: the server-side
+ * role refusal on `POST /api/sessions/:id/input` and `/ws/term`'s stdin is what closes the escalation
+ * path, so widening this predicate cannot make such a session writable — only a UI that lies about it.
  *
  * FAIL-SAFE SHAPE — read this before "fixing" it: the argument is deliberately wide (an optional session,
  * an optional role) and an UNKNOWN role answers **false** (not a companion). That is correct, not an

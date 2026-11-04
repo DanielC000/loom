@@ -74,8 +74,10 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
   // Companion (assistant-role) sessions are EXCLUDED here at the source: a companion is driven ONLY
   // through its chat surface (/companion, over /ws/companion/:id), never a raw pty tile + STDIN
   // Composer. Filtering at `live` keeps them out of every downstream view — the project dropdown, the
-  // counts, `shown`, and all grouping sub-lists (managers/orphans/standalone) — so a companion can
-  // never leak a raw-STDIN path onto this page.
+  // counts, `shown`, and all grouping sub-lists (managers/orphans/standalone) — so this page never
+  // OFFERS a raw-STDIN path for one. That is a UX guarantee, not the security boundary: the daemon
+  // refuses an assistant-role stdin write itself, on both inbound surfaces (lib/sessions'
+  // isCompanionSession carries the decision anchor).
   const live = (sessions.data ?? []).filter((s) => s.processState === "live" && !isCompanionSession(s));
   // The live set is only HALF the option list — the scoped project and the current filter value are
   // offered whether or not a session names them, or the control renders "All" while filtering (card

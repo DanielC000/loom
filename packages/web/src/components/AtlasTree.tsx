@@ -539,10 +539,15 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
     () => standingOperators(sessionsQ.data).filter((o) => o.home.to === "/platform").length,
     [sessionsQ.data],
   );
-  // The live, non-companion sessions of EVERY project — not just the selected one. `["allSessions"]`
-  // is ONE cross-project cache entry that is already being polled, so a session row costs the same
-  // whichever branch it is in. That is what makes card ec1aa18e's "the branch lists what is RUNNING"
-  // affordable for every project at once rather than only for the one you are scoped to.
+  // EVERY project's live sessions — not just the selected one, and NOT companion-filtered here: the
+  // only predicate below is `isLiveSession`, so an assistant-role (companion) session IS in this map.
+  // Companions are dropped downstream, at the render site, by `groupSessionRows` (see `sessionRows`
+  // below and lib/sessions' own note) — don't read this map as pre-filtered. Sibling `liveByProject`
+  // (lib/atlasHome' `liveCountsByProject`) is the one that DOES exclude them, which is why the row's
+  // live chip and this list can legitimately differ by a companion.
+  // `["allSessions"]` is ONE cross-project cache entry that is already being polled, so a session row
+  // costs the same whichever branch it is in. That is what makes card ec1aa18e's "the branch lists
+  // what is RUNNING" affordable for every project at once rather than only for the one you are scoped to.
   const liveByProjectId = useMemo(() => {
     const byId = new Map<string, SessionListItem[]>();
     for (const s of sessionsQ.data ?? []) {
