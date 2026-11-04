@@ -15,6 +15,7 @@ import {
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory, readProjectMemoryHistory, MAX_MEMORY_HISTORY_LIMIT } from "./memory.js";
 import { registerDecisionTools } from "./decisions.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
+import { resolveUsableConnections } from "../connections/store.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { isConfirmedSubagent, type ToolAttributionResult } from "../pty/tool-attribution.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
@@ -864,6 +865,18 @@ export class TaskMcpRouter {
     const sessionConnections = session?.connections ?? [];
     if (sessionConnections.length > 0) {
       const guard = resolveConfig(undefined, db.getPlatformConfig()).platform.connections;
+      // card 298b826e: the session's own USABLE allowlist — {id,name,host}, never the secret, already
+      // scope-filtered by `resolveUsableConnections` (never lists one this session's own project can't
+      // reach) — listed IN the description so an agent never has to guess an id or truncate one by hand.
+      const usableConnections = resolveUsableConnections(db, sessionConnections, projectId);
+      // `name`/`host` are owner/agent-authored (credential provisioning lets either set them) and are
+      // NOT restricted to a safe character set — a quote or newline inside either would otherwise break
+      // out of this hand-built delimited text and inject arbitrary content into the TOOL DESCRIPTION
+      // every agent reads. `JSON.stringify` quotes+escapes each field (including embedded quotes and
+      // newlines as `\n`), keeping the whole description one line per connection regardless of content.
+      const usableConnectionsText = usableConnections.length > 0
+        ? usableConnections.map((c) => `id=${JSON.stringify(c.id)} name=${JSON.stringify(c.name)} host=${JSON.stringify(c.host)}`).join("; ")
+        : "none are currently resolvable for this session in this project — ask your owner/manager to check the binding.";
       server.registerTool(
         "authenticated_request",
         {
@@ -875,7 +888,10 @@ export class TaskMcpRouter {
             "back as {status, location} instead of being chased. `method` defaults to GET. `headers` may " +
             "carry NON-auth headers only. `body` may be a string or a JSON-serializable object (a JSON " +
             "object defaults Content-Type: application/json). Bounded by a request timeout and a response-" +
-            "size cap; each connection also has a request-rate limit.",
+            "size cap; each connection also has a request-rate limit. `connection` may be given as an id, " +
+            "or as a NAME when it matches exactly one of this session's usable connections (case-sensitive) " +
+            "— an ambiguous or unresolved name is refused and the usable list is named again. This " +
+            `session's usable connections: ${usableConnectionsText}`,
           inputSchema: strictShape({
             connection: z.string(),
             path: z.string(),

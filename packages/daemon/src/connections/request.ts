@@ -31,12 +31,17 @@
  * call directly in tests.
  */
 import type { ConnectionsGuardConfig } from "@loom/shared";
-import { getConnectionMetadata, getSecretForUse, isConnectionUsableByProject, type ConnectionsDbStore } from "./store.js";
+import {
+  getConnectionMetadata, getSecretForUse, isConnectionUsableByProject, resolveUsableConnections,
+  type ConnectionsDbStore, type UsableConnectionSummary,
+} from "./store.js";
 import { ensureFreshOAuthToken } from "./oauth.js";
 import { boundedFetch } from "./boundedFetch.js";
 
 export interface AuthenticatedRequestInput {
-  /** The P1 connection id to use (must be in the caller's session-pinned allowlist — checked by mcp/server.ts). */
+  /** The P1 connection's id, OR — card 298b826e — a NAME that matches exactly one connection in the
+   *  caller's session-pinned allowlist (checked by mcp/server.ts). An id always takes priority: it is
+   *  tried first, so a connection legitimately NAMED the same as another one's id is never shadowed. */
   connection: string;
   /** Request path (+ optional query string). Must start with exactly one "/". Never a full URL. */
   path: string;
@@ -50,7 +55,16 @@ export interface AuthenticatedRequestInput {
 
 export type AuthenticatedRequestResult =
   | { ok: true; status: number; headers: Record<string, string>; body: string; location?: string }
-  | { ok: false; error: string };
+  // `usableConnections` (card 298b826e) rides every refusal that occurs while RESOLVING the caller's
+  // `connection` input — not-permitted, not-found (missing metadata or out-of-project-scope), and
+  // ambiguous-name — {id,name,host} ONLY, never the secret, and already scope-filtered by
+  // `resolveUsableConnections` so it can never list a connection this caller's project can't reach. Absent
+  // on every OTHER refusal (bad path/method, rejected header, rate limit, …) — those occur AFTER a
+  // connection has already resolved, so there is nothing to disambiguate. This INCLUDES the late
+  // "connection not found" right before dispatch (revoked between the metadata read and use, below) —
+  // despite sharing its error text with the resolution-time not-found refusal above, it fires after
+  // resolution already succeeded once, so it omits `usableConnections` too.
+  | { ok: false; error: string; usableConnections?: UsableConnectionSummary[] };
 
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
@@ -139,21 +153,51 @@ export async function performAuthenticatedRequest(
   input: AuthenticatedRequestInput,
   callerProjectId?: string | null,
 ): Promise<AuthenticatedRequestResult> {
-  const connectionId = input?.connection;
-  if (typeof connectionId !== "string" || !connectionId) {
+  const requested = input?.connection;
+  if (typeof requested !== "string" || !requested) {
     return { ok: false, error: "connection is required" };
   }
-  if (!sessionConnections.includes(connectionId)) {
-    return { ok: false, error: "this session is not permitted to use that connection" };
+
+  // The caller's USABLE allowlist (card 298b826e) — {id,name,host}, already scope-filtered by
+  // `resolveUsableConnections`. This is the ONLY list ever handed back to the caller below, and NAME
+  // resolution below searches only THIS list — a connection outside `callerProjectId`'s scope can
+  // therefore never be matched, listed, or confirmed to exist by name, exactly preserving the raw-id
+  // path's existing fail-closed "connection not found" (never scope-specific) wording further down.
+  const usable = resolveUsableConnections(deps.db, sessionConnections, callerProjectId);
+
+  let connectionId: string;
+  if (sessionConnections.includes(requested)) {
+    // Exact id match against the RAW pinned allowlist — byte-identical to pre-298b826e behavior: an id
+    // outside the caller's project scope, or one whose metadata is gone, still falls through to the SAME
+    // "connection not found" refusal below (never a different message).
+    connectionId = requested;
+  } else {
+    // Not a raw id on this session's allowlist — try NAME resolution, but only against the already
+    // scope-filtered `usable` list, never the raw one (see the comment above `usable`).
+    const matches = usable.filter((c) => c.name === requested);
+    const onlyMatch = matches.length === 1 ? matches[0] : undefined;
+    if (onlyMatch) {
+      connectionId = onlyMatch.id;
+    } else if (matches.length > 1) {
+      return {
+        ok: false,
+        error: `"${requested}" matches ${matches.length} of this session's allowlisted connections by name — use the id instead.`,
+        usableConnections: matches,
+      };
+    } else {
+      return { ok: false, error: "this session is not permitted to use that connection", usableConnections: usable };
+    }
   }
+
   const meta = getConnectionMetadata(deps.db, connectionId);
-  if (!meta) return { ok: false, error: "connection not found" };
+  if (!meta) return { ok: false, error: "connection not found", usableConnections: usable };
   // Fail-closed trust boundary: a cross-project session whose profile allowlists this id (e.g. a reused
   // Profile, or an owner misconfiguration) must resolve NOTHING for a project-scoped connection it doesn't
   // own. "connection not found" (not a scope-specific message) avoids confirming a scoped connection's
-  // existence to a caller outside its project.
+  // existence to a caller outside its project. `usableConnections` is safe to attach regardless — it
+  // never includes the connection that just failed this check, by construction of `usable` above.
   if (!isConnectionUsableByProject(meta.projectId, callerProjectId ?? null)) {
-    return { ok: false, error: "connection not found" };
+    return { ok: false, error: "connection not found", usableConnections: usable };
   }
 
   const pathCheck = validatePath(input.path);

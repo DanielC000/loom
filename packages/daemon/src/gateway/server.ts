@@ -4622,7 +4622,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (v.value.documentConversion) prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
     // `grantReach` is OMITTED entirely when the save granted nothing new, so its mere presence is the
     // signal — a reader never has to tell an empty payload apart from "no grant added".
-    return { ...deps.db.getProfile(id), ...(grantReach ? { grantReach } : {}) };
+    // card 298b826e: `connections` is pinned on a session ROW at spawn and stays frozen across resume/
+    // fork/recycle (the documented contract) — a bound agent's grant reach already says "next session"
+    // (decision 3c4e0df6), but that phrase alone doesn't disambiguate a recycle successor (also a "next"
+    // session row) from a genuinely fresh spawn. Name it explicitly, ONLY when THIS save actually added
+    // `connections` to the grant (never on an unrelated edit — see `addedKeys`).
+    const connectionsFreshSpawnNote = grantReach?.addedKeys.includes("connections")
+      ? "This grant reaches only a session spawned FRESH after this save — a session that is merely " +
+        "resumed or recycled keeps whatever connections it already had."
+      : undefined;
+    return {
+      ...deps.db.getProfile(id),
+      ...(grantReach ? { grantReach } : {}),
+      ...(connectionsFreshSpawnNote ? { connectionsFreshSpawnNote } : {}),
+    };
   });
   // Delete is safe in the sense that nothing BREAKS for an assigned agent — a dangling profile_id
   // resolves to the plain backstop (a bundled profile re-seeds on next boot) — but that backstop can

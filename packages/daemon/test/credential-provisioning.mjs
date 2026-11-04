@@ -491,12 +491,17 @@ function askCredential(e, { id, title, provisionTo, envVar }) {
   check("(G) a bound provisioning ack says the binding is PENDING", ackBound.includes("PENDING"));
   check("(G) a bound provisioning ack says it's NOT yet wired to any session", ackBound.includes("NOT yet wired to any session"));
   check("(G) a bound provisioning ack never says the binding IS applied", !/\bis applied\b/i.test(ackBound));
+  // card 298b826e: the freeze contract (connections pin at spawn, frozen across resume/fork/recycle) is
+  // stated plainly in the ack itself — the asking agent's own first signal, before any operator UI.
+  check("(G) a bound provisioning ack states the grant reaches only a FRESH spawn", ackBound.includes("spawned FRESH afterward"));
+  check("(G) a bound provisioning ack states a resumed or recycled session is NOT reached", ackBound.includes("resumed or recycled"));
 
   // Provisioned with NO binding requested.
   const qUnbound = askCredential(e, { id: "cred-ack-unbound", title: "Need the key", provisionTo: { connection: { name: "Ack API 2", host: "api.example.com" } } });
   await app.inject({ method: "POST", url: `/api/questions/${qUnbound.id}/answer`, payload: { secret: "sk_ack_unbound" } });
   const ackUnbound = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qUnbound.id), e.db).ack;
   check("(G) an unbound provisioning ack says no binding was requested", ackUnbound.includes("No profile binding was requested"));
+  check("(G) an unbound provisioning ack ALSO states the fresh-spawn-only reach", ackUnbound.includes("spawned FRESH afterward"));
 
   // A PLAIN (non-provisioning) credential ask keeps today's exact wording — no "Connection"/"provisioned into" language.
   const qPlain = askCredential(e, { id: "cred-ack-plain", title: "Need an SSH key" });

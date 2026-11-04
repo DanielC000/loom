@@ -197,6 +197,52 @@ try {
       check("1k object body: Content-Type defaulted to application/json", calls[0]?.headers?.["Content-Type"] === "application/json");
     }
 
+    // --- 1l. NAME resolution (card 298b826e): a name that matches exactly ONE allowlisted connection
+    //     resolves to THAT connection specifically — not merely "some" allowlisted one. The named
+    //     connection is deliberately SECOND in the allowlist here (Code-Reviewer mutant M4, "resolve a
+    //     name to usable[0].id", survives a bare ok:true check whenever the named connection happens to
+    //     also be first — asserting WHICH connection actually received the dispatch (host + injected
+    //     credential) closes that). ---
+    {
+      const SECOND_SECRET = "sk-SECOND-DO-NOT-LEAK-this-secret-1a2b3c4d5e";
+      const secondConn = createConnection(db, { name: "Second", host: "second.example", authScheme: "bearer", secret: SECOND_SECRET });
+      const calls = [];
+      const fetchImpl = async (url, init) => { calls.push({ url: String(url), init }); return new Response("ok", { status: 200 }); };
+      const r = await performAuthenticatedRequest({ db, fetchImpl }, [bearerConn.id, secondConn.id], GUARD, { connection: secondConn.name, path: "/by-name" });
+      check("1l name resolution: a unique allowlisted name resolves and the call succeeds", r.ok === true);
+      check("1l name resolution: dispatches to the NAMED connection's host, not the allowlist's first entry", calls[0]?.url === "https://second.example/by-name");
+      check("1l name resolution: injects the NAMED connection's own secret, not the first entry's", calls[0]?.init?.headers?.Authorization === `Bearer ${SECOND_SECRET}`);
+    }
+
+    // --- 1m. NAME resolution: an AMBIGUOUS name (two allowlisted connections share it) is refused, names BOTH, never dispatches ---
+    {
+      let fetchCalled = false;
+      const dup1 = createConnection(db, { name: "Dup", host: "dup1.example", authScheme: "bearer", secret: PLAINTEXT });
+      const dup2 = createConnection(db, { name: "Dup", host: "dup2.example", authScheme: "bearer", secret: PLAINTEXT });
+      const fetchImpl = async () => { fetchCalled = true; return new Response("ok", { status: 200 }); };
+      const r = await performAuthenticatedRequest({ db, fetchImpl }, [dup1.id, dup2.id], GUARD, { connection: "Dup", path: "/x" });
+      check("1m ambiguous name: refused", r.ok === false);
+      check("1m ambiguous name: error names the match count", /matches 2/.test(r.error ?? ""));
+      check(
+        "1m ambiguous name: usableConnections names BOTH ambiguous candidates (id,name,host — never the secret)",
+        JSON.stringify((r.usableConnections ?? []).map((c) => c.id).sort()) === JSON.stringify([dup1.id, dup2.id].sort())
+          && (r.usableConnections ?? []).every((c) => c.name === "Dup")
+          && !JSON.stringify(r).includes(PLAINTEXT),
+      );
+      check("1m ambiguous name: never reaches fetch (never dispatches on an ambiguous guess)", fetchCalled === false);
+    }
+
+    // --- 1n. an UNRESOLVED connection (neither a raw id nor a matching allowlisted name) is refused with the usable allowlist named ---
+    {
+      const r = await performAuthenticatedRequest({ db, fetchImpl: async () => new Response("ok") }, [bearerConn.id, apiKeyConn.id], GUARD, { connection: "no-such-connection", path: "/x" });
+      check("1n unresolved connection: refused", r.ok === false);
+      check(
+        "1n unresolved connection: usableConnections lists the session's own allowlist ({id,name,host}, never the secret)",
+        JSON.stringify((r.usableConnections ?? []).map((c) => c.id).sort()) === JSON.stringify([bearerConn.id, apiKeyConn.id].sort())
+          && !JSON.stringify(r).includes(PLAINTEXT),
+      );
+    }
+
     db.close();
   }
 
@@ -208,10 +254,15 @@ try {
     db.insertProject({ id: PROJECT_ID, name: "AuthReqProj", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
 
     const granted = createConnection(db, { name: "GitHub", host: "api.github.com", authScheme: "bearer", secret: PLAINTEXT });
+    // card 298b826e: a connection NAME containing a quote + a real newline — provisionable by an agent
+    // via credential provisioning, with no character restriction — exercises the tool-description
+    // injection guard below (2h).
+    const WEIRD_NAME = 'Weird "Quoted"\nName';
+    const weird = createConnection(db, { name: WEIRD_NAME, host: "weird.example", authScheme: "bearer", secret: PLAINTEXT });
 
-    // Profile A: no connections (the default/off case). Profile B: grants the one connection above.
+    // Profile A: no connections (the default/off case). Profile B: grants both connections above.
     db.insertProfile({ id: "profNoConn", name: "NoConnRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
-    db.insertProfile({ id: "profWithConn", name: "WithConnRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [granted.id] });
+    db.insertProfile({ id: "profWithConn", name: "WithConnRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [granted.id, weird.id] });
     db.insertAgent({ id: "agentNoConn", projectId: PROJECT_ID, name: "NoConn", startupPrompt: "", position: 0, profileId: "profNoConn" });
     db.insertAgent({ id: "agentWithConn", projectId: PROJECT_ID, name: "WithConn", startupPrompt: "", position: 1, profileId: "profWithConn" });
 
@@ -262,11 +313,31 @@ try {
     check("2e granted-connection session: authenticated_request PRESENT in tools/list", toolsWith.some((t) => t.name === "authenticated_request"));
     check("2f every other loom-tasks tool still present on both (additive, not replacing)", ["tasks_list", "tasks_get", "wake_me"].every((n) => toolsNo.some((t) => t.name === n) && toolsWith.some((t) => t.name === n)));
 
+    // --- 2g. card 298b826e: the tool's own DESCRIPTION lists this session's usable allowlist (id,name,host) ---
+    const authTool = toolsWith.find((t) => t.name === "authenticated_request");
+    check("2g description lists the granted connection's id", authTool?.description.includes(granted.id));
+    check("2g description lists the granted connection's name", authTool?.description.includes(granted.name));
+    check("2g description lists the granted connection's host", authTool?.description.includes(granted.host));
+    check("2g description never leaks the secret", !authTool?.description.includes(PLAINTEXT));
+
+    // --- 2h. card 298b826e: a connection NAME containing a quote + a newline cannot break the tool
+    //     description's one-line-per-connection shape (prompt-text injection guard) ---
+    check("2h description stays a SINGLE line even with an adversarial connection name (no raw newline reached the text)", !authTool?.description.includes("\n"));
+    check("2h description carries the adversarial name's content, safely ESCAPED rather than dropped", authTool?.description.includes(JSON.stringify(WEIRD_NAME)));
+    check("2h description still lists the weird connection's host", authTool?.description.includes(weird.host));
+    {
+      const marker = "session's usable connections: ";
+      const idx = authTool?.description.indexOf(marker) ?? -1;
+      const listText = idx >= 0 ? authTool.description.slice(idx + marker.length) : "";
+      const entries = listText.split("; ");
+      check("2h the usable-connections list still splits into exactly 2 entries (the quote/newline neither manufactured nor swallowed a delimiter)", entries.length === 2);
+    }
+
     db.close();
   }
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — authenticated_request: auth injected server-side (bearer/api-key), caller Authorization rejected, session allowlist + path validation enforced, redirects never auto-followed, echo responses redacted (body+headers, Set-Cookie stripped), response-size cap + rate limiter enforced, and the profile-gating wiring (spawn -> session row -> tools/list) is additive/byte-identical when off."
+    ? "\n✅ ALL PASS — authenticated_request: auth injected server-side (bearer/api-key), caller Authorization rejected, session allowlist + path validation enforced, redirects never auto-followed, echo responses redacted (body+headers, Set-Cookie stripped), response-size cap + rate limiter enforced, the profile-gating wiring (spawn -> session row -> tools/list) is additive/byte-identical when off, a unique allowlisted NAME resolves while an ambiguous one refuses and names both candidates, every not-permitted/not-found/ambiguous refusal carries the session's own usable allowlist (id/name/host, never the secret), and the tool description itself lists that same allowlist."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   cleanupPathSync(tmpHome);

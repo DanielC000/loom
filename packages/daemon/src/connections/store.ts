@@ -229,6 +229,40 @@ export function resolveScopedConnectionSecret(db: ConnectionsDbStore, connection
   } catch { return undefined; }
 }
 
+/** A connection a session may actually resolve — `{id, name, host}` only, NEVER the secret. */
+export interface UsableConnectionSummary {
+  id: string;
+  name: string;
+  host: string;
+}
+
+/**
+ * The session's own USABLE connection allowlist (card 298b826e): every id on `sessionConnections` (the
+ * session-row-pinned allowlist) that ALSO passes `isConnectionUsableByProject` for `callerProjectId`,
+ * resolved to non-secret display metadata. "Usable" means both — a connection pinned on the allowlist
+ * (e.g. a stale or misconfigured profile) that this caller's own project can't reach is deliberately
+ * EXCLUDED here, never just filtered at display time: this is the single list the `authenticated_request`
+ * tool's description and every not-permitted/not-found refusal surface back to the agent, so listing an
+ * out-of-project connection here would leak its existence to a caller who could never resolve it anyway —
+ * the exact leak `connections/request.ts`'s own "connection not found" (never scope-specific) wording is
+ * already careful not to cause. A revoked/unresolvable id (metadata missing) is silently dropped, same as
+ * `resolveScopedConnectionSecret`'s own fail-closed posture.
+ */
+export function resolveUsableConnections(
+  db: ConnectionsDbStore,
+  sessionConnections: string[],
+  callerProjectId?: string | null,
+): UsableConnectionSummary[] {
+  const out: UsableConnectionSummary[] = [];
+  for (const id of sessionConnections) {
+    const meta = getConnectionMetadata(db, id);
+    if (!meta) continue;
+    if (!isConnectionUsableByProject(meta.projectId, callerProjectId ?? null)) continue;
+    out.push({ id: meta.id, name: meta.name, host: meta.host });
+  }
+  return out;
+}
+
 // --- OAuth2 (agent-tooling epic P5a): authorization-code + PKCE registration + token-bundle seams -------
 // Everything below is HUMAN-only-triggered (REST, `gateway/server.ts`) or server-internal (the lazy
 // refresh-on-use seam in `connections/request.ts` / `connections/oauth.ts`) — no MCP tool ever reaches

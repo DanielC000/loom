@@ -2416,7 +2416,9 @@ function PendingBindingsPanel() {
           When you answer a credential an agent asked for, Loom stores the secret and creates a Connection —
           but it never grants that Connection to a profile on its own. Each grant an agent requested waits
           here for your explicit approval. "Review &amp; grant" opens the profile's connection allowlist with
-          the connection pre-selected; nothing is granted until you Save there.
+          the connection pre-selected; nothing is granted until you Save there. The grant then reaches only a
+          session spawned fresh afterward — a session that is merely resumed or recycled keeps whatever
+          connections it already had.
         </p>
       </Panel>
 

@@ -944,6 +944,12 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
             not in the credential store (will be ignored at spawn): {connections.filter((id) => !availableConnections.some((c) => c.id === id)).join(", ")}
           </span>
         )}
+        {/* card 298b826e: connections is pinned on a session row at spawn and stays frozen across resume/
+            fork/recycle, same family as the model+skills note above — a bound agent's live/recycled
+            session will not pick this up until it next spawns fresh. */}
+        <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>
+          Connections apply only to a session spawned fresh after this save — a resumed or recycled session keeps whatever it already had.
+        </span>
       </div>
 
       <span style={{ flex: 1 }} />

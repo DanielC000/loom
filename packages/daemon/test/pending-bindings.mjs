@@ -163,13 +163,19 @@ async function connections(app) {
   const put = await app.inject({ method: "PUT", url: `/api/profiles/${e.profId}`, payload: { connections: [connId] } });
   check("(C) granting via PUT /api/profiles/:id -> 200", put.statusCode === 200);
   check("(C) the connection is now on the profile's allowlist", (e.db.getProfile(e.profId).connections ?? []).includes(connId));
+  // card 298b826e: a save that ADDS a connections grant carries a plain fresh-spawn-only note — the
+  // freeze contract stated at the ONE place a human applying a binding actually looks.
+  const putBody = JSON.parse(put.body);
+  check("(C) the grant response states the fresh-spawn-only reach", (putBody.connectionsFreshSpawnNote ?? "").includes("spawned FRESH"));
 
   check("(C) the binding transitioned 'pending'->'applied' at the grant boundary", e.db.getQuestion(q.id).provisionBindingState === "applied");
   check("(C) the binding LEFT the queue (listPendingBindings clears)", (await pendingBindings(app)).rows.length === 0);
 
   // 'applied' is terminal — removing the connection again does NOT revert it back to the queue.
-  await app.inject({ method: "PUT", url: `/api/profiles/${e.profId}`, payload: { connections: [] } });
+  const putRemove = await app.inject({ method: "PUT", url: `/api/profiles/${e.profId}`, payload: { connections: [] } });
   check("(C) removing the connection is a separate action — the binding stays 'applied', never re-pends", e.db.getQuestion(q.id).provisionBindingState === "applied" && (await pendingBindings(app)).rows.length === 0);
+  // A save that NARROWS (removes) connections widens nothing — grantReach is null, and so is the note.
+  check("(C) a save that only REMOVES connections carries NO fresh-spawn note (nothing was granted)", !("connectionsFreshSpawnNote" in JSON.parse(putRemove.body)));
 
   // A DIFFERENT profile saving the same connection must NOT flip a binding that targeted THIS profile —
   // markBindingsApplied confirms the profileId inside provision_target, not just the connection id.

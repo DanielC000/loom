@@ -327,12 +327,19 @@ export function appendQuestionAskedEvent(db: Db, sessionId: string, question: Qu
  */
 function credentialAck(q: Question): string {
   if (q.provisionTarget) {
+    // card 298b826e: a profile's `connections` allowlist is pinned on a session ROW at spawn and stays
+    // frozen across resume/fork/recycle (the documented contract, packages/shared/src/types.ts) — so even
+    // once an operator applies the binding below, it reaches only a session spawned FRESH afterward, never
+    // one that was already resumed or recycled. Stated plainly here, not just at the profile-edit route,
+    // since this is the asking agent's own first (and sometimes only) signal.
+    const freshSpawnNote = " Once applied, the grant reaches only a session spawned FRESH afterward — a " +
+      "session that is merely resumed or recycled keeps whatever connections it already had.";
     const bindingNote =
       q.provisionBindingState === "pending"
         ? ` A binding to profile "${q.provisionTarget.binding?.profileId}" is PENDING human confirmation — ` +
-          "it is NOT yet wired to any session; an operator must apply it before an agent can use it."
+          "it is NOT yet wired to any session; an operator must apply it before an agent can use it." + freshSpawnNote
         : " No profile binding was requested — an operator must still bind this Connection to a profile " +
-          "before any agent session can use it.";
+          "before any agent session can use it." + freshSpawnNote;
     return (
       `Provided and stored securely — not returned via this tool. It was provisioned into Connection ` +
       `"${q.provisionTarget.connection.name}" (id ${q.provisionConnectionId}).` + bindingNote

@@ -18,6 +18,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) provisionConnection's OPTIONAL scoped-rotation extension: a same-name collision refuses across
 //       scopes (global vs scoped, or two different projects) exactly as before f2abce7e, but ROTATES in
 //       place when the existing row is already scoped to the EXACT requesting project (api-key only).
+//   (5) card 298b826e: a project-scoped connection out of the caller's own project is never resolvable by
+//       NAME (name resolution searches only `resolveUsableConnections`' already scope-filtered list) and
+//       never appears in any refusal's `usableConnections` enumeration, even though it is equally present
+//       in the raw session allowlist — the same fail-closed non-leak property (2) proves for a raw id.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/connections-project-scope.mjs
 import fs from "node:fs";
@@ -39,7 +43,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const {
   createConnection, getConnectionMetadata, getSecretForUse, isConnectionUsableByProject, provisionConnection,
-  resolveScopedConnectionSecret,
+  resolveScopedConnectionSecret, resolveUsableConnections,
 } = await import("../dist/connections/store.js");
 const { performAuthenticatedRequest, __resetConnectionsRateLimitState } = await import("../dist/connections/request.js");
 const { buildMcpServers } = await import("../dist/pty/host.js");
@@ -91,6 +95,40 @@ try {
 
     const rScopedNoProject = await performAuthenticatedRequest({ db, fetchImpl }, allowlist, GUARD, { connection: scopedConn.id, path: "/x" });
     check("(2) FAIL-CLOSED: scoped connection resolves NOTHING for a caller with NO project at all", rScopedNoProject.ok === false);
+
+    // ============ Part 2b (card 298b826e) — NAME resolution + the usableConnections listing never leak a scoped connection out of scope ============
+    const rScopedByNameFromB = await performAuthenticatedRequest({ db, fetchImpl }, allowlist, GUARD, { connection: scopedConn.name, path: "/x" }, "proj-b");
+    check("(5) FAIL-CLOSED: the scoped connection's NAME does not resolve for a caller in a different project B (same as its id)", rScopedByNameFromB.ok === false);
+    check("(5) usableConnections on that refusal lists ONLY the global connection — the scoped one is absent", JSON.stringify((rScopedByNameFromB.usableConnections ?? []).map((c) => c.id)) === JSON.stringify([globalConn.id]));
+
+    // Existence-oracle check: an out-of-scope NAME must refuse EXACTLY like a name that never existed at
+    // all — a different error text between the two would let a cross-project caller distinguish "exists,
+    // but not for you" from "doesn't exist," confirming the scoped connection's existence by name alone
+    // (Code-Reviewer mutant M5: "search names over raw metadata, keep the scope check" — resolving the
+    // out-of-scope NAME to its real id via unscoped metadata, then letting the later project-ownership
+    // check reject it with the DIFFERENT "connection not found" text, instead of the ordinary unresolved-
+    // name text every other caller gets).
+    const rNeverExistedFromB = await performAuthenticatedRequest({ db, fetchImpl }, allowlist, GUARD, { connection: "totally-made-up-connection-name", path: "/x" }, "proj-b");
+    check("(5) a never-existing name also refuses", rNeverExistedFromB.ok === false);
+    check(
+      "(5) EXISTENCE ORACLE CLOSED: the out-of-scope name's refusal error is BYTE-IDENTICAL to the never-existing name's refusal error",
+      rScopedByNameFromB.error === rNeverExistedFromB.error,
+    );
+    check(
+      "(5) the never-existing name's usableConnections also lists only the global connection (same shape either way)",
+      JSON.stringify((rNeverExistedFromB.usableConnections ?? []).map((c) => c.id)) === JSON.stringify([globalConn.id]),
+    );
+
+    const rScopedByNameFromA = await performAuthenticatedRequest({ db, fetchImpl }, allowlist, GUARD, { connection: scopedConn.name, path: "/x" }, "proj-a");
+    check("(5) the scoped connection's NAME DOES resolve for a caller in ITS OWN project A", rScopedByNameFromA.ok === true);
+
+    // Every OTHER refusal (an unresolved name) from project B must also never name the scoped connection —
+    // resolveUsableConnections itself is the direct proof, independent of any one refusal's shape.
+    const usableFromB = resolveUsableConnections(db, allowlist, "proj-b");
+    check("(5) resolveUsableConnections for project B excludes the proj-a-scoped connection entirely", !usableFromB.some((c) => c.id === scopedConn.id));
+    check("(5) resolveUsableConnections for project B still includes the global connection", usableFromB.some((c) => c.id === globalConn.id));
+    const usableFromA = resolveUsableConnections(db, allowlist, "proj-a");
+    check("(5) resolveUsableConnections for project A (the owning project) includes BOTH connections", usableFromA.length === 2);
 
     db.close();
   }
@@ -190,7 +228,7 @@ try {
   }
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — isConnectionUsableByProject's truth table holds; performAuthenticatedRequest resolves a project-scoped connection ONLY for its own project (fail-closed even when the id is in a cross-project session's own allowlist) while a global connection resolves anywhere; buildMcpServers' P4 capability-grant path (the real resolveScopedConnectionSecret helper index.ts's resolveConnectionSecret calls) injects the secret only on a projectId match and mounts secret-less otherwise; and provisionConnection's optional scoped-rotation extension refuses every cross-scope/cross-project/non-api-key collision while rotating cleanly in place for a same-project same-name api-key row."
+    ? "\n✅ ALL PASS — isConnectionUsableByProject's truth table holds; performAuthenticatedRequest resolves a project-scoped connection ONLY for its own project (fail-closed even when the id is in a cross-project session's own allowlist) while a global connection resolves anywhere; buildMcpServers' P4 capability-grant path (the real resolveScopedConnectionSecret helper index.ts's resolveConnectionSecret calls) injects the secret only on a projectId match and mounts secret-less otherwise; provisionConnection's optional scoped-rotation extension refuses every cross-scope/cross-project/non-api-key collision while rotating cleanly in place for a same-project same-name api-key row; and a project-scoped connection out of the caller's own project is never resolvable by NAME nor named in any usableConnections listing, matching the raw-id non-leak property exactly."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   cleanupPathSync(tmpHome);
