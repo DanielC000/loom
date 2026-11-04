@@ -390,8 +390,9 @@ export class TaskMcpRouter {
       // Card f5292cf9 — the auto-release-on-read fold/version-bump mechanics; see tasks.ts/gateway/
       // server.ts's own comments on that path.
       // Card 3b2aa339 — the terminal-close specimen where this guard correctly did NOT block the move; see
-      // tasks.ts's own `PendingRequestWarning` doc comment (a different, unrelated record under the same
-      // id elsewhere in this repo documents project-memory's REST-tier capacity estimate — not this).
+      // tasks.ts's own `PendingRequestWarning` doc comment. (3b2aa339 is the REST-tier memory-capacity
+      // card itself — card c4355598 cites that same card's own terminal close as its grounding specimen;
+      // one card, not a colliding id with project-memory-recall.ts's own decision anchor for it.)
       // @decision 022659ac — deferredUntilTaskId accepts an array for a card blocked on several tasks.
       // @decision c90e9525 — a manual deferral with no deferredUntilTaskId requires deferredReason.
       // @decision 1d27c3cd — the "Previously deferred" body fold happens before either reset.
@@ -678,8 +679,8 @@ export class TaskMcpRouter {
     );
     // Card 42e9caf9 — mirrors memory_write's own sub-agent-attribution refusal (card 8d158088, see that
     // tool's own provenance comment above); see also db.ts/memory.ts's own comments on the deleted-key
-    // conflict case (a different, unrelated record under the same id elsewhere in this repo documents
-    // RESERVED_CAPABILITY_SLUGS — not this).
+    // conflict case. (42e9caf9's own DoD covered this fix AND registry.ts's RESERVED_CAPABILITY_SLUGS
+    // reservation (its item 4) in the same card — one card, not two unrelated records sharing an id.)
     server.registerTool(
       "memory_forget",
       {
