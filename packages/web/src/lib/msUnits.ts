@@ -46,13 +46,19 @@ export function msInUnit(ms: number, unit: Unit): string {
   return `${ms / UNIT_MS[unit]}${unit}`;
 }
 
-/** The always-on range hint shown under a bounded MsField, in the field's own unit.
+/** True when a field's `max` is `MAX_TIMER_DELAY_MS` (the raw Node timer ceiling, not a policy cap — see
+ *  that constant's own doc in `shared/config.ts`) and so must never be RENDERED as a figure: it divides
+ *  into an ugly non-whole figure in every unit this module has (2147483.647s / 35791.39411666667m /
+ *  596.5232352777778h), which reads as a deliberate policy choice when it is nothing of the kind.
  *
- *  When `b.max` is `MAX_TIMER_DELAY_MS` (the raw Node timer ceiling, not a policy cap — see that
- *  constant's own doc in `shared/config.ts`), the max half is omitted rather than shown as an ugly
- *  non-whole-second figure (e.g. "2147483.647s") that would read as a policy choice when it isn't one. */
+ *  Shared by BOTH renderers below so they can never disagree about whether a bound is statable. Card
+ *  cb6a51b8: msRangeHint alone honoured it, while msRangeError printed the figure anyway. */
+const maxIsUnstatable = (b: MsBounds): boolean => b.max === MAX_TIMER_DELAY_MS;
+
+/** The always-on range hint shown under a bounded MsField, in the field's own unit. Drops the max half
+ *  entirely for an unstatable ceiling (see `maxIsUnstatable`). */
 export function msRangeHint(b: MsBounds, unit: Unit): string {
-  if (b.max === MAX_TIMER_DELAY_MS) return `min ${msInUnit(b.min, unit)}`;
+  if (maxIsUnstatable(b)) return `min ${msInUnit(b.min, unit)}`;
   return `min ${msInUnit(b.min, unit)} · max ${msInUnit(b.max, unit)}`;
 }
 
@@ -66,8 +72,18 @@ export function msRangeError(value: string, unit: Unit, b: MsBounds | undefined)
   // Rounded through the SAME helper every submit path uses, so this check and the server can never
   // disagree about a value sitting exactly on a bound (card 0a5d61c9).
   const ms = msFromUnit(value, unit);
-  if (ms < b.min || ms > b.max) return `must be between ${msInUnit(b.min, unit)} and ${msInUnit(b.max, unit)}`;
-  return null;
+  if (ms >= b.min && ms <= b.max) return null;
+  // Card cb6a51b8 — the same omission rule the hint applies, so a figure the hint deliberately hides can
+  // never arrive via the error instead. It used to: a plain under-min typo in "Gate command timeout (s)"
+  // read "must be between 1s and 2147483.647s", putting that figure in front of far more users than the
+  // over-ceiling entry it was there for. The message goes one-sided rather than losing a half — naming
+  // only the bound that is actually a choice, and naming the ceiling in words when it is the one breached.
+  if (maxIsUnstatable(b)) {
+    return ms < b.min
+      ? `must be at least ${msInUnit(b.min, unit)}`
+      : "must not exceed the maximum timer delay";
+  }
+  return `must be between ${msInUnit(b.min, unit)} and ${msInUnit(b.max, unit)}`;
 }
 
 /** Every bounded MsField on one form, reduced to the messages that must BLOCK its Save. Each entry is

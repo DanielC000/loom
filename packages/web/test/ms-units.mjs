@@ -12,11 +12,14 @@
 //   (3) PLATFORM_MS_BOUNDS carries the values the daemon's zod schema enforced BEFORE card 0a5d61c9 moved
 //       the literals into it. The expected table below is a hand-authored copy of those pre-move literals,
 //       so a typo during the relocation fails here rather than silently retuning a platform-wide bound.
-//   (4) Three source scans: every GLOBAL_FIELDS entry in Settings.tsx has a bound (a missing one renders
+//   (4) Four source scans: every GLOBAL_FIELDS entry in Settings.tsx has a bound (a missing one renders
 //       a silently unbounded field, since MsField simply drops the hint when `bounds` is undefined);
 //       every entry's display unit renders BOTH halves of that bound as a short, readable figure (card
-//       7663eeb4 — hours cannot state a sub-hour floor: 60_000ms is 0.016666666666666666h); and no bare
-//       `Number(...) * UNIT_MS` conversion has crept back in anywhere under src/.
+//       7663eeb4 — hours cannot state a sub-hour floor: 60_000ms is 0.016666666666666666h); every
+//       HAND-WRITTEN `<MsField>` call site, which declares its unit and bounds inline and so is invisible
+//       to the table scan, is held to that same rule (card cb6a51b8 — the Connections rate-limit window
+//       had shipped exactly that defect in minutes); and no bare `Number(...) * UNIT_MS` conversion has
+//       crept back in anywhere under src/.
 //   (5) Card 826483a7: the four rate-limit loop-breaker fields are actually RENDERED (card dfef375f
 //       landed them REST-only), each ms one in a unit that renders its shared bound whole, and their one
 //       cross-field invariant (backoff base vs ceiling) behaves as the resolve-time CLAMP it is rather
@@ -108,24 +111,54 @@ check("msRangeError accepts a fractional entry whose ROUNDED value sits exactly 
 });
 
 check("msRangeError still catches a genuinely out-of-range entry, stated in the field's own unit", () => {
-  // gateCommandTimeoutMs now has NO policy max (card: remove the gate command timeout ceiling) — its
-  // `max` is MAX_TIMER_DELAY_MS, the raw Node timer limit. Derive the expected message from the LIVE
-  // bound rather than a hardcoded "7200s" so this test keeps discriminating if the ceiling ever moves
-  // again, instead of silently testing a value that's no longer actually out of range.
-  const b = ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs;
-  const maxS = b.max / 1000; // field's own unit (seconds)
+  // An ORDINARY bound (a real policy ceiling) — both halves, in the field's own unit. deployCommandTimeoutMs
+  // rather than gateCommandTimeoutMs, because the gate field's max is the raw timer ceiling and so takes
+  // the one-sided form pinned in the next check. Derived from the LIVE bound rather than a hardcoded
+  // "1800s", so this keeps discriminating if either end ever moves instead of silently testing a value
+  // that is no longer out of range.
+  const b = ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs;
+  const minS = b.min / 1000, maxS = b.max / 1000; // field's own unit (seconds)
   const overMax = String(maxS + 1);
-  assert.equal(
-    msRangeError(overMax, "s", b),
-    `must be between 1s and ${maxS}s`,
-  );
-  assert.equal(
-    msRangeError("0.5", "s", b),
-    `must be between 1s and ${maxS}s`,
-  );
-  // The raw millisecond figure never appears in the message — that is the whole point.
+  assert.equal(msRangeError(overMax, "s", b), `must be between ${minS}s and ${maxS}s`);
+  assert.equal(msRangeError(String(minS / 2), "s", b), `must be between ${minS}s and ${maxS}s`);
+  // The raw millisecond figures never appear in the message — that is the whole point. Both ends, since
+  // only one of them is what a careless `${b.min}`/`${b.max}` interpolation would leak.
   const msg = msRangeError(overMax, "s", b);
   assert.equal(new RegExp(String(b.max)).test(msg), false);
+  assert.equal(new RegExp(String(b.min)).test(msg), false);
+});
+
+check("msRangeError omits the max half exactly where msRangeHint does, and says which end was breached", () => {
+  // Card cb6a51b8. msRangeHint already refused to render a MAX_TIMER_DELAY_MS ceiling as a figure (it
+  // divides to 2147483.647s / 35791.39411666667m / 596.5232352777778h — a non-policy number that reads as
+  // a policy choice), but the ERROR interpolated it anyway. The two renderers now share one rule, so a
+  // figure hidden from the hint can never arrive via the error instead.
+  const b = ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs;
+  assert.equal(b.max, MAX_TIMER_DELAY_MS, "this check is only meaningful while the gate field has no policy max");
+  // UNDER the floor — the common case, and the one that used to read "must be between 1s and 2147483.647s".
+  assert.equal(msRangeError("0.5", "s", b), "must be at least 1s");
+  // OVER the ceiling — the ceiling is named in words, never as a figure.
+  assert.equal(msRangeError(String(b.max / 1000 + 1), "s", b), "must not exceed the maximum timer delay");
+  // Neither polarity leaks the figure, in ms or in ANY display unit this module has. The loop is what
+  // makes this a rule about the number rather than about the one rendering that happened to be wrong.
+  for (const value of ["0.5", String(b.max / 1000 + 1)]) {
+    const msg = msRangeError(value, "s", b);
+    assert.ok(msg, `expected an error for ${value}`);
+    for (const fig of [String(b.max), ...Object.keys(UNIT_MS).map((u) => String(b.max / UNIT_MS[u]))]) {
+      assert.equal(msg.includes(fig), false, `"${msg}" leaks the unstatable ceiling as ${fig}`);
+    }
+  }
+  // CONTROL on the rule, not the constant: a bound ONE MILLISECOND below the timer ceiling is an ordinary
+  // policy max and must still state BOTH halves. Without this, "omit the max half" could have been
+  // implemented as "omit any large max" and this check would not notice.
+  const nearly = { min: 1000, max: MAX_TIMER_DELAY_MS - 1 };
+  assert.equal(
+    msRangeError("0.5", "s", nearly),
+    `must be between 1s and ${(MAX_TIMER_DELAY_MS - 1) / 1000}s`,
+  );
+  // And an in-range value is still clean at such a bound — the omission changes the MESSAGE, never the verdict.
+  assert.equal(msRangeError("1", "s", b), null);
+  assert.equal(msRangeError(String(b.max / 1000), "s", b), null);
 });
 
 check("msRangeError reports nothing for blank, for no bounds, or for a non-numeric entry", () => {
@@ -297,6 +330,26 @@ check("every GLOBAL_FIELDS entry in Settings.tsx has a PLATFORM_MS_BOUNDS entry"
 const LEGIBLE_FIGURE = /^\d+(\.\d{1,2})?$/;
 const figureIn = (ms, unit) => String(ms / UNIT_MS[unit]);
 
+/** Which halves of a bound a field actually RENDERS as a figure. `MAX_TIMER_DELAY_MS` is the raw Node
+ *  timer ceiling rather than a policy cap, and since card cb6a51b8 BOTH renderers suppress it — the hint
+ *  drops the max half and the inline error goes one-sided ("must not exceed the maximum timer delay"), so
+ *  there is no path left by which that figure reaches the page and nothing to check. Every other max is
+ *  rendered twice over, which is why both halves are checked below. */
+const renderedHalves = (b) => (b.max === MAX_TIMER_DELAY_MS ? ["min"] : ["min", "max"]);
+
+/** Assert every figure a bounded field renders reads as a short number in its own declared unit. Shared
+ *  by the GLOBAL_FIELDS sweep and the hand-written-call-site sweep so the two can never drift into
+ *  judging the same thing by different rules. `what` names the offender in the failure. */
+function assertLegibleBothHalves(b, unit, what) {
+  for (const half of renderedHalves(b)) {
+    const fig = figureIn(b[half], unit);
+    assert.ok(
+      LEGIBLE_FIGURE.test(fig),
+      `${what} in "${unit}" renders its ${half} bound as ${fig}${unit} — pick a unit whose bound reads as a short figure`,
+    );
+  }
+}
+
 check("every GLOBAL_FIELDS entry renders BOTH halves of its bound as a legible figure in its own unit", () => {
   // Card 7663eeb4. The per-field version of this rule arrived with card 826483a7's three loop-breaker
   // fields (section 5 below, which pins their tighter whole-number choice); it is corpus-wide here
@@ -304,28 +357,17 @@ check("every GLOBAL_FIELDS entry renders BOTH halves of its bound as a legible f
   // both in hours over a sub-hour floor — predate that card and no check could see them. A unit is not a
   // per-card aesthetic decision: it decides whether this field's own policy bound is statable at all.
   //
-  // ⚠️ KNOWN GAP, deliberately not papered over: this covers the GLOBAL_FIELDS *table* only. Settings.tsx
-  // also has hand-written MsField call sites that declare their unit and bounds inline (the connections
-  // and telemetry/update rows), and they are invisible here. One of them is currently illegible by this
-  // same rule — Connections → "Rate limit window (m)", floor 1000ms → "min 0.016666666666666666m" — found
-  // by the e2e absence assertion in e2e/settings-rate-limit-units.spec.ts, reported up rather than fixed
-  // under card 7663eeb4. Widening this scan means first giving those call sites a table to be read from.
+  // This covers the GLOBAL_FIELDS *table*. Settings.tsx's hand-written MsField call sites declare their
+  // unit and bounds inline and are invisible here; the check immediately below sweeps those, by the same
+  // rule through the same helper (card cb6a51b8, which closed the one illegible call site 7663eeb4 could
+  // only report up — Connections → "Rate limit window", floor 1000ms, then in minutes).
   const table = globalFieldsTable();
   // Second exact count, on a SEPARATE regex from the scan above: both must see the whole table, so a
   // future property inserted between `grp` and `key` cannot silently empty one of them (card 826483a7
   // shipped exactly that fail-open, caught only by a count).
   assert.equal(table.size, 24, `expected 24 parsed GLOBAL_FIELDS entries, got ${table.size}`);
   for (const [key, { grp, unit, label }] of table) {
-    const b = PLATFORM_MS_BOUNDS[grp][key];
-    // msRangeHint drops the max half only at the raw Node timer ceiling — but the inline out-of-range
-    // ERROR states both halves regardless, so both are checked whenever that ceiling is not in play.
-    for (const half of b.max === MAX_TIMER_DELAY_MS ? ["min"] : ["min", "max"]) {
-      const fig = figureIn(b[half], unit);
-      assert.ok(
-        LEGIBLE_FIGURE.test(fig),
-        `${label} (${grp}.${key}) in "${unit}" renders its ${half} bound as ${fig}${unit} — pick a unit whose bound reads as a short figure`,
-      );
-    }
+    assertLegibleBothHalves(PLATFORM_MS_BOUNDS[grp][key], unit, `${label} (${grp}.${key})`);
   }
   // Discriminating controls on the RULE, so the sweep above cannot pass merely by matching anything.
   // Hours over these two floors is a real option the table could pick (it is what it picked until this
@@ -345,6 +387,77 @@ check("every GLOBAL_FIELDS entry renders BOTH halves of its bound as a legible f
   ]) {
     assert.equal(msRangeHint(PLATFORM_MS_BOUNDS.rateLimit[key], table.get(key).unit), expected, key);
   }
+});
+
+/** The canonical-ms bounds tables a Settings.tsx `bounds={…}` prop may name. A path rooted anywhere else
+ *  FAILS the sweep below rather than being skipped — a third table added later must be wired in here
+ *  deliberately, not drop silently out of coverage. */
+const MS_BOUND_ROOTS = { PLATFORM_MS_BOUNDS, ORCHESTRATION_TIMEOUT_MS_BOUNDS };
+
+/** Every `<MsField …/>` element in Settings.tsx, as its raw prop text. Lazy to the first `/>` after the
+ *  tag name, which is that element's own close for every call site in this file: none nests a child
+ *  element, and no prop string contains a `/>`. */
+const msFieldCallSites = () => [...settingsSrc.matchAll(/<MsField\b([\s\S]*?)\/>/g)].map((m) => m[1]);
+
+check("every hand-written MsField call site renders its bound as a legible figure in its own unit", () => {
+  // Card cb6a51b8, the second half of the rule above. The GLOBAL_FIELDS sweep reads a TABLE; these call
+  // sites declare `unit` and `bounds` inline in JSX, so they had no static coverage at all — and one of
+  // them had shipped the very defect card 7663eeb4 fixed in the table (Connections → "Rate limit window",
+  // a 1000ms floor rendered in minutes as 0.016666666666666666m, in the always-on hint AND the inline
+  // error). They are swept here through the SAME `assertLegibleBothHalves` helper, so the two populations
+  // can never be judged by rules that have drifted apart.
+  //
+  // Deliberately NOT checked here: that a label's own "(s)"/"(m)"/"(h)" suffix agrees with the declared
+  // `unit`. That is a different rule about a different hazard (a mislabelled box, silently off by 60×),
+  // the table-driven fields have no such check either, and bolting it on would make this sweep's own
+  // negative control — flip one `unit` and leave the label — red for two reasons instead of one.
+  const sites = msFieldCallSites();
+  // Positive control on the parse: a regex that stopped matching would empty this sweep and pass clean.
+  assert.equal(sites.length, 9, `expected 9 <MsField> call sites in Settings.tsx, parsed ${sites.length}`);
+
+  const literal = (props, name) => (new RegExp(`\\b${name}="([^"]*)"`).exec(props) ?? [])[1];
+  const handWritten = [], tableDriven = [];
+  for (const props of sites) {
+    const unit = literal(props, "unit");
+    (unit === undefined ? tableDriven : handWritten).push({ props, unit, label: literal(props, "label") });
+  }
+  // The PARTITION is pinned too: exactly one site takes its unit from a variable, and it is the
+  // GLOBAL_FIELDS renderer the check above already covers field by field. A second expression-unit site
+  // would be a genuine hole — a bounded field no static check can see — so it must fail here, loudly,
+  // rather than land in the bucket this sweep skips.
+  assert.equal(tableDriven.length, 1, `expected exactly 1 table-driven <MsField> site, found ${tableDriven.length}`);
+  assert.ok(/unit=\{f\.unit\}/.test(tableDriven[0].props), "the one expression-unit site should be the GLOBAL_FIELDS renderer");
+  assert.equal(handWritten.length, 8, `expected 8 hand-written <MsField> sites, found ${handWritten.length}`);
+
+  for (const { props, unit, label } of handWritten) {
+    assert.ok(label, `a hand-written <MsField> has no literal label: ${props.trim().slice(0, 80)}`);
+    // `bounds` must be a plain dotted path into one of the shared tables — the only shape this scan can
+    // resolve, and the only shape a hand-written site has ever used. A computed expression, or a missing
+    // prop (MsField then renders NO hint and NO inline error at all — the same fail-open the table scan
+    // above exists to catch), fails rather than being skipped.
+    const path = (/\bbounds=\{([A-Za-z_][\w.]*)\}/.exec(props) ?? [])[1];
+    assert.ok(path, `${label} declares a literal unit but no resolvable bounds path — it would render unbounded`);
+    const [root, ...rest] = path.split(".");
+    assert.ok(root in MS_BOUND_ROOTS, `${label} reads bounds from an unknown table "${root}" — add it to MS_BOUND_ROOTS`);
+    const b = rest.reduce((o, k) => (o ?? {})[k], MS_BOUND_ROOTS[root]);
+    assert.ok(b && typeof b.min === "number" && typeof b.max === "number", `${label}: ${path} is not an MsBounds entry`);
+    assertLegibleBothHalves(b, unit, `${label} (${path})`);
+  }
+
+  // Discriminating control, on the real specimen: the SAME field's SAME bound, in the unit it actually
+  // shipped in, is rejected — so the sweep above passes because the unit moved, not because the rule
+  // matches anything handed to it. Asserted through the shared helper, not just the regex, so a helper
+  // that stopped throwing would be caught here as well.
+  const window = PLATFORM_MS_BOUNDS.connections.rateLimitWindowMs;
+  assert.equal(LEGIBLE_FIGURE.test(figureIn(window.min, "m")), false);
+  assert.equal(LEGIBLE_FIGURE.test(figureIn(window.min, "s")), true);
+  assert.throws(
+    () => assertLegibleBothHalves(window, "m", "Rate limit window"),
+    /renders its min bound as 0\.016666666666666666m/,
+  );
+  // And the strings the page really prints come from the helpers, at the unit the source now declares.
+  assert.equal(msRangeHint(window, "s"), "min 1s · max 3600s");
+  assert.equal(msRangeError("0.5", "s", window), "must be between 1s and 3600s");
 });
 
 // ── (5) The rate-limit loop-breaker fields are actually rendered, in units that read whole ───────────

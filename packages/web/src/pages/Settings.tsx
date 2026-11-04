@@ -1606,7 +1606,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const [connRequestTimeoutS, setConnRequestTimeoutS] = useState(msStr(override.connections?.requestTimeoutMs, "s"));
   const [connMaxResponseBytes, setConnMaxResponseBytes] = useState(numStr(override.connections?.maxResponseBytes));
   const [connRateLimitMax, setConnRateLimitMax] = useState(numStr(override.connections?.rateLimitMax));
-  const [connRateLimitWindowM, setConnRateLimitWindowM] = useState(msStr(override.connections?.rateLimitWindowMs, "m"));
+  // The window reads in SECONDS, not minutes (card cb6a51b8): its shared floor is 1000ms, which minutes
+  // cannot state legibly — MsField rendered "min 0.016666666666666666m" in the hint AND in the inline
+  // error. Seconds state the whole 1000ms..3_600_000ms range as "min 1s · max 3600s" and match the
+  // "Request timeout (s)" field beside it. The 5-minute default therefore displays as 300s: the same
+  // trade card 7663eeb4 accepted on the Rate Limits grid, since placeholder, `effective:` hint and bound
+  // then all speak one unit.
+  const [connRateLimitWindowS, setConnRateLimitWindowS] = useState(msStr(override.connections?.rateLimitWindowMs, "s"));
 
   // Build the PATCH body from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field sends the explicit PER-FIELD `null` clear-to-inherit sentinel (card ba9ccd75) — NOT
@@ -1673,9 +1679,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         const n = Number(rlm);
         entries.rateLimitMax = Number.isFinite(n) ? n : rlm;
       }
-      const rlw = connRateLimitWindowM.trim();
+      const rlw = connRateLimitWindowS.trim();
       if (rlw !== "") {
-        const n = msFromUnit(rlw, "m");
+        const n = msFromUnit(rlw, "s");
         entries.rateLimitWindowMs = Number.isFinite(n) ? n : rlw;
       }
       (o as Record<string, unknown>).connections = entries;
@@ -1839,7 +1845,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const globalRangeErrors = msRangeErrors([
     ...GLOBAL_FIELDS.map((f) => [f.label, vals[f.key] ?? "", f.unit, globalBounds(f)] as const),
     ["Request timeout (s)", connRequestTimeoutS, "s", PLATFORM_MS_BOUNDS.connections.requestTimeoutMs],
-    ["Rate limit window (m)", connRateLimitWindowM, "m", PLATFORM_MS_BOUNDS.connections.rateLimitWindowMs],
+    ["Rate limit window (s)", connRateLimitWindowS, "s", PLATFORM_MS_BOUNDS.connections.rateLimitWindowMs],
     ["Usage-sample cadence (m)", usageSampleIntervalMinutes, "m", PLATFORM_MS_BOUNDS.usageSampleIntervalMs],
     ["Update-check cadence (h)", updateCheckHours, "h", PLATFORM_MS_BOUNDS.updateCheckIntervalMs],
   ]);
@@ -1940,8 +1946,8 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             note="1KB-20MB" />
           <NumField label="Rate limit (requests / window)" value={connRateLimitMax} set={setConnRateLimitMax}
             effective={resolved.connections.rateLimitMax} def={defaults.connections.rateLimitMax} />
-          <MsField label="Rate limit window (m)" value={connRateLimitWindowM} set={setConnRateLimitWindowM}
-            effectiveMs={resolved.connections.rateLimitWindowMs} defMs={defaults.connections.rateLimitWindowMs} unit="m"
+          <MsField label="Rate limit window (s)" value={connRateLimitWindowS} set={setConnRateLimitWindowS}
+            effectiveMs={resolved.connections.rateLimitWindowMs} defMs={defaults.connections.rateLimitWindowMs} unit="s"
             bounds={PLATFORM_MS_BOUNDS.connections.rateLimitWindowMs} />
         </div>
       </Panel>

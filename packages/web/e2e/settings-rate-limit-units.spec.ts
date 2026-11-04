@@ -7,6 +7,11 @@
 // put the hint there for. Both fields now read in MINUTES, the unit their bounds render whole in and the
 // one their sibling "Deadline after reset" already used.
 //
+// Card cb6a51b8 then closed the one field this spec could originally only assert AROUND — Connections →
+// "Rate limit window", a hand-written MsField call site (not a GLOBAL_FIELDS entry) whose own 1000ms floor
+// rendered "min 0.016666666666666666m" — so every absence assertion here is now section-wide rather than
+// scoped to the Rate Limits grid, and that field's own hint and inline error are asserted in seconds.
+//
 // These EXERCISE the controls rather than reading the page: a render-only pass cannot tell a field that
 // writes its own key from one bleeding into a neighbour (the mis-bound-write-key hazard), and cannot tell
 // a reachable Save from a disabled one. test/ms-units.mjs pins the same unit choice statically, against
@@ -30,16 +35,14 @@ function box(page: Page, labelText: string) {
 // several Save buttons, and `.last()` is a bet on declaration order (see atlas-first-run-states.spec.ts).
 const globalSection = (page: Page) => page.getByTestId("settings-section-global-daemon");
 const globalSave = (page: Page) => globalSection(page).getByRole("button", { name: "Save", exact: true });
-// The "Rate Limits" field grid itself, addressed by a field it contains rather than by a nth-match on the
-// three `loom-field-grid` blocks this section renders. Every absence assertion below is scoped to THIS
-// grid, not to the whole daemon-global section, because the section also holds a field OUTSIDE this
-// card's scope with the very same defect: Connections → "Rate limit window (m)", whose own 1000ms floor
-// renders "min 0.016666666666666666m" (its MsField is a hand-written call site, not a GLOBAL_FIELDS
-// entry, so the static scan in test/ms-units.mjs cannot see it either). A page-wide absence assertion
-// here would be red for someone else's field; reported up instead of silently widened into this card.
-const rateLimitsGrid = (page: Page) => globalSection(page)
-  .locator("div.loom-field-grid")
-  .filter({ has: page.locator(`span:text-is(${JSON.stringify("Default backoff (m)")})`) });
+// Every absence assertion below is scoped to the WHOLE daemon-global section — every bounded ms field the
+// page renders here, not the five in one grid. It was deliberately narrowed to the "Rate Limits" grid
+// under card 7663eeb4, because this same section held a field outside that card's scope with the very
+// same defect: Connections → "Rate limit window", whose own 1000ms floor rendered as
+// "min 0.016666666666666666m" while the field read in minutes (a hand-written MsField call site, not a
+// GLOBAL_FIELDS entry, so the static scan in test/ms-units.mjs could not see it either), and a
+// section-wide assertion would have been red for someone else's field. Card cb6a51b8 moved that field to
+// seconds and widened the static scan to cover hand-written call sites, so the narrowing is spent.
 
 async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
@@ -58,9 +61,15 @@ async function storedRateLimit(baseURL: string): Promise<Record<string, number>>
 // 0.016666666666666666h · max 24h" and "min 0.16666666666666666h · max 48h".
 const BACKOFF = { label: "Default backoff (m)", hint: "min 1m · max 1440m", typed: "45", ms: 2_700_000 };
 const NO_RESET = { label: "Deadline, no reset (m)", hint: "min 10m · max 2880m", typed: "600", ms: 36_000_000 };
-// The repeating-decimal signature of the defect, in either field's own floor. Asserted ABSENT from the
-// Rate Limits grid — but only after the two hints above are asserted PRESENT, so an empty or unrendered
-// grid can never read as "the illegible figure is gone".
+// Card cb6a51b8 — the hand-written MsField call site that carried the same sub-unit-floor defect. A
+// different panel and a different config group from the two above (so its save round-trip is pinned where
+// the rest of the connections group is, in settings.spec.ts), but the same section, and the field that
+// forced the narrowing the comment above describes. In minutes its hint read
+// "min 0.016666666666666666m · max 60m".
+const CONN_WINDOW = { label: "Rate limit window (s)", hint: "min 1s · max 3600s", error: "must be between 1s and 3600s" };
+// The repeating-decimal signature of the defect, in any of these fields' own floors. Asserted ABSENT from
+// the daemon-global section — but only after the hints above are asserted PRESENT, so an empty or
+// unrendered section can never read as "the illegible figure is gone".
 const ILLEGIBLE = /0\.0166|0\.1666/;
 
 test("the sub-hour-floor rate-limit fields state their bounds in minutes, and a save persists both (card 7663eeb4)", async ({ page, loomDaemon }) => {
@@ -75,12 +84,20 @@ test("the sub-hour-floor rate-limit fields state their bounds in minutes, and a 
   // whole minutes. Asserted per-field so the hint is provably driven per-field, not one reused pair.
   await expect(box(page, BACKOFF.label).getByText(BACKOFF.hint)).toBeVisible();
   await expect(box(page, NO_RESET.label).getByText(NO_RESET.hint)).toBeVisible();
-  // ...and nowhere in the Rate Limits grid does the old repeating decimal survive. This is the regression
-  // guard: switching either field back to hours puts that figure straight back on the page. The grid
-  // locator is asserted to resolve FIRST — a `toHaveCount(0)` against a locator that matches no element
-  // at all passes for the wrong reason, which is the one way this guard could go quietly vacuous.
-  await expect(rateLimitsGrid(page)).toHaveCount(1);
-  await expect(rateLimitsGrid(page).getByText(ILLEGIBLE)).toHaveCount(0);
+  // The hand-written Connections call site states its own range in SECONDS (card cb6a51b8). Asserted
+  // PRESENT, not merely not-illegible: an absence assertion proves no bad figure is on the page, never
+  // that the good one rendered. Its panel neighbour states a DIFFERENT range in the same unit, so the
+  // hint is provably read per-field rather than one pair reused down the panel.
+  await expect(box(page, CONN_WINDOW.label).getByText(CONN_WINDOW.hint)).toBeVisible();
+  await expect(box(page, "Request timeout (s)").getByText("min 1s · max 120s")).toBeVisible();
+
+  // ...and nowhere in the whole daemon-global section does the old repeating decimal survive. This is the
+  // regression guard: switching any of these fields back to its old unit puts that figure straight back
+  // on the page. The section locator is asserted to resolve FIRST — a `toHaveCount(0)` against a locator
+  // that matches no element at all passes for the wrong reason, which is the one way this could go
+  // quietly vacuous.
+  await expect(globalSection(page)).toHaveCount(1);
+  await expect(globalSection(page).getByText(ILLEGIBLE)).toHaveCount(0);
 
   // The sibling that was already in minutes is untouched — the point was to make the two deadline fields
   // one comparable pair, not to re-unit the whole panel. "Recency window" deliberately KEEPS hours (its
@@ -183,8 +200,8 @@ test("an out-of-range entry on either field is reported in minutes, never raw ms
   // The blocked Save names the offending field, and neither message leaks raw ms or the old decimal.
   await expect(globalSection(page).getByText(`${NO_RESET.label} must be between 10m and 2880m`).last()).toBeVisible();
   await expect(globalSection(page).getByText(/600000/)).toHaveCount(0);
-  await expect(rateLimitsGrid(page)).toHaveCount(1);
-  await expect(rateLimitsGrid(page).getByText(ILLEGIBLE)).toHaveCount(0);
+  await expect(globalSection(page)).toHaveCount(1);
+  await expect(globalSection(page).getByText(ILLEGIBLE)).toHaveCount(0);
 
   // The other field reports its OWN floor, 1m — so the bound is read per-field rather than one pair
   // shared across the panel (the two share a unit, NOT a range).
@@ -199,5 +216,25 @@ test("an out-of-range entry on either field is reported in minutes, never raw ms
   await noReset.fill(recovered);
   await expect(box(page, BACKOFF.label).getByRole("alert")).toHaveCount(0);
   await expect(noResetBox.getByRole("alert")).toHaveCount(0);
+  await expect(globalSave(page)).toBeEnabled();
+
+  // Card cb6a51b8 — the hand-written Connections call site, held to the same standard: its inline error
+  // quotes the SAME seconds figures its hint shows, and it blocks the SAME Save as the grid fields above
+  // (one form, one `globalRangeErrors` list). The 1000ms floor is NOT also asserted absent as a raw
+  // figure here the way 600000 is above: "1000" is too short a token to assert absent across a section
+  // full of unrelated numbers, and would red for a reason this card is not about.
+  const connWindow = field(page, CONN_WINDOW.label);
+  const connLoaded = await connWindow.inputValue();
+  await connWindow.fill("0.5");
+  await expect(box(page, CONN_WINDOW.label).getByRole("alert")).toHaveText(CONN_WINDOW.error);
+  await expect(globalSave(page)).toBeDisabled();
+  await expect(globalSection(page).getByText(`${CONN_WINDOW.label} ${CONN_WINDOW.error}`).last()).toBeVisible();
+  // The repeating decimal stays absent while that error is actually on screen — the one moment the old
+  // minute-unit rendering would have put it into the error as well as the hint.
+  await expect(globalSection(page).getByText(ILLEGIBLE)).toHaveCount(0);
+  // Recovered: the form is still dirty from `recovered` above, so an enabled Save here proves the error
+  // cleared rather than merely that nothing was typed.
+  await connWindow.fill(connLoaded);
+  await expect(box(page, CONN_WINDOW.label).getByRole("alert")).toHaveCount(0);
   await expect(globalSave(page)).toBeEnabled();
 });

@@ -608,7 +608,9 @@ test("editing the Authenticated Request Guard (connections) fields persists whol
   const reqTimeout = field(page, "Request timeout (s)");
   const maxBytes = field(page, "Max response bytes");
   const rateLimitMax = field(page, "Rate limit (requests / window)");
-  const rateLimitWindow = field(page, "Rate limit window (m)");
+  // SECONDS since card cb6a51b8 — minutes could not state the field's own 1000ms floor legibly. The
+  // canonical ms asserted below is unchanged (600_000); only the figure typed into the box moved, 10 → 600.
+  const rateLimitWindow = field(page, "Rate limit window (s)");
   await expect(reqTimeout).toBeVisible();
 
   const readConnections = async () => {
@@ -620,7 +622,7 @@ test("editing the Authenticated Request Guard (connections) fields persists whol
   await reqTimeout.fill("15");
   await maxBytes.fill("2000000");
   await rateLimitMax.fill("50");
-  await rateLimitWindow.fill("10");
+  await rateLimitWindow.fill("600");
   const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
@@ -633,14 +635,16 @@ test("editing the Authenticated Request Guard (connections) fields persists whol
   await expect(field(page, "Request timeout (s)")).toHaveValue("15");
   await expect(field(page, "Max response bytes")).toHaveValue("2000000");
   await expect(field(page, "Rate limit (requests / window)")).toHaveValue("50");
-  await expect(field(page, "Rate limit window (m)")).toHaveValue("10");
+  // 600_000ms re-seeding as "600" is what proves the display unit is read from the same table on BOTH
+  // directions: in minutes the same stored value would come back as "10".
+  await expect(field(page, "Rate limit window (s)")).toHaveValue("600");
 
   // CLEAR all 4 — since the group is always emitted, blanking every field replaces the persisted
   // `connections` override with an empty object (every field reverts to its platform default).
   await field(page, "Request timeout (s)").fill("");
   await field(page, "Max response bytes").fill("");
   await field(page, "Rate limit (requests / window)").fill("");
-  await field(page, "Rate limit window (m)").fill("");
+  await field(page, "Rate limit window (s)").fill("");
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
   await expect.poll(readConnections).toEqual({});
@@ -793,12 +797,19 @@ test("timeout fields state their bound in seconds and block an over-limit entry 
   // older over-limit probes ("2000"/"4000"/"8000") are all IN-RANGE now, so this uses a value one second
   // over the raw timer ceiling (2147483.647s) instead to keep exercising the over-limit path the test is
   // named for.
+  // Card cb6a51b8 — this field's `max` is the one bound msRangeHint refuses to render as a figure, and
+  // the inline error now honours the same rule: it names the ceiling in words rather than printing
+  // "2147483.647s". Over the ceiling the error is the max half alone.
   await gate.fill("2147484");
-  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 2147483.647s");
+  await expect(gateBox.getByRole("alert")).toHaveText("must not exceed the maximum timer delay");
   await expect(projectSave).toBeDisabled();
   // The raw millisecond bound never reaches the user. (Asserted as the server error's own phrasing so a
   // legitimate ms-derived value elsewhere on the page can't make this vacuously pass.)
   await expect(page.getByText(/<=\s*2147483647/)).toHaveCount(0);
+  // ...and neither does the second-scale rendering of it, which the error used to print verbatim. Scoped
+  // to this field's own box, asserted while the error IS on screen, so it cannot pass by the error being
+  // absent: the alert assertion two lines up is what rules that out.
+  await expect(gateBox.getByText("2147483.647")).toHaveCount(0);
   // AFTER: back in range → the error clears and Save is reachable again.
   await gate.fill("1800");
   await expect(gateBox.getByRole("alert")).toHaveCount(0);
@@ -817,9 +828,12 @@ test("timeout fields state their bound in seconds and block an over-limit entry 
   await expect(projectSave).toBeDisabled();
   await webhook.fill("");
 
-  // The under-limit end of the range is caught too, not just the ceiling.
+  // The under-limit end of the range is caught too, not just the ceiling — and THIS is the common case
+  // card cb6a51b8 was really about: a one-character typo used to be answered with the timer ceiling in
+  // seconds. It now states the floor alone, the same figure the hint above shows.
   await gate.fill("0.5");
-  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 2147483.647s");
+  await expect(gateBox.getByRole("alert")).toHaveText("must be at least 1s");
+  await expect(gateBox.getByText("2147483.647")).toHaveCount(0);
 
   // And an in-range value still SAVES — the guard rejects out-of-range entries, it doesn't wedge the form.
   await gate.fill("300");
