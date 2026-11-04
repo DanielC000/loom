@@ -222,6 +222,10 @@ async function scenarioPostVerificationCatchesDivert(tag) {
   check(`[post-verify ${tag}] precondition: the fake's combined-call interception actually fired more than once`, combinedCalls > 1);
   check(`[post-verify ${tag}] the real ff-only DID run (HEAD actually advanced)`, git(repo, `rev-parse refs/heads/${mainlineBranch}`) === targetSha);
   check(`[post-verify ${tag}] but the function still refuses to report ok:true on the FAKE post-merge mismatch`, result.ok === false && result.branchDiverted === true);
+  // Card bd45c919 — the post-ff verify refusal names the self-service route for a deliberate switch, plus
+  // the human-only reset route's credential/body requirement.
+  check(`[post-verify ${tag}] REFUSAL TEXT names the self-service route for a deliberate switch`, result.reason?.includes("project_checkout_branch") && result.reason?.includes("create:true") && result.reason?.includes("repoKey"));
+  check(`[post-verify ${tag}] REFUSAL TEXT names the human-only reset route's credential + multi-repo body`, result.reason?.includes("loom open") && result.reason?.includes('{"repoKey": "<key>"}'));
 }
 
 // Fix round (Code Review MINOR 2): a FAILED post-ff RE-READ (e.g. a timeout) — as opposed to a re-read

@@ -1264,6 +1264,13 @@ of the "runs its own deployed instance" property this whole section is about: a 
 reason (comparing a side branch) silently becomes the source for the NEXT rebuild too, for any project
 self-hosted this way.
 
+**Switch the branch through that same tool, never a raw git command outside it, whenever your platform
+tracks which branch it trusts as mainline.** A raw checkout/rename made directly against the canonical
+repo (outside the tool) is indistinguishable from an accident, so a platform with that kind of tripwire
+can flag or refuse the NEXT landing even though your switch was entirely deliberate — e.g. a branch-per-
+ticket or branch-per-release workflow. Declaring the switch through the tool itself is what tells the
+platform the move was intentional, instead of leaving it to infer that from a refusal later.
+
 ## A restart/redeploy note other sessions will read
 
 Some orchestration platforms include a shared restart or redeploy path that resumes, or otherwise

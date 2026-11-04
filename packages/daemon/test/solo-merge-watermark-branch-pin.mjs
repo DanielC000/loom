@@ -145,6 +145,10 @@ const rejectedEvents = (db, workerId, reason) => db.listEventsForWorker(workerId
   check("(A) the stray branch is untouched too (nothing was squashed anywhere)", git(A.repo, "rev-parse", "refs/heads/strayA") === preSha);
   check("(A) the worktree is retained (not finalized)", fs.existsSync(w.worktreePath));
   check("(A) a durable branch_diverted merge_rejected event was filed", rejectedEvents(db, w.workerId, "branch_diverted").length === 1);
+  // Card bd45c919 — the refusal names the self-service route for a deliberate switch, plus the human-only
+  // reset route's credential/body requirement, so a manager isn't left with only "check out the old branch".
+  check("(bd45c919) (A) REFUSAL TEXT names the self-service route for a deliberate switch", confirm.reason?.includes("project_checkout_branch") && confirm.reason?.includes("create:true") && confirm.reason?.includes("repoKey"));
+  check("(bd45c919) (A) REFUSAL TEXT names the human-only reset route's credential + multi-repo body", confirm.reason?.includes("loom open") && confirm.reason?.includes('{"repoKey": "<key>"}'));
   try { db.close(); } catch { /* already closed */ }
 }
 

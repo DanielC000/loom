@@ -321,6 +321,10 @@ try {
   const nudgeTextD7 = MW.mainlineMovedNudgeText({ branch: "stray-branch-name", repoKey: "primary", from: "a".repeat(40), to: "b".repeat(40), evidence: ["branch-diverted"], suspectShas: ["b".repeat(40)], atBoot: false, expectedBranch: "main" });
   check("(D7) the divert nudge names the OBSERVED (stray) branch and the EXPECTED (watermark) branch", nudgeTextD7.includes("stray-branch-name") && nudgeTextD7.includes('"main"'));
   check("(D7) the divert nudge gives a checkout remedy and a reset-for-rename remedy naming the real route, never the generic sha-level 'git log A..B' / 'bypass the merge gate' framing", /check out "main"/.test(nudgeTextD7) && nudgeTextD7.includes("/api/projects/:id/mainline-watermark/reset") && !/git log/.test(nudgeTextD7) && !/bypass of the merge gate/.test(nudgeTextD7));
+  // Card bd45c919 — the notice names the self-service route for a deliberate switch, plus the reset
+  // route's credential/body requirement.
+  check("(bd45c919) (D7) the divert nudge names the self-service route for a deliberate switch", nudgeTextD7.includes("project_checkout_branch") && nudgeTextD7.includes("create:true") && nudgeTextD7.includes("repoKey"));
+  check("(bd45c919) (D7) the divert nudge names the human-only reset route's credential + multi-repo body", nudgeTextD7.includes("loom open") && nudgeTextD7.includes('{"repoKey": "<key>"}'));
   const nudgeTextD7boot = MW.mainlineMovedNudgeText({ branch: "stray-branch-name", repoKey: "primary", from: "a".repeat(40), to: "b".repeat(40), evidence: ["branch-diverted"], suspectShas: ["b".repeat(40)], atBoot: true, expectedBranch: "main" });
   check("(D7) atBoot wording differs (found when the daemon started) while the remedy stays the same", nudgeTextD7boot.includes("found when the daemon started") && nudgeTextD7boot.includes('"main"'));
 

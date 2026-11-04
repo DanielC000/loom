@@ -119,6 +119,10 @@ try {
   check("(ba663984) (W1) REFUSAL TEXT names the expected branch (the watermark's)", rw1.reason?.includes(`"${bogusBranch}"`));
   check("(ba663984) (W1) REFUSAL TEXT names the observed branch (the live checkout)", rw1.reason?.includes(`"${MAIN}"`));
   check("(ba663984) (W1) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", rw1.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
+  // Card bd45c919 — the refusal names the self-service route for a deliberate switch, plus the reset
+  // route's credential/body requirement.
+  check("(bd45c919) (W1) REFUSAL TEXT names the self-service route for a deliberate switch", rw1.reason?.includes("project_checkout_branch") && rw1.reason?.includes("create:true") && rw1.reason?.includes("repoKey"));
+  check("(bd45c919) (W1) REFUSAL TEXT names the human-only reset route's credential + multi-repo body", rw1.reason?.includes("loom open") && rw1.reason?.includes('{"repoKey": "<key>"}'));
   // @decision 2a6a292a round 2 — a corrupted watermark BRANCH no longer self-corrects via an ordinary
   // landing — unchanged by ba663984, since this refusal never reaches advanceMainlineWatermarkForBatch at
   // all (result.ok is false).
@@ -151,6 +155,9 @@ try {
   check("(ba663984) (P1) REFUSAL TEXT names the expected branch (MAIN, the watermark's)", v1.reason?.includes(`"${MAIN}"`));
   check("(ba663984) (P1) REFUSAL TEXT names the observed branch (the stray branch)", v1.reason?.includes(`"${strayBranch}"`));
   check("(ba663984) (P1) REFUSAL TEXT names the human-only mainline-watermark reset route as the remedy", v1.reason?.includes("POST /api/projects/:id/mainline-watermark/reset"));
+  // Card bd45c919 — same self-service-route addition as (W1) above, on the pre-ff check's own refusal.
+  check("(bd45c919) (P1) REFUSAL TEXT names the self-service route for a deliberate switch", v1.reason?.includes("project_checkout_branch") && v1.reason?.includes("create:true") && v1.reason?.includes("repoKey"));
+  check("(bd45c919) (P1) REFUSAL TEXT names the human-only reset route's credential + multi-repo body", v1.reason?.includes("loom open") && v1.reason?.includes('{"repoKey": "<key>"}'));
   // @decision 2a6a292a round 2 — the watermark was never at risk here either: this refusal never reaches
   // advanceMainlineWatermarkForBatch (result.ok is false), so both fields stay exactly as seeded.
   check("(2a6a292a) the watermark's branch is still MAIN (never touched by a refusal)", watermark()?.branch === MAIN);
