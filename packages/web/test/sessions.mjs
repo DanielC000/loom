@@ -7,7 +7,7 @@
 // wired into @loom/web's `build` script (which CI runs via `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/sessions.mjs
 import assert from "node:assert/strict";
-import { groupSessionRows, canResumeSession, goLiveHeldControl, goLiveSessionPill, holdsGoLiveSlot } from "../src/lib/sessions.ts";
+import { groupSessionRows, canResumeSession, goLiveHeldControl, goLiveSessionPill, holdsGoLiveSlot, projectFilterOptions } from "../src/lib/sessions.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -135,6 +135,56 @@ check("goLiveSessionPill: starting reads as pending; live/busy keep their existi
   assert.deepEqual(goLiveSessionPill({ processState: "starting", busy: true }), { label: "starting", pending: true });
   assert.deepEqual(goLiveSessionPill({ processState: "live", busy: false }), { label: "live", pending: false });
   assert.deepEqual(goLiveSessionPill({ processState: "live", busy: true }), { label: "busy", pending: true });
+});
+
+// ── projectFilterOptions: the live set is not the whole option list (card d72994d7) ──────────────
+
+// One live session, only the field this helper reads.
+const P = (projectName) => ({ projectName });
+
+check("projectFilterOptions: a SCOPED project with zero live sessions is still offered", () => {
+  // THE DEFECT, stated as the one claim that separates the fix from what it replaced: the scoped
+  // project names no live session, so the old live-set-only derivation left it out — and a <select>
+  // whose value matches no option renders its FIRST one, which is the page's "All (N)" entry.
+  const opts = projectFilterOptions([P("Fire Studio")], ["Loom", "Loom"]);
+  assert.ok(opts.includes("Loom"), "the scoped project must be selectable even with nothing live in it");
+  // And it did not replace the live one: widening back to a project that IS running must still work.
+  assert.deepEqual(opts, ["Fire Studio", "Loom"], "sorted, deduped, both projects present");
+});
+
+check("projectFilterOptions: a project with NO live sessions and NO hold is NOT invented", () => {
+  // The other polarity — without this the first check is satisfied by a helper that offers every
+  // project it has ever seen, which would put dead projects in the god-eye page's filter forever.
+  assert.deepEqual(projectFilterOptions([P("Fire Studio")], []), ["Fire Studio"]);
+});
+
+check("projectFilterOptions: a held name that IS live appears exactly once", () => {
+  const opts = projectFilterOptions([P("Loom"), P("Loom"), P("Fire Studio")], ["Loom"]);
+  assert.deepEqual(opts, ["Fire Studio", "Loom"], "the live set and the hold must not double up");
+});
+
+check("projectFilterOptions: empty/absent holds are dropped, never drawn as a blank option", () => {
+  // "" is the "All" entry's own value — emitting it here would mint a second, nameless All. undefined
+  // is the real god-eye mount (no scoped project) and the real loading state (project?.name).
+  assert.deepEqual(projectFilterOptions([P("Loom")], ["", undefined, null]), ["Loom"]);
+  // The god-eye page AT REST: no scoped project, filter "" — byte-identical to the old derivation.
+  assert.deepEqual(projectFilterOptions([P("Loom"), P("Fire Studio")], [undefined, ""]), ["Fire Studio", "Loom"]);
+  // …and with nothing live at all it is empty, so the page draws "All (0)" alone and says so honestly.
+  assert.deepEqual(projectFilterOptions([], [undefined, ""]), []);
+});
+
+check("projectFilterOptions: a FILTER value whose last session exited stays offered", () => {
+  // The classic god-eye page's own form of the same defect: the reader picked a project, its last
+  // session then exited, and the control went back to claiming "All" while still filtering to it.
+  // Distinct from the scoped case above — here there is no scoped project at all, only a selection.
+  const opts = projectFilterOptions([P("Fire Studio")], [undefined, "Loom"]);
+  assert.ok(opts.includes("Loom"), "the current selection must survive its last session exiting");
+  assert.deepEqual(opts, ["Fire Studio", "Loom"]);
+});
+
+check("projectFilterOptions: the default `held` keeps a one-argument call working", () => {
+  // The signature stays usable by any caller that has no selection to preserve.
+  assert.deepEqual(projectFilterOptions([P("Loom")]), ["Loom"]);
 });
 
 console.log(`\n${pass} passed`);

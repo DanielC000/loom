@@ -1,4 +1,4 @@
-import type { Session, ProcessState, SessionRole } from "@loom/shared";
+import type { Session, SessionListItem, ProcessState, SessionRole } from "@loom/shared";
 
 // The ONE shared session ordering, applied at every session-list tier (Workspace, Terminals,
 // Mission Control, the Overview fleet accordion) so a session's place in a list is consistent everywhere.
@@ -206,6 +206,31 @@ export function groupSessionRows<T extends SessionRowMember>(sessions: readonly 
   if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byCreatedStable) });
   if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(byCreatedStable) });
   return [...managerRows, ...trailing];
+}
+
+/** The minimal shape the project-filter option list reads — SessionListItem satisfies it. */
+export type SessionProjectNamed = Pick<SessionListItem, "projectName">;
+
+/**
+ * The PROJECT options of the live-sessions grid's filter, in the order they are drawn beneath that
+ * control's standing "All (N)" entry: deduped and sorted, exactly as the live set alone produced them.
+ *
+ * `held` is every project name that must stay OFFERED whether or not a live session names it — the
+ * scoped project a host pre-selected, and the filter's own current value. Empty and absent entries are
+ * dropped rather than drawn as a blank option (`""` is the "All" entry's own value, never a project),
+ * so a god-eye mount at rest holds nothing and its list is byte-identical to the old derivation's.
+ *
+ * @decision d72994d7 — never derive these options from the live sessions alone: a `<select value="X">`
+ * with no `X` among its options renders its FIRST one instead, so a quiet scoped project silently
+ * reads as "All". Both `held` sources are load-bearing; neither substitutes for the other.
+ */
+export function projectFilterOptions(
+  live: readonly SessionProjectNamed[],
+  held: readonly (string | null | undefined)[] = [],
+): string[] {
+  const names = new Set(live.map((s) => s.projectName));
+  for (const name of held) if (name) names.add(name);
+  return [...names].sort();
 }
 
 /**

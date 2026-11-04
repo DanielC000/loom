@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Rea
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal } from "@loom/shared";
 import { api } from "../lib/api";
-import { byManagerThenCreated, groupSessionRows, isCompanionSession, type SessionRowGroup } from "../lib/sessions";
+import { byManagerThenCreated, groupSessionRows, isCompanionSession, projectFilterOptions, type SessionRowGroup } from "../lib/sessions";
 import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
@@ -77,7 +77,13 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
   // counts, `shown`, and all grouping sub-lists (managers/orphans/standalone) — so a companion can
   // never leak a raw-STDIN path onto this page.
   const live = (sessions.data ?? []).filter((s) => s.processState === "live" && !isCompanionSession(s));
-  const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
+  // The live set is only HALF the option list — the scoped project and the current filter value are
+  // offered whether or not a session names them, or the control renders "All" while filtering (card
+  // d72994d7). Derivation + why both held names are load-bearing: lib/sessions' projectFilterOptions.
+  const projectNames = useMemo(
+    () => projectFilterOptions(live, [projectName, filter]),
+    [live, projectName, filter],
+  );
   // Tile order: the STABLE shared key (lib/sessions.ts byManagerThenCreated) — managers first, then
   // createdAt DESC (newest first), tiebreak by id within each bucket. A session keeps its slot whether
   // it's busy or idle, so the grid never reshuffles on a poll (the old activity sort made rows jump).
