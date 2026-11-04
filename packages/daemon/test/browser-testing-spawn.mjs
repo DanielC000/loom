@@ -27,8 +27,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
+import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -56,6 +58,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveProfile } = await import("@loom/shared");
 const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
+const { ensureDirs } = await import("../dist/paths.js");
 
 const AGENT = { startupPrompt: "agent own prompt" };
 
@@ -251,6 +254,62 @@ check("(disallow-assistant) all flags off ⇒ byte-identical to disallowedToolsF
     argsAssistant.includes("mcp__playwright__browser_file_upload") && argsAssistant.includes("mcp__playwright__browser_drop"));
   check("(e2e-disallow-assistant) worker role, SAME playwright mount: file_upload/drop absent from --disallowedTools argv",
     !argsWorker.includes("mcp__playwright__browser_file_upload") && !argsWorker.includes("mcp__playwright__browser_drop"));
+}
+
+// ===================== REAL createPty() chokepoint (card c1575ee7): pin the ACTUAL call site's
+// `!!mcpServers.playwright` threading into disallowedToolsForSpawn, not just the pure-function/
+// buildSpawnArgs checks above (both already proven correct, but neither ever executes the real
+// `createPty` method body, so a mutant at the call site itself — e.g. a literal `false` in place of
+// `!!mcpServers.playwright` — is INVISIBLE to the checks above). Mirrors
+// image-gen-disallow-createpty-chokepoint.mjs's own technique: drive the REAL (unsubclassed)
+// `PtyHost.createPty()` end to end against a fixture CLI substituted via `LOOM_CLAUDE_BIN` — never the
+// real claude, so no real spawn hazard. WINDOWS-ONLY (.cmd wrapper) — runs only when the fixture can be
+// built; on a platform where it can't, this section is skipped (checks above still cover every platform).
+// =====================
+{
+  const pwFixturePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "env-dump-cli.mjs");
+  const pwWrapperPath = path.join(tmpHome, "fake-claude-pw.cmd");
+  const pwEvents = { onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onBusy() {}, onExit() {} };
+
+  /** Drives the REAL createPty() to a real spawned fixture child; returns the captured argv array. */
+  async function spawnPwAndCaptureArgv(sessionId, { role, browserTesting }) {
+    const host = new PtyHost(pwEvents);
+    const spawnCwd = fs.mkdtempSync(path.join(tmpHome, `cwd-${sessionId}-`));
+    const argvOutputFile = path.join(tmpHome, `argv-${sessionId}.json`);
+    const envOutputFile = path.join(tmpHome, `env-${sessionId}.json`);
+    const opts = {
+      sessionId, cwd: spawnCwd, role, browserTesting,
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 },
+      sessionEnv: { FIXTURE_ENV_OUTPUT_FILE: envOutputFile, FIXTURE_ARGV_OUTPUT_FILE: argvOutputFile },
+    };
+    const pty = host.createPty(opts);
+    try {
+      await waitUntil(() => fs.existsSync(argvOutputFile), { label: `${sessionId} fixture's argv dump file to appear` });
+      return JSON.parse(fs.readFileSync(argvOutputFile, "utf8"));
+    } finally {
+      try { pty.kill(); } catch { /* best-effort */ }
+    }
+  }
+
+  if (process.platform !== "win32") {
+    console.log("WARN  SKIP  (chokepoint) REAL createPty() Playwright disallow chokepoint — the .cmd-wrapper fixture mechanism is Windows-only (mirrors image-gen-disallow-createpty-chokepoint.mjs's own accepted POSIX gap); the pure disallowedToolsForSpawn/buildSpawnArgs checks above stay covered on every platform.");
+  } else {
+    fs.writeFileSync(pwWrapperPath, `@"${process.execPath}" "${pwFixturePath}" %*\r\n`);
+    const prevClaudeBin = process.env.LOOM_CLAUDE_BIN;
+    process.env.LOOM_CLAUDE_BIN = pwWrapperPath;
+    try {
+      ensureDirs();
+      const argvOn = await spawnPwAndCaptureArgv("pw-chokepoint-on", { role: "worker", browserTesting: true });
+      check("(chokepoint) REAL createPty argv includes browser_run_code_unsafe in --disallowedTools when browserTesting=true",
+        argvOn.includes("mcp__playwright__browser_run_code_unsafe"));
+      const argvOff = await spawnPwAndCaptureArgv("pw-chokepoint-off", { role: "worker", browserTesting: false });
+      check("(chokepoint) REAL createPty argv does NOT include browser_run_code_unsafe when browserTesting=false (byte-identical-off on the real path)",
+        !argvOff.includes("mcp__playwright__browser_run_code_unsafe"));
+    } finally {
+      if (prevClaudeBin === undefined) delete process.env.LOOM_CLAUDE_BIN; else process.env.LOOM_CLAUDE_BIN = prevClaudeBin;
+    }
+  }
 }
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================

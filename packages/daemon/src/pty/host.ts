@@ -2687,6 +2687,33 @@ export function capabilityToolAllowlist(grants: CapabilityGrant[], catalog: Capa
   });
 }
 
+/**
+ * The mount key(s) (`grant.slug`, identical to the `mcpServers` key that row resolves to) of every
+ * resolved capability grant whose catalog row's OWN resolved `provision.package` (parsed from its
+ * `provisionJson`) equals `pkg` — never keyed on a single hardcoded slug the way `!!mcpServers["image-gen"]`
+ * was. Mirrors {@link capabilityToolAllowlist}'s own `catalog.find` scan. NEVER throws: a
+ * malformed/corrupt `provisionJson` is treated as "not this package" (`buildMcpServers` itself already
+ * warns + skips that row's actual mount separately); this function only ever reads, it never
+ * resolves/spawns anything.
+ *
+ * @decision c1575ee7 — image-gen's disallow union must be keyed on this, never on `!!mcpServers["image-gen"]`.
+ */
+export function capabilityGrantsMountKeysForPackage(grants: CapabilityGrant[], catalog: CapabilityDefRow[], pkg: string): string[] {
+  const keys: string[] = [];
+  for (const grant of grants) {
+    const def = catalog.find((c) => c.slug === grant.slug);
+    if (!def) continue;
+    let provision: { package?: string };
+    try { provision = JSON.parse(def.provisionJson) as { package?: string }; } catch { continue; }
+    const p = provision.package;
+    if (typeof p !== "string") continue;
+    // @decision c1575ee7 — `package` may be an owner-typed ABSOLUTE path to an already-installed copy,
+    // not just the bare specifier (require.resolve accepts either) — match the basename too in that case.
+    if (p === pkg || (path.isAbsolute(p) && path.basename(p) === pkg)) keys.push(grant.slug);
+  }
+  return keys;
+}
+
 interface Subscriber {
   onData: (b: Buffer) => void;
   onControl: (e: TerminalControl) => void;
@@ -4415,25 +4442,29 @@ export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
  * `browser_run_code_unsafe` — see PLAYWRIGHT_DISALLOWED_TOOLS's doc), AND — ONLY when `role ===
  * "assistant"` — with {@link ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS} (the host-file-reading
  * file_upload/drop pair; role-scoped because worker rigs legitimately need them — see that const's
- * doc), AND with {@link IMAGE_GEN_DISALLOWED_TOOLS} iff `imageGenMounted` is true (the mounted
- * mcp-imagenate MCP's own `generate_video` tool is powered by the same Gemini key image-gen always
- * injects — see that const's doc). When ALL of
- * restrictedTools/codescapeMounted/playwrightMounted/imageGenMounted are off/falsy this returns
- * EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL to today (no
- * restricted/codescape/playwright/image-gen tokens appended). Pure + exported so the spawn-args test
- * asserts the union + the byte-identical-off invariant with no real claude. (Companion blast-radius
- * card; Codescape C2 hardening; card 7159466a Playwright hardening; card f1609e1a assistant
- * file_upload/drop hardening; card b7d6b7f3 image-gen generate_video hardening.)
+ * doc), AND with `mcp__<key>__generate_video` for every key in `imageGenMounted` (that tool is powered
+ * by the same Gemini key image-gen always injects — see {@link IMAGE_GEN_DISALLOWED_TOOLS}'s doc).
+ * `imageGenMounted` accepts EITHER a boolean (legacy shape — `true` is exactly
+ * {@link IMAGE_GEN_DISALLOWED_TOOLS}, i.e. the single key `"image-gen"`) OR an array of mount keys (card
+ * `c1575ee7` — one entry per catalog row, under ANY slug, whose own resolved package is mcp-imagenate;
+ * see {@link capabilityGrantsMountKeysForPackage}), so a non-"image-gen"-slugged row's OWN
+ * `generate_video` tool is disallowed by its OWN mount-key prefix, not just the fixed legacy name. When
+ * ALL of restrictedTools/codescapeMounted/playwrightMounted are off/falsy AND `imageGenMounted` is
+ * falsy/empty this returns EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is
+ * BYTE-IDENTICAL to today (no restricted/codescape/playwright/image-gen tokens appended). Pure +
+ * exported so the spawn-args test asserts the union + the byte-identical-off invariant with no real
+ * claude.
  */
-export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean, playwrightMounted?: boolean, imageGenMounted?: boolean): string[] {
+export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean, playwrightMounted?: boolean, imageGenMounted?: boolean | readonly string[]): string[] {
   const base = disallowedToolsForRole(role);
-  if (!restrictedTools && !codescapeMounted && !playwrightMounted && !imageGenMounted) return base; // OFF: exactly the role's disallow list (byte-identical to today)
+  const imageGenKeys: readonly string[] = Array.isArray(imageGenMounted) ? imageGenMounted : imageGenMounted ? ["image-gen"] : [];
+  if (!restrictedTools && !codescapeMounted && !playwrightMounted && imageGenKeys.length === 0) return base; // OFF: exactly the role's disallow list (byte-identical to today)
   const merged = [...base];
   if (restrictedTools) for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (codescapeMounted) for (const t of CODESCAPE_WRITE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (playwrightMounted) for (const t of PLAYWRIGHT_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (playwrightMounted && role === "assistant") for (const t of ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped — role-scoped
-  if (imageGenMounted) for (const t of IMAGE_GEN_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
+  for (const key of imageGenKeys) { const t = `mcp__${key}__generate_video`; if (!merged.includes(t)) merged.push(t); } // union, de-duped — one per resolved mount key
   return merged;
 }
 
@@ -9048,7 +9079,21 @@ export class PtyHost {
     // single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot) inherits it; with
     // restrictedTools off and codescape/playwright/image-gen unmounted this is exactly
     // disallowedToolsForRole(role) ⇒ byte-identical argv. See disallowedToolsForSpawn.
-    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape, !!mcpServers.playwright, !!mcpServers["image-gen"]);
+    // imageGenMountKeys is the package-matched keys (capabilityGrantsMountKeysForPackage) UNIONED with
+    // the literal "image-gen" slug whenever THAT key is actually mounted — never package-matched keys
+    // ALONE: a seeded/re-created "image-gen" row whose own provisionJson carries no `package` field at
+    // all (a `bundled`/`command` row, e.g. a customized legacy row the migration skipped, or one the owner
+    // deleted and re-created under the reserved slug) resolves no package match, so the slug leg is what
+    // still disallows generate_video for exactly that row — dropping it reopens the original b7d6b7f3 gap
+    // for the one row shape most likely to hit it. playwrightMounted stays keyed on the literal
+    // `mcpServers.playwright` key, which is itself Loom-reserved and non-owner-collidable.
+    //
+    // @decision c1575ee7 — never drop the slug leg; see capabilityGrantsMountKeysForPackage's own doc too.
+    const imageGenPackageKeys = capabilityGrantsMountKeysForPackage(resolveProfileCapabilities(opts), capabilityCatalog, "mcp-imagenate");
+    const imageGenMountKeys = mcpServers["image-gen"] && !imageGenPackageKeys.includes("image-gen")
+      ? [...imageGenPackageKeys, "image-gen"]
+      : imageGenPackageKeys;
+    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape, !!mcpServers.playwright, imageGenMountKeys);
     // Card f9b47cd1: gate `-n <name>` on the installed claude version HERE (the single spawn chokepoint),
     // NOT in the caller — an older claude REJECTS the unknown flag and would break EVERY spawn (the
     // load-bearing gate-free recipe). getCachedClaudeVersion() is a NON-BLOCKING read (see its doc) —

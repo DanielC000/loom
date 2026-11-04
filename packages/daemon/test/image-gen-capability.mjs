@@ -71,7 +71,7 @@ const { seedDefaultCapabilities, bundledCapabilities } = await import("../dist/c
 const { resolveCapabilityServer } = await import("../dist/capabilities/registry.js");
 const {
   buildMcpServers, buildSpawnArgs, collectMcpEnvSecrets, mcpConfigHasSecret, redactSecrets,
-  disallowedToolsForSpawn, IMAGE_GEN_DISALLOWED_TOOLS,
+  disallowedToolsForSpawn, IMAGE_GEN_DISALLOWED_TOOLS, capabilityGrantsMountKeysForPackage,
 } = await import("../dist/pty/host.js");
 const { writeSessionMcpConfig } = await import("../dist/pty/claude-settings.js");
 const { SETTINGS_DIR, sessionScratchDir } = await import("../dist/paths.js");
@@ -257,6 +257,48 @@ check("(disallow) all flags off ⇒ byte-identical to disallowedToolsForSpawn(ro
   const strict = argsWith.indexOf("--strict-mcp-config");
   check("(e2e-disallow) --disallowedTools is present and still precedes --strict-mcp-config (flag-ordering invariant preserved)",
     d !== -1 && strict !== -1 && d < strict);
+}
+
+// ===================== (i) capabilityGrantsMountKeysForPackage (card c1575ee7 fix round) — the pure
+// package-keyed matcher in isolation, no spawn/mount needed. Covers the two legs the real createPty call
+// site unions (the exact bare-specifier match, and — card c1575ee7's fix round — an owner-typed ABSOLUTE
+// path whose basename is the package, e.g. "<LOOM_HOME>/node/node_modules/mcp-imagenate"), plus the
+// negative/degradation cases: a different package (no match), and malformed provisionJson (never throws).
+// =====================
+{
+  const nodePkgCatalogRow = (slug, pkg) => ({
+    id: `cap-${slug}`, slug, name: slug, description: "", transport: "stdio", kind: "node-package",
+    provisionJson: JSON.stringify({ kind: "node-package", package: pkg, binRelativeToPackageJson: "index.js" }),
+    toolAllowlistJson: JSON.stringify([]), wantsScratchDir: false, requiresConnection: false, secretEnvVar: null,
+    passEnv: [], createdAt: new Date().toISOString(),
+  });
+  // A leading path separator is absolute under BOTH node:path's posix and win32 isAbsolute() rules
+  // (verified: path.win32.isAbsolute('/x') and path.posix.isAbsolute('/x') both return true), so this
+  // fixture is absolute — and matches the "<LOOM_HOME>/node/node_modules/mcp-imagenate" realistic owner
+  // shape named in the fix round — on whichever OS this file actually runs under, no platform branch needed.
+  const exactRow = nodePkgCatalogRow("ig-exact", "mcp-imagenate");
+  const absRow = nodePkgCatalogRow("ig-abs", path.join(path.sep, "home", "x", ".loom", "node", "node_modules", "mcp-imagenate"));
+  const otherRow = nodePkgCatalogRow("ig-other", path.join(path.sep, "home", "x", ".loom", "node", "node_modules", "some-other-package"));
+  const bareOtherRow = nodePkgCatalogRow("ig-bare-other", "some-other-package");
+  const malformedRow = { ...nodePkgCatalogRow("ig-malformed", "mcp-imagenate"), provisionJson: "{not json" };
+  const catalog = [exactRow, absRow, otherRow, bareOtherRow, malformedRow];
+  const grantsFor = (...slugs) => slugs.map((slug) => ({ slug }));
+
+  check("(mount-keys) exact bare-specifier match returns that row's own slug",
+    capabilityGrantsMountKeysForPackage(grantsFor("ig-exact"), catalog, "mcp-imagenate").includes("ig-exact"));
+  check("(mount-keys) an ABSOLUTE path whose basename is the package also matches",
+    capabilityGrantsMountKeysForPackage(grantsFor("ig-abs"), catalog, "mcp-imagenate").includes("ig-abs"));
+  check("(mount-keys) a bare specifier that is a DIFFERENT package never matches",
+    !capabilityGrantsMountKeysForPackage(grantsFor("ig-bare-other"), catalog, "mcp-imagenate").includes("ig-bare-other"));
+  check("(mount-keys) an absolute path whose basename is a DIFFERENT package never matches",
+    !capabilityGrantsMountKeysForPackage(grantsFor("ig-other"), catalog, "mcp-imagenate").includes("ig-other"));
+  check("(mount-keys) malformed provisionJson degrades to 'no match', never throws",
+    capabilityGrantsMountKeysForPackage(grantsFor("ig-malformed"), catalog, "mcp-imagenate").length === 0);
+  check("(mount-keys) a grant with no matching catalog row is skipped, never throws",
+    capabilityGrantsMountKeysForPackage(grantsFor("no-such-slug"), catalog, "mcp-imagenate").length === 0);
+  check("(mount-keys) scanning every row above together returns exactly the two real matches, nothing extra",
+    JSON.stringify(capabilityGrantsMountKeysForPackage(grantsFor("ig-exact", "ig-abs", "ig-other", "ig-bare-other"), catalog, "mcp-imagenate").sort())
+      === JSON.stringify(["ig-abs", "ig-exact"]));
 }
 
 db.close();

@@ -153,6 +153,15 @@ method for the general codex-parity gap.)
   independently re-checking THAT provider's own gating line — the original mistake this record documents
   was exactly this: assuming `generate_video` was inert "by the same mechanism" as OpenAI/BFL/Reve without
   re-reading its own, different, gating condition.
+- Do not key the image-gen disallow union on `!!mcpServers["image-gen"]` (the literal mount slug) — card
+  `c1575ee7` found this misses an owner-added catalog row, under any OTHER slug, whose own `provision`
+  resolves the SAME `mcp-imagenate` package. The `createPty` call site now computes the mount KEYS via
+  `capabilityGrantsMountKeysForPackage(resolveProfileCapabilities(opts), capabilityCatalog, "mcp-imagenate")`
+  and disallows each key's OWN `mcp__<key>__generate_video` name, keyed on the row's own resolved
+  `provision.package` instead of a fixed slug. See
+  `docs/decisions/c1575ee7-image-gen-disallow-keyed-on-package-not-slug.md` for the full fix and its
+  named residual (a `bundled`/`command` row running `mcp-imagenate` via a free-form wrapper command, with
+  no `package` field to key on, is NOT caught by this).
 
 ## Verification
 
