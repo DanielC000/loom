@@ -1,11 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 import { normForCompare, containmentForms } from "../git/worktrees.js";
 import { WORKTREES_DIR } from "../paths.js";
+// Card 4c2a0bfd: writeJsonAtomic/__setRenameSyncForTest/transientFsRetryLimit/isTransientFsError/
+// sleepSync moved to ../write-json-atomic.ts (dependency-free — node builtins only). Re-exported below so
+// every existing caller/test of this file keeps working byte-for-byte; also imported for plain internal
+// use (withTrustLock's own retry logic shares this same bounded-retry budget by design).
+import { writeJsonAtomic, __setRenameSyncForTest, transientFsRetryLimit, isTransientFsError, sleepSync } from "../write-json-atomic.js";
+export { writeJsonAtomic, __setRenameSyncForTest, transientFsRetryLimit, isTransientFsError };
 
 /**
  * Resolve the base `CLAUDE_CONFIG_DIR` relocates to when set, or `os.homedir()` when it's unset — the
@@ -45,39 +50,6 @@ export function claudeJsonPath(): string {
   return path.join(claudeConfigHome(), ".claude.json");
 }
 
-// Windows can transiently throw EPERM/EACCES/EBUSY (instead of succeeding, or EEXIST/ENOENT as
-// POSIX would) when a create/rename/delete races another process's brief handle on the SAME path —
-// an AV/indexer mid-scan, or (for the lock below) a create landing just as another process's
-// release-delete of that lockfile is completing. It clears in milliseconds, so both writeJsonAtomic's
-// rename retry and withTrustLock's lock-acquire retry treat it as transient and retry it with this
-// SAME bounded count + backoff, rather than inventing separate numbers that could drift apart.
-const DEFAULT_TRANSIENT_FS_RETRY_LIMIT = 12; // worst case (1,2,4,8,16,32,50,50,…ms backoff) well under 1s
-// Ceiling for an env override — withTrustLock's transient-retry branch (below) loops WITHOUT
-// re-checking the trustLockMs() deadline, so an unbounded override would block the synchronous spawn
-// thread far past LOOM_TRUST_LOCK_MS's own "bounded" contract. 1000 × the ~50ms backoff ceiling is
-// ~50s worst case — generous for even extreme contention, while still bounding a typo'd huge value.
-const MAX_TRANSIENT_FS_RETRY_LIMIT = 1000;
-// Under EXTREME concurrent Windows FS contention (heavy-stress repro: ~1 in ~64 attempts at 12
-// concurrent writers), the fixed default budget above can genuinely exhaust and surface an EPERM that
-// would have cleared given a bit more time — asymmetric with the lock-acquire timeout below
-// (LOOM_TRUST_LOCK_MS), which is already env-overridable. LOOM_TRANSIENT_FS_RETRY_LIMIT mirrors that
-// same override pattern (trustLockMs() below) for this budget: read fresh on each call (never cached
-// at module load) so a test can flip it per-run, an operator on a heavily-contended host can raise it
-// without a code change, and — left unset — retry behavior is BYTE-IDENTICAL to the pre-fix fixed
-// constant. Floor BEFORE the positivity check (not after) — a fractional override like "0.5" is
-// `> 0` but floors to 0, which would DISABLE retries entirely (writeJsonAtomic throws on the very
-// first transient EPERM) instead of falling back to the default.
-export function transientFsRetryLimit(): number {
-  const n = Number(process.env.LOOM_TRANSIENT_FS_RETRY_LIMIT);
-  const floored = Math.floor(n);
-  if (!Number.isFinite(n) || floored < 1) return DEFAULT_TRANSIENT_FS_RETRY_LIMIT;
-  return Math.min(floored, MAX_TRANSIENT_FS_RETRY_LIMIT);
-}
-// Exported so a caller outside this module (ensureTrustedResilient's host.ts call site) can classify an
-// error the SAME way writeJsonAtomic/withTrustLock already do, instead of re-listing the three codes.
-export const isTransientFsError = (code: string): boolean =>
-  code === "EPERM" || code === "EACCES" || code === "EBUSY";
-
 /** TEST SEAM: swap the fs.openSync used by withTrustLock's lock-acquire — fs's ESM namespace import
  *  is immutable and can't be monkeypatched directly, mirroring companion/tts.ts's spawnImpl seam. Lets
  *  a hermetic test fault-inject transient EPERM/EACCES/EBUSY on the lock-acquire open, deterministically
@@ -86,42 +58,6 @@ export const isTransientFsError = (code: string): boolean =>
 type OpenSyncFn = typeof fs.openSync;
 let openSyncImpl: OpenSyncFn = fs.openSync;
 export function __setOpenSyncForTest(fn?: OpenSyncFn): void { openSyncImpl = fn ?? fs.openSync; }
-
-/** TEST SEAM: swap the fs.renameSync used by writeJsonAtomic's rename retry — same rationale/shape as
- *  __setOpenSyncForTest above. Lets a hermetic test fault-inject transient EPERM/EACCES/EBUSY on the
- *  rename deterministically. Defaults to the real fs.renameSync; production code never calls the setter. */
-type RenameSyncFn = typeof fs.renameSync;
-let renameSyncImpl: RenameSyncFn = fs.renameSync;
-export function __setRenameSyncForTest(fn?: RenameSyncFn): void { renameSyncImpl = fn ?? fs.renameSync; }
-
-/**
- * Atomically write `value` as pretty JSON to `filePath`: a uniquely-named temp file in the
- * same directory (so two concurrent writers can't collide on it) followed by a rename onto
- * the target. The rename is atomic on a single filesystem, so a crash mid-write can never
- * leave the real (possibly large, concurrently-read) config truncated/corrupt.
- */
-export function writeJsonAtomic(filePath: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.${process.pid}.${randomUUID()}.loom.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
-  // On Windows, rename onto an EXISTING target can transiently throw EPERM/EACCES/EBUSY when another
-  // process holds a handle on it — exactly the lock-free fast-path readers of .claude.json during
-  // concurrent spawns (ensureTrusted's fast-path readCfg runs OUTSIDE the trust lock by design), or an
-  // AV/indexer mid-scan. POSIX rename(2) has no such issue. The handle is released in milliseconds, so
-  // retry with a short bounded backoff; rethrow once it persists (a genuine permission error still
-  // surfaces), cleaning up the temp file so a terminal failure leaves nothing behind.
-  for (let attempt = 0; ; attempt++) {
-    try { renameSyncImpl(tmp, filePath); return; }
-    catch (err) {
-      const code = (err as NodeJS.ErrnoException).code ?? "";
-      if (attempt >= transientFsRetryLimit() || !isTransientFsError(code)) {
-        try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
-        throw err;
-      }
-      sleepSync(Math.min(50, 2 ** attempt)); // 1,2,4,8,16,32,50,50,… ms — worst case well under 1s
-    }
-  }
-}
 
 type ClaudeCfg = { projects?: Record<string, Record<string, unknown>> };
 
@@ -286,11 +222,6 @@ function trustLockMs(): number {
  */
 function staleLockCeilingMs(): number {
   return Math.max(10 * trustLockMs(), 60_000);
-}
-
-/** Synchronous sleep that parks the thread (no busy-spin) — ensureTrusted is sync by contract. */
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /** Card 5b97da80: the lock file's own content, written at acquire time so a later waiter can identify
