@@ -1,4 +1,4 @@
-import { useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { contextWindowForModel, resolveConfig, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
@@ -26,7 +26,7 @@ import {
   type NodeHeadPill,
 } from "../components/atlasHome";
 import {
-  BriefLine, BriefTrailing, LaneChips, OverviewCard, RosterTable,
+  BriefLine, BriefTrailing, LaneChips, OverviewCard, RosterScopeToggle, RosterTable,
   type BriefReading, type RosterCell,
 } from "../components/atlasProjectOverview";
 import { AgentsQuickSpawn } from "../components/atlasAgents";
@@ -36,7 +36,10 @@ import {
   boardRollup, gateLanes, isLiveSession, mergeThroughput, plural, relativeTime,
   useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
-import { lastEventBySession, rosterCardLabel, rosterRows, taskTitlesById } from "../lib/atlasProjectOverview";
+import {
+  DEFAULT_ROSTER_SCOPE, filterRosterRows, lastEventBySession, readRosterScope, rosterCardLabel,
+  rosterRows, taskTitlesById, writeRosterScope, type RosterScope,
+} from "../lib/atlasProjectOverview";
 import { PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt } from "../nav";
 import { color, font } from "../theme";
 
@@ -103,6 +106,28 @@ export default function ProjectHome() {
   visited.current.add(tab);
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
+
+  // WHICH AGENTS' SESSIONS THE ROSTER LISTS (card effd47d5) — the owner's own item on this tab:
+  // "Optionaly show either only tarminals of spawnable agents or teminals of all running agents.
+  // Adjustable by user preference." Persisted per project in localStorage, the same store and the
+  // same `<area>.<field>.<projectId>` key shape the Sessions tab's tile layout already uses; the
+  // key, the parse and the default all live in lib/atlasProjectOverview.ts.
+  //
+  // Seeded from storage in the INITIALISER (so a stored choice is on screen in the first paint
+  // rather than flashing the default for a frame) and re-read by the effect, which is what makes it
+  // follow a project switch — the tree can repoint this node's project under a mount that never
+  // unmounts, so an initialiser alone would pin whichever project happened to resolve first. Same
+  // pairing, for the same reason, as pages/Terminals.tsx's own per-project layout.
+  const [rosterScope, setRosterScope] = useState<RosterScope>(
+    () => (projectId ? readRosterScope(projectId) : DEFAULT_ROSTER_SCOPE),
+  );
+  useEffect(() => {
+    setRosterScope(projectId ? readRosterScope(projectId) : DEFAULT_ROSTER_SCOPE);
+  }, [projectId]);
+  const chooseRosterScope = (next: RosterScope) => {
+    setRosterScope(next);
+    if (projectId) writeRosterScope(projectId, next);
+  };
 
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
@@ -171,6 +196,20 @@ export default function ProjectHome() {
   // derivation (lib/atlasAgents.ts), off the three reads this page already makes, so the count in
   // the KPI sub-line and the rows in the panel can never disagree about who is spawnable.
   const roster = splitRoster(agentsQ.data, profilesQ.data, sessionsQ.data);
+
+  // …and the SAME derivation is what the roster's scope filter asks about, as an id set, so the
+  // table and the `spawnable` figure in the briefing line can never disagree about who is spawnable.
+  //
+  // `null` until BOTH reads behind that answer have landed. `splitRoster` answers a missing agent
+  // list with an empty roster and a missing profile list by reading every role as null, so an
+  // in-flight page would otherwise claim either that nothing is spawnable (hiding the whole fleet)
+  // or that everything is (showing dispatched workers under a filter that says it hides them).
+  // `filterRosterRows` lists everything for `null`, which is exactly what the page showed a tick
+  // earlier — a loading state, never a stated one.
+  const spawnableAgentIds = useMemo(
+    () => (agentsQ.data && profilesQ.data ? new Set(roster.spawnable.map((r) => r.agent.id)) : null),
+    [agentsQ.data, profilesQ.data, roster.spawnable],
+  );
 
   // The project's pulse, TWO TIERS — card 102bc915 extending card ef86b089 from the workspace node to
   // this one. This fed off `liveManagers` alone, so an exited-but-unarchived manager's stream was
@@ -278,6 +317,12 @@ export default function ProjectHome() {
   const taskTitles = taskTitlesById(boardQ.data?.tasks);
   const lastEvents = lastEventBySession(events);
   const rows = rosterRows(managers, workers);
+  // The scope filter (card effd47d5). BOTH populations are derived, in both modes, because the
+  // toggle states each option's own count — so the reading the reader is not looking at says what
+  // picking it would yield, rather than making them click to find out.
+  const spawnableRows = filterRosterRows(rows, "spawnable", spawnableAgentIds);
+  const visibleRows = filterRosterRows(rows, rosterScope, spawnableAgentIds);
+  const hiddenRows = rows.length - visibleRows.length;
   const cellFor: (row: { session: SessionListItem }) => RosterCell = ({ session: s }) => {
     const ctx = s.ctxInputTokens ?? 0;
     const ratio = ctx > 0 ? ctx / contextWindowForModel(s.model) : 0;
@@ -424,15 +469,39 @@ export default function ProjectHome() {
 
             <OverviewCard label="Work in flight" count={`${live.length} live · ${working} working`}
               action={{ to: "/terminals", label: "Sessions" }} testId="atlas-overview-roster"
+              controls={
+                <RosterScopeToggle testId="atlas-roster-scope" value={rosterScope}
+                  onChange={chooseRosterScope}
+                  counts={{ all: rows.length, spawnable: spawnableRows.length }} />
+              }
               footer={<>
+                {/* THE FILTER SENTENCE COMES FIRST, and only while something is actually hidden.
+                    This footer's job is to keep the card's own label honest, and "Work in flight"
+                    over a filtered list is the one thing on the card that can now be read as more
+                    than it is. The head count is deliberately left alone — it is the project's live
+                    FLEET, which is what the Sessions exit beside it opens, and restating a filtered
+                    figure there would put two populations in one head. */}
+                {hiddenRows > 0 ? <>
+                  Listing only the agents you start by hand; {plural(hiddenRows, "session")} dispatched
+                  by a manager {hiddenRows === 1 ? "is" : "are"} hidden.{" "}
+                </> : null}
                 Context is measured against each session's own model window
                 {recycleAt > 0 ? <>; a manager is nudged to hand off at {Math.round(recycleAt * 100)}%</> : null}.
                 An idle worker is live and waiting on its manager, not stopped, and an exited session
                 stays listed here until it is archived.
               </>}>
+              {/* THREE states, not two: a project with no sessions at all, and a project whose
+                  sessions are all filtered out, are different facts and the second must not be
+                  reported as the first — a reader who has just hidden four running workers would
+                  otherwise be told the project has nothing in flight. */}
               {rows.length === 0
                 ? <BandEmpty>No sessions in this project.</BandEmpty>
-                : <RosterTable rows={rows} cellFor={cellFor} />}
+                : visibleRows.length === 0
+                  ? <BandEmpty>
+                      No agent you start by hand has a session here — {plural(rows.length, "session")}{" "}
+                      dispatched by a manager {rows.length === 1 ? "is" : "are"} hidden by the filter above.
+                    </BandEmpty>
+                  : <RosterTable rows={visibleRows} cellFor={cellFor} />}
             </OverviewCard>
 
             <OverviewCard label="Board" count={`${board.open} open · ${board.total} total`}

@@ -20,10 +20,10 @@
 // alone.
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { Button, Dot, Panel, SectionLabel, StatusPill } from "./ui";
+import { Button, Dot, Panel, SectionLabel, Segmented, StatusPill } from "./ui";
 import { useDismissable } from "../lib/useDismissable";
 import type { BoardLane } from "../lib/atlasHome";
-import type { RosterRow } from "../lib/atlasProjectOverview";
+import type { RosterRow, RosterScope } from "../lib/atlasProjectOverview";
 import { color, columnTone, font, tone, type Tone } from "../theme";
 
 // ── The briefing line ──────────────────────────────────────────────────────────────────────────
@@ -148,9 +148,16 @@ export function BriefTrailing({ label, value, sub, tone: t = "phosphor", childre
  * `bodyMaxHeight` is opt-in and used by exactly one caller: a Pulse feed capped at 100 events would
  * otherwise make the page as long as the day has been busy. Every other card is as tall as it needs.
  */
-export function OverviewCard({ label, count, action, children, footer, bodyMaxHeight, testId }: {
+export function OverviewCard({ label, count, controls, action, children, footer, bodyMaxHeight, testId }: {
   label: string;
   count?: ReactNode;
+  /**
+   * A control that changes what the body shows, drawn beside the reading it changes rather than
+   * above the card or inside the body — so the label, the count it is about to change, and the
+   * control that changes it read as one statement. `.loom-bandhead` already wraps, so a narrow
+   * viewport drops this onto its own row with the exit link rather than squeezing the label.
+   */
+  controls?: ReactNode;
   action?: { to: string; label: string };
   children: ReactNode;
   /** A muted caption under the body — the sentence that keeps the card's own label honest. */
@@ -163,6 +170,7 @@ export function OverviewCard({ label, count, action, children, footer, bodyMaxHe
       <div className="loom-bandhead">
         <SectionLabel style={{ margin: 0, whiteSpace: "nowrap" }}>{label}</SectionLabel>
         {count !== undefined && <span className="loom-bandcount">{count}</span>}
+        {controls}
         <span style={{ flex: 1 }} />
         {action && (
           <Link to={action.to} className="loom-btn loom-btn-default loom-bandlink" title={`Open ${action.label}`}>
@@ -190,6 +198,43 @@ export function OverviewCard({ label, count, action, children, footer, bodyMaxHe
 // wide one. That is deliberate: it is what lets the stacked rendering keep all seven facts named
 // without a second render path, and a screen reader hears the label either way, where the wide
 // `.loom-ovroster-head` row alone would leave the stacked cells unlabelled.
+
+/**
+ * Which agents' sessions the roster lists — card effd47d5, the owner's own item on this tab:
+ * "Optionaly show either only tarminals of spawnable agents or teminals of all running agents.
+ * Adjustable by user preference."
+ *
+ * `Segmented` (components/ui) rather than a `<Select>`, which is this app's other small-picker
+ * vocabulary, for one reason: a collapsed select hides the option the reader did not pick, and the
+ * whole point of this control is knowing WHICH population is on screen. Both readings stay visible,
+ * and both carry their own count — so the alternative states what it would yield before it is
+ * clicked, the same courtesy the Sessions tab's project filter already pays ("All (4)"). The kit
+ * owns the chrome and the roving-tabindex keyboard handling; nothing here restyles a segment.
+ *
+ * @decision effd47d5 — do not shrink these segments with a CSS rule, and do not swap this for a
+ * `<Select>`. Segment padding and font size are INLINE in the kit, so a class rule here is silently
+ * inert; a collapsed select hides the very population comparison this control exists to state.
+ */
+export function RosterScopeToggle({ value, onChange, counts, testId }: {
+  value: RosterScope;
+  onChange: (next: RosterScope) => void;
+  counts: { all: number; spawnable: number };
+  testId?: string;
+}) {
+  return (
+    <Segmented<RosterScope>
+      data-testid={testId}
+      aria-label="Which agents' sessions to list"
+      title="List every running agent, or only the agents you start by hand"
+      value={value}
+      onChange={onChange}
+      items={[
+        { key: "all", label: `All (${counts.all})` },
+        { key: "spawnable", label: `You spawn (${counts.spawnable})` },
+      ]}
+    />
+  );
+}
 
 export interface RosterCell {
   /** `sessionStatus`'s own reading — the pill that says busy / idle / exited / rate-limited. */

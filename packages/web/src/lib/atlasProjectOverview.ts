@@ -6,9 +6,12 @@
 // come off rows ProjectHome already has in hand (`Session.taskId` + the board roll-up's own task list;
 // `api.orchestrationEvents` per manager, which the Pulse feed already assembles).
 //
-// Pure functions only, so the table's rows and the counts stated above them are derived once and
-// cannot disagree — and so they can be asserted without a DOM (packages/web/test/atlas-project-
-// overview.mjs). Nothing here is shared with the WORKSPACE node: it keeps its five-panel band.
+// Pure functions, so the table's rows and the counts stated above them are derived once and cannot
+// disagree — and so they can be asserted without a DOM (packages/web/test/atlas-project-
+// overview.mjs). The two storage helpers at the very bottom are the only impure part, and they
+// exist so the preference's key shape has exactly one home — the same split, for the same reason,
+// as lib/terminalLayout.ts. Nothing here is shared with the WORKSPACE node: it keeps its
+// five-panel band.
 import type { OrchestrationEvent, SessionListItem } from "@loom/shared";
 
 /** One row of the work-in-flight table: a session, plus whether it is nested under its manager. */
@@ -99,4 +102,105 @@ export function rosterCardLabel(
   if (s.gen) parts.push(`gen ${s.gen}`);
   if (s.ctxTurns) parts.push(`${s.ctxTurns} turn${s.ctxTurns === 1 ? "" : "s"}`);
   return parts.length > 0 ? { text: parts.join(" · "), muted: true } : null;
+}
+
+// ── Which agents' sessions the roster lists (card effd47d5) ───────────────────────────────────
+//
+// The owner's own words, under Projects › Overview: "Optionaly show either only tarminals of
+// spawnable agents or teminals of all running agents. Adjustable by user preference."
+//
+// 🔴 "SPAWNABLE" HAS EXACTLY ONE DEFINITION IN THIS APP AND THIS IS NOT A SECOND ONE. It is
+// `splitRoster`'s (lib/atlasAgents.ts): an agent whose bound rig's role is not `worker` — the ones a
+// human may start by hand, as against the worker rigs a manager dispatches. That file's own header
+// states why there is one derivation ("so the three can never disagree about which agent is
+// spawnable"), and the Agents tab already states the split in words ("3 you spawn, 2 your manager
+// dispatches"), so this filter takes that set as an ARGUMENT rather than re-deriving the predicate
+// from a session's own `role`. The two agree on every ordinary fleet and diverge exactly where the
+// app itself has changed its mind — an agent re-bound to another rig after its session started — and
+// there the one authoritative answer is the one the rest of the UI is already showing.
+//
+// @decision effd47d5 — never re-derive "spawnable" here from `session.role !== "worker"`; take
+// `splitRoster`'s agent set as an argument, or this surface becomes a second definition that drifts
+// from the Agents tab silently.
+
+/** Which population the roster table lists. `"all"` is the pre-card behaviour and the default. */
+export type RosterScope = "all" | "spawnable";
+
+/**
+ * What a reader with no stored preference sees — and it is `"all"`, the behaviour this page already
+ * had, NOT `"spawnable"`.
+ *
+ * Worth stating because card effd47d5 guessed the other way ("'spawnable agents only' (today's
+ * behaviour, confirm first)"). Confirmed against the code it was written about: the table's rows are
+ * `rosterRows(managers, workers)` over every non-archived manager AND worker, so today's page lists
+ * the dispatched workers too. Defaulting to `"spawnable"` would silently hide rows from every
+ * existing reader on upgrade, which is a change nobody asked for; the filter is opt-in.
+ */
+export const DEFAULT_ROSTER_SCOPE: RosterScope = "all";
+
+/**
+ * Narrow the roster to one scope.
+ *
+ * `spawnableAgentIds` is the agent-id set behind `splitRoster(...).spawnable` — or `null` for "not
+ * known yet", which is NOT the same as "empty". A caller whose agent/rig reads have not landed must
+ * pass `null`: `splitRoster` answers an unloaded agent list with an EMPTY roster, so treating that
+ * as the real set would state "no agent you spawn has a session" over a fleet that is merely still
+ * loading. `null` lists everything instead, which is the same thing the page shows one tick earlier.
+ *
+ * ORDER IS PRESERVED and nothing is re-grouped: a kept row sits where `rosterRows` put it. The one
+ * thing that can change is a row's own INDENT — `child` is the table's single level of nesting, "a
+ * worker drawn under the manager that owns it", so a kept row whose manager was filtered out loses
+ * it rather than hanging an indent off whatever row happens to precede it now. Reachable, not
+ * theoretical: a worker session whose agent is later re-bound to a non-worker rig is spawnable by
+ * the definition above while the manager that dispatched it is not.
+ *
+ * Never mutates `rows` — the caller's array is render state.
+ *
+ * @decision effd47d5 — never pass an empty set to mean "the agent reads have not landed". `null` is
+ * that state; an empty set is the real answer that no agent here is spawnable, and conflating them
+ * states an empty fleet over a loading one.
+ */
+export function filterRosterRows(
+  rows: readonly RosterRow[],
+  scope: RosterScope,
+  spawnableAgentIds: ReadonlySet<string> | null,
+): RosterRow[] {
+  if (scope === "all" || spawnableAgentIds === null) return rows.slice();
+  const kept = rows.filter((r) => spawnableAgentIds.has(r.session.agentId));
+  const keptIds = new Set(kept.map((r) => r.session.id));
+  return kept.map((r) => ({
+    session: r.session,
+    child: r.child && r.session.parentSessionId != null && keptIds.has(r.session.parentSessionId),
+  }));
+}
+
+/**
+ * The storage key. Per PROJECT, like the Sessions tab's own tile layout
+ * (lib/terminalLayout.ts `loom.sessionsLayout.<id>`) and in the same `<area>.<field>.<projectId>`
+ * shape: which agents are worth watching is a fact about one project's fleet — a project whose work
+ * is all dispatched to workers wants the opposite answer from one run by hand.
+ */
+export function rosterScopeStorageKey(projectId: string): string {
+  return `loom.overviewRoster.${projectId}`;
+}
+
+/**
+ * Read a stored scope back, defensively. Absent, empty, an unknown word, a stale value from an older
+ * build, something hand-edited in devtools — every one of them is the default rather than a throw.
+ * This is a browser-storage read on a page the reader is trying to use.
+ */
+export function parseRosterScope(raw: string | null | undefined): RosterScope {
+  return raw === "all" || raw === "spawnable" ? raw : DEFAULT_ROSTER_SCOPE;
+}
+
+/** Read one project's stored scope. Storage can be unavailable or throw; the default is the answer then. */
+export function readRosterScope(projectId: string): RosterScope {
+  try { return parseRosterScope(localStorage.getItem(rosterScopeStorageKey(projectId))); }
+  catch { return DEFAULT_ROSTER_SCOPE; }
+}
+
+/** Persist one project's scope, best-effort. A write that cannot land leaves the in-memory choice. */
+export function writeRosterScope(projectId: string, scope: RosterScope): void {
+  try { localStorage.setItem(rosterScopeStorageKey(projectId), scope); }
+  catch { /* storage unavailable (private mode, blocked site data) — the in-memory state still applies */ }
 }

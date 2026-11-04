@@ -110,6 +110,65 @@ async function seedFleet(loomDaemon: LoomDaemon, workerCtxPct: number) {
   };
 }
 
+// ── The scope filter's fixture (card effd47d5) ────────────────────────────────────────────────
+//
+// `seedFleet` above mints its agents through `seedLiveSession`, which binds them to NO rig — and an
+// agent with no rig has a null role, which `splitRoster` reads as SPAWNABLE. So the scope filter
+// needs a fleet whose agents carry real rigs, and that is the only reason this second fixture
+// exists: `seedFleet` stays byte-identical, and the four legs above keep the fixture they were
+// written against.
+//
+// REST seeding through the same human/loopback endpoints the UI drives, inline rather than added to
+// fixtures/daemon.ts — the pattern atlas-agents.spec.ts and profiles-agents.spec.ts already set.
+async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, { ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
+  if (!res.ok) throw new Error(`${init?.method ?? "GET"} ${url} -> ${res.status}: ${await res.text()}`);
+  return (await res.json()) as T;
+}
+
+/**
+ * A project whose fleet is ONE manager on a manager rig and ONE worker on a worker rig.
+ *
+ * That asymmetry is the whole fixture: `splitRoster` calls the manager's agent spawnable and the
+ * worker's agent dispatched, so the two scopes have genuinely different populations — 2 rows and 1 —
+ * and a filter that kept or dropped everything could satisfy neither.
+ */
+async function seedRiggedFleet(loomDaemon: LoomDaemon) {
+  const base = loomDaemon.baseURL;
+  const project = await loomDaemon.createProject(uniq("atlasovscope"));
+  const mgrRig = await apiJson<{ id: string }>(`${base}/api/profiles`,
+    { method: "POST", body: JSON.stringify({ name: uniq("Scope Mgr Rig"), role: "manager" }) });
+  const wkrRig = await apiJson<{ id: string }>(`${base}/api/profiles`,
+    { method: "POST", body: JSON.stringify({ name: uniq("Scope Wkr Rig"), role: "worker" }) });
+  // Names share no stem with each other: the assertions below read row text as well as ids.
+  const mgrName = uniq("ScopeConductor");
+  const wkrName = uniq("ScopeHauler");
+  const mgrAgent = await apiJson<{ id: string }>(`${base}/api/projects/${project.id}/agents`,
+    { method: "POST", body: JSON.stringify({ name: mgrName, startupPrompt: "" }) });
+  const wkrAgent = await apiJson<{ id: string }>(`${base}/api/projects/${project.id}/agents`,
+    { method: "POST", body: JSON.stringify({ name: wkrName, startupPrompt: "" }) });
+  await apiJson(`${base}/api/agents/${mgrAgent.id}`, { method: "POST", body: JSON.stringify({ profileId: mgrRig.id }) });
+  await apiJson(`${base}/api/agents/${wkrAgent.id}`, { method: "POST", body: JSON.stringify({ profileId: wkrRig.id }) });
+
+  const short = `${Math.floor(Math.random() * 1e6)}`;
+  // `agentName` is passed to MATCH the agent actually created above: the fixture echoes back whatever
+  // it was handed, while the row on screen renders the DB's own join — so a mismatch here would make
+  // every text assertion below read a name the page never draws.
+  const mgr = await loomDaemon.seedLiveSession({
+    project, id: `e2e-ovsc-mgr-${short}`, agentId: mgrAgent.id, agentName: mgrName, role: "manager",
+  });
+  const worker = await loomDaemon.seedLiveSession({
+    project, id: `e2e-ovsc-wkr-${short}`, agentId: wkrAgent.id, agentName: wkrName, role: "worker",
+    parentSessionId: mgr.sessionId, branch: `loom/ovscope${short}`,
+  });
+  return { project, mgr, worker, mgrName, wkrName };
+}
+
+/** The scope toggle's two segments, scoped through the control's own testid. */
+const scopeSegment = (page: Page, which: "all" | "spawnable") =>
+  page.getByTestId("atlas-roster-scope")
+    .getByRole("radio", { name: which === "all" ? /^All/ : /^You spawn/ });
+
 /** One roster row, by the session it draws — never by text, which a sibling spec's row can match. */
 const row = (page: Page, sessionId: string) =>
   page.locator(`[data-testid="atlas-roster-row"][data-session-id="${sessionId}"]`);
@@ -325,5 +384,91 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     // it, "red" is equally satisfied by a page that painted every meter red.
     await expect(row(page, seeded.mgr.sessionId).locator(".loom-ovroster-track > span"))
       .not.toHaveCSS("background-color", TONE_RED);
+  });
+
+  // ── THE SCOPE FILTER (card effd47d5) ────────────────────────────────────────────────────────
+  // The owner's own item on this tab, verbatim: "Optionaly show either only tarminals of spawnable
+  // agents or teminals of all running agents. Adjustable by user preference."
+  //
+  // ⚠️ The roster is a TABLE of sessions, not a strip of terminals — this page has mounted no
+  // terminal since the rework (card 269f46ef), and re-adding one is explicitly out of scope. These
+  // legs are about which agents' sessions the table LISTS.
+
+  test("switch ON: the scope toggle really changes the listed population, both ways", async ({ page, loomDaemon }) => {
+    const seeded = await seedRiggedFleet(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize(WIDE);
+    await page.goto(loomDaemon.baseURL + "/project");
+
+    // FIXTURE IDENTITY first: a silent fallback to a sibling worker's daemon renders a plausible,
+    // entirely wrong page, and every row count below would be read off it.
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+    await expect(page.getByTestId("atlas-roster-table")).toBeVisible();
+
+    // ── DEFAULT = ALL. Pinned deliberately: the card GUESSED that "spawnable only" was already
+    //    this page's behaviour, and it was not. Defaulting the other way would hide rows from every
+    //    existing reader on upgrade.
+    await expect(scopeSegment(page, "all")).toHaveAttribute("aria-checked", "true");
+    await expect(scopeSegment(page, "spawnable")).toHaveAttribute("aria-checked", "false");
+    await expect(row(page, seeded.mgr.sessionId)).toBeVisible();
+    await expect(row(page, seeded.worker.sessionId)).toBeVisible();
+
+    // 🔴 THE COUNTS ON THE SEGMENTS ARE THE FILTER, COMPUTED, BEFORE ANYTHING IS CLICKED. The rigs
+    // are what make them differ: 2 sessions, 1 of them on an agent a human may start. A filter that
+    // was a no-op would read "You spawn (2)" here and pass every visibility assertion below.
+    await expect(scopeSegment(page, "all")).toHaveText(/^All \(2\)$/);
+    await expect(scopeSegment(page, "spawnable")).toHaveText(/^You spawn \(1\)$/);
+
+    // ── CLICK → SPAWNABLE ONLY. The dispatched worker goes, the manager stays. Presence first
+    //    (card 625d791c): assert the row that must REMAIN before the one that must disappear, or a
+    //    page that simply stopped rendering the table satisfies the absence.
+    await scopeSegment(page, "spawnable").click();
+    await expect(scopeSegment(page, "spawnable")).toHaveAttribute("aria-checked", "true");
+    await expect(row(page, seeded.mgr.sessionId)).toBeVisible();
+    await expect(row(page, seeded.worker.sessionId)).toHaveCount(0);
+    await expect(page.locator('[data-testid="atlas-roster-row"]')).toHaveCount(1);
+
+    // …and the card SAYS it is filtered, in the footer whose job is keeping the label honest. A
+    // table silently showing a subset under the heading "Work in flight" is the defect here.
+    await expect(page.getByTestId("atlas-overview-roster"))
+      .toContainText("Listing only the agents you start by hand; 1 session dispatched by a manager is hidden.");
+
+    // ── AND BACK. Both directions, so "the worker vanished" cannot be satisfied by a row that
+    //    merely failed to render once and never came back.
+    await scopeSegment(page, "all").click();
+    await expect(scopeSegment(page, "all")).toHaveAttribute("aria-checked", "true");
+    await expect(row(page, seeded.worker.sessionId)).toBeVisible();
+    await expect(page.locator('[data-testid="atlas-roster-row"]')).toHaveCount(2);
+    await expect(page.getByTestId("atlas-overview-roster")).not.toContainText("Listing only the agents");
+  });
+
+  test("switch ON: the chosen scope survives a reload, stored per project", async ({ page, loomDaemon }) => {
+    const seeded = await seedRiggedFleet(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.setViewportSize(WIDE);
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+
+    await expect(row(page, seeded.worker.sessionId)).toBeVisible();
+    await scopeSegment(page, "spawnable").click();
+    await expect(row(page, seeded.worker.sessionId)).toHaveCount(0);
+
+    // It is a PREFERENCE, not component state: it must be in the per-project localStorage key the
+    // Sessions tab's own layout already uses the shape of, not a React state that dies on reload.
+    expect(await page.evaluate((k) => localStorage.getItem(k), `loom.overviewRoster.${seeded.project.id}`))
+      .toBe("spawnable");
+
+    await page.reload();
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
+
+    // AFTER THE RELOAD: the control is still on the chosen reading, and the list still reflects it.
+    // Presence first again — the manager row proves the table rendered at all, so the worker's
+    // absence is a filter result rather than a page that never finished loading.
+    await expect(scopeSegment(page, "spawnable")).toHaveAttribute("aria-checked", "true");
+    await expect(row(page, seeded.mgr.sessionId)).toBeVisible();
+    await expect(row(page, seeded.worker.sessionId)).toHaveCount(0);
+    await expect(page.locator('[data-testid="atlas-roster-row"]')).toHaveCount(1);
   });
 });
