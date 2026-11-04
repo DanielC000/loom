@@ -867,7 +867,7 @@ function quarantineUndeliverableDest(dest: string, name: string, claudeDir: stri
     console.log(`[skills] quarantine: could not remove or relocate ${dest}; overwrote its SKILL.md with a neutral stub instead`);
     return true;
   } catch (e) {
-    console.log(`[skills] quarantine FAILED for ${dest}: could not remove, relocate, or neutralize it — an unstripped hazard may still be present (${(e as Error).message})`);
+    console.error(`[skills] quarantine FAILED for ${dest}: could not remove, relocate, or neutralize it — an unstripped hazard may still be present (${(e as Error).message}); delete ${dest} by hand`);
     return false;
   }
 }

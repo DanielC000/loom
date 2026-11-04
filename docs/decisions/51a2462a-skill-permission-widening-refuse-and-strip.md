@@ -180,12 +180,15 @@ sound but three gaps around it, all fixed in the same pass:
    copy at that exact path (`fs.rmSync(aside, {recursive:true, force:true})`, errors swallowed) before the
    rename, so a failed clear doesn't block the relocation attempt; `fs.renameSync` itself still fails
    closed into fallback (ii)/(iii) if the target genuinely can't be cleared or replaced. A fixed name was
-   chosen over pruning the whole quarantine dir at the START of `injectSkills`: a start-of-call prune would
-   race a CONCURRENT session sharing the same `cwd` (manager/platform/setup/auditor all share
-   `repoPath`) — one session's prune could delete a sibling session's own just-written quarantine entry
-   before anyone ever inspected it. The fixed-name replace has no such cross-session hazard: each skill
-   name's own quarantine slot is independent, and two sessions racing to quarantine the SAME skill name at
-   the SAME cwd lose at most each other's forensic copy of THAT one name, never an unrelated one.
+   chosen over pruning the whole quarantine dir at the START of `injectSkills`. `injectSkills` itself is
+   synchronous, so this is NOT an in-process race between concurrently-interleaved calls — the real
+   problem is simpler and purely sequential: a shared `cwd` (manager/platform/setup/auditor all share
+   `repoPath`) means one session's call can run, in full, between two OTHER sessions' calls, and a
+   start-of-call prune deletes EVERY name's quarantine entry indiscriminately — including one a sibling
+   session wrote moments earlier in its own now-finished call, that nobody has inspected yet. The
+   fixed-name replace has no such cross-session hazard: each skill name's own quarantine slot is
+   independent, and two sessions quarantining the SAME skill name at the SAME cwd, in either order, lose
+   at most each other's forensic copy of THAT one name, never an unrelated one.
 3. **Fallbacks (ii) and (iii) were untested.** Only fallback (i) (rename aside) had ever been exercised —
    round 3 itself named this gap but didn't close it. Two new tests
    (`skills-inject-permission-strip.mjs` (n)/(o)) now force BOTH `fs.rmSync(dest, …)` AND
@@ -279,8 +282,9 @@ recognizes Loom's own stripped delivery as unmodified-since-placement rather tha
 - Do not go back to a timestamp+random quarantine name (round 4) — it accumulates without bound; use the
   ONE FIXED name per skill, replacing any prior copy (best effort) on every call.
 - Do not prune the whole quarantine dir at the start of `injectSkills` as an alternative to the fixed name
-  above (round 4) — a shared `cwd` (manager/platform/setup/auditor) means a start-of-call prune can race
-  and delete a concurrent session's own just-written quarantine entry before anyone inspects it.
+  above (round 4) — `injectSkills` is synchronous, so this is not an in-process race; a shared `cwd`
+  (manager/platform/setup/auditor) means a start-of-call prune in one session's call deletes a sibling
+  session's own still-uninspected forensic copy, written by an earlier, already-finished call.
 - Do not treat fallback (ii) (stub overwrite) or (iii) (loud log) as implicitly covered by fallback (i)'s
   own test (round 4) — each failure mode needs its OWN fault injection (force rmSync+renameSync to reach
   (ii); force rmSync+renameSync+the stub write to reach (iii)), since a reviewer confirmed round 3 shipped

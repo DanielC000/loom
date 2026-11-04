@@ -311,6 +311,7 @@ let firstBlock = null;
 // yield inside it. --------------------------------------------------------------------------------------
 {
   const { pruneStaleCodexDoctrineExclude, pruneStaleCodexDoctrineExcludesAtBoot } = await import("../dist/pty/codex-doctrine.js");
+  const { QUARANTINED_SKILLS_DIRNAME } = await import("../dist/pty/claude-doctrine.js");
   const LOOM_HEADER = "# loom-managed exclusions (injected per session; do not commit)";
 
   // A hermetic, in-memory fake of PruneDoneMarkerStore (the real one is Db's getMeta/setMeta) — a fresh one
@@ -401,6 +402,49 @@ let firstBlock = null;
     const outcome2 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
     check("mixed file second run: outcome is 'none'", outcome2 === "none");
     check("mixed file second run: content unchanged", fs.readFileSync(excludePath, "utf8") === after);
+  }
+
+  // --- card a09a076b item 2: the quarantine-dir entry (`doctrineGitExcludeEntries`'s unconditional
+  // `/.claude/.loom-quarantined-skills/` line) must be recognized by isKnownLoomExcludeEntry too, same as
+  // the skills/manifest/settings entries above — without it, a header whose run is ONLY the quarantine
+  // entry (nothing else recognized under it) gets dropped on any write this function makes, even though
+  // the quarantine entry itself isn't touched and no pattern is actually lost. Scoped to a header whose
+  // run is the quarantine entry ALONE, so this is the one shape that actually discriminates the fix: a
+  // quarantine entry sitting alongside other recognized entries (as in the mixed-file case above) never
+  // breaks the run-continuation scan either way, since those entries alone already keep `kept.length > 0`.
+  {
+    const cwd = makeFakeRepo("loom-codex-doctrine-prune-quarantine-");
+    const excludePath = path.join(cwd, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    const content = [
+      LOOM_HEADER,
+      `/.claude/${QUARANTINED_SKILLS_DIRNAME}/`, // a header whose ENTIRE run is just this one entry
+      LOOM_HEADER,
+      "/AGENTS.md", // the real stale entry — needed so `removedAny` is true and a write actually happens
+      "",
+    ].join("\n");
+    fs.writeFileSync(excludePath, content);
+
+    const store = makeMemMetaStore();
+    const outcome = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("quarantine-only run: outcome is 'removed' (the second header's stale entry was removed)", outcome === "removed");
+    const after = fs.readFileSync(excludePath, "utf8");
+    const afterLines = after.split(/\r?\n/);
+
+    check("the quarantine entry itself survives (no pattern lost either way)",
+      afterLines.includes(`/.claude/${QUARANTINED_SKILLS_DIRNAME}/`));
+    check("the header directly above the quarantine-only run SURVIVES too (nothing under it was removed, so it must not be dropped)",
+      afterLines.filter((l) => l === LOOM_HEADER).length === 1);
+    check("the quarantine entry still sits directly under its surviving header, not as an orphaned loose line",
+      afterLines.indexOf(LOOM_HEADER) === afterLines.indexOf(`/.claude/${QUARANTINED_SKILLS_DIRNAME}/`) - 1);
+    check("the second header (whose whole run was the real stale entry) is dropped, same as the existing stale-entry case",
+      !afterLines.slice(afterLines.indexOf(`/.claude/${QUARANTINED_SKILLS_DIRNAME}/`) + 1).includes(LOOM_HEADER));
+    check("the stale '/AGENTS.md' entry is gone", !afterLines.includes("/AGENTS.md"));
+
+    // --- idempotent on a second run ---
+    const outcome2 = await pruneStaleCodexDoctrineExclude(path.join(cwd, ".git"), store);
+    check("quarantine-only run second pass: outcome is 'none'", outcome2 === "none");
+    check("quarantine-only run second pass: content unchanged", fs.readFileSync(excludePath, "utf8") === after);
   }
 
   // --- round 2, item 1 (BLOCKING, CR ce9c4156): a '/AGENTS.md' line directly following a SKILLS run with

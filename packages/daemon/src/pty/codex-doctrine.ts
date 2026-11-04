@@ -10,6 +10,7 @@ import { roleDoctrineSkillName } from "../skills/inject.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
 import { resolveGitBinaryForSpawn } from "../git/bounded.js";
 import { CLAUDE_DOCTRINE_DIR } from "./claude-dirname.js";
+import { QUARANTINED_SKILLS_DIRNAME } from "./claude-doctrine.js";
 
 /**
  * HarnessAdapter seam (multi-harness epic df1f94b0, Phase 1, card 353f6dc4): the codex adapter's
@@ -592,7 +593,8 @@ function hideCodexDoctrineFromGit(cwd: string): void {
 function isKnownLoomExcludeEntry(line: string): boolean {
   return line === `/${CODEX_DOCTRINE_FILE}`
     || line === `/${CLAUDE_DOCTRINE_DIR}/settings.local.json`
-    || line.startsWith(`/${CLAUDE_DOCTRINE_DIR}/skills/`);
+    || line.startsWith(`/${CLAUDE_DOCTRINE_DIR}/skills/`)
+    || line === `/${CLAUDE_DOCTRINE_DIR}/${QUARANTINED_SKILLS_DIRNAME}/`;
 }
 
 /** Bounded timeout for the INITIAL async `fs.promises` steps {@link pruneStaleCodexDoctrineExclude}

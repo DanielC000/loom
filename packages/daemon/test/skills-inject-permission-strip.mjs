@@ -439,7 +439,10 @@ try {
   // =====================================================================================================
   // (o) fallback (iii) — force fs.rmSync, fs.renameSync, AND the stub-overwrite fs.writeFileSync to ALL
   // throw: every fallback fails, so the hazard is left sitting at dest exactly as the decision record's
-  // residual (b) describes. Also captures console.log to prove the loud error-level line actually fires.
+  // residual (b) describes. Captures console.error (card a09a076b item 3 — this line moved off console.log
+  // to actually match its own documented "error level") to prove the loud error-level line actually fires,
+  // AND captures console.log too (must stay EMPTY) as the negative control proving the level genuinely
+  // changed, not merely that something was logged somewhere.
   // @decision 51a2462a
   // =====================================================================================================
   const cwdLogFail = path.join(root, "log-fail-cwd");
@@ -451,10 +454,12 @@ try {
   const realRmSync3 = fs.rmSync;
   const realRenameSync2 = fs.renameSync;
   const realConsoleLog = console.log;
+  const realConsoleError = console.error;
   let logFailRmTripped = false;
   let logFailRenameTripped = false;
   let logFailStubWriteTripped = false;
   const loggedLines = [];
+  const erroredLines = [];
   fs.writeFileSync = (file, ...rest) => {
     if (typeof file === "string" && file.includes("agent-log-fail") && file.endsWith(".loom-permstrip-tmp")) {
       throw Object.assign(new Error("EISDIR: simulated strip-write failure"), { code: "EISDIR" });
@@ -480,6 +485,7 @@ try {
     return realRenameSync2(src, dst, ...rest);
   };
   console.log = (...args) => { loggedLines.push(args.join(" ")); };
+  console.error = (...args) => { erroredLines.push(args.join(" ")); };
   let thrownLogFail;
   try {
     injectSkills(cwdLogFail, "sess-log-fail", null, "worker");
@@ -489,6 +495,7 @@ try {
     fs.rmSync = realRmSync3;
     fs.renameSync = realRenameSync2;
     console.log = realConsoleLog;
+    console.error = realConsoleError;
   }
 
   check("(o) precondition: rm, rename, AND stub-write fault injections all fired",
@@ -500,8 +507,10 @@ try {
   const unstrippedContent = fs.readFileSync(path.join(logFailDest, "SKILL.md"), "utf8");
   check("(o) dest/SKILL.md STILL carries the original unstripped hazard (residual (b) — no further mitigation)",
     detectPermissionWidening(unstrippedContent).length > 0);
-  check("(o) a loud error-level log line was actually emitted naming the failure",
-    loggedLines.some((l) => l.includes("quarantine FAILED") && l.includes(logFailDest)));
+  check("(o) a loud error-level line was actually emitted via console.error, naming the failure AND a one-clause remedy to delete dest by hand",
+    erroredLines.some((l) => l.includes("quarantine FAILED") && l.includes(logFailDest) && l.includes(`delete ${logFailDest} by hand`)));
+  check("(o) NOTHING was logged via console.log for this failure (negative control — the level genuinely moved to console.error, not merely logged somewhere)",
+    !loggedLines.some((l) => l.includes("quarantine FAILED") && l.includes(logFailDest)));
   check("(o) a sibling fixture in the SAME call still lands normally",
     fs.existsSync(path.join(cwdLogFail, ".claude", "skills", "agent-clean", "SKILL.md")));
 
@@ -591,6 +600,71 @@ try {
   const fenceFp = JSON.parse(fs.readFileSync(fenceFpPath, "utf8"));
   check("(q) no fingerprint was recorded for the withheld skill",
     fenceFp.__lastPlaced?.["agent-fence-hazard"] === undefined);
+
+  // =====================================================================================================
+  // (r) card a09a076b item 1: the pre-clear `fs.rmSync(aside, …)` inside `quarantineUndeliverableDest`
+  // (the line that clears any PRIOR quarantine entry for this exact name before the atomic rename) is
+  // untested — deleting it would leave `fs.renameSync(dest, aside)` colliding with a STALE `aside` left
+  // over from an earlier quarantine of the SAME skill name, degrading this (second) quarantine to the
+  // in-place stub fallback (ii) instead of actually relocating the new content, same as (n) above. Pre-
+  // seed `.loom-quarantined-skills/<name>/` with OLD content (simulating a prior quarantine of this exact
+  // name), force the dest rm to fail (same EISDIR-on-strip + EBUSY-on-dest-rm technique as (m)) so
+  // `quarantineUndeliverableDest`'s fallback (i) is actually reached, and assert the NEW content replaces
+  // the old at `aside` — never a degrade to the stub, and never a second, accumulated entry.
+  // @decision 51a2462a
+  // =====================================================================================================
+  const cwdReQuarantine = path.join(root, "re-quarantine-cwd");
+  fs.mkdirSync(cwdReQuarantine, { recursive: true });
+  writeSkill("agent-re-quarantine", hazardMd("agent-re-quarantine"), "agent");
+  const reQuarantineDest = path.join(cwdReQuarantine, ".claude", "skills", "agent-re-quarantine");
+  const reQuarantineDir = path.join(cwdReQuarantine, ".claude", ".loom-quarantined-skills");
+  const reQuarantineAside = path.join(reQuarantineDir, "agent-re-quarantine");
+
+  // A STALE quarantine entry for this exact name, as if an earlier session already quarantined this same
+  // skill once before.
+  fs.mkdirSync(reQuarantineAside, { recursive: true });
+  fs.writeFileSync(path.join(reQuarantineAside, "SKILL.md"), "OLD quarantined content from a prior run\n");
+
+  const realWriteFileSync5 = fs.writeFileSync;
+  const realRmSync4 = fs.rmSync;
+  let reQuarantineRmTripped = false;
+  fs.writeFileSync = (file, ...rest) => {
+    if (typeof file === "string" && file.includes("agent-re-quarantine") && file.endsWith(".loom-permstrip-tmp")) {
+      throw Object.assign(new Error("EISDIR: simulated strip-write failure"), { code: "EISDIR" });
+    }
+    return realWriteFileSync5(file, ...rest);
+  };
+  // Same precision-scoping as (m): only the LATER call against the already-existing `dest` (inside
+  // quarantineUndeliverableDest) is faulted, never copySkillAtomic's own pre-existing-copy rm on a fresh
+  // delivery (which runs before `dest` exists).
+  fs.rmSync = (target, ...rest) => {
+    if (typeof target === "string" && path.resolve(target) === path.resolve(reQuarantineDest) && fs.existsSync(target)) {
+      reQuarantineRmTripped = true;
+      throw Object.assign(new Error("EBUSY: simulated rm failure"), { code: "EBUSY" });
+    }
+    return realRmSync4(target, ...rest);
+  };
+  let thrownReQuarantine;
+  try {
+    injectSkills(cwdReQuarantine, "sess-re-quarantine", null, "worker");
+  } catch (e) { thrownReQuarantine = e; }
+  finally {
+    fs.writeFileSync = realWriteFileSync5;
+    fs.rmSync = realRmSync4;
+  }
+
+  check("(r) precondition: the dest rm fault injection actually fired", reQuarantineRmTripped === true);
+  check("(r) injectSkills still surfaces the underlying strip failure (throws, naming the skill)",
+    thrownReQuarantine instanceof Error && /agent-re-quarantine/.test(thrownReQuarantine.message));
+  check("(r) the ORIGINAL dest no longer exists (quarantined away, never left or degraded to the in-place stub)",
+    !fs.existsSync(reQuarantineDest));
+  check("(r) the aside now holds the NEW content, replacing the stale prior quarantine entry (never the old content)",
+    fs.existsSync(path.join(reQuarantineAside, "SKILL.md")) &&
+    fs.readFileSync(path.join(reQuarantineAside, "SKILL.md"), "utf8") === hazardMd("agent-re-quarantine"));
+  check("(r) there is exactly ONE entry under the quarantine dir for this name (the old one was cleared, never left as a second, accumulated entry)",
+    fs.readdirSync(reQuarantineDir).length === 1 && fs.readdirSync(reQuarantineDir)[0] === "agent-re-quarantine");
+  check("(r) a sibling fixture in the SAME call still lands normally",
+    fs.existsSync(path.join(cwdReQuarantine, ".claude", "skills", "agent-clean", "SKILL.md")));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
