@@ -30,6 +30,11 @@
 //   7. EXPANDING ATTACHES, COLLAPSING DOES NOT STOP. Measured on the mounted pane's REPLAYED BYTES
 //      (each session carries its own sentinel), and on the daemon's own `processState` across a
 //      collapse — sessions outlive viewers, so releasing the view must not touch the pty.
+//   8. THE ROSTER LISTS EVERY RUNNING SESSION, not only managers and workers (card 6a9cb96a, an
+//      owner bug report). A live `assistant` — the role an ideation/thought-partner rig and the
+//      Companion share — and a role-less plain terminal each get a row with their own role label,
+//      an EXITED one does not, and the card's HEAD count is asserted in the same breath as the row
+//      count: the defect was the head counting a population its own list could not draw.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
@@ -437,6 +442,88 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     // it, "red" is equally satisfied by a page that painted every meter red.
     await expect(row(page, seeded.mgr.sessionId).locator(".loom-ovroster-track > span"))
       .not.toHaveCSS("background-color", TONE_RED);
+  });
+
+  // ── EVERY RUNNING SESSION, NOT ONLY MANAGERS AND WORKERS (card 6a9cb96a) ────────────────────
+  //
+  // The owner's own bug report, verbatim: "'work in flight' card in the UI atlas ui overview page
+  // does not show the currently running 'Thought Partner' 'ba96294d' session."
+  //
+  // The page split its sessions by exact role match into `manager` and `worker` and handed only
+  // those two to `rosterRows`, so an ideation/thought-partner rig (which runs as `assistant`), the
+  // Companion, an operator, an Agent run and a plain role-less terminal each appeared in NO row —
+  // while the card's own head counted every one of them. Record:
+  // docs/decisions/6a9cb96a-atlas-overview-roster-lists-every-running-session.md.
+
+  test("switch ON: the roster lists running non-worker sessions, and its head count matches its own list", async ({ page, loomDaemon }) => {
+    // Its OWN fleet, never `seedRiggedFleet`'s: the two scope legs below pin that fixture's row
+    // count and segment counts exactly, so adding a session to it would redden them.
+    const project = await loomDaemon.createProject(uniq("atlasovroles"));
+    const short = `${Math.floor(Math.random() * 1e6)}`;
+    const mgr = await loomDaemon.seedLiveSession({
+      project, id: `e2e-ovrole-mgr-${short}`, agentName: `RoleConductor-${short}`, role: "manager",
+    });
+    // 🔴 THE SUBJECT. `assistant` is the role an ideation/thought-partner rig and the Companion both
+    // run under, so this row IS the owner's reported session's shape.
+    const tp = await loomDaemon.seedLiveSession({
+      project, id: `e2e-ovrole-tp-${short}`, agentName: `RoleThoughtPartner-${short}`, role: "assistant",
+    });
+    // …and a role-less plain terminal beside it, so a fix that special-cased the one role the bug
+    // report named would still leave this leg red. It is the broader class, not one role.
+    const plain = await loomDaemon.seedLiveSession({
+      project, id: `e2e-ovrole-plain-${short}`, agentName: `RolePlain-${short}`, role: "plain",
+    });
+    // THE NEGATIVE, differing from `tp` in exactly ONE field: an EXITED assistant. These rows are
+    // deliberately LIVE-only (unlike the manager/worker rows, which keep every non-archived row) —
+    // `role:"run"` is never archived on exit at all, so listing exited rows here would accrue a
+    // dead Agent Run row per invocation under a card called "Work in flight".
+    const deadTp = await loomDaemon.seedLiveSession({
+      project, id: `e2e-ovrole-deadtp-${short}`, agentName: `RoleDeadPartner-${short}`,
+      role: "assistant", processState: "exited",
+    });
+    await seedAtlasOn(page);
+    await pinProject(page, project.id);
+    await page.setViewportSize(WIDE);
+    await page.goto(loomDaemon.baseURL + "/project");
+
+    // FIXTURE IDENTITY first — a silent fallback to a sibling worker's daemon renders a plausible,
+    // entirely wrong page, and every count below would be read off it. Plus the shell's own
+    // identity: both shells mount a project surface, so without this the leg could pass with
+    // `seedAtlasOn` broken and become a mute copy of its classic sibling.
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+    await expect(page.getByTestId("atlas-project-name")).toHaveText(project.name);
+    await expect(page.getByTestId("atlas-roster-table")).toBeVisible();
+
+    // ── THE ROWS. Presence before absence (card 625d791c): a leading `toHaveCount(0)` is satisfied
+    //    by a page that is merely still loading.
+    await expect(row(page, mgr.sessionId)).toBeVisible();
+    await expect(row(page, tp.sessionId)).toBeVisible();
+    await expect(row(page, plain.sessionId)).toBeVisible();
+    await expect(row(page, deadTp.sessionId)).toHaveCount(0);
+    await expect(page.locator('[data-testid="atlas-roster-row"]')).toHaveCount(3);
+
+    // THE LABEL the DoD asked for, read off each row's own role slot — the thought partner reads
+    // `assistant` and a role-less terminal reads `session`, never a blank or a borrowed "worker".
+    await expect(row(page, tp.sessionId).locator(".loom-ovroster-agent i")).toHaveText("assistant");
+    await expect(row(page, plain.sessionId).locator(".loom-ovroster-agent i")).toHaveText("session");
+    await expect(row(page, tp.sessionId).locator(".loom-ovroster-agent b")).toHaveText(tp.agentName);
+
+    // 🔴 THE DEFECT'S OWN SIGNATURE: the head counted the thought partner while the list could not
+    // draw it — the head-disagrees-with-its-own-list shape card 9b6be377 was filed against. Both
+    // readings are asserted together, so a fix that narrowed the HEAD instead would fail here.
+    await expect(page.getByTestId("atlas-overview-roster").locator(".loom-bandcount").first())
+      .toHaveText("3 live · 0 working");
+    // …and the scope toggle's own derived count, which reads off the same row set.
+    await expect(scopeSegment(page, "all")).toHaveText(/^All \(3\)$/);
+
+    // THE ROW IS NOT INDENTED. `child` means "a worker drawn under the manager that owns it";
+    // nothing outside that relationship may claim it.
+    await expect(row(page, tp.sessionId)).not.toHaveClass(/is-child/);
+
+    // …and the footer states the live-only asymmetry rather than leaving the exited row's absence
+    // to be discovered.
+    await expect(page.getByTestId("atlas-overview-roster"))
+      .toContainText("is listed only while it is running");
   });
 
   // ── THE SCOPE FILTER (card effd47d5) ────────────────────────────────────────────────────────

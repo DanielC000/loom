@@ -180,6 +180,20 @@ export default function ProjectHome() {
   const managers = all.filter((s) => s.role === "manager").sort(byCreatedStable);
   const workers = all.filter((s) => s.role === "worker").sort(bySessionActivity);
   const liveManagers = managers.filter(isLiveSession);
+  // The roster's THIRD population (card 6a9cb96a, an owner bug report): every other kind of session
+  // this project runs. The two filters above are exact role matches, so a thought-partner rig and
+  // the Companion (both `assistant`), an `operator`, an Agent `run` and a plain terminal (no role)
+  // all fell through them — while the card's own head counts them all (`${live.length} live`).
+  //
+  // `byCreatedStable`, not `bySessionActivity`: these are peers of a manager, whose own rows use the
+  // stable key precisely so no row jumps between the page's 3s polls.
+  //
+  // @decision 6a9cb96a — keep this LIVE-only, and never narrow it by excluding companions: an
+  // ideation/thought-partner rig shares the `assistant` role, so that exclusion drops the very
+  // session this card was filed about.
+  const others = all
+    .filter((s) => isLiveSession(s) && s.role !== "manager" && s.role !== "worker")
+    .sort(byCreatedStable);
 
   // Scoped through the SHARED resolver the classic Overview and Mission Control both use, fed from
   // queries this page already makes — so this list is the same set the old page listed, not a
@@ -335,7 +349,7 @@ export default function ProjectHome() {
   // lib/atlasProjectOverview.ts for why a manager and a worker resolve "last event" differently.
   const taskTitles = taskTitlesById(boardQ.data?.tasks);
   const lastEvents = lastEventBySession(events);
-  const rows = rosterRows(managers, workers);
+  const rows = rosterRows(managers, workers, others);
   // The scope filter (card effd47d5). BOTH populations are derived, in both modes, because the
   // toggle states each option's own count — so the reading the reader is not looking at says what
   // picking it would yield, rather than making them click to find out.
@@ -520,8 +534,10 @@ export default function ProjectHome() {
                 </> : null}
                 Context is measured against each session's own model window
                 {recycleAt > 0 ? <>; a manager is nudged to hand off at {Math.round(recycleAt * 100)}%</> : null}.
-                An idle worker is live and waiting on its manager, not stopped, and an exited session
-                stays listed here until it is archived.
+                An idle worker is live and waiting on its manager, not stopped, and an exited manager
+                or worker stays listed here until it is archived. Every other kind of session — a
+                thought partner, a companion, an operator, a run, a plain terminal — is listed only
+                while it is running.
               </>}>
               {/* THREE states, not two: a project with no sessions at all, and a project whose
                   sessions are all filtered out, are different facts and the second must not be

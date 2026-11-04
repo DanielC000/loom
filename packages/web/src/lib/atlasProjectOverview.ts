@@ -24,16 +24,36 @@ export interface RosterRow {
 /**
  * The managers→workers hierarchy, flattened to table rows in the SAME order `FleetList` drew it in
  * the band panel this table replaces: each manager, then its own workers, then every worker whose
- * parent is not in this set.
+ * parent is not in this set — and then, as a tail of unindented rows, every OTHER session the
+ * caller hands in.
  *
- * The INPUT set is deliberately identical to that panel's too — every non-archived manager and
- * worker, not only the live ones. "Work in flight" is the card's name for the surface, but dropping
- * an exited-and-unarchived session would lose a row the Overview shows today, and its state pill
- * says `exited` in plain words. The card's own footer names that so the label cannot mislead.
+ * The manager/worker INPUT set is deliberately identical to that panel's — every non-archived
+ * manager and worker, not only the live ones. "Work in flight" is the card's name for the surface,
+ * but dropping an exited-and-unarchived session would lose a row the Overview shows today, and its
+ * state pill says `exited` in plain words. The card's own footer names that so the label cannot
+ * mislead.
+ *
+ * ⭐ `others` IS THE REST OF THE FLEET, AND IT IS NOT OPTIONAL (card 6a9cb96a, an owner bug report:
+ * a live Thought Partner session was listed nowhere on this card). A project's sessions are not
+ * only managers and workers — an ideation/thought-partner rig and the Companion both run as
+ * `role:"assistant"`, an elevated operator as `role:"operator"`, an Agent Run as `role:"run"`, and
+ * a plain terminal carries no role at all. Every one of them is a session this project is running,
+ * counted by the card's own head (`N live`), and before this card every one of them was dropped
+ * here — so the head stated a population the table below it could not list, which is exactly the
+ * disagreement card 9b6be377 was filed against.
+ *
+ * They are appended LAST and never indented: `child` is "a worker drawn under the manager that owns
+ * it", so nothing outside that relationship may claim it, and keeping the manager/worker hierarchy
+ * contiguous leaves the card's spine where every existing reader already found it.
+ *
+ * @decision 6a9cb96a — never give `others` an `= []` default or an internal `?? []`. A caller that
+ * then forgets the population compiles clean and states a short fleet, which reads exactly like a
+ * project with nothing else running.
  */
 export function rosterRows(
   managers: readonly SessionListItem[],
   workers: readonly SessionListItem[],
+  others: readonly SessionListItem[],
 ): RosterRow[] {
   const rows: RosterRow[] = [];
   for (const m of managers) {
@@ -45,6 +65,7 @@ export function rosterRows(
   for (const w of workers) {
     if (!managers.some((m) => m.id === w.parentSessionId)) rows.push({ session: w, child: false });
   }
+  for (const s of others) rows.push({ session: s, child: false });
   return rows;
 }
 
@@ -140,9 +161,10 @@ export type RosterScope = "all" | "spawnable";
  *
  * Worth stating because card effd47d5 guessed the other way ("'spawnable agents only' (today's
  * behaviour, confirm first)"). Confirmed against the code it was written about: the table's rows are
- * `rosterRows(managers, workers)` over every non-archived manager AND worker, so today's page lists
- * the dispatched workers too. Defaulting to `"spawnable"` would silently hide rows from every
- * existing reader on upgrade, which is a change nobody asked for; the filter is opt-in.
+ * `rosterRows`' own output over every non-archived manager AND worker — plus, since card 6a9cb96a,
+ * every OTHER running session — so the page lists the dispatched workers too. Defaulting to
+ * `"spawnable"` would silently hide rows from every existing reader on upgrade, which is a change
+ * nobody asked for; the filter is opt-in.
  */
 export const DEFAULT_ROSTER_SCOPE: RosterScope = "all";
 

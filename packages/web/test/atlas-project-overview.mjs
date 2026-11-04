@@ -24,7 +24,7 @@ check("a manager is followed by its own workers, each marked as a child", () => 
   const m = S("m1", "manager");
   const w1 = S("w1", "worker", { parentSessionId: "m1" });
   const w2 = S("w2", "worker", { parentSessionId: "m1" });
-  const rows = rosterRows([m], [w1, w2]);
+  const rows = rosterRows([m], [w1, w2], []);
   assert.deepEqual(rows.map((r) => [r.session.id, r.child]), [["m1", false], ["w1", true], ["w2", true]]);
 });
 
@@ -32,6 +32,7 @@ check("two managers keep their own workers under themselves, in manager order", 
   const rows = rosterRows(
     [S("m1", "manager"), S("m2", "manager")],
     [S("w2", "worker", { parentSessionId: "m2" }), S("w1", "worker", { parentSessionId: "m1" })],
+    [],
   );
   assert.deepEqual(rows.map((r) => r.session.id), ["m1", "w1", "m2", "w2"]);
 });
@@ -39,17 +40,65 @@ check("two managers keep their own workers under themselves, in manager order", 
 // The band panel this table replaced listed a parentless worker at the END and unindented; a row
 // that silently vanished because nothing claimed it is the regression worth pinning.
 check("a worker whose parent is not in the set is listed LAST, and not as a child", () => {
-  const rows = rosterRows([S("m1", "manager")], [S("orphan", "worker", { parentSessionId: "gone" })]);
+  const rows = rosterRows([S("m1", "manager")], [S("orphan", "worker", { parentSessionId: "gone" })], []);
   assert.deepEqual(rows.map((r) => [r.session.id, r.child]), [["m1", false], ["orphan", false]]);
 });
 
 check("a worker with a null parent is listed, not dropped", () => {
-  const rows = rosterRows([], [S("loose", "worker")]);
+  const rows = rosterRows([], [S("loose", "worker")], []);
   assert.deepEqual(rows.map((r) => r.session.id), ["loose"]);
 });
 
 check("no sessions at all yields no rows", () => {
-  assert.deepEqual(rosterRows([], []), []);
+  assert.deepEqual(rosterRows([], [], []), []);
+});
+
+// ── rosterRows' THIRD population (card 6a9cb96a, an owner bug report) ─────────────────────────
+//
+// 🔴 THE LOAD-BEARING LEG OF THIS CARD. The owner's live `Thought Partner` session was listed in no
+// row of the "Work in flight" card, because the page handed this function only its `role ===
+// "manager"` and `role === "worker"` sets and an ideation/thought-partner rig runs as `assistant`
+// (decision record 2db23c4d). Every other role, and a plain role-less terminal, fell through the
+// same two filters. The card's own head counts them all, so the head stated a population its own
+// list could not draw — the shape card 9b6be377 was filed against.
+//
+// Asserted by ROLE here rather than only by id: a fix that happened to list an assistant while
+// still dropping a role-less terminal would satisfy the owner's one session and leave the class
+// half-closed.
+
+check("a running non-worker session — the Thought Partner's own role — IS listed", () => {
+  const tp = S("tp1", "assistant", { agentName: "Thought Partner" });
+  const rows = rosterRows([S("m1", "manager")], [], [tp]);
+  assert.deepEqual(rows.map((r) => [r.session.id, r.session.role]), [["m1", "manager"], ["tp1", "assistant"]]);
+});
+
+check("a role-less plain terminal is listed too, not just the assistant role", () => {
+  const rows = rosterRows([], [], [S("plain1", null), S("op1", "operator"), S("run1", "run")]);
+  assert.deepEqual(rows.map((r) => r.session.id), ["plain1", "op1", "run1"]);
+});
+
+// The tail is appended AFTER the whole manager/worker hierarchy, orphan workers included — the
+// card's spine stays contiguous and where every existing reader already found it.
+check("the others are appended LAST, after even a parentless worker", () => {
+  const rows = rosterRows(
+    [S("m1", "manager")],
+    [S("w1", "worker", { parentSessionId: "m1" }), S("orphan", "worker", { parentSessionId: "gone" })],
+    [S("tp1", "assistant")],
+  );
+  assert.deepEqual(rows.map((r) => r.session.id), ["m1", "w1", "orphan", "tp1"]);
+});
+
+// `child` is "a worker drawn under the manager that owns it". An assistant parented to a manager
+// (the relay direction decision record 2db23c4d describes) is still not that, so it must not take
+// the indent — which is also what keeps `filterRosterRows`' own demotion rule coherent.
+check("an other row is never indented, even when it names a manager as its parent", () => {
+  const rows = rosterRows([S("m1", "manager")], [], [S("tp1", "assistant", { parentSessionId: "m1" })]);
+  assert.deepEqual(rows.map((r) => [r.session.id, r.child]), [["m1", false], ["tp1", false]]);
+});
+
+check("an others-only project still yields rows — no manager is not an empty fleet", () => {
+  const rows = rosterRows([], [], [S("tp1", "assistant")]);
+  assert.deepEqual(rows.map((r) => [r.session.id, r.child]), [["tp1", false]]);
 });
 
 // ── lastEventBySession ────────────────────────────────────────────────────────────────────────
@@ -124,7 +173,7 @@ check("taskTitlesById tolerates an undefined task list", () => {
 const SCOPE_MGR = S("m1", "manager", { agentId: "a-mgr" });
 const SCOPE_W1 = S("w1", "worker", { parentSessionId: "m1", agentId: "a-wkr1" });
 const SCOPE_W2 = S("w2", "worker", { parentSessionId: "m1", agentId: "a-wkr2" });
-const SCOPE_ROWS = rosterRows([SCOPE_MGR], [SCOPE_W1, SCOPE_W2]);
+const SCOPE_ROWS = rosterRows([SCOPE_MGR], [SCOPE_W1, SCOPE_W2], []);
 /** `splitRoster(...).spawnable` for the ordinary case: the manager's rig, never a worker's. */
 const ONLY_MGR = new Set(["a-mgr"]);
 const shape = (rows) => rows.map((r) => [r.session.id, r.child]);
