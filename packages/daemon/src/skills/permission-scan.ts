@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import type { SkillPermissionVector } from "@loom/shared";
 import { claudeSkillsDir } from "../pty/claude-doctrine.js";
 import { CLAUDE_DOCTRINE_DIR, CWD_SKILLS_SCAN_SCOPE } from "../pty/claude-dirname.js";
-import { detectPermissionWidening, frontmatterReadIncomplete } from "./permissionWidening.js";
+import { detectPermissionWidening, frontmatterReadIncomplete, VECTOR_TEXT } from "./permissionWidening.js";
 import { fingerprintSkillDir } from "./inject.js";
 
 /** Card 015fdb23 — bounds for the spawn-time cwd-skills permission-frontmatter scan, so a pathological
@@ -49,12 +49,14 @@ export function isScannedPermissionField(v: SkillPermissionVector): v is SkillPe
  *  line (the one place `findings[].fields` is rendered/logged). Keyed by `SkillPermissionField` itself
  *  — a future vector this scan newly includes (every one but the two shell forms, per
  *  `isScannedPermissionField`'s own EXCLUDE shape) is a compile error here until it's given a label,
- *  never a silent bare-id fallback. */
+ *  never a silent bare-id fallback. Values are the `.terse` half of `permissionWidening.ts`'s shared
+ *  `VECTOR_TEXT` (card f39341d5, item 3) — `permissionGuard.ts`'s own `VECTOR_LABEL` derives from the
+ *  SAME source's `.verbose` half, so the two tables' wording can no longer drift apart unnoticed. */
 export const SKILL_PERMISSION_FIELD_LABEL: Record<SkillPermissionField, string> = {
-  "allowed-tools": "allowed-tools:",
-  hooks: "hooks:",
-  "frontmatter-unrecognized": "unrecognized frontmatter syntax",
-  "frontmatter-fence-unrecognized": "frontmatter fence the CLI's own loader parses differently",
+  "allowed-tools": VECTOR_TEXT["allowed-tools"].terse,
+  hooks: VECTOR_TEXT.hooks.terse,
+  "frontmatter-unrecognized": VECTOR_TEXT["frontmatter-unrecognized"].terse,
+  "frontmatter-fence-unrecognized": VECTOR_TEXT["frontmatter-fence-unrecognized"].terse,
 };
 
 export interface SkillPermissionFinding {

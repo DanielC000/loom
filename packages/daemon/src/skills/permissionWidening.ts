@@ -328,6 +328,38 @@ export const INLINE_SHELL_RE = /(?<!`)!`[^`\n]+`/;
 export const FENCED_SHELL_RE = /```!/;
 
 /**
+ * Canonical human-readable text per vector, in the two registers its two consumers each need: `terse`
+ * (a short noun-phrase for a one-line console/push log — `permission-scan.ts`'s
+ * `SKILL_PERMISSION_FIELD_LABEL` derives from this) and `verbose` (a fuller, actionable phrase for the
+ * write-time refusal error — `permissionGuard.ts`'s `VECTOR_LABEL` derives from this). ONE shared
+ * source so the two tables can't drift wording independently with no compiler signal: both are already
+ * compile-exhaustive `Record<X, string>` literals on their own, which only catches a MISSING key, never
+ * a DRIFTED string (card f39341d5, item 3). Not itself a detection pattern — decision record 87a51903's
+ * "no second copy of these patterns" is about the regexes above, not display text — but kept here, the
+ * one module both label tables already import from, rather than invented a third time at either call site.
+ */
+export const VECTOR_TEXT: Record<SkillPermissionVector, { terse: string; verbose: string }> = {
+  "allowed-tools": { terse: "allowed-tools:", verbose: "a frontmatter `allowed-tools:` grant" },
+  hooks: { terse: "hooks:", verbose: "a frontmatter `hooks:` registration" },
+  "frontmatter-unrecognized": {
+    terse: "unrecognized frontmatter syntax",
+    verbose: "frontmatter syntax this detector cannot confidently parse (e.g. a quoted "
+      + "key, a flow mapping, an anchor/alias/tag value, an explicit/tagged/merge key)",
+  },
+  "frontmatter-fence-unrecognized": {
+    terse: "frontmatter fence the CLI's own loader parses differently",
+    verbose: "a frontmatter fence shape the installed CLI's own loader parses "
+      + "differently than this detector does",
+  },
+  // Not consumed by SKILL_PERMISSION_FIELD_LABEL today (permission-scan.ts's scan deliberately excludes
+  // both shell forms — see SkillPermissionField's own doc) — carried here only so VECTOR_TEXT stays
+  // exhaustive over the full SkillPermissionVector union. `terse` text borrowed from the bundled-asset
+  // guard's own pre-existing presentation copy (skill-permission-widening-guard.mjs) for consistency.
+  "shell-inline": { terse: "inline shell injection (!`cmd`)", verbose: "an inline `` !`cmd` `` shell injection" },
+  "shell-fenced": { terse: "fenced shell injection (```!)", verbose: "a fenced ` ```! ` shell block" },
+};
+
+/**
  * Every permission-widening vector `content` carries, in a stable order (frontmatter keys first, then
  * body forms) so a caller can render or compare them without sorting. An empty array means the skill
  * is clean — the scan ran and found nothing.

@@ -523,6 +523,35 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     check("alertLine: skill_permission_frontmatter_warning stays within ALERT_LINE_MAX_CHARS even with many findings",
       alertLine({ ...skillEvt, detail: { ...skillEvt.detail, findings: Array.from({ length: 40 }, (_, i) => ({ name: `skill-${i}`, fields: ["hooks"] })) } }, "escalation", "Proj A").length <= 200);
 
+    // Card f39341d5, item 4: the line must name WHICH vector(s) each flagged skill carries, not just the
+    // skill name — the owner couldn't previously tell "odd syntax" from "hooks" from this line alone.
+    check("alertLine: skill_permission_frontmatter_warning names both of sketchy-skill's own vectors",
+      skillLine.includes("allowed-tools:") && skillLine.includes("hooks:"));
+    const unrecognizedOnlyLine = alertLine(
+      { ...skillEvt, detail: { ...skillEvt.detail, findings: [{ name: "odd-syntax-skill", fields: ["frontmatter-unrecognized"] }] } },
+      "escalation", "Proj A",
+    );
+    const hooksOnlyLine = alertLine(
+      { ...skillEvt, detail: { ...skillEvt.detail, findings: [{ name: "hook-skill", fields: ["hooks"] }] } },
+      "escalation", "Proj A",
+    );
+    check("alertLine: a frontmatter-unrecognized-only finding names 'unrecognized frontmatter syntax', never 'hooks:'",
+      unrecognizedOnlyLine.includes("unrecognized frontmatter syntax") && !unrecognizedOnlyLine.includes("hooks:"));
+    check("alertLine: a hooks-only finding names 'hooks:', never 'unrecognized frontmatter syntax' — the owner can "
+        + "now tell these two apart, which was this card's whole point",
+      hooksOnlyLine.includes("hooks:") && !hooksOnlyLine.includes("unrecognized frontmatter syntax"));
+    // Negative control: an empty fields array (defensive — the real producer always sets it) falls back
+    // to the bare skill name, same as before this card, rather than rendering an empty "()" suffix.
+    const noFieldsLine = alertLine(
+      { ...skillEvt, detail: { ...skillEvt.detail, findings: [{ name: "bare-skill", fields: [] }] } },
+      "escalation", "Proj A",
+    );
+    // (the line's own trailing "(<scope>, unmanaged by Loom)" clause always follows the name with a
+    // space+paren regardless, so the control checks for the EXACT unlabelled join to the scope clause,
+    // never a bare "name (" substring — which the scope clause would satisfy vacuously either way)
+    check("alertLine: a finding with no fields renders the bare skill name, no vector-label suffix inserted",
+      noFieldsLine.includes("frontmatter in bare-skill (<cwd>/.claude/skills, unmanaged by Loom)"));
+
     // CR round 4, item 5: a TRUNCATION-only event (no real findings — the `truncNote` branch) was
     // untested before this round. The line must name the affected skill(s) (bounded) and skippedCount —
     // a bare "scan truncated at its X cap" told the owner nothing about WHICH skill(s) or how many.
@@ -558,6 +587,139 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     const incompleteEvt = { ...truncOnlyEvt, detail: { role: "assistant", scope: "<cwd>/.claude/skills", findings: [], incomplete: true } };
     const incompleteLine = alertLine(incompleteEvt, "escalation", "Proj A");
     check("alertLine (incomplete-only): says the scan was incomplete", /incomplete/i.test(incompleteLine));
+
+    // CR fix round, MAJOR (card f39341d5): reproduces the CR's own worst case — a realistic long(ish)
+    // project name, 3+ real findings spanning EVERY scanned vector, plus an incomplete scan. Before the
+    // fix, the unbounded names+labels segment pushed the who id (and sometimes the incomplete note
+    // itself) past the final ALERT_LINE_MAX_CHARS trim; both must now ALWAYS survive regardless of how
+    // many findings/vectors are in play.
+    const everyVectorEvt = {
+      id: "x3", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01",
+      kind: "skill_permission_frontmatter_warning",
+      detail: {
+        role: "manager", scope: "<cwd>/.claude/skills", incomplete: true,
+        findings: [
+          { name: "deploy-helper", fields: ["allowed-tools", "hooks"] },
+          { name: "lint-runner", fields: ["frontmatter-unrecognized"] },
+          { name: "auth-bootstrap", fields: ["frontmatter-fence-unrecognized"] },
+        ],
+      },
+    };
+    const everyVectorLine = alertLine(everyVectorEvt, "escalation", "Northwind Trading Platform");
+    check("alertLine (every scanned vector + incomplete, long project name): stays within ALERT_LINE_MAX_CHARS",
+      everyVectorLine.length <= 200);
+    check("alertLine (every scanned vector + incomplete, long project name): the manager session id still survives",
+      everyVectorLine.includes("m:mgr-abcd"));
+    check("alertLine (every scanned vector + incomplete, long project name): the incomplete note still survives",
+      everyVectorLine.includes("may be missing a finding"));
+
+    // Round 3 (second Code Review, both blocking Majors): a "(label, label)"-shaped run with NOTHING
+    // before it — namesOut empty, labelsSuffix non-empty — is the smoking gun of Major 1 (labels fitted
+    // first, starving names). Structurally impossible now (fitNamesAndLabels never emits labelsSuffix
+    // when namesOut is falsy), checked directly against the reported repro shape: 3 findings spanning
+    // every one of the 4 scanned vectors (3 shown + "+1 more"), a `w:… task:…` who.
+    const noLabelsWithoutNamesRe = /in\s{2}\(|found\s{2}\(/; // "...in  (" / "...found  (" — empty name before the paren
+    const labelStarveRepro = {
+      id: "x5", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", workerSessionId: "w-fedcba98", taskId: "task-starve",
+      kind: "skill_permission_frontmatter_warning",
+      detail: {
+        role: "worker", scope: "<cwd>/.claude/skills",
+        findings: [
+          { name: "skill-one", fields: ["allowed-tools", "hooks"] },
+          { name: "skill-two", fields: ["frontmatter-unrecognized"] },
+          { name: "skill-three", fields: ["frontmatter-fence-unrecognized"] },
+        ],
+      },
+    };
+    const labelStarveLine = alertLine(labelStarveRepro, "escalation", "Northwind Trading Platform");
+    check("alertLine round3 (label-starve repro): names at least one skill, not just labels",
+      labelStarveLine.includes("skill-one") || /\+\d+ more/.test(labelStarveLine));
+    check("alertLine round3 (label-starve repro): never renders a labels-only '( label, label )' with no name before it",
+      !noLabelsWithoutNamesRe.test(labelStarveLine));
+
+    // Round 3: both `who` shapes (m: only, and w:+task:), crossed with a baseline/69-char/134-char/non-
+    // ASCII project name. Two separate guarantees, tested separately because they're mathematically
+    // distinct (card f39341d5 round 3 self-check, below): (A) WITHOUT an incomplete-scan note, there is
+    // always enough budget left for at least one skill name (or a "+N more" tail) to survive alongside
+    // the who id, however long/non-ASCII the project name. (B) WITH an incomplete-scan note (the
+    // heaviest fixed-text case this line ever renders), the who id and the incomplete note are
+    // STRUCTURALLY guaranteed to survive (placed before every free-text part) regardless of project-
+    // name length — but the lead decision's guarantee is "names take priority over labels WITHIN
+    // whatever free-text budget remains", never "free-text budget is always non-zero"; this case's own
+    // fixed overhead (the full incomplete-note text + the scope-clause suffix + the "permission-widening
+    // frontmatter in" phrase alone run ~130 chars) can legitimately leave zero room for a name, and the
+    // pre-existing `everyVectorLine` check above (baseline project name) already demonstrates exactly
+    // that — it has never asserted name survival, deliberately.
+    const threeFindingNoIncomplete = {
+      id: "x3b", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01",
+      kind: "skill_permission_frontmatter_warning",
+      detail: { role: "manager", scope: "<cwd>/.claude/skills", findings: everyVectorEvt.detail.findings },
+    };
+    for (const [whoLabel, whoOverrides] of [
+      ["m: only", {}],
+      ["w: + task:", { workerSessionId: "w-fedcba98", taskId: "task-round3" }],
+    ]) {
+      const expectedWho = whoOverrides.workerSessionId
+        ? `w:${whoOverrides.workerSessionId.slice(0, 8)} task:${whoOverrides.taskId.slice(0, 8)}`
+        : "m:mgr-abcd";
+      for (const [pnLabel, pName] of [
+        ["baseline", "Northwind Trading Platform"],
+        ["69-char project name", "N".repeat(69)],
+        ["134-char project name", "N".repeat(134)],
+        ["non-ASCII project name", "北方貿易プラットフォーム株式会社－オフィス移転プロジェクト"],
+      ]) {
+        // (A) no incomplete note — a skill name must survive.
+        const evtA = { ...threeFindingNoIncomplete, ...whoOverrides };
+        const renderedA = alertLine(evtA, "escalation", pName);
+        check(`alertLine round3-A (${whoLabel}, ${pnLabel}): stays within ALERT_LINE_MAX_CHARS`, renderedA.length <= 200);
+        check(`alertLine round3-A (${whoLabel}, ${pnLabel}): the who id survives`, renderedA.includes(expectedWho));
+        check(`alertLine round3-A (${whoLabel}, ${pnLabel}): at least one skill name (or a preceding name + "+N more") survives`,
+          renderedA.includes("deploy-helper") || /\+\d+ more/.test(renderedA));
+        check(`alertLine round3-A (${whoLabel}, ${pnLabel}): never renders a labels-only '( label, label )' with no name before it`,
+          !noLabelsWithoutNamesRe.test(renderedA));
+
+        // (B) incomplete:true (everyVectorEvt) — who + incomplete note must survive (name not required).
+        const evtB = { ...everyVectorEvt, ...whoOverrides };
+        const renderedB = alertLine(evtB, "escalation", pName);
+        check(`alertLine round3-B (${whoLabel}, ${pnLabel}): stays within ALERT_LINE_MAX_CHARS`, renderedB.length <= 200);
+        check(`alertLine round3-B (${whoLabel}, ${pnLabel}): the who id survives`, renderedB.includes(expectedWho));
+        check(`alertLine round3-B (${whoLabel}, ${pnLabel}): the incomplete note survives`, renderedB.includes("may be missing a finding"));
+        check(`alertLine round3-B (${whoLabel}, ${pnLabel}): never renders a labels-only '( label, label )' with no name before it`,
+          !noLabelsWithoutNamesRe.test(renderedB));
+      }
+    }
+
+    // Round 3 (second Code Review, Major 2): `detail.scope` is deliberately left uncapped ("low risk" —
+    // ordinarily a short, fixed string) — but a pathological long scope must still never cost the who id
+    // or the incomplete note, which is exactly what the STRUCTURAL placement (not the caps above) is for.
+    // This is the one scenario the two caps alone (projectName/truncNote names) cannot protect against.
+    const longScopeEvt = {
+      id: "x6", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", workerSessionId: "w-fedcba98", taskId: "task-round3",
+      kind: "skill_permission_frontmatter_warning",
+      detail: { role: "manager", scope: "x".repeat(100), incomplete: true, findings: everyVectorEvt.detail.findings },
+    };
+    const longScopeLine = alertLine(longScopeEvt, "escalation", "Northwind Trading Platform");
+    check("alertLine round3 (pathological long scope): stays within ALERT_LINE_MAX_CHARS", longScopeLine.length <= 200);
+    check("alertLine round3 (pathological long scope): the who id survives", longScopeLine.includes("w:w-fedcba task:task-rou"));
+    check("alertLine round3 (pathological long scope): the incomplete note survives", longScopeLine.includes("may be missing a finding"));
+
+    // Round 3 (second Code Review, Major 2): a truncNote carrying two pathologically long (~80-char)
+    // skill-directory names must not, on its own, push the who id past the final trim — and at least one
+    // (capped) truncNote name must still be nameable, not just the who id.
+    const longTruncNamesEvt = {
+      id: "x4", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", workerSessionId: "w-12345678", taskId: "task-1",
+      kind: "skill_permission_frontmatter_warning",
+      detail: {
+        role: "assistant", scope: "<cwd>/.claude/skills", findings: [],
+        truncated: [{ cap: "entries", names: ["a".repeat(80), "b".repeat(80)], skippedCount: 2 }],
+      },
+    };
+    const longTruncNamesLine = alertLine(longTruncNamesEvt, "escalation", "Proj A");
+    check("alertLine round3 (truncNote, two 80-char names): stays within ALERT_LINE_MAX_CHARS", longTruncNamesLine.length <= 200);
+    check("alertLine round3 (truncNote, two 80-char names): the who id survives",
+      longTruncNamesLine.includes("w:w-123456") && longTruncNamesLine.includes("task:task-1"));
+    check("alertLine round3 (truncNote, two 80-char names): a capped truncNote name (not the raw 80-char name) survives",
+      longTruncNamesLine.includes("a".repeat(20)) && !longTruncNamesLine.includes("a".repeat(30)));
   }
   // Card ab3c965d: confirms the pre-existing session_message_gave_up kind (the WORKER-scoped sibling of
   // manager_kickoff_dropped — see that kind's own doc in shared/src/types.ts) still classifies exactly as

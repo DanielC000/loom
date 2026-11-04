@@ -9,6 +9,7 @@ import {
   FENCED_SHELL_RE,
   splitLeadingBom,
   BOM,
+  VECTOR_TEXT,
 } from "./permissionWidening.js";
 
 /**
@@ -34,16 +35,17 @@ import {
 
 /** Human-readable label for each vector, for the refuse error text below. Keyed by the SAME
  *  `SkillPermissionVector` union `detectPermissionWidening` returns — a missing case is a compile error,
- *  not a silent fallback, so a future vector can't ship a refusal with nothing to say about it. */
+ *  not a silent fallback, so a future vector can't ship a refusal with nothing to say about it. Values
+ *  are the `.verbose` half of `permissionWidening.ts`'s shared `VECTOR_TEXT` (card f39341d5, item 3) —
+ *  `permission-scan.ts`'s own `SKILL_PERMISSION_FIELD_LABEL` derives from the SAME source's `.terse`
+ *  half, so the two tables' wording can no longer drift apart unnoticed. */
 const VECTOR_LABEL: Record<SkillPermissionVector, string> = {
-  "allowed-tools": "a frontmatter `allowed-tools:` grant",
-  hooks: "a frontmatter `hooks:` registration",
-  "frontmatter-unrecognized": "frontmatter syntax this detector cannot confidently parse (e.g. a quoted "
-    + "key, a flow mapping, an anchor/alias/tag value, an explicit/tagged/merge key)",
-  "frontmatter-fence-unrecognized": "a frontmatter fence shape the installed CLI's own loader parses "
-    + "differently than this detector does",
-  "shell-inline": "an inline `` !`cmd` `` shell injection",
-  "shell-fenced": "a fenced ` ```! ` shell block",
+  "allowed-tools": VECTOR_TEXT["allowed-tools"].verbose,
+  hooks: VECTOR_TEXT.hooks.verbose,
+  "frontmatter-unrecognized": VECTOR_TEXT["frontmatter-unrecognized"].verbose,
+  "frontmatter-fence-unrecognized": VECTOR_TEXT["frontmatter-fence-unrecognized"].verbose,
+  "shell-inline": VECTOR_TEXT["shell-inline"].verbose,
+  "shell-fenced": VECTOR_TEXT["shell-fenced"].verbose,
 };
 
 /**

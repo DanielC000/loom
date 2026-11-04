@@ -38,6 +38,11 @@ import { inAppHomeRoute } from "./in-app.js";
 // CR round 4, item 7 (card 015fdb23): imported from the LEAF module, never `../skills/permission-scan.js`
 // — that file pulls in `inject.js` + pty-doctrine transitively, weight this module has no need for.
 import { CWD_SKILLS_SCAN_SCOPE } from "../pty/claude-dirname.js";
+// Card f39341d5, item 4: VECTOR_TEXT is permissionWidening.ts's own shared label source (card f39341d5,
+// item 3 — the SAME source permission-scan.ts's SKILL_PERMISSION_FIELD_LABEL now derives its `.terse`
+// half from). Imported from THIS leaf module rather than permission-scan.ts for the same weight reason
+// as CWD_SKILLS_SCAN_SCOPE just above — permissionWidening.ts has no fs/pty-doctrine imports at all.
+import { VECTOR_TEXT } from "../skills/permissionWidening.js";
 
 /** The trusted-daemon framing tag — also the marker the no-stacking guard matches in the pending queue
  *  (mirrors HEARTBEAT_TAG/REMINDER_TAG). */
@@ -85,6 +90,17 @@ const ALERT_TITLE_MAX_CHARS = 100;
  *  `skill_permission_frontmatter_warning` truncation entry names in the Companion alert line, so a
  *  pathological entries-cap hit doesn't dominate the line before `ALERT_LINE_MAX_CHARS` even applies. */
 const TRUNC_NOTE_NAMES_MAX = 3;
+/** Card f39341d5, round 3 (second Code Review, Major 2): each truncNote name is a skill DIRECTORY name
+ *  read straight from the scanned repo — unbounded on its own even after TRUNC_NOTE_NAMES_MAX limits how
+ *  MANY are shown. Two realistic ~80-char names were enough to push the who id and the incomplete note
+ *  past the final ALERT_LINE_MAX_CHARS trim before this cap existed. */
+const TRUNC_NOTE_NAME_MAX_CHARS = 24;
+/** Card f39341d5, round 3 (second Code Review, Major 2): this case's own line carries more fixed + free
+ *  text (role, who, the incomplete/truncation notes, the scope clause) than any other `alertLine` case,
+ *  so an ordinary-length project name that's harmless everywhere else can still crowd the who id out of
+ *  this one. Capped ONLY for this case — every other case leaves `projectName` exactly as the caller
+ *  passed it. */
+const SKILL_WARNING_PROJECT_NAME_MAX_CHARS = 40;
 /** Card ee05750e: same pattern as ALERT_TITLE_MAX_CHARS. By the time a reason reaches this surface it has
  *  already passed `normalizeResumeOneResult`'s allowlist (resume-nudge.ts) — never an arbitrary re-thrown
  *  message — but one of the 7 allowlisted messages is itself up to ~140 chars; this keeps ANY one reason
@@ -96,6 +112,44 @@ const ALERT_RESUME_REASON_MAX_CHARS = 60;
  *  enough — never lengthens or otherwise mutates a line that's already within bounds. */
 function truncateText(s: string, maxChars: number): string {
   return s.length > maxChars ? `${s.slice(0, maxChars - 1)}…` : s;
+}
+
+/** Card f39341d5 (CR MAJOR fix, `skill_permission_frontmatter_warning`; round 3 correction — second
+ *  Code Review, Major 1): fit a "name1, name2 (label1, label2)"-shaped segment into `budget` characters.
+ *  NAMES take priority: at least the first name, or a "+N more" tail, is kept before labels get any of
+ *  what's left, and a labels suffix is NEVER emitted when no name survives — the opposite of the
+ *  original round, which degraded labels first and could starve names entirely (a realistic 3-finding
+ *  case rendered "… frontmatter in  (allowed-tools:, hooks:, …)", naming no skill at all). The caller
+ *  reserves room for every other, non-degradable part of the line FIRST — the who id, the incomplete-
+ *  scan note, the scope clause, the truncation note — so this segment, being the one genuinely
+ *  unbounded field, is what the final ALERT_LINE_MAX_CHARS trim ends up cutting if anything still
+ *  overflows. Labels are deduplicated across every finding by the caller, so in practice this almost
+ *  never needs to touch them — only names (which can be arbitrarily many) usually need bounding. */
+function fitNamesAndLabels(names: string[], labels: string[], budget: number): string {
+  let namesOut = "";
+  for (let keep = names.length; keep >= 0; keep--) {
+    const shown = names.slice(0, keep);
+    const more = names.length - keep;
+    const candidate = more > 0
+      ? `${shown.length ? `${shown.join(", ")}, ` : ""}+${more} more`
+      : shown.join(", ");
+    if (candidate.length <= budget) { namesOut = candidate; break; }
+    // Even the bare "+N more" marker doesn't fit this budget — omit names entirely rather than ever
+    // exceeding it (a forced "last resort" that still overflows would defeat the whole point).
+    if (keep === 0) { namesOut = ""; break; }
+  }
+  if (!namesOut) return ""; // no room for even one name/"+N more" — never show a labels-only suffix.
+  let labelsSuffix = "";
+  const labelsBudget = Math.max(0, budget - namesOut.length);
+  for (let keep = labels.length; keep >= 0; keep--) {
+    const shown = labels.slice(0, keep);
+    const more = labels.length - keep;
+    const parts = more > 0 ? [...shown, `+${more} more`] : shown;
+    const candidate = parts.length ? ` (${parts.join(", ")})` : "";
+    if (candidate.length <= labelsBudget) { labelsSuffix = candidate; break; }
+    if (keep === 0) { labelsSuffix = ""; break; }
+  }
+  return `${namesOut}${labelsSuffix}`;
 }
 
 /** Frame a single immediate alert as a clearly-marked, no-stacking-guarded turn. */
@@ -499,29 +553,70 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     case "skill_permission_frontmatter_warning": {
       const roleLabel = typeof detail.role === "string" ? detail.role : "session";
       const scope = typeof detail.scope === "string" ? detail.scope : CWD_SKILLS_SCAN_SCOPE;
-      const names = Array.isArray(detail.findings) && detail.findings.length
-        ? detail.findings.map((f) => (f && typeof f === "object" && "name" in f ? String((f as { name: unknown }).name) : "?")).join(", ")
-        : null;
+      // Card f39341d5, item 4 (+ the MAJOR fix round below): collect every flagged skill's NAME, and the
+      // UNION of distinct vectors seen across ALL findings — rendered ONCE as "name1, name2 (label1,
+      // label2)" rather than per-skill ("name1 (label1), name2 (label2)"), so a vector repeated across
+      // many skills doesn't multiply the same label. `fields` is already on every `detail.findings[i]`
+      // (set at `SessionService.handleSkillPermissionFrontmatterWarning`'s own event-append call); an id
+      // with no VECTOR_TEXT entry (never expected — detectPermissionWidening's own union is exhaustive
+      // here) falls back to the bare id rather than silently dropping it. Owner-visible text only — no
+      // routing/classification change.
+      const rawFindings = Array.isArray(detail.findings) ? detail.findings : [];
+      const skillNames: string[] = [];
+      const vectorIds: string[] = [];
+      const seenVectors = new Set<string>();
+      for (const f of rawFindings) {
+        if (!f || typeof f !== "object" || !("name" in f)) { skillNames.push("?"); continue; }
+        skillNames.push(String((f as { name: unknown }).name));
+        const rawFields = (f as { fields?: unknown }).fields;
+        const fields = Array.isArray(rawFields) ? rawFields.map(String) : [];
+        for (const v of fields) if (!seenVectors.has(v)) { seenVectors.add(v); vectorIds.push(v); }
+      }
+      const labels = vectorIds.map((v) => VECTOR_TEXT[v as keyof typeof VECTOR_TEXT]?.terse ?? v);
       // CR round 3, finding 1: a bound hit (`detail.truncated`) escalates for the Companion exactly
       // like a real finding — a padded repo must not evade this push just because the finding it was
       // hiding fell past the scan's own cap. CR round 4, item 5: name the affected skill(s) (bounded)
       // and skippedCount too — a bare "scan truncated at its X cap" told the owner nothing about WHICH
       // skill(s) or how many were skipped.
+      // Round 3 (second Code Review, Major 2): each shown name is itself capped — two realistic ~80-char
+      // skill-directory names were otherwise enough to blow the line's budget on their own, independent
+      // of TRUNC_NOTE_NAMES_MAX (which bounds how MANY names are shown, never how LONG each one is).
       const truncNote = Array.isArray(detail.truncated) && detail.truncated.length
         ? detail.truncated.map((t) => {
             if (!t || typeof t !== "object") return "scan truncated";
             const tt = t as { cap?: unknown; names?: unknown; skippedCount?: unknown };
             const cap = typeof tt.cap === "string" ? tt.cap : "?";
             const tNames = Array.isArray(tt.names) ? tt.names.map(String) : [];
-            const shown = tNames.slice(0, TRUNC_NOTE_NAMES_MAX);
+            const shown = tNames.slice(0, TRUNC_NOTE_NAMES_MAX).map((n) => truncateText(n, TRUNC_NOTE_NAME_MAX_CHARS));
             const more = tNames.length > shown.length ? `, +${tNames.length - shown.length} more` : "";
             const skippedCount = typeof tt.skippedCount === "number" ? tt.skippedCount : null;
             return `scan truncated at its ${cap} cap${shown.length ? `: ${shown.join(", ")}${more}` : ""}${skippedCount !== null ? ` (${skippedCount} skipped)` : ""}`;
           }).join("; ")
         : null;
       const incompleteNote = detail.incomplete === true ? "scan INCOMPLETE (I/O error) — may be missing a finding" : null;
-      const what = [names ? `permission-widening frontmatter in ${names}` : null, truncNote, incompleteNote].filter(Boolean).join(" — ") || "a permission-widening concern";
-      line = `${projectName}: ${roleLabel} spawn found ${what} (${scope}, unmanaged by Loom) — ${who}`;
+      // Round 3 (second Code Review, Major 2): the original fix only bounded the names+labels segment —
+      // but the parts it RESERVED room for (projectName, the scope clause) were themselves unbounded, so
+      // a realistic long project name or a long truncNote name could still push the who id / incomplete
+      // note past the final ALERT_LINE_MAX_CHARS trim, which cuts from the END. Fixing this with budget
+      // arithmetic alone just moves the same race to a different field, so the guarantee is now
+      // STRUCTURAL instead: the who id and the incomplete-scan note are placed BEFORE every unbounded or
+      // free-text part of the line (mirroring `platform_escalate`'s taskRef-before-title placement), and
+      // `projectName` is capped for this case specifically (every other case leaves it uncapped). The
+      // end-trim can then only ever cut the free text that remains at the end — names, labels, truncNote,
+      // the scope clause — never the who id or the incomplete note.
+      const projectNameCapped = truncateText(projectName, SKILL_WARNING_PROJECT_NAME_MAX_CHARS);
+      const prefix = `${projectNameCapped}: ${roleLabel} spawn (${who})${incompleteNote ? ` — ${incompleteNote}` : ""} found `;
+      const suffix = ` (${scope}, unmanaged by Loom)`;
+      let names: string | null = null;
+      if (skillNames.length) {
+        const reserved = prefix.length + suffix.length
+          + (truncNote ? ` — ${truncNote}`.length : 0)
+          + "permission-widening frontmatter in ".length;
+        const budget = Math.max(0, ALERT_LINE_MAX_CHARS - reserved);
+        names = fitNamesAndLabels(skillNames, labels, budget);
+      }
+      const what = [names ? `permission-widening frontmatter in ${names}` : null, truncNote].filter(Boolean).join(" — ") || "a permission-widening concern";
+      line = `${prefix}${what}${suffix}`;
       break;
     }
     // Code Review 5f95e7a1: named explicitly, same discipline as claude_boot_dialog_stuck immediately
