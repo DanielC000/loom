@@ -37,7 +37,7 @@ null`):
    regardless of which repo-registry entry resolves — see `ResolvedRepo.commitTrailers`'s own doc). A
    stale `t.repoKey` (not in the current registry) is treated as "don't skip" — `resolveMergedInfo` below
    already degrades a stale key to primary safely, so there's nothing to protect against by skipping here
-   too.
+   too. **REMOVED by card `03f85c8e` — see "Update" below; its premise stopped holding.**
 2. **Never write a `mergedSha` that differs from one already recorded.** After the scan resolves
    (`resolved.merged`), re-read the row (`fresh`, guarding the same TOCTOU race as before — a real landing
    completing between this handler's start and the write). If `fresh.mergedSha` is unset, write the full
@@ -46,9 +46,11 @@ null`):
    `mergedVerification` (sha/repoKey/date stay exactly as recorded). A resolved sha that DIFFERS from the
    recorded one writes nothing at all.
 
-The net effect: a trailers-off card's `null` verification stays `null` forever (nothing to find, ever).
-A trailered legacy card's `null` verification CAN still backfill, but only when the scan's own sha
-matches the one already on the row — never a silent overwrite with a different, possibly stale, sha.
+The net effect AT THE TIME OF THIS FIX: a trailers-off card's `null` verification stayed `null` forever
+(nothing to find, ever). A trailered legacy card's `null` verification CAN still backfill, but only when
+the scan's own sha matches the one already on the row — never a silent overwrite with a different,
+possibly stale, sha. **See "Update (card `03f85c8e`)" below — the trailers-off half of this is no longer
+true; the sha-match half is unchanged and still what makes a write safe.**
 
 ## Do not
 
@@ -66,9 +68,9 @@ matches the one already on the row — never a silent overwrite with a different
 - Do not assume this closes the SAME staleness risk for any OTHER caller of `getTaskMergedInfo` that
   writes through `setTaskMergedInfoNoTouch` without pinning — this fix is scoped to this one route.
 
-## Consequences
+## Consequences (AT THE TIME OF THIS FIX — see "Update" below for what changed)
 
-A trailers-off card's `mergedVerification` is permanently `null` (an honest "unknown", never a wrong
+A trailers-off card's `mergedVerification` was permanently `null` (an honest "unknown", never a wrong
 guess). A trailered legacy card's `null` verification can still resolve to a real tier on a later drawer
 open, exactly as cards `634edd2b`/`d6d40edd` intended, but a task whose branch landed twice under
 different trailer regimes (or any other reason the scan finds a different commit) can never have its
@@ -78,3 +80,34 @@ recorded `mergedSha` silently replaced.
 
 Code Review `295fdd33` on card `5933734e` (child of epic `d9332365`); corrected by the manager after this
 record's own "Round 1" over-corrected per the review's own (partially incorrect) wording.
+
+## Update (card `03f85c8e`, item 2) — the trailers-off skip is REMOVED; its premise stopped holding
+
+Fix #1 above rested on one claim: a `commitTrailers:"off"` repo's scan is "structurally INCAPABLE of ever
+converging" because the scan is trailer-keyed and no trailer was ever written. Card `aa09a59a` (decision
+`e8d4fdc3` rounds 3-4) made that claim false: `getTaskMergedInfo` (what `resolveMergedInfo` calls) now
+falls back to a branch-keyed `"ledger"` tier once its trailer walk misses, so a trailers-off landing CAN
+converge — whenever Loom's own merge code left a `mainline_landed_commits`/`batch_landed_worker_tips` row
+behind for that exact landing.
+
+Card `03f85c8e` removed the `commitTrailersOff` skip from `GET /api/tasks/:id` (`gateway/server.ts`)
+entirely — the route now calls `resolveMergedInfo` unconditionally, same as a trailered project. Fix #2's
+sha-match write guard is UNCHANGED and is what still makes this safe: a resolved sha that differs from
+the one already recorded still writes nothing, trailers on or off. Covered by
+`task-merged-lazy-backfill.mjs` scenario (6a) (a ledger-backed, sha-matching landing now backfills to
+`"ledger"`) and (6a-mismatch) (a ledger-backed but sha-MISMATCHED landing still writes nothing), proved
+RED→GREEN against a mutant that re-adds the old skip while leaving every other scenario's behavior
+untouched.
+
+### Do not (card `03f85c8e` additions)
+
+- Do not reintroduce the `commitTrailersOff` skip as a "safe no-op simplification" — it was only ever safe
+  because the scan was GUARANTEED empty for that repo class; `aa09a59a`'s ledger tier removed that
+  guarantee, so skipping now would silently withhold a real, available backfill.
+- Do not read this as closing gap 1 of `docs/decisions/d9332365-*.md` (the crash-window) — that gap is a
+  pre-commit-vs-ledger-write ordering problem, unrelated to whether a ledger row exists later; this update
+  only concerns the STEADY-STATE read path once a ledger row genuinely was written.
+- Do not assume every trailers-off card's `mergedVerification` now backfills — only one whose landing
+  genuinely went through Loom's own merge code (and so left a ledger row) can; pre-ledger history or a
+  landing from outside Loom's merge code still resolves `null`, same as `task-merged-state.mjs` scenario
+  (6) proves for the read path generally.

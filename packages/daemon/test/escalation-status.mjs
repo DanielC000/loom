@@ -35,6 +35,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       built one entry per EVENT rather than per distinct task, so a re-escalated card's own id-prefix
 //       matched itself N times and was rejected as ambiguous against itself. Genuine cross-task ambiguity
 //       (two DISTINCT ids sharing a prefix, case (e) above) must still be reported and still name both.
+//   (i) card 03f85c8e item 1 — the SAME "resolved" derivation as (f), but the DESTINATION project has
+//       `commitTrailers:"off"`: the landed commit carries NO trailer at all, so `deriveEscalationStatus`
+//       can only resolve it via the branch-keyed ledger tier (d9332365 gap 4) now threaded through.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/escalation-status.mjs
 import fs from "node:fs";
@@ -335,6 +338,45 @@ try {
     listAllAfterReescalation.escalations.find((e) => e.taskId === t2)?.count === 1);
   check("(h) list mode's total row count is 5 DISTINCT taskIds (t1, t2, dupId1, dupId2, t3), not the 15 raw events filed",
     listAllAfterReescalation.escalations.length === 5);
+
+  // ===================== (i) card 03f85c8e item 1 — a TRAILERS-OFF destination project's escalation
+  // resolves via the branch-keyed ledger tier (d9332365 gap 4), not just a trailers-on trailer landing
+  // like (f) above =====================
+  db.insertProject({ id: "pC", name: "Project C (trailers off)", repoPath: repo, vaultPath: repo, config: { orchestration: { commitTrailers: "off" } }, createdAt: now, archivedAt: null, reserved: false });
+  db.insertAgent({ id: "agentC", projectId: "pC", name: "WorkC", startupPrompt: "WORK-C", position: 0, profileId: null });
+  seedSession("MGR_C", "pC", "agentC", "manager");
+
+  const esc4 = await callAs("MGR_C", "manager", "platform_escalate", {
+    title: "escalation from a trailers-off project", detail: "destination lands without a reserved trailer", severity: "low",
+  });
+  check("(i) platform_escalate filed T4", !!esc4.taskId && !esc4.error);
+  const t4 = esc4.taskId;
+  db.updateTask(t4, { columnKey: "done" });
+  const destTask4 = createProjectTask(db, "pC", { title: "fix: the actual bug behind T4" });
+  check("(i) destination task created on project C (trailers off)", !("error" in destTask4));
+  db.appendEvent({
+    id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "LEAD",
+    taskId: t4, kind: "escalation_triaged",
+    detail: { destinationProjectId: "pC", destinationTaskId: destTask4.id },
+  });
+  const st4Before = await callAs("MGR_C", "manager", "escalation_status", { taskId: t4 });
+  check("(i) linked but destination NOT YET merged → still triaged", st4Before.escalation.status === "triaged" && st4Before.escalation.triagedTo?.merged === null);
+
+  // Land the destination's content with NO reserved trailer — exactly what a trailers-off landing of
+  // this branch leaves behind — plus the mainline_landed_commits row a real confirmWorkerMerge would
+  // have written. The branch itself is never created here (the gone-branch arm) — matching production,
+  // where this read happens AFTER a landing has finalized and deleted the branch.
+  const destBranch4 = `loom/${taskKey(destTask4.id)}`;
+  const mainlineBranch4 = execSync("git rev-parse --abbrev-ref HEAD", { cwd: repo }).toString().trim();
+  execSync(`git -c user.email=x@loom -c user.name=x commit --allow-empty -q -m "fix(x): trailers-off landing for T4's destination"`, { cwd: repo }); // no Loom-Worker-Branch trailer
+  const landedSha4 = execSync("git rev-parse HEAD", { cwd: repo }).toString().trim();
+  const landedBase4 = execSync("git rev-parse HEAD^", { cwd: repo }).toString().trim();
+  db.recordMainlineLandedCommit("pC", "primary", mainlineBranch4, landedSha4, landedBase4, "f".repeat(40), destBranch4);
+
+  const st4After = await callAs("MGR_C", "manager", "escalation_status", { taskId: t4 });
+  check("(i) THE FIX: a trailers-off, ledger-backed destination landing now resolves to \"resolved\"", st4After.escalation.status === "resolved");
+  check("(i) merged.verification reports the \"ledger\" tier", st4After.escalation.triagedTo?.merged?.verification === "ledger");
+  check("(i) merged.sha is the ledger-recorded landed commit's short sha", st4After.escalation.triagedTo?.merged?.sha === landedSha4.slice(0, 7));
 
   // Defense in depth: the service method itself rejects a non-manager caller. escalationStatus is now
   // async (card ba04d607 — deriving `resolved` needs an awaited git-derived merged check), so its guard

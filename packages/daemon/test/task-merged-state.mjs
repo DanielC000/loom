@@ -38,14 +38,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the landed commit, with verification:"ledger" — this is the actual fix for gap 2 of
 //       docs/decisions/d9332365-optional-merge-commit-trailers.md ("every agent-facing `merged` field
 //       reads `null` on a trailers-off project — in steady state, not just after a crash").
-//   (8)/(9) card aa09a59a round 2, MAJOR fix — (3)'s own re-cut shape, but ALSO carrying the ledger row a
-//       real PRIOR landing writes. Pre-fix, the branch-keyed ledger fallback had no notion of the
-//       branch's LIVE tip and resolved the old, already-superseded squash as merged — bypassing the
-//       re-task guard entirely. (8) is trailers-ON, (9) is trailers-OFF (the shape that actually shipped
-//       the bug, since the ledger fallback is the only mechanism answering a trailers-off read at all).
+//   (8)/(9) card aa09a59a round 2 — (3)'s own re-cut shape, but ALSO carrying a ledger row from its
+//       PRIOR landing: (8) trailers-ON, (9) trailers-OFF. See docs/decisions/e8d4fdc3-*.md's "Round 4"
+//       section for the re-task-guard bypass this closes.
 //   (10) card aa09a59a round 2, test-gap close — the gone-branch ancestry re-verify (`mergeBase ===
 //       landedSha`) is load-bearing: a ledger row pointing at a commit no longer reachable from `base`
 //       (main reset/force-moved past it) must resolve null, never the stale sha.
+//   (11) card 03f85c8e (CR triage item 3, on aa09a59a) — the PRESENT-branch arm's SUCCESS path: a worker
+//       branch still present and unmoved at its recorded workerLandedTip, trailers off, must resolve via
+//       the tip-keyed ledger fallback (never the branch-only lookup) with verification:"ledger".
 //
 // Run: 1) build (turbo builds shared first), 2) node test/task-merged-state.mjs
 import fs from "node:fs";
@@ -226,6 +227,35 @@ try {
   db.recordMainlineLandedCommit("pRepo", "primary", defaultBranch, divergentSha, defaultBranch, "c".repeat(40), branch10);
   const got10 = await getProjectTask(db, "pRepo", resetPast.id);
   check("(10) TEST-GAP CLOSE: a ledger row no longer reachable from base (main reset/force-moved past it) resolves merged:null — the ancestry re-verify is load-bearing", got10.merged === null);
+
+  // (11) card 03f85c8e (CR triage item 3, on aa09a59a) — the PRESENT-branch arm's SUCCESS path. Unlike
+  // (7)/(9) above (the branch is never created, exercising the branch-ABSENT ledger lookup), here the
+  // worker branch ref is STILL PRESENT and UNMOVED at its recorded workerLandedTip — the window before
+  // finalizeMerge's branch delete runs, or a failed delete — so tryWorkerTipLedgerBranchFallback (round 4)
+  // must defer to the tip-keyed tryWorkerTipLedgerFallback, never the branch-only lookup (which alone
+  // can't tell "still landed" apart from "re-cut, live again"). Trailers off, mirroring (7)'s shape.
+  const presentLedger = createProjectTask(db, "pRepo", { title: "feat(x): trailers-off landing, branch still present" });
+  const branch11 = `loom/${taskKey(presentLedger.id)}`;
+  git(`checkout -q -b ${branch11} ${defaultBranch}`);
+  fs.writeFileSync(path.join(repo, "present-ledger.txt"), "worker branch content, not yet deleted\n");
+  git("add -A");
+  git(`-c user.email=x@loom -c user.name=x commit -q -m "worker's own pre-squash commit"`);
+  const workerTip11 = git("log -1 --format=%H").trim();
+  git(`checkout -q ${defaultBranch}`);
+  fs.writeFileSync(path.join(repo, "present-ledger-landed.txt"), "trailers-off content, branch still present\n");
+  git("add -A");
+  git(`-c user.email=x@loom -c user.name=x commit -q -m "feat(x): trailers-off landing, branch still present"`); // no Loom-Worker-Branch trailer
+  const landedSha11 = git("log -1 --format=%H").trim();
+  const landedBase11 = git(`log -1 --format=%H ${landedSha11}^`).trim();
+  db.recordMainlineLandedCommit("pRepo", "primary", defaultBranch, landedSha11, landedBase11, workerTip11, branch11);
+  // branch11 is DELIBERATELY left present at workerTip11 — never deleted, never advanced — standing in
+  // for the window before finalizeMerge's branch delete, or a failed delete.
+  const got11 = await getProjectTask(db, "pRepo", presentLedger.id);
+  check("(11) a PRESENT, unmoved worker branch with a ledger row resolves merged non-null via the tip-keyed fallback (not the branch-only lookup)", !!got11.merged);
+  check("(11) merged.sha is the ledger-recorded landed commit's short sha", got11.merged?.sha === landedSha11.slice(0, 7));
+  check("(11) verification reports the \"ledger\" tier", got11.merged?.verification === "ledger");
+  const row11 = (await listProjectTasks(db, "pRepo", { includeBody: true })).find((t) => t.id === presentLedger.id);
+  check("(11) listProjectTasks ALSO resolves the present-branch ledger landing the same way", row11?.merged?.sha === landedSha11.slice(0, 7) && row11?.merged?.verification === "ledger");
 } finally {
   db.close();
   fs.rmSync(file, { force: true });

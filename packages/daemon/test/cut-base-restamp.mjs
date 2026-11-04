@@ -14,6 +14,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Scenario 15 (MCP surface): manager-only, absent from the worker router.
 // Scenario 16: a session with a NEWER sibling row at the same worktree path/branch is refused; the
 //   newest row itself still succeeds.
+// Scenario 17: card 03f85c8e item 1 — the SAME already-merged refusal as scenario 11, trailers off and
+//   ledger-backed (no reserved trailer) rather than a real confirmed landing.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/cut-base-restamp.mjs
 import fs from "node:fs";
@@ -310,6 +312,29 @@ try {
     const succeeded = await call16("worker_restamp_cut_base", { workerSessionId: successor.id });
     check("(16) restamping the NEWEST (successor) row succeeds", succeeded.ok === true && succeeded.noop === false);
     check("(16) the successor's own row IS updated", db.getSession(successor.id).cutBaseSha === atlasTip);
+  }
+  // ===================================================================================
+  // SCENARIO 17 (card 03f85c8e item 1) — the SAME "already proven merged" refusal as scenario 11, but
+  // trailers off and ledger-backed (no Loom-Worker-Branch trailer at all) rather than a real confirmed
+  // landing — the shape restampWorkerCutBase's own getTaskMergedInfo call couldn't see before threading
+  // workerTipLedger.
+  // ===================================================================================
+  {
+    const fx = await makeFixture("ledger");
+    db.setProjectConfig(fx.projId, { orchestration: { gateCommand: "pnpm gate", commitTrailers: "off" } });
+    const { worktreePath, branch } = fx.worker;
+    const workerTip = git(worktreePath, "rev-parse", "HEAD");
+    const mainlineBranch = git(fx.repo, "rev-parse", "--abbrev-ref", "HEAD");
+    // The SAME content, landed through some OTHER route with NO reserved trailer — exactly what a real
+    // trailers-off landing of this branch would leave behind.
+    fs.writeFileSync(path.join(fx.repo, "ledger-landed.txt"), "already landed, trailers off\n");
+    commitAll(fx.repo, "feat(x): ledger-backed trailers-off landing", GIT_ID);
+    const landedSha = git(fx.repo, "log", "-1", "--format=%H");
+    const landedBase = git(fx.repo, "log", "-1", "--format=%H", `${landedSha}^`);
+    db.recordMainlineLandedCommit(fx.projId, "primary", mainlineBranch, landedSha, landedBase, workerTip, branch);
+    const result = await fx.call("worker_restamp_cut_base", { workerSessionId: fx.worker.workerId });
+    check("(17) refused — task already proven merged (trailers off, ledger-backed)", result.ok === false && /already proven merged/i.test(result.error ?? ""));
+    check("(17) the session is untouched", db.getSession(fx.worker.workerId).cutBaseSha === fx.worker.cutBaseSha);
   }
 } finally {
   // registerForCleanup-tracked dirs are swept by the harness; LOOM_HOME itself is cleaned by useOwnLoomHome.

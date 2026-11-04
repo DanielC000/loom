@@ -16,9 +16,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       repo) still 200s with the row returned unchanged — never a 500 over a cache-fill failure.
 //   (4) a task that ALREADY has a persisted mergedSha is returned as-is, no backfill attempted (proven by
 //       the returned mergedSha being the pre-seeded value, not re-derived from git).
-//   (6a) card 5933734e (Code Review 295fdd33, round 2): a commitTrailers:"off" project's scan is skipped
-//       ENTIRELY, even when a sha-matching commit exists that would trivially backfill if the scan ran —
-//       the skip is keyed on the project's config, never on what the scan would or wouldn't find.
+//   (6a) card 03f85c8e item 2: a commitTrailers:"off" project's scan is NO LONGER skipped — the gateway
+//       route stopped special-casing `commitTrailers` because `resolveMergedInfo` already threads the
+//       branch-keyed `"ledger"` tier (decision e8d4fdc3), so a ledger-backed, trailer-less landing whose
+//       sha matches what's already recorded backfills its verification to "ledger".
+//   (6a-mismatch) the SAME trailers-off/ledger shape as (6a), but the scan resolves a DIFFERENT sha than
+//       the one already recorded — nothing is written, mirroring (6c)'s trailered-mismatch contract.
 //   (6b) a TRAILERED legacy card (mergedSha set, mergedVerification null) DOES still backfill verification
 //       when the scan's own sha matches the one already recorded — the case 634edd2b/d6d40edd built this
 //       for in the first place; sha/repoKey stay untouched, only verification is filled in.
@@ -58,6 +61,7 @@ const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const repo = path.join(os.tmpdir(), `loom-lazy-backfill-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 execSync("git init -q && git -c user.email=x@loom -c user.name=x commit --allow-empty -q -m init", { cwd: repo });
+const defaultBranch = git(repo, "rev-parse --abbrev-ref HEAD");
 
 const db = new Db(path.join(tmpHome, "test.db"));
 db.insertProject({ id: "pRepo", name: "Repo Project", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
@@ -134,21 +138,41 @@ try {
   check("(5) a stale-repoKey task's sha is still found (degraded scan against primary)", res5.json().mergedSha === landedSha5);
   check("(5) mergedRepoKey backfills to null (primary — where it was ACTUALLY found), NOT the stale 'no-such-registry-entry' key", res5.json().mergedRepoKey === null);
 
-  // ===== (6a) card 5933734e: a commitTrailers:"off" repo's scan is skipped ENTIRELY — even when a REAL
-  // commit exists bearing the EXACT sha already recorded (so if the scan ran at all, it would trivially
-  // backfill the verification), it must NOT run, proving the skip is keyed on the project's config, not
-  // on whatever the scan would or wouldn't have found =====
-  const t6a = { id: `lazy-trailersoff-${Date.now()}`, projectId: "pTrailersOff", title: "trailers-off batch landing", body: "", columnKey: "done", position: 5, priority: "p2", createdAt: now, updatedAt: now };
+  // ===== (6a) card 03f85c8e item 2: a commitTrailers:"off" repo's scan is NO LONGER skipped — a
+  // ledger-backed landing (no reserved trailer at all) whose branch was NEVER created as a real git ref
+  // (the gone-branch arm) must still resolve via `resolveMergedInfo`'s branch-keyed "ledger" tier
+  // (decision e8d4fdc3) and backfill the recorded mergedSha's verification =====
+  const t6a = { id: `lazy-trailersoff-ledger-${Date.now()}`, projectId: "pTrailersOff", title: "trailers-off, ledger-backed landing", body: "", columnKey: "done", position: 5, priority: "p2", createdAt: now, updatedAt: now };
   db.insertTask(t6a);
   const branch6a = `loom/${taskKey(t6a.id)}`;
-  git(repo, `-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(z): trailers-off landing (its branch's trailer still lands structurally)" -m "Loom-Worker-Branch: ${branch6a}"`);
-  const landedSha6a = git(repo, "log -1 --format=%H").slice(0, 7);
+  git(repo, `-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(z): trailers-off, ledger-backed landing"`); // no Loom-Worker-Branch trailer
+  const landedSha6aFull = git(repo, "log -1 --format=%H");
+  const landedSha6a = landedSha6aFull.slice(0, 7);
+  const landedBase6a = git(repo, `log -1 --format=%H ${landedSha6aFull}^`);
+  db.recordMainlineLandedCommit("pTrailersOff", "primary", defaultBranch, landedSha6aFull, landedBase6a, "f".repeat(40), branch6a);
   db.updateTask(t6a.id, { mergedSha: landedSha6a, mergedRepoKey: null, mergedVerification: null });
   const res6a = await app.inject({ method: "GET", url: `/api/tasks/${t6a.id}` });
   check("(6a) GET 200s", res6a.statusCode === 200);
   check("(6a) mergedSha is unchanged (still the recorded sha)", res6a.json().mergedSha === landedSha6a);
-  check("(6a) mergedVerification STAYS null — the scan never ran despite a sha-matching commit existing", res6a.json().mergedVerification == null);
-  check("(6a) the PERSISTED column is also unchanged — no write happened at all", db.getTask(t6a.id)?.mergedVerification == null);
+  check("(6a) THE FIX: mergedVerification backfills to \"ledger\" — the scan is no longer skipped for trailers-off", res6a.json().mergedVerification === "ledger");
+  check("(6a) the PERSISTED column also reflects the backfilled \"ledger\" verification", db.getTask(t6a.id)?.mergedVerification === "ledger");
+
+  // ===== (6a-mismatch) the SAME trailers-off/ledger shape as (6a), but the ledger-aware scan resolves a
+  // DIFFERENT sha than the one already recorded — nothing is written, mirroring (6c)'s contract =====
+  const t6aMismatch = { id: `lazy-trailersoff-mismatch-${Date.now()}`, projectId: "pTrailersOff", title: "trailers-off, ledger scan finds a different sha", body: "", columnKey: "done", position: 8, priority: "p2", createdAt: now, updatedAt: now };
+  db.insertTask(t6aMismatch);
+  const branch6aMismatch = `loom/${taskKey(t6aMismatch.id)}`;
+  git(repo, `-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "feat(z): another trailers-off, ledger-backed landing"`);
+  const landedSha6aMismatchFull = git(repo, "log -1 --format=%H");
+  const landedBase6aMismatch = git(repo, `log -1 --format=%H ${landedSha6aMismatchFull}^`);
+  db.recordMainlineLandedCommit("pTrailersOff", "primary", defaultBranch, landedSha6aMismatchFull, landedBase6aMismatch, "f".repeat(40), branch6aMismatch);
+  db.updateTask(t6aMismatch.id, { mergedSha: "cafef00", mergedRepoKey: null, mergedVerification: null });
+  check("(6a-mismatch) setup: the ledger-resolved sha genuinely differs from the recorded one", landedSha6aMismatchFull.slice(0, 7) !== "cafef00");
+  const res6aMismatch = await app.inject({ method: "GET", url: `/api/tasks/${t6aMismatch.id}` });
+  check("(6a-mismatch) GET 200s", res6aMismatch.statusCode === 200);
+  check("(6a-mismatch) the response's mergedSha is UNCHANGED (never overwritten by the ledger-resolved, differently-shaped commit)", res6aMismatch.json().mergedSha === "cafef00");
+  check("(6a-mismatch) mergedVerification STAYS null (never backfilled from a mismatched ledger resolve)", res6aMismatch.json().mergedVerification == null);
+  check("(6a-mismatch) the PERSISTED column is also unchanged — no write happened at all", db.getTask(t6aMismatch.id)?.mergedSha === "cafef00");
 
   // ===== (6b) a TRAILERED (commitTrailers "on", the default) legacy card with mergedSha already set but
   // mergedVerification null — this IS the case 634edd2b/d6d40edd built the backfill for: the scan's own
@@ -186,6 +210,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GET /api/tasks/:id lazily backfills a pre-existing merged card's ship-state on first open (resolves + persists, so a second read is served from the column with no re-scan), leaves a genuinely unmerged task's mergedSha null with no error, degrades to a plain 200 (never a 500) when the underlying git lookup fails (a moved/deleted project repo), never re-derives ship-state for a task that already has it persisted, skips the scan entirely for a commitTrailers:\"off\" project even when a sha-matching commit exists, backfills a trailered legacy card's null verification when the scan's sha matches the recorded one, and writes nothing when a trailered card's scan resolves a different sha than the one already recorded."
+  ? "\n✅ ALL PASS — GET /api/tasks/:id lazily backfills a pre-existing merged card's ship-state on first open (resolves + persists, so a second read is served from the column with no re-scan), leaves a genuinely unmerged task's mergedSha null with no error, degrades to a plain 200 (never a 500) when the underlying git lookup fails (a moved/deleted project repo), never re-derives ship-state for a task that already has it persisted, backfills a commitTrailers:\"off\" card's null verification to \"ledger\" when the ledger-aware scan's sha matches the one recorded (never when it doesn't), backfills a trailered legacy card's null verification when the scan's sha matches the recorded one, and writes nothing when a trailered card's scan resolves a different sha than the one already recorded."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

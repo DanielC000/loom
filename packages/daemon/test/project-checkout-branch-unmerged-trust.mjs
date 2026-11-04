@@ -5,6 +5,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - (UNMRG) an unmerged worker branch (live OR exited) blocks the switch
 //   - (UNMRG-TAG) card 1bc9602b — a same-named TAG on the worker's own branch used to
 //   - (UNMRG-REMOTEHEAD) card 1bc9602b — a SECOND, independent real-git ambiguity
+//   - (UNMRG-LEDGER) card 03f85c8e item 1 — a trailers-off, ledger-backed already-landed branch does NOT block the switch
+//   - (UNMRG-LEDGER-RECUT) card 03f85c8e CR round 2 — the negative partner: a re-cut branch with a STALE ledger row is STILL refused
 //   - (TRUST) an existing branch with no trust record is refused outright
 //   - (RESET) the human-only reset route re-stamps the adopted branch's trust (M2)
 //   - (LNDR-1 / LNDR-2) laundering keyed on the TARGET, not the current branch
@@ -19,8 +21,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 useOwnLoomHome("loom-pcb-umt-");
 
+import fs from "node:fs";
+import path from "node:path";
 import {
-  loadPcbDistModules, makeFixtureKit, git,
+  loadPcbDistModules, makeFixtureKit, git, commitAll, GIT_ID,
 } from "./_project-checkout-branch-fixture.mjs";
 
 const mods = await loadPcbDistModules();
@@ -95,6 +99,55 @@ try {
     check("(UNMRG-REMOTEHEAD) setup: the branch actually landed", confirmed.settled === true && confirmed.ok === true && confirmed.value.merged === true);
     const r2 = await fx.call("project_checkout_branch", { branch: "atlas" });
     check("(UNMRG-REMOTEHEAD) negative control: once merged, the SAME call now succeeds", r2.ok === true);
+  }
+
+  // ===================== (UNMRG-LEDGER) card 03f85c8e item 1 — a worker branch whose content ALREADY
+  // landed elsewhere, trailers off (no Loom-Worker-Branch trailer — invisible to listUnmergedWorkerBranches'
+  // own trailer-only lookup before it threaded workerTipLedger), must NOT block the switch. =====================
+  {
+    const fx = makeFixture("unmrg-ledger");
+    db.setProjectConfig(fx.projId, { orchestration: { gateCommand: "pnpm gate", commitTrailers: "off" } });
+    git(fx.repo, "branch", "atlas");
+    fx.trustBranch("atlas");
+    const w = await fx.addWorker("w"); // exited, worktree present — the same unmerged-candidate shape as (UNMRG)
+    const workerTip = git(w.worktreePath, "rev-parse", "HEAD");
+    // The SAME content, landed on main through some OTHER route (e.g. a batch landing) with NO reserved
+    // trailer — exactly what a real trailers-off landing of this branch would leave behind.
+    fs.writeFileSync(path.join(fx.repo, "ledger-landed.txt"), "already landed, trailers off\n");
+    commitAll(fx.repo, "feat(x): ledger-backed trailers-off landing", GIT_ID);
+    const landedSha = git(fx.repo, "log", "-1", "--format=%H");
+    const landedBase = git(fx.repo, "log", "-1", "--format=%H", `${landedSha}^`);
+    db.recordMainlineLandedCommit(fx.projId, "primary", fx.main, landedSha, landedBase, workerTip, w.branch);
+    const r1 = await fx.call("project_checkout_branch", { branch: "atlas" });
+    check("(UNMRG-LEDGER) a ledger-backed, trailers-off already-landed branch does NOT block the switch", r1.ok === true && r1.branch === "atlas");
+    check("(UNMRG-LEDGER) canonical switched to atlas", fx.canonBranch() === "atlas");
+  }
+
+  // ===================== (UNMRG-LEDGER-RECUT) card 03f85c8e Code Review round 2 — the negative partner
+  // to (UNMRG-LEDGER): the SAME ledger-backed shape, but the worker branch gets a NEW commit AFTER the
+  // ledger row was recorded (a re-cut, still-live branch). The tip-keyed fallback must fail closed: the
+  // branch's new tip no longer matches the recorded workerLandedTip, so this is STILL treated as
+  // unmerged and the switch is refused. =====================
+  {
+    const fx = makeFixture("unmrg-ledger-recut");
+    db.setProjectConfig(fx.projId, { orchestration: { gateCommand: "pnpm gate", commitTrailers: "off" } });
+    git(fx.repo, "branch", "atlas");
+    fx.trustBranch("atlas");
+    const w = await fx.addWorker("w");
+    const workerTip = git(w.worktreePath, "rev-parse", "HEAD");
+    fs.writeFileSync(path.join(fx.repo, "ledger-landed-recut.txt"), "already landed, trailers off\n");
+    commitAll(fx.repo, "feat(x): ledger-backed trailers-off landing (recut)", GIT_ID);
+    const landedSha = git(fx.repo, "log", "-1", "--format=%H");
+    const landedBase = git(fx.repo, "log", "-1", "--format=%H", `${landedSha}^`);
+    db.recordMainlineLandedCommit(fx.projId, "primary", fx.main, landedSha, landedBase, workerTip, w.branch);
+    // The branch is RE-CUT: NEW live work lands on it AFTER the ledger row was stamped for the OLD tip.
+    fs.writeFileSync(path.join(w.worktreePath, "new-live-work.txt"), "new live work after the ledger row\n");
+    commitAll(w.worktreePath, "feat(x): new live work on the re-cut branch", GIT_ID);
+    const newWorkerTip = git(w.worktreePath, "rev-parse", "HEAD");
+    check("(UNMRG-LEDGER-RECUT) setup: the branch's live tip has genuinely moved past the ledger-recorded one", newWorkerTip !== workerTip);
+    const r1Recut = await fx.call("project_checkout_branch", { branch: "atlas" });
+    check("(UNMRG-LEDGER-RECUT) a re-cut branch with a STALE ledger row is STILL refused (fails closed, never a false merged)", r1Recut.ok === false && r1Recut.refused === true && Array.isArray(r1Recut.unmergedWorkers) && r1Recut.unmergedWorkers.some((u) => u.workerSessionId === w.workerId && u.branch === w.branch));
+    check("(UNMRG-LEDGER-RECUT) canonical untouched", fx.canonBranch() === fx.main);
   }
 
   // ===================== (TRUST) an existing branch with no trust record is refused outright =====================

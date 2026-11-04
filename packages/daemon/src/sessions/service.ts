@@ -6957,13 +6957,18 @@ export class SessionService {
     //
     // @decision c13666c6 round 2 (Code Review finding 6) — a non-primary candidate gets the WRONG ledger
     // scope, so a genuinely-gone branch there reads unmerged, never wrongly merged — safe over-refusal.
+
+    // Same scoping below for workerTipLedger: it only ever narrows a false "unmerged" into a correct
+    // "merged" (e8d4fdc3 round 4's present-branch arm fails closed on a re-cut/live branch), so a
+    // non-primary candidate's safe-over-refusal posture above is unaffected either way.
     const goneBranchLedger = this.db.getGoneBranchLedgerFacts(projectId, "primary");
+    const workerTipLedger = this.db.getWorkerTipLedgerFacts(projectId, "primary");
     for (const s of candidates) {
       const branch = s.branch as string;
       if (existingBranches && !existingBranches.has(branch)) continue;
       let merged: Awaited<ReturnType<typeof getTaskMergedInfo>> = null;
       if (s.taskId) {
-        try { merged = await getTaskMergedInfo(repoPath, s.taskId, { timeoutMs: this.gitOpMs, goneBranchLedger }); } catch { merged = null; }
+        try { merged = await getTaskMergedInfo(repoPath, s.taskId, { timeoutMs: this.gitOpMs, goneBranchLedger, workerTipLedger }); } catch { merged = null; }
       }
       if (!merged) out.push({ workerSessionId: s.id, taskId: s.taskId ?? null, branch });
     }
@@ -7339,7 +7344,7 @@ export class SessionService {
     if (worker.taskId) {
       let merged: Awaited<ReturnType<typeof getTaskMergedInfo>> = null;
       try {
-        merged = await getTaskMergedInfo(repoPath, worker.taskId, { timeoutMs: this.gitOpMs, goneBranchLedger: this.db.getGoneBranchLedgerFacts(managerProjectId, repoKey) });
+        merged = await getTaskMergedInfo(repoPath, worker.taskId, { timeoutMs: this.gitOpMs, goneBranchLedger: this.db.getGoneBranchLedgerFacts(managerProjectId, repoKey), workerTipLedger: this.db.getWorkerTipLedgerFacts(managerProjectId, repoKey) });
       } catch { merged = null; }
       if (merged) return { ok: false, error: `task ${worker.taskId} is already proven merged — nothing to restamp` };
     }
@@ -14482,7 +14487,14 @@ export class SessionService {
       const destProject = this.db.getProject(link.destinationProjectId);
       const destTask = this.db.getTask(link.destinationTaskId);
       // @decision c13666c6 — the branch-gone ledger gate, scoped to the destination task's own repoKey.
-      const merged = destProject ? await getTaskMergedInfo(destProject.repoPath, link.destinationTaskId, { goneBranchLedger: this.db.getGoneBranchLedgerFacts(destProject.id, destTask?.repoKey ?? "primary") }) : null;
+      // @decision e8d4fdc3 round 3 (card 03f85c8e item 1) — SAME scope for workerTipLedger: this is a
+      // steady-state, post-finalize read of a (possibly different) project's repo, exactly the shape the
+      // branch-keyed ledger tier exists to answer; closes d9332365 gap 4.
+      const destRepoKey = destTask?.repoKey ?? "primary";
+      const merged = destProject ? await getTaskMergedInfo(destProject.repoPath, link.destinationTaskId, {
+        goneBranchLedger: this.db.getGoneBranchLedgerFacts(destProject.id, destRepoKey),
+        workerTipLedger: this.db.getWorkerTipLedgerFacts(destProject.id, destRepoKey),
+      }) : null;
       const triagedTo: EscalationStatusItem["triagedTo"] = {
         projectId: link.destinationProjectId,
         projectName: destProject?.name ?? "",

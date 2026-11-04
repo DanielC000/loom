@@ -3437,9 +3437,10 @@ export class PlatformMcpRouter {
           "(no reserved trailer was ever written, so there is nothing to verify), or pre-fix " +
           "history — NEVER an anomaly to chase. The web board drawer's lazy backfill (human-triggered, not " +
           "agent-facing) CAN fill this in on a later read, but ONLY when its own scan resolves the SAME " +
-          "sha already recorded on the row (never a different one — that writes nothing), and NEVER AT " +
-          "ALL for a `commitTrailers:\"off\"` repo: that scan is trailer-keyed and a " +
-          "trailers-off landing wrote no trailer, so it structurally cannot ever converge. A " +
+          "sha already recorded on the row (never a different one — that writes nothing); for a " +
+          "`commitTrailers:\"off\"` repo the scan can still converge via a durable, Loom-written landing " +
+          "record when no trailer exists to find one by — but that is a best-effort recovery, not a " +
+          "guarantee the way a trailer-carrying landing is. A " +
           "freshly-landed batch branch on a `commitTrailers:\"on\"` project (the default) still stamps " +
           "\"pathset\"/\"trailer-only\" eagerly AT LANDING TIME, same as a solo squash-confirm stamps " +
           "\"content\". " +
