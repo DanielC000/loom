@@ -205,6 +205,30 @@ try {
   check("6c tick() forces taskId: null for a platform-role session even though session.taskId is set",
     rawTaskId(dbFile1, "sess1d") === null);
 
+  // -- 6d) card aaacafe4: reviewOfTaskId fallback — a TASKLESS review worker's sample carries the
+  //        REVIEWED task; a TASKED worker's own taskId still wins over a (structurally-redundant, but
+  //        defensively-checked) reviewOfTaskId; a manager-role session's reviewOfTaskId never leaks
+  //        either, same write-time enforcement as 6c's taskId check. All on the RAW column (mutant: a
+  //        swapped-precedence `reviewOfTaskId ?? taskId` implementation would fail the second check
+  //        below; an implementation that ignores reviewOfTaskId entirely would fail the first). -------
+  mkSession(db1, { id: "sess1e", projectId: "p1", agentId: "a1", engineSessionId: "eng-1e", cwd: cwd1, taskId: null, reviewOfTaskId: "task-1b", role: "worker" });
+  writeTranscript(cwd1, "eng-1e", [{ in: 55, out: 15, cc: 5, cr: 2 }]);
+  await sampler1.tick(new Date());
+  check("6d tick() falls back to reviewOfTaskId for a TASKLESS review worker (RAW column)",
+    rawTaskId(dbFile1, "sess1e") === "task-1b");
+
+  mkSession(db1, { id: "sess1f", projectId: "p1", agentId: "a1", engineSessionId: "eng-1f", cwd: cwd1, taskId: "task-1b", reviewOfTaskId: "task-should-not-win", role: "worker" });
+  writeTranscript(cwd1, "eng-1f", [{ in: 56, out: 16, cc: 6, cr: 3 }]);
+  await sampler1.tick(new Date());
+  check("6d tick() prefers the session's OWN taskId over reviewOfTaskId when both are set",
+    rawTaskId(dbFile1, "sess1f") === "task-1b");
+
+  mkSession(db1, { id: "sess1g", projectId: "p1", agentId: "a1", engineSessionId: "eng-1g", cwd: cwd1, taskId: null, reviewOfTaskId: "task-should-not-leak-3", role: "manager" });
+  writeTranscript(cwd1, "eng-1g", [{ in: 57, out: 17, cc: 7, cr: 4 }]);
+  await sampler1.tick(new Date());
+  check("6d tick() forces taskId: null for a manager-role session even when reviewOfTaskId is set",
+    rawTaskId(dbFile1, "sess1g") === null);
+
   db1.close();
 
   // ===================================================================================================
@@ -550,6 +574,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — session usage COLLECTION ENGINE: tick delta (first-sight/incremental/zero) + reset (never negative) + teardown tail + tick-driven prune + one-time boot backfill (seed-once marker + zero-skip + lastSeen no-double-count) + RESTART double-count regression (DB-aware first-sight baseline: gap-window exact, new-session counts full) + one-shot corrective reset (runs once, re-arms backfill) + LAYER-1 incremental reader (chunk-boundary == full parse, straddling-duplicate dedup, partial-line buffering, rotation/truncation reset) + end-to-end async-tick delta equivalence — pure file IO, ZERO agent tokens."
+  ? "\n✅ ALL PASS — session usage COLLECTION ENGINE: tick delta (first-sight/incremental/zero) + reset (never negative) + teardown tail + tick-driven prune + one-time boot backfill (seed-once marker + zero-skip + lastSeen no-double-count) + RESTART double-count regression (DB-aware first-sight baseline: gap-window exact, new-session counts full) + one-shot corrective reset (runs once, re-arms backfill) + LAYER-1 incremental reader (chunk-boundary == full parse, straddling-duplicate dedup, partial-line buffering, rotation/truncation reset) + end-to-end async-tick delta equivalence + reviewOfTaskId fallback (taskless review worker attributes to the reviewed task, a tasked worker's own taskId still wins, manager/platform never leaks either) — pure file IO, ZERO agent tokens."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

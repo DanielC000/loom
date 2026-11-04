@@ -91,7 +91,9 @@ export const DEFAULT_SESSION_SUMMARY_CAP = 50;
 // settle-reconcile discriminator), never a field an agent-facing view should carry.
 // @decision 963462f5 — forcedPlain excluded too, same posture: purely internal spawn machinery.
 // @decision 0eaaa693 — cutBaseSha excluded too, same posture: purely internal merge-safety plumbing.
-const SESSION_LIST_FIELDS: Record<Exclude<keyof SessionListItem, "reachedReadyAt" | "forcedPlain" | "cutBaseSha">, 1> = {
+// @decision aaacafe4 — reviewOfTaskId excluded too, same posture: purely internal usage-attribution
+// plumbing (the usage sampler's own fallback), never a field an agent-facing view should carry.
+const SESSION_LIST_FIELDS: Record<Exclude<keyof SessionListItem, "reachedReadyAt" | "forcedPlain" | "cutBaseSha" | "reviewOfTaskId">, 1> = {
   id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
   resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
   parentSessionId: 1, taskId: 1, worktreePath: 1, branch: 1, reviewBaseSha: 1, repoKey: 1,

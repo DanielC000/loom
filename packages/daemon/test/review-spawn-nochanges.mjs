@@ -103,6 +103,17 @@ commitAll(authorWt, "feature", GIT_ID);
 // BEFORE cutting the review worktree — see Session.reviewBaseSha's doc.
 const reviewedHeadSha = execSync(`git rev-parse ${authorBranch}`, { cwd: repo }).toString().trim();
 
+// Card aaacafe4: a real SESSION row for the "author" (not just the worktree/branch above), bound to
+// authorTaskId — what `reviewOfWorkerSessionId` form (E) resolves its own `reviewOfTaskId` stamp FROM
+// (`reviewed.taskId`). processState:'exited' deliberately — a LIVE row here would wrongly claim
+// liveSessionIdForTask(authorTaskId)'s mutex before (D) ever gets to spawn a REAL tasked worker on it.
+const authorSessionId = `rsn-author-session-${sfx}`;
+db.insertSession({
+  id: authorSessionId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: authorWt,
+  processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "worker", parentSessionId: mgrId, taskId: authorTaskId, worktreePath: authorWt, branch: authorBranch,
+});
+
 // Build one review worker: a taskless worktree forked from the reviewed branch's tip (mirrors
 // createWorktree's `forkFrom` call in spawnWorker), with Session.reviewBaseSha stamped exactly as
 // spawnWorker stamps it.
@@ -157,6 +168,26 @@ try {
   check("(C) FRESH spawnWorker review spawn: taskless", cRow.taskId === null);
   check("(C) FRESH spawnWorker review spawn: reviewBaseSha stamped to the reviewed tip (the REAL spawn-time stamping call site)", cRow.reviewBaseSha === reviewedHeadSha);
   check("(C) FRESH spawnWorker review spawn: cut its OWN branch, never the author's", cRow.branch !== authorBranch);
+  // Card aaacafe4: usage-attribution-only field — stamped to the reviewed TASK (reviewOfTaskId form
+  // resolves it directly from the already-resolved task), never read by any card/mutex/lane logic.
+  check("(C) reviewOfTaskId stamped to the reviewed task (reviewOfTaskId form)", cRow.reviewOfTaskId === authorTaskId);
+  check("(C) the reviewed task's own column is UNCHANGED by the review spawn (no card move)", db.getTask(authorTaskId).columnKey === "todo");
+  check("(C) no mutex taken by the review spawn: the reviewed task still has NO live worker registered", db.liveSessionIdForTask(authorTaskId) == null);
+
+  // ── (E) FRESH, reviewOfWorkerSessionId form (card aaacafe4): a taskless spawnWorker pointed at the
+  //    author's own SESSION (not its task) must resolve reviewOfTaskId from THAT session's taskId, same
+  //    usage-attribution-only posture as (C)'s reviewOfTaskId form — taskless, card unmoved, no mutex. ──
+  const E = await sessionsSpawn.spawnWorker(mgrId, { agentId, kickoffPrompt: "REVIEW_E", reviewOfWorkerSessionId: authorSessionId });
+  cleanupDirs.push(E.worktreePath);
+  const eRow = db.getSession(E.id);
+  check("(E) FRESH spawnWorker review spawn (reviewOfWorkerSessionId): taskless", eRow.taskId === null);
+  check("(E) reviewOfTaskId stamped to the reviewed SESSION's own task (reviewOfWorkerSessionId form)", eRow.reviewOfTaskId === authorTaskId);
+  check("(E) the reviewed task's own column is STILL UNCHANGED by this review spawn either (no card move)", db.getTask(authorTaskId).columnKey === "todo");
+  check("(E) no mutex taken by this review spawn either: the reviewed task still has NO live worker registered", db.liveSessionIdForTask(authorTaskId) == null);
+  // Retire C/E directly (white-box — same style as buildReviewWorker's own manual inserts above): they've
+  // served their assertions, and (D) below needs a free concurrency-cap slot to spawn its own worker.
+  db.setProcessState(C.id, "exited");
+  db.setProcessState(E.id, "exited");
 
   // ── (D) ALIASED, via REAL spawnWorker (round 3 test gap, the exact CR-round-2 aliasing scenario): a
   //    TASKED spawnWorker(taskId:T, reviewOfTaskId:T) resolves to T's OWN existing worktree/branch
@@ -167,6 +198,9 @@ try {
   check("(D) ALIASED spawnWorker review spawn: resolves to the author's OWN existing worktree (reuse, not a fresh fork)", D.worktreePath === authorWt);
   check("(D) ALIASED spawnWorker review spawn: resolves to the author's OWN existing branch", dRow.branch === authorBranch);
   check("(D) ALIASED spawnWorker review spawn: reviewBaseSha stamped to null (never the aliased tip — CR round 2's fix)", dRow.reviewBaseSha === null);
+  // Card aaacafe4: reviewOfTaskId still resolves here (redundant with the real taskId, but harmless) —
+  // the usage sampler's own fallback reads taskId FIRST, so this never actually changes attribution.
+  check("(D) ALIASED spawnWorker review spawn: reviewOfTaskId still stamped (redundant with taskId, harmless)", dRow.reviewOfTaskId === authorTaskId);
 } finally {
   db.close();
   for (const dir of cleanupDirs) {
@@ -176,6 +210,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a review spawn's ahead-of-base check now compares against Session.reviewBaseSha (the reviewed branch's tip), not mainline HEAD: a reviewer that authors nothing can report noChanges:true and auto-retires; one that DID author a commit is still refused, with a message naming the real base instead of sending it hunting for uncommitted work or leaving merge status ambiguous. A REAL spawnWorker review spawn (fresh AND aliased) stamps reviewBaseSha correctly either way."
+  ? "\n✅ ALL PASS — a review spawn's ahead-of-base check now compares against Session.reviewBaseSha (the reviewed branch's tip), not mainline HEAD: a reviewer that authors nothing can report noChanges:true and auto-retires; one that DID author a commit is still refused, with a message naming the real base instead of sending it hunting for uncommitted work or leaving merge status ambiguous. A REAL spawnWorker review spawn (fresh AND aliased) stamps reviewBaseSha correctly either way. Both review-target forms (reviewOfTaskId and reviewOfWorkerSessionId) also stamp reviewOfTaskId for usage attribution, stay taskless, leave the reviewed card unmoved, and never take its one-live-worker mutex."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

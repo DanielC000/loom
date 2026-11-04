@@ -10078,6 +10078,9 @@ export class SessionService {
       throw new Error("worker_spawn: pass EITHER reviewOfWorkerSessionId OR reviewOfTaskId, not both");
     }
     let reviewForkFrom: { branch: string; repo: ResolvedRepo; headSha: string } | undefined;
+    // @decision aaacafe4 — USAGE-ATTRIBUTION ONLY (Session.reviewOfTaskId's doc); never fed into `taskId`
+    // or any card/mutex/lane logic — that's `taskId` above, already resolved and left untouched by this.
+    let reviewOfTaskIdToStamp: string | null = null;
     if (opts.reviewOfWorkerSessionId) {
       const reviewed = this.db.getSession(opts.reviewOfWorkerSessionId);
       if (!reviewed || reviewed.projectId !== manager.projectId) {
@@ -10094,6 +10097,7 @@ export class SessionService {
         throw new Error(`worker_spawn reviewOfWorkerSessionId '${opts.reviewOfWorkerSessionId}' names branch '${reviewed.branch}' which does not exist in ${reviewRepo.path}`);
       }
       reviewForkFrom = { branch: reviewed.branch, repo: reviewRepo, headSha };
+      reviewOfTaskIdToStamp = reviewed.taskId ?? null;
     } else if (opts.reviewOfTaskId) {
       const reviewRef = opts.reviewOfTaskId.trim();
       if (/\s/.test(reviewRef)) throw new Error(`worker_spawn reviewOfTaskId '${opts.reviewOfTaskId}' is not a valid task id`);
@@ -10116,6 +10120,7 @@ export class SessionService {
         throw new Error(`worker_spawn reviewOfTaskId '${reviewRef}' resolves to branch '${reviewBranch}' which does not exist in ${reviewRepo.path} — has a worker been spawned on it yet?`);
       }
       reviewForkFrom = { branch: reviewBranch, repo: reviewRepo, headSha };
+      reviewOfTaskIdToStamp = reviewedTask.id;
     }
     // Resolve THAT agent's profile for its browser-automation opt-in + skill subset — a manager spawns a
     // QA worker by pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is
@@ -10310,6 +10315,10 @@ export class SessionService {
         // aliased taskId/reviewOf* silently takes the reuse/reattach path (forkFrom never consulted).
         reviewBaseSha: reviewBaseShaToStamp(forkedFromReviewed, reviewForkFrom?.headSha),
         cutBaseSha, // the worker's recorded fork point — see Session.cutBaseSha's doc
+        // @decision aaacafe4 — usage-attribution ONLY (Session.reviewOfTaskId's doc); null for every
+        // non-review spawn. Never gated on forkedFromReviewed: an aliased taskId/reviewOf* still reviewed
+        // a real task, and mis-attributing its usage costs nothing a mutex/lane depends on.
+        reviewOfTaskId: reviewOfTaskIdToStamp,
         repoKey: targetRepo.key === "primary" ? null : targetRepo.key, // stamped once — see Session.repoKey's doc
       };
       this.db.insertSession(worker);
@@ -10428,6 +10437,9 @@ export class SessionService {
         this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(),
           managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
+          // @decision aaacafe4 — observability only, mirrors reviewOfTaskId's own usage-attribution
+          // posture; omitted (not null) for every non-review spawn, byte-identical to before this existed.
+          detail: reviewOfTaskIdToStamp != null ? { reviewOfTaskId: reviewOfTaskIdToStamp } : undefined,
         });
       });
       if (internal?.revive) {

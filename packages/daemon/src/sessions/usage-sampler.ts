@@ -18,9 +18,18 @@ const BACKFILL_MARKER_KEY = "usage_backfill_done";
  * `null` here closes that gap at the source: a purged manager/platform row can never resurface attributed
  * to a task via the sample's own denormalized column, which is exactly the column designed to survive a
  * purge.
+ *
+ * For a non-manager/platform session with no `taskId` of its own (a taskless review spawn), falls back
+ * to `reviewOfTaskId` so a review worker's billed usage attributes to the task it reviewed instead of
+ * `unattributed`. A TASKED session's own `taskId` always wins (see `review-spawn-nochanges.mjs` scenario
+ * D, the ALIASED case where both are set to the same task).
+ *
+ * @decision aaacafe4 — never merge or prefer `reviewOfTaskId` over `taskId`; read it only as a fallback.
  */
 function sampleTaskId(session: Session): string | null {
-  return session.role === "manager" || session.role === "platform" ? null : (session.taskId ?? null);
+  return session.role === "manager" || session.role === "platform"
+    ? null
+    : (session.taskId ?? session.reviewOfTaskId ?? null);
 }
 
 /** app_meta one-time marker for the corrective reset that ships the restart-double-count fix. The boot that

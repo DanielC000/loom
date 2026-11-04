@@ -806,6 +806,20 @@ export interface Session {
    */
   reviewBaseSha?: string | null;
   /**
+   * For a REVIEW spawn only (`worker_spawn` with `reviewOfWorkerSessionId`/`reviewOfTaskId`), the
+   * task id this review is OF — resolved from whichever form was used (`reviewOfWorkerSessionId` →
+   * that session's own `taskId`; `reviewOfTaskId` → the resolved task's id) and stamped ONCE at
+   * spawn, same shape as `reviewBaseSha`. `null`/absent on every non-review spawn, and also `null`
+   * when the reviewed session/task itself had no task to attribute (rare).
+   *
+   * USAGE-ATTRIBUTION ONLY — consumed exclusively by the usage sampler's `sampleTaskId()` fallback
+   * (`session.taskId ?? session.reviewOfTaskId ?? null`) so a review worker's billed usage counts
+   * against the task it reviewed instead of landing `unattributed`.
+   *
+   * @decision aaacafe4 — never read by any card/mutex/lane logic; never conflate with `taskId`.
+   */
+  reviewOfTaskId?: string | null;
+  /**
    * This worker's branch's recorded CUT BASE (fork point) — see `WorktreeInfo.cutBaseAdvanced`'s doc
    * (`git/worktrees.ts`) for how it's derived, and `docs/decisions/0eaaa693-fork-point-ancestry-check.md`
    * for why it's a separate field from `reviewBaseSha` above.
