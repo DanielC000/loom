@@ -183,11 +183,21 @@ jobs:
   # docs/decisions/884c8d56-no-bundleddependencies-in-published-package.md and docs/releasing.md):
   # there was previously no global-install smoke test anywhere in CI. Deliberately a SEPARATE job (not a
   # step inside `release`) so it runs on windows-latest too, not just release's own ubuntu-latest.
+  #
+  # Card d21719d3 — a SECOND matrix dimension, `npm: [stock, pinned]`, crossed with `os` for 4 legs
+  # total. `stock` uses whatever npm each runner's Node 22 setup bundles (npm ~10.x); `pinned` upgrades
+  # to the exact npm 11.x version the `publish` job below pins (`npm@11.18.0` — see that job's own step
+  # for why that exact version) before running the same install. Node 24 ships npm 11 by default, and the
+  # upstream bug this whole job guards against (npm/cli#7355, see docs/decisions/884c8d56-*.md) is still
+  # open — covering npm 11 here proves the global-install path stays clean on the newer major too, not
+  # only the one Node 22 happens to bundle. Each leg is an independent GitHub-hosted runner VM, so
+  # upgrading npm on a `pinned` leg can never touch a `stock` leg's own npm.
   global-install-smoke:
     needs: release
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest]
+        npm: [stock, pinned]
     runs-on: ${{ matrix.os }}
     steps:
       # Needed for scripts/smoke-dist-shared-import.mjs below (the dynamic-import step) — this job has
@@ -199,6 +209,13 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "22"
+
+      - name: Upgrade npm to the pinned 11.x (matches the publish job's own npm@11.18.0 pin below)
+        if: matrix.npm == 'pinned'
+        run: npm install -g npm@11.18.0
+
+      - name: Report which npm ran this leg
+        run: npm --version
 
       - name: Download the packed tarball
         uses: actions/download-artifact@v4

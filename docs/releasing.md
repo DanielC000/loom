@@ -102,9 +102,18 @@ regardless, via this job.
 
 **`global-install-smoke` (card `884c8d56`) — a matrix job on `windows-latest` AND `ubuntu-latest`,
 between `release` (which packs the tarball and uploads it as an artifact) and `publish` (which
-`release` and this job both gate).** Each matrix leg downloads the packed tarball and runs a real
-`npm install --global <tarball>` into a scratch `--prefix`, then two checks, each hard-failing the
-release on any problem:
+`release` and this job both gate).** **Card `d21719d3` crosses that `os` matrix with a second dimension,
+`npm: [stock, pinned]`, for 4 legs total.** `stock` runs with whatever npm Node 22's `setup-node` action
+bundles (npm ~10.x); `pinned` first upgrades to the exact npm 11.x version the `publish` job below pins
+(`npm@11.18.0`, via `npm install -g npm@11.18.0`) before running the identical install. npm 11 is covered
+because Node 24 ships it by default, and the upstream bug this whole job guards against
+([npm/cli#7355](https://github.com/npm/cli/issues/7355), see
+`docs/decisions/884c8d56-no-bundleddependencies-in-published-package.md`) is still open — the pinned leg
+proves the global-install path stays clean on the newer npm major too, not only the one Node 22 happens
+to bundle. Each leg logs its own `npm --version` so the four legs (`windows-latest`/`ubuntu-latest` ×
+`stock`/`pinned`) are distinguishable in the Actions log. Each matrix leg downloads the packed tarball
+and runs a real `npm install --global <tarball>` into a scratch `--prefix`, then two checks, each
+hard-failing the release on any problem:
 
 1. **`loom --version`** — npm's `--prefix` global-install layout differs by platform (POSIX puts shims
    in `<prefix>/bin`, Windows puts them directly in `<prefix>`), so this step puts the right bin dir on
