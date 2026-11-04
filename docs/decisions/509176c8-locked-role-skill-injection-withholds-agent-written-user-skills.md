@@ -340,6 +340,20 @@ real subset; no further fix is planned here.
   fresh spawn, and deliver-all can ADD a skill the human deliberately excluded, not just drop ones they
   wanted. This is an accepted trade, not a gap to patch here.
 
+## Scope note (card `af65fef1`, investigate-only, no code change): rounds 4-6 cover LOCKED roles only
+
+Rounds 4-6 close the explicit-subset bypass for LOCKED roles only. For manager/worker, `skills` stays
+agent-writable and `injectSkills`'s explicit-subset branch still bypasses `passesCapabilityGate` (card
+`31f997e7`) exactly as it bypasses this record's own locked-role trust filter — unchanged by this card,
+and already pinned by `skills-capability-bound.mjs` cases (4)/(5) (role:`"manager"`, asserting the
+bypass fires at a shared cwd both granted and ungranted). Who can author a non-locked profile's `skills`:
+human REST (Profiles UI), the Platform Lead (`mcp/platform.ts`'s `profile_create`/`profile_update`), and
+the Setup Assistant (`mcp/setup.ts`'s own) — never a manager (its only profile tool, `agent_assign_profile`,
+assigns an EXISTING profile verbatim and cannot author `skills`) or a worker (no profile-authoring tools
+at all). See `31f997e7`'s own record for why this carries no security consequence: a capability-bound
+skill delivers doctrine text only, never the MCP mount itself, which is gated separately and untouched by
+this bypass.
+
 ## Source
 
 Round 4 adds `agentLockedRoleSkillsError`/`roleChangeLockedSkillsCarryoverError` (`profiles/validate.ts`),
