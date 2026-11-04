@@ -53,7 +53,7 @@ process.env.HOME = sandboxHome;           // POSIX
 
 const {
   detectPermissionWidening, permissionWideningField, frontmatterReadIncomplete, frontmatterUnrecognizedSyntax,
-  frontmatterFenceUnrecognized,
+  frontmatterFenceUnrecognized, FRONTMATTER_RE, REAL_LOADER_FENCE_RE,
 } = await import("../dist/skills/permissionWidening.js");
 const { listSkills, writeSkill } = await import("../dist/skills/store.js");
 const { Db } = await import("../dist/db.js");
@@ -222,6 +222,79 @@ try {
   check("[99f2ae1a][accepted-over-match] a frontmatter VALUE containing a literal --- is caught as an "
       + "unrecognized fence, even though the real loader itself never reaches the hooks: line past it",
     same(detectPermissionWidening("---\nname: a---b\nhooks: y\n---\nbody"), ["hooks", "frontmatter-fence-unrecognized"]));
+
+  // The fixtures below pin REAL_LOADER_FENCE_RE's own EXTRACTED BODY (not just a vector boolean).
+  // @decision 712148f1 — REAL_LOADER_FENCE_RE must stay a byte-exact port of the loader's extractor; do
+  // not swap in the EOL-requiring closer.
+  const MIDLINE_TRAILING_SPACE_FM = "---\nname: a---b\nhooks: y\n---   \nbody";
+  const realBodyMatch = MIDLINE_TRAILING_SPACE_FM.match(REAL_LOADER_FENCE_RE);
+  check("[12bb342b] REAL_LOADER_FENCE_RE (the real loader's own lenient, no-EOL-required closer) "
+      + "truncates at the FIRST literal --- it finds, regardless of what trails the REAL closer further "
+      + "down — extracted body is 'name: a', not the full intended block",
+    realBodyMatch?.[1] === "name: a");
+  const loomBodyMatch = MIDLINE_TRAILING_SPACE_FM.match(FRONTMATTER_RE);
+  check("[12bb342b] Loom's OWN FRONTMATTER_RE (line-anchored close) skips the mid-line decoy and finds "
+      + "the REAL closer instead — extracted body is the FULL intended block, trailing spaces on the "
+      + "real closer notwithstanding",
+    loomBodyMatch?.[1] === "name: a---b\nhooks: y");
+  check("[12bb342b] the two captures disagree, so frontmatterFenceUnrecognized still correctly flags "
+      + "this exact fixture (ties the body-level pin above back to the existing vector-level coverage)",
+    frontmatterFenceUnrecognized(MIDLINE_TRAILING_SPACE_FM) === true);
+  // Mutant: swap REAL_LOADER_FENCE_RE for the P5/_9 shape (EOL-required close) on the SAME fixture, same
+  // capture-group contract (match[1] is the body) — the API is unchanged, only which regex answers it.
+  // P5/_9 does NOT stop at the mid-line decoy (its close requires the --- to START its own line, which
+  // "a---b"'s embedded --- does not) and instead finds the REAL closer further down — INCLUDING its
+  // trailing spaces, via `[ \t]*` before the EOL check — so it captures the FULL block, not the
+  // truncated one REAL_LOADER_FENCE_RE actually captures. If a future change ever swapped
+  // REAL_LOADER_FENCE_RE's own definition for this shape, the assertion above (`realBodyMatch?.[1] ===
+  // "name: a"`) would go RED against the mutant's output — proving this fixture, not merely the vector
+  // boolean, is what would actually catch that regression.
+  const P5_MUTANT_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/;
+  const mutantBodyMatch = MIDLINE_TRAILING_SPACE_FM.match(P5_MUTANT_RE);
+  check("[12bb342b][mutant] swapping in the P5/_9 (EOL-required) regex on the SAME fixture captures a "
+      + "DIFFERENT body than the real sE/bk-based REAL_LOADER_FENCE_RE does — this fixture would catch "
+      + "a real swap, not pass either way",
+    mutantBodyMatch?.[1] === "name: a---b\nhooks: y" && mutantBodyMatch?.[1] !== realBodyMatch?.[1]);
+
+  // --- card 12bb342b (manager addendum): pin the CARD'S OWN exact divergence input — the one its body
+  // poses as the hypothetical case where P5 feeding the parse would matter — against BOTH FRONTMATTER_RE
+  // and REAL_LOADER_FENCE_RE (sE/bk) directly, not merely against the AGGREGATE vector list. This matters
+  // because `detectPermissionWidening` on this exact input is CLEAN either way "allowed-tools: Bash"
+  // never makes it into EITHER regex's captured body (it sits past whichever --- the engine stops at), so
+  // an aggregate-only assertion here would be insensitive to whether the two regexes actually agree on
+  // WHAT THEY STOP AT — only a direct capture comparison proves that.
+  const CARD_DIVERGENCE_INPUT = "---\nname: x\n---x\nallowed-tools: Bash\n---\n";
+  const cardRealRaw = CARD_DIVERGENCE_INPUT.match(REAL_LOADER_FENCE_RE)?.[1];
+  const cardLoomRaw = CARD_DIVERGENCE_INPUT.match(FRONTMATTER_RE)?.[1];
+  // REAL_LOADER_FENCE_RE's lazy close captures THROUGH the line terminator right before the first literal
+  // --- it finds (here, the --- starting "---x" sits on its own line, so the terminator is INCLUDED);
+  // FRONTMATTER_RE's own grouping carves that SAME terminator OUTSIDE its capture (see
+  // frontmatterFenceUnrecognized's own doc comment in permissionWidening.ts for why — this is the
+  // established, already-used normalization, not a new one invented for this fixture). Stripping exactly
+  // one trailing \r?\n off the REAL side only (never the Loom side) is what makes an honest comparison —
+  // and it is NOT vacuous: if FRONTMATTER_RE's own close semantics ever changed to match sE's unanchored
+  // shape, its raw capture would ALSO start carrying that trailing terminator, and this exact equality
+  // would go RED (the normalization is asymmetric by design, not accidentally permissive).
+  check("[12bb342b][card-input] REAL_LOADER_FENCE_RE's raw capture on the card's own divergence input is "
+      + "'name: x\\n' (includes the line terminator before the first literal --- it finds)",
+    cardRealRaw === "name: x\n");
+  check("[12bb342b][card-input] FRONTMATTER_RE's raw capture on the SAME input is 'name: x' (same stopping "
+      + "point, terminator carved outside the group by its own grouping, not by a different stopping rule)",
+    cardLoomRaw === "name: x");
+  check("[12bb342b][card-input] NOT A REAL DIVERGENCE: after the established trailing-terminator "
+      + "normalization, FRONTMATTER_RE and REAL_LOADER_FENCE_RE (sE — the confirmed real extractor, never "
+      + "P5/_9) agree on exactly what the loader extracts here — 'name: x', with 'allowed-tools: Bash' "
+      + "never live to either reader. This directly confirms the card's own hypothesis: Loom agrees with "
+      + "the loader on its stated divergence input, because bk/sE (not P5) is what the real loader uses.",
+    cardLoomRaw === (cardRealRaw ?? "").replace(/\r?\n$/, ""));
+  check("[12bb342b][card-input] frontmatterFenceUnrecognized agrees: no disagreement is flagged for this "
+      + "exact input (it is NOT one of the five fence-evasion fixtures card 99f2ae1a's own table covers)",
+    frontmatterFenceUnrecognized(CARD_DIVERGENCE_INPUT) === false);
+  check("[12bb342b][card-input] detectPermissionWidening reports CLEAN for this exact input — confirming "
+      + "'allowed-tools: Bash' is genuinely never seen as live frontmatter by Loom's own scan either, "
+      + "matching what the real loader (via sE) also extracts",
+    same(detectPermissionWidening(CARD_DIVERGENCE_INPUT), []));
+
   // Negative control: the new check must not newly flag ordinary, boring fences it already passed.
   check("[99f2ae1a][trap] an ordinary boring fence with a real hooks: key reports ONLY ['hooks'] — no "
       + "fence disagreement for a shape both readers already agree on",

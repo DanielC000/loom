@@ -119,6 +119,21 @@ check("(self) [99f2ae1a] a value containing a literal --- is flagged as an unrec
     + "(accepted over-match — the real loader truncates its own parse there too, so nothing past the "
     + "embedded --- was ever live to it either, but Loom's wider capture disagrees and withholds)",
   scanContent("---\nname: a---b\nhooks: y\n---\nbody").includes("frontmatter (unrecognized fence shape)"));
+
+// card 12bb342b (manager addendum): there is NO separate text-copy of FRONTMATTER_RE in this file to pin
+// independently (card 84893cab removed it — this guard dynamic-imports the real detector directly now,
+// per decision record 36101180). Pinning "the bundled guard copy" against the card's own exact
+// divergence input therefore means pinning THIS FILE'S OWN call path (scanContent ->
+// detectPermissionWidening -> the real FRONTMATTER_RE/REAL_LOADER_FENCE_RE) against it, not a second
+// regex literal that no longer exists. See skill-permission-widening-detector.mjs's own
+// `[12bb342b][card-input]` fixtures for the direct raw-capture comparison proving FRONTMATTER_RE and
+// REAL_LOADER_FENCE_RE (sE) agree on this input.
+check("(self) [12bb342b] the card's own exact divergence input (`---\\nname: x\\n---x\\nallowed-tools: "
+    + "Bash\\n---\\n`) is reported CLEAN by this guard's own call path — 'allowed-tools: Bash' never "
+    + "live, and no fence-shape disagreement either, matching what the real loader (bk/sE, confirmed the "
+    + "real extractor — never P5/_9) also extracts",
+  scanContent("---\nname: x\n---x\nallowed-tools: Bash\n---\n").length === 0);
+
 // card 99f2ae1a round 2 (Code Review item 4): a leading BOM at the very START of the file (position 0,
 // before the `---`), combined with a mid-line close evasion.
 check("(self) [99f2ae1a][r2] a file-start BOM combined with a mid-line-close evasion is STILL flagged as "

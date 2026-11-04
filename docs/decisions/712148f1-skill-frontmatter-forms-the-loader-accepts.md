@@ -18,10 +18,11 @@ releases with no Loom-side signal; re-verify this record's claims (ideally by re
 static-scan method against the installed binary) after any CLI upgrade, rather than trusting an old
 scan's offsets or conclusions against new bytes.
 
-**Round 3 note (out of scope for this round):** the installed `claude.exe` was updated 2026-11-03
-~02:30Z — it may now be newer than the 2.1.317 build this record's per-form table is pinned to. The
-CLI's two `---` closers / EOL requirement is carded separately; that card owns re-running this record's
-own static-scan method against whatever build is installed when it picks the work up, not this round.
+**Round 3 note — RESOLVED by Round 6 below:** the installed `claude.exe` was updated 2026-11-03 ~02:30Z,
+newer than the 2.1.317 build this record's per-form table was originally pinned to. By the time card
+`12bb342b` picked up the two-closers question, the binary had moved AGAIN, to a 2026-11-04 build — see
+"Round 6" below for that re-verification (table rows 2/4/5/6 reconfirmed, row 3 holds with a drifted
+literal, the P5-vs-bk extraction question settled) rather than re-deriving it from this note.
 
 ## Method (why this is evidence, not a guess)
 
@@ -193,16 +194,17 @@ False-positive measurement for round 2's allowlist is its own section below ("Fa
 (round 2)") — read it alongside round 1's own measurement, which used a slightly different population
 shape (counted `references/**` files inline rather than separately).
 
-**YAML parser identification (time-boxed ~20 min, per the card):** a static byte-offset string scan of
-the installed `claude.exe` (2.1.317) found the literal string `"Map keys must be unique"` — a distinctive
-error message from the `eemeli/yaml` npm package's `Composer` — present somewhere in the binary. This is
-suggestive that Claude Code bundles a real YAML parser SOMEWHERE in its dependency tree, but it does NOT
-by itself establish that the skill-frontmatter LOADER (the specific code path this record's own method
-section already searched) uses that parser for `allowed-tools`/`hooks` extraction — the original
-per-call-site search near the three boundary-regex sites still found no key/value-interpretation regex,
-consistent with a lenient, non-full-YAML frontmatter reader. Common markers for other candidate libraries
-(`js-yaml`, `yaml-ast-parser`) were searched and NOT found. INCONCLUSIVE; not pursued further within the
-time-box. Re-running this same string scan after a future CLI upgrade may settle it either way.
+**YAML parser identification — RESOLVED (card `12bb342b`, re-verified against the 2026-11-04 build):**
+the frontmatter body is parsed by `Bun.YAML.parse` — found directly as the body of the function the real
+extractor's `pMn(y)` call reaches (`function jN(e){return Bun.YAML.parse(e)}`), beside a sibling
+`Bun.YAML.stringify` export, in the same module as the frontmatter-reading function itself. The earlier
+`"Map keys must be unique"` (`eemeli/yaml`) hit was a DECOY from elsewhere in the bundle, not this code
+path — this record's original "consistent with a lenient, non-full-YAML frontmatter reader" conclusion
+was WRONG; the loader uses a real, full YAML parser. **This does NOT by itself establish new per-row
+verdicts for the quoted-key/space-before-colon/flow-mapping/explicit-tagged-merge-key/anchor-alias-tag-
+value rows below** (Bun's own YAML conformance for each specific shape — e.g. merge keys, tags, anchors —
+is not yet individually checked); that re-check is carded separately as `6ee2f9dd`. Do not assert any of
+those rows' verdicts as confirmed from this finding alone — see "Do not" below.
 
 ## False-positive measurement (round 1)
 
@@ -460,6 +462,13 @@ alignment of `FRONTMATTER_OPEN_RE`/`FRONTMATTER_RE` themselves).
   `bk`'s lazier/wider semantics (a body that can end mid-line, or legitimately swallow blank lines).
   `REAL_LOADER_FENCE_RE` (a literal, separately-maintained port of `bk`) exists ONLY to ask "does the
   real loader see a live block here, and with what body" — see `docs/decisions/99f2ae1a-*.md`.
+- Do not cite the old "consistent with a lenient, non-full-YAML frontmatter reader" conclusion (round 6,
+  card `12bb342b`) — the real loader parses the extracted body with `Bun.YAML.parse`, a full YAML parser;
+  that conclusion was wrong, not merely superseded.
+- Do not treat `Bun.YAML.parse`'s discovery (round 6) as itself confirming any of the quoted-key /
+  space-before-colon / flow-mapping / explicit-tagged-merge-key / anchor-alias-tag-value rows above as
+  loader-accepted — Bun's own per-shape YAML conformance is unchecked; that re-check is carded `6ee2f9dd`,
+  not this record.
 
 ## Round 5 (card `84893cab`) — SUPERSEDED: the guard's text-copy regexes are gone, and so is the lockstep test
 
@@ -475,3 +484,71 @@ compare, in either direction.
 superseded by this round** — not because the underlying caution was wrong, but because its premise (a
 second copy exists to drift) no longer holds. Do not resurrect either the copy or the lockstep test; see
 `docs/decisions/36101180-skill-permission-widening-bundled-asset-lint.md` for the current rule and why.
+
+## Round 6 (card `12bb342b`) — re-verified against a NEWER, 2026-11-04 build; P5-vs-bk extraction question CONFIRMED; table rows 2/4/5/6 reconfirmed, row 3's literal drifted
+
+The installed `claude.exe` moved again since Round 4's own re-verification note (which only flagged the
+mtime change, it never re-ran the scan): now 342,408,352 bytes, mtime `2026-11-04T01:00:05` (local). The
+literal string `"2.1.317"` has **0 hits** in this build — no semver could be recovered via a static byte
+read without running `claude --version`, which this card's own standing constraint forbids. Every finding
+in this round is therefore pinned to "the build installed as of 2026-11-04", not to a recoverable version
+number — re-verify by re-running the same byte-offset method, not by trusting this date against a later
+install.
+
+**The P5-vs-bk extraction question (the open question card `9d01b4c1`'s own "Round 3" section left
+pointing at this card) is CONFIRMED.** Re-running this record's own static-scan method against the
+2026-11-04 build found, in the readable JS-source region (never executed), at offset ~292087393:
+
+```
+var eTe=30,vye=65536,sE=/^---\s*\n([\s\S]*?)---\s*\n?/,_9=/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/;
+function Gm(e,n){return e}
+function xd(e,n,r){let s=e;e=qw(e);let h=e.indexOf("---",3)<0?null:e.match(sE); ...
+```
+
+`sE` (this build's minified name for the recovered `bk`) is what feeds the extraction: `e.match(sE)` ->
+`h[1]` -> the body that reaches `pMn(y)` -> `jN(e){return Bun.YAML.parse(e)}` (see the corrected "YAML
+parser identification" note above). `_9` (this build's name for `P5`) appears only inside a
+`quoteLossyValues`-gated branch, producing the literal `'the closing --- is ambiguous (a value containing
+"---"?) — part of the block may have read as body'` string — never contributing to the extracted body.
+This matches `9d01b4c1`'s own triage-note hypothesis exactly, now independently re-confirmed against a
+build newer than the one that triage note was written against.
+
+`permissionWidening.ts`'s `REAL_LOADER_FENCE_RE` (built from `REAL_LOADER_FENCE_OPEN_RE`, card `99f2ae1a`)
+is **byte-for-byte identical** to `sE` above — `/^---\s*\n([\s\S]*?)---\s*\n?/` either way. Card
+`99f2ae1a`'s own fence-boundary design was therefore already correct on this exact question before this
+card existed; no code change was needed here. New fixtures pinning `REAL_LOADER_FENCE_RE`'s own closer
+semantics by asserting the EXTRACTED BODY (not just the `frontmatter-fence-unrecognized` vector boolean,
+which the existing round-4 fixtures never did), plus a mutant proof that swapping in the `_9`/P5 shape on
+the same fixture captures a different body, now live in `skill-permission-widening-detector.mjs` (search
+`[12bb342b]`).
+
+**The card's own posed divergence input, directly checked (manager addendum):** the card body poses
+`---\nname: x\n---x\nallowed-tools: Bash\n---\n` as the case where it would matter whether `P5` or `bk`
+feeds the parse. Checked directly against the real compiled `FRONTMATTER_RE`/`REAL_LOADER_FENCE_RE`
+(not merely the aggregate vector list, which is insensitive to this question on this exact input, since
+"allowed-tools: Bash" sits past whichever `---` either regex stops at either way): `REAL_LOADER_FENCE_RE`
+raw-captures `"name: x\n"` (its lazy close includes the line terminator right before the first literal
+`---` it finds); `FRONTMATTER_RE` raw-captures `"name: x"` (the SAME stopping point — its own grouping
+just carves that terminator outside the capture, per `frontmatterFenceUnrecognized`'s own established
+normalization). After stripping that one trailing terminator off the real side only, the two agree
+exactly: `"name: x"` either way. **Not a real divergence** — confirmed via `frontmatterFenceUnrecognized`
+returning `false` and `detectPermissionWidening` returning `[]` for this exact input, too. This directly
+confirms the card's own hypothesis, now with ground truth rather than a hand-traced regex: Loom agrees
+with the real loader on its own stated example, because `bk`/`sE` (not `P5`) is what the real loader
+actually uses. Fixtures: `skill-permission-widening-detector.mjs` (search `[card-input]`) and the
+bundled-asset lint's own self-test in `skill-permission-widening-guard.mjs` (search `[12bb342b]`) — the
+latter pins the guard's own call path rather than a second regex copy, since card `84893cab` (Round 5
+above) already removed that copy; there is nothing left to pin independently there.
+
+**Table re-verification:** rows 2 (`...` as closer), 4 (`~~~!` tilde fence), 5 (fenced-trigger regex), and
+6 (inline-trigger backtick-lookbehind regex) were re-run against the 2026-11-04 build and are
+RECONFIRMED — same 0-hit/byte-identical results as against 2.1.317. Row 3 (leading BOM tolerance) still
+HOLDS (still tolerated by at least one implementation), but the specific regex literal implementing it
+has visibly drifted in shape since 2.1.317 — this build's version is
+`^(﻿?(?:[ \t]*\r?\n)*---[ \t]*\r?\n)([\s\S]*?)(?=\r?\n---[ \t]*(?...` (truncated in this scan),
+wider on the open-fence side than the `﻿?` prefix the row's original evidence cited. The row's
+VERDICT is unchanged; only the literal backing it moved. Rows 7-10 (quoted key / space-before-colon /
+flow-mapping / explicit-tagged-merge-key forms) were NOT re-verified by direct regex search this round —
+see the corrected "YAML parser identification" note above and card `6ee2f9dd` for why a regex-search
+method can no longer settle them, and don't conflate "not re-verified this round" with "unconfirmed for
+the same reason as before."
