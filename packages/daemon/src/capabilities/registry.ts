@@ -41,7 +41,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { loomGithubMcpBin, ensureGithubMcpBinaryAsync } from "./github-binary.js";
 import type { EnsureGithubBinaryOpts, EnsureGithubBinaryResult, GithubBinaryProvisionOutcome } from "./github-binary.js";
-import { loomNpmPinnedBin, ensureNpmPinnedAsync, validateNpmPinnedSpec } from "./npm-pinned.js";
+import { loomNpmPinnedBin, ensureNpmPinnedAsync, validateNpmPinnedSpec, npmPinnedLockAssetPath, npmPinnedLockContentHash } from "./npm-pinned.js";
 import type { EnsureNpmPinnedOpts, EnsureNpmPinnedResult, NpmPinnedProvisionOutcome } from "./npm-pinned.js";
 import { resolveExecutable } from "../pty/resolve-bin.js";
 import { LOOM_FIRST_PARTY_SERVER_IDS } from "../pty/tool-attribution.js";
@@ -557,7 +557,10 @@ function resolveNpmPinned(slug: string, provision: Extract<CapabilityProvision, 
     provisionStatus.set(slug, { state: "failed", reason: "invalid-spec", errorTail: invalid, lastAttemptAt: Date.now() });
     return null;
   }
-  const bin = loomNpmPinnedBin(provision.package, provision.version, provision.binRelativeToPackageJson);
+  // @decision 66ab2bc0 — the install dir (and so the bin path) is keyed on the committed lock's own
+  // content hash, memoized per lockAssetPath so this never re-reads+re-hashes on every cold-path spawn.
+  const lockHash = npmPinnedLockContentHash(npmPinnedLockAssetPath(provision.package, provision.version));
+  const bin = loomNpmPinnedBin(provision.package, provision.version, provision.binRelativeToPackageJson, lockHash);
   if (fs.existsSync(bin)) {
     resolvedBinCache.set(slug, bin);
     provisionStatus.set(slug, { state: "ready", binary: bin, lastAttemptAt: Date.now() });

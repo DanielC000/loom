@@ -19,9 +19,11 @@
  * shape at boot — see its own doc for the narrow-match/idempotency contract.
  *
  * "image-gen" (kind "npm-pinned", migrated off its original "bundled"/npx form — card e7d6e43b): a pinned
- * npm package, `mcp-imagenate` (npm, MIT, github.com/mimo-3/mcp-imagenate), installed with
- * `npm install --ignore-scripts` into `<LOOM_HOME>/node/mcp-imagenate/<version>/` so its spawn hot path
- * never pays an `npx` re-resolve/download. See `capabilities/npm-pinned.ts` for the
+ * npm package, `mcp-imagenate` (npm, MIT, github.com/mimo-3/mcp-imagenate), installed with `npm ci
+ * --ignore-scripts` (card 66ab2bc0 — against a COMMITTED `package-lock.json` asset that locks the whole
+ * resolved tree, not just this top-level pin) into `<LOOM_HOME>/node/mcp-imagenate/<version>-<lockHash>/`
+ * (see `loomNpmPinnedDir` in `npm-pinned.ts`) so its
+ * spawn hot path never pays an `npx` re-resolve/download. See `capabilities/npm-pinned.ts` for the
  * download(install)+resolve pipeline and `registry.ts`'s `resolveNpmPinned` for the fs.existsSync-fast-path
  * + background-provision resolution (mirrors `github-binary`). `migrateImageGenCapabilityToNpmPinned`
  * (below) rewrites an EXISTING install's old `bundled`/npx row to this shape at boot — see its own doc for
@@ -76,7 +78,11 @@ import { GITHUB_MCP_SERVER_VERSION } from "./github-binary.js";
  * npx re-resolves to whatever is CURRENTLY "latest" at every spawn, so a future compromised release of the
  * package would silently run with the user's live Gemini key on the very next spawn — and the trust
  * assessment above is specific to THIS version's actual code, not to "whatever mcp-imagenate becomes."
- * Bumping this constant is a deliberate, reviewed act (mirrors GITHUB_MCP_SERVER_VERSION's own pin).
+ * Bumping this constant is a deliberate, reviewed act (mirrors GITHUB_MCP_SERVER_VERSION's own pin) —
+ * and, since card 66ab2bc0, ALSO requires regenerating the committed lock asset at
+ * `packages/daemon/assets/npm-pinned-locks/mcp-imagenate/<new-version>/package-lock.json` and re-reading
+ * its `npm audit` output BEFORE committing the bump; see docs/decisions/66ab2bc0-npm-pinned-lockfile-pin.md
+ * ("The bump ritual is extended, not duplicated") for the exact steps — not repeated here.
  */
 const MCP_IMAGENATE_VERSION = "0.2.1";
 
@@ -89,7 +95,11 @@ const MCP_IMAGENATE_VERSION = "0.2.1";
  * docs/decisions/c3f9ce1f-shadcn-mcp-dotenv-exfil-mitigation.md) depends on THIS version's bundle still
  * importing the literal specifier `@dotenvx/dotenvx`; a bump REQUIRES re-running
  * `test/shadcn-dotenv-exfil-real-spawn.mjs` by hand first (`LOOM_NETWORK_SMOKE=1`) — the hermetic tests
- * cannot catch a future shadcn release changing that import shape.
+ * cannot catch a future shadcn release changing that import shape. Since card 66ab2bc0, a bump ALSO
+ * requires regenerating the committed lock asset at
+ * `packages/daemon/assets/npm-pinned-locks/shadcn/<new-version>/package-lock.json` and re-reading its
+ * `npm audit` output first — see docs/decisions/66ab2bc0-npm-pinned-lockfile-pin.md for the exact steps,
+ * added to this same ritual rather than duplicated here.
  */
 const SHADCN_VERSION = "4.23.0";
 

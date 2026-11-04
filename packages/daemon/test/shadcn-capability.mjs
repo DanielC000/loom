@@ -61,7 +61,7 @@ process.env.LOOM_NPM_PINNED_NO_PROVISION = "1";
 const { Db } = await import("../dist/db.js");
 const { seedDefaultCapabilities, bundledCapabilities } = await import("../dist/capabilities/seed.js");
 const { resolveCapabilityServer, validateCapabilityDefInput } = await import("../dist/capabilities/registry.js");
-const { loomNpmPinnedBin } = await import("../dist/capabilities/npm-pinned.js");
+const { loomNpmPinnedBin, npmPinnedLockAssetPath, npmPinnedLockContentHash } = await import("../dist/capabilities/npm-pinned.js");
 const { buildMcpServers } = await import("../dist/pty/host.js");
 const { validateProfile } = await import("../dist/profiles/validate.js");
 const { BUNDLED_PROFILES } = await import("../dist/profiles/seed.js");
@@ -125,7 +125,10 @@ check("(c, cold) resolveCapabilityServer on the REAL (cold, provisioning-disable
 // file there directly (mirrors npm-pinned-provision.mjs's own 'READY_BIN' pattern) proves the REAL
 // "npm-pinned" kind dispatch end to end, through the ACTUAL seeded row, rather than swapping in a
 // different provision kind as a stand-in.
-const realBinPath = loomNpmPinnedBin(scProvision.package, scProvision.version, scProvision.binRelativeToPackageJson);
+// card 66ab2bc0 round 2 (D1): the install dir (and so the bin path) is now keyed on a content hash of
+// the REAL committed lock asset for this row's package/version.
+const scLockHash = npmPinnedLockContentHash(npmPinnedLockAssetPath(scProvision.package, scProvision.version));
+const realBinPath = loomNpmPinnedBin(scProvision.package, scProvision.version, scProvision.binRelativeToPackageJson, scLockHash);
 fs.mkdirSync(path.dirname(realBinPath), { recursive: true });
 fs.writeFileSync(realBinPath, "// test stand-in, never executed by this test\n");
 
@@ -265,7 +268,8 @@ check("(h) image-gen's own real row resolves null when cold + provisioning disab
 // Warm image-gen's REAL row the SAME way (c) warmed shadcn's — a direct fs.existsSync hit against its
 // own FINAL install path, no fixture/kind swap — so this is a true byte-identity proof of the SAME
 // resolveCapabilityServer npm-pinned branch both rows share, not a different code path.
-const igBinPath = loomNpmPinnedBin(igProvision.package, igProvision.version, igProvision.binRelativeToPackageJson);
+const igLockHash = npmPinnedLockContentHash(npmPinnedLockAssetPath(igProvision.package, igProvision.version));
+const igBinPath = loomNpmPinnedBin(igProvision.package, igProvision.version, igProvision.binRelativeToPackageJson, igLockHash);
 fs.mkdirSync(path.dirname(igBinPath), { recursive: true });
 fs.writeFileSync(igBinPath, "// test stand-in, never executed by this test\n");
 const igWarmResolved = resolveCapabilityServer(igRow, {});

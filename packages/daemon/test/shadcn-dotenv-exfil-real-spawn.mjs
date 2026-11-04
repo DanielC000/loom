@@ -63,7 +63,7 @@ process.env.npm_config_cache = TEST_NPM_CACHE_DIR; // every npm call this test (
 
 const { Db } = await import("../dist/db.js");
 const { seedDefaultCapabilities } = await import("../dist/capabilities/seed.js");
-const { ensureNpmPinnedAsync, loomNpmPinnedBin } = await import("../dist/capabilities/npm-pinned.js");
+const { ensureNpmPinnedAsync, loomNpmPinnedBin, npmPinnedLockAssetPath, npmPinnedLockContentHash } = await import("../dist/capabilities/npm-pinned.js");
 const { buildMcpServers } = await import("../dist/pty/host.js");
 const { SHADCN_NO_DOTENV_PRELOAD_SCRIPT } = await import("../dist/paths.js");
 
@@ -76,7 +76,11 @@ const scProvision = JSON.parse(scRow.provisionJson);
 check("precondition: the seeded shadcn row's package is 'shadcn'", scProvision.package === "shadcn");
 
 // ===================== (a) REAL npm install of the pinned version, via the REAL production pipeline =====================
-const bin = loomNpmPinnedBin(scProvision.package, scProvision.version, scProvision.binRelativeToPackageJson);
+// card 66ab2bc0 round 2 (D1): the install dir (and so the bin path) is keyed on a content hash of the
+// REAL committed lock asset for this row's package/version — production (ensureNpmPinnedAsync with no
+// override, below) resolves the SAME hash internally.
+const scLockHash = npmPinnedLockContentHash(npmPinnedLockAssetPath(scProvision.package, scProvision.version));
+const bin = loomNpmPinnedBin(scProvision.package, scProvision.version, scProvision.binRelativeToPackageJson, scLockHash);
 check("precondition: the bin is ABSENT before install (cold)", !fs.existsSync(bin));
 const installResult = await ensureNpmPinnedAsync({
   package: scProvision.package, version: scProvision.version, binRelativeToPackageJson: scProvision.binRelativeToPackageJson,

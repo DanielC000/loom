@@ -82,6 +82,27 @@ function run(cmd, cmdArgs, opts = {}) {
 // 1. Build the workspace (shared → daemon → web) unless told to skip.
 if (!noBuild) { log("building workspace (pnpm build) …"); run("pnpm", ["build"]); }
 
+// card 66ab2bc0 n3: the first committed npm-pinned lock asset found (two levels under
+// assets/npm-pinned-locks/<package>/<version>/package-lock.json) — a representative sentinel for the
+// required-files check below, so a packaging drop under that tree is caught here rather than only once an
+// end user's daemon tries to provision a pinned npm capability and fails closed. Scans rather than
+// hardcoding one package/version pair, which would duplicate (and drift against) seed.ts's own
+// MCP_IMAGENATE_VERSION/SHADCN_VERSION constants. Returns a path that deliberately never exists when none
+// is found, so the existsSync check below fails exactly like any other missing required file.
+function firstNpmPinnedLockAsset(locksRoot) {
+  try {
+    for (const pkg of fs.readdirSync(locksRoot)) {
+      const pkgDir = path.join(locksRoot, pkg);
+      if (!fs.statSync(pkgDir).isDirectory()) continue;
+      for (const version of fs.readdirSync(pkgDir)) {
+        const lockPath = path.join(pkgDir, version, "package-lock.json");
+        if (fs.existsSync(lockPath)) return lockPath;
+      }
+    }
+  } catch { /* fall through to the never-exists sentinel below */ }
+  return path.join(locksRoot, "<none-found>", "package-lock.json");
+}
+
 // 2. Verify the built inputs exist.
 const { daemonDist, webDist, sharedDist, daemonAssets } = PACKAGED_ROOTS;
 for (const [label, p] of [
@@ -89,6 +110,7 @@ for (const [label, p] of [
   ["web dist", path.join(webDist, "index.html")],
   ["shared dist", path.join(sharedDist, "index.js")],
   ["daemon assets", path.join(daemonAssets, "hook-relay.mjs")],
+  ["daemon assets (npm-pinned lock)", firstNpmPinnedLockAsset(path.join(daemonAssets, "npm-pinned-locks"))],
 ]) {
   if (!fs.existsSync(p)) {
     console.error(`[pack:npm] missing ${label} (${p}). Run \`pnpm build\` first (or drop --no-build).`);

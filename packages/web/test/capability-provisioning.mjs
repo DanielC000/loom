@@ -132,7 +132,7 @@ check("every classified failure reason across all three kinds gets a human phras
   const reasons = [
     "no-base-python", "venv-create-failed", "pip-failed",
     "unsupported-platform", "download-failed", "checksum-mismatch", "extract-failed",
-    "invalid-spec", "install-failed", "timeout", "disabled",
+    "invalid-spec", "lock-missing", "install-failed", "timeout", "disabled",
   ];
   for (const r of reasons) {
     const text = provisionReasonText(r, "npm-pinned");

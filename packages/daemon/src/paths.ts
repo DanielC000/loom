@@ -412,6 +412,17 @@ export const ENV_ISOLATED_LAUNCH_SCRIPT = path.join(__dirname, "..", "assets", "
  */
 export const SHADCN_NO_DOTENV_PRELOAD_SCRIPT = path.join(__dirname, "..", "assets", "shadcn-no-dotenv-preload.mjs");
 /**
+ * `<assets>/npm-pinned-locks/` — the root of the per-`package`/`version` COMMITTED `package-lock.json`
+ * assets for the "npm-pinned" capability kind (card 66ab2bc0). e7d6e43b's own decision record pinned only
+ * the TOP-LEVEL package version, deliberately leaving transitive deps unpinned ("a future, stricter pin
+ * … if transitive drift ever becomes a concrete problem"); card 66ab2bc0 measured that bar as met (both
+ * shipped rows' live resolutions already carried known vulnerabilities) and closed it by locking the WHOLE
+ * resolved tree via a real npm lockfile + `npm ci`, rather than a top-level-only checksum (see
+ * docs/decisions/66ab2bc0-npm-pinned-lockfile-pin.md). Ships as an asset like the scripts above — see
+ * {@link npm-pinned.ts!npmPinnedLockAssetPath} for the per-package/version path under this root.
+ */
+export const NPM_PINNED_LOCKS_DIR = path.join(__dirname, "..", "assets", "npm-pinned-locks");
+/**
  * decision-records.mjs (card 661b7d46) — the PostToolUse `Read` hook that appends complete, out-of-band
  * decision records to a `Read` result when the range actually returned intersects a `// @decision <id>`
  * source anchor. Ships as an asset, read live from the package dir like the other hooks here — no
@@ -770,7 +781,7 @@ export const LOOM_HOME_WRITE_DENY_REGISTRY: readonly LoomHomeWriteDenyEntry[] = 
   { relPath: "codescape", kind: "dir" },
   { relPath: "python", kind: "dir" }, // also covers python/venv, python/hf-cache, python/kokoro-cache — all nested
   { relPath: "bin", kind: "dir" }, // also covers bin/github-mcp-server/<version>
-  { relPath: "node", kind: "dir" }, // card e7d6e43b — npm-pinned capability installs, e.g. node/<package>/<version>
+  { relPath: "node", kind: "dir" }, // card e7d6e43b — npm-pinned capability installs, e.g. node/<package>/<version>-<lockHash>
   { relPath: "deploy-backup", kind: "dir" },
   { relPath: "merge-danger-latches", kind: "dir" },
   { relPath: "merge-quarantines", kind: "dir" },

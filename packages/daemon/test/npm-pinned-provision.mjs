@@ -48,13 +48,30 @@ const {
   resolveCapabilityServer, getCapabilityProvisionStatus, __setNpmPinnedProvisionerForTest, resetCapabilityProvisionStatus,
 } = await import("../dist/capabilities/registry.js");
 const { buildMcpServers } = await import("../dist/pty/host.js");
-const { loomNpmPinnedBin, loomNpmPinnedDir, ensureNpmPinnedAsync, __setSpawnForTest, __setKillTreeForTest, sweepStaleTmpInstallDirs } = await import("../dist/capabilities/npm-pinned.js");
+const {
+  loomNpmPinnedBin, loomNpmPinnedDir, npmPinnedLockAssetPath, npmPinnedLockContentHash,
+  ensureNpmPinnedAsync, __setSpawnForTest, __setKillTreeForTest, sweepStaleTmpInstallDirs,
+} = await import("../dist/capabilities/npm-pinned.js");
 const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 
 const PKG = "mcp-imagenate";
 const VERSION = "0.2.1";
 const BIN_REL = "dist/index.js";
-const READY_BIN = loomNpmPinnedBin(PKG, VERSION, BIN_REL);
+// card 66ab2bc0 round 2 (D1): the install dir (and so the bin path) is now keyed on a content hash of the
+// REAL committed lock asset for this pair — every row below reuses this SAME package/version, so this is
+// the one hash every `loomNpmPinnedBin`/`loomNpmPinnedDir` call in this file that targets it must match.
+const LOCK_HASH = npmPinnedLockContentHash(npmPinnedLockAssetPath(PKG, VERSION));
+const READY_BIN = loomNpmPinnedBin(PKG, VERSION, BIN_REL, LOCK_HASH);
+
+// A throwaway fixture lock asset (card 66ab2bc0) — these (8a)/(8a2) sections exercise
+// ensureNpmPinnedAsync's real atomic-install logic directly, via the __setSpawnForTest fake child, so the
+// LOCK ASSET's own content is irrelevant (the fake spawn never reads it) but its mere EXISTENCE is now a
+// precondition the real function checks before doing anything else. Any valid-looking lockfile shape
+// satisfies it; content correctness is covered separately by npm-pinned-lock-asset.mjs.
+const FIXTURE_LOCK_FOR_ATOMIC_TESTS = path.join(process.env.LOOM_HOME, "fixture-atomic-lock.json");
+fs.mkdirSync(path.dirname(FIXTURE_LOCK_FOR_ATOMIC_TESTS), { recursive: true });
+fs.writeFileSync(FIXTURE_LOCK_FOR_ATOMIC_TESTS, JSON.stringify({ lockfileVersion: 3, packages: { "": {} } }));
+const ATOMIC_LOCK_HASH = npmPinnedLockContentHash(FIXTURE_LOCK_FOR_ATOMIC_TESTS);
 
 const npmRow = {
   id: "cap-npm", slug: "image-gen", name: "Image Gen", description: "d", transport: "stdio", kind: "npm-pinned",
@@ -194,7 +211,7 @@ function rowFor(slug) {
   resolveCapabilityServer(row, {});
   await flush();
   check("(3) retry precondition: first attempt failed", getCapabilityProvisionStatus(row.slug)?.state === "failed");
-  const retryBin = loomNpmPinnedBin(PKG, row.slug, BIN_REL);
+  const retryBin = loomNpmPinnedBin(PKG, row.slug, BIN_REL, null); // label-only path fed to the fake provisioner — never filesystem-checked
   __setNpmPinnedProvisionerForTest(fixed({ binary: retryBin, outcome: "ready" }));
   resetCapabilityProvisionStatus(row.slug); // the explicit human-retry bypass
   resolveCapabilityServer(row, {});
@@ -210,7 +227,7 @@ function rowFor(slug) {
   // (9a) retry-on-ready: must still read 'ready' both immediately after the reset AND after the
   // route's own re-resolve call (proving the cache-hit short-circuit re-asserts 'ready' too).
   const row = rowFor("case-retry-on-ready");
-  const bin = loomNpmPinnedBin(PKG, VERSION, BIN_REL);
+  const bin = loomNpmPinnedBin(PKG, VERSION, BIN_REL, LOCK_HASH);
   fs.mkdirSync(path.dirname(bin), { recursive: true });
   fs.writeFileSync(bin, "// fixture bin\n"); // a real file, so the warm existsSync path is genuine, not assumed
   __setNpmPinnedProvisionerForTest(fixed({ binary: null, outcome: "install-failed" })); // must NEVER actually be called below
@@ -246,7 +263,7 @@ function rowFor(slug) {
   await flush();
   check("(9c) precondition: the slug is 'failed'", getCapabilityProvisionStatus(row3.slug)?.state === "failed");
   let rekicked = false;
-  __setNpmPinnedProvisionerForTest(async () => { rekicked = true; return { binary: loomNpmPinnedBin("pkg-9c-failed", "1.0.0", BIN_REL), outcome: "ready" }; });
+  __setNpmPinnedProvisionerForTest(async () => { rekicked = true; return { binary: loomNpmPinnedBin("pkg-9c-failed", "1.0.0", BIN_REL, null), outcome: "ready" }; });
   resetCapabilityProvisionStatus(row3.slug);
   check("(9c) retry-on-failed: the reset actually clears the terminal failure", getCapabilityProvisionStatus(row3.slug) === undefined);
   resolveCapabilityServer(row3, {}); // the retry route's re-resolve
@@ -262,7 +279,7 @@ function rowFor(slug) {
 // kickCapabilityProvision tracker (registry.ts) must never let that downgrade the already-'ready' status.
 {
   const row = rowFor("case-stale-no-downgrade");
-  const bin = loomNpmPinnedBin(PKG, VERSION, BIN_REL);
+  const bin = loomNpmPinnedBin(PKG, VERSION, BIN_REL, LOCK_HASH);
   fs.mkdirSync(path.dirname(bin), { recursive: true });
   fs.writeFileSync(bin, "// fixture bin\n");
   // a warm fs.existsSync resolve (no kick at all) sets status to 'ready' directly.
@@ -281,7 +298,7 @@ function rowFor(slug) {
 {
   const row = rowFor("case-traversal");
   // node_modules/<pkg>/../../x.js normalizes to <installDir>/x.js — pre-create a REAL file there.
-  const installDir = loomNpmPinnedDir(PKG, row.slug);
+  const installDir = loomNpmPinnedDir(PKG, row.slug, null);
   fs.mkdirSync(installDir, { recursive: true });
   const trapFile = path.join(installDir, "x.js");
   fs.writeFileSync(trapFile, "// an unrelated, real, pre-existing file\n");
@@ -316,9 +333,9 @@ function rowFor(slug) {
       process.nextTick(() => ee.emit("close", 0)); // settles via "close" (card e7d6e43b round 2), not "exit"
       return ee;
     });
-    const result = await ensureNpmPinnedAsync({ package: pkg, version, binRelativeToPackageJson: binRel });
+    const result = await ensureNpmPinnedAsync({ package: pkg, version, binRelativeToPackageJson: binRel, lockAssetPathOverride: FIXTURE_LOCK_FOR_ATOMIC_TESTS });
     check("(8a) a fake 'succeeded but no bin' install resolves 'install-failed'", result.outcome === "install-failed");
-    check("(8a) the FINAL install dir was never created (no partial tree visible to the hot path)", !fs.existsSync(loomNpmPinnedDir(pkg, version)));
+    check("(8a) the FINAL install dir was never created (no partial tree visible to the hot path)", !fs.existsSync(loomNpmPinnedDir(pkg, version, ATOMIC_LOCK_HASH)));
     __setSpawnForTest();
   }
 
@@ -344,10 +361,10 @@ function rowFor(slug) {
       return ee; // deliberately never emits "exit" — only the timeout settles this
     });
     __setKillTreeForTest(async () => { killTreeCalled = true; }); // simulate a successful tree-kill issue
-    const result = await ensureNpmPinnedAsync({ package: pkg, version, binRelativeToPackageJson: binRel, timeoutMs: 50 });
+    const result = await ensureNpmPinnedAsync({ package: pkg, version, binRelativeToPackageJson: binRel, timeoutMs: 50, lockAssetPathOverride: FIXTURE_LOCK_FOR_ATOMIC_TESTS });
     check("(8a2) a killed-after-partial-write install resolves 'timeout', never 'ready'", result.outcome === "timeout" && result.binary === null);
     check("(8a2) the process TREE kill was actually issued (not just a plain child.kill())", killTreeCalled);
-    check("(8a2) the FINAL dir was never created — the partially-written bin is never visible to the hot path", !fs.existsSync(loomNpmPinnedDir(pkg, version)));
+    check("(8a2) the FINAL dir was never created — the partially-written bin is never visible to the hot path", !fs.existsSync(loomNpmPinnedDir(pkg, version, ATOMIC_LOCK_HASH)));
     check("(8a2) the real resolver independently reports this slug as cold too", resolveCapabilityServer(
       { id: "cap-killed", slug: "case-killed-after-write", name: "x", description: "d", transport: "stdio", kind: "npm-pinned", provisionJson: JSON.stringify({ kind: "npm-pinned", package: pkg, version, binRelativeToPackageJson: binRel }), toolAllowlistJson: "[]", wantsScratchDir: false, requiresConnection: false, secretEnvVar: null, createdAt: new Date().toISOString() },
       {},
@@ -362,7 +379,7 @@ function rowFor(slug) {
     const pkg = "atomic-stale-tmp-pkg";
     const version = "1.0.0";
     const binRel = "bin/cli.js";
-    const parentDir = path.dirname(loomNpmPinnedDir(pkg, version));
+    const parentDir = path.dirname(loomNpmPinnedDir(pkg, version, null));
     const staleTmp = path.join(parentDir, `.${version}.tmp-deadbeef0001`);
     fs.mkdirSync(path.join(staleTmp, "node_modules", pkg, "bin"), { recursive: true });
     fs.writeFileSync(path.join(staleTmp, "node_modules", pkg, "bin", "cli.js"), "// stale, abandoned by a crashed attempt\n");
@@ -397,7 +414,7 @@ function rowFor(slug) {
   {
     const pkg = "sweep-test-pkg";
     const version = "1.0.0";
-    const parentDir = path.dirname(loomNpmPinnedDir(pkg, version));
+    const parentDir = path.dirname(loomNpmPinnedDir(pkg, version, null));
     fs.mkdirSync(parentDir, { recursive: true });
 
     const oldTmp = path.join(parentDir, ".9.9.9.tmp-oldstale01");
@@ -414,9 +431,24 @@ function rowFor(slug) {
 
     check("(8d) the OLD stale tmp dir was swept", !fs.existsSync(oldTmp));
     check("(8d) the FRESH tmp dir was left alone (too young to assume abandoned)", fs.existsSync(freshTmp));
-    check("(8d) the final (un-suffixed) dir was never created/touched by the sweep", !fs.existsSync(loomNpmPinnedDir(pkg, version)));
+    check("(8d) the final (un-suffixed) dir was never created/touched by the sweep", !fs.existsSync(loomNpmPinnedDir(pkg, version, null)));
 
     fs.rmSync(freshTmp, { recursive: true, force: true }); // test cleanup
+  }
+
+  // (8e) card 66ab2bc0 round 2 (D1): an OLD-SHAPE (pre-round-2, version-only, no content-hash suffix) dir
+  // with a REAL bin in it is NOT mistaken for ready by the REAL hot-path resolver — mirrors (8b)'s
+  // stale-tmp-dir shape, for the old final-dir shape instead of an abandoned tmp dir.
+  {
+    const pkg = "atomic-old-shape-pkg";
+    const version = "1.0.0";
+    const binRel = "bin/cli.js";
+    const oldShapeBin = path.join(process.env.LOOM_HOME, "node", pkg, version, "node_modules", pkg, binRel);
+    fs.mkdirSync(path.dirname(oldShapeBin), { recursive: true });
+    fs.writeFileSync(oldShapeBin, "// pre-round-2 (old-shape) install — must never be mistaken for ready\n");
+    const row4 = { id: "cap-old-shape", slug: "case-old-shape", name: "x", description: "d", transport: "stdio", kind: "npm-pinned", provisionJson: JSON.stringify({ kind: "npm-pinned", package: pkg, version, binRelativeToPackageJson: binRel }), toolAllowlistJson: "[]", wantsScratchDir: false, requiresConnection: false, secretEnvVar: null, createdAt: new Date().toISOString() };
+    check("(8e) an old-shape (version-only) dir with a real bin is NOT mistaken for ready (the real resolver still reports cold)", resolveCapabilityServer(row4, {}) === null);
+    check("(8e) the old-shape bin is left alone (this resolve path doesn't delete pre-existing content)", fs.existsSync(oldShapeBin));
   }
 }
 
@@ -426,7 +458,7 @@ function rowFor(slug) {
     ...rowFor("case-scratch-dir"), wantsScratchDir: true,
     provisionJson: JSON.stringify({ kind: "npm-pinned", package: PKG, version: VERSION, binRelativeToPackageJson: BIN_REL, outputDirEnvVar: "NANO_BANANA_OUTPUT_DIR" }),
   };
-  const bin = loomNpmPinnedBin(PKG, VERSION, BIN_REL);
+  const bin = loomNpmPinnedBin(PKG, VERSION, BIN_REL, LOCK_HASH);
   fs.mkdirSync(path.dirname(bin), { recursive: true });
   fs.writeFileSync(bin, "// fixture bin\n");
   const server = resolveCapabilityServer(scratchRow, { scratchDir: "/tmp/scratch-dir-xyz" });

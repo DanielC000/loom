@@ -1,17 +1,28 @@
 /**
  * Loom-managed provisioning for a SEED-ONLY "npm-pinned" capability kind (card e7d6e43b): a pinned npm
- * package installed with `npm install --ignore-scripts` into `<LOOM_HOME>/node/<package>/<version>/`.
- * Mirrors `github-binary.ts`'s event-loop discipline exactly: the spawn hot path only ever does a
- * synchronous `fs.existsSync` (see `resolveNpmPinned` in `registry.ts`); the actual install here runs OFF
- * the event loop, in the BACKGROUND, kicked by that resolver on a cold miss. This kind exists so a
- * `bundled`/npx-resolved capability (today: "image-gen") can be migrated onto a kind whose spawn hot path
- * never pays an `npx` re-resolve/download, mirroring the python-venv/github-binary precedent for npm.
+ * package installed with `npm ci --ignore-scripts` (card 66ab2bc0 — was `npm install`, see below) into
+ * `<LOOM_HOME>/node/<package>/<version>-<lockHash>/` (see {@link loomNpmPinnedDir}). Mirrors
+ * `github-binary.ts`'s event-loop discipline exactly: the spawn hot path only ever does a synchronous
+ * `fs.existsSync` (see `resolveNpmPinned` in `registry.ts`);
+ * the actual install here runs OFF the event loop, in the BACKGROUND, kicked by that resolver on a cold
+ * miss. This kind exists so a `bundled`/npx-resolved capability (today: "image-gen") can be migrated onto
+ * a kind whose spawn hot path never pays an `npx` re-resolve/download, mirroring the python-venv/
+ * github-binary precedent for npm.
  *
  * TRUST + ATOMICITY: `provisionJson` lives in a DB row, so it is constant-AT-SEED-TIME but not
  * compile-time-constant — a hand-edited/corrupted row must never reach the shell, and a killed-mid-install
  * child must never leave a partial tree visible as "ready". `--ignore-scripts` is ALWAYS present (never
  * conditional, never agent/owner-settable) — this is a SEED-ONLY kind (`validateCapabilityDefInput` never
  * accepts it from an owner, same posture as `github-binary`).
+ *
+ * LOCKED (card 66ab2bc0): `npm install --ignore-scripts <pkg>@<version>` pinned the TOP-LEVEL package
+ * only — every transitive dependency re-resolved against whatever the registry currently published,
+ * unpinned and unverified beyond npm's own live `dist.integrity` fetch. This kind now installs via
+ * `npm ci` against a COMMITTED `package-lock.json` asset ({@link npmPinnedLockAssetPath}) that locks the
+ * WHOLE resolved tree (every transitive package's version + integrity hash) — see
+ * docs/decisions/66ab2bc0-npm-pinned-lockfile-pin.md for the trade-off this accepts (a lock freezes
+ * today's resolution, vulnerable transitive versions included, until someone deliberately regenerates it)
+ * and the extended version-bump ritual.
  *
  * @decision e7d6e43b — never interpolate a path into the install command string; never skip
  * validateNpmPinnedSpec before building a path or calling existsSync; never install directly into the
@@ -21,17 +32,20 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { LOOM_HOME } from "../paths.js";
+import { LOOM_HOME, NPM_PINNED_LOCKS_DIR } from "../paths.js";
 import { killGateProcessTree } from "../orchestration/gate-runner.js";
 
-/** `<LOOM_HOME>/node/<package>/<version>/` — the FINAL (post-install) install dir, version-namespaced so
- *  a version bump lands in a FRESH dir (never overwritten in place), mirrors {@link loomGithubMcpBinDir}.
- *  A scoped package's `@scope/name` slash would otherwise create a nested directory the version segment
- *  doesn't expect — callers always pass an already-validated `package` (see
- *  {@link validateNpmPinnedSpec}), but this function itself stays PURE (no validation, no fs access) so
- *  it's cheap to call from a hot-path resolver. */
-export function loomNpmPinnedDir(pkg: string, version: string): string {
-  return path.join(LOOM_HOME, "node", pkg, version);
+/**
+ * `<LOOM_HOME>/node/<package>/<version>-<lockHash>/` — the FINAL (post-install) install dir, keyed on
+ * BOTH `version` AND a content hash of the committed lock (`lockHash`, `null` ⇒ a fixed `-nolock`
+ * dead-end suffix). PURE (no fs access) — the caller hashes BEFORE calling this; mirrors
+ * {@link loomGithubMcpBinDir}'s version-namespacing, one level finer.
+ *
+ * @decision 66ab2bc0 — never let a caller omit `lockHash` / fall back to the pre-round-2 version-only
+ * shape; a dir in that old shape is inert and must never be resolved again.
+ */
+export function loomNpmPinnedDir(pkg: string, version: string, lockHash: string | null): string {
+  return path.join(LOOM_HOME, "node", pkg, lockHash ? `${version}-${lockHash}` : `${version}-nolock`);
 }
 
 /** The ABSOLUTE path to an installed package's own bin script UNDER a given install dir — the package
@@ -45,9 +59,57 @@ function npmPinnedBinUnder(installDir: string, pkg: string, binRelativeToPackage
 
 /** The ABSOLUTE path to the installed package's own bin script inside {@link loomNpmPinnedDir} (the FINAL
  *  path). Mirrors `resolveNodePackage`'s own `binRelativeToPackageJson` convention in `registry.ts`,
- *  applied to an installed-under-LOOM_HOME package instead of an already-installed daemon dependency. */
-export function loomNpmPinnedBin(pkg: string, version: string, binRelativeToPackageJson: string): string {
-  return npmPinnedBinUnder(loomNpmPinnedDir(pkg, version), pkg, binRelativeToPackageJson);
+ *  applied to an installed-under-LOOM_HOME package instead of an already-installed daemon dependency.
+ *  `lockHash` — see {@link loomNpmPinnedDir}'s own doc; callers compute it via
+ *  {@link npmPinnedLockContentHash} BEFORE calling this. */
+export function loomNpmPinnedBin(pkg: string, version: string, binRelativeToPackageJson: string, lockHash: string | null): string {
+  return npmPinnedBinUnder(loomNpmPinnedDir(pkg, version, lockHash), pkg, binRelativeToPackageJson);
+}
+
+/**
+ * The ABSOLUTE path to the COMMITTED `package-lock.json` asset for one `package`/`version` pin. This asset
+ * locks the WHOLE resolved dependency tree (every transitive package's version + integrity hash), not
+ * just the top-level pin `version` already covers. PURE (no fs access) — mirrors {@link loomNpmPinnedDir}.
+ *
+ * @decision 66ab2bc0 — never fall back to an unpinned `npm install` when this asset is missing for a
+ * package/version; fail closed (`lock-missing`) instead.
+ */
+export function npmPinnedLockAssetPath(pkg: string, version: string): string {
+  return path.join(NPM_PINNED_LOCKS_DIR, pkg, version, "package-lock.json");
+}
+
+/** MEMOIZED per absolute `lockAssetPath`, keyed on the file's own `(mtimeMs, size)` (round 3, Code Review
+ *  MINOR 1) — a cheap `fs.statSync` is enough to tell "unchanged since last call" from "added, removed, or
+ *  edited since last call", so the hot path (`registry.ts`'s `resolveNpmPinned`) still pays only one cheap
+ *  read per unchanged lock, but never trusts a hash that no longer matches the file on disk. This is what
+ *  makes BOTH of the bump ritual's sanctioned cases resolve correctly with NO daemon restart: a lock that
+ *  didn't exist yet and was just added (previously: a `null` result was cached forever, so a package whose
+ *  lock showed up after the daemon had already resolved it once stayed stuck `lock-missing`/installed into
+ *  the `-nolock` dead end until a restart), and an in-place content overwrite for a transitive-only fix
+ *  (see "Round 2"/the bump ritual in docs/decisions/66ab2bc0-npm-pinned-lockfile-pin.md) — a changed
+ *  mtime/size is detected on the very next call and re-hashes, so the NEW content hash (and so the new,
+ *  correctly-keyed install dir) is live immediately, not just after a fresh process. A `null` result (file
+ *  missing / unreadable) is NEVER cached, for the same reason. {@link ensureNpmPinnedAsync} does NOT call
+ *  this function at all — it reads+hashes the lock bytes itself (see its own doc) so the bytes it hashes
+ *  and the bytes it installs are provably the same, independent of this cache's behavior. */
+const lockContentHashCache = new Map<string, { mtimeMs: number; size: number; hash: string }>();
+export function npmPinnedLockContentHash(lockAssetPath: string): string | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(lockAssetPath);
+  } catch {
+    return null;
+  }
+  const cached = lockContentHashCache.get(lockAssetPath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.hash;
+  let hash: string;
+  try {
+    hash = crypto.createHash("sha256").update(fs.readFileSync(lockAssetPath)).digest("hex").slice(0, 12);
+  } catch {
+    return null;
+  }
+  lockContentHashCache.set(lockAssetPath, { mtimeMs: stat.mtimeMs, size: stat.size, hash });
+  return hash;
 }
 
 /**
@@ -104,13 +166,18 @@ export function validateNpmPinnedSpec(pkg: string, version: string, binRelativeT
  *   - `invalid-spec`   — {@link validateNpmPinnedSpec} rejected `package`/`version`/`binRelativeToPackageJson`
  *                         BEFORE any path was built or anything was interpolated into the shell — nothing
  *                         was ever spawned, and no existsSync check against the (unvalidated) path ever ran;
- *   - `install-failed` — `npm install` exited non-zero, timed out and left no verified install, or
- *                         completed but the expected bin still doesn't exist inside the temp install dir —
- *                         errorTail carries the captured stdout+stderr tail;
+ *   - `lock-missing`   — no COMMITTED `package-lock.json` asset exists for this package/version (see
+ *                         {@link npmPinnedLockAssetPath}) — checked BEFORE any tmp dir is created or
+ *                         anything is spawned; this kind never falls back to an unpinned `npm install`;
+ *   - `install-failed` — `npm ci` exited non-zero (including a package.json/lock mismatch from a stale
+ *                         lock asset — typically npm's own `EUSAGE` refusal when online; measured as
+ *                         `ENOTCACHED` instead when offline, npm 10.9.2), timed out and left no verified
+ *                         install, or completed but the expected bin still doesn't exist inside the temp
+ *                         install dir — errorTail carries the captured stdout+stderr tail;
  *   - `timeout`        — the install was killed by its bound (the whole process TREE, not just the shell);
  *   - `disabled`       — `LOOM_NPM_PINNED_NO_PROVISION=1` (tests / ops): provisioning was not attempted.
  */
-export type NpmPinnedProvisionOutcome = "ready" | "invalid-spec" | "install-failed" | "timeout" | "disabled";
+export type NpmPinnedProvisionOutcome = "ready" | "invalid-spec" | "lock-missing" | "install-failed" | "timeout" | "disabled";
 
 /** Structured result of {@link ensureNpmPinnedAsync}: the resolved absolute bin path (or null) + why. */
 export interface EnsureNpmPinnedResult {
@@ -126,16 +193,23 @@ export interface EnsureNpmPinnedOpts {
   /** Bound (ms) for the install. Default {@link NPM_PINNED_INSTALL_TIMEOUT_MS}. */
   timeoutMs?: number;
   /**
-   * TEST-ONLY: install this exact npm install-spec instead of `${package}@${version}` — lets a hermetic
-   * test install a LOCAL fixture tarball (e.g. an absolute `.tgz` path) through the SAME real
-   * `npm install --ignore-scripts` spawn path, with no network dependency. Production code (`registry.ts`'s
-   * `resolveNpmPinned`) NEVER sets this — the install-spec is always `${package}@${version}` there. The
-   * resolved bin path is still computed from `package`/`version` alone (the installed tarball's own
-   * `name`/`version` in its package.json must match, or the bin simply won't exist at the expected path
-   * and this classifies as `install-failed` exactly like any other install that doesn't produce the
-   * expected bin).
+   * TEST-ONLY: write this exact string as the synthesized package.json's dependency VALUE for `package`,
+   * instead of `version` — lets a hermetic/real-spawn test point `npm ci` at a LOCAL fixture tarball (an
+   * absolute `file:` URL, e.g. from {@link !url.pathToFileURL}) through the SAME real `npm ci` spawn path,
+   * with no registry dependency. Production code (`registry.ts`'s `resolveNpmPinned`) NEVER sets this —
+   * the dependency value is always `version` there. The resolved bin path is still computed from
+   * `package`/`version` alone (the installed tarball's own `name`/`version` in its package.json must
+   * match, or the bin simply won't exist at the expected path and this classifies as `install-failed`
+   * exactly like any other install that doesn't produce the expected bin).
    */
-  installSpecOverride?: string;
+  dependencySpecOverride?: string;
+  /**
+   * TEST-ONLY: read the committed lock asset from this exact path instead of
+   * {@link npmPinnedLockAssetPath}`(package, version)` — lets a test exercise a FIXTURE lock (e.g. one
+   * generated for a local `dependencySpecOverride` tarball) without needing a real committed asset for
+   * that package/version. Production code never sets this.
+   */
+  lockAssetPathOverride?: string;
 }
 
 /** Bound (ms) for `npm install` — the installed packages this kind targets are small (no native builds,
@@ -206,7 +280,7 @@ type KillTreeFn = (child: ChildProcess) => Promise<void>;
 let killTreeImpl: KillTreeFn = killGateProcessTree;
 export function __setKillTreeForTest(fn?: KillTreeFn): void { killTreeImpl = fn ?? killGateProcessTree; }
 
-/** Run `npm install` to completion ASYNCHRONOUSLY (never blocks the event loop), capturing a bounded
+/** Run `npm ci` to completion ASYNCHRONOUSLY (never blocks the event loop), capturing a bounded
  *  stdout+stderr tail. NEVER rejects — a spawn error, non-zero exit, or timeout all resolve `ok:false`
  *  (mirrors `python/venv.ts`'s `runAsync` / `github-binary.ts`'s `runChildAsync`). `shell:true` (Windows
  *  `npm.cmd`) + a single hardcoded command STRING, and the timeout killing the WHOLE process tree via
@@ -255,13 +329,16 @@ function runNpmInstallAsync(command: string, cwd: string, timeoutMs: number): Pr
 /**
  * THE reusable surface `resolveNpmPinned` (registry.ts) calls OFF the event-loop hot path (from a
  * background provisioning job) to resolve an ABSOLUTE path to a pinned npm package's bin — installing it
- * with `npm install --ignore-scripts` into the per-package/version `<LOOM_HOME>/node/<package>/<version>/`
- * dir on first use. Mirrors `ensureGithubMcpBinaryAsync`'s shape/discipline: ASYNC (never blocks),
- * IDEMPOTENT (a fast `fs.existsSync` short-circuit), BOUNDED (the install has a timeout), and NEVER
- * THROWS — always resolves a CLASSIFIED {@link EnsureNpmPinnedResult}. Validates BEFORE building any
- * path; installs into a temp sibling dir and renames atomically into place as the LAST step, sweeping any
- * abandoned sibling from a prior crashed/killed attempt first — see this file's module doc (the e7d6e43b
- * decision record it cites) for the full ordering/atomicity/tree-kill rationale.
+ * with `npm ci --ignore-scripts` (against the committed lock asset — see {@link npmPinnedLockAssetPath})
+ * into the per-package/version/lock-content `<LOOM_HOME>/node/<package>/<version>-<lockHash>/` dir on
+ * first use (see {@link loomNpmPinnedDir}). Mirrors
+ * `ensureGithubMcpBinaryAsync`'s shape/discipline: ASYNC (never blocks), IDEMPOTENT (a fast
+ * `fs.existsSync` short-circuit), BOUNDED (the install has a timeout), and NEVER THROWS — always resolves
+ * a CLASSIFIED {@link EnsureNpmPinnedResult}. Validates BEFORE building any path, and FAILS CLOSED (never
+ * falls back to an unpinned install) when no committed lock asset exists; installs into a temp sibling
+ * dir and renames atomically into place as the LAST step, sweeping any abandoned sibling from a prior
+ * crashed/killed attempt first — see this file's module doc (the e7d6e43b/66ab2bc0 decision records it
+ * cites) for the full ordering/atomicity/tree-kill/lock-pin rationale.
  *
  * TEST/ops seam: `LOOM_NPM_PINNED_NO_PROVISION=1` makes this NEVER install (only ever resolves an
  * already-present bin, else `disabled`) — mirrors `LOOM_GITHUB_MCP_NO_PROVISION`/`LOOM_PYTHON_NO_PROVISION`.
@@ -271,7 +348,27 @@ export async function ensureNpmPinnedAsync(opts: EnsureNpmPinnedOpts): Promise<E
     const invalid = validateNpmPinnedSpec(opts.package, opts.version, opts.binRelativeToPackageJson);
     if (invalid) return { binary: null, outcome: "invalid-spec", errorTail: invalid };
 
-    const finalDir = loomNpmPinnedDir(opts.package, opts.version);
+    // @decision 66ab2bc0 — fail closed (never fall back to an unpinned `npm install`) when no committed
+    // lock asset exists; checked before any hashing, tmp dir, or mkdir.
+    //
+    // Read the lock's bytes HERE, ONCE, and hash + install from THESE SAME bytes below — never via the
+    // memoized `npmPinnedLockContentHash` (hot-path-only; using it here could name a dir keyed on a hash
+    // that no longer matches what actually gets written into tmpDir a moment later — a hash-vs-write
+    // TOCTOU, round 3 Code Review MINOR 1).
+    const lockAssetPath = opts.lockAssetPathOverride ?? npmPinnedLockAssetPath(opts.package, opts.version);
+    let lockBytes: Buffer;
+    try {
+      lockBytes = fs.readFileSync(lockAssetPath);
+    } catch (e) {
+      return {
+        binary: null,
+        outcome: "lock-missing",
+        errorTail: `no committed package-lock.json asset for ${opts.package}@${opts.version} at ${lockAssetPath} (${e instanceof Error ? e.message : String(e)})`,
+      };
+    }
+
+    const lockHash = crypto.createHash("sha256").update(lockBytes).digest("hex").slice(0, 12);
+    const finalDir = loomNpmPinnedDir(opts.package, opts.version, lockHash);
     const bin = npmPinnedBinUnder(finalDir, opts.package, opts.binRelativeToPackageJson);
     if (fs.existsSync(bin)) return { binary: bin, outcome: "ready" };
     if (process.env.LOOM_NPM_PINNED_NO_PROVISION === "1") return { binary: null, outcome: "disabled" };
@@ -292,11 +389,24 @@ export async function ensureNpmPinnedAsync(opts: EnsureNpmPinnedOpts): Promise<E
       return { binary: null, outcome: "install-failed", errorTail: e instanceof Error ? e.message : String(e) };
     }
 
-    const installSpec = opts.installSpecOverride ?? `${opts.package}@${opts.version}`;
-    // No path is interpolated here — `--prefix .` names the cwd (set below to tmpDir) literally, never
-    // through the shell's own %VAR%/$/backtick parsing. installSpec is the only interpolated value, and
-    // it was already validated above (or, for the test-only override, is a Loom-authored absolute path).
-    const command = `npm install --ignore-scripts --no-audit --no-fund --no-save "${installSpec}" --prefix .`;
+    // `npm ci` takes no install-spec argument at all — it installs exactly what package.json + the
+    // committed lockfile asset say. The dependency VALUE is opts.version (the validated exact pin) in
+    // production, or dependencySpecOverride (a test-only local file: URL) under test; either way it's the
+    // only interpolated value here, and it was already validated above (or, for the override, is a
+    // Loom-authored absolute path, never shell-interpolated — no path is interpolated into the command
+    // STRING itself; the package.json/lock live in cwd=tmpDir, read by npm, not by the shell).
+    const dependencySpec = opts.dependencySpecOverride ?? opts.version;
+    const pkgJson = { name: "loom-npm-pinned-install", version: "0.0.0", private: true, dependencies: { [opts.package]: dependencySpec } };
+    try {
+      fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify(pkgJson, null, 2));
+      // Write the SAME bytes hashed above — never re-read/copy from lockAssetPath — so the installed
+      // content is provably the bytes the dir name (lockHash) was computed from.
+      fs.writeFileSync(path.join(tmpDir, "package-lock.json"), lockBytes);
+    } catch (e) {
+      cleanupTmp();
+      return { binary: null, outcome: "install-failed", errorTail: e instanceof Error ? e.message : String(e) };
+    }
+    const command = `npm ci --ignore-scripts --no-audit --no-fund`;
     const r = await runNpmInstallAsync(command, tmpDir, timeoutMs);
     if (!r.ok) {
       cleanupTmp();

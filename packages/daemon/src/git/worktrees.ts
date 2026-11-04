@@ -5849,6 +5849,11 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/kickoff-real-spawn.mjs",
   "packages/daemon/test/manager-context-block.mjs",
   "packages/daemon/test/merge-orphaned-to-main.mjs",
+  // Card 66ab2bc0 round 2 (D2): direct reader (route (1)) of every committed package-lock.json asset
+  // under assets/npm-pinned-locks/** — ties each bundled "npm-pinned" seed row's package@version to its
+  // own lock's content (lockfileVersion, the root dependency pin, every entry's sha512 integrity, every
+  // resolved URL). Editing (or forgetting to regenerate) a committed lock changes what this asserts.
+  "packages/daemon/test/npm-pinned-seed-lock-parity.mjs",
   "packages/daemon/test/platform-dev-flag.mjs",
   "packages/daemon/test/platform-home.mjs",
   "packages/daemon/test/redirect-discoverability.mjs",

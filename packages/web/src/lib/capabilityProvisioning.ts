@@ -40,7 +40,7 @@ export type CapabilityProvisionReason =
   // github-binary
   | "unsupported-platform" | "download-failed" | "checksum-mismatch" | "extract-failed"
   // npm-pinned
-  | "invalid-spec" | "install-failed"
+  | "invalid-spec" | "lock-missing" | "install-failed"
   // shared by all three
   | "timeout" | "disabled";
 
@@ -70,7 +70,8 @@ const REASON_TEXT: Record<Exclude<CapabilityProvisionReason, "disabled">, string
   "checksum-mismatch": "the download's checksum didn't match the pinned one — refused, not installed",
   "extract-failed": "the download couldn't be unpacked",
   "invalid-spec": "the pinned package/version is malformed — nothing was installed",
-  "install-failed": "npm install failed",
+  "lock-missing": "no committed lockfile for this pinned version — nothing was installed",
+  "install-failed": "npm ci failed",
   timeout: "install timed out",
 };
 
