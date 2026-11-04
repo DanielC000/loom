@@ -152,14 +152,29 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     // The primary SAYS which role it will apply — that is the whole point of the label.
     await expect(spawnCard(page, seeded.manager.id)).toHaveText(/manager/i);
 
-    // (2) THE WORKER IS ABSENT FROM THE CONTROLS…
+    // (2) THE WORKER IS ABSENT FROM THE SPAWN CONTROLS…
     await expect(panel.getByTestId(`atlas-agent-card-${seeded.worker.id}`)).toHaveCount(0);
-    // …AND NAMED IN THE LINE THAT EXPLAINS WHY. Both halves, because a roster that simply dropped
-    // the worker would pass the first on its own, and that is the round-3 bug this replaced.
+    // …AND NAMED, WITH NO SPAWN CONTROL, IN THE GROUP THAT SAYS WHY. Both halves, because a roster
+    // that simply dropped the worker would pass the first on its own, and that is the round-3 bug
+    // this replaced.
+    //
+    // 🔴 WHERE THE NAME LIVES MOVED, DELIBERATELY (card 699fe92a's Launch Bay rebuild). It used to
+    // be a run-together list inside this note, because worker rigs were not drawn at all and the
+    // note was the only thing that could answer "where did Dev go?". The rebuild draws every rig as
+    // its own `atlas-worker-rig-*` card in a group of its own, so the name is asserted THERE — and
+    // the `atlas-agents-worker-note` id was kept, by name, on that group's `why` line (699fe92a
+    // record: "The dispatched group's copy keeps the `atlas-agents-worker-note` test id, so the
+    // sentence stays addressable under the id it has always had"). So the name is strictly MORE
+    // present than it was, which is why this re-points the claim rather than relaxing it: the rig
+    // card is also where the LIFECYCLE absence is now observable, and the id-level zero above only
+    // says "not in the spawnable set" on its own.
+    const rig = panel.getByTestId(`atlas-worker-rig-${seeded.worker.id}`);
+    await expect(rig).toBeVisible();
+    await expect(rig).toContainText(seeded.worker.name);
+    await expect(rig.locator('button[title^="Spawn from profile"]')).toHaveCount(0);
     const note = panel.getByTestId("atlas-agents-worker-note");
     await expect(note).toBeVisible();
-    await expect(note).toContainText(seeded.worker.name);
-    await expect(note).toContainText(/dispatched/i);
+    await expect(note).toContainText(/dispatch it from the manager/i);
 
     // (3) THE OVERVIEW'S OWN READOUT AGREES WITH THE ROSTER. One derivation (`splitRoster`) feeds
     // both, so a figure reading differently from the rows would mean two. It used to be the
