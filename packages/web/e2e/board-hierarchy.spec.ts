@@ -78,10 +78,10 @@ async function readTask(baseURL: string, secret: string, taskId: string): Promis
 /** The drawer's links block; `data-testid` is on the block itself so its absence is assertable. */
 const linksBlock = (page: Page) => page.getByTestId("task-links");
 /**
- * One SECTION of the links block (parent / children / blockedBy / blocks / related / discoveredFrom /
- * discoveries). Scoping matters: the same card can legitimately appear in two sections at once — the epic
- * below is both this card's parent AND the card it was discovered from — so an unscoped role+name lookup
- * is genuinely ambiguous rather than merely fragile.
+ * One SECTION of the links block (children / discoveries — the only two it still draws). Scoping matters:
+ * the same card can legitimately appear in two places at once — the epic below is both this card's parent
+ * AND the card it was discovered from — so an unscoped role+name lookup is genuinely ambiguous rather
+ * than merely fragile.
  */
 const linkSection = (page: Page, key: string) => page.getByTestId(`links-${key}`);
 /**
@@ -91,10 +91,20 @@ const linkSection = (page: Page, key: string) => page.getByTestId(`links-${key}`
  * without. Their assertions below moved with them; the facts asserted are unchanged.
  */
 const editSection = (page: Page, key: string) => page.getByTestId(`relations-edit-${key}`);
-/** The clickable link to a given card WITHIN one section (read-only block or editor row). */
+/**
+ * The drawer's one-line PARENT row — label, clickable parent, edit/clear. Card 6ed6d8b2 moved the parent
+ * here for the same reason 03d9db6e moved the four relation kinds into the editor: this dialog WRITES the
+ * parent, so stating it in the read-only block too put the same edge on screen twice, ~150px apart, once
+ * clickable-without-controls and once with-controls-but-not-clickable. The block's `Parent` assertions
+ * below moved here with it, and the row gained the click-through the block's copy used to own.
+ */
+const parentSummary = (page: Page) => page.getByRole("dialog").getByTestId("parent-summary");
+/** The clickable link to a given card WITHIN one section (links block, editor row, or the parent row). */
 const linkIn = (scope: Locator, id: string) =>
   scope.getByRole("button", { name: new RegExp(`^Open card ${id.slice(0, 8)} `) });
 const linkTo = (page: Page, section: string, id: string) => linkIn(linkSection(page, section), id);
+/** The parent row's own click-through — the drawer's ONE statement of the parent since card 6ed6d8b2. */
+const parentLinkTo = (page: Page, id: string) => linkIn(parentSummary(page), id);
 const editLinkTo = (page: Page, kind: string, id: string) => linkIn(editSection(page, kind), id);
 /**
   * The open drawer's card id, read off the dossier header — the observable for "which card am I on".
@@ -204,15 +214,15 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   const block = linksBlock(page);
   await expect(block).toBeVisible();
   // The read-only block carries what this card cannot write about itself.
-  await expect(block.getByText("Parent", { exact: true })).toBeVisible();
   await expect(block.getByText("Children", { exact: true })).toBeVisible();
   await expect(block.getByText("0/1 done", { exact: true })).toBeVisible();
-  await expect(linkTo(page, "parent", epic.id)).toBeVisible();
-  // …and NOT the writable kinds, which the editor owns — the same edge must not appear in both, once
-  // with a remove control and once without (card 03d9db6e).
-  for (const label of ["Blocked by", "Related", "Discovered from"]) {
+  // …and NOT the writable kinds, which the editor owns, NOR the parent, which its own control owns — the
+  // same edge must not appear in both, once with a remove control and once without (cards 03d9db6e and
+  // 6ed6d8b2). THE PARENT ROW IS THE ONE THIS CARD FIXES: it is here that the second copy used to sit.
+  for (const label of ["Parent", "Blocked by", "Related", "Discovered from"]) {
     await expect(block.getByText(label, { exact: true })).toHaveCount(0);
   }
+  await expect(linkSection(page, "parent")).toHaveCount(0);
   await expect(linkSection(page, "blockedBy")).toHaveCount(0);
 
   // Every writable section the contract defines for this card, each naming its target, in the editor.
@@ -225,16 +235,24 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   await expect(editLinkTo(page, "blockedBy", doneChild.id)).toBeVisible();
   // …and the LIVE blocker sits in the same section, unmuted.
   await expect(editLinkTo(page, "blockedBy", blocker.id)).toBeVisible();
-  // The parent link is in the block's Parent section; the SAME epic also appears under Discovered from
-  // in the editor, which is correct and is exactly why both are addressed per-section, not by name.
+  // The parent link lives on the Parent row; the SAME epic also appears under Discovered from in the
+  // editor, which is correct and is exactly why both are addressed per-section, not by name.
   await expect(editLinkTo(page, "discoveredFrom", epic.id)).toBeVisible();
-  // A card that HAS a parent shows it as ONE line with edit/clear, not an open field — and the open
-  // field is absent from the DOM until one of those is clicked.
-  const summary = dialog.getByTestId("parent-summary");
+  // A card that HAS a parent shows it as ONE line with a clickable parent plus edit/clear, not an open
+  // field — and the open field is absent from the DOM until one of those is clicked.
+  const summary = parentSummary(page);
+  await expect(summary.getByText("Parent", { exact: true })).toBeVisible();
   await expect(summary).toContainText(epicTitle);
+  await expect(parentLinkTo(page, epic.id)).toBeVisible();
   await expect(summary.getByRole("button", { name: "Change parent" })).toBeVisible();
   await expect(summary.getByRole("button", { name: "Clear parent" })).toBeVisible();
   await expect(dialog.getByLabel("Parent card id")).toHaveCount(0);
+  // ⭐ THE CARD'S OWN FACT (6ed6d8b2): the epic is this card's parent AND its discoveredFrom, so it is
+  // legitimately named TWICE in this dialog — once per EDGE. What must never happen again is the SAME
+  // edge twice: exactly one of those two occurrences is the parent one, and it is this row's.
+  await expect(linkIn(dialog, epic.id)).toHaveCount(2);
+  await expect(parentLinkTo(page, epic.id)).toHaveCount(1);
+  await expect(linkIn(dialog.getByTestId("task-relations-editor"), epic.id)).toHaveCount(1);
   await shoot(dialog, "board-hierarchy-drawer-open-child.png");
 
   // `clear` STAGES the change — it opens the editor emptied and enables Save, rather than writing on the
@@ -249,7 +267,7 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   // CLICK the parent link → the SAME dialog now shows the EPIC. Before/after on the header id, which is
   // the drawer's own identity, so this can't pass by the dialog merely still being open.
   const before = await openCardId(page);
-  await linkTo(page, "parent", epic.id).click();
+  await parentLinkTo(page, epic.id).click();
   await expect(dialog).toBeVisible();
   await expect.poll(() => openCardId(page)).toBe(epic.id.slice(0, 8));
   expect(before).not.toBe(epic.id.slice(0, 8));
@@ -260,8 +278,10 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   await expect(linkTo(page, "children", doneChild.id)).toBeVisible();
   await expect(linkTo(page, "children", openChild.id)).toBeVisible();
   await expect(epicBlock.getByText("Discoveries", { exact: true })).toBeVisible();
-  // An epic has no parent → that section is absent entirely, not rendered empty.
+  // An epic has no parent → its Parent row collapses to the one ghost link, and the block never carries
+  // a Parent section for any card at all now (card 6ed6d8b2).
   await expect(epicBlock.getByText("Parent", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Set parent…" })).toBeVisible();
   await shoot(dialog, "board-hierarchy-drawer-epic.png");
 
   // ── CLICK-THROUGH parent → child → blocker: the third hop the DoD names ───────────────────────────
@@ -372,9 +392,16 @@ test("the drawer's Parent field resolves an id prefix, names the resolved card, 
   await field.fill(epic.id.slice(0, 8));
   await save.click();
 
-  // Collapses back to the one-line summary naming the parent, and the links block now exists at all.
+  // Collapses back to the one-line summary naming the parent — clickably, since card 6ed6d8b2.
   await expect(dialog.getByTestId("parent-summary")).toContainText(epicTitle);
-  await expect(linkTo(page, "parent", epic.id)).toBeVisible();
+  await expect(parentLinkTo(page, epic.id)).toBeVisible();
+  // ⭐ THE STRONGEST FORM OF "ONCE" THE FIXTURES ALLOW: this epic is this card's parent and NOTHING else
+  // (no relation edges at all), so one occurrence dialog-wide is the exact fact 6ed6d8b2 is for. The
+  // board-hierarchy fixture above cannot assert this — its epic is legitimately two different edges.
+  await expect(linkIn(dialog, epic.id)).toHaveCount(1);
+  // …and with the parent now drawn beside its own control, a card whose ONLY link is a parent gets NO
+  // read-only block: the gate moved with the row, so there is no empty bordered box (hasTaskContextLinks).
+  await expect(linksBlock(page)).toHaveCount(0);
   // Read it back through the REST route: the UI showing a parent is not by itself proof one was stored.
   const { baseURL, loopbackSecret } = loomDaemon;
   expect((await readTask(baseURL, loopbackSecret, child.id)).parentId).toBe(epic.id);

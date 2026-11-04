@@ -12,8 +12,8 @@ import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
 import { color, columnTone, font, radius, tone, type Tone } from "../theme";
 // Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
 // structurally and defaults every one of them, so a response without them renders exactly as before.
-import { boardHierarchy, hasBoardHierarchy, hasTaskContextLinks, resolveParentInput, taskLinks, type TaskLinks } from "../lib/taskHierarchy";
-import { BoardCardHierarchy, TaskLinksBlock } from "../components/taskLinks";
+import { boardHierarchy, hasBoardHierarchy, hasTaskContextLinks, resolveParentInput, taskLinks, type TaskLinks, type TaskRef } from "../lib/taskHierarchy";
+import { BoardCardHierarchy, TaskLinkRow, TaskLinksBlock } from "../components/taskLinks";
 import { TaskRelationsEditor } from "../components/taskRelationsEditor";
 import {
   relationBaseline, relationErrorTarget, relationPatch, relationsDirty,
@@ -900,6 +900,12 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   const parentServer = links.parentId ? links.parentId.slice(0, 8) : "";
   const parentInput = parentDraft ?? parentServer;
   const parentRes = resolveParentInput(parentInput, task.id, titleById);
+  // The summary's clickable row (card 6ed6d8b2). `parentId` can be set while `parent` is still null — the
+  // resolved form is absent for a parent on another project's board, or for one archived since. Falling
+  // back to the 8-char handle keeps the row readable AND keeps TaskLinkRow's own not-on-this-board branch
+  // the thing that decides clickability, instead of a second guess about it here.
+  const parentRef: TaskRef = links.parent
+    ?? { id: links.parentId ?? "", title: links.parentId?.slice(0, 8) ?? "", columnKey: "", resolved: false, released: false };
   // Collapse back to the summary once a save actually SUCCEEDS — staying in the editor after a committed
   // write leaves the drawer looking like it still has pending work. Dropping the draft at the same time
   // hands the field back to the server value, which the edit mutation has just invalidated and refetched.
@@ -1084,9 +1090,10 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <Button onClick={() => setPendingNav(null)}>Cancel</Button>
           </div>
         )}
-        {/* Card-context section: the parent, the children, and the relations this card cannot write
-            about itself. The four WRITABLE kinds moved to the Relations editor below when it shipped
-            (card 03d9db6e) — see hasTaskContextLinks for why the gate had to move with them.
+        {/* Card-context section: the children, and the relations this card cannot write about itself.
+            The four WRITABLE kinds moved to the Relations editor below when it shipped (card 03d9db6e),
+            and the parent followed (card 6ed6d8b2) — see hasTaskContextLinks for why the gate had to
+            move with them both times.
 
             @decision 1ae4f88c — sits directly under the dossier header, above the edit body, and
             reserves no loading placeholder: that would flash an empty panel on every drawer open for
@@ -1136,8 +1143,9 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             and adjust Task relations". The heading is authored HERE, like every other section label in
             this dialog, so the PARENT control below falls under it: parent is part of the same card
             graph, and leaving it heading-less above the section read as a stray line under PRIORITY.
-            Its own control is unchanged and NOT rebuilt inside the editor — a second parent editor
-            would be a second place for the same write to diverge. */}
+            Its own control is NOT rebuilt inside the editor — a second parent editor would be a second
+            place for the same write to diverge — but since card 6ed6d8b2 this section is the ONE place
+            the dialog states the parent at all, so the summary row below is clickable like every chip. */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
           <span style={labelStyle}>Relations</span>
           <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
@@ -1176,14 +1184,29 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
         ) : (
           /* At rest: ONE line. Either the resolved parent with edit/clear, or a bare "Set parent…" — so a
              card that will never have a parent costs a single ghost link instead of a labelled field. */
-          <div data-testid="parent-summary" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <div data-testid="parent-summary" style={{ display: "flex", alignItems: "center", flexWrap: "wrap",
+            columnGap: 4, rowGap: 2, minWidth: 0 }}>
             {links.parentId ? (
               <>
-                <span style={{ ...labelStyle, flexShrink: 0 }}>Parent</span>
-                <span style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.textDim,
-                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                  title={links.parent?.title ?? `card ${links.parentId.slice(0, 8)}`}>
-                  ↳ {links.parent?.title ?? links.parentId.slice(0, 8)}
+                <span style={{ ...labelStyle, flexShrink: 0, marginRight: 4 }}>Parent</span>
+                {/* The SAME TaskLinkRow the editor's chips below use, so the parent reads as one of the
+                    five relation rows rather than a different kind of thing — and so this dialog's ONLY
+                    statement of the parent is the clickable one. `flex: 0 1 auto` (not `flex: 1`) for
+                    RelationChip's own reason: edit/clear have to sit against the name they act on, not
+                    pushed to the far panel edge as a column of controls belonging to nothing.
+
+                    The `minWidth` floor is what makes the row's own `flexWrap` fire instead of crushing
+                    the name. TaskLinkRow brings a `flexShrink: 0` lane badge the plain text here never
+                    had, and with an unshrinkable badge beside two word-buttons a 420px panel spent the
+                    whole budget on them and ellipsised the title to FOUR characters (measured). A wrap
+                    is decided on the HYPOTHETICAL size (basis clamped by this floor), before any
+                    shrinking, so the floor is what pushes edit/clear onto a second line and hands the
+                    name the full width. Kept modest on purpose: a floor wider than the usual title also
+                    reserves dead space at 1600, which is the "controls belonging to nothing" above. */}
+                <span style={{ flexGrow: 0, flexShrink: 1, flexBasis: "auto", minWidth: 140,
+                  maxWidth: "100%", display: "flex" }}>
+                  <TaskLinkRow ref_={parentRef} columns={columns} titleById={titleById}
+                    onOpenTask={requestOpen} glyph="↳" />
                 </span>
                 <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }} aria-label="Change parent"
                   onClick={() => setParentEditing(true)}>edit</Button>

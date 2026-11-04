@@ -10,6 +10,26 @@ Checked at the source before any UI was written, because the card said to and be
 
 `discoveries` is the one relation the dialog shows that is NOT writable here, and that is correct rather than a gap: it is the inverse projection of some other card's `discoveredFrom`, so no field on *this* card's body can change it. It stays read-only in the links block and the editor never offers it.
 
+## The parent left the links block too (card `6ed6d8b2`)
+
+This card moved the four writable kinds out of `TaskLinksBlock` so no edge was drawn twice — and left the PARENT behind, out of scope, still stated in the block AND again in the editor's parent summary ~150px below. That was the one duplicate this card's own fix did not reach, and card `6ed6d8b2` closed it.
+
+**The rule decided the answer, not a preference between the two sites.** The block's membership criterion is already written down: *what this card cannot write about itself* (`CONTEXT_RELATION_KINDS`'s doc comment — `discoveries` is another card's field, a child's parentage lives on the child). The parent fails that criterion outright: this very dialog writes it, through the same `POST /api/tasks/:id` body as the four. So the parent never belonged in the block once the editor existed; it survived only because `03d9db6e` was scoped to relation *kinds*. Keeping the block's copy and dropping the editor's was never the alternative — the editor's copy is the one attached to the control that performs the write, and separating a relation's display from its control is exactly what this card's "a second place for the same write to diverge" reasoning rules out.
+
+**The click-through moved with it, and got strictly better.** Before, the block's row was the clickable one (a `TaskLinkRow`) and the summary was plain text — the parent was the ONE relation in this dialog whose editable statement you could not click through. The summary now renders the same `TaskLinkRow` the editor's chips do, so all five kinds read and behave alike, and `edit`/`clear` sit where a chip's `×` sits.
+
+**The gate had to move with the row, for the second time.** Dropping the row without dropping `l.parent !== null` from `hasTaskContextLinks` would draw an empty bordered box for a card whose only edge is a parent — the identical failure this card's own doc comment already warns about for `blockedBy`. Measured: a parent-only card now renders no block at all (`board-hierarchy.spec.ts`).
+
+### Do not
+
+- **Do not re-add a bucket to `TaskLinksBlock` because it is also rendered read-only somewhere.** Membership is "this card's own write body cannot change it", not "it happens to be read-only today". Both times a kind left this block, the reason was that the dialog writes it.
+- **Do not drop a row from the block without dropping its term from `hasTaskContextLinks` in the same change.** Twice now the gate has been the half that was almost forgotten, and the symptom — an empty bordered box — is silent in every assertion that only checks what the block contains.
+- **Do not give the parent summary's link an unbounded shrink.** `TaskLinkRow` brings a `flexShrink: 0` lane badge that the plain text it replaced did not have; with that badge beside two word-buttons, a 420px panel ellipsised the parent's title to FOUR characters (measured). The row wraps `edit`/`clear` onto a second line instead, via a modest `minWidth` floor on the link — a wrap is decided on the hypothetical size, before shrinking, so the floor is what makes it fire. Keep the floor modest: a floor wider than a typical title reserves dead space at 1600 and recreates the "controls belonging to nothing" the chips were shaped to avoid.
+
+### Still true, and not a duplicate
+
+One card can legitimately be named twice in this dialog — the fixture in `board-hierarchy.spec.ts` has an epic that is both the subject's parent and its `discoveredFrom`. That is two EDGES, one occurrence each, and the spec asserts exactly that shape (two dialog-wide, one of them the parent row's). The defect was ever drawing the SAME edge twice.
+
 ## Do not
 
 - **Do not send a `released:true` item back in a `blockedBy`/`blocks` write.** It is auto-released deferral history: `declared:false`, not live (`buildRelationView`'s `releasedOnly`). The write replaces the DECLARED bit of a card's blocks edges, so including a released item promotes dead history to a live declared dependency. `relationBaseline` (`lib/taskRelationsEdit.ts`) drops them; `releasedHistory` returns them separately so the UI can still show them, muted and with no remove control.

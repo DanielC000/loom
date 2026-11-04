@@ -164,17 +164,22 @@ export function taskLinks(task: Task | null | undefined): TaskLinks {
  * both places put the same edge on screen twice, ~200px apart, once with a remove control and once
  * without. What is left is what this card genuinely cannot change from here: `discoveries` is the inverse
  * of another card's `discoveredFrom`, and a child's parentage lives on the child.
+ *
+ * @decision 03d9db6e — membership is "this card's own write body cannot change it", NOT "it is read-only
+ * today". The PARENT left this block (card 6ed6d8b2) for the same reason the four did: this dialog writes
+ * it. Do not re-add a bucket here because it happens to also be drawn read-only somewhere.
  */
 export const CONTEXT_RELATION_KINDS: RelationKind[] = ["discoveries"];
 
 /**
  * True when the drawer's read-only context block has anything to render (else it renders nothing at all).
  *
- * Deliberately NOT "does this card have any link": a card whose only edge is a `blockedBy` has links, but
- * they are the editor's to draw, and gating the block on them would render an empty bordered box.
+ * Deliberately NOT "does this card have any link": a card whose only edge is a `blockedBy` — or, since
+ * card 6ed6d8b2, a `parent` — has links, but they are the editor's to draw, and gating the block on them
+ * would render an empty bordered box. The gate must move with the row, every time one moves.
  */
 export function hasTaskContextLinks(l: TaskLinks): boolean {
-  return l.parent !== null || l.children.total > 0 || CONTEXT_RELATION_KINDS.some((k) => l.relations[k].length > 0);
+  return l.children.total > 0 || CONTEXT_RELATION_KINDS.some((k) => l.relations[k].length > 0);
 }
 
 /**

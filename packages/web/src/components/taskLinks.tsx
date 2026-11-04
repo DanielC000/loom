@@ -4,9 +4,9 @@
 //   · BoardCardHierarchy — ONE optional 10px meta line on a board card. The owner's primary board is the
 //     Overview-embedded one, so this surface must NOT grow: it renders nothing at all unless the card
 //     genuinely has a parent, children or an open blocker — which most cards don't.
-//   · TaskLinksBlock — the card's read-only CONTEXT in the drawer: the parent, the children list with
-//     progress, and the buckets this card cannot write about itself, each clickable through. The four
-//     WRITABLE kinds live in components/taskRelationsEditor (03d9db6e); drawing them here too said it twice.
+//   · TaskLinksBlock — the card's read-only CONTEXT in the drawer: children with progress, plus the
+//     buckets it cannot write about itself, each clickable through. What this dialog WRITES is drawn
+//     beside its own control (components/taskRelationsEditor) — drawing it here too said it twice.
 //
 // Glyphs match the board's own (⠿ grip, ≣ body, ⑂ repo, ✓ shipped): ↳ parent, ⊞ children, ⊘ blocked.
 // Colour is the established signal palette — amber for "waiting on something" (plain TEXT, never a filled
@@ -108,12 +108,14 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
 }) {
   const allDone = links.children.total > 0 && links.children.done >= links.children.total;
   // Only the buckets this card cannot write about itself (card 03d9db6e moved the other four into the
-  // drawer's relation editor — see CONTEXT_RELATION_KINDS for why they are not also drawn here).
+  // drawer's relation editor, card 6ed6d8b2 the parent — see CONTEXT_RELATION_KINDS for why none of the
+  // five is also drawn here).
   const buckets: [RelationKind, TaskRef[]][] = CONTEXT_RELATION_KINDS.map((k) => [k, links.relations[k]]);
   // The label/items pair is `display: contents` so both land directly on the outer grid. The items div
   // carries `data-testid="links-<key>"` because the SAME card can legitimately appear in two sections at
-  // once (an epic that is both this card's parent AND where it was discovered from), so the per-section
-  // element is the only way to say which occurrence you mean — the `display: contents` wrapper isn't one.
+  // once (an epic that is both a `discoveries` target AND, before 6ed6d8b2, this card's parent), so the
+  // per-section element is the only way to say which occurrence you mean — the `display: contents`
+  // wrapper isn't one.
   const row = (label: string, hint: string, body: ReactNode, key: string) => (
     <div key={key} style={{ display: "contents" }}>
       <span style={linkLabel} title={hint}>{label}</span>
@@ -124,9 +126,6 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
     <div data-testid="task-links" style={{ display: "grid", gridTemplateColumns: "minmax(64px, auto) 1fr",
       columnGap: 10, rowGap: 6, alignItems: "start", padding: "8px 10px", background: color.panel2,
       border: `1px solid ${color.border}`, borderRadius: radius.base }}>
-      {links.parent && row("Parent", "the card this one sits under",
-        <TaskLinkRow ref_={links.parent} columns={columns} titleById={titleById} onOpenTask={onOpenTask} glyph="↳" />,
-        "parent")}
       {links.children.total > 0 && row("Children", `${links.children.done} of ${links.children.total} done`,
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11,

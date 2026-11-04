@@ -99,8 +99,10 @@ check("a task read carries parentId, parent, children and all five relation buck
   assert.equal(hasTaskContextLinks(l), true);
 });
 
-// ── What the read-only CONTEXT block still draws (card 03d9db6e moved the writable kinds out) ──────
-check("the context block's gate IGNORES the editable kinds — else it draws an empty box", () => {
+// ── What the read-only CONTEXT block still draws ───────────────────────────────────────────────────
+// Card 03d9db6e moved the four writable relation kinds out of it; card 6ed6d8b2 moved the PARENT out for
+// the same reason (the dialog writes it, so it belongs beside its own control, stated once).
+check("the context block's gate IGNORES everything the dialog writes — else it draws an empty box", () => {
   // A card whose ONLY edge is a blockedBy genuinely HAS a link, but the editor draws it now. Gating the
   // context block on it would render a bordered box with nothing inside, which is what this pins.
   const onlyEditable = taskLinks({
@@ -109,8 +111,12 @@ check("the context block's gate IGNORES the editable kinds — else it draws an 
   });
   assert.equal(onlyEditable.relations.blockedBy.length, 1, "the edge is still READ, just drawn elsewhere");
   assert.equal(hasTaskContextLinks(onlyEditable), false);
+  // The parent is the SAME case since 6ed6d8b2: still fully read, drawn by the Parent control alone.
+  const onlyParent = taskLinks({ id: "t1", title: "child only", parent: { id: "p", title: "epic", columnKey: "todo" } });
+  assert.equal(onlyParent.parent.title, "epic", "the parent is still READ, just drawn elsewhere");
+  assert.equal(onlyParent.parentId, "p");
+  assert.equal(hasTaskContextLinks(onlyParent), false);
   // …while each thing the card cannot write about itself DOES open the block.
-  assert.equal(hasTaskContextLinks(taskLinks({ parent: { id: "p", title: "epic", columnKey: "todo" } })), true);
   assert.equal(hasTaskContextLinks(taskLinks({ children: { done: 0, total: 1, items: [] } })), true);
   assert.equal(hasTaskContextLinks(taskLinks({
     relations: { discoveries: [{ id: "d", title: "spun out", columnKey: "todo" }] },
