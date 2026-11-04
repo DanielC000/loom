@@ -169,42 +169,10 @@ const SKILL_SURFACE_ALLOWLIST = [
 // are fully clean; any citation appearing on any of them now is a REAL regression, not backlog, and fails
 // against an implicit expectedCount of 0.
 const ROUTER_ID_CITATION_ALLOWLIST = [
-  { surface: "OrchestrationMcpRouter(manager)", tool: "my_context", expectedCount: 5 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_list", expectedCount: 41 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_status", expectedCount: 13 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_transcript", expectedCount: 1 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_report_get", expectedCount: 4 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_spawn", expectedCount: 4 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_stop", expectedCount: 3 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_flush", expectedCount: 4 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_message", expectedCount: 2 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_redirect", expectedCount: 1 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "requests_list", expectedCount: 2 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_recycle", expectedCount: 2 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_merge", expectedCount: 8 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "worker_merge_confirm", expectedCount: 34 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "merge_batch", expectedCount: 31 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_status", expectedCount: 57 },
   { surface: "OrchestrationMcpRouter(manager)", tool: "gate_queue", expectedCount: 21 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "project_checkout_branch", expectedCount: 1 },
   { surface: "OrchestrationMcpRouter(manager)", tool: "gate_history", expectedCount: 30 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "events_search", expectedCount: 4 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "gate_cancel", expectedCount: 3 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "resume_doc_check", expectedCount: 7 },
-  // `deploy` is CONFIG-GATED (registers only when the project has a resolved orchestration.deployCommand)
-  // — see the fixture setup right above SHIPPED_END_USER_MCP_SURFACES below, which configures one so this
-  // tool is actually rendered and scanned rather than silently skipped (card a2f2becc round 2 CR).
-  { surface: "OrchestrationMcpRouter(manager)", tool: "deploy", expectedCount: 2 },
   { surface: "OrchestrationMcpRouter(manager)", tool: "served_status", expectedCount: 22 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "idle_report", expectedCount: 1 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "profile_delete", expectedCount: 1 },
-  { surface: "OrchestrationMcpRouter(manager)", tool: "platform_escalate", expectedCount: 1 },
-  { surface: "OrchestrationMcpRouter(worker)", tool: "my_context", expectedCount: 5 },
-  { surface: "OrchestrationMcpRouter(worker)", tool: "run_gate", expectedCount: 5 },
-  { surface: "OrchestrationMcpRouter(worker)", tool: "gate_status", expectedCount: 9 },
   { surface: "OrchestrationMcpRouter(worker)", tool: "gate_queue", expectedCount: 21 },
-  { surface: "OrchestrationMcpRouter(worker)", tool: "directive_status", expectedCount: 1 },
-  { surface: "OrchestrationMcpRouter(assistant)", tool: "my_context", expectedCount: 5 },
   { surface: "TaskMcpRouter(worker)", tool: "tasks_list", expectedCount: 6 },
   { surface: "TaskMcpRouter(worker)", tool: "tasks_get", expectedCount: 6 },
   { surface: "TaskMcpRouter(worker)", tool: "tasks_create", expectedCount: 4 },
@@ -1124,15 +1092,19 @@ function walkTsFiles(dir) {
 // =====================     its baselined expectedCount without the baseline being lowered to match — this
 // =====================     must ALSO trip the ratchet, not silently pass through a too-generous stale
 // =====================     baseline. Plant by wrapping registerTool to strip ONE real citation out of the
-// =====================     REAL gate_cancel description (a genuine decrease at the source, re-rendered
-// =====================     through the real client — never a hand-built string copy). ====================
+// =====================     REAL gate_queue description (a genuine decrease at the source, re-rendered
+// =====================     through the real client — never a hand-built string copy). Target tool chosen
+// =====================     to have a real, nonzero baseline at authoring time (card 6927a53f's own cleanup
+// =====================     pass retargeted this from gate_cancel to worker_list to gate_status, each
+// =====================     cleaned to 0 in turn, retargeting again here to gate_queue) — re-target again
+// =====================     to any still-nonzero-baselined tool if this one too is ever fully cleaned. =====
 {
   const fx = freshNonDevLeadFixture("e-plant-stale");
   const sid = insertFakeSessionForRole(fx, "manager");
   const origRegisterTool = McpServer.prototype.registerTool;
   let strippedOne = false;
   McpServer.prototype.registerTool = function (name, config, handler) {
-    if (name === "gate_cancel" && config?.description) {
+    if (name === "gate_queue" && config?.description) {
       const stripped = config.description.replace(new RegExp(ID_CITATION_RE_SOURCE, "i"), "");
       if (stripped !== config.description) { strippedOne = true; config = { ...config, description: stripped }; }
     }
@@ -1145,9 +1117,9 @@ function walkTsFiles(dir) {
   } finally {
     McpServer.prototype.registerTool = origRegisterTool;
   }
-  check("(e positive control ii) sanity: the plant actually stripped a real citation out of gate_cancel", strippedOne);
+  check("(e positive control ii) sanity: the plant actually stripped a real citation out of gate_queue", strippedOne);
   // Goes through the SAME scanSurfaceRatchet function the live check uses (see control (i)'s own note).
-  const verdict = scanSurfaceRatchet("OrchestrationMcpRouter(manager)", tools).find((v) => v.tool === "gate_cancel");
+  const verdict = scanSurfaceRatchet("OrchestrationMcpRouter(manager)", tools).find((v) => v.tool === "gate_queue");
   check(`(e positive control ii) sanity: the real count genuinely dropped below the stale baseline (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && verdict.real < verdict.expected);
   check(`(e positive control ii) the stale-entry check trips the ratchet on a DECREASE too — RED (measured ${verdict?.real} vs baselined ${verdict?.expected})`, !!verdict && !verdict.ok);
   fx.db.close();
