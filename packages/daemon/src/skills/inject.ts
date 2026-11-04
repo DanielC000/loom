@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import crypto from "node:crypto";
 import type { SessionRole } from "@loom/shared";
 import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT, WORKTREES_DIR } from "../paths.js";
@@ -514,6 +515,99 @@ export function fingerprintSkillDir(dir: string): string | null {
 }
 
 /**
+ * Shared gate for every Loom write/delete path that must never clobber or remove a hand-edited (or
+ * otherwise diverged) skill copy: is `currentFp` — the CALLER's own already-computed current on-disk
+ * fingerprint for the dir in question (several callers need that same fingerprint for OTHER purposes too,
+ * e.g. the shared-cwd untracked-check cache below, so this takes the value rather than a path to compute
+ * it twice) — safe to treat as still Loom's own? Safe when EITHER (a) it matches one of `recorded` — the
+ * fingerprint(s) actually recorded at a real Loom placement — OR, only when `recorded` is empty/absent (a
+ * legacy claim predating this mechanism, or a fingerprint computation that itself failed at placement
+ * time) AND a `storeFallback` is supplied, (b) it already matches the CURRENT store copy's own
+ * fingerprint — nothing would be lost by overwriting/pruning content that's already byte-identical to
+ * what we'd write there anyway. Any other case — content diverges from both, or `currentFp`/the store
+ * copy can't be read at all — fails CLOSED: "cannot verify" never means "safe to destroy." `storeFallback`
+ * is a lazily-invoked thunk (never called when a `recorded` entry already matches) so the two existing
+ * dead-claim call sites, which never pass one, pay no extra fingerprinting cost and keep their exact
+ * pre-card-6db94dfe behavior (fail toward keeping on ANY unrecorded claim, no store comparison at all).
+ *
+ * @decision 31f997e7 — card 6db94dfe closed the same-session-resume residual named in that record's
+ * "What remains"; see it for the full history and the two existing dead-claim call sites this helper was
+ * extracted from (behaviour-preserving — neither passes `storeFallback`).
+ */
+function matchesRecordedFingerprint(currentFp: string | null, recorded: Iterable<string> | undefined, storeFallback?: () => string | null): boolean {
+  if (!currentFp) return false;
+  let hasRecorded = false;
+  if (recorded) {
+    for (const fp of recorded) {
+      hasRecorded = true;
+      if (fp === currentFp) return true;
+    }
+  }
+  if (!hasRecorded && storeFallback) {
+    const storeFp = storeFallback();
+    if (storeFp && storeFp === currentFp) return true;
+  }
+  return false;
+}
+
+/**
+ * The set of content fingerprints that are SAFE to treat as "this is Loom's own, unmodified work" for
+ * `name` right now: every fingerprint any CURRENT claimant of `name` (per `manifest`, including the
+ * caller's own entry) actually recorded placing there. Mirrors the dead-claim cleanup's own any-of-set
+ * match (`deadFingerprints`), but for LIVE claimants sharing a cwd: a shared cwd's on-disk content is
+ * whatever ANY live co-claimant most recently refreshed it to, so a session whose OWN last-recorded
+ * fingerprint predates a co-claimant's legitimate refresh must not read that refresh as a hand edit.
+ * `manifest` here already excludes any session `isSessionLive` has pruned as dead (done earlier in
+ * `injectSkills`), so every key still present is live.
+ *
+ * @decision 31f997e7 — never compare against ONLY the calling session's own recorded fingerprint for a
+ * shared-cwd name; that misdiagnoses a live co-claimant's legitimate refresh as a hand edit.
+ */
+function recordedFingerprintsForName(manifest: Manifest, fingerprints: FingerprintMap, name: string): Set<string> {
+  const set = new Set<string>();
+  for (const [sid, names] of Object.entries(manifest)) {
+    if (!names.includes(name)) continue;
+    const fp = fingerprints[sid]?.[name];
+    if (fp) set.add(fp);
+  }
+  return set;
+}
+
+/**
+ * What `fingerprintSkillDir` would compute for `name` if Loom placed it RIGHT NOW — applying the exact
+ * same transforms real placement does (permission-strip, then the Obsidian fragment append when this
+ * session has it enabled), never the raw, untransformed store bytes. Built off to the side, under the OS
+ * temp dir (never this session's own cwd), and unconditionally cleaned up. Returns null when the store
+ * copy is missing, a strip would FAIL (the same "undeliverable" outcome real placement treats as never
+ * fingerprinted at all — see `needsPermissionStrip`/`stripPermissionWideningFile`), or the temp copy can't
+ * be built/read: "cannot verify" fails toward keeping here too. Lazy by construction (only ever invoked
+ * from `matchesRecordedFingerprint`'s `storeFallback` thunk, on the "nobody has a recorded fingerprint for
+ * this name" branch) — never on the ordinary-resume hot path.
+ *
+ * @decision 31f997e7 — Code Review on card 6db94dfe: the legacy-claim fallback originally compared
+ * against the RAW store dir, which false-mismatched a legacy claim of an agent-written (strip-needing) or
+ * fragment-target skill even when the delivered copy was exactly what real placement would produce.
+ */
+function wouldPlaceFingerprint(name: string, obsidianEnabled: boolean): string | null {
+  const src = path.join(SKILLS_DIR, name);
+  if (!fs.existsSync(src)) return null;
+  let tmp: string;
+  try { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "loom-skill-wouldplace-")); } catch { return null; }
+  try {
+    const dest = path.join(tmp, name);
+    fs.cpSync(src, dest, { recursive: true });
+    if (needsPermissionStrip(name, dest) && !stripPermissionWideningFile(dest)) return null; // would be undeliverable — never fingerprinted
+    if (obsidianEnabled && OBSIDIAN_FRAGMENT_SKILLS.has(name)) {
+      let fragment: string | null = null;
+      try { fragment = fs.readFileSync(OBSIDIAN_PREFLIGHT_FRAGMENT, "utf8"); } catch { /* best effort, same degrade real placement gives a missing fragment */ }
+      if (fragment) appendObsidianFragment(dest, fragment);
+    }
+    return fingerprintSkillDir(dest);
+  } catch { return null; }
+  finally { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } }
+}
+
+/**
  * Append the Obsidian "vault preflight" fragment to a JUST-injected skill's SKILL.md, after its whole body
  * and NEVER into the top frontmatter block. Called ONLY when a session's project has `obsidian.autoStart`
  * on (the additive-when-off invariant: with it off this is never reached, so the injected file is
@@ -924,8 +1018,7 @@ export function injectSkills(
       const recordedFps = deadFingerprints.get(stale);
       if (!recordedFps || recordedFps.size === 0) { console.log(`[skills] keeping dead-session claim '${stale}': no recorded content fingerprint (a legacy claim) — cannot verify it's still Loom's own, so not deleting`); continue; }
       const target = path.join(targetDir, stale);
-      const currentFp = fingerprintSkillDir(target);
-      if (!currentFp || !recordedFps.has(currentFp)) { console.log(`[skills] keeping dead-session claim '${stale}': on-disk content doesn't match any recorded Loom placement (edited, or files added) — not deleting`); continue; }
+      if (!matchesRecordedFingerprint(fingerprintSkillDir(target), recordedFps)) { console.log(`[skills] keeping dead-session claim '${stale}': on-disk content doesn't match any recorded Loom placement (edited, or files added) — not deleting`); continue; }
       if (path.dirname(target) !== targetDir) { console.log(`[skills] refusing to remove out-of-scope dead-session manifest entry: ${stale}`); continue; }
       try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* ignore */ }
     }
@@ -956,8 +1049,8 @@ export function injectSkills(
       const target = path.join(targetDir, name);
       if (path.dirname(target) !== targetDir) { console.log(`[skills] refusing to reclaim out-of-scope dead-session manifest entry (shared cwd): ${name}`); pendingWorking.delete(name); continue; }
       if (!fs.existsSync(target)) { pendingWorking.delete(name); continue; } // resolved: the dir is gone
-      const currentFp = fingerprintSkillDir(target);
-      if (!currentFp || !rec.deadFingerprints.has(currentFp)) {
+      const currentFp = fingerprintSkillDir(target); // reused below for the untracked-check cache + kick, not just this match
+      if (!currentFp || !matchesRecordedFingerprint(currentFp, rec.deadFingerprints)) {
         console.log(`[skills] keeping dead-session claim '${name}' (shared cwd): on-disk content doesn't match any recorded Loom placement (edited, or files added) — not reclaiming`);
         pendingWorking.delete(name); // resolved: edited — drop the record and never touch it again
         continue;
@@ -1028,6 +1121,7 @@ export function injectSkills(
   const placedFingerprints: Record<string, string> = {};
   for (const name of want) {
     const dest = path.join(targetDir, name);
+    const src = path.join(SKILLS_DIR, name);
     const exists = fs.existsSync(dest);
     // A pre-existing dir that NO loom session claims (not mine, not another session's) is the repo's OWN
     // project-local skill — never clobber it. A dir another session injected IS loom's: re-copying the
@@ -1035,7 +1129,26 @@ export function injectSkills(
     // dead-claim orphan, already confirmed untracked — treat it as claimed too, so this same copy path
     // performs its own atomic replace over it (never a separate delete first).
     if (exists && !myPrev.includes(name) && !otherClaimed.has(name) && !reclaimableNow.has(name)) continue;
-    const src = path.join(SKILLS_DIR, name);
+    // card 6db94dfe: a name I (THIS session) previously placed is re-copied unconditionally on every
+    // resume/fork/recycle call — but between calls the worker may have hand-edited it, force-added it to
+    // git, or a merge/rebase may have replaced it with tracked content. Gate the overwrite on EVERY
+    // CURRENT claimant's recorded placement fingerprint (mine + any live co-claimant's, in a shared cwd —
+    // `recordedFingerprintsForName`): a mismatch against ALL of them leaves it alone, same as the "repo's
+    // own" skip above — the name then naturally drops out of `placed`/`fingerprints[sessionId]` below and
+    // is never claimed (or overwritten) again. A legacy claim with no recorded fingerprint ANYWHERE is
+    // still refreshed when it's already byte-identical to what placement would ACTUALLY produce right now
+    // (`wouldPlaceFingerprint` — the transformed bytes, not the raw store dir); only a genuine divergence
+    // is kept.
+    //
+    // @decision 31f997e7 — a shared cwd's content reflects whatever ANY live co-claimant last placed, so
+    // the match must accept any of their recorded fingerprints, not just mine (CR on card 6db94dfe).
+    if (exists && myPrev.includes(name)) {
+      const recorded = recordedFingerprintsForName(manifest, fingerprints, name);
+      if (!matchesRecordedFingerprint(fingerprintSkillDir(dest), recorded, () => wouldPlaceFingerprint(name, obsidianEnabled))) {
+        console.log(`[skills] keeping hand-modified copy of '${name}' at ${dest}: on-disk content doesn't match any current claimant's last placement (edited, or files added) — not overwriting`);
+        continue;
+      }
+    }
     // COPY (atomic tmp+swap), never junction: a junction here lets worktree removal's recursive rm follow
     // it into the store and delete the store's SKILL.md (see header). An independent copy is self-contained.
     // A copy that ultimately fails is recorded (`failed`) and surfaced below — NOT silently skipped, which
@@ -1072,6 +1185,20 @@ export function injectSkills(
     // never trip in practice — but never rmSync anything that isn't a DIRECT CHILD of targetDir, in case
     // a future manifest source (or a validation bug) ever lets something else through.
     if (path.dirname(target) !== targetDir) { console.log(`[skills] refusing to prune out-of-scope manifest entry: ${stale}`); continue; }
+    // card 6db94dfe: never prune a name I claimed if its on-disk content no longer matches ANY current
+    // claimant's recorded placement (hand-edited, force-added to git, or replaced by a tracked same-named
+    // skill) — same gate, same rationale, as the re-copy skip above (the `otherClaimed` check just above
+    // already means no OTHER live session claims `stale` by the time we reach here, but this still goes
+    // through the same shared helper for consistency). A legacy claim with no recorded fingerprint
+    // anywhere is pruned only when it's still byte-identical to what placement would ACTUALLY produce
+    // right now; a genuine divergence is kept.
+    //
+    // @decision 31f997e7 — see the re-copy skip's own pointer above; this is the loop's prune sibling.
+    const recorded = recordedFingerprintsForName(manifest, fingerprints, stale);
+    if (!matchesRecordedFingerprint(fingerprintSkillDir(target), recorded, () => wouldPlaceFingerprint(stale, obsidianEnabled))) {
+      console.log(`[skills] keeping hand-modified copy of '${stale}' at ${target}: on-disk content doesn't match any current claimant's last placement (edited, or files added) — not pruning`);
+      continue;
+    }
     try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 

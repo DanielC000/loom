@@ -6181,6 +6181,13 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // it on a reduced gate — a seat here only means it also runs when a compiled .ts path changes, which
   // is strictly safer and costs nothing extra on a gate that would otherwise skip it.
   "packages/daemon/test/mainline-watch-boot-reader.mjs",
+  // Card 6db94dfe (found incidentally while editing this file, not newly added): its own buildMutant
+  // helper raw-reads real compiled dist/skills/inject.js via fs.readFileSync and builds mutant modules by
+  // exact-occurrence text substitution (mutants M1-M5) — the same unstripped dist-text-reader shape as
+  // this list's other entries, pre-dating this card (f4e93dbf) but never previously registered here.
+  // A comment-only edit near any of the substitution's anchor text could make an oldStr occurrence count
+  // mismatch (buildMutant throws) or silently substitute the wrong text.
+  "packages/daemon/test/skills-dead-claim-reclaim-shared-cwd.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its

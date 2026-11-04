@@ -145,7 +145,131 @@ untouched; an untouched claim is still cleaned (round 2's own cases stay green);
 claim is kept; both orders of two dead sids claiming the same name with different fingerprints still
 clean correctly (round 4's determinism fix).
 
-## What remains (accurate as of round 4)
+## CARD `6db94dfe`: the SAME-SESSION-resume class (point 4 of "What remains") is now closed
+
+Round 3 deliberately left the two PRE-EXISTING paths untouched (see the "Do not" list below): the
+`want`-loop re-copy for a name already in `myPrev` (`copySkillAtomic`, unconditional whenever the "repo's
+own" skip didn't fire), and the `myPrev`-vs-`want` stale-prune loop (`fs.rmSync`, unconditional). Both ran
+with zero content check — a worker that hand-edited, added a file to, or had a merge/rebase replace, its
+OWN injected skill lost that work on its own session's very next resume, exactly the same class of damage
+round 3 had just closed for a DEAD session's claim.
+
+**The fix (`inject.ts`), as it stands after the correction below (the ORIGINAL version of this paragraph
+compared only against the calling session's own fingerprint — see "CORRECTED" below for why that was
+wrong):** `fingerprintSkillDir`'s match logic was extracted into one shared helper,
+`matchesRecordedFingerprint(currentFp, recorded, storeFallback?)`, now used by all four fingerprint-gated
+write/delete decisions in this file (the two existing dead-claim sites, behaviour-preserving, plus the two
+new same-session sites). Before the `want`-loop re-copy or the stale-prune `rmSync` touches a name already
+in `myPrev`, the on-disk fingerprint is compared against `recordedFingerprintsForName(manifest,
+fingerprints, name)` — the UNION of every CURRENT claimant's (mine, plus any live co-claimant sharing this
+cwd) own last-recorded fingerprint for that name, read at the top of the call before this call's own write
+overwrites anything. A mismatch against EVERY one of those skips the write/delete and logs, exactly like
+the dead-claim cleanup; the name then drops out of `placed`/`fingerprints[sessionId]` for this call and is
+never claimed (or touched) again, the same self-healing "becomes an ordinary unmanaged dir" outcome the
+"repo's own" skip already gives an unclaimed dir.
+
+**Refinement over the dead-claim policy (owner-reviewed): a legacy claim (no recorded fingerprint from any
+current claimant) is not unconditionally kept.** Unconditionally skipping would permanently un-manage
+every claim made before this fingerprint mechanism existed — which, for the SAME-session path (unlike the
+dead-claim path), is the *common* case on this card's own first live deploy, not a rare transitional edge.
+Instead: no recorded fingerprint anywhere ⇒ the write/delete proceeds ONLY if the on-disk content is
+already byte-identical to what placement would ACTUALLY produce right now (`wouldPlaceFingerprint` — see
+"CORRECTED" below for why this is NOT simply the raw store dir; nothing would be lost by proceeding); any
+divergence still fails toward keeping. The two existing dead-claim call sites never pass `storeFallback`
+and keep their exact pre-6db94dfe behavior (any unrecorded claim is kept, no store comparison at all) —
+that policy is unchanged for THEM, deliberately; see the helper's own doc for why the two paths differ.
+
+**Named residual carried forward, NOT fixed here:** the same git-tracked-but-byte-identical gap named in
+round 3 (point 5 there) now ALSO applies to these two new sites — there is no git call anywhere in this
+sync path, by design, so a dir that's become git-tracked (force-added, or replaced by a merge/rebase) but
+happens to be byte-identical to what Loom last placed is still overwritten/pruned. Folded into "What
+remains" below rather than re-stated as a new point.
+
+**Deliberately out of scope, carded separately:** the `otherClaimed` re-copy — the WANT-loop branch that
+fires when a name is in `otherClaimed` (another live session's claim) but NOT in `myPrev` (I've never
+placed it myself) — still re-copies unconditionally with no fingerprint check of its own; that path is
+untouched by 6db94dfe. ⛔ **RETRACTED, see the correction below:** this paragraph originally also claimed
+6db94dfe's own fix "gates purely on the calling session's OWN fingerprint... the conservative default,
+consistent with every fail-toward-keeping check in this file." That was WRONG — it was never conservative;
+comparing against only my own recorded value, in a shared cwd, FAILED TOWARD RELINQUISHING a still-needed
+claim the moment a co-claimant legitimately refreshed the content, which a later prune could then act on.
+See the correction section immediately below for the real mechanism and the fix.
+
+Pinned in `skills-inject-same-session-fingerprint.mjs`: a hand-edited SKILL.md and an added file both
+survive a same-session re-copy; a hand-edited name dropped from a narrowed subset survives the prune; an
+UNTOUCHED resume still refreshes/prunes normally (no regression); a legacy no-fingerprint claim is
+refreshed/pruned when byte-identical to what placement would actually produce, kept when it diverges —
+see the correction below for the fuller, corrected coverage list.
+
+## CORRECTED (Code Review on card `6db94dfe`, reviewer `cb4d6528`): the live-co-claimant case regressed data, and the legacy fallback compared the wrong bytes
+
+**Finding 1 — MAJOR, blocking: a shared cwd with two LIVE co-claimants reproduced real data loss.**
+Sequence (reviewer's `coclaim2.mjs` repro): A and B both claim `skill-a` in a shared cwd. The store
+reseeds (`skill-a` v1 → v2). A resumes first and legitimately refreshes its own copy to v2, recording v2 as
+ITS OWN fingerprint. B then resumes: the original fix compared the on-disk content (now v2, from A's
+refresh) against ONLY `fingerprints["B"]["skill-a"]` — B's OWN last-recorded value, still v1 — a mismatch,
+so B logged "hand-modified" and silently dropped its own claim on `skill-a`, even though nothing was ever
+hand-edited; the only thing that happened was a LEGITIMATE refresh by a co-claimant. A then narrows its own
+subset away from `skill-a`; its prune loop checks `otherClaimed`, which no longer lists B (B just
+relinquished), so A deletes `skill-a` out from under B, which still wants and claims it in its own next
+`want`. This is a regression THIS CARD introduced, not a pre-existing gap.
+
+**The fix:** `recordedFingerprintsForName(manifest, fingerprints, name)` builds the full set of
+fingerprints every CURRENT claimant of `name` (mine included, read from `manifest` — which already
+excludes anyone `isSessionLive` pruned as dead earlier in the same call) actually recorded placing there,
+and `matchesRecordedFingerprint` is called with THAT set instead of a singleton of just my own value — at
+BOTH the re-copy site and the prune site. This mirrors the dead-claim cleanup's own any-of-set match
+(`deadFingerprints`) for the identical reason: a shared cwd's on-disk content is whatever ANY live
+co-claimant most recently and legitimately wrote, so "does this match what I, personally, last placed" was
+always the wrong question in a shared cwd — the right question is "does this match what SOME live Loom
+session placed."
+
+**Finding 2 — the prune site's own legacy branch had no test:** a legacy claim (no recorded fingerprint
+anywhere) that is byte-identical to the current store copy, and gets dropped from `want` on resume, must
+still be PRUNED — the reviewer's mutant D (disabling that branch) survived the full suite because no test
+exercised it. Added as its own case in `skills-inject-same-session-fingerprint.mjs`.
+
+**Finding 3 — the legacy fallback compared against the wrong bytes.** `storeFallback` originally
+fingerprinted the RAW, untransformed store directory. Real placement never delivers raw store bytes: it
+runs `needsPermissionStrip`/`stripPermissionWideningFile` (strips a permission-widening construct from an
+agent-written or unstamped skill) and, for a fragment-target skill with `obsidian.autoStart` on, appends
+the Obsidian preflight fragment. A legacy, no-fingerprint claim of such a skill could be EXACTLY what real
+placement would produce and still read as "diverged" against the raw store, permanently un-managing a
+skill that was never actually touched by hand.
+
+**The fix:** `wouldPlaceFingerprint(name, obsidianEnabled)` builds the SAME bytes real placement would, off
+to the side under the OS temp dir (never the session's own cwd, never the real store): copy the store dir,
+run the SAME `needsPermissionStrip`/`stripPermissionWideningFile` call, run the SAME obsidian-fragment
+append when applicable, fingerprint the result, then unconditionally clean up. Returns null (fails toward
+keeping, like every other branch here) when the store copy is missing or the strip would genuinely fail —
+the same "undeliverable" outcome real placement treats as never fingerprinted at all. Lazy: only invoked
+from `matchesRecordedFingerprint`'s `storeFallback` thunk, on the "nobody has a recorded fingerprint for
+this name" branch — never on the ordinary hot path where a real recorded fingerprint already exists.
+
+**Named residual — NOT closed, and genuinely cannot be from inside this mechanism:** a legacy copy that
+was placed from an OLDER store version (one predating a later reseed) still matches NEITHER any current
+claimant's recorded fingerprint (there isn't one — that's what "legacy" means) NOR what placement would
+produce from TODAY's store (the store has since moved on) — it fails both halves of the gate and is kept,
+permanently. There is no third comparison available: the only two Loom-authored states this mechanism can
+ever reconstruct are "what a live claimant actually recorded" and "what today's store would produce right
+now" — a byte-exact record of what some PAST store version produced was never captured and cannot be
+recovered after the fact. **In a shared repo cwd this is not a per-session inconvenience — it freezes that
+skill for every later session sharing the cwd, forever**, until a human manually intervenes (deletes the
+stale dir, or edits/re-adopts it): every session's own placement attempt hits the identical two-way
+mismatch and relinquishes the same way, so no session ever re-claims it, and the dir settles into the same
+permanently-unmanaged state an ordinary user/repo skill occupies — except this one is stale Loom output,
+not anything a human actually wrote.
+
+Pinned in `skills-inject-same-session-fingerprint.mjs`: the reviewer's two-live-co-claimant repro (a
+store reseed between resumes never causes a false "hand-modified" relinquish, and a co-claimant's own
+subset-narrowing prune never destroys a skill the OTHER co-claimant still claims); the missing legacy
+prune-and-byte-identical case; a legacy claim that matches the TRANSFORMED (obsidian-fragment-appended)
+bytes refreshes/claims correctly even though it diverges from the raw store; the same claim does NOT
+false-match when `obsidianEnabled` is off (so the fragment legitimately wouldn't be there) — proving the
+fallback reflects THIS session's own real settings, not a blind "does it look like it came from the store"
+guess.
+
+## What remains (accurate as of card `6db94dfe`)
 
 1. An EXPLICIT `skills` subset naming a bound skill still bypasses both the grant check and the isolation
    check (unchanged since round 1 — `509176c8`'s existing "an explicit subset is a deliberate,
@@ -155,13 +279,22 @@ clean correctly (round 4's determinism fix).
 2. Card `f4e93dbf`'s own scope: the GENERAL dead-session-orphan problem for a SHARED cwd, for every skill
    (not just a capability-bound one). Tracked separately; this card's fixes deliberately do not reach
    into it.
-3. The TWO narrowed residuals named above (point 5): a symlink/junction child or empty subdirectory
-   added to a claimed dir doesn't change its fingerprint, so such a dir is still deleted; and a TRACKED
-   dir whose content happens to be byte-identical to what Loom wrote can also still be deleted. Both
-   accepted rather than fixed — closing either would mean adding real content-type/git awareness to a
-   sync path that deliberately has neither.
-4. The SAME-SESSION-resume class the round-3 fix deliberately did NOT touch (point 4 above) — tracked on
-   its own, separately filed card.
+3. A symlink/junction child or empty subdirectory added to a claimed dir doesn't change its fingerprint,
+   so such a dir is still deleted/overwritten; and a TRACKED dir whose content happens to be byte-identical
+   to what Loom wrote can also still be deleted/overwritten — true of the original round-3 dead-claim
+   cleanup AND, since card `6db94dfe`, of the same-session re-copy/prune paths too. Both accepted rather
+   than fixed — closing either would mean adding real content-type/git awareness to a sync path that
+   deliberately has neither.
+4. ~~The SAME-SESSION-resume class the round-3 fix deliberately did NOT touch~~ — CLOSED by card
+   `6db94dfe` (see above). The `otherClaimed` re-copy (a DIFFERENT session's claim, shared cwd) is the one
+   adjacent path 6db94dfe deliberately left untouched; it is a candidate for its own, separately filed
+   card, not folded into this point.
+5. A legacy claim (no recorded fingerprint from any current claimant) placed from an OLDER store version
+   — one that has since been reseeded/updated — matches neither any claimant's recorded fingerprint nor
+   what today's store would actually produce, and so is kept, permanently: there is no third, byte-exact
+   record of a past store version to compare against. In a SHARED repo cwd this freezes that skill, for
+   every later session there, until a human intervenes — see card `6db94dfe`'s own correction section
+   above for why this cannot be closed from inside the mechanism itself.
 
 There is no longer an isolated-cwd residual for a capability-bound skill from the claim-pruning mechanism
 itself: the round-2/3 cleanup applies regardless of whether the current session uses a subset or the
@@ -184,9 +317,10 @@ now additionally requires the content fingerprint to match before it ever delete
   current content fingerprint matches none of that claim's recorded fingerprints.
 - Do not collapse two dead claimants' fingerprints for the same name into one last-writer-wins value —
   that makes the outcome depend on manifest key iteration order (round 4). Keep the SET.
-- Do not touch the two PRE-EXISTING paths (copy-over-`myPrev`, the `myPrev` stale-prune loop) on this
-  card — the same hand-edit-destruction class exists there too, for a same-session resume, but it's a
-  separate, already-filed card.
+- (Round 3's own scope limit, now CLOSED by card `6db94dfe`.) Round 3 itself did not touch the two
+  PRE-EXISTING paths (copy-over-`myPrev`, the `myPrev` stale-prune loop) — the same hand-edit-destruction
+  class existed there too, for a same-session resume. Card `6db94dfe` fixed both; see "CARD `6db94dfe`"
+  above. Do not re-open this as a finding — it is closed, not merely tracked.
 - Do not treat a bound skill's presence on disk as proof a session without the grant can act on it. The
   capability's own MCP mount shares the SAME grant source (`resolveProfileCapabilities`) but additionally
   requires a valid catalog row (a missing or first-party-squatting slug is dropped there) — this skill
@@ -195,5 +329,6 @@ now additionally requires the content fingerprint to match before it ever delete
 - Do not widen the fix search to "stop sharing cwd" as a follow-on to this card — that's a much larger
   change to manager/platform/setup/auditor/plain session architecture, out of scope here.
 - Do not fix card `9d73e537`'s or card `f4e93dbf`'s general dead-session-orphan problem for a SHARED cwd,
-  or the round-3-named tracked-but-byte-identical / same-session-resume residuals, on this card — all are
-  separate, broader findings tracked on their own cards.
+  or the round-3-named tracked-but-byte-identical residual, on this card — both are separate, broader
+  findings tracked on their own cards. (The same-session-resume residual this bullet used to also name
+  here is CLOSED — card `6db94dfe`, see above — not merely tracked elsewhere.)
