@@ -235,10 +235,11 @@ try {
 
   const fpSidecarPath = path.join(cwdStripFail, ".claude", "skills", ".loom-skills-fingerprints.json");
   const fpSidecar = JSON.parse(fs.readFileSync(fpSidecarPath, "utf8"));
+  // card f4272888: fingerprints are no longer per-session — ONE persisted fact per name, under `__lastPlaced`.
   check("(i) no fingerprint was recorded for the failed skill",
-    fpSidecar["sess-strip-fail"]?.["agent-strip-fail"] === undefined);
+    fpSidecar.__lastPlaced?.["agent-strip-fail"] === undefined);
   check("(i) a fingerprint WAS recorded for the sibling that succeeded (control — the sidecar write itself works)",
-    typeof fpSidecar["sess-strip-fail"]?.["agent-clean"] === "string");
+    Array.isArray(fpSidecar.__lastPlaced?.["agent-clean"]) && typeof fpSidecar.__lastPlaced["agent-clean"][0] === "string");
 
   const manifestPath = path.join(cwdStripFail, ".claude", "skills", ".loom-skills.json");
   const manifestJson = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -305,9 +306,9 @@ try {
     const nullStripFpPath = path.join(cwdNullStrip, ".claude", "skills", ".loom-skills-fingerprints.json");
     const nullStripFp = JSON.parse(fs.readFileSync(nullStripFpPath, "utf8"));
     check("(l) no fingerprint was recorded for the withheld skill",
-      nullStripFp["sess-nullstrip"]?.["agent-nullstrip"] === undefined);
+      nullStripFp.__lastPlaced?.["agent-nullstrip"] === undefined);
     check("(l) a fingerprint WAS recorded for the sibling that succeeded (control)",
-      typeof nullStripFp["sess-nullstrip"]?.["human-hazard"] === "string");
+      Array.isArray(nullStripFp.__lastPlaced?.["human-hazard"]) && typeof nullStripFp.__lastPlaced["human-hazard"][0] === "string");
   } finally {
     try { fs.rmSync(stubGuardPath, { force: true }); } catch { /* best effort */ }
     try { fs.rmSync(mutantInjectPath, { force: true }); } catch { /* best effort */ }
@@ -546,7 +547,7 @@ try {
   const flowMapFpPath = path.join(cwdFlowMap, ".claude", "skills", ".loom-skills-fingerprints.json");
   const flowMapFp = JSON.parse(fs.readFileSync(flowMapFpPath, "utf8"));
   check("(p) no fingerprint was recorded for the withheld skill",
-    flowMapFp["sess-flowmap"]?.["agent-flowmap-hazard"] === undefined);
+    flowMapFp.__lastPlaced?.["agent-flowmap-hazard"] === undefined);
 
   // =====================================================================================================
   // (q) card 99f2ae1a, Code Review round 2 item 2: a REAL fence-shape disagreement — same proof shape as
@@ -589,7 +590,7 @@ try {
   const fenceFpPath = path.join(cwdFence, ".claude", "skills", ".loom-skills-fingerprints.json");
   const fenceFp = JSON.parse(fs.readFileSync(fenceFpPath, "utf8"));
   check("(q) no fingerprint was recorded for the withheld skill",
-    fenceFp["sess-fence"]?.["agent-fence-hazard"] === undefined);
+    fenceFp.__lastPlaced?.["agent-fence-hazard"] === undefined);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

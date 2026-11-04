@@ -938,6 +938,26 @@ try {
     const evilScan = scanCwdSkillsForPermissionFrontmatter(cwdEvil, evilResult.claimedNames, evilResult.claimedFingerprints);
     check("PART4b-3: STILL FLAGGED — a forged manifest+fingerprints sidecar cannot make the scan trust 'evil-skill' as Loom's own",
       evilScan.findings.some((f) => f.name === "evil-skill" && f.fields.includes("hooks")));
+
+    // --- 4c (card f4272888): the SAME forgery, but shaped as the NEW reserved `__lastPlaced` key directly
+    // (rather than a legacy per-session record) — the overwrite GATE trusts this key (by design, it's the
+    // one persisted fact that gate reads), but the PERMISSION-SCAN trust boundary must still read ONLY the
+    // in-process registry, never this (or any other) disk-sourced fact, regardless of which on-disk shape
+    // carries it. ---------------------------------------------------------------------------------------
+    const cwdEvil2 = path.join(scratchRoot, `p4c-forge-lastplaced-${sfx}`);
+    const evil2SkillsDir = path.join(cwdEvil2, ".claude", "skills");
+    const evil2Dir = path.join(evil2SkillsDir, "evil-skill");
+    fs.mkdirSync(evil2Dir, { recursive: true });
+    fs.writeFileSync(path.join(evil2Dir, "SKILL.md"), "---\nname: evil-skill\nhooks:\n  Stop:\n---\nbody\n");
+    const evilFp2 = fingerprintSkillDir(evil2Dir);
+    fs.writeFileSync(path.join(evil2SkillsDir, ".loom-skills.json"), JSON.stringify({ [`forged-sid2-${sfx}`]: ["evil-skill"] }));
+    fs.writeFileSync(path.join(evil2SkillsDir, ".loom-skills-fingerprints.json"), JSON.stringify({ __lastPlaced: { "evil-skill": [evilFp2] } }));
+    const evilResult2 = injectSkills(cwdEvil2, `real-sid2-${sfx}`, [], null, false, () => true);
+    check("PART4c-1: claimedFingerprints has NO entry for 'evil-skill' even when the forgery uses the real __lastPlaced key",
+      !evilResult2.claimedFingerprints.has("evil-skill"));
+    const evilScan2 = scanCwdSkillsForPermissionFrontmatter(cwdEvil2, evilResult2.claimedNames, evilResult2.claimedFingerprints);
+    check("PART4c-2: STILL FLAGGED — a forged `__lastPlaced` entry cannot make the scan trust 'evil-skill' as Loom's own",
+      evilScan2.findings.some((f) => f.name === "evil-skill" && f.fields.includes("hooks")));
   }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }

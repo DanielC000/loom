@@ -16,8 +16,22 @@
 //
 // Cases (12)-(13) are card 3b2a8707: the SAME myPrev gate now also covers a FRESH session's first-time
 // otherClaimed claim. (14)-(16) add the cross-variant co-claim + wouldPlaceFingerprint's own strip-
-// failure paths. (17)-(20) are Code Review rounds 2-3: closing the LAST-WRITER-DIED false freeze,
-// in-process (17)-(18) and surviving a simulated daemon restart (19)-(20).
+// failure paths. (17)-(21c) are Code Review rounds 2-4 of card 3b2a8707: closing the LAST-WRITER-DIED
+// false freeze, in-process (17)-(18) and surviving a simulated daemon restart (19)-(21c).
+//
+// card f4272888 retired the multi-source gate (17)-(21c) were written to probe (the daemon-side registry
+// union, the merged/capped `__lastPlaced` carry-forward) in favor of ONE persisted per-(cwd,name) fact,
+// written at every real placement and read directly by the gate — never session-scoped, so a session's
+// death (or `freshInjectModule`'s simulated restart, below) has NOTHING to carry forward or lose. Cases
+// (17)-(21c) still PASS and are kept as black-box regression coverage of the same end-to-end outcomes,
+// but they no longer isolate restart-survival specifically — there is nothing left in this area that
+// COULD fail across a restart. See docs/decisions/31f997e7-*.md's "CARD f4272888" section for the full
+// redesign and why every one of these scenarios still resolves correctly. (22)-(23) are new for f4272888:
+// the one-shot migration fold of a pre-card legacy sidecar, and the forged-`"__proto__"`-key hazard.
+// (24)/(24b)-(25a)/(25b) are a round-6 Code Review pass on f4272888's own implementation: (24)/(24b) prove
+// the migration fold is order-independent (the fold used to REPLACE rather than UNION when `__lastPlaced`
+// was reached after a legacy section in the real pre-card key order); (25a)/(25b) close a pre-existing
+// gap at the PRUNE loop's own `wouldPlaceFingerprint` fallback call, the prune-site sibling of (10)/(11).
 // @decision 31f997e7
 //
 // useOwnLoomHome sets up a managed temp LOOM_HOME with guaranteed cleanup; WORKTREES_DIR (a sibling of
@@ -39,7 +53,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // every import `inject.js` itself makes (paths.js, store.js, …) stays the SAME already-cached instance —
 // same technique as merge-quarantine-lazy-graduation-multi-pending.mjs's own `freshBootModule`.
 const injectModuleHref = pathToFileURL(path.join(__dirname, "..", "dist", "skills", "inject.js")).href;
-const { injectSkills } = await import(injectModuleHref);
+const { injectSkills, fingerprintSkillDir } = await import(injectModuleHref);
+const { isValidSkillName } = await import("../dist/skills/store.js");
 const { WORKTREES_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT } = await import("../dist/paths.js");
 registerForCleanup(WORKTREES_DIR); // a sibling of LOOM_HOME, not nested under it — clean it up too
 
@@ -89,6 +104,7 @@ const live = () => true; // every session in this file's co-claimant cases is li
 
 const deliveredPath = (cwd, name, file = "SKILL.md") => path.join(cwd, ".claude", "skills", name, file);
 const manifestPath = (cwd) => path.join(cwd, ".claude", "skills", ".loom-skills.json");
+const fingerprintsPath = (cwd) => path.join(cwd, ".claude", "skills", ".loom-skills-fingerprints.json");
 const readManifestClaims = (cwd, sid) => {
   const p = manifestPath(cwd);
   if (!fs.existsSync(p)) return [];
@@ -389,7 +405,10 @@ try {
   //     `matchesRecordedFingerprint` ever reaches its `storeFallback` branch) — reverting JUST (b)'s rule
   //     leaves this case GREEN. See (19b) immediately below for a construction that genuinely isolates
   //     (b): round 3 only ever carries forward a DEAD session's own claim, so a case with no dead session
-  //     at all is untouched by it. ---------------------------------------------------------------------
+  //     at all is untouched by it.
+  //     (card f4272888: `freshInjectModule`'s simulated restart no longer matters here at all — the gate
+  //     reads only the persisted `lastPlaced` fact, which the restart never touches. Kept as regression
+  //     coverage of the outcome, not as a restart-survival isolation.) ------------------------------------
   {
     const cwd = sharedCwd("case19-restart-no-store-change-fallback-b");
     injectSkills(cwd, "A19", ["skill-a"], "manager", false, live); // A places v1
@@ -433,7 +452,9 @@ try {
   //     AFTER C's death and the restart — `wouldPlaceFingerprint` (fix (b)) now computes v3, which does
   //     NOT match the still-v2 disk, so (b) CANNOT rescue this one; only round 3's persisted `lastPlaced`
   //     (the sidecar survives the restart even though the in-memory registry doesn't) can. On main before
-  //     this round, ALL THREE ended claims=[] and the disk froze at v2 forever. ---------------------------
+  //     this round, ALL THREE ended claims=[] and the disk froze at v2 forever.
+  //     (card f4272888: `lastPlaced` is now the ONLY source the gate reads, persisted from the start — the
+  //     restart is a non-event; C's v2 fingerprint was already on disk, nothing to lose.) -----------------
   {
     const cwd = sharedCwd("case20-restart-store-moves-again-p1");
     injectSkills(cwd, "A20", ["skill-a"], "manager", false, live); // A places v1
@@ -466,7 +487,11 @@ try {
   //     v2, matching neither the stale [fp1] record nor wouldPlaceFingerprint's now-v3 computation).
   //     Under MERGE, lastPlaced holds [fp1, fp2] after F's call, fp2 still vouches for the v2 disk, and
   //     both resolve normally, refreshing to v3. Built as a shared setup so the L-resume and fresh-claim
-  //     checks each get their OWN cwd — proving either one alone is enough to go RED, not just their sum. -
+  //     checks each get their OWN cwd — proving either one alone is enough to go RED, not just their sum.
+  //     (card f4272888: the whole REPLACE-vs-MERGE question is retired along with `carryDeadFingerprintsForward`
+  //     itself — a real placement always REPLACES `lastPlaced.get(name)` with ONE fresh fingerprint, and
+  //     nothing ever "carries forward" a dead session's value at all, because the fact was never
+  //     session-scoped. These three cases still pass, now trivially, and are kept as regression coverage.) -
   const case21StoreMd = path.join(skillsDir, "skill-a", "SKILL.md");
   const case21OrigStore = fs.readFileSync(case21StoreMd, "utf8"); // captured ONCE, before any (21*) sub-case touches the store — restored at the very end
   async function buildCase21Scenario(label) {
@@ -521,12 +546,182 @@ try {
     check("(21c) CONTROL: with only one prune pass ever, L's resume refreshes to v3 normally", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a v3"));
   }
   fs.writeFileSync(case21StoreMd, case21OrigStore); // restore the shared store fixture, once, for any later case/test file
+
+  // --- (22) card f4272888, owner-approved design decision (2): the ONE-SHOT MIGRATION FOLD closes the
+  //     upgrade-boundary false freeze. Fabricate a sidecar in the PRE-f4272888 per-session shape (no
+  //     `__lastPlaced` key at all — simulating a cwd this version has never written to) for a session
+  //     that is still LIVE, placed at v1; reseed the store to v2; resume. Without the fold, `lastPlaced`
+  //     would be empty for this name and `wouldPlaceFingerprint` would compute v2 — NOT matching the
+  //     still-v1 disk — a false "hand-modified" freeze on content nobody ever touched by hand. With the
+  //     fold, the legacy entry's own fp is folded into `lastPlaced` on THIS read, matches v1 disk, and the
+  //     resume refreshes normally. A second, parallel setup proves a GENUINE hand edit still survives the
+  //     exact same legacy sidecar shape — the fold only ever widens what counts as Loom's own, never
+  //     admits a real divergence. -------------------------------------------------------------------------
+  {
+    const cwd = isolatedCwd("case22-legacy-sidecar-migration-fold-refreshes");
+    const skillsDest = path.join(cwd, ".claude", "skills");
+    fs.mkdirSync(skillsDest, { recursive: true });
+    fs.cpSync(path.join(skillsDir, "skill-a"), path.join(skillsDest, "skill-a"), { recursive: true }); // v1, byte-identical to the store right now
+    const v1Fp = fingerprintSkillDir(path.join(skillsDest, "skill-a"));
+    fs.writeFileSync(manifestPath(cwd), JSON.stringify({ S22: ["skill-a"] }));
+    // PRE-f4272888 shape: a real session id as a top-level key, mapping straight to { name: fp } — no
+    // __lastPlaced key anywhere in this file.
+    fs.writeFileSync(fingerprintsPath(cwd), JSON.stringify({ S22: { "skill-a": v1Fp } }));
+    const storeMd = path.join(skillsDir, "skill-a", "SKILL.md");
+    const origStore = fs.readFileSync(storeMd, "utf8");
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2")); // the store reseeds AFTER the legacy placement
+    injectSkills(cwd, "S22", ["skill-a"], "worker", false); // S22 (still live) resumes against the legacy sidecar
+    check("(22) a legacy per-session fp with no __lastPlaced entry is folded on read: untouched content refreshes (no false freeze)", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a v2"));
+    check("(22) the claim survives the refresh", readManifestClaims(cwd, "S22").includes("skill-a"));
+
+    // Parallel setup: the SAME legacy sidecar shape, but the content is GENUINELY hand-edited before the
+    // resume — the fold must never let this be mistaken for untouched Loom output.
+    const cwdEdited = isolatedCwd("case22-legacy-sidecar-handedit-survives");
+    const skillsDestEdited = path.join(cwdEdited, ".claude", "skills");
+    fs.mkdirSync(skillsDestEdited, { recursive: true });
+    fs.cpSync(path.join(skillsDir, "skill-a"), path.join(skillsDestEdited, "skill-a"), { recursive: true });
+    fs.writeFileSync(storeMd, origStore); // back to v1 so this copy's fp matches v1 too
+    const v1FpEdited = fingerprintSkillDir(path.join(skillsDestEdited, "skill-a"));
+    fs.writeFileSync(manifestPath(cwdEdited), JSON.stringify({ S22b: ["skill-a"] }));
+    fs.writeFileSync(fingerprintsPath(cwdEdited), JSON.stringify({ S22b: { "skill-a": v1FpEdited } }));
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2")); // reseed again
+    const handEditedPath = deliveredPath(cwdEdited, "skill-a");
+    fs.writeFileSync(handEditedPath, "# hand edit over a legacy (pre-f4272888) placement\n");
+    injectSkills(cwdEdited, "S22b", ["skill-a"], "worker", false); // resume: still wants it
+    check("(22) a GENUINE hand edit over the same legacy shape still SURVIVES (the fold never admits a real divergence)", fs.readFileSync(handEditedPath, "utf8") === "# hand edit over a legacy (pre-f4272888) placement\n");
+    check("(22) the hand-edited claim is relinquished, not refreshed", !readManifestClaims(cwdEdited, "S22b").includes("skill-a"));
+    fs.writeFileSync(storeMd, origStore);
+  }
+
+  // --- (23) card f4272888, owner-approved design decision (4): a forged sidecar carrying a top-level key
+  //     literally `"__proto__"` (a pre-f4272888-shaped legacy "session" record) AND a nested `"__proto__"`
+  //     name key inside a real `__lastPlaced` entry. `readFingerprintsFile`'s rewrite must neither throw
+  //     nor pollute `Object.prototype` either way — the top-level case is reached purely as a loop
+  //     discriminant (never an object/Map key), and the nested case is dropped by the existing
+  //     `isSafeManifestEntry`/NAME_RE check before it ever reaches a `Map.set`. -------------------------
+  {
+    check('(23) precondition: "__proto__" is not a valid skill name (NAME_RE requires a leading [a-z0-9])', isValidSkillName("__proto__") === false);
+    const cwd = isolatedCwd("case23-forged-proto-sidecar");
+    const skillsDest = path.join(cwd, ".claude", "skills");
+    fs.mkdirSync(skillsDest, { recursive: true });
+    fs.writeFileSync(manifestPath(cwd), JSON.stringify({}));
+    const forged = {
+      "__proto__": { "legit-skill-name": "deadbeef".repeat(8) }, // legacy-shaped "session" record under a forged key
+      "__lastPlaced": { "__proto__": ["deadbeef".repeat(8)] },   // real reserved key, forged NESTED name
+    };
+    fs.writeFileSync(fingerprintsPath(cwd), JSON.stringify(forged));
+    let threw = null;
+    try { injectSkills(cwd, "S23", ["skill-a"], "worker", false); } catch (e) { threw = e; }
+    check("(23) injectSkills does NOT throw on a forged top-level/nested \"__proto__\" sidecar", threw === null);
+    check("(23) Object.prototype is NOT polluted after parsing the forged sidecar", ({}).legitSkillName === undefined && ({}).__proto__ === Object.prototype);
+    check('(23) a plain object\'s OWN keys are unaffected (no stray "legit-skill-name"/"__proto__" own property leaked onto {})', !Object.prototype.hasOwnProperty.call({}, "legit-skill-name"));
+    // The sharper check (({}).someKey alone would NOT catch a bracket-assignment bug that only reassigns a
+    // LOCAL accumulator's own prototype, never the global Object.prototype): the internal Map this forged
+    // read feeds into must still behave normally for SUBSEQUENT, genuine data in the SAME cwd — a corrupted
+    // accumulator would plausibly misbehave (lose entries, throw on iteration/serialize) on its very next use.
+    injectSkills(cwd, "S23", ["skill-a", "skill-b"], "worker", false); // a second, perfectly ordinary call, same session+cwd
+    check("(23) a subsequent ordinary claim in the SAME cwd still succeeds normally after the forged read", readManifestClaims(cwd, "S23").includes("skill-a") && readManifestClaims(cwd, "S23").includes("skill-b"));
+    check("(23) the re-serialized sidecar file is still valid, parseable JSON", (() => { try { JSON.parse(fs.readFileSync(fingerprintsPath(cwd), "utf8")); return true; } catch { return false; } })());
+  }
+
+  // --- (24)/(24b) card f4272888 round 6 Code Review (MAJOR finding): the migration fold used to REPLACE
+  //     rather than UNION whenever the loop reached `__lastPlaced` AFTER a legacy per-session section for
+  //     the same name — exactly the real pre-card key order (`serializeFingerprintsFile` always wrote
+  //     `{...bySession, __pendingReclaim, __lastPlaced}`, `__lastPlaced` LAST). A sidecar built in THAT
+  //     order, carrying both a legacy fp matching current disk and a DIFFERENT, older `__lastPlaced` fp,
+  //     must still refresh on a reseed (24) — and a genuine hand edit over the identical shape must still
+  //     survive (24b), proving the fix widens what's recognized without ever admitting a real divergence. ---
+  {
+    const storeMd = path.join(skillsDir, "skill-a", "SKILL.md");
+    const origStore = fs.readFileSync(storeMd, "utf8");
+
+    // (24) refresh, not freeze.
+    {
+      const cwd = isolatedCwd("case24-order-dependent-fold-unions-not-replaces");
+      const skillsDest = path.join(cwd, ".claude", "skills");
+      fs.mkdirSync(path.join(skillsDest, "skill-a"), { recursive: true });
+      fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v1-for-fold24")); // an OLDER version, never on disk here
+      const v1Fp = fingerprintSkillDir(path.join(skillsDir, "skill-a"));
+      fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2-for-fold24")); // what disk actually holds
+      fs.cpSync(path.join(skillsDir, "skill-a"), path.join(skillsDest, "skill-a"), { recursive: true });
+      const v2Fp = fingerprintSkillDir(path.join(skillsDest, "skill-a"));
+      fs.writeFileSync(manifestPath(cwd), JSON.stringify({ S24: ["skill-a"] }));
+      // Real pre-card key order: a legacy per-session section FIRST, `__lastPlaced` LAST — the exact shape
+      // `{...bySession, __pendingReclaim, __lastPlaced}` always produced. The legacy fp (v2Fp) matches
+      // disk; the `__lastPlaced` fp (v1Fp) is a different, older value — a REPLACE would discard v2Fp.
+      fs.writeFileSync(fingerprintsPath(cwd), JSON.stringify({ S24: { "skill-a": v2Fp }, "__lastPlaced": { "skill-a": [v1Fp] } }));
+      fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v3-for-fold24")); // reseed AFTER the sidecar is written
+      injectSkills(cwd, "S24", ["skill-a"], "worker", false); // S24 (still live) resumes
+      check("(24) a sidecar in the real pre-card key order (legacy fp matching disk, __lastPlaced LAST with a different fp) refreshes, not freezes", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a v3-for-fold24"));
+      check("(24) the claim survives the refresh", readManifestClaims(cwd, "S24").includes("skill-a"));
+    }
+
+    // (24b) the SAME sidecar shape, but disk is a genuine hand edit matching NEITHER fp: must still SURVIVE.
+    {
+      const cwd = isolatedCwd("case24b-order-dependent-fold-handedit-survives");
+      const skillsDest = path.join(cwd, ".claude", "skills");
+      fs.mkdirSync(path.join(skillsDest, "skill-a"), { recursive: true });
+      fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v1-for-fold24b"));
+      const v1Fp = fingerprintSkillDir(path.join(skillsDir, "skill-a"));
+      fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2-for-fold24b"));
+      const v2Fp = fingerprintSkillDir(path.join(skillsDir, "skill-a"));
+      fs.writeFileSync(manifestPath(cwd), JSON.stringify({ S24b: ["skill-a"] }));
+      fs.writeFileSync(fingerprintsPath(cwd), JSON.stringify({ S24b: { "skill-a": v2Fp }, "__lastPlaced": { "skill-a": [v1Fp] } }));
+      const handEditedPath = deliveredPath(cwd, "skill-a");
+      fs.writeFileSync(handEditedPath, "# hand edit over an order-dependent legacy+__lastPlaced sidecar\n");
+      fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v3-for-fold24b")); // reseed again
+      injectSkills(cwd, "S24b", ["skill-a"], "worker", false);
+      check("(24b) a GENUINE hand edit over the same sidecar shape still SURVIVES", fs.readFileSync(handEditedPath, "utf8") === "# hand edit over an order-dependent legacy+__lastPlaced sidecar\n");
+      check("(24b) the hand-edited claim is relinquished, not refreshed", !readManifestClaims(cwd, "S24b").includes("skill-a"));
+    }
+
+    fs.writeFileSync(storeMd, origStore);
+  }
+
+  // --- (25a)/(25b) card f4272888 round 6 Code Review (minor finding 3): the PRUNE loop's own
+  //     `wouldPlaceFingerprint(stale, obsidianEnabled)` fallback call (~:1244) had no case distinguishing
+  //     it from a wrong-variant mutant (obsidianEnabled negated) — the identical mutant at the RE-COPY
+  //     site (10)/(11) already cover goes RED, but nothing exercised the prune loop's own copy of the
+  //     same fallback. Same transform-aware probe technique as (10)/(11), for a LEGACY claim (no recorded
+  //     fingerprint) that drops OUT of `want` on resume — triggering the prune loop, not the re-copy loop. ---
+  {
+    const probeCwd = isolatedCwd("case25-probe-transformed-bytes");
+    injectSkills(probeCwd, "probe25", ["loom-pickup"], "worker", true);
+    const transformedBytes = fs.readFileSync(deliveredPath(probeCwd, "loom-pickup"), "utf8");
+
+    // (25a) obsidianEnabled=true on resume, dropped from `want`: disk (fragment-appended) bytes match what
+    // the prune loop's own fallback computes right now ⇒ PRUNED. A mutant negating obsidianEnabled there
+    // would compute the fragment-FREE bytes instead — a mismatch — turning this assertion RED.
+    {
+      const cwd = isolatedCwd("case25a-legacy-prune-obsidian-true-pruned");
+      const skillsDest = path.join(cwd, ".claude", "skills");
+      fs.mkdirSync(path.join(skillsDest, "loom-pickup"), { recursive: true });
+      fs.writeFileSync(path.join(skillsDest, "loom-pickup", "SKILL.md"), transformedBytes);
+      fs.writeFileSync(manifestPath(cwd), JSON.stringify({ S25a: ["loom-pickup"] })); // legacy, no fingerprints file
+      injectSkills(cwd, "S25a", ["skill-b"], "worker", true); // a non-empty subset (empty means "ALL") excluding loom-pickup
+      check("(25a) legacy prune, obsidianEnabled=true matches the transformed bytes already on disk: PRUNED", !fs.existsSync(deliveredPath(cwd, "loom-pickup")));
+    }
+
+    // (25b) SAME fragment-appended on-disk bytes, but THIS session has obsidianEnabled=false: the prune
+    // loop's fallback now computes the fragment-free bytes, which must NOT match ⇒ KEPT, not pruned. The
+    // SAME mutant, negated the other way, would compute the fragment-appended bytes — a false match —
+    // turning THIS assertion RED instead, so either direction of the mutant is caught by one of the two.
+    {
+      const cwd = isolatedCwd("case25b-legacy-prune-obsidian-false-kept");
+      const skillsDest = path.join(cwd, ".claude", "skills");
+      fs.mkdirSync(path.join(skillsDest, "loom-pickup"), { recursive: true });
+      fs.writeFileSync(path.join(skillsDest, "loom-pickup", "SKILL.md"), transformedBytes);
+      fs.writeFileSync(manifestPath(cwd), JSON.stringify({ S25b: ["loom-pickup"] }));
+      injectSkills(cwd, "S25b", ["skill-b"], "worker", false); // a non-empty subset excluding loom-pickup
+      check("(25b) legacy prune, obsidianEnabled=false does NOT false-match the fragment-appended bytes: KEPT, not pruned", fs.existsSync(deliveredPath(cwd, "loom-pickup")));
+    }
+  }
 } catch (e) {
   console.log(`FAIL  unexpected throw: ${e.stack}`);
   failures++;
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a same-session resume never overwrites or prunes a hand-modified (or added-to) injected skill copy; an untouched resume still refreshes/prunes normally; a legacy no-fingerprint claim is refreshed only when matching ANY current claimant's recorded fingerprint or what placement would ACTUALLY produce right now (transform-aware, not a raw-store comparison); two LIVE co-claimants sharing a cwd never misread each other's legitimate refresh as a hand edit, and one's narrowing never destroys what the other still claims; a FRESH session claiming a name for the first time is held to the SAME gate (card 3b2a8707) — it never overwrites another live claimant's hand edit, it DOES succeed on an untouched co-claim, and two co-claimants with differing per-session variants (e.g. obsidian fragment on/off) never misread each other's legitimate variant as a hand edit either; wouldPlaceFingerprint applies the SAME permission-strip transform real placement does, and fails toward keeping (never a crash) when that strip is itself undeliverable; a session that died AFTER being the last one to legitimately write the dir never permanently freezes it for a fresh co-claimant OR the original claimant's own later resume — the daemon-side placement registry survives that death, and a last-resort wouldPlace comparison covers it even when the registry doesn't; and (Code Review round 4) a SECOND dead-session prune, for the same name, after a restart, MERGES into lastPlaced instead of REPLACING it — neither a resuming original co-claimant nor a fresh one freezes when an earlier pass's own carried-forward fingerprint would otherwise be discarded, with a control proving the fixture itself is sane absent that second death."
+  ? "\n✅ ALL PASS — a same-session resume never overwrites or prunes a hand-modified (or added-to) injected skill copy; an untouched resume still refreshes/prunes normally; a legacy no-fingerprint claim is refreshed only when matching the one persisted `lastPlaced` fact or what placement would ACTUALLY produce right now (transform-aware, not a raw-store comparison); two LIVE co-claimants sharing a cwd never misread each other's legitimate refresh as a hand edit, and one's narrowing never destroys what the other still claims; a FRESH session claiming a name for the first time is held to the SAME gate — it never overwrites another live claimant's hand edit, it DOES succeed on an untouched co-claim, and two co-claimants with differing per-session variants (e.g. obsidian fragment on/off) never misread each other's legitimate variant as a hand edit either; wouldPlaceFingerprint applies the SAME permission-strip transform real placement does, and fails toward keeping (never a crash) when that strip is itself undeliverable; a session that died AFTER being the last one to legitimately write the dir never permanently freezes it for a fresh co-claimant OR the original claimant's own later resume, and neither does a daemon restart or a second dead-session discovery for the same name — the persisted `lastPlaced` fact was never session- or process-scoped to begin with (card f4272888); a pre-f4272888 legacy sidecar's per-session record is folded into `lastPlaced` on read exactly once, closing the upgrade-boundary false freeze without ever admitting a genuine hand edit; a forged sidecar carrying a literal \"__proto__\" key, top-level or nested, neither crashes the parser nor pollutes Object.prototype; the migration fold is order-INDEPENDENT (a legacy section and a `__lastPlaced` entry for the same name union regardless of which key the reader reaches first), while still never admitting a genuine hand edit; and the prune loop's own `wouldPlaceFingerprint` fallback (not just the re-copy loop's) correctly reflects this session's real obsidian setting."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

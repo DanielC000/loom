@@ -69,11 +69,14 @@ const readManifestClaims = (cwd, sid) => {
   return m[sid] ?? [];
 };
 // CR round 3: fingerprints live in a SEPARATE sidecar file, never merged into the manifest's own shape.
-const readManifestFingerprint = (cwd, sid, name) => {
+// card f4272888: no longer per-session — ONE persisted fact per name, under the reserved `__lastPlaced`
+// key (always a 1-element array after a real placement). `sid` is accepted for call-site compatibility
+// but no longer consulted — the fact is never session-scoped.
+const readManifestFingerprint = (cwd, _sid, name) => {
   const p = path.join(cwd, ".claude", "skills", ".loom-skills-fingerprints.json");
   if (!fs.existsSync(p)) return undefined;
   const m = JSON.parse(fs.readFileSync(p, "utf8"));
-  return m[sid]?.[name];
+  return m.__lastPlaced?.[name]?.[0];
 };
 
 // Two kinds of fresh cwd: an ISOLATED one, nested under the REAL WORKTREES_DIR (mirrors a real worker's
@@ -410,42 +413,42 @@ try {
       !readDelivered(cwdGrantedShared).includes("loom-shadcn"));
   }
 
-  // --- (21) CODE REVIEW ROUND 4, item 3: the dead-session prune loop's own `fingerprints[sid]?.[n]` read
-  //     (inject.ts's top-of-function prune, NOT recordedFingerprintsForName — that one was already fixed
-  //     for case 8's own "constructor" skill) must ALSO guard against prototype shadowing. A dead
-  //     session's manifest claim for a skill named "constructor", with its OWN recorded fingerprint entry
-  //     missing (the legacy / failed-fingerprint shape — real, documented, and already covered elsewhere
-  //     in this file as "KEPT, not deleted"), must never let the bracket read fall through to
-  //     Object.prototype's own inherited `constructor` function. The reviewer's own probe showed exactly
-  //     that happening and surviving all the way to disk: `"__lastPlaced":{"constructor":[null]}` — a
-  //     function value, once JSON.stringify'd inside an array, renders as `null`. ------------------------
+  // --- (21) card f4272888 rewrite: the ORIGINAL hazard this case guarded (the dead-session prune loop's
+  //     own per-session `fingerprints[sid]?.[n]` bracket read falling through to Object.prototype for a
+  //     skill literally named "constructor") is now STRUCTURALLY IMPOSSIBLE, not merely fixed — that
+  //     whole per-session fingerprint read was deleted; the prune loop collects only NAMES from the
+  //     manifest, and the one persisted `__lastPlaced` fact is read later via `Map.get`, which has no
+  //     prototype-shadowing hazard for any key. This case is repurposed to prove the "constructor"-named
+  //     skill still behaves correctly end-to-end under the NEW mechanism: a dead claim with NO recorded
+  //     fingerprint anywhere (the legacy shape) is KEPT, never deleted, and nothing crashes or corrupts
+  //     the sidecar in the process. ---------------------------------------------------------------------
   {
-    fs.mkdirSync(path.join(skillsDir, "constructor"), { recursive: true }); // same fixture shape as case (8) — a store skill literally named "constructor"
+    fs.mkdirSync(path.join(skillsDir, "constructor"), { recursive: true }); // a store skill literally named "constructor" — a valid NAME_RE slug (all letters)
     fs.writeFileSync(path.join(skillsDir, "constructor", "SKILL.md"), skillMd("constructor"));
     const cwd = sharedCwd("case21-constructor-dead-prune-no-pollution");
     const alive = new Set(["Y-ctor", "X-ctor"]);
     const isLive = (sid) => alive.has(sid);
     injectSkills(cwd, "Y-ctor", null, "manager", false, isLive); // Y claims deliver-all (including "constructor") and stays live
-    injectSkills(cwd, "X-ctor", null, "manager", false, isLive); // X claims it too
-    // Strip X's OWN recorded fingerprint for "constructor" directly from the sidecar, leaving its
-    // manifest claim intact — simulates the legacy/failed-fingerprint shape this file already proves is
-    // kept (not deleted) elsewhere, and is exactly the condition that exposes the bracket-access hazard:
-    // fingerprints["X-ctor"] still exists as an object, it simply has no OWN "constructor" key.
+    injectSkills(cwd, "X-ctor", null, "manager", false, isLive); // X claims it too — records __lastPlaced["constructor"]
+    // Strip the ONE persisted fact for "constructor" directly — simulating the legacy/failed-fingerprint
+    // shape this file already proves is kept (not deleted) elsewhere (case 17). `__lastPlaced` is a plain
+    // object under a FIXED, non-attacker-controlled key; deleting an own "constructor" property on it is
+    // an ordinary, safe `delete` (unlike a bracket WRITE of "__proto__", deleting an existing own
+    // "constructor" key never touches the prototype chain).
     const fpPath = path.join(cwd, ".claude", "skills", ".loom-skills-fingerprints.json");
     const fpRaw = JSON.parse(fs.readFileSync(fpPath, "utf8"));
-    delete fpRaw["X-ctor"]["constructor"];
+    delete fpRaw.__lastPlaced.constructor;
     fs.writeFileSync(fpPath, JSON.stringify(fpRaw));
     alive.delete("X-ctor"); // X dies
-    injectSkills(cwd, "Z-ctor", ["plain-skill"], "manager", false, isLive); // Z doesn't want "constructor" at all — its call is what runs the dead-session prune over X's claim
+    let threw = null;
+    try { injectSkills(cwd, "Z-ctor", ["plain-skill"], "manager", false, isLive); } catch (e) { threw = e; } // Z doesn't want "constructor" at all — its call is what runs the dead-session prune over X's claim
+    check('(21) injectSkills does NOT throw pruning a dead "constructor" claim with no recorded fingerprint', threw === null);
+    check('(21) the "constructor" skill dir SURVIVES (no recorded fp ⇒ cannot verify ⇒ not deleted)', fs.existsSync(path.join(cwd, ".claude", "skills", "constructor")));
     const afterRaw = JSON.parse(fs.readFileSync(fpPath, "utf8"));
-    // Object.hasOwn here too — the SAME hazard this case exists to catch would otherwise bite this very
-    // assertion: a plain `afterRaw.__lastPlaced?.constructor` falls through to Object.prototype.constructor
-    // (a function) whenever __lastPlaced genuinely has NO own "constructor" key, which is exactly the
-    // CORRECT (fixed) outcome this check wants to confirm.
-    const lastPlaced = afterRaw.__lastPlaced;
-    const lastPlacedCtor = lastPlaced && Object.hasOwn(lastPlaced, "constructor") ? lastPlaced.constructor : undefined;
-    check('(21) no non-string fingerprint ever reaches __lastPlaced for a dead claim named "constructor" with no recorded fp',
-      lastPlacedCtor === undefined || (Array.isArray(lastPlacedCtor) && lastPlacedCtor.every((fp) => typeof fp === "string" && fp.length > 0)));
+    const lastPlaced = afterRaw.__lastPlaced ?? {};
+    const ctorEntry = Object.hasOwn(lastPlaced, "constructor") ? lastPlaced.constructor : undefined;
+    check('(21) __lastPlaced carries no non-string fingerprint for "constructor" (absent, or a clean string array)',
+      ctorEntry === undefined || (Array.isArray(ctorEntry) && ctorEntry.every((fp) => typeof fp === "string" && fp.length > 0)));
   }
 } catch (e) {
   console.log(`FAIL  unexpected throw: ${e.stack}`);
@@ -453,6 +456,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — capability-bound skill delivery requires BOTH worktree isolation and the grant, subset still bypasses both, resume re-evaluates + prunes, isWorktreeCwd rejects every near-miss and accepts every genuine descendant, a dead session's claimed dirs (any skill, in an isolated cwd) are cleaned up ONLY when their content fingerprint matches ANY dead claimant's recorded one (order-independent across two different dead claimants), a hand edit / extra file / legacy no-fingerprint claim all survive, the worktree-reuse sequence never orphans a bound skill, the legacy-flag-to-slug wiring is intact, and (Code Review round 4 on card 3b2a8707) the dead-session prune loop's own fingerprint read never falls through to Object.prototype for a claim named \"constructor\" with no recorded fp."
+  ? "\n✅ ALL PASS — capability-bound skill delivery requires BOTH worktree isolation and the grant, subset still bypasses both, resume re-evaluates + prunes, isWorktreeCwd rejects every near-miss and accepts every genuine descendant, a dead session's claimed dirs (any skill, in an isolated cwd) are cleaned up ONLY when their content fingerprint matches the one persisted `__lastPlaced` fact, a hand edit / extra file / legacy no-fingerprint claim all survive, the worktree-reuse sequence never orphans a bound skill, the legacy-flag-to-slug wiring is intact, and (card f4272888) a dead claim named \"constructor\" with no recorded fingerprint neither crashes nor corrupts the sidecar — the prototype-shadowing hazard this case used to probe is now structurally unreachable, since the dead-session prune loop no longer reads any per-session fingerprint map at all."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

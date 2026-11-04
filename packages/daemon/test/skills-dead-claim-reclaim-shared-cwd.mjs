@@ -195,14 +195,15 @@ try {
     check("(5) legacy no-fingerprint claim: content untouched", readSkillBody(cwd, "loom-x") === "LEGACY, NO FINGERPRINT RECORD");
     check("(5) never reclaimed (real code)", !r2.claimedNames.includes("loom-x") && !r3.claimedNames.includes("loom-x"));
 
-    // Mutant M3: disable the no-recorded-fingerprint skip in the deadClaimed-merge loop — fabricate a
-    // dead-fingerprint set from the CURRENT on-disk content, so the subsequent match trivially passes for
-    // exactly the legacy (no-record) case, without weakening the match-check for any case that DOES have
-    // a real recorded fingerprint (sections 1/3/4/6 are untouched by this mutation).
+    // Mutant M3: disable the no-recorded-fingerprint skip in the deadClaimed-merge loop (card f4272888:
+    // `lastPlaced.get(stale)` is now the ONE persisted fact, no longer a per-call `deadFingerprints` Map)
+    // — fabricate a recorded-fingerprint array from the CURRENT on-disk content, so the subsequent match
+    // trivially passes for exactly the legacy (no-record) case, without weakening the match-check for any
+    // case that DOES have a real recorded fingerprint (sections 1/3/4/6 are untouched by this mutation).
     const m3 = await buildMutant(
       "m3",
-      `for (const stale of deadClaimed) {\n            const recordedFps = deadFingerprints.get(stale);\n            if (!recordedFps || recordedFps.size === 0) {\n                if (!pendingWorking.has(stale))\n                    console.log(\`[skills] keeping dead-session claim '\${stale}' (shared cwd): no recorded content fingerprint (a legacy claim) — cannot verify it's still Loom's own, so not reclaiming\`);\n                continue; // never trusted, with or without a pending record — same posture as before round 2\n            }\n            const existing = pendingWorking.get(stale);`,
-      `for (const stale of deadClaimed) {\n            let recordedFps = deadFingerprints.get(stale);\n            if (!recordedFps || recordedFps.size === 0) { recordedFps = new Set([fingerprintSkillDir(path.join(targetDir, stale))]); } // MUTANT M3: legacy-no-fingerprint guard disabled\n            const existing = pendingWorking.get(stale);`,
+      `for (const stale of deadClaimed) {\n            const recordedFps = lastPlaced.get(stale);\n            if (!recordedFps || recordedFps.length === 0) {\n                if (!pendingWorking.has(stale))\n                    console.log(\`[skills] keeping dead-session claim '\${stale}' (shared cwd): no recorded content fingerprint (a legacy claim) — cannot verify it's still Loom's own, so not reclaiming\`);\n                continue; // never trusted, with or without a pending record — same posture as before round 2\n            }\n            const existing = pendingWorking.get(stale);`,
+      `for (const stale of deadClaimed) {\n            let recordedFps = lastPlaced.get(stale);\n            if (!recordedFps || recordedFps.length === 0) { recordedFps = [fingerprintSkillDir(path.join(targetDir, stale))]; } // MUTANT M3: legacy-no-fingerprint guard disabled\n            const existing = pendingWorking.get(stale);`,
     );
     const cwdM3 = freshRepoCwd();
     initRepo(cwdM3);
