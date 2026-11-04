@@ -28,7 +28,33 @@ const sectionLabel: CSSProperties = {
   fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
   letterSpacing: "0.1em", color: color.textDim,
 };
-const rowLabel: CSSProperties = { ...sectionLabel, paddingTop: 3, whiteSpace: "nowrap" };
+
+/**
+ * The width of the label column that the relation rows below and the dialog's PARENT summary row
+ * above them BOTH lay out on — an explicit width, not the `auto` this column used to be.
+ *
+ * @decision 03d9db6e — keep ONE label-column width across the two grids; an `auto`/`max-content`
+ * track on either side sizes from that side's own labels alone and the values stop lining up.
+ *
+ * Sized to clear the widest label this column ever carries (`EDIT_RELATION_LABEL` uppercased, plus
+ * "Parent") with headroom for the fallback face that renders before Space Grotesk loads. A label is
+ * `nowrap`, so one wider than this overflows into the value column rather than wrapping;
+ * `board-relations-grid-align.spec.ts` asserts none does, so a label that needs more room fails
+ * there rather than colliding silently on screen.
+ */
+export const RELATION_LABEL_COL = 112;
+
+/**
+ * The grid the relation rows and the parent summary row share. Exported so there is exactly one
+ * declaration of the column geometry; `pages/Board.tsx` lays its parent row out on this same object.
+ */
+export const relationGrid: CSSProperties = {
+  display: "grid", gridTemplateColumns: `${RELATION_LABEL_COL}px minmax(0, 1fr)`,
+  columnGap: 10, rowGap: 6, alignItems: "start", minWidth: 0,
+};
+
+/** A label in that grid's first column. Exported with the grid so the parent's label can't drift from it. */
+export const relationRowLabel: CSSProperties = { ...sectionLabel, paddingTop: 3, whiteSpace: "nowrap" };
 
 /** A staged chip's glyph/tone, keyed by kind — the read side's vocabulary, one place. */
 const KIND_GLYPH: Record<EditableRelationKind, string> = {
@@ -85,11 +111,10 @@ export function TaskRelationsEditor({
         </span>
       )}
       {rows.length > 0 && (
-        <div data-testid="task-relations-editor" style={{ display: "grid", gridTemplateColumns: "minmax(74px, auto) 1fr",
-          columnGap: 10, rowGap: 6, alignItems: "start", minWidth: 0 }}>
+        <div data-testid="task-relations-editor" style={relationGrid}>
           {rows.map(({ kind, ids, released }) => (
             <div key={kind} style={{ display: "contents" }}>
-              <span style={rowLabel} title={EDIT_RELATION_HINT[kind]}>{EDIT_RELATION_LABEL[kind]}</span>
+              <span style={relationRowLabel} title={EDIT_RELATION_HINT[kind]}>{EDIT_RELATION_LABEL[kind]}</span>
               <div data-testid={`relations-edit-${kind}`}
                 style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
                 {ids.map((id) => (

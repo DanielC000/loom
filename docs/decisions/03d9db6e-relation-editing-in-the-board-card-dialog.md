@@ -30,6 +30,24 @@ This card moved the four writable kinds out of `TaskLinksBlock` so no edge was d
 
 One card can legitimately be named twice in this dialog — the fixture in `board-hierarchy.spec.ts` has an epic that is both the subject's parent and its `discoveredFrom`. That is two EDGES, one occurrence each, and the spec asserts exactly that shape (two dialog-wide, one of them the parent row's). The defect was ever drawing the SAME edge twice.
 
+## The parent row and the editor share one label column (card `e8e6d91e`)
+
+Once card `6ed6d8b2` made the parent summary the dialog's ONE statement of the parent, and gave it the same `TaskLinkRow` the editor's chips use, the section read as five relation rows — and the parent's value started 63px left of the other four (measured, 1600px, classic and Atlas alike). The parent was a plain flex row, so its value sat at `width("PARENT") + 4`; the editor was a `minmax(74px, auto) 1fr` grid whose column auto-sized to "DISCOVERED FROM", putting its values at ~104 + 10. Nothing was wrong with either rule on its own; there were simply two of them in a block that reads as one list.
+
+**The constraint ruled out the obvious fix, and that was right.** The natural move is to make the parent another row OF the editor's grid — but this card's own "a second place for the same write to diverge" reasoning forbids a parent editor inside `TaskRelationsEditor`, and `TaskRelationsEditor` returns several top-level elements (the graph-error line, the rows grid, the picker / `＋ Add relation…`), so hoisting a shared grid container around it would push each of those into a grid cell too. Both roads end at a structural change to the component boundary for a layout defect.
+
+**So the two grids share a WIDTH instead of a container:** `RELATION_LABEL_COL` (112px) plus `relationGrid` and `relationRowLabel`, declared once in `components/taskRelationsEditor.tsx` and imported by `pages/Board.tsx`. The parent summary becomes a two-cell row on that same geometry; nothing about the editor's internals, its props, or any testid changes. The label column stops being content-sized, which also means it no longer moves when a row appears or disappears, or when Space Grotesk finishes loading over the fallback face.
+
+**The accepted costs, both measured rather than assumed.** A fixed column is as wide as the widest label whether or not that row is present, so a card showing only "RELATED" now indents ~56px further than before. And at 420px the parent's value gives up that same ~56px to the shared column, so its title ellipsises sooner than it did under `6ed6d8b2`'s floor — unavoidable for ANY shared column, since the column must clear "DISCOVERED FROM". The wrap behaviour itself is intact: `edit`/`clear` still drop to a second line, now under the name rather than under the label, because the wrap happens inside the grid's value cell.
+
+**The number is only safe because something checks it.** A label is `nowrap`, so one that outgrows 112px overflows into the value beside it rather than wrapping — silent on screen until it collides. `board-relations-grid-align.spec.ts` asserts, at both widths and in both shells, that the five values start at one x AND that no label's `scrollWidth` exceeds its column.
+
+### Do not
+
+- **Do not put either grid's label column back on an `auto`/`max-content` track.** They are two separate grids in the same column; each would size from its own labels and the values would diverge again. Change `RELATION_LABEL_COL` if a label needs more room — never one side's template.
+- **Do not add or rename a relation label without re-running `board-relations-grid-align.spec.ts`.** It is the only thing standing between a longer label and a silent collision with the value beside it.
+- **Do not give the parent summary its own copy of the grid style.** It imports `relationGrid`/`relationRowLabel` from the editor precisely so there is one declaration; a look-alike literal is the same two-rules defect written more convincingly.
+
 ## Do not
 
 - **Do not send a `released:true` item back in a `blockedBy`/`blocks` write.** It is auto-released deferral history: `declared:false`, not live (`buildRelationView`'s `releasedOnly`). The write replaces the DECLARED bit of a card's blocks edges, so including a released item promotes dead history to a live declared dependency. `relationBaseline` (`lib/taskRelationsEdit.ts`) drops them; `releasedHistory` returns them separately so the UI can still show them, muted and with no remove control.

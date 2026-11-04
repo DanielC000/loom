@@ -14,7 +14,7 @@ import { color, columnTone, font, radius, tone, type Tone } from "../theme";
 // structurally and defaults every one of them, so a response without them renders exactly as before.
 import { boardHierarchy, hasBoardHierarchy, hasTaskContextLinks, resolveParentInput, taskLinks, type TaskLinks, type TaskRef } from "../lib/taskHierarchy";
 import { BoardCardHierarchy, TaskLinkRow, TaskLinksBlock } from "../components/taskLinks";
-import { TaskRelationsEditor } from "../components/taskRelationsEditor";
+import { TaskRelationsEditor, relationGrid, relationRowLabel } from "../components/taskRelationsEditor";
 import {
   relationBaseline, relationErrorTarget, relationPatch, relationsDirty,
   type PickerCard, type RelationDraft, type RelationPatch,
@@ -1183,44 +1183,53 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           </>
         ) : (
           /* At rest: ONE line. Either the resolved parent with edit/clear, or a bare "Set parent…" — so a
-             card that will never have a parent costs a single ghost link instead of a labelled field. */
-          <div data-testid="parent-summary" style={{ display: "flex", alignItems: "center", flexWrap: "wrap",
-            columnGap: 4, rowGap: 2, minWidth: 0 }}>
+             card that will never have a parent costs a single ghost link instead of a labelled field.
+
+             Laid out on `relationGrid` — the SAME grid object the editor's own rows below use, not a
+             look-alike — so PARENT's value starts on the same vertical rule as BLOCKED BY's and
+             DISCOVERED FROM's. It used to be a plain flex row, which put its value at
+             `width("PARENT") + 4` while the editor's values sat at its own auto-sized column + 10:
+             two rules ~50px apart in a block that reads as one list of relations. The label column's
+             width is the editor's exported constant for the same reason — see RELATION_LABEL_COL. */
+          <div data-testid="parent-summary" style={relationGrid}>
             {links.parentId ? (
               <>
-                <span style={{ ...labelStyle, flexShrink: 0, marginRight: 4 }}>Parent</span>
+                <span style={relationRowLabel}>Parent</span>
                 {/* The SAME TaskLinkRow the editor's chips below use, so the parent reads as one of the
                     five relation rows rather than a different kind of thing — and so this dialog's ONLY
-                    statement of the parent is the clickable one. `flex: 0 1 auto` (not `flex: 1`) for
-                    RelationChip's own reason: edit/clear have to sit against the name they act on, not
-                    pushed to the far panel edge as a column of controls belonging to nothing.
+                    statement of the parent is the clickable one.
 
-                    The `minWidth` floor is what makes the row's own `flexWrap` fire instead of crushing
-                    the name. TaskLinkRow brings a `flexShrink: 0` lane badge the plain text here never
-                    had, and with an unshrinkable badge beside two word-buttons a 420px panel spent the
-                    whole budget on them and ellipsised the title to FOUR characters (measured). A wrap
-                    is decided on the HYPOTHETICAL size (basis clamped by this floor), before any
-                    shrinking, so the floor is what pushes edit/clear onto a second line and hands the
-                    name the full width. Kept modest on purpose: a floor wider than the usual title also
-                    reserves dead space at 1600, which is the "controls belonging to nothing" above. */}
-                <span style={{ flexGrow: 0, flexShrink: 1, flexBasis: "auto", minWidth: 140,
-                  maxWidth: "100%", display: "flex" }}>
-                  <TaskLinkRow ref_={parentRef} columns={columns} titleById={titleById}
-                    onOpenTask={requestOpen} glyph="↳" />
-                </span>
-                <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }} aria-label="Change parent"
-                  onClick={() => setParentEditing(true)}>edit</Button>
-                {/* Clear STAGES the change (empties the field and opens the editor) rather than saving on
-                    the spot — every other field in this drawer persists on Save, and a one-click write
-                    hiding among staged ones is exactly the inconsistency that makes Save untrustworthy. */}
-                <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }} aria-label="Clear parent"
-                  onClick={() => { setParentDraft(""); setParentEditing(true); }}>clear</Button>
+                    @decision 03d9db6e — keep the link's shrink bounded by a MODEST `minWidth` floor and
+                    the cell wrapping. Remove either and TaskLinkRow's unshrinkable lane badge plus
+                    edit/clear crush the title to four characters at 420px (measured).
+
+                    The wrap happens inside the grid's VALUE cell, not across the whole row, so a
+                    wrapped edit/clear lands under the name rather than under the label. */}
+                <div data-testid="parent-summary-value" style={{ display: "flex", alignItems: "center",
+                  flexWrap: "wrap", columnGap: 4, rowGap: 2, minWidth: 0 }}>
+                  <span style={{ flexGrow: 0, flexShrink: 1, flexBasis: "auto", minWidth: 140,
+                    maxWidth: "100%", display: "flex" }}>
+                    <TaskLinkRow ref_={parentRef} columns={columns} titleById={titleById}
+                      onOpenTask={requestOpen} glyph="↳" />
+                  </span>
+                  <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }} aria-label="Change parent"
+                    onClick={() => setParentEditing(true)}>edit</Button>
+                  {/* Clear STAGES the change (empties the field and opens the editor) rather than saving on
+                      the spot — every other field in this drawer persists on Save, and a one-click write
+                      hiding among staged ones is exactly the inconsistency that makes Save untrustworthy. */}
+                  <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11 }} aria-label="Clear parent"
+                    onClick={() => { setParentDraft(""); setParentEditing(true); }}>clear</Button>
+                </div>
               </>
             ) : (
-              // Negative margin cancels the button's own left padding so the label text sits on the SAME
-              // vertical rule as TITLE/PRIORITY/HOLD, while the padding still gives the hover fill room.
-              <Button variant="ghost" style={{ fontSize: 11, padding: "2px 6px", marginLeft: -6 }}
-                onClick={() => { setParentDraft(""); setParentEditing(true); }}>Set parent…</Button>
+              // No parent yet: the ghost link spans BOTH grid columns, so it keeps sitting on the dialog's
+              // own left rule (TITLE/PRIORITY/HOLD) rather than being indented into the value column —
+              // there is no label beside it to align to. The negative margin cancels the button's own left
+              // padding so its text, not its hover fill, is what lands on that rule.
+              <div style={{ gridColumn: "1 / -1" }}>
+                <Button variant="ghost" style={{ fontSize: 11, padding: "2px 6px", marginLeft: -6 }}
+                  onClick={() => { setParentDraft(""); setParentEditing(true); }}>Set parent…</Button>
+              </div>
             )}
           </div>
         )}
