@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal } from "@loom/shared";
 import { api } from "../lib/api";
@@ -11,12 +11,21 @@ import { useSessionQueuesBulk, useSessionWakesBulk, useInvalidateSessionQueueWak
 import { Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { AgentQuickStart } from "../components/atlasAgents";
 import { HarnessMixProvider } from "../components/HarnessPicker";
+import {
+  AUTO_GRID_TEMPLATE, DEFAULT_TILE_LAYOUT, GRID_COLUMN_CHOICES, applyTileOrder, gridTemplateColumns,
+  moveTileInOrder, readTileLayout, writeTileLayout, type GridColumns, type TileLayout,
+} from "../lib/terminalLayout";
 import { color, font } from "../theme";
 
 // Tiles flow horizontally then wrap; reused per manager row and the catch-all rows. alignItems:"start" so
 // each tile hugs its own content up to its cap rather than being stretched to the tallest tile in the row
 // (which padded a bare card out below its composer). Content-dynamic per-card height is the intended shape.
-const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
+const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: AUTO_GRID_TEMPLATE, gap: 12, alignItems: "start" };
+
+/** What each column choice is called in the picker. `auto` names what it does, not its number. */
+const COLUMN_LABELS: Record<GridColumns, string> = {
+  auto: "Auto", "1": "1 column", "2": "2 columns", "3": "3 columns",
+};
 
 // The micro-label on each group in the controls bar. Hoisted out of the one call site it used to
 // have (the project filter) so every group in that bar reads at the same weight and tracking — two
@@ -47,6 +56,10 @@ type SessionRow = SessionRowGroup<SessionListItem>;
 // nothing is both the classic shell's state and the honest answer, and the page stays byte-identical
 // there. Both props are optional and independent on purpose: a host that knows only the name still
 // gets the filter pre-selection it got before this card.
+
+// @decision ac0cfe91 — the column control NEVER resizes a pty (a narrowed pane re-solves its font for
+// the daemon's pinned grid, which TerminalPane already did), and ShellsSection stays off it: a shell
+// FITS its grid and pushes the new geometry to the real pty. It also gates on `projectId` alone.
 export default function Terminals({ projectId, projectName }: { projectId?: string; projectName?: string } = {}) {
   const [filter, setFilter] = useState<string>(projectName ?? "");  // projectName filter ("" = all)
   // Re-sync when the host changes which project it is showing — the Atlas tab stays MOUNTED across a
@@ -80,6 +93,52 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
   // drops companion/assistant sessions at the source so they can never render a pty tile in any row.
   const rows = useMemo<SessionRow[]>(() => groupSessionRows(shown), [shown]);
 
+  // ── The reader's own layout for this project's grid (card ac0cfe91) ────────────────────────────
+  // Gated on `projectId`, for the SAME reason the quick-start above is and with the same consequence:
+  // the god-eye mount passes none, so it keeps `DEFAULT_TILE_LAYOUT` — `auto` columns and no order —
+  // and renders byte-identically to before this card. Here the gate is not merely consistent, it is
+  // structural: the preference is stored PER PROJECT (lib/terminalLayout.ts `tileLayoutStorageKey`),
+  // and a mount with no single project in scope has no key to store it under.
+  //
+  // Read in an effect rather than a `useState` initialiser because this component is MOUNTED across a
+  // project switch — the Atlas node parks every visited tab body with `hidden` instead of unmounting it
+  // — exactly like the filter re-sync above. An initialiser would pin the first project's layout and
+  // then apply it to every project the reader navigated to afterwards.
+  const [layout, setLayout] = useState<TileLayout>(DEFAULT_TILE_LAYOUT);
+  useEffect(() => { setLayout(projectId ? readTileLayout(projectId) : DEFAULT_TILE_LAYOUT); }, [projectId]);
+  const saveLayout = useCallback((next: TileLayout) => {
+    setLayout(next);
+    if (projectId) writeTileLayout(projectId, next);
+  }, [projectId]);
+
+  // A manager row's manager is held at its own row's head — see `applyTileOrder`'s own note: RowHeader
+  // names `list[0]` as the manager and counts the rest as its workers, so promoting a worker above it
+  // would relabel both. `row.key` IS that manager's id (groupSessionRows), checked against the row's
+  // own membership so a key with nothing behind it can never be injected into the saved order.
+  const pinnedIdOf = (row: SessionRow) =>
+    (row.kind === "manager" && row.list.some((s) => s.id === row.key) ? row.key : undefined);
+  const orderedRows = useMemo<SessionRow[]>(
+    () => (layout.order.length === 0
+      ? rows
+      : rows.map((r) => ({ ...r, list: applyTileOrder(r.list, layout.order, { pinnedFirstId: pinnedIdOf(r) }) }))),
+    [rows, layout.order],
+  );
+
+  // One move rewrites the WHOLE saved order from what is currently on screen, not just the pair that
+  // swapped: the stored list is a flat snapshot across every row, so writing back the full rendered
+  // sequence is what keeps it a faithful description of the grid (and quietly drops the ids of sessions
+  // that have since exited). `row` here is always an ORDERED row, so `row.list` is the sequence the
+  // reader is looking at — the one their "earlier" is relative to.
+  const moveTile = useCallback((row: SessionRow, id: string, delta: number) => {
+    const pinnedId = pinnedIdOf(row);
+    const moved = moveTileInOrder(row.list.filter((s) => s.id !== pinnedId).map((s) => s.id), id, delta);
+    const nextRowIds = pinnedId ? [pinnedId, ...moved] : moved;
+    saveLayout({
+      ...layout,
+      order: orderedRows.flatMap((r) => (r.key === row.key ? nextRowIds : r.list.map((s) => s.id))),
+    });
+  }, [orderedRows, layout, saveLayout]);
+
   // ONE bulk queue/wakes poll for the whole grid instead of 2×N per-card round-trips (perf profile
   // 2026-07-16 finding #4) — every tile below reads its own slice via queueData/wakesData props instead
   // of running its own useQuery. Keyed off `shown` (the flat live set), not per-row, so the same two
@@ -91,11 +150,12 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
 
   // The slim bound-task bar is fetched + rendered by TerminalTile itself (per-session), so no task
   // lookup or prop pass is needed here — every tile shows it automatically, identically to Overview.
-  const renderTile = (s: SessionListItem) => (
+  const renderTile = (s: SessionListItem, moveControls?: ReactNode) => (
     <TerminalTile key={s.id} s={s} height={540} showProject
       onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
       onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
       queueData={queues.data?.[s.id] ?? []} wakesData={wakes.data?.[s.id] ?? []}
+      actionsExtra={moveControls}
       onQueueMutated={invalidateQueues} onWakeCancelled={invalidateWakes} />
   );
 
@@ -105,10 +165,10 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
     <HarnessMixProvider sessions={shown}>
     <div>
       <ShellsSection />
-      {/* ONE bar for every control that acts on the grid below, so the next one added here has a
-          declared home rather than a fresh row of its own (card ac0cfe91 adds ordering + gridding
-          to this same tab). It wraps at narrow widths and each group keeps its label with its
-          control, so a wrapped bar never leaves a label stranded above the wrong field. */}
+      {/* ONE bar for every control that acts on the grid below, so a control added here has a declared
+          home rather than a fresh row of its own — which is where card ac0cfe91's Columns and Reset
+          landed. It wraps at narrow widths and each group keeps its label with its control, so a
+          wrapped bar never leaves a label stranded above the wrong field. */}
       <div className="loom-sessionbar" data-testid="sessions-bar">
         <div className="loom-sessionbar-group">
           <span style={barLabelStyle}>Project</span>
@@ -126,16 +186,86 @@ export default function Terminals({ projectId, projectName }: { projectId?: stri
             <AgentQuickStart projectId={projectId} projectName={projectName} />
           </div>
         )}
+        {/* Columns, and — only once there is one to undo — the way back out of a chosen order. Both
+            ride the SAME bar as the filter and the quick-start, per the note above it. */}
+        {projectId && (
+          <div className="loom-sessionbar-group">
+            <span style={barLabelStyle}>Columns</span>
+            <Select data-testid="sessions-columns" aria-label="Terminal grid columns"
+              value={layout.columns}
+              onChange={(e) => saveLayout({ ...layout, columns: e.target.value as GridColumns })}>
+              {GRID_COLUMN_CHOICES.map((c) => <option key={c} value={c}>{COLUMN_LABELS[c]}</option>)}
+            </Select>
+          </div>
+        )}
+        {/* Hidden until it has something to do: with no saved order there is nothing to reset, and a
+            control whose only state is disabled teaches the reader nothing about what it would undo.
+            The ordering affordance itself lives on each tile, where the thing being ordered is.
+
+            The button reads "Reset" and not "Reset order" because the group's own label already says
+            Order an inch to its left, and the pair would otherwise stutter. The `aria-label` carries
+            the full phrase for a reader who gets the button without its label — and it CONTAINS the
+            visible word, so the accessible name still matches what is on screen (WCAG 2.5.3). */}
+        {projectId && layout.order.length > 0 && (
+          <div className="loom-sessionbar-group">
+            <span style={barLabelStyle}>Order</span>
+            <Button data-testid="sessions-order-reset" aria-label="Reset the terminal order"
+              title="Drop your own tile order and go back to the default"
+              onClick={() => saveLayout({ ...layout, order: [] })}>Reset</Button>
+          </div>
+        )}
       </div>
       {shown.length === 0 && <p style={{ color: color.textMuted }}>No running sessions.</p>}
-      {rows.map((row) => (
-        <section key={row.key} style={{ marginBottom: 20 }}>
-          <RowHeader row={row} />
-          <div style={gridStyle}>{row.list.map(renderTile)}</div>
-        </section>
-      ))}
+      {orderedRows.map((row) => {
+        // The pinned manager occupies slot 0, so the first slot the reader may move is the one after
+        // it. A row with fewer than two movable tiles gets NO controls at all rather than a pair of
+        // permanently-dead buttons on a lone tile — there is nothing in it to put in an order.
+        const firstMovable = pinnedIdOf(row) === undefined ? 0 : 1;
+        const reorderable = !!projectId && row.list.length - firstMovable >= 2;
+        return (
+          <section key={row.key} style={{ marginBottom: 20 }}>
+            <RowHeader row={row} />
+            <div style={{ ...gridStyle, gridTemplateColumns: gridTemplateColumns(layout.columns) }}
+              data-testid={`sessions-grid-${row.key}`} data-columns={layout.columns}>
+              {row.list.map((s, i) => renderTile(s, reorderable && i >= firstMovable ? (
+                <TileMoveControls id={s.id} canEarlier={i > firstMovable} canLater={i < row.list.length - 1}
+                  onMove={(delta) => moveTile(row, s.id, delta)} />
+              ) : undefined))}
+            </div>
+          </section>
+        );
+      })}
     </div>
     </HarnessMixProvider>
+  );
+}
+
+/**
+ * One tile's order controls, in the card header's own action cluster (card ac0cfe91).
+ *
+ * TWO BUTTONS, NOT A DRAG HANDLE. The card's body is a live terminal, and selecting text in it is the
+ * same press-and-move gesture a drag would have to claim; a button pair takes nothing away from the
+ * thing being reordered, is operable from the keyboard and under touch with no extra implementation,
+ * and is the affordance the card offered as an alternative ("drag, or move controls"). The cost is
+ * that a long move is N presses rather than one drag — acceptable on a grid whose readable size is a
+ * handful of tiles, and the Reset in the bar is the escape from a wrong order either way.
+ *
+ * "Earlier"/"later" rather than left/right or up/down: the SAME press moves a tile sideways at three
+ * columns and vertically at one, so a direction word would be wrong in one of the two layouts this
+ * card ships. The glyphs are the neutral single-angle quotes for the same reason.
+ */
+function TileMoveControls({ id, canEarlier, canLater, onMove }: {
+  id: string; canEarlier: boolean; canLater: boolean; onMove: (delta: number) => void;
+}) {
+  return (
+    <>
+      <Button style={{ padding: "0 6px" }} disabled={!canEarlier} data-testid={`sessions-move-earlier-${id}`}
+        aria-label="Move terminal earlier" title="Move this terminal earlier in the order"
+        onClick={(ev) => { ev.stopPropagation(); onMove(-1); }}>‹</Button>
+      <Button style={{ padding: "0 6px" }} disabled={!canLater} data-testid={`sessions-move-later-${id}`}
+        aria-label="Move terminal later" title="Move this terminal later in the order"
+        onClick={(ev) => { ev.stopPropagation(); onMove(1); }}>›</Button>
+    </>
   );
 }
 

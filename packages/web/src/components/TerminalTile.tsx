@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { SessionListItem, Wake } from "@loom/shared";
 import { TerminalCard } from "./TerminalCard";
 import type { QueuedMessage } from "../lib/api";
@@ -21,6 +22,7 @@ export { ForkButton, StopButton, TileTitle } from "./TerminalCard";
 
 export function TerminalTile({
   s, height, showProject, onFork, forkPending, onStop, stopPending, queueData, wakesData, onQueueMutated, onWakeCancelled,
+  actionsExtra,
 }: {
   s: SessionListItem;
   height: number | string;
@@ -35,6 +37,9 @@ export function TerminalTile({
   wakesData?: Wake[];
   onQueueMutated?: () => void;
   onWakeCancelled?: () => void;
+  /** Extra header buttons, forwarded verbatim to the base's own action cluster — the Terminals page's
+   *  per-tile order controls (card ac0cfe91). Omitted ⇒ every other call site stays byte-identical. */
+  actionsExtra?: ReactNode;
 }) {
   return (
     <TerminalCard
@@ -50,6 +55,7 @@ export function TerminalTile({
       maximizable
       statusMode="busy"
       subPanels={{ queue: true, wakes: true, taskCard: true, queueData, wakesData, onQueueMutated, onWakeCancelled }}
+      actionsExtra={actionsExtra}
     />
   );
 }
