@@ -30,7 +30,10 @@ export default function Actors() {
   const setTab = (t: ActorsTab) => host.set({ [host.key]: t === "skills" ? "skills" : null });
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    // `actors` is the scope handle the narrow-viewport spec measures within: it resolves identically in
+    // both shells, which is what lets ONE per-box overflow census cover classic and Atlas (where a page
+    // -level scroll reading is non-diagnostic, since .loom-atlas-content scrolls).
+    <div data-testid="actors" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Segmented value={tab} onChange={setTab} items={TABS} ariaLabel="Actors — Profiles or Skills" />
       {tab === "profiles" ? <Profiles /> : <Skills />}
     </div>

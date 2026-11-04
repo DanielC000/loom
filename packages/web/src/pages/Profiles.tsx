@@ -110,7 +110,10 @@ export default function Profiles() {
       {deleteReach && (
         <DeleteGrantReachNotice name={deleteReach.name} reach={deleteReach.reach} onDismiss={() => setDeleteReach(null)} />
       )}
-      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
+      {/* The list→editor shell, shared with Skills (the Actors page's other body). Both tracks and the
+          phone fold live in `.loom-actor-split` (styles/global.css) — an inline `300px 1fr` here
+          overflowed the page by 340px at 390px. */}
+      <div className="loom-actor-split">
         <Panel style={{ alignSelf: "start" }}>
           <SectionLabel>Profiles</SectionLabel>
           <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
@@ -675,7 +678,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
           error={(preview.error as Error | null) ?? adoptError} />
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: 10 }}>
+      <div className="loom-field-grid loom-field-grid-trail" style={{ gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Name</span>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
@@ -735,8 +738,13 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
           return (
             <label key={c.slug} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: capsDropped ? "default" : "pointer" }}>
               <input type="checkbox" checked={checked} disabled={capsDropped} onChange={() => toggleCapability(c.slug)} style={{ marginTop: 2 }} />
-              <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
-                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              {/* `minWidth: 0` releases this column's min-content floor, and the name+badge row below
+                  wraps rather than holding one line — the same treatment every other badge cluster on
+                  this page already uses. Without the pair, a long capability name plus two badges (e.g.
+                  "Image Generation (Gemini/Imagen)" + "needs connection" + "network") floored this row
+                  at 302px inside a 264px panel and pushed the page sideways at phone width. */}
+              <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontSize: 13 }}>{c.name}</span>
                   {c.builtin && <Badge tone="muted">builtin</Badge>}
                   {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}

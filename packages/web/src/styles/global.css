@@ -156,6 +156,12 @@ body {
 .loom-field-grid-aside {
   grid-template-columns: 120px 1fr;
 }
+/* The mirror of -aside: a wide field FOLLOWED by a narrow one (the profile editor's Name + Icon pair).
+   Same `min-width: 0` release as every other modifier here — without it the Name input's own intrinsic
+   width floored this pair at 308px inside a 290px panel. */
+.loom-field-grid-trail {
+  grid-template-columns: minmax(0, 1fr) 90px;
+}
 @media (max-width: 760px) {
   .loom-field-grid-3 {
     grid-template-columns: repeat(2, 1fr);
@@ -164,7 +170,8 @@ body {
 @media (max-width: 560px) {
   .loom-field-grid-2,
   .loom-field-grid-3,
-  .loom-field-grid-aside {
+  .loom-field-grid-aside,
+  .loom-field-grid-trail {
     grid-template-columns: 1fr;
   }
 }
@@ -220,6 +227,30 @@ body {
 }
 @media (max-width: 820px) {
   .loom-mc-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The Actors page's two bodies (Profiles and Skills) share ONE list→editor shell: a fixed 300px
+   definition list beside the editor for whatever is selected. The inline `300px 1fr` track list these
+   replace overflowed the page at phone width twice over, and BOTH halves had to go (measured on
+   /actors at 390px, where the classic content box is 290px):
+     1. The 300px track is wider than the whole box on its own, before the editor gets a single pixel.
+     2. `1fr` floors at its content's min-content width under the grid item's default `min-width: auto`,
+        so the editor track resolved to 334px rather than dividing what was left — the document went to
+        730px (300 + 16 gap + 334), exactly the figure the defect was reported at. `minmax(0, 1fr)`
+        is what releases that floor; the fold below is what keeps the result usable rather than two
+        slivers.
+   760px is `.loom-field-grid`'s own breakpoint, reused deliberately: the editor is BUILT from those
+   field grids, and below it the editor track (~344px) is narrower than the Name+Icon pair they lay out.
+   Above it both panels keep their desktop shape, so no wide viewport is reflowed. */
+.loom-actor-split {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+}
+@media (max-width: 760px) {
+  .loom-actor-split {
     grid-template-columns: minmax(0, 1fr);
   }
 }

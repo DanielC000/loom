@@ -95,7 +95,10 @@ export default function Skills() {
   const permissionVectors = selectedSkill?.permissionWidening ?? [];
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
+    // The list→editor shell, shared with Profiles (the Actors page's other body) — tracks and the phone
+    // fold live in `.loom-actor-split` (styles/global.css); an inline `300px 1fr` here overflowed the
+    // page at 390px.
+    <div className="loom-actor-split">
       <Panel style={{ alignSelf: "start" }}>
         <SectionLabel>Skills</SectionLabel>
         <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
