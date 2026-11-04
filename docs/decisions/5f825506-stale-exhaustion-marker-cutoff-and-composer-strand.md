@@ -86,9 +86,11 @@ did; only once every OTHER conjunct has cleared does the exhaustion-specific bai
 - Do not relax any conjunct OTHER than the exhaustion bail for the composer's entry — a composer entry
   still correctly waits out `rateLimited`/`startupCycleInFlight`/`drainHeld`/`isHumanSubmitHeld`/
   `deferForHumanDraft` like any other arrival; only `live.contextExhausted` itself is special-cased.
-- Do not drop the "nothing else can drain anyway while contextExhausted holds" reasoning
-  (`enqueueStdin`'s own comment on `composerRecoveryBypassesQueue`) — it is what justifies letting the
-  composer-sender entry jump the ordinary FIFO order inside `drainPending` too.
+- Do not drop the "nothing else can drain anyway while contextExhausted holds" reasoning — it is what
+  justifies letting the composer-sender entry jump the ordinary FIFO order inside `drainPending` too. It
+  now lives in `drainPending`'s own exhausted-branch composer scan (`pty/host.ts`, the `@decision 5f825506
+  (round 3)` comment above the `composerIdx` scan) — the sole policy owner since card `b70eade0` deleted
+  `enqueueStdin`'s own `composerRecoveryBypassesQueue` comment that used to carry it.
 
 ## Part 3 — `fleet.mjs`'s "Lead surfaces" test couldn't have caught the bug it names
 

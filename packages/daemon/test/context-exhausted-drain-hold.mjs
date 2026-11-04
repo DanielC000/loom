@@ -5,50 +5,38 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Proves:
 //   (1) a message enqueued WHILE busy queues normally (pre-existing behaviour, unaffected).
-//   (2) markContextExhausted clears busy AND sets live.contextExhausted — observable via getPendingQueueDepth
-//       staying put and the queued message never being handed to the fake pty's write().
+//   (2) markContextExhausted clears busy AND sets live.contextExhausted — observable via
+//       getPendingQueueDepth staying put and the queued message never being handed to the fake pty's
+//       write().
 //   (3) a FURTHER message enqueued AFTER exhaustion is marked is ALSO held (queued), never delivered
-//       immediately — even though `busy` now reads false (idleEligible's own !live.contextExhausted gate).
-//   (4) PtyHost.reconcile() — the periodic safety net that unconditionally calls drainPending for every
-//       live claude session — does NOT flush the held queue while contextExhausted is set (drainPending's
-//       own guard). The queue depth is UNCHANGED across a reconcile() call, and the fake pty's write()
-//       is never invoked with the held text.
-//   (5) DB-level clear: stamped, then cleared via the REAL rising-edge chokepoint
-//       (`SessionService.handleBusyEdge(id, true)`, card 7b1b2b3f — previously a hand-copied direct
-//       `Db.clearContextExhaustedOnResume` call that only "mirrored" that chokepoint, so a revert of the
-//       production `if (busy) this.db.clearContextExhaustedOnResume(...)` line never failed this file),
-//       and the GUARD — a row that was NEVER exhausted keeps its own (unrelated) lastError completely
-//       untouched by the same call; round 2 adds a SECOND guard — a row re-exhausted-then-overwritten-by-
-//       something-else keeps that UNRELATED LATER lastError untouched too (the prefix match, not just the
-//       WHERE clause).
+//       immediately — even though `busy` now reads false (idleEligible's own !live.contextExhausted
+//       gate).
+//   (4) PtyHost.reconcile() does NOT flush the held queue while contextExhausted is set — queue depth
+//       is UNCHANGED across a reconcile() call, and the fake pty's write() is never invoked with the
+//       held text.
+//   (5) a DB-level clear via the REAL rising-edge chokepoint (SessionService.handleBusyEdge, card
+//       7b1b2b3f) resets the mark while leaving an unrelated session's own lastError untouched — both
+//       for a row never exhausted and for one re-exhausted-then-overwritten by something unrelated.
 //   (6) a fresh UserPromptSubmit rising edge clears the in-memory hold end-to-end.
-//   (7) round 2 (CR finding, mutant B2): an exhausted session with an EMPTY pending queue — the ONE
-//       shape (3) above can't exercise — still holds a new enqueue (no write, depth 1).
-//   (8) round 2 (CR finding): a HUMAN_COMPOSER_SENDER_ID entry delivers despite exhaustion (a human
-//       acting IS the recovery); an ordinary agent-kind entry on an identical setup stays held.
-//   (8c) round 3 (CR finding, Major 1): the round-2 exemption above only ever mattered on an EMPTY
-//       queue — with a PRE-HELD agent entry already queued, a composer entry still delivers immediately
-//       (bypassing FIFO, since nothing ahead of it could ever drain while exhausted anyway), and the
-//       pre-held entry stays held — then drains normally once the composer's own turn completes.
-//   (9b) card 5f825506 ROUND 2 (CR MAJOR): a variant of (9) with a pre-held AGENT entry sitting AHEAD of
-//       the composer's own recovery entry — drainPending's own head-only bail used to check ONLY the
-//       head's senderId, so it never looked past that agent entry; the composer entry now drains OUT OF
-//       ORDER once the OTHER conjunct clears, leaving the agent entry queued and held.
-//   (10) card 5f825506 ROUND 2 (item 2): a REAL-PtyHost seam test proving the actual `busySinceMs` stamp
-//       (never a fake/stub) is correctly accepted/rejected as `detectContextExhaustionInTail`'s own
-//       stale-marker cutoff — the real stamp is read off `PtyHost.busySinceMs` and fed DIRECTLY to that
-//       function; this does not itself exercise the full watcher-tick → checkContextExhaustion wiring.
-//   (14) card da8b2fc6 — COMPOSER-TO-COMPOSER FIFO: an older composer entry (A) held ONLY by a
-//       DIFFERENT idleEligible conjunct (isHumanSubmitHeld) that clears BEFORE a newer composer entry
-//       (B) arrives, with NO reconcile()/drainPending call made anywhere in the test — asserts A's
-//       write is observed strictly before B's, with no manual drain kick: `enqueueStdin`'s own
-//       `olderComposerEntryQueued` guard refuses the bypass for B, and its existing
-//       `if (idleEligible) { this.drainPending(...) }` held-path branch (unconditional, pre-existing)
-//       drains A synchronously inside B's OWN enqueue call.
-//   (15) card da8b2fc6 — the GIVE-UP-HOLD variant of (14): A is injected directly into `live.pending`
-//       as an ALREADY-EXPIRED give-up hold (`giveUpGen`/`giveUpHeldUntil` — the established injection
-//       pattern test (12) uses), never driven through the real give-up timeout. Same assertion: A's
-//       write precedes B's, no manual reconcile() anywhere.
+//   (7) an exhausted session with an EMPTY pending queue still holds a new enqueue (no write, depth 1).
+//   (8) a HUMAN_COMPOSER_SENDER_ID entry delivers despite exhaustion (a human acting IS the recovery);
+//       an ordinary agent-kind entry on an identical setup stays held.
+//   (8c) with a PRE-HELD agent entry already queued, a composer entry still delivers immediately —
+//       drains via the exhausted composer scan — and the pre-held entry stays held, draining normally
+//       only once the composer's own turn completes.
+//   (9b) a pre-held AGENT entry sitting AHEAD of the composer's own recovery entry — the composer entry
+//       still drains OUT OF ORDER once the OTHER conjunct clears, leaving the agent entry queued/held.
+//   (10) a REAL-PtyHost seam test proving the actual `busySinceMs` stamp (never a fake/stub) is
+//       correctly accepted/rejected as `detectContextExhaustionInTail`'s own stale-marker cutoff.
+//   (14) an older composer entry (A), held only by a DIFFERENT idleEligible conjunct that clears
+//       before a newer composer entry (B) arrives, drains before B — with no reconcile()/drainPending
+//       call made anywhere in the test. See
+//       docs/decisions/b70eade0-drainpending-is-sole-owner-of-the-composer-drain-policy.md.
+//   (15) the GIVE-UP-HOLD variant of (14): same assertion, A injected as an ALREADY-EXPIRED give-up
+//       hold rather than driven through the real timeout.
+//   (16) the first composer message queued BEHIND ONLY undeliverable non-composer entries is delivered
+//       while exhausted, purely from drainPending's own exhausted-branch composer scan, with no
+//       reconcile() call anywhere; those non-composer entries stay queued, in their original order.
 //
 // Run: 1) build (turbo builds shared first), 2) node packages/daemon/test/context-exhausted-drain-hold.mjs
 import fs from "node:fs";
@@ -239,7 +227,7 @@ try {
 
     const composerAfterHeld = host.enqueueStdin(SID6, "COMPOSER_DESPITE_PREHELD_QUEUE", "human", undefined, undefined, "agent", undefined, "COMPOSER_DESPITE_PREHELD_QUEUE", undefined, HUMAN_COMPOSER_SENDER_ID);
     check("(8c) MAJOR FIX: a composer entry delivers immediately even with a non-empty (held) queue ahead of it", composerAfterHeld.delivered === true);
-    check("(8c) its own submit's rising edge cleared contextExhausted", busyLog[SID6]?.at(-1) === true);
+    check("(8c) its own submit's rising edge cleared contextExhausted (busy flips true)", busyLog[SID6]?.at(-1) === true);
     check("(8c) the composer text WAS handed to write()",
       writes.some((w) => w.sessionId === SID6 && typeof w.data === "string" && w.data.includes("COMPOSER_DESPITE_PREHELD_QUEUE")));
     check("(8c) the pre-held agent entry STAYS held (queue depth still 1 — not drained, not dropped) while the composer's own turn is in flight",
@@ -585,10 +573,10 @@ try {
     check("(13) the second composer's text WAS eventually written", writes.some((w) => w.sessionId === SID13 && typeof w.data === "string" && w.data.includes("COMPOSER_SECOND_13")));
   }
 
-  // ===== (14) card da8b2fc6 — COMPOSER-TO-COMPOSER FIFO: A is held by isHumanSubmitHeld (a DIFFERENT
-  // conjunct than the exhaustion bail), that hold clears, then B arrives — with NO reconcile() call
-  // made anywhere in this block. Pre-fix, `composerRecoveryBypassesQueue` ignored `live.pending`
-  // entirely and B would bypass straight past A. =====
+  // ===== (14) card da8b2fc6, kept GREEN by card b70eade0 — COMPOSER-TO-COMPOSER FIFO: A is held by
+  // isHumanSubmitHeld (a DIFFERENT conjunct than the exhaustion bail), that hold clears, then B arrives
+  // — with NO reconcile() call made anywhere in this block. B's own `live.pending.length === 0`
+  // disjunct can't fire (A already queued), so B unconditionally takes the held-push path. =====
   {
     const SID14 = "wkr-composer-fifo-olderqueued";
     spawnReady(SID14);
@@ -607,10 +595,9 @@ try {
     check("(14) setup: neither A nor any write has happened yet",
       !writes.some((w) => w.sessionId === SID14 && typeof w.data === "string" && w.data.includes("COMPOSER_A_OLDER_14")));
 
-    // B arrives. THE FIX: `olderComposerEntryQueued` refuses the bypass (A is still a composer-sender
-    // entry in the queue), so B falls to the ordinary held push — whose own PRE-EXISTING
-    // `if (idleEligible) { this.drainPending(...) }` branch (unconditional, not new) then drains A
-    // SYNCHRONOUSLY, inside this SAME enqueueStdin(B) call. No reconcile(), no timer.
+    // B arrives. `live.pending.length === 0` is false (A is still queued), so B unconditionally falls
+    // to the ordinary held push — whose own PRE-EXISTING `if (idleEligible) { this.drainPending(...) }`
+    // branch then drains A SYNCHRONOUSLY, inside this SAME enqueueStdin(B) call. No reconcile(), no timer.
     const b14 = host.enqueueStdin(SID14, "COMPOSER_B_NEWER_14", "human", undefined, undefined, "agent", undefined, "COMPOSER_B_NEWER_14", undefined, HUMAN_COMPOSER_SENDER_ID);
     check("(14) THE FIX: B is HELD (queued FIFO-behind A), never an immediate bypass", b14.delivered === false);
 
@@ -627,9 +614,10 @@ try {
     check("(14) B's text WAS eventually written, and strictly AFTER A's own write", bIdx14b !== -1 && bIdx14b > aIdx14);
   }
 
-  // ===== (15) card da8b2fc6 — the GIVE-UP-HOLD variant of (14): A is injected directly as an
-  // ALREADY-EXPIRED give-up hold (the established pattern from test (12)), never driven through the
-  // real give-up timeout. Same assertion: A's write precedes B's, with NO reconcile() anywhere. =====
+  // ===== (15) card da8b2fc6, kept GREEN by card b70eade0 (see (14) above) — the GIVE-UP-HOLD variant of
+  // (14): A is injected directly as an ALREADY-EXPIRED give-up hold (the established pattern from test
+  // (12)), never driven through the real give-up timeout. Same assertion: A's write precedes B's, with
+  // NO reconcile() anywhere. =====
   {
     const SID15 = "wkr-composer-fifo-giveup-olderqueued";
     spawnReady(SID15);
@@ -660,6 +648,83 @@ try {
     check("(15) B drains normally once A's turn completes (depth back to 0)", host.getPendingQueueDepth(SID15) === 0);
     const bIdx15b = writes.findIndex((w) => w.sessionId === SID15 && typeof w.data === "string" && w.data.includes("COMPOSER_B_NEWER_15"));
     check("(15) B's text WAS eventually written, and strictly AFTER A's own write", bIdx15b !== -1 && bIdx15b > aIdx15);
+  }
+
+  // ===== (16) card b70eade0 — NEW: the first composer message queued BEHIND ONLY undeliverable
+  // non-composer entries is delivered while exhausted, purely via drainPending's own exhausted-branch
+  // composer scan (5f825506 round 3) — enqueueStdin's own composer fast path is gone (card b70eade0),
+  // so this now runs through the SAME held-push + synchronous drainPending fallthrough every other held
+  // entry uses. NO reconcile() call anywhere in this block. Two non-composer entries (N1, N2, same
+  // sender — undeliverable while exhausted, neither is the composer) queue first; the composer entry
+  // (C) then drains ALONE, synchronously, inside its OWN enqueueStdin call, leaving N1/N2 queued,
+  // UNTOUCHED, in their original relative order (checked via getPending(), not just depth — depth alone
+  // can't tell two entries apart from one reordered pair). A THIRD non-composer entry (N3, same sender
+  // as N1/N2) then arrives — a non-composer arrival strictly LATER than C's own write (the only
+  // reachable "later" shape: C's own rising edge clears contextExhausted the instant it drains,
+  // synchronously within its own enqueueStdin call, so nothing can interleave between C's push and its
+  // own drain) — and must not retroactively disturb C's already-completed write or reorder ahead of
+  // N1/N2: it queues at the tail, FIFO, behind both. =====
+  try {
+    const SID16 = "wkr-composer-behind-noncomposer-only";
+    spawnReady(SID16);
+    host.enqueueStdin(SID16, "T16_FIRST_TURN"); // delivers immediately; busy=true, pending empty
+    check("(16) setup: markContextExhausted succeeds", host.markContextExhausted(SID16) === true);
+    check("(16) setup: pending queue is empty right after marking", host.getPendingQueueDepth(SID16) === 0);
+
+    const n1_16 = host.enqueueStdin(SID16, "NONCOMPOSER_N1_16", "system", undefined, undefined, "agent", undefined, undefined, undefined, "sender-16nc");
+    check("(16) setup: N1 (non-composer) is held", n1_16.delivered === false);
+    const n2_16 = host.enqueueStdin(SID16, "NONCOMPOSER_N2_16", "system", undefined, undefined, "agent", undefined, undefined, undefined, "sender-16nc");
+    check("(16) setup: N2 (non-composer) is also held, FIFO behind N1", n2_16.delivered === false);
+    check("(16) setup: pendingQueueDepth is 2 (N1, N2 — both undeliverable while exhausted)", host.getPendingQueueDepth(SID16) === 2);
+    check("(16) setup: N1 then N2, in that exact order", JSON.stringify(host.getPending(SID16)) === JSON.stringify(["NONCOMPOSER_N1_16", "NONCOMPOSER_N2_16"]));
+
+    // THE FIX: C is HELD ONLY behind two entries that are themselves undeliverable while exhausted —
+    // never special-cased by enqueueStdin's own composer fast path (deleted, card b70eade0) — so it
+    // falls to the ordinary held-push path, whose own PRE-EXISTING
+    // `if (idleEligible) { this.drainPending(...) }` branch drains it SYNCHRONOUSLY, inside this SAME
+    // enqueueStdin(C) call, via drainPending's exhausted-branch composer scan finding it regardless of
+    // its push position. No reconcile(), no timer, no second composer message.
+    const c16 = host.enqueueStdin(SID16, "COMPOSER_C_16", "human", undefined, undefined, "agent", undefined, "COMPOSER_C_16", undefined, HUMAN_COMPOSER_SENDER_ID);
+    check("(16) THE FIX: the composer entry delivers, drained alone from behind two undeliverable non-composer entries, with NO reconcile() anywhere", c16.delivered === true);
+    check("(16) its own submit's rising edge cleared contextExhausted (busy flips true)", busyLog[SID16]?.at(-1) === true);
+    check("(16) the composer text WAS handed to write() — the ONLY thing written while exhausted",
+      writes.some((w) => w.sessionId === SID16 && typeof w.data === "string" && w.data.includes("COMPOSER_C_16")));
+    check("(16) N1 and N2 are STILL queued, untouched (depth still 2 — not drained, not dropped, not coalesced into C's write)",
+      host.getPendingQueueDepth(SID16) === 2);
+    check("(16) N1 and N2 are STILL in their original relative order (no reordering — splice removed C, not N1/N2)",
+      JSON.stringify(host.getPending(SID16)) === JSON.stringify(["NONCOMPOSER_N1_16", "NONCOMPOSER_N2_16"]));
+    check("(16) neither N1's nor N2's text was written",
+      !writes.some((w) => w.sessionId === SID16 && typeof w.data === "string"
+        && (w.data.includes("NONCOMPOSER_N1_16") || w.data.includes("NONCOMPOSER_N2_16"))));
+
+    // A non-composer entry arriving strictly LATER than C's own (already-completed) write. By the time
+    // this call runs, C's rising edge has already cleared contextExhausted and armed busy=true (C's own
+    // turn is in flight) — this is the only reachable "later" shape (see the block comment above) — and
+    // N3 must queue at the TAIL, FIFO-behind N1/N2, never ahead of them and never disturbing C's write.
+    const n3_16 = host.enqueueStdin(SID16, "NONCOMPOSER_N3_16", "system", undefined, undefined, "agent", undefined, undefined, undefined, "sender-16nc");
+    check("(16) a LATER non-composer arrival (N3) is held, same as any ordinary busy-queue entry", n3_16.delivered === false);
+    check("(16) N3 does NOT disturb C's already-completed write — still the only write recorded so far",
+      writes.filter((w) => w.sessionId === SID16 && typeof w.data === "string"
+        && (w.data.includes("COMPOSER_C_16") || w.data.includes("NONCOMPOSER_N1_16") || w.data.includes("NONCOMPOSER_N2_16") || w.data.includes("NONCOMPOSER_N3_16"))).length === 1);
+    check("(16) N3 queues at the TAIL — N1, N2, N3 in that exact FIFO order, never reordered ahead of N1/N2",
+      JSON.stringify(host.getPending(SID16)) === JSON.stringify(["NONCOMPOSER_N1_16", "NONCOMPOSER_N2_16", "NONCOMPOSER_N3_16"]));
+
+    // Closing: end C's own turn — N1/N2/N3 share one sender/route/proactive, so the ordinary same-sender
+    // coalescing run drains all three together on this single Stop, proving none were lost or stranded.
+    host.deliverHook(SID16, { hook_event_name: "Stop" });
+    check("(16) N1/N2/N3 all drain once C's own turn completes (depth back to 0)", host.getPendingQueueDepth(SID16) === 0);
+    check("(16) all three eventually written, coalesced into ONE turn, in FIFO order",
+      writes.some((w) => {
+        if (w.sessionId !== SID16 || typeof w.data !== "string") return false;
+        const i1 = w.data.indexOf("NONCOMPOSER_N1_16");
+        const i2 = w.data.indexOf("NONCOMPOSER_N2_16");
+        const i3 = w.data.indexOf("NONCOMPOSER_N3_16");
+        // All three must actually be present — an absent substring's indexOf(-1) would otherwise
+        // satisfy a naive `<` comparison against a present one and pass for the wrong reason.
+        return i1 >= 0 && i2 >= 0 && i3 >= 0 && i1 < i2 && i2 < i3;
+      }));
+  } finally {
+    try { host.stop?.("wkr-composer-behind-noncomposer-only"); } catch { /* best-effort */ }
   }
 } finally {
   try { host.stop?.("wkr-drain-hold"); } catch { /* best-effort */ }

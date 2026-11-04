@@ -1,5 +1,11 @@
 # da8b2fc6 — the composer exhaustion bypass must not skip an older, already-queued composer entry
 
+⚠️ **Superseded by card `b70eade0`** — the bypass this record's fix introduced was later deleted entirely,
+not merely patched; see `docs/decisions/b70eade0-drainpending-is-sole-owner-of-the-composer-drain-policy.md`
+for why and what replaced it (the current policy owner, `drainPending`'s exhausted-branch composer scan,
+card `5f825506` round 3). Everything below is HISTORY: what `composerRecoveryBypassesQueue` and
+`olderComposerEntryQueued` once did, in `pty/host.ts`, before `b70eade0` removed both identifiers.
+
 From the 5f825506 CR round 3 (reviewer 9eddf2fa, MERGE) follow-up, untraced at the time: does
 `enqueueStdin`'s `composerRecoveryBypassesQueue` let a NEW composer arrival jump an OLDER composer
 entry still sitting in `live.pending`?
@@ -34,7 +40,7 @@ Reproduced hermetically twice (fake-pty seam, `PtyHost`, no real claude):
 User-visible consequence: REORDERING, not loss. B is delivered before A, but A is never dropped —
 firing B's own Stop afterward drains A normally via the ordinary (now non-exhausted) busy-queue path.
 
-## The fix
+## The fix (card da8b2fc6, HISTORICAL — deleted by card b70eade0)
 
 ```js
 const olderComposerEntryQueued = live.pending.some((m) => !this.exhaustionHoldAppliesTo(m.senderId));
@@ -62,16 +68,8 @@ delivered, with zero external events, purely from B's own `enqueueStdin` call. V
 (repro scripts, both the `isHumanSubmitHeld` and the give-up-hold variant): A's write is observed before
 B's, and the pending queue reaches 0 after B's own turn ends.
 
-## Do not
+## Superseded
 
-- Do not revert `olderComposerEntryQueued` to simply checking `live.pending.length === 0` — that would
-  reintroduce the original bug this record's bypass was designed to fix (5f825506's own Part 2/Round 2:
-  a composer recovery message queued behind a genuinely-undeliverable non-composer entry must still
-  bypass immediately, or the one write that can clear the exhaustion mark never runs).
-- Do not add a timer/poll to force A's drain when B queues — `enqueueStdin`'s own `if (idleEligible)`
-  branch already calls `drainPending` synchronously in the same call; a timer would be redundant and
-  could itself race a later event.
-- Do not assume this scenario requires a per-entry give-up hold specifically — any `idleEligible`
-  conjunct holding the older composer entry (isHumanSubmitHeld, a give-up hold, or simply arriving before
-  some other conjunct cleared) reproduces the same bypass defect; the fix is agnostic to WHY the older
-  entry is still queued.
+See `docs/decisions/b70eade0-drainpending-is-sole-owner-of-the-composer-drain-policy.md` — a Code Review
+found the fix above fully redundant with `drainPending`'s own composer scan, and card `b70eade0` deleted
+it entirely. That record carries the mutant evidence and the current "Do not" list.

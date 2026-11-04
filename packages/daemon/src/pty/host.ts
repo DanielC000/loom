@@ -10929,31 +10929,17 @@ export class PtyHost {
     // everything queued behind it. An agent/Loom entry's senderId is never this sentinel, so the hold
     // stays in force for them.
     //
-    // @decision 5f825506 — `exhaustionHoldAppliesTo` is the shared predicate `drainPending`'s own bail
-    // now also consults, so the two gates can't drift apart.
+    // @decision 5f825506 — `exhaustionHoldAppliesTo` is the shared predicate `drainPending`'s own
+    // exhausted-branch composer SCAN (round 3) also consults, so the two gates can't drift apart.
     const contextExhaustedHold = live.contextExhausted && this.exhaustionHoldAppliesTo(senderId);
     const idleEligible = live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !contextExhaustedHold && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live) && !this.isBlockedOnUnresolvedBootDialog(live) && !live.startupCycleInFlight;
     // @decision b5ab3aa4 — do not drop the `live.pending.length === 0` conjunct: without it, a new arrival
     // can jump an older entry that just became eligible in this same call, breaking FIFO delivery order.
     //
-    // Card 66ff7321 (CR round 3, Major 1): while `live.contextExhausted` holds, EVERY OTHER entry
-    // already in `live.pending` is itself undeliverable — `drainPending`'s own exhaustion bail still
-    // applies to any entry that isn't itself the composer's own (its shared predicate is
-    // `exhaustionHoldAppliesTo`, just below) — so there is no real FIFO order left to protect by
-    // making the composer wait behind them. Without this, the round-2 exemption above only ever fired
-    // on an EMPTY queue: the realistic case (a held worker report, an idle nudge, queued manager
-    // direction already sitting in `live.pending` when exhaustion hit) still queued the composer's own
-    // `/compact` FIFO-behind them, and nothing could then ever drain that queue while `contextExhausted`
-    // stayed set, so the composer message — the one write that can actually clear the mark — never ran
-    // either. Scoped tightly to `live.contextExhausted`: outside that state the conjunct above still
-    // applies byte-identically.
-    //
-    // @decision da8b2fc6 — do not drop `olderComposerEntryQueued`: without it, a brand-new composer
-    // arrival bypasses an OLDER, independently-eligible composer entry already queued, delivering the
-    // newer human turn before the older one.
-    const olderComposerEntryQueued = live.pending.some((m) => !this.exhaustionHoldAppliesTo(m.senderId));
-    const composerRecoveryBypassesQueue = live.contextExhausted && !this.exhaustionHoldAppliesTo(senderId) && !olderComposerEntryQueued;
-    if (idleEligible && (live.pending.length === 0 || composerRecoveryBypassesQueue)) {
+    // @decision b70eade0 — do not re-add an enqueue-side composer fast path here: `drainPending`'s own
+    // exhausted-branch composer scan (5f825506 round 3) is the single policy owner for which composer
+    // entry drains while `live.contextExhausted` holds.
+    if (idleEligible && live.pending.length === 0) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -13440,9 +13426,9 @@ export class PtyHost {
   }
 
   /**
-   * @decision 5f825506 (item 2) — SHARED by `enqueueStdin`'s immediate path AND `drainPending`'s own
-   * composer-eligibility SCAN (not a bare head-only bail since card da8b2fc6/5f825506 round 3), the
-   * same sibling-pair shape as `isHumanSubmitHeld` just above.
+   * @decision 5f825506 (item 2) — SHARED by `enqueueStdin`'s `idleEligible` gate AND `drainPending`'s
+   * own composer-eligibility SCAN (not a bare head-only bail since 5f825506 round 3 — see that record's
+   * "Round 3" section), the same sibling-pair shape as `isHumanSubmitHeld` just above.
    */
   private exhaustionHoldAppliesTo(senderId: string | null | undefined): boolean {
     return senderId !== HUMAN_COMPOSER_SENDER_ID;
