@@ -5744,6 +5744,20 @@ export const STATIC_GUARD_REPO_PATHS = [
   // fixed-wait-witness-guard.mjs was added to close). See the guard's own header for the full mechanism
   // (AST-based spawn-call detection, the three safe markers, the reasoned non-engine allowlist).
   "packages/daemon/test/real-engine-spawn-opt-in-guard.mjs",
+  // Card e36e04b3 (from card 060b9cb7's own recommendation): a corpus-wide, comment-stripped scan of BOTH
+  // packages/daemon/assets/**/*.mjs and packages/daemon/src/**/*.ts asserting no `detached: true` spawn
+  // ships without `windowsHide: true` in the same options object (Windows pops a new visible console).
+  // Belongs here on the SAME ground as codescape-privacy-guard.mjs above (this list's other asset-reading
+  // member): a real packages/daemon/src/**/*.ts regression already fails computeEmitCompareGate's
+  // transpile-identity check and forces the FULL gate (where this guard runs anyway via the corpus walk),
+  // but a real packages/daemon/assets/**/*.mjs regression does NOT — that function's own
+  // EMIT_COMPARE_ASSETS_PREFIX arm never tries to prove a script-asset change behavior-inert, so an
+  // assets-only diff reduces regardless of content and only runs the fixed ASSET_READING_TEST_REPO_PATHS
+  // set, which this guard is not a member of. Seated here — unconditionally, like
+  // codescape-privacy-guard.mjs, rather than added to that conditional list — so it closes the gap
+  // regardless of which of its two scanned trees a future regression lands in, at negligible cost (<1s,
+  // pure text, no subprocess).
+  "packages/daemon/test/windows-detached-console-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
