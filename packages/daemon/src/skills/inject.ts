@@ -107,17 +107,36 @@ function innermostGitRepoRoot(dir: string): string | null {
 const UNTRACKED_CHECK_TIMEOUT_MS = 10_000; // matches this codebase's own convention for one quick, bounded git read (sessions/service.ts's mainlineGitMs)
 const UNTRACKED_CACHE_TTL_MS = 60_000; // bounds the one named residual: a commit landing AFTER the check but BEFORE a later call consumes it
 const UNTRACKED_CACHE_MAX_ENTRIES = 500; // defensive cap — this only ever grows on a genuine dead-claim reclaim event, which is rare
+// card f4e93dbf round 3 (card d467d56d): how long a NEGATIVE outcome (confirmed tracked, or the check
+// itself failed/was refused) backs off before the NEXT injectSkills call at this (cwd, name) is allowed
+// to kick a fresh git subprocess again. Deliberately much longer than UNTRACKED_CACHE_TTL_MS (that one
+// bounds a race window; this one bounds REPEATED COST) but still finite and far shorter than
+// PENDING_RECLAIM_MAX_AGE_MS — a negative outcome is NEVER treated as permanent: a genuinely-untracked
+// dir whose check merely failed once (a timeout, a transient lock) is re-verified on this cadence rather
+// than abandoned for the life of the daemon process, and a genuinely, durably tracked dir just costs one
+// re-check per window instead of one per call.
+const NEGATIVE_CHECK_BACKOFF_MS = 60 * 60 * 1000; // 1 hour
 
-interface UntrackedCheckEntry { readonly fingerprint: string; readonly expiresAt: number; }
-/** `${cwd}\u0000${name}` -> the fingerprint that was confirmed untracked, plus when that confirmation
- *  expires. NUL-separated so neither half can ever be ambiguous about where it ends (a skill name is
- *  already a validated kebab slug with no NUL byte; `cwd` is a filesystem path, same reasoning). This
- *  cache holds ONLY the verified-untracked FACT, with its own short TTL — it is deliberately NOT where a
- *  caller remembers "this name is an orphan worth re-checking"; that is the separate, disk-persisted
- *  {@link PendingReclaimMap} below, which has no TTL and survives across this cache's own expiry.
+interface UntrackedCheckEntry { readonly fingerprint: string; readonly expiresAt: number; readonly negative?: boolean; }
+/** `${cwd}\u0000${name}` -> either (a) the fingerprint that was confirmed UNTRACKED, plus when that
+ *  confirmation expires (`negative` absent/false) — a genuine reclaim opportunity — or (b) `negative:true`
+ *  (card d467d56d): the fingerprint was confirmed TRACKED, or the check itself failed/was refused, for
+ *  this exact content, backing off for {@link NEGATIVE_CHECK_BACKOFF_MS} before the next call may kick a
+ *  fresh check again. NEVER a permanent "stop asking" — only `expiresAt`-bounded, so a failed check is
+ *  retried on a cadence rather than abandoned, and the pending-reclaim record itself is left entirely
+ *  untouched while backing off (this cache entry is the ONLY thing a negative outcome writes). NUL-
+ *  separated so neither half can ever be ambiguous about where it ends (a skill name is already a
+ *  validated kebab slug with no NUL byte; `cwd` is a filesystem path, same reasoning). This cache holds
+ *  ONLY a verified CHECK OUTCOME (reclaimable or not), never "an orphan is worth checking at all" — that
+ *  is the separate, disk-persisted {@link PendingReclaimMap} below, which has no TTL of its own and
+ *  survives across (and past) this cache's own entries.
  *
- *  @decision f4e93dbf round 2 — the 60s TTL applies ONLY to this verified fact, never to the fact that an
- *  orphan exists at all; see the decision record for the gap this split closes. */
+ *  @decision f4e93dbf round 2 — the 60s TTL applies ONLY to the reclaimable (untracked) fact, never to
+ *  the fact that an orphan exists at all; see the decision record for the gap this split closes.
+ *
+ *  @decision f4e93dbf — a `negative:true` entry is read regardless of `want` (it is never a reclaim
+ *  opportunity for anyone to consume) but still expires — see the decision record's own section for why
+ *  "tracked" and "check failed" share one bounded backoff instead of a permanent resolution. */
 const verifiedUntrackedCache = new Map<string, UntrackedCheckEntry>();
 /** Dedupes concurrent kicks for the exact same (cwd, name) — same key shape as the cache above. Also the
  *  TEST-ONLY await surface ({@link __awaitPendingSkillTrackChecks}): production never awaits an entry
@@ -137,6 +156,18 @@ function untrackedCacheKey(cwd: string, name: string): string { return `${cwd}\u
  *  wall clock via a bare `Date.now()` (this codebase's own convention for a test-overridable clock —
  *  several other test files reassign `Date.now` directly, e.g. `temp-path-collision-guard.mjs` — rather
  *  than threading an injectable clock parameter through every caller). */
+/** Bounded cache-write, shared by every outcome {@link kickUntrackedCheck} can produce — the single
+ *  place that enforces {@link UNTRACKED_CACHE_MAX_ENTRIES}, so a `negative:true` backoff write (now far
+ *  more frequent than before card d467d56d, since it fires for every tracked/failed check too) can't
+ *  drift from the reclaimable-fact write's own eviction policy. */
+function cacheCheckResult(key: string, entry: UntrackedCheckEntry): void {
+  if (verifiedUntrackedCache.size >= UNTRACKED_CACHE_MAX_ENTRIES) {
+    const oldestKey = verifiedUntrackedCache.keys().next().value;
+    if (oldestKey !== undefined) verifiedUntrackedCache.delete(oldestKey); // defensive eviction; practically never hit
+  }
+  verifiedUntrackedCache.set(key, entry);
+}
+
 function kickUntrackedCheck(cwd: string, name: string, fingerprint: string, repoRoot: string, target: string): void {
   const key = untrackedCacheKey(cwd, name);
   if (inFlightTrackChecks.has(key)) return; // already checking this exact (cwd, name) — don't pile on another
@@ -146,15 +177,27 @@ function kickUntrackedCheck(cwd: string, name: string, fingerprint: string, repo
       const git = canonicalGit(repoRoot, UNTRACKED_CHECK_TIMEOUT_MS);
       const out = await withTimeout(git.raw(["ls-files", "--", pathspec]), UNTRACKED_CHECK_TIMEOUT_MS, "git ls-files (skill dead-claim reclaim check)");
       if (out.trim() === "") {
-        if (verifiedUntrackedCache.size >= UNTRACKED_CACHE_MAX_ENTRIES) {
-          const oldestKey = verifiedUntrackedCache.keys().next().value;
-          if (oldestKey !== undefined) verifiedUntrackedCache.delete(oldestKey); // defensive eviction; practically never hit
-        }
-        verifiedUntrackedCache.set(key, { fingerprint, expiresAt: Date.now() + UNTRACKED_CACHE_TTL_MS });
+        cacheCheckResult(key, { fingerprint, expiresAt: Date.now() + UNTRACKED_CACHE_TTL_MS });
+      } else {
+        // At least one file under it is git-tracked. Back off rather than cache nothing — without this,
+        // every future injectSkills call at this cwd re-kicked a fresh git subprocess for up to
+        // PENDING_RECLAIM_MAX_AGE_MS (30 days) for a dir unlikely to become reclaimable soon. Bounded, not
+        // permanent: a later content change (a different fingerprint), or the backoff simply expiring,
+        // re-checks from scratch — see NEGATIVE_CHECK_BACKOFF_MS's own doc for why.
+        //
+        // @decision f4e93dbf — cache a confirmed-tracked result as a bounded backoff, never nothing.
+        console.log(`[skills] dead-claim reclaim: '${name}' at ${cwd} is git-tracked — backing off for ${NEGATIVE_CHECK_BACKOFF_MS}ms before checking again`);
+        cacheCheckResult(key, { fingerprint, expiresAt: Date.now() + NEGATIVE_CHECK_BACKOFF_MS, negative: true });
       }
-      // non-empty output => at least one file under it is git-tracked — cache nothing, same as an error below
     } catch (e) {
-      console.log(`[skills] dead-claim reclaim: git-tracked check failed for '${name}' at ${cwd} (treating as tracked — not reclaiming): ${(e as Error)?.message ?? e}`);
+      // A FAILED check (a timeout, or canonicalGit's own fail-closed refusal — e.g. a FILE-shaped
+      // `.git`, see the decision record's named residual) gets the SAME bounded backoff as a confirmed-
+      // tracked result — never a permanent give-up, since the failure could be transient (unlike a
+      // confirmed-tracked result, which we actually know for a fact).
+      //
+      // @decision f4e93dbf — cache a failed/refused check as a bounded backoff too, same as tracked.
+      console.log(`[skills] dead-claim reclaim: git-tracked check failed for '${name}' at ${cwd} (backing off for ${NEGATIVE_CHECK_BACKOFF_MS}ms before checking again): ${(e as Error)?.message ?? e}`);
+      cacheCheckResult(key, { fingerprint, expiresAt: Date.now() + NEGATIVE_CHECK_BACKOFF_MS, negative: true });
     } finally {
       inFlightTrackChecks.delete(key);
     }
@@ -1134,6 +1177,13 @@ export function injectSkills(
       const key = untrackedCacheKey(cwd, name);
       const cacheEntry = verifiedUntrackedCache.get(key);
       if (cacheEntry) {
+        // A still-valid `negative:true` entry for this exact content (confirmed tracked, or a failed/
+        // refused check) is never a reclaim opportunity for anyone — skip it, regardless of `want`, but
+        // leave the pending-reclaim record itself untouched: this is a backoff, not a resolution, so a
+        // LATER call (once `expiresAt` passes) re-verifies from scratch rather than this name being lost.
+        //
+        // @decision f4e93dbf — a live `negative:true` entry is skipped (never consumed, never dropped).
+        if (cacheEntry.negative && cacheEntry.fingerprint === currentFp && cacheEntry.expiresAt > nowMs) continue;
         if (cacheEntry.expiresAt <= nowMs || cacheEntry.fingerprint !== currentFp) {
           verifiedUntrackedCache.delete(key); // stale or invalidated by an edit since it was kicked — a wrong fact is never worth keeping, for anyone
         } else if (want.includes(name)) {
@@ -1184,7 +1234,10 @@ export function injectSkills(
     // project-local skill — never clobber it. A dir another session injected IS loom's: re-copying the
     // same store content is idempotent and harmless. `reclaimableNow` (card f4e93dbf): a verified
     // dead-claim orphan, already confirmed untracked — treat it as claimed too, so this same copy path
-    // performs its own atomic replace over it (never a separate delete first).
+    // handles it exactly like any other refresh: `copySkillAtomic` builds the new copy fully before
+    // touching the old one, but it is NOT a single atomic replace with no delete step — it rm's `dest`
+    // then renames, with a real (if brief) window where `dest` is simply missing (card d467d56d; see
+    // that function's own doc).
     if (exists && !myPrev.includes(name) && !otherClaimed.has(name) && !reclaimableNow.has(name)) continue;
     // card f4272888: a name that already exists at `dest` — whether I placed it before, or ANOTHER live
     // session did (the `otherClaimed` case, a fresh first-time claim in a shared cwd) — is re-copied only

@@ -74,8 +74,12 @@ The approved shape:
    fingerprint STILL matches the recorded one (closing the race against an edit/commit landing between
    the check and this call) and no live session now claims it, the name is added to `reclaimableNow` and
    flows through the EXISTING `want`-loop `copySkillAtomic` path, exactly like any other normal
-   refresh — never a separate delete. There is no delete-then-recopy window: `copySkillAtomic` already
-   performs its own atomic tmp-copy + swap over an existing dest.
+   refresh — never a SEPARATE delete step performed by this reclaim logic itself. **Corrected (round 2,
+   Fix 4; see that section below): `copySkillAtomic` itself is NOT a single atomic replace with no delete
+   step** — it builds the new copy in a sibling tmp dir, THEN `rm`s `dest`, THEN renames the tmp into
+   place, with a real (if brief) window where `dest` does not exist at all. What this point actually
+   guarantees is narrower, and still holds: the new copy is always fully built before the old one is ever
+   removed, so a failed copy never leaves `dest` half-written or merged with stale content.
 4. A mismatch at consume time (Pass 1) drops the cache entry silently — never deletes, never overwrites.
 5. `__awaitPendingSkillTrackChecks()` is a narrowly-named, TEST-ONLY export to await in-flight checks
    deterministically; production never calls it (that would reintroduce the exact block this design
@@ -215,6 +219,52 @@ hardening this card's kickoff floated is NOT implemented here (it would widen sc
 actual bug, which is the shared-cwd reclaim mechanism, not `copySkillAtomic`'s general delivery path used
 by every skill, reclaimed or not) — named as a residual, not fixed.
 
+## Round 3 (card d467d56d, from the f4e93dbf Code Review): a confirmed-tracked or failed check now backs off instead of re-kicking forever
+
+Reviewer `e43b3710` (non-blocking): every call to `injectSkills` at a cwd carrying a STALE pending-reclaim
+record for a genuinely git-TRACKED dir — or one whose check keeps failing (a timeout, or `canonicalGit`'s
+own fail-closed refusal, e.g. for a FILE-shaped `.git` — see the named residual below) — re-kicked a
+fresh `kickUntrackedCheck` on EVERY SINGLE such call, for up to `PENDING_RECLAIM_MAX_AGE_MS` (30 days):
+`kickUntrackedCheck` cached something only on the "untracked" (reclaimable) outcome; a tracked result or a
+caught error cached nothing at all, so the next call always found no cache entry and kicked again.
+
+**The fix:** `kickUntrackedCheck` now caches EVERY outcome, not just "untracked" — a confirmed-tracked
+result, or a caught error, writes a `negative:true` entry (`expiresAt: Date.now() +
+NEGATIVE_CHECK_BACKOFF_MS`, 1 hour) into the SAME `verifiedUntrackedCache` map the reclaimable fact
+already used (a new optional `negative` field on `UntrackedCheckEntry`). The resolve loop in
+`injectSkills` checks this FIRST: a still-valid `negative:true` entry whose fingerprint still matches
+current content is skipped — never gated on `want` (it is never a reclaim opportunity for anyone either
+way) — so a genuinely-tracked (or persistently-refused) dir costs at most one kick per backoff window
+instead of one per call.
+
+**Deliberately NOT a permanent resolution, and this is the load-bearing correction over the FIRST version
+of this fix (caught before merge, not by an external reviewer): a `negative:true` entry only ever writes
+to the in-memory cache, and NEVER touches the persisted pending-reclaim record.** The first version of
+this fix cached a confirmed-tracked or failed result with `expiresAt: Infinity` and dropped the
+pending-reclaim record outright the moment it was read — permanently "resolving" it. That is correct for
+a confirmed-tracked result (a verified fact about current content), but WRONG for a failed/refused check:
+caching the IDENTICAL outcome for both meant a single TRANSIENT failure (a timeout, a momentary lock) on a
+genuinely-untracked, genuinely-reclaimable dir would permanently abandon it for the life of the daemon
+process — the exact "wait forever" failure mode this round exists to avoid, just moved from "every call"
+to "after one unlucky call." The bounded backoff fixes this for BOTH outcomes uniformly: a confirmed-
+tracked dir is simply re-verified once per window instead of being trusted forever (cheap, and correctly
+self-heals if the dir is later `git rm --cached`d), and a failed/refused check gets an honest retry
+cadence instead of a single-shot verdict. The pending-reclaim record itself is UNTOUCHED while backing
+off either way — it is bounded only by the pre-existing, already-reviewed `PENDING_RECLAIM_MAX_AGE_MS`
+give-up, exactly as before this round.
+
+Treating "tracked" and "failed/refused" the same way (one shared backoff mechanism) is deliberate, not a
+simplification that loses information: both already logged a "not reclaiming right now" outcome before
+this fix, and the backoff's own bound means neither can ever wait forever — there is no transient-vs-
+permanent distinction worth building a separate mechanism for here.
+
+Pinned in `skills-dead-claim-reclaim-shared-cwd.mjs` (section 12) — not the negative-control-compatible
+`-core.mjs` sibling, since this mechanism has no pre-fix analogue to diff against (the whole
+`verifiedUntrackedCache`/`kickUntrackedCheck` machinery it extends postdates the original card). Proven
+two ways per outcome: a real check-fire counter (via the log line) shows exactly ONE real git subprocess
+fires across a discovery call and a repeated call within the backoff window; advancing the mocked clock
+past the window shows a THIRD call fires a fresh check — the "not forever" proof the card asked for.
+
 ## Do not (round 2 additions)
 
 - Do not consume a verified-untracked fact, or perform the no-repo immediate reclaim, for a name `want`
@@ -231,3 +281,52 @@ by every skill, reclaimed or not) — named as a residual, not fixed.
 - Do not treat `__pendingReclaim` as a real session id anywhere this file's reclaim code iterates
   `Object.keys`/`Object.entries` of the fingerprints sidecar's session map — it is a reserved top-level
   key, parsed and written separately from every real session's own fingerprint record.
+
+## Do not (round 3 additions)
+
+- Do not cache only the "untracked" (reclaimable) outcome of `kickUntrackedCheck` — a confirmed-tracked
+  result and a failed/refused check must ALSO be cached (as a `negative:true`, backoff-bounded entry), or
+  a stale pending-reclaim record re-kicks a fresh git subprocess on every single future `injectSkills`
+  call at that cwd, for up to `PENDING_RECLAIM_MAX_AGE_MS`.
+- Do not cache a confirmed-tracked or failed/refused outcome as a PERMANENT resolution (`expiresAt:
+  Infinity`), and do not drop the pending-reclaim record on either outcome — a single transient failure
+  (a timeout, a momentary lock) would then permanently abandon a genuinely-reclaimable dir for the life of
+  the daemon process. Use a BOUNDED backoff (`NEGATIVE_CHECK_BACKOFF_MS`) and leave the pending-reclaim
+  record entirely untouched while backing off; this was a real defect in the first version of this fix,
+  caught before merge.
+- Do not gate the `negative:true` skip branch on `want` — it is never a reclaim opportunity for anyone
+  either way, wanting or not.
+- Do not re-derive `NEGATIVE_CHECK_BACKOFF_MS`'s value elsewhere — read it at its one definition in
+  `inject.ts`.
+
+## Named residuals (round 3 additions)
+
+- **A shared cwd whose repo has a FILE-shaped `.git`** (a linked worktree, a submodule, or a
+  `--separate-git-dir` checkout) never reclaims. `kickUntrackedCheck` calls `canonicalGit(repoRoot,
+  UNTRACKED_CHECK_TIMEOUT_MS)` with no `trustedMainRoot`/`commondirOpts`, and `canonicalGit` fail-closed
+  refuses ANY call against a FILE-shaped `.git` it wasn't given a `trustedMainRoot` to verify against
+  (`git/bounded.ts`, card `3a5c5d4a`) — every check for such a dir throws, and (since Round 3 above) backs
+  off for `NEGATIVE_CHECK_BACKOFF_MS` before the next call retries it (and will keep failing the same way
+  every time, so it costs one retry per window, forever — never a permanent give-up, since the mechanism
+  has no way to distinguish this from a genuinely transient failure). This is accepted, not fixed:
+  threading a `trustedMainRoot` through here would mean resolving and trusting a SECOND repo's main
+  checkout from inside the skill-injection hot path, a materially larger change than this card's own
+  scope, for a configuration (a project whose shared cwd is itself a linked worktree or submodule) Loom's
+  own session cwds never produce.
+- **Windows (or any case-insensitive filesystem) case-variant tracking.** `kickUntrackedCheck`'s
+  `git ls-files -- <pathspec>` is a case-SENSITIVE literal match — if the repo tracks the skill dir under
+  a different-case path (e.g. `.Claude/skills/x` committed on a case-insensitive filesystem, then later
+  read back as `.claude/skills/x`), `ls-files` returns empty for the literal pathspec even though the
+  content IS tracked under a case variant, and the dir is wrongly treated as untracked and reclaimed.
+  Considered: passing `:(icase)<pathspec>` pathspec magic to make the match case-insensitive. NOT done —
+  `:(icase)` would be WRONG to apply unconditionally (a case-sensitive filesystem, e.g. ext4, can
+  legitimately hold two same-cased-differently dirs as genuinely distinct paths, and a blind icase match
+  would then falsely treat an unrelated case-variant sibling as "the same tracked file"), and applying it
+  conditionally needs a real filesystem-case-sensitivity probe threaded through this hot path for a
+  residual whose own blast radius is already bounded: the gate this check feeds is a POSITIVE-only
+  reclaim decision gated on a content-fingerprint match against a specific dead-session placement (never
+  the bare "is this name tracked" question alone) — a false "untracked" here can only ever lead to
+  re-copying content that is ALSO exactly what the dead session already fingerprinted placing, so the
+  worst case is overwriting a case-variant-tracked file with byte-identical Loom content, recoverable from
+  git exactly like the round-3-named tracked-but-byte-identical residual elsewhere in this file's sibling
+  card (`31f997e7`). Recorded as a residual rather than implemented.
