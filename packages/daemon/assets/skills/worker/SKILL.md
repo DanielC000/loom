@@ -372,6 +372,11 @@ itself a note) uses the SAME grammar wrapped in an HTML comment instead of a cod
 invisible in a rendered Markdown preview, resolved by the exact same anchor mechanism and id rules as a
 code comment.
 
+**A finding that already has a decision record doesn't also need a project-memory note restating it.**
+The record is the source of truth — keep memory notes for cross-cutting facts that have no record of
+their own, and if you want to point to the record from memory, a one-line pointer is enough; don't
+re-explain its content.
+
 **Learned something durable? Write it to project memory.** When your task surfaces a fact a FUTURE agent
 on this project would want handed to it — a verified invariant, a load-bearing gotcha, a hard-won
 root-cause or repro — capture it with `memory_write`: the store is SHARED across every session on the

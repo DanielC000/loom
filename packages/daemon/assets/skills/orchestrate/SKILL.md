@@ -1003,7 +1003,8 @@ what you checked. Found none? Treat it as live.
    lineage handoff (full state, for your successor). `memory_write` instead writes a project-scoped note
    SHARED across EVERY agent/session and auto-injected into each kickoff. When you or a worker
    establishes a durable cross-session fact any future agent should have — a verified invariant, a
-   load-bearing gotcha, a settled decision + why, a "this is already done/closed" fact — capture it
+   load-bearing gotcha, a settled decision + why (unless it already has a decision record — then a
+   one-line pointer beats restating it), a "this is already done/closed" fact — capture it
    there. **Query it, don't only write it** — consult the store (`memory_read`/`memory_list`) when a
    decision might already be settled in it. **Read `references/project-memory.md` (under this skill's
    own directory) BEFORE your first memory call** — the `memory_*` tools are deferred with exact param

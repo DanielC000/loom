@@ -11,7 +11,8 @@ optional **`title`**, **`pinned`**, **`tags`**, **`requestIds`**, **`triggerGlob
 names verbatim; a guessed param (`args`/`value`/`content`) is silently stripped and the call fails
 validation for the missing required field. When you or a worker establishes a durable cross-session
 fact any future agent should have — a verified invariant, a load-bearing gotcha, a settled decision +
-why, a "this is already done/closed" fact — capture it as a compact titled note under a stable `key`
+why (unless it already has a decision record — then a one-line pointer beats restating it), a
+"this is already done/closed" fact — capture it as a compact titled note under a stable `key`
 (same key UPDATES in place; ≤4000 bytes, curated, not task chatter — a pinned note also tagged
 `"never-drop"`, see below, has a LOWER cap, ≤2000 bytes, since it rides every future kickoff
 unconditionally). Pin only a rare always-relevant fact, and reach for the `"never-drop"` tag (via
