@@ -153,6 +153,15 @@ const PENDING_RECLAIM_KEY = "__pendingReclaim"; // reserved top-level key in FIN
 const PENDING_RECLAIM_MAX_PER_CWD = 200; // defensive cap — practically never hit (mirrors UNTRACKED_CACHE_MAX_ENTRIES's own framing)
 const PENDING_RECLAIM_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days — generous; bounds disk growth for an orphan nobody ever asks for again, not a safety mechanism
 
+// card 3b2a8707 Code Review round 3: a SECOND reserved top-level key in FINGERPRINTS_FILE, same posture
+// as PENDING_RECLAIM_KEY (never a real session id — see readFingerprintsFile/serializeFingerprintsFile).
+const LAST_PLACED_KEY = "__lastPlaced";
+// Cap on how many distinct fingerprints lastPlaced[name] may hold at once — a cross-pass accumulator
+// since Code Review round 4 on card 3b2a8707 (carryDeadFingerprintsForward now MERGES, never replaces;
+// see its own doc for the merge order and the eviction edge this cap creates once a single pass alone
+// discovers >= this many distinct fingerprints for one name).
+const LAST_PLACED_MAX_FPS_PER_NAME = 8;
+
 /** One persisted, disk-durable record of a shared-cwd dead-claim orphan still awaiting reclaim — the
  *  "remember the orphan" half of the split {@link verifiedUntrackedCache} documents. `deadFingerprints`
  *  is every content fingerprint any dead claimant has ever recorded placing under this name (unioned
@@ -345,14 +354,38 @@ function readManifest(manifestPath: string, sessionId: string): Manifest {
 
 /** One cwd's full parse of the {@link FINGERPRINTS_FILE} sidecar: every real session's own fingerprint
  *  record, PLUS the reserved {@link PENDING_RECLAIM_KEY} entry (never a real session id) parsed
- *  separately as a {@link PendingReclaimMap}. */
-interface FingerprintsFileData { bySession: FingerprintMap; pending: PendingReclaimMap; }
+ *  separately as a {@link PendingReclaimMap}, PLUS the reserved {@link LAST_PLACED_KEY} entry (card
+ *  3b2a8707 Code Review round 3) parsed as `name -> every fingerprint a dead session's prune carried
+ *  forward for it` — see `recordedFingerprintsForName`'s own doc for why this exists and
+ *  `carryDeadFingerprintsForward` for how it's written. */
+interface FingerprintsFileData { bySession: FingerprintMap; pending: PendingReclaimMap; lastPlaced: Record<string, string[]>; }
 /** A FRESH object every call — never a shared constant. `injectSkills` mutates the returned `bySession`
  *  in place (`delete fingerprints[sid]`, `fingerprints[sessionId] = …`); a shared singleton here would
  *  let one call's write leak into every OTHER call whose fingerprints file happens to be missing/corrupt
  *  (a real regression this fixed — card f4e93dbf round 2, caught by `skills-capability-bound.mjs` case
  *  17 only after several EARLIER worktree cases had already written through the same stale reference). */
-function emptyFingerprintsFile(): FingerprintsFileData { return { bySession: {}, pending: {} }; }
+function emptyFingerprintsFile(): FingerprintsFileData { return { bySession: {}, pending: {}, lastPlaced: {} }; }
+
+/** Validate+bound one untrusted {@link LAST_PLACED_KEY} entry: a non-empty array of valid fingerprints
+ *  (same `sanitizeFingerprint` bound as everywhere else in this file), capped at
+ *  {@link LAST_PLACED_MAX_FPS_PER_NAME} (a malformed/huge array is truncated, never rejected outright —
+ *  "too many" is still real fingerprint data, worth keeping some of, unlike a wrong-shaped value). */
+function sanitizeLastPlacedRecord(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const fps = [...new Set(raw.map(sanitizeFingerprint).filter((fp): fp is string => fp !== null))];
+  return fps.length > 0 ? fps.slice(0, LAST_PLACED_MAX_FPS_PER_NAME) : null;
+}
+
+function sanitizeLastPlacedMap(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [name, rec] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isSafeManifestEntry(name)) continue;
+    const sanitized = sanitizeLastPlacedRecord(rec);
+    if (sanitized) out[name] = sanitized;
+  }
+  return out;
+}
 
 /** Validate+bound one untrusted pending-reclaim record read from the {@link PENDING_RECLAIM_KEY} entry.
  *  `deadFingerprints` must be a non-empty array of valid fingerprints (bounded the same way a session's
@@ -401,8 +434,10 @@ function readFingerprintsFile(fingerprintsPath: string): FingerprintsFileData {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return emptyFingerprintsFile();
   const bySession: FingerprintMap = {};
   let pending: PendingReclaimMap = {};
+  let lastPlaced: Record<string, string[]> = {};
   for (const [sid, m] of Object.entries(raw as Record<string, unknown>)) {
     if (sid === PENDING_RECLAIM_KEY) { pending = sanitizePendingReclaimMap(m); continue; }
+    if (sid === LAST_PLACED_KEY) { lastPlaced = sanitizeLastPlacedMap(m); continue; }
     if (!m || typeof m !== "object" || Array.isArray(m)) continue;
     const inner: Record<string, string> = {};
     for (const [name, fp] of Object.entries(m as Record<string, unknown>)) {
@@ -412,15 +447,17 @@ function readFingerprintsFile(fingerprintsPath: string): FingerprintsFileData {
     }
     bySession[sid] = inner;
   }
-  return { bySession, pending };
+  return { bySession, pending, lastPlaced };
 }
 
-/** Serialize `bySession` + `pending` back to the {@link FINGERPRINTS_FILE} on-disk shape — the exact
- *  inverse of `readFingerprintsFile`'s parse. `pending` is omitted entirely when empty, so an ordinary
- *  cwd with nothing ever orphaned never carries the reserved key at all. */
-function serializeFingerprintsFile(bySession: FingerprintMap, pending: PendingReclaimMap): Record<string, unknown> {
+/** Serialize `bySession` + `pending` + `lastPlaced` back to the {@link FINGERPRINTS_FILE} on-disk shape —
+ *  the exact inverse of `readFingerprintsFile`'s parse. `pending`/`lastPlaced` are each omitted entirely
+ *  when empty, so an ordinary cwd with nothing ever orphaned/carried-forward never carries either
+ *  reserved key at all. */
+function serializeFingerprintsFile(bySession: FingerprintMap, pending: PendingReclaimMap, lastPlaced: Record<string, string[]>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...bySession };
   if (Object.keys(pending).length > 0) out[PENDING_RECLAIM_KEY] = pending;
+  if (Object.keys(lastPlaced).length > 0) out[LAST_PLACED_KEY] = lastPlaced;
   return out;
 }
 
@@ -520,15 +557,22 @@ export function fingerprintSkillDir(dir: string): string | null {
  * fingerprint for the dir in question (several callers need that same fingerprint for OTHER purposes too,
  * e.g. the shared-cwd untracked-check cache below, so this takes the value rather than a path to compute
  * it twice) — safe to treat as still Loom's own? Safe when EITHER (a) it matches one of `recorded` — the
- * fingerprint(s) actually recorded at a real Loom placement — OR, only when `recorded` is empty/absent (a
- * legacy claim predating this mechanism, or a fingerprint computation that itself failed at placement
- * time) AND a `storeFallback` is supplied, (b) it already matches the CURRENT store copy's own
- * fingerprint — nothing would be lost by overwriting/pruning content that's already byte-identical to
- * what we'd write there anyway. Any other case — content diverges from both, or `currentFp`/the store
- * copy can't be read at all — fails CLOSED: "cannot verify" never means "safe to destroy." `storeFallback`
- * is a lazily-invoked thunk (never called when a `recorded` entry already matches) so the two existing
- * dead-claim call sites, which never pass one, pay no extra fingerprinting cost and keep their exact
- * pre-card-6db94dfe behavior (fail toward keeping on ANY unrecorded claim, no store comparison at all).
+ * fingerprint(s) actually recorded at a real Loom placement — OR (b) a `storeFallback` is supplied and it
+ * matches the CURRENT store copy's own fingerprint — nothing would be lost by overwriting/pruning content
+ * that's already byte-identical to what we'd write there anyway. Any other case — content diverges from
+ * both, or `currentFp`/the store copy can't be read at all — fails CLOSED: "cannot verify" never means
+ * "safe to destroy." `storeFallback` is a lazily-invoked thunk, called only when nothing in `recorded`
+ * already matched, so the two existing dead-claim call sites, which never pass one, pay no extra
+ * fingerprinting cost and keep their exact pre-card-6db94dfe behavior (fail toward keeping on ANY
+ * unrecorded claim, no store comparison at all).
+ *
+ * card 3b2a8707 (Code Review finding 1): `storeFallback` used to run ONLY when `recorded` was entirely
+ * empty — so a `recorded` set that existed but didn't match (every entry stale relative to current disk)
+ * never got a chance to fall back to "is this byte-identical to what I'd place right now anyway." That is
+ * exactly the shape of the false-freeze this card's own fix otherwise reintroduced (see
+ * `recordedFingerprintsForName`'s own doc and the decision record's "CARD `3b2a8707`" section) — `recorded`
+ * being non-empty-but-stale and `recorded` being absent are the SAME "nothing here vouches for this
+ * content" case from this function's own point of view, and both now get the same last-resort check.
  *
  * @decision 31f997e7 — card 6db94dfe closed the same-session-resume residual named in that record's
  * "What remains"; see it for the full history and the two existing dead-claim call sites this helper was
@@ -536,14 +580,12 @@ export function fingerprintSkillDir(dir: string): string | null {
  */
 function matchesRecordedFingerprint(currentFp: string | null, recorded: Iterable<string> | undefined, storeFallback?: () => string | null): boolean {
   if (!currentFp) return false;
-  let hasRecorded = false;
   if (recorded) {
     for (const fp of recorded) {
-      hasRecorded = true;
       if (fp === currentFp) return true;
     }
   }
-  if (!hasRecorded && storeFallback) {
+  if (storeFallback) {
     const storeFp = storeFallback();
     if (storeFp && storeFp === currentFp) return true;
   }
@@ -553,24 +595,105 @@ function matchesRecordedFingerprint(currentFp: string | null, recorded: Iterable
 /**
  * The set of content fingerprints that are SAFE to treat as "this is Loom's own, unmodified work" for
  * `name` right now: every fingerprint any CURRENT claimant of `name` (per `manifest`, including the
- * caller's own entry) actually recorded placing there. Mirrors the dead-claim cleanup's own any-of-set
- * match (`deadFingerprints`), but for LIVE claimants sharing a cwd: a shared cwd's on-disk content is
- * whatever ANY live co-claimant most recently refreshed it to, so a session whose OWN last-recorded
- * fingerprint predates a co-claimant's legitimate refresh must not read that refresh as a hand edit.
- * `manifest` here already excludes any session `isSessionLive` has pruned as dead (done earlier in
- * `injectSkills`), so every key still present is live.
+ * caller's own entry) actually recorded placing there, UNION the daemon-side {@link
+ * loomPlacedFingerprintsByCwd} registry entry for (`cwd`, `name`), UNION `lastPlaced[name]` (the
+ * PERSISTED carry-forward set this cwd's {@link FINGERPRINTS_FILE} sidecar holds for `name` — see
+ * `carryDeadFingerprintsForward`'s own doc for how it's written). Mirrors the dead-claim cleanup's own
+ * any-of-set match (`deadFingerprints`), but for LIVE claimants sharing a cwd: a shared cwd's on-disk
+ * content is whatever ANY live co-claimant most recently refreshed it to, so a session whose OWN
+ * last-recorded fingerprint predates a co-claimant's legitimate refresh must not read that refresh as a
+ * hand edit. `manifest` here already excludes any session `isSessionLive` has pruned as dead (done
+ * earlier in `injectSkills`), so every key still present is live.
+ *
+ * card 3b2a8707 (Code Review finding 1, round 2): the per-session `manifest`/`fingerprints` half alone
+ * reopened a false-freeze the pre-card unconditional `otherClaimed` re-copy never had — the LAST session
+ * to actually write the dir can die before anyone else refreshes it, at which point `delete
+ * manifest[sid]`/`delete fingerprints[sid]` (above, in the dead-session prune) erases the ONLY per-session
+ * record of those exact bytes, even though the content itself is still genuinely untouched Loom output.
+ * The registry survives THAT prune for as long as this daemon process stays up, but not across a
+ * restart — which round 3 closed by ALSO persisting the carried fingerprint into `lastPlaced`
+ * (`carryDeadFingerprintsForward`) at the exact moment it would otherwise be lost, for any name a LIVE
+ * claimant still wants. This is NOT a new trust tier: `fingerprints[sid][name]` for a LIVE sid was
+ * already read straight from this same sidecar file before this card ever existed; `lastPlaced` persists
+ * the identical already-trusted value past the sid's own death, nothing more.
  *
  * @decision 31f997e7 — never compare against ONLY the calling session's own recorded fingerprint for a
  * shared-cwd name; that misdiagnoses a live co-claimant's legitimate refresh as a hand edit.
  */
-function recordedFingerprintsForName(manifest: Manifest, fingerprints: FingerprintMap, name: string): Set<string> {
+function recordedFingerprintsForName(manifest: Manifest, fingerprints: FingerprintMap, lastPlaced: Record<string, string[]>, name: string, cwd: string): Set<string> {
   const set = new Set<string>();
   for (const [sid, names] of Object.entries(manifest)) {
     if (!names.includes(name)) continue;
-    const fp = fingerprints[sid]?.[name];
+    // Object.hasOwn, not a bare `fingerprints[sid]?.[name]` — a store skill literally named "constructor"
+    // (or "toString"/"valueOf"/etc.) would otherwise read back Object.prototype's own inherited member for
+    // any sid that hasn't recorded a fingerprint for it yet, the exact prototype-shadowing hazard case (8)
+    // above already proves `passesCapabilityGate` guards against with the same `Object.hasOwn` pattern.
+    const perSid = fingerprints[sid];
+    const fp = perSid && Object.hasOwn(perSid, name) ? perSid[name] : undefined;
     if (fp) set.add(fp);
   }
+  const registryFps = loomPlacedFingerprintsByCwd.get(comparisonKey(cwd))?.get(name);
+  if (registryFps) for (const fp of registryFps) set.add(fp);
+  // @decision 31f997e7 — a bare `lastPlaced[name] ?? []` is the same prototype-shadowing hazard, except
+  // iterated directly with no truthy check first, so it THROWS instead of silently pollutes; see the
+  // decision record's "CORRECTED" section on this fix for the reproduction and why `?? []` doesn't save it.
+  const ownLastPlaced = Object.hasOwn(lastPlaced, name) ? lastPlaced[name] : undefined;
+  for (const fp of ownLastPlaced ?? []) set.add(fp);
   return set;
+}
+
+/**
+ * Carry forward, into the PERSISTED `lastPlaced` sidecar map, the content fingerprint(s) a dead session's
+ * prune (in `injectSkills`, above this call) is about to discard for a name — but ONLY for a name in
+ * `stillLiveClaimed` (every name ANY live session's manifest entry lists, post-prune — i.e. `myPrev`
+ * union `otherClaimed`). A name NOBODY live claims anymore is the EXISTING dead-claim/pending-reclaim
+ * mechanism's own concern (card f4e93dbf), not this one, so it is deliberately never touched here —
+ * `deadFingerprints` may hold entries for such a name too, and this loop silently skips them.
+ *
+ * MERGES with whatever `lastPlaced[name]` already held from an earlier call — this pass's own fps go
+ * FIRST, then whatever survives from the existing entry (deduped against this pass's own set), capped at
+ * {@link LAST_PLACED_MAX_FPS_PER_NAME} by simple truncation. "First" here is PRUNE-DISCOVERY order for
+ * THIS call, never placement-age/recency — `fps` is built from `Set` insertion order over whichever dead
+ * sids this pass's own scan happens to visit first (sidecar key order), so a long-lived session's OWN
+ * fingerprint, however old, ranks ahead of anything already sitting in `existing` the moment THIS pass is
+ * the one that discovers that session's death; a fp this pass re-discovers that was already somewhere in
+ * `existing` moves to the front too (deduped out of the `existing` tail, kept only in the `fps`-first
+ * segment). Truncation therefore evicts whatever this pass's OWN ordering puts last, not necessarily the
+ * actual oldest content — and if a single pass alone discovers `>= LAST_PLACED_MAX_FPS_PER_NAME` distinct
+ * fingerprints for one name, `[...fps]` already fills the whole cap, evicting EVERY entry `existing` held
+ * from prior passes outright. Either shape only ever moves a GENUINE Loom-placed fingerprint out of the
+ * retained set — it can never promote a hand edit in. The failure mode is correspondingly always toward
+ * FREEZE (a real fingerprint evicted too early stops matching something it otherwise would have), never
+ * toward an unsafe overwrite.
+ *
+ * A REPLACE (what this function did before Code Review round 4 on card 3b2a8707) loses an EARLIER pass's
+ * own carry exactly when a SECOND dead-session prune, for the SAME name, runs after the first: C dies and
+ * is pruned (carrying forward C's own fp) → a daemon restart → A ALSO dies and is pruned in a LATER call
+ * → a bare replace with just A's own fp would discard C's already-persisted one even though it may still
+ * be the only record of the content currently on disk, re-opening the exact post-restart freeze round 3
+ * was meant to close. A name this pass's prune never touched is left exactly as it was (the loop only ever
+ * visits `deadFingerprints`' own keys).
+ *
+ * This does NOT reintroduce a hand-edit risk: every entry, old or new, is a sha256 this file itself
+ * computed at a real Loom placement — accumulating more of them only ever widens what counts as "still
+ * Loom's own," never admits a hand edit. It DOES mean retention is bounded in COUNT (the cap), not in
+ * TIME — an entry survives indefinitely across any number of later calls as long as the cap isn't
+ * exceeded and the name stays in `stillLiveClaimed`, even long after the dead session that produced it is
+ * forgotten everywhere else. See the decision record's own "Named residual" for the one edge this opens
+ * (an old, retained fingerprint vouching for disk later reset back to those exact bytes) and why dropping
+ * an entry once nobody live claims the name was considered and deliberately NOT done here.
+ *
+ * @decision 31f997e7 — never persist a `lastPlaced` entry for a name no live session claims; that is
+ * card `f4e93dbf`'s own, separately-reviewed mechanism, not this one's to duplicate or interfere with.
+ */
+function carryDeadFingerprintsForward(lastPlaced: Record<string, string[]>, deadFingerprints: Map<string, Set<string>>, stillLiveClaimed: Set<string>): void {
+  for (const [name, fps] of deadFingerprints) {
+    if (!stillLiveClaimed.has(name)) continue;
+    const ownExisting = Object.hasOwn(lastPlaced, name) ? lastPlaced[name] : undefined; // same prototype-shadowing guard as recordedFingerprintsForName's own read
+    const existing = ownExisting ?? [];
+    const merged = [...fps, ...existing.filter((fp) => !fps.has(fp))]; // this pass's own fps first (prune-discovery order, not placement age), then whatever survives from before, deduped
+    lastPlaced[name] = merged.slice(0, LAST_PLACED_MAX_FPS_PER_NAME); // truncation evicts whatever ranks last in THIS pass's own order — see the doc above for why that's not necessarily the oldest
+  }
 }
 
 /**
@@ -581,8 +704,9 @@ function recordedFingerprintsForName(manifest: Manifest, fingerprints: Fingerpri
  * copy is missing, a strip would FAIL (the same "undeliverable" outcome real placement treats as never
  * fingerprinted at all — see `needsPermissionStrip`/`stripPermissionWideningFile`), or the temp copy can't
  * be built/read: "cannot verify" fails toward keeping here too. Lazy by construction (only ever invoked
- * from `matchesRecordedFingerprint`'s `storeFallback` thunk, on the "nobody has a recorded fingerprint for
- * this name" branch) — never on the ordinary-resume hot path.
+ * from `matchesRecordedFingerprint`'s `storeFallback` thunk, as the LAST resort once nothing in the
+ * recorded/registry set already matched — card 3b2a8707, see that function's own doc) — never on the
+ * ordinary-resume hot path.
  *
  * @decision 31f997e7 — Code Review on card 6db94dfe: the legacy-claim fallback originally compared
  * against the RAW store dir, which false-mismatched a legacy claim of an agent-written (strip-needing) or
@@ -596,12 +720,16 @@ function wouldPlaceFingerprint(name: string, obsidianEnabled: boolean): string |
   try {
     const dest = path.join(tmp, name);
     fs.cpSync(src, dest, { recursive: true });
-    if (needsPermissionStrip(name, dest) && !stripPermissionWideningFile(dest)) return null; // would be undeliverable — never fingerprinted
-    if (obsidianEnabled && OBSIDIAN_FRAGMENT_SKILLS.has(name)) {
-      let fragment: string | null = null;
+    // card 3b2a8707 (item 3 nit): `applyPlacementTransforms` is the one place that decides whether `name`
+    // is actually a fragment-target skill (OBSIDIAN_FRAGMENT_SKILLS) — this caller only decides whether
+    // the fragment is enabled AT ALL for this session, never re-checking the per-name eligibility the
+    // helper already checks. A harmless, rare-path file read for an ineligible name (never appended
+    // either way) is cheaper than the two checks drifting apart.
+    let fragment: string | null = null;
+    if (obsidianEnabled) {
       try { fragment = fs.readFileSync(OBSIDIAN_PREFLIGHT_FRAGMENT, "utf8"); } catch { /* best effort, same degrade real placement gives a missing fragment */ }
-      if (fragment) appendObsidianFragment(dest, fragment);
     }
+    if (!applyPlacementTransforms(name, dest, fragment, true)) return null; // would be undeliverable — never fingerprinted
     return fingerprintSkillDir(dest);
   } catch { return null; }
   finally { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } }
@@ -674,8 +802,14 @@ function needsPermissionStrip(name: string, skillDir: string): boolean {
  * the already-stripped base, and the RECORDED fingerprint always covers the bytes actually delivered.
  * A no-op write (`stripPermissionWidening` returns its input unchanged) is skipped entirely — a clean
  * skill's delivered file is never touched, not even its mtime.
+ *
+ * `isProbe` (card 3b2a8707, item 4) affects ONLY the failure log wording, never behavior: `dir` is a real
+ * SKILL.md on the real on-disk delivery path when false (the default, every pre-card-3b2a8707 call site),
+ * but `wouldPlaceFingerprint`'s own off-to-the-side probe copy (a `loom-skill-wouldplace-*` temp dir) when
+ * true — logging that temp path as "refusing to deliver" read as a real, actionable delivery failure when
+ * it was only ever a scratch comparison; the probe wording below names the skill instead of that path.
  */
-function stripPermissionWideningFile(skillDir: string): boolean {
+function stripPermissionWideningFile(skillDir: string, isProbe = false): boolean {
   const skillMd = path.join(skillDir, "SKILL.md");
   let body: string;
   try { body = fs.readFileSync(skillMd, "utf8"); }
@@ -687,7 +821,9 @@ function stripPermissionWideningFile(skillDir: string): boolean {
   const stripped = stripPermissionWidening(body);
   if (stripped === body) return true; // clean — never touch the file for a no-op
   if (stripped === null) {
-    console.log(`[skills] refusing to deliver ${skillMd}: permission-widening content could not be stripped to a verified-clean result`);
+    console.log(isProbe
+      ? `[skills] probe placement for '${path.basename(skillDir)}' would refuse to deliver: permission-widening content could not be stripped to a verified-clean result`
+      : `[skills] refusing to deliver ${skillMd}: permission-widening content could not be stripped to a verified-clean result`);
     return false;
   }
   const tmp = `${skillMd}.loom-permstrip-tmp`;
@@ -700,8 +836,26 @@ function stripPermissionWideningFile(skillDir: string): boolean {
     } catch (e) { lastErr = e; }
   }
   try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
-  console.log(`[skills] failed to strip permission-widening content from ${skillMd} after 3 attempts: ${(lastErr as Error)?.message}`);
+  console.log(isProbe
+    ? `[skills] probe placement for '${path.basename(skillDir)}' failed to strip permission-widening content after 3 attempts: ${(lastErr as Error)?.message}`
+    : `[skills] failed to strip permission-widening content from ${skillMd} after 3 attempts: ${(lastErr as Error)?.message}`);
   return false;
+}
+
+/**
+ * Apply, in order, the two transforms real placement performs on an already-copied skill dir: permission
+ * strip, then the Obsidian fragment append (only when `fragment` is non-null AND `name` is a fragment-
+ * target skill — the ONE place deciding this per-name eligibility; a caller only decides whether to
+ * prepare a non-null `fragment` at all) — shared by the real placement loop below and
+ * `wouldPlaceFingerprint`'s probe above (card 3b2a8707 item 3, replacing their prior duplication).
+ * Returns false iff the strip failed (`dir` is UNDELIVERABLE — quarantine/discard it, never fingerprint
+ * it, same as both callers already did before this extraction). `isProbe` forwards unchanged to
+ * `stripPermissionWideningFile` — see that function's own doc.
+ */
+function applyPlacementTransforms(name: string, dir: string, fragment: string | null, isProbe = false): boolean {
+  if (needsPermissionStrip(name, dir) && !stripPermissionWideningFile(dir, isProbe)) return false;
+  if (fragment && OBSIDIAN_FRAGMENT_SKILLS.has(name)) appendObsidianFragment(dir, fragment);
+  return true;
 }
 
 // `fs.rmSync` alone is not fail-safe: an EBUSY on the rm (correlated with the SAME rename/write failure
@@ -936,6 +1090,7 @@ export function injectSkills(
   const fingerprintsPath = path.join(targetDir, FINGERPRINTS_FILE);
   const fingerprintsFile = readFingerprintsFile(fingerprintsPath);
   const fingerprints = fingerprintsFile.bySession; // mutated in place below (dead-sid prune, own entry) — same discipline as pre-round-2
+  const lastPlaced = fingerprintsFile.lastPlaced; // mutated in place below (card 3b2a8707 round 3 — carryDeadFingerprintsForward)
   // Prune a manifest key for any OTHER session the caller-injected predicate says is not CURRENTLY
   // live/starting (card 9d73e537; see this function's own doc comment for why "live", not "resumable").
   // Never asked about our own key — this call IS that session, live, right now. A throw for one id is
@@ -962,9 +1117,17 @@ export function injectSkills(
       let live = true;
       try { live = isSessionLive(sid); } catch { /* fail-safe: keep this entry on error */ }
       if (!live) {
+        // `sid` is a real manifest/fingerprints key, never attacker-named in practice (a session id is
+        // server-minted) — but a FORGED sidecar with a literal top-level "constructor" key would hit the
+        // same bracket-access hazard here too (Code Review round 5, item 4, nit): read-only, caught by
+        // the same non-fatal try/catch at injectSkills's one call site. Not fixed here — see the record.
         for (const n of manifest[sid] ?? []) {
           deadClaimed.add(n);
-          const fp = fingerprints[sid]?.[n];
+          // Object.hasOwn — same prototype-shadowing hazard recordedFingerprintsForName's own lookups
+          // already guard against (card 3b2a8707, Code Review round 4): a dead claim named "constructor"
+          // (or any other Object.prototype member) would otherwise read back the inherited function.
+          const perSidFp = fingerprints[sid];
+          const fp = perSidFp && Object.hasOwn(perSidFp, n) ? perSidFp[n] : undefined;
           if (fp) {
             let set = deadFingerprints.get(n);
             if (!set) { set = new Set(); deadFingerprints.set(n, set); }
@@ -981,6 +1144,11 @@ export function injectSkills(
   // and are NOT the repo's own (the landmine-2 invariant: concurrent sessions share project.repoPath).
   const otherClaimed = new Set<string>();
   for (const [sid, ns] of Object.entries(manifest)) if (sid !== sessionId) for (const n of ns) otherClaimed.add(n);
+
+  // card 3b2a8707 (Code Review round 3): persist, into `lastPlaced`, whatever this call's own dead-session
+  // prune (above) just made unverifiable for the fingerprint gate — for a name still live-claimed right
+  // now (`myPrev` union `otherClaimed`) only. See `carryDeadFingerprintsForward`'s own doc.
+  carryDeadFingerprintsForward(lastPlaced, deadFingerprints, new Set([...myPrev, ...otherClaimed]));
 
   // In an ISOLATED worktree cwd, a just-pruned dead session's manifest-claimed dirs are CANDIDATES for
   // cleanup — closing the worktree-REUSE orphan (a stopped/rejected worker's worktree reused by a
@@ -1140,10 +1308,19 @@ export function injectSkills(
     // (`wouldPlaceFingerprint` — the transformed bytes, not the raw store dir); only a genuine divergence
     // is kept.
     //
+    // card 3b2a8707: the SAME gate now also covers a name in `otherClaimed` but NOT `myPrev` — a fresh
+    // session claiming a name for the first time, where ANOTHER live session already claims it in this
+    // shared cwd. Before this card that re-copy was unconditional, with no fingerprint check at all —
+    // `recordedFingerprintsForName` already answers "does this match what SOME live Loom session placed"
+    // regardless of whose claim it is, so no new comparison logic is needed, only widening which names
+    // reach it. When this session goes on to place the name successfully (below), it records its OWN
+    // fingerprint and becomes a co-claimant too — see that code's own note on why this doesn't strand a
+    // legitimate cross-session content difference as a permanent false "hand-modified".
+    //
     // @decision 31f997e7 — a shared cwd's content reflects whatever ANY live co-claimant last placed, so
     // the match must accept any of their recorded fingerprints, not just mine (CR on card 6db94dfe).
-    if (exists && myPrev.includes(name)) {
-      const recorded = recordedFingerprintsForName(manifest, fingerprints, name);
+    if (exists && (myPrev.includes(name) || otherClaimed.has(name))) {
+      const recorded = recordedFingerprintsForName(manifest, fingerprints, lastPlaced, name, cwd);
       if (!matchesRecordedFingerprint(fingerprintSkillDir(dest), recorded, () => wouldPlaceFingerprint(name, obsidianEnabled))) {
         console.log(`[skills] keeping hand-modified copy of '${name}' at ${dest}: on-disk content doesn't match any current claimant's last placement (edited, or files added) — not overwriting`);
         continue;
@@ -1157,15 +1334,17 @@ export function injectSkills(
       // @decision 51a2462a round 2 — a strip failure is now treated exactly like a copy failure (remove
       // dest, record failed, never fingerprint), never the old fail-open shape. Round 3: the removal
       // itself is fail-safe (see `quarantineUndeliverableDest`'s own doc), not a bare best-effort rm.
-      if (needsPermissionStrip(name, dest) && !stripPermissionWideningFile(dest)) {
+      //
+      // card 3b2a8707 (item 3): strip + fragment-append now share `applyPlacementTransforms` with
+      // `wouldPlaceFingerprint`'s probe — ONLY the fragment-target skills, and ONLY when enabled + the
+      // fragment loaded, still get the append; it runs after the fresh base copy (copySkillAtomic
+      // re-copies the fragment-free store base first), so the append lands once.
+      if (!applyPlacementTransforms(name, dest, obsidianFragment)) {
         quarantineUndeliverableDest(dest, name, claudeDir);
         failed.push(name);
         continue;
       }
       placed.push(name);
-      // ONLY the fragment-target skills, and ONLY when enabled + the fragment loaded. Runs after the fresh
-      // base copy (copySkillAtomic re-copies the fragment-free store base first), so the append lands once.
-      if (obsidianFragment && OBSIDIAN_FRAGMENT_SKILLS.has(name)) appendObsidianFragment(dest, obsidianFragment);
       const fp = fingerprintSkillDir(dest);
       if (fp) {
         placedFingerprints[name] = fp; // absent (fingerprint failed) ⇒ a future dead-claim read sees it as unverifiable, never as a false match
@@ -1194,7 +1373,7 @@ export function injectSkills(
     // right now; a genuine divergence is kept.
     //
     // @decision 31f997e7 — see the re-copy skip's own pointer above; this is the loop's prune sibling.
-    const recorded = recordedFingerprintsForName(manifest, fingerprints, stale);
+    const recorded = recordedFingerprintsForName(manifest, fingerprints, lastPlaced, stale, cwd);
     if (!matchesRecordedFingerprint(fingerprintSkillDir(target), recorded, () => wouldPlaceFingerprint(stale, obsidianEnabled))) {
       console.log(`[skills] keeping hand-modified copy of '${stale}' at ${target}: on-disk content doesn't match any current claimant's last placement (edited, or files added) — not pruning`);
       continue;
@@ -1224,7 +1403,7 @@ export function injectSkills(
   // serializes to nothing and the reserved key is omitted entirely, same as before this card.
   const pendingOut: PendingReclaimMap = {};
   for (const [name, rec] of pendingWorking) pendingOut[name] = { deadFingerprints: [...rec.deadFingerprints], firstSeenAt: rec.firstSeenAt };
-  const fingerprintsOut = serializeFingerprintsFile(fingerprints, pendingOut);
+  const fingerprintsOut = serializeFingerprintsFile(fingerprints, pendingOut, lastPlaced);
   const fingerprintsTmp = `${fingerprintsPath}.tmp`;
   try {
     fs.writeFileSync(fingerprintsTmp, JSON.stringify(fingerprintsOut));

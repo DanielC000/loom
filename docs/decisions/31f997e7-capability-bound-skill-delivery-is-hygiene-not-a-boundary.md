@@ -188,7 +188,8 @@ remains" below rather than re-stated as a new point.
 **Deliberately out of scope, carded separately:** the `otherClaimed` re-copy — the WANT-loop branch that
 fires when a name is in `otherClaimed` (another live session's claim) but NOT in `myPrev` (I've never
 placed it myself) — still re-copies unconditionally with no fingerprint check of its own; that path is
-untouched by 6db94dfe. ⛔ **RETRACTED, see the correction below:** this paragraph originally also claimed
+untouched by 6db94dfe. **CLOSED by card `3b2a8707` — see the "CARD `3b2a8707`" section further down.**
+⛔ **RETRACTED, see the correction below:** this paragraph originally also claimed
 6db94dfe's own fix "gates purely on the calling session's OWN fingerprint... the conservative default,
 consistent with every fail-toward-keeping check in this file." That was WRONG — it was never conservative;
 comparing against only my own recorded value, in a shared cwd, FAILED TOWARD RELINQUISHING a still-needed
@@ -260,6 +261,18 @@ mismatch and relinquishes the same way, so no session ever re-claims it, and the
 permanently-unmanaged state an ordinary user/repo skill occupies — except this one is stale Loom output,
 not anything a human actually wrote.
 
+**QUALIFIED (card `3b2a8707`, item 5), then CORRECTED (round 3 of the same card — see "What remains" point
+5 below for the full correction): "no session ever re-claims it… forever" is true only once EVERY claimant
+has relinquished — but a live claimant's `manifest` entry is NOT an independent anchor that survives
+regardless of future checks.** `manifest[sessionId] = placed` is rewritten in full on every one of that
+session's own calls, so its OWN next resume reruns the identical fingerprint gate against the same on-disk
+content and can relinquish its own claim the exact same way a fresh co-claimant would — "currently claimed"
+offers no protection by itself. See the "CARD `3b2a8707`" section below for the SEPARATE defect this
+correction is downstream of: before that card, a
+fresh session's `otherClaimed`-not-`myPrev` re-copy had no fingerprint gate at all, so it would blindly
+overwrite (and re-claim) a name even while hand-edited content sat under a still-live claimant — the
+opposite failure mode from the one this paragraph describes.
+
 Pinned in `skills-inject-same-session-fingerprint.mjs`: the reviewer's two-live-co-claimant repro (a
 store reseed between resumes never causes a false "hand-modified" relinquish, and a co-claimant's own
 subset-narrowing prune never destroys a skill the OTHER co-claimant still claims); the missing legacy
@@ -269,7 +282,391 @@ false-match when `obsidianEnabled` is off (so the fragment legitimately wouldn't
 fallback reflects THIS session's own real settings, not a blind "does it look like it came from the store"
 guess.
 
-## What remains (accurate as of card `6db94dfe`)
+## CARD `3b2a8707`: the `otherClaimed`-not-`myPrev` re-copy (point 4's own named exception) is now closed
+
+Card `6db94dfe`'s own "Deliberately out of scope" paragraph (above) named exactly one adjacent path it
+left untouched: the WANT-loop branch that fires when a name is in `otherClaimed` (another live session's
+claim) but NOT in `myPrev` (the calling session has never placed it itself) — a FRESH session claiming a
+name for the first time, where some OTHER live session already claims it in this shared cwd. That branch
+re-copied unconditionally, with no fingerprint check of its own: a live claimant's hand-edited (or
+otherwise diverged) copy was overwritten the moment a second session wanted the same name.
+
+**The fix (`inject.ts`):** the SAME gate 6db94dfe already built for the `myPrev` case now also covers this
+one — `exists && (myPrev.includes(name) || otherClaimed.has(name))`, using `recordedFingerprintsForName`/
+`matchesRecordedFingerprint`/`wouldPlaceFingerprint` completely unchanged. No new comparison logic was
+needed: `recordedFingerprintsForName` already answers "does this match what SOME live Loom session
+placed," not "does this match what I personally placed," which is exactly the right question for a
+first-time claimant too.
+
+**Claimed, but WRONG — the cross-variant co-claim question (see the correction immediately below):** this
+section originally claimed two live sessions legitimately producing different bytes for the same name
+(e.g. one has `obsidian.autoStart` on, the other off) could never freeze each other out, because
+"whichever variant is currently on disk always matches SOME claimant's own entry." A Code Review on THIS
+card found that claim false the moment the LAST session to write the dir has since died — see the
+correction and fix below.
+
+**Item 4 (nitpick, also fixed on this card):** `stripPermissionWideningFile`'s failure-path log used to
+name the real `skillMd` path unconditionally — when reached from `wouldPlaceFingerprint`'s off-to-the-side
+probe (a `loom-skill-wouldplace-*` temp dir), that read as a real, actionable delivery failure rather than
+a scratch comparison. `stripPermissionWideningFile`/`applyPlacementTransforms` (the item-3 extraction,
+below) now take an `isProbe` flag that only changes the log wording, never behavior.
+
+**Item 3 (extraction, also this card):** the copy→strip→fragment-append sequence was duplicated between
+the real placement loop and `wouldPlaceFingerprint`'s probe. `applyPlacementTransforms(name, dir, fragment,
+isProbe?)` now holds that sequence once; both callers keep their own copy step (`copySkillAtomic`'s
+atomic/retried real delivery vs. `wouldPlaceFingerprint`'s plain scratch `cpSync`) and their own decision
+about whether/how to even obtain a `fragment` to pass in — the extraction is behaviour-preserving.
+
+## CORRECTED (Code Review round 2 on card `3b2a8707`): the widened gate reopened a FALSE FREEZE the pre-card unconditional re-copy never had
+
+The round-1 fix above gates on `recordedFingerprintsForName` — every CURRENT (live) claimant's own
+per-session recorded fingerprint. That set is built from `manifest`/`fingerprints`, which the dead-session
+prune (above, in `injectSkills`'s own top section) has ALREADY deleted entries from by the time this gate
+runs. So the moment the LAST session to actually write the dir dies before anyone else refreshes it, the
+only per-session record of those exact (genuinely untouched) bytes is gone — and the gate now reads
+untouched Loom content as unverifiable, indistinguishable from a real hand edit.
+
+**Repro (two independent shapes, both real):**
+1. **`otherClaimed` branch:** A places v1 → the store moves to v2 → C (a fresh co-claimant) first-claims
+   and refreshes to v2 → C dies → B (another fresh co-claimant) first-claims: on-disk is v2, but the only
+   recorded fingerprint left is A's stale v1 → mismatch → B refuses, never claims. A's own next resume
+   also mismatches the same way and relinquishes (`continue` before `placed.push`) — the dir ends up
+   claimed by NOBODY and, from the very next call onward, reads exactly like an ordinary unmanaged repo
+   dir (the "repo's own" skip fires for everyone, forever).
+2. **`myPrev` branch, the pre-existing variant case:** A (obsidian on) places its fragment-appended
+   variant → B (a fresh co-claimant, obsidian off) first-claims and overwrites with its OWN fragment-free
+   variant, recording B's own fingerprint → B dies → A's OWN resume: on-disk is B's variant, but the only
+   recorded fingerprint left is A's OWN stale (fragment-appended) one → mismatch → A relinquishes its own
+   claim (`A=[]`).
+
+**Critically, on main BEFORE this card, shape 1 healed itself:** the `otherClaimed` branch's unconditional
+pre-card re-copy meant B would overwrite (a no-op, since content was already v2) and, in doing so,
+UNCONDITIONALLY record its own fresh fingerprint for whatever was already there — bootstrapping a new,
+live per-session record for content nobody currently had one for. Gating that re-copy (round 1 of this
+card) removed the unconditional write that used to do this healing, without replacing what it implicitly
+provided.
+
+## THE ROUND-2 FIX (card `3b2a8707`): a daemon-local registry, plus an unconditional last-resort fallback
+
+`recordedFingerprintsForName` now unions in `loomPlacedFingerprintsByCwd` — the daemon-side registry
+(`inject.ts`, keyed by `(cwd, name)`, never by session id) that already tracks the latest bytes THIS
+DAEMON PROCESS itself most recently placed for a name in a cwd, for the cwd-skill permission scan's own
+trust decision (card `015fdb23`). That registry is NEVER cleared on a session's death — only on an LRU
+eviction or a daemon restart — so as long as the daemon process that did the actual writing is still the
+one running, the registry still vouches for content a dead session's own manifest/fingerprints entries no
+longer can. This single change, applied inside the ONE shared helper both the `myPrev` and `otherClaimed`
+branches already called, closes BOTH repro shapes above at once — no per-branch special-casing needed.
+
+Separately, `matchesRecordedFingerprint`'s `storeFallback` (the `wouldPlaceFingerprint` thunk) used to run
+ONLY when `recorded` was entirely empty. It now runs whenever nothing in `recorded` already matched —
+whether `recorded` was empty, or non-empty but every entry was stale. "A recorded set exists but is stale"
+and "no recorded set exists at all" are the same "nothing here vouches for this content" case from this
+function's own point of view, and an overwrite that turns out byte-identical to what's already there loses
+nothing either way.
+
+**Residual at this round (CLOSED by round 3 below, for any name a live session still claims at the moment
+a dead session's claim is discovered and pruned):** the registry is in-process daemon memory. After a
+DAEMON RESTART it is empty, so the fix above degrades to the `wouldPlaceFingerprint` fallback alone, and a
+name can still freeze — reproduced directly by test cases (19)/(20) below. See "THE ROUND-3 FIX" below for
+the persisted `lastPlaced` carry-forward that closes it, and "What remains" point 5 for the one residual
+that survives even after round 3.
+
+Pinned in `skills-inject-same-session-fingerprint.mjs`: cases (12)/(13) (a fresh claimant's first-time
+`otherClaimed` re-copy respects a live claimant's hand edit, and still succeeds normally when untouched),
+(14) (a cross-variant co-claim where neither co-claimant has died — see the correction above for the
+case where one does), (15) (the exact mutant-killing recipe for `wouldPlaceFingerprint`'s own strip step —
+a real agent/unstamped hazard skill's REAL probe-generated stripped bytes, planted as a legacy claim, must
+still match), (16) (`wouldPlaceFingerprint`'s undeliverable `return null` branch, via card `712148f1`'s own
+flow-mapping-form hazard), (17) (repro shape 1 above: the `otherClaimed` branch, last writer dies, a fresh
+co-claimant AND the original claimant's own resume both still succeed), and (18) (repro shape 2 above: the
+`myPrev` branch, same shape, same fix).
+
+## THE ROUND-3 FIX (card `3b2a8707`, same card, later round): the carry-forward now survives a daemon restart
+
+Round 2's daemon-local registry (`loomPlacedFingerprintsByCwd`) survives a dead session's own manifest
+prune, but only for the lifetime of the daemon PROCESS that did the writing — it is plain in-memory state,
+never written to disk. A daemon restart between a session's death and the next resume/claim empties it, and
+the fix degrades back to `wouldPlaceFingerprint` alone — which cannot rescue a case where the store has
+moved on a SECOND time since the dead session's own write (test case (20) below), reopening the exact
+freeze round 2 had just closed, now gated on daemon uptime instead of session liveness.
+
+**The fix:** `injectSkills`'s existing dead-session prune (the loop that deletes `manifest[sid]`/
+`fingerprints[sid]` for any sid `isSessionLive` reports dead, collecting what it claimed into
+`deadClaimed`/`deadFingerprints` before deleting) now also calls `carryDeadFingerprintsForward` immediately
+after that prune, in the SAME call that discovers the death — i.e. whenever the daemon first notices the
+session is gone, which may be long after the session actually died. For every name `deadFingerprints`
+collected, if that name is STILL claimed by some live session right now (`myPrev` ∪ `otherClaimed`,
+computed post-prune — `stillLiveClaimed`), the dead claimant's fingerprint(s) for it are written into a
+new reserved top-level key in the `FINGERPRINTS_FILE` sidecar, `__lastPlaced` (`LAST_PLACED_KEY`): `name ->
+string[]` of every fingerprint a dead session's prune has carried forward for it. `recordedFingerprintsForName`
+unions this set in alongside the manifest/fingerprints and in-process-registry sets, so a dead session's
+last-known-good content is available to the fingerprint gate across a restart, not just within one daemon
+process's lifetime.
+
+**Semantics, as of Code Review round 4 (corrected — see the "CORRECTED (Code Review round 4...)" section
+below for why the original REPLACE semantics were wrong):** each call MERGES this pass's own fps into
+whatever `lastPlaced[name]` already held — this pass's own fps go first, then whatever survives from the
+existing entry — then truncates at `LAST_PLACED_MAX_FPS_PER_NAME` (8) per name. **"First" is
+PRUNE-DISCOVERY order for THIS call, never placement-age (Code Review round 5 correction — see "Item 2"
+in that round's own section below):** it is `Set` insertion order over whichever dead sids this pass's
+scan happens to visit first, so a long-lived session's own fingerprint, however old, can rank ahead of
+fresher content already in `existing`; a fp re-discovered this pass that was already in `existing` moves
+to the front too. Truncation evicts whatever ranks last in THIS pass's own order, which is not always the
+genuinely oldest entry — and if a single pass alone discovers `>= LAST_PLACED_MAX_FPS_PER_NAME` distinct
+fingerprints for one name, `existing` is evicted in full. Either shape only ever moves a GENUINE
+Loom-placed fingerprint out of the set, so the failure mode is always toward FREEZE, never toward an
+unsafe overwrite. A name this call's prune didn't touch is left exactly as it was. Never written
+for a name NO live session claims at the moment of the carry — that is deliberately left to card
+`f4e93dbf`'s own pending-reclaim mechanism (a shared cwd) or resolved immediately, in that same call, by
+the isolated-cwd dead-claim deletion path above (which already has `deadFingerprints` to hand and never
+needs cross-call persistence at all); this one is not meant to duplicate or interfere with either.
+
+**This adds no new trust tier.** A live sid's own `fingerprints[sid][name]` was already read straight from
+this same `FINGERPRINTS_FILE` sidecar before this fix (and before this card's round 3 ever existed) —
+`lastPlaced` persists the identical, already-trusted kind of value (a fingerprint a real Loom placement
+actually recorded) past the owning sid's own death, nothing more. The sidecar's existing fail-toward-empty
+posture (absent or corrupt reads as "nothing recorded") covers `lastPlaced` too — `sanitizeLastPlacedMap`/
+`sanitizeLastPlacedRecord` apply the same untrusted-input bounds as every other field this file parses from
+disk (`isSafeManifestEntry` for the name, `sanitizeFingerprint` for each value, truncated at the cap rather
+than rejected outright). An older daemon build (one that predates `LAST_PLACED_KEY`) reading a sidecar that
+already carries it does not choke: its own `readFingerprintsFile` has no special case for the key, so it
+reads `__lastPlaced`'s value as if it were an ordinary session's fingerprint map; every entry under it is an
+array, `sanitizeFingerprint` returns `null` for anything that isn't a string, so the "session" it reads is
+simply empty, is then treated as a dead/unknown sid on the very next prune pass, and quietly drops out of
+the file on the next write — no crash, no corruption, just a silent (and harmless, since that older build
+never looks for `__lastPlaced` anyway) loss of the carried-forward data.
+
+**Why test case (19) does not isolate this fix, and why (19b) does.** (19) reproduces the reviewer's
+originally-described repro (last writer dies, daemon restarts, a fresh co-claimant resumes with no further
+store change) — but reverting ONLY this round-3 fix still leaves (19) green: round 2's `wouldPlaceFingerprint`
+fallback ALSO independently matches it (disk is still exactly what placement would produce right now, since
+the store never moved again after the dead session's write), so (19) cannot tell the two fixes apart. (19b)
+isolates round 2's OWN fallback instead — removing round 3 from the picture entirely (no dead session at
+all) and constructing a `recorded` set that is non-empty but stale, which only round 2's "always try the
+store fallback once nothing in `recorded` matches, whether `recorded` is empty or non-empty-but-stale" rule
+(not round 3's `lastPlaced`) rescues. (20) is the case that genuinely needs round 3: the store moves a
+SECOND time (v2→v3) after the dead session's death AND after a daemon restart, so `wouldPlaceFingerprint`
+now computes v3 against a disk still at v2 and cannot rescue it — only the persisted `lastPlaced` entry
+(which still holds the dead session's own recorded v2 fingerprint, surviving the restart even though the
+in-memory registry didn't) matches.
+
+Pinned in `skills-inject-same-session-fingerprint.mjs`: (19) (restart, no further store move — real
+coverage of the described repro, but not a clean isolation of this fix alone, see above), (19b) (a true
+isolation of round 2's own fallback: no dead session, a stale-but-non-empty `recorded` set), (20) (the case
+round 3 actually closes: restart plus a second store move after the death, for a fresh co-claimant, the
+original claimant's own resume, AND a third fresh co-claimant — none freeze).
+
+## CORRECTED (full regression sweep, not an external reviewer round): round 3's `lastPlaced[name]` access crashed on a store skill named "constructor"
+
+Found running `skills-capability-bound.mjs` as part of this card's own standing DoD, not by a Code
+Reviewer — reported here anyway since it is a real defect in round 3's own new code, not a pre-existing
+one. `recordedFingerprintsForName`'s `lastPlaced` is a plain `Record<string, string[]>` — the exact same
+shape test case (8) in that file already exists to prove is a prototype-shadowing hazard for
+`passesCapabilityGate`'s `capabilityBindings` lookup: when `lastPlaced` has no OWN property for `name`,
+bracket access (`lastPlaced[name]`) falls through the prototype chain to `Object.prototype`'s own inherited
+member of that name (e.g. a store skill literally named `"constructor"` reads back the `Object`
+constructor FUNCTION, not `undefined`) — and unlike `passesCapabilityGate`, this read was never guarded by
+`Object.hasOwn`. Because the access was iterated directly (`for (const fp of lastPlaced[name] ?? [])`
+— the `??` guard is no help, since a function is not nullish), this one THROWS (`TypeError: function is
+not iterable`) rather than merely polluting a Set with a stray function value the way an equivalent
+`fingerprints[sid]?.[name]` lookup a few lines above it would (that one's own `if (fp)` truthy check at
+least prevented a crash, though it could still silently add a non-string value — fixed in the same pass,
+below, for consistency, not because it crashed).
+
+Reproduced directly: case (8)'s own fixture plants a real store skill directory named `"constructor"` and
+never removes it, so every LATER case in the same file that reaches the `want` loop's fingerprint-gated
+re-copy branch for an unbound skill (case 11's own "(c) A resumes" step) hits this function with
+`name === "constructor"` and throws — case (8) itself never reaches this exact branch, so it passed, and
+the throw only surfaced three cases later.
+
+**The fix (`inject.ts`):** both the `fingerprints[sid]?.[name]` lookup and the `lastPlaced[name]` lookup in
+`recordedFingerprintsForName` now gate on `Object.hasOwn` first, mirroring `passesCapabilityGate`'s own
+established pattern — an absent own property reads as genuinely absent (`undefined`), never as whatever
+`Object.prototype` happens to have under that name. Both were fixed together, in the same pass, for
+consistency within this one function — the `fingerprints[sid]?.[name]` side never crashed on its own (its
+`if (fp)` truthy check stopped a stray function value from reaching an iteration), so it was a latent,
+benign pollution risk rather than the reproduced crash, but it shares the identical root cause and the
+identical fix. Scoped to this one function only when first fixed; a Code Review round 4 full sweep of
+every other `[name]`-keyed plain-object access in this file found exactly ONE more site sharing the
+same hazard — the dead-session prune loop's own `fingerprints[sid]?.[n]` read, one call earlier in the
+same pipeline — fixed in the "CORRECTED (Code Review round 4...)" section below; with that fix, the
+sweep is COMPLETE, not merely scoped to this function anymore.
+
+**Blast radius, precisely:** `injectSkills`'s one call site (`pty/host.ts`) already wraps the whole call in
+a non-fatal `try/catch` — so this never crashed the daemon, only silently disabled skill injection entirely
+(logged, non-fatal) for every session touching a cwd where a skill named `"constructor"` (or any other
+`Object.prototype` member: `toString`, `valueOf`, `hasOwnProperty`, `isPrototypeOf`,
+`propertyIsEnumerable`, `toLocaleString`) was in `want` and reached this gate — a real, user-triggerable
+regression (anyone who can write a user-store skill by that name) even though not a crash.
+
+Pinned in `skills-capability-bound.mjs`'s own existing case (8) (unchanged assertion, now also exercising
+the previously-crashing later cases in the same run without throwing) — no new case added, since the
+existing fixture already plants the exact trigger and the full suite run is itself the regression proof
+(RED under the pre-fix code at this card's own round 3, GREEN after).
+
+## CORRECTED (Code Review round 4 on card `3b2a8707`): REPLACE semantics let a SECOND prune pass re-open the freeze round 3 had just closed
+
+Round 3's own `carryDeadFingerprintsForward` (above) REPLACED `lastPlaced[name]` wholesale on every call
+that touched it. That is safe for a single dead-session discovery, but breaks the moment a SECOND,
+LATER call discovers a DIFFERENT dead session claiming the SAME name — exactly the shape a long-lived
+shared cwd produces over time, one session dying at a time.
+
+**Reviewer's repro:** A and L place v1 → store moves to v2 → C claims and refreshes to v2 (recording fp2)
+→ C dies; a session E that does NOT want this name nonetheless triggers the dead-session prune as a side
+effect of its own call, carrying C's fp2 forward: `lastPlaced[name] = [fp2]` → daemon RESTART (empties the
+in-process registry) → store moves AGAIN to v3 → A also dies; a LATER call (another non-wanting session F)
+discovers A's death and runs the SAME carry-forward — under the original REPLACE semantics this
+overwrites `lastPlaced[name]` to `[fp1]` (A's own fingerprint), discarding the already-persisted `fp2`
+even though `fp2` is still the ONLY record of the content genuinely sitting on disk right now (v2, from
+C's write). From here, L's own resume AND a fresh co-claimant's first claim both fail the fingerprint
+gate — current disk (fp2) matches neither the now-REPLACED `recorded` set (`{fp1}` plus whatever a live
+claimant's own manifest entry independently offers) nor `wouldPlaceFingerprint`'s own fresh computation
+(which is now v3, not v2) — and the dir freezes at v2, permanently, the exact outcome round 3 existed to
+prevent. A control run of the identical timeline WITHOUT A's second death (only C's prune ever runs)
+refreshes to v3 normally, isolating the SECOND prune pass itself — not the restart, not the second store
+move alone — as the trigger.
+
+**THE FIX:** `carryDeadFingerprintsForward` now MERGES this pass's own fingerprints into whatever
+`lastPlaced[name]` already held (this pass's own fps first, then whatever survives from the existing
+entry, deduped), then truncates to `LAST_PLACED_MAX_FPS_PER_NAME`. **"First" is PRUNE-DISCOVERY order,
+not placement-age — corrected further in Code Review round 5's own section below; don't read "evicts the
+oldest" as literal recency.** This is safe to accumulate regardless of ordering: every single entry, old
+or new, is a sha256 this file itself computed at a REAL Loom placement — there is no way merging more of
+them in (or evicting one in the wrong order) can ever cause a hand edit to start matching; eviction only
+ever removes a genuine Loom-placed candidate, so the failure mode is always toward FREEZE, never toward an
+unsafe overwrite. The same read also picked up its own instance of the prototype-shadowing hazard (reading
+the EXISTING `lastPlaced[name]` before merging) and is guarded with `Object.hasOwn` from the start.
+
+**Item 3 (same round): the dead-session prune loop's OWN `fingerprints[sid]?.[n]` read had the identical
+prototype-shadowing hazard `recordedFingerprintsForName` was already fixed for (the "full regression
+sweep" section above) — just one call earlier in the same pipeline.** When a dead session's manifest claims
+a name (e.g. `"constructor"`) but its OWN fingerprint entry for that name is missing (the legacy /
+failed-to-fingerprint shape this file already documents and tests as "keep, don't delete" elsewhere), the
+bare bracket read `fingerprints[sid]?.[n]` falls through to `Object.prototype`'s own inherited member —
+for `n === "constructor"` specifically, the `Object` constructor FUNCTION, which is truthy. That function
+value was then added to `deadFingerprints`, carried forward by `carryDeadFingerprintsForward`, and
+persisted into `lastPlaced[name]` — a function has no sensible JSON form, so `JSON.stringify` renders it
+as `null` inside the array: the reviewer's own probe output, `"__lastPlaced":{"constructor":[null]}`,
+reproduced byte-for-byte. Fixed with the same `Object.hasOwn` guard as every other name-keyed lookup in
+this file. Pinned in `skills-capability-bound.mjs` case (21): a dead claim named `"constructor"` with its
+own fingerprint entry deliberately stripped (simulating the legacy/failed-fingerprint shape) never lets a
+non-string value reach `__lastPlaced`, proven by reading the sidecar's raw JSON directly after the prune.
+
+**Full sweep re-confirmed (narrowed to READ-side, Code Review round 5 correction):** the reviewer's own
+sweep covering every other `[name]`-keyed plain-object lookup in this file found none shares this
+crash/pollution shape. The complete READ-side set is FIVE sites, not three — the three fixed by this card
+(`recordedFingerprintsForName`'s two lookups, and this prune loop's one) PLUS two that were already
+correctly guarded before this card ever touched them: `passesCapabilityGate`'s own `capabilityBindings`
+lookup (round 1 of this same card) and `carryDeadFingerprintsForward`'s own `ownExisting` read of
+`lastPlaced[name]` (written guarded from the moment it was added, this round). This claim is READ-side
+only — see "Item 3" in Code Review round 5's own section below for the separate, NOT-fixed-here WRITE-side
+hazard a literal `"__proto__"`-named skill creates.
+
+**Item 2 — the record's own overclaims, corrected (see "What remains" point 5 below for where the
+corrected claims now live):**
+- *"This is the ONLY residual left standing after round 3"* was FALSE the moment the REPLACE bug above
+  existed — it is TRUE AGAIN now that round 4 has closed it, but see the next two points for what round
+  4's OWN fix adds back as a replacement residual.
+- *"Bounded per-call, not cumulative across a cwd's whole lifetime"* was also false, independent of the
+  REPLACE/MERGE question: nothing in this mechanism EVER removes an entry from `lastPlaced[name]` once
+  written (short of a fresh dead-session prune for that exact name touching it again) — retention is
+  bounded in COUNT (the cap), never in TIME. An entry can survive for as long as the name stays in
+  `stillLiveClaimed` across any number of later calls, long after the dead session that produced it is
+  forgotten everywhere else (its own manifest/fingerprints entries are long gone).
+- **The edge this opens, named precisely:** because `lastPlaced[name]` can now hold SEVERAL historical
+  fingerprints at once (not just the latest), a fingerprint from an OLDER Loom placement can still vouch
+  for disk content LONG after that placement is gone from everywhere else — so if disk is later reset,
+  by some means OUTSIDE this mechanism (a deliberate revert, or tracked content checked out), back to
+  EXACTLY those old bytes, the stale retained fingerprint still matches and the gate treats the dir as
+  "safe to overwrite," proceeding to re-copy over it. This needs an exact byte-for-byte match against a
+  genuine PAST Loom placement — not an arbitrary hand edit, which still fails every comparison — so the
+  risk is low, but it is real and it is new: before round 4's MERGE fix, a REPLACE'd `lastPlaced[name]`
+  could only ever vouch for the SINGLE most recently discovered dead claim, not an arbitrary one from
+  further back.
+- **Considered and NOT done: dropping `lastPlaced[name]` once no live session claims the name.** The
+  dead-claim path (round 2/3's own isolated-cwd delete, and card `f4e93dbf`'s shared-cwd pending-reclaim)
+  already owns the "nobody live claims this anymore" case and never reads `lastPlaced` at all — so
+  dropping it there would not, by itself, be reachable through either of those paths and could not
+  reopen the freeze through them. The reason it is NOT done here anyway: `carryDeadFingerprintsForward`
+  only ever learns a name has dropped OUT of `stillLiveClaimed` on the NEXT call that happens to discover
+  a death for that exact name — there is no independent sweep that revisits every existing `lastPlaced`
+  key on every call to check whether its name is still live-claimed, and adding one is a real behavior
+  change with its own correctness surface (does it ever need to fire when NO death is being discovered at
+  all? does an added sweep interact safely with a name that drops out of live claims and is then reclaimed
+  moments later via `f4e93dbf`'s own path, which never touches `lastPlaced`?) that this round did not have
+  reason to open. Documenting the time-unbounded retention above, rather than building that sweep, is the
+  deliberate choice for this round — a correct future addition of such a sweep remains open, not
+  foreclosed, but is not required to close round 4's own named findings.
+
+Pinned in `skills-inject-same-session-fingerprint.mjs` cases (21a)/(21b)/(21c): (21a) the ORIGINAL
+co-claimant's (L's) own resume succeeds after a second dead-session prune pass; (21b) the SAME scenario
+tested independently via a FRESH co-claimant's first claim (never relying on L having already fixed the
+state); (21c) the control — the identical restart + second-store-move shape, but with only ONE prune pass
+ever (A never dies), refreshing normally, isolating the second prune pass itself as the trigger. All three
+reproduce RED under the pre-round-4 REPLACE code and GREEN after.
+
+## CORRECTED (Code Review round 5 on card `3b2a8707`): wording/record corrections only — no behavior change
+
+Round 4 shipped correct code (three mutants reconfirmed RED by the reviewer) but described its own
+ordering guarantee imprecisely in several places. This round is comments and this record only.
+
+**Item 1 — `LAST_PLACED_MAX_FPS_PER_NAME`'s own doc comment (`inject.ts`) still said "never a cross-pass
+accumulator… a pass always REPLACES… never hit in practice"** — exactly the claim round 4 made false.
+Rewritten to describe the cap as what it now is: the bound on `lastPlaced[name]`'s MERGED retention
+ACROSS passes, and the thing that creates the eviction edge named in Item 2 below.
+
+**Item 2 — "newest first / evicts the oldest" is true only in PRUNE-DISCOVERY order, not placement age.**
+This pass's own `fps` (a `Set`) is built in whatever order THIS call's dead-sid scan happens to visit —
+sidecar key iteration order, not a timestamp — so "this pass's fps first" really means "whichever dead
+claim THIS call happened to discover first," which can easily be a long-lived session's OWN, genuinely
+OLD fingerprint: that session simply died (and was discovered dead) in this call, so its fp ranks ahead of
+fresher content a PRIOR call already carried into `existing`. A fp this pass re-discovers that was already
+somewhere in `existing` also moves to the front (deduped out of the tail, kept only in the `fps`-first
+segment) — so re-discovery, not recency, decides rank. Truncation at the cap therefore evicts whatever
+ranks LAST in THIS pass's own order, which is not guaranteed to be the actual oldest placement; and if a
+SINGLE pass alone discovers `>= LAST_PLACED_MAX_FPS_PER_NAME` distinct fingerprints for one name (e.g.
+that many sessions dying in the same call, each with a different recorded fp for it), `existing` is
+evicted in full regardless of how long any of its entries had survived. **Named precisely, this always
+fails toward FREEZE, never toward an unsafe overwrite** — every candidate ever evicted is itself a real
+sha256 a genuine Loom placement produced, so losing one can only ever make the gate MORE conservative
+(refuse a write it would otherwise have allowed), never less. Rewritten at the doc comment and both
+inline comments on `carryDeadFingerprintsForward` (`inject.ts`), in this record's own "Semantics" / "THE
+FIX" paragraphs above, and in the "Do not" bullet below — all now say "most recently discovered," never
+"newest," and name the `>= LAST_PLACED_MAX_FPS_PER_NAME`-in-one-pass case explicitly.
+
+**Item 3 — the "complete set of three sites" claim was too narrow in TWO ways.** First, it counted only
+the sites this card itself had to FIX, omitting the two that were already correctly guarded before this
+card touched them: `passesCapabilityGate`'s own `capabilityBindings` lookup (round 1 of this card) and
+`carryDeadFingerprintsForward`'s own `ownExisting` read of `lastPlaced[name]` (added already-guarded this
+round). The complete READ-side set is FIVE, not three. Second, the claim never distinguished READ from
+WRITE — and a WRITE-side hazard this file still carries, genuinely NOT fixed by any of these five guards,
+is real: `lastPlaced[name] = …` (and every other bare `obj[name] = …` write keyed by an untrusted skill
+`name` in this file) is an ordinary bracket ASSIGNMENT, and for the one literal name `"__proto__"`,
+bracket assignment on a plain object does not create an own property at all — it invokes the special
+`[[Prototype]]` setter, reassigning the TARGET OBJECT's own prototype to whatever is assigned (silently
+ignored only when the assigned value isn't an object or `null`; here it's always an array, which IS an
+object, so the setter fires for real). A store or user skill literally named `__proto__` would therefore
+corrupt `lastPlaced`'s own prototype chain the next time a dead claim for it is carried forward — a
+different, stranger failure shape than the read-side hazard, and NOT merely a freeze at the write site
+itself (though every DOWNSTREAM read of the corrupted object still only ever fails toward freeze, never
+toward an unsafe overwrite, for the same genuine-sha256-only reason Item 2 gives). **Not fixed on this
+round — tracked as a follow-up finding, not yet filed to a card id this record can cite.** The sweep claim
+above is now explicitly scoped to READ-side only; do not read it as also covering writes.
+
+**Item 4 — nit, mentioned only, not fixed.** The dead-session prune loop's OUTER `manifest[sid] ?? []`
+read (`inject.ts`, the loop over `allSids`) shares the identical bracket-access shape, keyed by `sid`
+rather than a skill `name` — reachable only if the `FINGERPRINTS_FILE` sidecar is FORGED to carry a
+literal top-level key `"constructor"` as if it were a real session id (a real session id is server-minted
+and never arbitrary), since `allSids` is built straight from `Object.keys(manifest)` ∪
+`Object.keys(fingerprints)` with no other validation. Read-only, and caught the same way every other
+hazard in this file is: `injectSkills`'s one call site (`pty/host.ts`) wraps the whole call in a
+non-fatal `try/catch`, so a forged sidecar degrades to "this session boots without its injected skills,"
+never a daemon crash. Mentioned at its own call site and here; not fixed, since it needs a forged file to
+reach at all and the existing containment already bounds the blast radius to the one call.
+
+No test changes this round — nothing here changes observable behavior, only the words describing it.
+
+## What remains (accurate as of card `3b2a8707`)
 
 1. An EXPLICIT `skills` subset naming a bound skill still bypasses both the grant check and the isolation
    check (unchanged since round 1 — `509176c8`'s existing "an explicit subset is a deliberate,
@@ -286,15 +683,47 @@ guess.
    than fixed — closing either would mean adding real content-type/git awareness to a sync path that
    deliberately has neither.
 4. ~~The SAME-SESSION-resume class the round-3 fix deliberately did NOT touch~~ — CLOSED by card
-   `6db94dfe` (see above). The `otherClaimed` re-copy (a DIFFERENT session's claim, shared cwd) is the one
-   adjacent path 6db94dfe deliberately left untouched; it is a candidate for its own, separately filed
-   card, not folded into this point.
-5. A legacy claim (no recorded fingerprint from any current claimant) placed from an OLDER store version
-   — one that has since been reseeded/updated — matches neither any claimant's recorded fingerprint nor
-   what today's store would actually produce, and so is kept, permanently: there is no third, byte-exact
-   record of a past store version to compare against. In a SHARED repo cwd this freezes that skill, for
-   every later session there, until a human intervenes — see card `6db94dfe`'s own correction section
-   above for why this cannot be closed from inside the mechanism itself.
+   `6db94dfe` (see above). ~~The `otherClaimed` re-copy (a DIFFERENT session's claim, shared cwd) is the
+   one adjacent path 6db94dfe deliberately left untouched~~ — ALSO CLOSED, by card `3b2a8707` (see the
+   "CARD `3b2a8707`" section above, including its own round-2 correction). The ORIGINAL defect named here
+   (unconditional overwrite, no fingerprint check at all) is closed. ~~What is NOT closed: after a daemon
+   restart, this same gate degrades to the `wouldPlaceFingerprint` fallback alone~~ — ALSO CLOSED, by
+   `3b2a8707`'s own round 3 (see "THE ROUND-3 FIX" section above): the persisted `lastPlaced` carry-forward
+   survives the restart for any name a live session still claims at the moment the dead claim is pruned.
+   What remains after round 3 is folded entirely into point 5 below — do not re-open this point as a
+   separate finding.
+5. A legacy claim (no recorded fingerprint from any current claimant, the registry, or `lastPlaced`)
+   placed from an OLDER store version — one that has since been reseeded/updated — matches neither any
+   claimant's recorded fingerprint nor what today's store would actually produce, and so is kept,
+   permanently: there is no third, byte-exact record of a past store version to compare against. In a
+   SHARED repo cwd this freezes that skill, for every later session there, until a human intervenes — see
+   card `6db94dfe`'s own correction section above for why this cannot be closed from inside the mechanism
+   itself. **This residual survives round 4 too** — round 4 (see "CORRECTED (Code Review round 4...)"
+   above) closes the SECOND-prune-pass REPLACE bug that round 3's own fix had reopened, but it does not
+   touch this one. **It is no longer the ONLY one, though:** round 4's own MERGE fix, by design, now
+   retains MULTIPLE historical fingerprints per name (not just the latest), bounded in COUNT but not in
+   TIME — see that section's "Item 2" for the two things this adds: unbounded-time retention, and the
+   narrow (exact-byte-match-required) edge where an old retained fingerprint can vouch for disk later
+   reset back to those exact bytes by something outside this mechanism.
+
+   **CORRECTED (round 3): the earlier "while ANY live session still claims the name, that claim alone
+   keeps it alive" qualifier was FALSE, and is retracted.** A live session's `manifest` entry is rewritten
+   in full (`manifest[sessionId] = placed`) on every one of ITS OWN calls — it is not a standing exemption.
+   That session's own NEXT resume reruns the identical fingerprint gate against the same on-disk content
+   and can relinquish its own claim the exact same way a fresh co-claimant would. The honest framing: a
+   name only truly freezes once it reaches a state where NO session's — live, dead, or future —
+   recorded or reconstructable fingerprint matches current disk; it does not require every claimant to
+   have already died first, and a presently-"claimed" name offers no protection against it on its own.
+
+   **A name whose only claimant died while NO live session claimed it at the moment of discovery is
+   deliberately out of scope for this entire fingerprint-gate mechanism (manifest/fingerprints + registry +
+   `lastPlaced` + `wouldPlaceFingerprint`), and this is a separate point from the legacy-claim residual
+   above, not a widening of it.** `carryDeadFingerprintsForward` only ever persists `lastPlaced` for a name
+   still in `myPrev ∪ otherClaimed` at the time of the carry (see its own doc) — a fully-unclaimed name is
+   either resolved immediately, in the SAME call that discovers the death, by the isolated-cwd dead-claim
+   deletion path above (which uses `deadFingerprints` directly and never depends on `lastPlaced` or a
+   restart at all), or, for a shared cwd, is card `f4e93dbf`'s own pending-reclaim concern — a separate,
+   already-reviewed mechanism this one deliberately does not duplicate or interfere with.
 
 There is no longer an isolated-cwd residual for a capability-bound skill from the claim-pruning mechanism
 itself: the round-2/3 cleanup applies regardless of whether the current session uses a subset or the
@@ -321,14 +750,59 @@ now additionally requires the content fingerprint to match before it ever delete
   PRE-EXISTING paths (copy-over-`myPrev`, the `myPrev` stale-prune loop) — the same hand-edit-destruction
   class existed there too, for a same-session resume. Card `6db94dfe` fixed both; see "CARD `6db94dfe`"
   above. Do not re-open this as a finding — it is closed, not merely tracked.
+- (Card `6db94dfe`'s own scope limit, now CLOSED by card `3b2a8707`.) `6db94dfe` deliberately left the
+  `otherClaimed`-not-`myPrev` re-copy (a FRESH session's first-time claim, where a DIFFERENT live session
+  already claims the name) with no fingerprint gate at all. Card `3b2a8707` closed it by widening the
+  SAME gate; its own round-2 Code Review found that widening alone reopened a false freeze for a
+  cross-variant co-claim whose LAST writer has since died (NOT closed merely by the round-1 widening —
+  see the "CORRECTED (Code Review round 2...)" section above) — the round-2 fix (the daemon-side registry
+  + the unconditional last-resort fallback) closed it within one daemon process's lifetime; round 3 (see
+  "THE ROUND-3 FIX" section above) then closed the post-daemon-restart case too, for any name a live
+  session still claims at the moment the dead claim is pruned, via the persisted `lastPlaced` sidecar key.
+  Do not re-open the ORIGINAL (unconditional-overwrite) defect, or the post-restart freeze for a
+  still-claimed name, as findings — both are closed. The one residual that survives both rounds is the
+  pre-existing legacy-claim shape (no fingerprint ever recorded by anyone, from a store version that has
+  since moved on), named precisely at "What remains" point 5 — do not cite "a cross-variant co-claim can
+  never get stuck" without that one qualification.
 - Do not treat a bound skill's presence on disk as proof a session without the grant can act on it. The
   capability's own MCP mount shares the SAME grant source (`resolveProfileCapabilities`) but additionally
   requires a valid catalog row (a missing or first-party-squatting slug is dropped there) — this skill
   gate keys on the raw slug alone. **The capability grant gating the MCP mount is the real gate.** A
   bound skill must never be the only thing standing between an agent and a capability.
+- (Card `3b2a8707` round 3.) Do not persist a `lastPlaced` entry for a name no live session claims at the
+  moment of the carry — that is card `f4e93dbf`'s own pending-reclaim concern. Do not let it grow
+  unbounded — cap it at `LAST_PLACED_MAX_FPS_PER_NAME` per name. And do not claim the post-restart freeze
+  is closed WITHOUT the "for a name still live-claimed at the moment of discovery" qualification — a name
+  nobody live claims at that moment is explicitly out of this mechanism's scope (see "What remains"
+  point 5's second paragraph).
+- (Card `3b2a8707` round 4 — CORRECTS round 3's own bullet above.) ⛔ Do NOT REPLACE `lastPlaced[name]`
+  on each call — round 3 originally shipped exactly that, and a Code Review found it reopens the
+  post-restart freeze the moment a SECOND dead-session prune, for the SAME name, runs after the first
+  (see "CORRECTED (Code Review round 4...)" above for the full repro). **MERGE this pass's own
+  fingerprints into whatever is already there (this pass's own fps first, deduped), THEN truncate to the
+  cap** — truncation evicts whatever ranks last in THIS pass's own order. **Do not call that order
+  "newest" (Code Review round 5 correction) — it is PRUNE-DISCOVERY order for this call, not placement
+  age; a long-lived session's own old fp can rank ahead of fresher content, and discovering
+  `>= LAST_PLACED_MAX_FPS_PER_NAME` distinct fps in one pass evicts the prior entries in full.** This is
+  safe regardless of ordering specifically because every entry, old or new, is a sha256 this file itself
+  computed at a real Loom placement; merging — or evicting one in the "wrong" order — can never make a
+  hand edit start matching, so the failure mode this creates is always toward FREEZE, never toward an
+  unsafe overwrite. Do not re-open the ORIGINAL (unconditional-overwrite) defect as a finding — it is
+  closed, by round 2's registry + round 3's persisted carry-forward — but do not cite the post-restart
+  freeze as fully closed without ALSO naming round 4's MERGE fix; round 3 alone was insufficient. Do not
+  read "merge, not replace" as removing the time-unbounded-retention caveat — document it instead of
+  silently accepting it as solved (see "What remains" point 5 and "Item 2" above).
 - Do not widen the fix search to "stop sharing cwd" as a follow-on to this card — that's a much larger
   change to manager/platform/setup/auditor/plain session architecture, out of scope here.
 - Do not fix card `9d73e537`'s or card `f4e93dbf`'s general dead-session-orphan problem for a SHARED cwd,
   or the round-3-named tracked-but-byte-identical residual, on this card — both are separate, broader
   findings tracked on their own cards. (The same-session-resume residual this bullet used to also name
   here is CLOSED — card `6db94dfe`, see above — not merely tracked elsewhere.)
+- Do not bracket-access a `[name: string]: string | string[]`-shaped plain object (`lastPlaced`,
+  `fingerprints[sid]`, `capabilityBindings`) with an untrusted, store/attacker-controllable `name` —
+  `Object.hasOwn(obj, name)` first, always. A skill literally named `"constructor"` (or any other
+  `Object.prototype` member) otherwise reads back the inherited member instead of `undefined`; three
+  separate sites in this file have now hit this (`passesCapabilityGate`, fixed from round 1;
+  `recordedFingerprintsForName`'s two lookups, fixed in the full-regression-sweep section above;
+  the dead-session prune loop's own lookup, fixed in round 4 — see "Item 3" above) — read every one of
+  them as the worked examples for the next one, rather than re-deriving the guard from scratch.

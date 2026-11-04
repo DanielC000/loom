@@ -409,12 +409,50 @@ try {
     check("(20c) granted shadcn capability + SHARED cwd: still withheld (isolation required even for the real binding)",
       !readDelivered(cwdGrantedShared).includes("loom-shadcn"));
   }
+
+  // --- (21) CODE REVIEW ROUND 4, item 3: the dead-session prune loop's own `fingerprints[sid]?.[n]` read
+  //     (inject.ts's top-of-function prune, NOT recordedFingerprintsForName — that one was already fixed
+  //     for case 8's own "constructor" skill) must ALSO guard against prototype shadowing. A dead
+  //     session's manifest claim for a skill named "constructor", with its OWN recorded fingerprint entry
+  //     missing (the legacy / failed-fingerprint shape — real, documented, and already covered elsewhere
+  //     in this file as "KEPT, not deleted"), must never let the bracket read fall through to
+  //     Object.prototype's own inherited `constructor` function. The reviewer's own probe showed exactly
+  //     that happening and surviving all the way to disk: `"__lastPlaced":{"constructor":[null]}` — a
+  //     function value, once JSON.stringify'd inside an array, renders as `null`. ------------------------
+  {
+    fs.mkdirSync(path.join(skillsDir, "constructor"), { recursive: true }); // same fixture shape as case (8) — a store skill literally named "constructor"
+    fs.writeFileSync(path.join(skillsDir, "constructor", "SKILL.md"), skillMd("constructor"));
+    const cwd = sharedCwd("case21-constructor-dead-prune-no-pollution");
+    const alive = new Set(["Y-ctor", "X-ctor"]);
+    const isLive = (sid) => alive.has(sid);
+    injectSkills(cwd, "Y-ctor", null, "manager", false, isLive); // Y claims deliver-all (including "constructor") and stays live
+    injectSkills(cwd, "X-ctor", null, "manager", false, isLive); // X claims it too
+    // Strip X's OWN recorded fingerprint for "constructor" directly from the sidecar, leaving its
+    // manifest claim intact — simulates the legacy/failed-fingerprint shape this file already proves is
+    // kept (not deleted) elsewhere, and is exactly the condition that exposes the bracket-access hazard:
+    // fingerprints["X-ctor"] still exists as an object, it simply has no OWN "constructor" key.
+    const fpPath = path.join(cwd, ".claude", "skills", ".loom-skills-fingerprints.json");
+    const fpRaw = JSON.parse(fs.readFileSync(fpPath, "utf8"));
+    delete fpRaw["X-ctor"]["constructor"];
+    fs.writeFileSync(fpPath, JSON.stringify(fpRaw));
+    alive.delete("X-ctor"); // X dies
+    injectSkills(cwd, "Z-ctor", ["plain-skill"], "manager", false, isLive); // Z doesn't want "constructor" at all — its call is what runs the dead-session prune over X's claim
+    const afterRaw = JSON.parse(fs.readFileSync(fpPath, "utf8"));
+    // Object.hasOwn here too — the SAME hazard this case exists to catch would otherwise bite this very
+    // assertion: a plain `afterRaw.__lastPlaced?.constructor` falls through to Object.prototype.constructor
+    // (a function) whenever __lastPlaced genuinely has NO own "constructor" key, which is exactly the
+    // CORRECT (fixed) outcome this check wants to confirm.
+    const lastPlaced = afterRaw.__lastPlaced;
+    const lastPlacedCtor = lastPlaced && Object.hasOwn(lastPlaced, "constructor") ? lastPlaced.constructor : undefined;
+    check('(21) no non-string fingerprint ever reaches __lastPlaced for a dead claim named "constructor" with no recorded fp',
+      lastPlacedCtor === undefined || (Array.isArray(lastPlacedCtor) && lastPlacedCtor.every((fp) => typeof fp === "string" && fp.length > 0)));
+  }
 } catch (e) {
   console.log(`FAIL  unexpected throw: ${e.stack}`);
   failures++;
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — capability-bound skill delivery requires BOTH worktree isolation and the grant, subset still bypasses both, resume re-evaluates + prunes, isWorktreeCwd rejects every near-miss and accepts every genuine descendant, a dead session's claimed dirs (any skill, in an isolated cwd) are cleaned up ONLY when their content fingerprint matches ANY dead claimant's recorded one (order-independent across two different dead claimants), a hand edit / extra file / legacy no-fingerprint claim all survive, the worktree-reuse sequence never orphans a bound skill, and the legacy-flag-to-slug wiring is intact."
+  ? "\n✅ ALL PASS — capability-bound skill delivery requires BOTH worktree isolation and the grant, subset still bypasses both, resume re-evaluates + prunes, isWorktreeCwd rejects every near-miss and accepts every genuine descendant, a dead session's claimed dirs (any skill, in an isolated cwd) are cleaned up ONLY when their content fingerprint matches ANY dead claimant's recorded one (order-independent across two different dead claimants), a hand edit / extra file / legacy no-fingerprint claim all survive, the worktree-reuse sequence never orphans a bound skill, the legacy-flag-to-slug wiring is intact, and (Code Review round 4 on card 3b2a8707) the dead-session prune loop's own fingerprint read never falls through to Object.prototype for a claim named \"constructor\" with no recorded fp."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

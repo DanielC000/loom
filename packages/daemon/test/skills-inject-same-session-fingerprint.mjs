@@ -14,20 +14,40 @@
 //   - a LEGACY claim (no recorded fingerprint — predates this mechanism) is refreshed/pruned when it's
 //     already byte-identical to the CURRENT store copy (nothing would be lost), but kept when it diverges.
 //
+// Cases (12)-(13) are card 3b2a8707: the SAME myPrev gate now also covers a FRESH session's first-time
+// otherClaimed claim. (14)-(16) add the cross-variant co-claim + wouldPlaceFingerprint's own strip-
+// failure paths. (17)-(20) are Code Review rounds 2-3: closing the LAST-WRITER-DIED false freeze,
+// in-process (17)-(18) and surviving a simulated daemon restart (19)-(20).
+// @decision 31f997e7
+//
 // useOwnLoomHome sets up a managed temp LOOM_HOME with guaranteed cleanup; WORKTREES_DIR (a sibling of
 // LOOM_HOME) is separately registered. dist is imported only AFTER useOwnLoomHome.
 // Run after build: node test/skills-inject-same-session-fingerprint.mjs
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { useOwnLoomHome, registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 useOwnLoomHome("loom-same-session-fp-");
-const { injectSkills } = await import("../dist/skills/inject.js");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// card 3b2a8707 Code Review round 3: a stable, re-importable module URL — `freshInjectModule` below
+// appends a cache-busting query to force Node to evaluate a GENUINELY FRESH module instance (its own
+// empty `loomPlacedFingerprintsByCwd`), simulating a daemon restart's effect on in-memory state while
+// every import `inject.js` itself makes (paths.js, store.js, …) stays the SAME already-cached instance —
+// same technique as merge-quarantine-lazy-graduation-multi-pending.mjs's own `freshBootModule`.
+const injectModuleHref = pathToFileURL(path.join(__dirname, "..", "dist", "skills", "inject.js")).href;
+const { injectSkills } = await import(injectModuleHref);
 const { WORKTREES_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT } = await import("../dist/paths.js");
 registerForCleanup(WORKTREES_DIR); // a sibling of LOOM_HOME, not nested under it — clean it up too
+
+let restartCounter = 0;
+async function freshInjectModule() {
+  restartCounter++;
+  return await import(`${injectModuleHref}?restart=${restartCounter}`);
+}
 
 const skillsDir = path.join(process.env.LOOM_HOME, "skills");
 fs.mkdirSync(skillsDir, { recursive: true });
@@ -45,6 +65,22 @@ writeStoreSkill("skill-b", "skill-b");
 // real asset dir list), so needsPermissionStrip's own pristine-content check runs too (a harmless no-op,
 // since this fixture body has no permission-widening construct either way).
 writeStoreSkill("loom-pickup", "loom-pickup store base");
+// card 3b2a8707, item 2 — a simple, UNSTAMPED strippable hazard (same shape as
+// skills-inject-permission-strip.mjs's own `hazardMd`): not bundled, not human-provenance-stamped, so
+// `needsPermissionStrip` is true, and this specific construct (a frontmatter key + one inline shell
+// trigger) strips cleanly to a verified-clean result — used only by case (15) below.
+const hazardMd = (name) => `---\nname: ${name}\ndescription: test skill ${name}\nallowed-tools: Bash(*)\n---\n\n# ${name}\n\nRun: !\`node sentinel.js\`\n`;
+const writeHazardStoreSkill = (name, md) => {
+  fs.mkdirSync(path.join(skillsDir, name), { recursive: true });
+  fs.writeFileSync(path.join(skillsDir, name, "SKILL.md"), md);
+};
+writeHazardStoreSkill("skill-hazard", hazardMd("skill-hazard"));
+// card 3b2a8707, item 2 — card 712148f1's own flow-mapping-form hazard: the ONE construct that
+// genuinely, unassistedly (no fault injection) defeats the strip's fixpoint loop, returning null rather
+// than a stripped result — used only by case (16) below to exercise `wouldPlaceFingerprint`'s own
+// undeliverable `return null` branch.
+const flowMapHazardMd = (name) => `---\n{name: ${name}, allowed-tools: Bash(*)}\n---\n\n# ${name}\n`;
+writeHazardStoreSkill("skill-flowmap-hazard", flowMapHazardMd("skill-flowmap-hazard"));
 
 let seq = 0;
 const isolatedCwd = (sub) => { const d = path.join(WORKTREES_DIR, "proj", `${sub}-${seq++}`); fs.mkdirSync(d, { recursive: true }); return d; };
@@ -215,12 +251,282 @@ try {
       check("(11) legacy + fragment-appended bytes, obsidianEnabled=false: does NOT false-match, content KEPT", fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8") === transformedBytes);
     }
   }
+
+  // --- (12) MAIN ITEM (card 3b2a8707): shared cwd, session A claims+hand-edits `skill-a`; session B,
+  //     which has NEVER claimed `skill-a` before (the otherClaimed-not-myPrev branch), then wants it for
+  //     the first time. Before this card that re-copy was unconditional — A's hand edit must now survive,
+  //     and B must NOT claim a name whose on-disk content it never actually placed. --------------------
+  {
+    const cwd = sharedCwd("case12-otherclaimed-hand-edit-survives");
+    injectSkills(cwd, "A12", ["skill-a"], "manager", false, live);
+    const skillMdPath = deliveredPath(cwd, "skill-a");
+    fs.writeFileSync(skillMdPath, "# A's hand edit, uncommitted\n"); // A hand-edits AFTER placing
+    injectSkills(cwd, "B12", ["skill-a"], "manager", false, live); // B wants skill-a for the FIRST time
+    check("(12) A's hand-edited SKILL.md SURVIVES B's first-time otherClaimed re-copy", fs.readFileSync(skillMdPath, "utf8") === "# A's hand edit, uncommitted\n");
+    check("(12) B does NOT claim a name it never actually placed", !readManifestClaims(cwd, "B12").includes("skill-a"));
+    check("(12) A still claims it (untouched)", readManifestClaims(cwd, "A12").includes("skill-a"));
+  }
+
+  // --- (13) REGRESSION: same shape as (12) but A's copy is UNTOUCHED (no hand edit) — B's first-time
+  //     otherClaimed claim must still succeed normally; the fix must not block a legitimate second live
+  //     session joining an existing claim. -------------------------------------------------------------
+  {
+    const cwd = sharedCwd("case13-otherclaimed-untouched-first-claim-succeeds");
+    injectSkills(cwd, "A13", ["skill-a"], "manager", false, live);
+    injectSkills(cwd, "B13", ["skill-a"], "manager", false, live); // B wants skill-a for the first time, untouched
+    check("(13) B successfully co-claims an untouched otherClaimed name", readManifestClaims(cwd, "B13").includes("skill-a"));
+    check("(13) A still claims it too", readManifestClaims(cwd, "A13").includes("skill-a"));
+    check("(13) content is the plain store content (no divergence)", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a"));
+  }
+
+  // --- (14) VARIANT DRIFT (manager's extra ask on card 3b2a8707): two LIVE co-claimants with DIFFERING
+  //     obsidianEnabled settings on a fragment-target skill. A places WITH the fragment; B then
+  //     first-claims the SAME name WITHOUT it. B's own placement overwrites with its own (fragment-free)
+  //     variant and records its OWN fingerprint — so A's NEXT resume must see B's recorded fingerprint in
+  //     the union and refresh normally, never read B's legitimate variant as a hand edit and freeze. ----
+  {
+    const cwd = sharedCwd("case14-variant-drift-coclaim");
+    injectSkills(cwd, "A14", ["loom-pickup"], "manager", true, live); // A: obsidianEnabled=true
+    const aVariant = fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8");
+    injectSkills(cwd, "B14", ["loom-pickup"], "manager", false, live); // B: first claim, obsidianEnabled=false
+    const bVariant = fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8");
+    check("(14) precondition: A's and B's variants actually differ", aVariant !== bVariant);
+    check("(14) B successfully claims (did not read A's variant as a hand edit)", readManifestClaims(cwd, "B14").includes("loom-pickup"));
+    check("(14) disk now reflects B's own (fragment-free) variant", fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8") === bVariant);
+    injectSkills(cwd, "A14", ["loom-pickup"], "manager", true, live); // A resumes: must NOT see B's variant as hand-modified
+    check("(14) A's resume does NOT freeze as hand-modified (still claims it)", readManifestClaims(cwd, "A14").includes("loom-pickup"));
+    check("(14) A's resume refreshes back to A's own (fragment-appended) variant", fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8") === aVariant);
+  }
+
+  // --- (15) item 2's exact recipe: an agent/unstamped STORE skill with a strippable construct
+  //     (`skill-hazard`) — generate the REAL stripped delivered bytes via a genuine probe placement, then
+  //     plant those EXACT bytes as a LEGACY claim (no recorded fingerprint) elsewhere. `wouldPlaceFingerprint`
+  //     must apply the SAME strip to match them — a mutant that drops the strip step inside it would
+  //     fingerprint the UNSTRIPPED store bytes instead, which would NOT match these on-disk (stripped)
+  //     bytes, and this case would go RED (kept, not claimed) under that mutant. ----------------------
+  {
+    const probeCwd = isolatedCwd("case15-probe-stripped-bytes");
+    injectSkills(probeCwd, "probe15", ["skill-hazard"], "worker", false);
+    const strippedBytes = fs.readFileSync(deliveredPath(probeCwd, "skill-hazard"), "utf8");
+    const rawStoreBytes = fs.readFileSync(path.join(skillsDir, "skill-hazard", "SKILL.md"), "utf8");
+    check("(15) precondition: the real probe placement actually stripped the hazard (delivered bytes differ from raw store)", strippedBytes !== rawStoreBytes);
+
+    const cwd = isolatedCwd("case15-legacy-stripped-match");
+    const skillsDest = path.join(cwd, ".claude", "skills");
+    fs.mkdirSync(path.join(skillsDest, "skill-hazard"), { recursive: true });
+    fs.writeFileSync(path.join(skillsDest, "skill-hazard", "SKILL.md"), strippedBytes);
+    fs.writeFileSync(manifestPath(cwd), JSON.stringify({ S15: ["skill-hazard"] })); // legacy, no fingerprints file
+    injectSkills(cwd, "S15", ["skill-hazard"], "worker", false);
+    check("(15) legacy claim matching the REAL stripped bytes: refreshed/claimed normally (mutant-killing — see header)", readManifestClaims(cwd, "S15").includes("skill-hazard"));
+  }
+
+  // --- (16) item 2's "also cover the undeliverable `return null` path": the store copy itself is the
+  //     flow-mapping-form hazard that genuinely defeats the strip (card 712148f1) — real placement of this
+  //     name would THROW (undeliverable), so there is no "real probe" bytes to generate. A legacy claim
+  //     whose on-disk content is the RAW (unstripped) store bytes must still be KEPT, never claimed —
+  //     proving `wouldPlaceFingerprint`'s own `return null` is reached and "cannot verify" fails toward
+  //     keeping even though the on-disk bytes happen to equal the raw store (which real placement would
+  //     never actually produce, since it's undeliverable). ------------------------------------------------
+  {
+    const cwd = isolatedCwd("case16-legacy-undeliverable-kept");
+    const skillsDest = path.join(cwd, ".claude", "skills");
+    const rawFlowMapBytes = fs.readFileSync(path.join(skillsDir, "skill-flowmap-hazard", "SKILL.md"), "utf8");
+    fs.mkdirSync(path.join(skillsDest, "skill-flowmap-hazard"), { recursive: true });
+    fs.writeFileSync(path.join(skillsDest, "skill-flowmap-hazard", "SKILL.md"), rawFlowMapBytes);
+    fs.writeFileSync(manifestPath(cwd), JSON.stringify({ S16: ["skill-flowmap-hazard"] })); // legacy, no fingerprints file
+    let thrown16;
+    try { injectSkills(cwd, "S16", ["skill-flowmap-hazard"], "worker", false); } catch (e) { thrown16 = e; }
+    check("(16) injectSkills does NOT throw (kept, never attempted a real undeliverable re-placement)", !thrown16);
+    check("(16) content is KEPT exactly as the legacy raw bytes (undeliverable ⇒ cannot verify ⇒ not overwritten)", fs.readFileSync(deliveredPath(cwd, "skill-flowmap-hazard"), "utf8") === rawFlowMapBytes);
+    check("(16) NOT claimed (never verified safe to claim)", !readManifestClaims(cwd, "S16").includes("skill-flowmap-hazard"));
+  }
+
+  // --- (17) CODE REVIEW regression (finding 1, round 2 on card 3b2a8707): the LAST WRITER died before
+  //     anyone else refreshed. Sequence (reviewer's dist repro): A places v1; the store moves to v2; C (a
+  //     fresh co-claimant) first-claims and refreshes to v2; C dies; B (a fresh co-claimant) must still
+  //     succeed — not read C's now-unrecorded-but-genuinely-untouched v2 content as hand-modified and
+  //     refuse forever. A's own resume afterward must also still succeed. ------------------------------
+  {
+    const cwd = sharedCwd("case17-last-writer-dies-fresh-coclaim");
+    injectSkills(cwd, "A17", ["skill-a"], "manager", false, live); // A places v1
+    const storeMd = path.join(skillsDir, "skill-a", "SKILL.md");
+    const origStore = fs.readFileSync(storeMd, "utf8");
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2")); // store moves to v2
+    injectSkills(cwd, "C17", ["skill-a"], "manager", false, live); // C first-claims, refreshes to v2
+    const v2Bytes = fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8");
+    const deadC = (sid) => sid !== "C17"; // C is now dead
+    injectSkills(cwd, "B17", ["skill-a"], "manager", false, deadC); // B first-claims; C is dead; store still at v2
+    check("(17) B successfully claims the now-dead C's untouched v2 content (not frozen as hand-modified)", readManifestClaims(cwd, "B17").includes("skill-a"));
+    check("(17) content is unchanged (still v2 — byte-identical overwrite, nothing lost)", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8") === v2Bytes);
+    injectSkills(cwd, "A17", ["skill-a"], "manager", false, deadC); // A's own resume must also still succeed
+    check("(17) A's own resume also succeeds (not frozen)", readManifestClaims(cwd, "A17").includes("skill-a"));
+    fs.writeFileSync(storeMd, origStore); // restore immediately, now that all placements for this case are done
+  }
+
+  // --- (18) CODE REVIEW regression (finding 2's "pre-existing variant" case): the SAME last-writer-dies
+  //     shape, but reached through the myPrev branch instead of otherClaimed. A places WITH the obsidian
+  //     fragment; B (a fresh co-claimant) places its OWN fragment-free variant; B dies; A's OWN resume
+  //     must still succeed — the per-session record of B's variant is gone, but the daemon-side registry
+  //     still has it. -------------------------------------------------------------------------------------
+  {
+    const cwd = sharedCwd("case18-myprev-last-writer-dies");
+    injectSkills(cwd, "A18", ["loom-pickup"], "manager", true, live); // A: obsidianEnabled=true
+    const aVariant = fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8");
+    injectSkills(cwd, "B18", ["loom-pickup"], "manager", false, live); // B: first claim, obsidianEnabled=false
+    const bVariant = fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8");
+    check("(18) precondition: A's and B's variants actually differ", aVariant !== bVariant);
+    const deadB = (sid) => sid !== "B18"; // B is now dead
+    injectSkills(cwd, "A18", ["loom-pickup"], "manager", true, deadB); // A resumes; B is dead
+    check("(18) A's resume succeeds (does NOT freeze on the now-dead B's untouched variant)", readManifestClaims(cwd, "A18").includes("loom-pickup"));
+    check("(18) disk refreshes back to A's own fragment-appended variant", fs.readFileSync(deliveredPath(cwd, "loom-pickup"), "utf8") === aVariant);
+  }
+
+  // --- (19) CODE REVIEW round 3, reviewer's P2: case (17)'s shape, but with a daemon RESTART before B's
+  //     claim and NO further store change. Valid, real coverage of the described repro — but EMPIRICALLY
+  //     VERIFIED (ran the exact mutant below against it) this does NOT isolate fix (b): round 3's own
+  //     `lastPlaced` carry-forward ALSO independently matches here (it carries forward C's own v2
+  //     fingerprint, which still equals current disk, directly in the `recorded` set BEFORE
+  //     `matchesRecordedFingerprint` ever reaches its `storeFallback` branch) — reverting JUST (b)'s rule
+  //     leaves this case GREEN. See (19b) immediately below for a construction that genuinely isolates
+  //     (b): round 3 only ever carries forward a DEAD session's own claim, so a case with no dead session
+  //     at all is untouched by it. ---------------------------------------------------------------------
+  {
+    const cwd = sharedCwd("case19-restart-no-store-change-fallback-b");
+    injectSkills(cwd, "A19", ["skill-a"], "manager", false, live); // A places v1
+    const storeMd = path.join(skillsDir, "skill-a", "SKILL.md");
+    const origStore = fs.readFileSync(storeMd, "utf8");
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2")); // store moves to v2
+    injectSkills(cwd, "C19", ["skill-a"], "manager", false, live); // C first-claims, refreshes to v2
+    const v2Bytes = fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8");
+    const deadC = (sid) => sid !== "C19";
+    const { injectSkills: injectAfterRestart } = await freshInjectModule(); // RESTART: fresh registry
+    injectAfterRestart(cwd, "B19", ["skill-a"], "manager", false, deadC); // store UNCHANGED since C's write
+    check("(19) B successfully claims across a restart with no store change", readManifestClaims(cwd, "B19").includes("skill-a"));
+    check("(19) content is unchanged (still v2)", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8") === v2Bytes);
+    fs.writeFileSync(storeMd, origStore);
+  }
+
+  // --- (19b) TRUE isolation of fix (b), added because (19) doesn't provide one: NO dead session at all,
+  //     so round 3's `lastPlaced` carry-forward has nothing to do with this case. A places v1 (recorded
+  //     v1fp). The store moves to v2. Disk is then overwritten OUT OF BAND (never through injectSkills —
+  //     simulating e.g. a git checkout/rebase bringing in tracked content) to EXACTLY v2's own bytes —
+  //     content no claimant, the registry, or `lastPlaced` has ever recorded Loom itself placing. A's own
+  //     resume: `recorded` = {v1fp} only — NON-EMPTY but STALE (round 2's old `!hasRecorded` gate would
+  //     have skipped the fallback here entirely, since `recorded` isn't empty) — yet current disk is
+  //     EXACTLY what `wouldPlaceFingerprint` computes fresh right now. Only fix (b)'s "always fall back,
+  //     even when recorded is non-empty-but-stale" rule recognizes this as safe to refresh. -------------
+  {
+    const cwd = isolatedCwd("case19b-recorded-nonempty-stale-fallback-b");
+    injectSkills(cwd, "A19b", ["skill-a"], "worker", false); // A places v1
+    const storeMd = path.join(skillsDir, "skill-a", "SKILL.md");
+    const origStore = fs.readFileSync(storeMd, "utf8");
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2")); // store moves to v2
+    fs.writeFileSync(deliveredPath(cwd, "skill-a"), skillMd("skill-a", "skill-a v2")); // out-of-band write, never through injectSkills
+    injectSkills(cwd, "A19b", ["skill-a"], "worker", false); // A resumes: recorded={v1fp} (stale), disk=v2 (byte-identical to fresh wouldPlace)
+    check("(19b) fix (b) rescues a non-empty-but-stale recorded set when disk matches wouldPlace fresh", readManifestClaims(cwd, "A19b").includes("skill-a"));
+    fs.writeFileSync(storeMd, origStore);
+  }
+
+  // --- (20) CODE REVIEW round 3, reviewer's P1 (the one genuinely closed by this round): A places v1 →
+  //     store v2 → C first-claims+writes v2 → C dies → RESTART (fresh, empty registry) → store v3 → B
+  //     first-claims, A resumes, D first-claims. Unlike (19), the store has moved a SECOND time (v2→v3)
+  //     AFTER C's death and the restart — `wouldPlaceFingerprint` (fix (b)) now computes v3, which does
+  //     NOT match the still-v2 disk, so (b) CANNOT rescue this one; only round 3's persisted `lastPlaced`
+  //     (the sidecar survives the restart even though the in-memory registry doesn't) can. On main before
+  //     this round, ALL THREE ended claims=[] and the disk froze at v2 forever. ---------------------------
+  {
+    const cwd = sharedCwd("case20-restart-store-moves-again-p1");
+    injectSkills(cwd, "A20", ["skill-a"], "manager", false, live); // A places v1
+    const storeMd = path.join(skillsDir, "skill-a", "SKILL.md");
+    const origStore = fs.readFileSync(storeMd, "utf8");
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2")); // store moves to v2
+    injectSkills(cwd, "C20", ["skill-a"], "manager", false, live); // C first-claims, refreshes to v2
+    const v2Bytes = fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8");
+    const deadC = (sid) => sid !== "C20";
+    const { injectSkills: injectAfterRestart } = await freshInjectModule(); // RESTART: fresh registry
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v3")); // store moves AGAIN, to v3, after the restart
+    injectAfterRestart(cwd, "B20", ["skill-a"], "manager", false, deadC); // B first-claims
+    check("(20) B successfully claims across a restart even though the store moved again", readManifestClaims(cwd, "B20").includes("skill-a"));
+    const v3Bytes = fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8");
+    check("(20) B's claim actually refreshed the dir to v3 (the current store, not frozen at v2)", v3Bytes !== v2Bytes && v3Bytes.includes("skill-a v3"));
+    injectAfterRestart(cwd, "A20", ["skill-a"], "manager", false, deadC); // A's own resume must also succeed
+    check("(20) A's own resume also succeeds (not frozen)", readManifestClaims(cwd, "A20").includes("skill-a"));
+    injectAfterRestart(cwd, "D20", ["skill-a"], "manager", false, deadC); // D first-claims too
+    check("(20) D (a THIRD fresh claimant) also succeeds", readManifestClaims(cwd, "D20").includes("skill-a"));
+    fs.writeFileSync(storeMd, origStore);
+  }
+
+  // --- (21) CODE REVIEW ROUND 4, MAJOR: lastPlaced must MERGE a new prune's fingerprints with what an
+  //     EARLIER prune already carried forward, never REPLACE — a second dead-session prune for the SAME
+  //     name, after a restart, must not discard an earlier pass's own carry. Reviewer's repro: A and L
+  //     place v1 → store v2 → C claims+refreshes to v2 → C dies, a non-wanting E's call prunes C
+  //     (lastPlaced=[fp2]) → RESTART (fresh registry) → store v3 → A ALSO dies, a non-wanting F's call
+  //     prunes A — under the pre-round-4 REPLACE, this call overwrites lastPlaced to [fp1] alone, losing
+  //     fp2, and L's own resume AND a fresh co-claimant's first claim both then refuse (disk frozen at
+  //     v2, matching neither the stale [fp1] record nor wouldPlaceFingerprint's now-v3 computation).
+  //     Under MERGE, lastPlaced holds [fp1, fp2] after F's call, fp2 still vouches for the v2 disk, and
+  //     both resolve normally, refreshing to v3. Built as a shared setup so the L-resume and fresh-claim
+  //     checks each get their OWN cwd — proving either one alone is enough to go RED, not just their sum. -
+  const case21StoreMd = path.join(skillsDir, "skill-a", "SKILL.md");
+  const case21OrigStore = fs.readFileSync(case21StoreMd, "utf8"); // captured ONCE, before any (21*) sub-case touches the store — restored at the very end
+  async function buildCase21Scenario(label) {
+    const cwd = sharedCwd(label);
+    const storeMd = path.join(skillsDir, "skill-a", "SKILL.md");
+    const aliveSet = new Set(["A21", "L21"]);
+    const isLive = (sid) => aliveSet.has(sid);
+    injectSkills(cwd, "A21", ["skill-a"], "manager", false, isLive); // A places v1
+    injectSkills(cwd, "L21", ["skill-a"], "manager", false, isLive); // L places v1 too
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v2")); // store moves to v2
+    aliveSet.add("C21");
+    injectSkills(cwd, "C21", ["skill-a"], "manager", false, isLive); // C first-claims, refreshes to v2
+    check(`(21 ${label}) precondition: C's claim refreshed disk to v2`, fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a v2"));
+    aliveSet.delete("C21"); // C dies
+    injectSkills(cwd, "E21", ["skill-b"], "manager", false, isLive); // E doesn't want skill-a — its call still prunes dead C, carrying C's v2 fp into lastPlaced (A/L still live-claim it)
+    const { injectSkills: injectAfterRestart } = await freshInjectModule(); // RESTART: fresh in-memory registry; lastPlaced persists on disk
+    fs.writeFileSync(storeMd, skillMd("skill-a", "skill-a v3")); // store moves AGAIN, to v3, after the restart
+    aliveSet.delete("A21"); // A dies too, AFTER the restart — a SECOND dead-session prune for the same name
+    injectAfterRestart(cwd, "F21", ["skill-b"], "manager", false, isLive); // F doesn't want skill-a either — its call is the SECOND prune pass (replaces or merges lastPlaced)
+    return { cwd, injectAfterRestart, isLive };
+  }
+  {
+    const { cwd, injectAfterRestart, isLive } = await buildCase21Scenario("case21a-second-prune-L-resume");
+    injectAfterRestart(cwd, "L21", ["skill-a"], "manager", false, isLive); // L's own resume: still wants skill-a
+    check("(21a) L's own resume succeeds after a SECOND dead-session prune pass (not frozen)", readManifestClaims(cwd, "L21").includes("skill-a"));
+    check("(21a) L's resume actually refreshed disk to v3 (not frozen at v2)", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a v3"));
+  }
+  {
+    const { cwd, injectAfterRestart, isLive } = await buildCase21Scenario("case21b-second-prune-fresh-claim");
+    injectAfterRestart(cwd, "B21", ["skill-a"], "manager", false, isLive); // B: a FRESH co-claimant, tested independently of L's own resume
+    check("(21b) a fresh co-claimant's first claim succeeds after a SECOND dead-session prune pass (not frozen)", readManifestClaims(cwd, "B21").includes("skill-a"));
+    check("(21b) B's claim actually refreshed disk to v3 (not frozen at v2)", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a v3"));
+  }
+  {
+    // --- (21c) CONTROL, per the reviewer's own verification: the SAME restart + second-store-move shape,
+    //     but WITHOUT A's death (only ONE prune pass ever runs, for C) — confirms the fixture mechanics
+    //     themselves are sane and the freeze in (21a)/(21b) is specifically the SECOND prune pass, not an
+    //     artifact of restart+store-move alone. -------------------------------------------------------
+    const cwd = sharedCwd("case21c-control-no-second-death");
+    const aliveSet = new Set(["A21c", "L21c"]);
+    const isLive = (sid) => aliveSet.has(sid);
+    injectSkills(cwd, "A21c", ["skill-a"], "manager", false, isLive);
+    injectSkills(cwd, "L21c", ["skill-a"], "manager", false, isLive);
+    fs.writeFileSync(case21StoreMd, skillMd("skill-a", "skill-a v2"));
+    aliveSet.add("C21c");
+    injectSkills(cwd, "C21c", ["skill-a"], "manager", false, isLive);
+    aliveSet.delete("C21c");
+    injectSkills(cwd, "E21c", ["skill-b"], "manager", false, isLive); // ONE prune pass only — A stays alive throughout
+    const { injectSkills: injectAfterRestart } = await freshInjectModule();
+    fs.writeFileSync(case21StoreMd, skillMd("skill-a", "skill-a v3"));
+    injectAfterRestart(cwd, "L21c", ["skill-a"], "manager", false, isLive); // L's own resume — A never died, so this is NOT the bug's trigger shape
+    check("(21c) CONTROL: with only one prune pass ever, L's resume refreshes to v3 normally", fs.readFileSync(deliveredPath(cwd, "skill-a"), "utf8").includes("skill-a v3"));
+  }
+  fs.writeFileSync(case21StoreMd, case21OrigStore); // restore the shared store fixture, once, for any later case/test file
 } catch (e) {
   console.log(`FAIL  unexpected throw: ${e.stack}`);
   failures++;
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a same-session resume never overwrites or prunes a hand-modified (or added-to) injected skill copy; an untouched resume still refreshes/prunes normally; a legacy no-fingerprint claim is refreshed only when matching ANY current claimant's recorded fingerprint or what placement would ACTUALLY produce right now (transform-aware, not a raw-store comparison); two LIVE co-claimants sharing a cwd never misread each other's legitimate refresh as a hand edit, and one's narrowing never destroys what the other still claims."
+  ? "\n✅ ALL PASS — a same-session resume never overwrites or prunes a hand-modified (or added-to) injected skill copy; an untouched resume still refreshes/prunes normally; a legacy no-fingerprint claim is refreshed only when matching ANY current claimant's recorded fingerprint or what placement would ACTUALLY produce right now (transform-aware, not a raw-store comparison); two LIVE co-claimants sharing a cwd never misread each other's legitimate refresh as a hand edit, and one's narrowing never destroys what the other still claims; a FRESH session claiming a name for the first time is held to the SAME gate (card 3b2a8707) — it never overwrites another live claimant's hand edit, it DOES succeed on an untouched co-claim, and two co-claimants with differing per-session variants (e.g. obsidian fragment on/off) never misread each other's legitimate variant as a hand edit either; wouldPlaceFingerprint applies the SAME permission-strip transform real placement does, and fails toward keeping (never a crash) when that strip is itself undeliverable; a session that died AFTER being the last one to legitimately write the dir never permanently freezes it for a fresh co-claimant OR the original claimant's own later resume — the daemon-side placement registry survives that death, and a last-resort wouldPlace comparison covers it even when the registry doesn't; and (Code Review round 4) a SECOND dead-session prune, for the same name, after a restart, MERGES into lastPlaced instead of REPLACING it — neither a resuming original co-claimant nor a fresh one freezes when an earlier pass's own carried-forward fingerprint would otherwise be discarded, with a control proving the fixture itself is sane absent that second death."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
