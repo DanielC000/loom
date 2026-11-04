@@ -7,6 +7,10 @@ import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
 import { buildMentionsIndex } from "../sessions/project-memory-references.js";
 import { computeNearDuplicateSignal, type NearDuplicateSignal } from "../sessions/project-memory-dedup.js";
+import {
+  buildOutboundLinksIndex, findUnresolvedOutboundLinks, findUnresolvedOutboundLinksBulk,
+  unresolvedOutboundLinksMessage,
+} from "../sessions/project-memory-outbound-links.js";
 
 // Project-scoped SHARED memory tool business logic (card 2fd9abf9). EVERY function takes the projectId
 // resolved SERVER-SIDE from the session id — the agent never passes a projectId, mirroring tasks.ts.
@@ -186,6 +190,26 @@ export interface ExpiryStatusSignal {
   alreadyExpired?: true;
 }
 
+/**
+ * Card 1c9dcb24 — same purely-advisory, computed-after-write posture as every sibling signal above:
+ * present only when the just-written note's `[[wikilink]]` targets include at least one key this
+ * project's memory store does not currently have. Never blocks the write — an unresolved target may be a
+ * typo, a note not yet written, OR a deliberate reference into a different memory system (see
+ * project-memory-outbound-links.ts's own doc comment) — this signal only reports, it never strips the
+ * link or rejects the write.
+ */
+export interface UnresolvedLinkSignal {
+  message: string;
+  unresolvedKeys: string[];
+}
+
+function computeUnresolvedLinkStatus(db: Db, projectId: string, entry: ProjectMemoryEntry): UnresolvedLinkSignal | undefined {
+  const existingKeys = new Set(db.listProjectMemoryKeys(projectId));
+  const unresolvedKeys = findUnresolvedOutboundLinks(entry, existingKeys);
+  if (unresolvedKeys.length === 0) return undefined;
+  return { unresolvedKeys, message: unresolvedOutboundLinksMessage(unresolvedKeys) };
+}
+
 function computeExpiryStatus(entry: ProjectMemoryEntry): ExpiryStatusSignal | undefined {
   if (!entry.expiresAt) return undefined;
   if (isProjectMemoryExpired(entry)) {
@@ -309,7 +333,7 @@ export function writeProjectMemory(
   projectId: string,
   input: MemoryWriteInput,
 ):
-  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal; evictionStatus?: EvictionCandidateSignal; nearDuplicateStatus?: NearDuplicateSignal; expiryStatus?: ExpiryStatusSignal })
+  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal; evictionStatus?: EvictionCandidateSignal; nearDuplicateStatus?: NearDuplicateSignal; expiryStatus?: ExpiryStatusSignal; unresolvedLinkStatus?: UnresolvedLinkSignal })
   | { error: string }
   | MemoryWriteConflict
   | MemoryWriteTooLong {
@@ -445,6 +469,7 @@ export function writeProjectMemory(
   const evictionStatus = computeEvictionCandidateStatus(db, projectId, result.entry, memoryConfig.maxNotes);
   const nearDuplicateStatus = computeNearDuplicateSignal(nearDuplicateCandidate);
   const expiryStatus = computeExpiryStatus(result.entry);
+  const unresolvedLinkStatus = computeUnresolvedLinkStatus(db, projectId, result.entry);
   return {
     ...result.entry,
     ...(neverDropStatus ? { neverDropStatus } : {}),
@@ -453,6 +478,7 @@ export function writeProjectMemory(
     ...(evictionStatus ? { evictionStatus } : {}),
     ...(nearDuplicateStatus ? { nearDuplicateStatus } : {}),
     ...(expiryStatus ? { expiryStatus } : {}),
+    ...(unresolvedLinkStatus ? { unresolvedLinkStatus } : {}),
   };
 }
 
@@ -480,11 +506,13 @@ function computeNeverDropStatus(
   const mentionsIndex = buildMentionsIndex(db, projectId);
   // Card 527ed4f0 — same build-once fix for the OTHER per-note scan annotateNote used to run: backlinks.
   const backlinksIndex = buildBacklinksIndex(db, projectId);
+  // Card 1c9dcb24 — same build-once shape again, for outbound [[wikilink]] targets that don't resolve.
+  const outboundLinksIndex = buildOutboundLinksIndex(db, projectId);
   // Card e4e180ad: uses the SAME combined annotate as the real kickoff digest (project-memory-recall.ts's
   // retrieveProjectMemoryForKickoff) — backlinks ride in the floor tier's rendered size exactly like
   // linked-request annotations already did, so this status can never under-report against what the
   // packer's own in-digest ALARM line actually computes (see composeProjectMemoryDigest's DoD-6 cross-check).
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex, outboundLinksIndex);
   const status = computeFloorTierStatus(pinnedNow, budgetTokens, annotate);
   return {
     floorCount: status.floorCount,
@@ -520,7 +548,9 @@ function computeRestTierSignal(
   const mentionsIndex = buildMentionsIndex(db, projectId);
   // Card 527ed4f0 — same build-once fix for the OTHER per-note scan annotateNote used to run: backlinks.
   const backlinksIndex = buildBacklinksIndex(db, projectId);
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex);
+  // Card 1c9dcb24 — same build-once shape again, for outbound [[wikilink]] targets that don't resolve.
+  const outboundLinksIndex = buildOutboundLinksIndex(db, projectId);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex, outboundLinksIndex);
   const status = computeRestTierStatus(pinnedNow, budgetTokens, annotate);
   const cycle = status.roughCycleKickoffs;
   return {
@@ -567,25 +597,36 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *  an empty `backlinks: []` is a MEASURED zero — "this note has no inbound links" — structurally
  *  distinguishable from absent.
  *
+ *  `unresolvedOutboundLinks` (card 1c9dcb24) — the mirror image of `backlinks`: every `[[wikilink]]`
+ *  target THIS note's own text cites that does not exist in this project's memory store, resolved fresh
+ *  at read time (see sessions/project-memory-outbound-links.ts). ALWAYS an array (never omitted); `[]` is
+ *  a measured zero, same discipline as `backlinks`. Never auto-stripped from `text` — an unresolved
+ *  target may be a typo, a note not written yet, or a deliberate reference into a different memory
+ *  system this store has no visibility into.
+ *
  *  @decision 57a91801 — `expired` is `isProjectMemoryExpired(entry)` at THIS read (mem0's own
  *  `show_expired` escape hatch): `memory_read`/`memory_list` keep returning the note regardless, this
  *  just names whether it's currently excluded from every kickoff tier. */
-export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[]; expired: boolean };
+export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[]; unresolvedOutboundLinks: string[]; expired: boolean };
 
-/** `backlinks` is a REQUIRED, already-resolved value — never an optional override with a per-note
- *  fallback (card d305f1a2 residual: the old `backlinksOverride?` defaulted to {@link annotateBacklinks}'s
- *  per-note DB round-trip when omitted, so a future LIST caller that forgot to pass it would silently
- *  reintroduce the O(N²) cost {@link annotateBacklinksBulk} exists to replace, with no error and no test
- *  failure — a doc comment was the only thing stopping it). Making it required moves that guarantee from
- *  prose to the type system: `listProjectMemoryEntries` resolves its corpus-wide bulk value and passes it
- *  in; `readProjectMemory` resolves its own single-note value via {@link annotateBacklinks} and passes
- *  that. Neither caller can omit it. */
-function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlinks: string[]): ProjectMemoryEntryWithLinks {
+/** `backlinks`/`unresolvedOutboundLinks` are REQUIRED, already-resolved values — never an optional
+ *  override with a per-note fallback (card d305f1a2 residual: the old `backlinksOverride?` defaulted to
+ *  {@link annotateBacklinks}'s per-note DB round-trip when omitted, so a future LIST caller that forgot to
+ *  pass it would silently reintroduce the O(N²) cost {@link annotateBacklinksBulk} exists to replace, with
+ *  no error and no test failure — a doc comment was the only thing stopping it). Making both required
+ *  moves that guarantee from prose to the type system: `listProjectMemoryEntries` resolves its corpus-wide
+ *  bulk values and passes them in; `readProjectMemory` resolves its own single-note values via {@link
+ *  annotateBacklinks}/{@link findUnresolvedOutboundLinks} and passes those. Neither caller can omit
+ *  either. */
+function withLinks(
+  db: Db, projectId: string, entry: ProjectMemoryEntry, backlinks: string[], unresolvedOutboundLinks: string[],
+): ProjectMemoryEntryWithLinks {
   return {
     ...entry,
     requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds),
     everDelivered: entry.retrievalCount > 0,
     backlinks,
+    unresolvedOutboundLinks,
     expired: isProjectMemoryExpired(entry),
   };
 }
@@ -612,16 +653,23 @@ function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlin
 export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntryWithLinks[] {
   const corpus = db.listProjectMemory(projectId);
   const backlinksByKey = annotateBacklinksBulk(corpus);
-  return corpus.map((e) => withLinks(db, projectId, e, backlinksByKey.get(e.key) ?? []));
+  // Card 1c9dcb24 — same "build once over the corpus already fetched" shape as backlinks just above,
+  // never a second db.listProjectMemory round-trip.
+  const unresolvedByKey = findUnresolvedOutboundLinksBulk(corpus);
+  return corpus.map((e) => withLinks(db, projectId, e, backlinksByKey.get(e.key) ?? [], unresolvedByKey.get(e.key) ?? []));
 }
 
 /** Read ONE note in full by key, annotated with its linked Requests' LIVE state (card e6d270b3). An
  *  on-demand single-note read, so it resolves its own backlinks via {@link annotateBacklinks} (the
- *  per-note path) rather than the bulk resolver a listing amortizes across many rows. */
+ *  per-note path) rather than the bulk resolver a listing amortizes across many rows. Its outbound
+ *  `[[wikilink]]` targets (card 1c9dcb24) are resolved against a KEY-ONLY corpus fetch ({@link
+ *  Db.listProjectMemoryKeys}) rather than the full-row fetch `annotateBacklinks` makes for inbound
+ *  matching — cheaper for this single-note read, since it never needs any OTHER note's body. */
 export function readProjectMemory(db: Db, projectId: string, key: string): ProjectMemoryEntryWithLinks | { error: string } {
   const found = db.getProjectMemoryByKey(projectId, key.trim());
   if (!found) return { error: `no memory note with key "${key}" on this project` };
-  return withLinks(db, projectId, found, annotateBacklinks(db, projectId, found.key));
+  const existingKeys = new Set(db.listProjectMemoryKeys(projectId));
+  return withLinks(db, projectId, found, annotateBacklinks(db, projectId, found.key), findUnresolvedOutboundLinks(found, existingKeys));
 }
 
 /** A bounded cap on `memory_history`'s own `limit` param — independent of, and tighter than, the

@@ -560,6 +560,13 @@ export class TaskMcpRouter {
           "advisory, it never blocks the write; consider `memory_write`-ing the NAMED existing key instead " +
           "of accumulating a near-duplicate under a different one. Never present on an update to an " +
           "existing key (that's the mechanism for fixing a flagged duplicate, not something to re-flag). " +
+          "If `text` contains a `[[wikilink]]` whose target key does not exist in this project's memory " +
+          "store, this response carries an `unresolvedLinkStatus` ({message, unresolvedKeys}) naming every " +
+          "such target — purely advisory, it never blocks this write, and the link is never auto-stripped " +
+          "or auto-deleted. A target that doesn't resolve may be a typo, a note you haven't written yet, " +
+          "or a deliberate reference into a DIFFERENT memory system (e.g. a personal cross-session memory " +
+          "store this project memory has no visibility into) — this signal can't tell those apart, so " +
+          "treat it as a prompt to double-check, not a confirmed error. " +
           "Optional `expiresAt` (card 57a91801) — an ISO date/datetime (UTC, e.g. \"2026-12-01\") past " +
           "which this note is excluded from EVERY kickoff tier (pinned AND related) — relevant for a note " +
           "that should only compete for context while something stays true (e.g. an investigation is " +
@@ -659,7 +666,12 @@ export class TaskMcpRouter {
           "`backlinks` — one line per OTHER note whose text `[[wikilinks]]` to this note's key, resolved live " +
           "at THIS read (never stored, never counted against this note's own byte cap); `[]` is a measured " +
           "zero (nothing links here), not an absent field; past 20 inbound links a trailing line reports " +
-          "\"showing 20 of N\" rather than truncating silently. Each note also carries `expired` (card " +
+          "\"showing 20 of N\" rather than truncating silently. Each note also carries " +
+          "`unresolvedOutboundLinks` — every `[[wikilink]]` key THIS note's own text cites that does NOT " +
+          "exist in this project's memory store, resolved live at THIS read; `[]` is a measured zero " +
+          "(every target resolves, or there are none), not an absent field. Never auto-stripped from " +
+          "`text` — a target may be a typo, a note not written yet, or a deliberate reference into a " +
+          "different memory system this store has no visibility into. Each note also carries `expired` (card " +
           "57a91801, `expiresAt` set AND already past) — an expired note is NOT deleted, it's still " +
           "returned here in full; `expired:true` just means it's currently excluded from every kickoff " +
           "tier (pinned and related). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
@@ -695,7 +707,12 @@ export class TaskMcpRouter {
           "Also carries `backlinks` — one line per OTHER note whose text `[[wikilinks]]` to THIS note's key, " +
           "resolved live at THIS read (never stored, never counted against this note's own byte cap); `[]` " +
           "is a measured zero (nothing links here), not an absent field; past 20 inbound links a trailing " +
-          "line reports \"showing 20 of N\" rather than truncating silently. Also carries `expired` (card " +
+          "line reports \"showing 20 of N\" rather than truncating silently. Also carries " +
+          "`unresolvedOutboundLinks` — every `[[wikilink]]` key THIS note's own text cites that does NOT " +
+          "exist in this project's memory store, resolved live at THIS read; `[]` is a measured zero " +
+          "(every target resolves, or there are none), not an absent field. Never auto-stripped from " +
+          "`text` — a target may be a typo, a note not written yet, or a deliberate reference into a " +
+          "different memory system this store has no visibility into. Also carries `expired` (card " +
           "57a91801, `expiresAt` set AND already past) — the note is still returned here in full either " +
           "way; `expired:true` just means it's currently excluded from every kickoff tier.",
         inputSchema: strictShape({ key: z.string() }),

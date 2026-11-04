@@ -9503,6 +9503,16 @@ export class Db {
     return (this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? ORDER BY pinned DESC, updated_at DESC")
       .all(projectId) as Row[]).map(toProjectMemoryEntry);
   }
+  /** Card 1c9dcb24 — a KEY-ONLY listing for outbound `[[wikilink]]` resolution (does this project's store
+   *  actually have a note under this key), so an on-demand single-note read (`memory_read`) doesn't have
+   *  to pull every note's full `text`/history columns just to build the existence check. Deliberately
+   *  UNFILTERED by expiry/pinned — an expired or unpinned note still genuinely EXISTS (card 57a91801:
+   *  expiry gates kickoff delivery, never existence), so a link to one is a resolved link, not a broken
+   *  one; order is irrelevant, this is consumed only as a Set. */
+  listProjectMemoryKeys(projectId: string): string[] {
+    return (this.db.prepare("SELECT key FROM project_memory WHERE project_id = ?")
+      .all(projectId) as { key: string }[]).map((r) => r.key);
+  }
   /** Explicit curation (`memory_forget`). Idempotent on a missing key. Returns whether a row was deleted.
    *  Card 5ccc2462 round 2 (reversing round 1): ALSO deletes this key's `project_memory_history` rows, in
    *  the SAME transaction as the live-row delete — "forget" must mean forget. A forgotten note can have
