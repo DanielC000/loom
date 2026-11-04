@@ -15,8 +15,8 @@
 //   node --experimental-strip-types packages/web/test/task-hierarchy.mjs
 import assert from "node:assert/strict";
 import {
-  boardHierarchy, hasBoardHierarchy, taskLinks, hasTaskLinks, splitResolved, resolveParentInput,
-  RELATION_KINDS, RESOLVABLE_KINDS,
+  boardHierarchy, hasBoardHierarchy, taskLinks, hasTaskContextLinks, splitResolved, resolveParentInput,
+  RELATION_KINDS, RESOLVABLE_KINDS, CONTEXT_RELATION_KINDS,
 } from "../src/lib/taskHierarchy.ts";
 
 let pass = 0;
@@ -35,13 +35,13 @@ check("a task read with no hierarchy fields reads as fully empty and renders not
   assert.equal(l.parent, null);
   assert.deepEqual(l.children, { done: 0, total: 0, items: [] });
   for (const k of RELATION_KINDS) assert.deepEqual(l.relations[k], []);
-  assert.equal(hasTaskLinks(l), false);
+  assert.equal(hasTaskContextLinks(l), false);
 });
 
 check("a null/undefined task (detail still loading) is empty, not a throw", () => {
   for (const t of [null, undefined]) {
     const l = taskLinks(t);
-    assert.equal(hasTaskLinks(l), false);
+    assert.equal(hasTaskContextLinks(l), false);
     assert.equal(l.children.total, 0);
   }
 });
@@ -96,7 +96,30 @@ check("a task read carries parentId, parent, children and all five relation buck
   assert.equal(l.children.done, 1);
   assert.equal(l.children.total, 2);
   for (const k of RELATION_KINDS) assert.equal(l.relations[k].length, 1, `${k} should carry one edge`);
-  assert.equal(hasTaskLinks(l), true);
+  assert.equal(hasTaskContextLinks(l), true);
+});
+
+// ── What the read-only CONTEXT block still draws (card 03d9db6e moved the writable kinds out) ──────
+check("the context block's gate IGNORES the editable kinds — else it draws an empty box", () => {
+  // A card whose ONLY edge is a blockedBy genuinely HAS a link, but the editor draws it now. Gating the
+  // context block on it would render a bordered box with nothing inside, which is what this pins.
+  const onlyEditable = taskLinks({
+    id: "t1", title: "blocked only",
+    relations: { blockedBy: [{ id: "b1", title: "blocker", columnKey: "todo", resolved: false }] },
+  });
+  assert.equal(onlyEditable.relations.blockedBy.length, 1, "the edge is still READ, just drawn elsewhere");
+  assert.equal(hasTaskContextLinks(onlyEditable), false);
+  // …while each thing the card cannot write about itself DOES open the block.
+  assert.equal(hasTaskContextLinks(taskLinks({ parent: { id: "p", title: "epic", columnKey: "todo" } })), true);
+  assert.equal(hasTaskContextLinks(taskLinks({ children: { done: 0, total: 1, items: [] } })), true);
+  assert.equal(hasTaskContextLinks(taskLinks({
+    relations: { discoveries: [{ id: "d", title: "spun out", columnKey: "todo" }] },
+  })), true);
+});
+
+check("CONTEXT_RELATION_KINDS holds only kinds this card's own write body cannot change", () => {
+  assert.deepEqual(CONTEXT_RELATION_KINDS, ["discoveries"]);
+  for (const k of CONTEXT_RELATION_KINDS) assert.ok(RELATION_KINDS.includes(k), `${k} must be a real kind`);
 });
 
 check("parentId falls back to the resolved parent's id, and vice versa is not invented", () => {

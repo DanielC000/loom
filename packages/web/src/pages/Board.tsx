@@ -12,8 +12,13 @@ import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
 import { color, columnTone, font, radius, tone, type Tone } from "../theme";
 // Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
 // structurally and defaults every one of them, so a response without them renders exactly as before.
-import { boardHierarchy, hasBoardHierarchy, hasTaskLinks, resolveParentInput, taskLinks, type TaskLinks } from "../lib/taskHierarchy";
+import { boardHierarchy, hasBoardHierarchy, hasTaskContextLinks, resolveParentInput, taskLinks, type TaskLinks } from "../lib/taskHierarchy";
 import { BoardCardHierarchy, TaskLinksBlock } from "../components/taskLinks";
+import { TaskRelationsEditor } from "../components/taskRelationsEditor";
+import {
+  relationBaseline, relationErrorTarget, relationPatch, relationsDirty,
+  type PickerCard, type RelationDraft, type RelationPatch,
+} from "../lib/taskRelationsEdit";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
@@ -32,10 +37,12 @@ const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
 // receives it and api.updateTask all read the same shape, so a new editable field can't be added to the
 // form and quietly dropped on the way to the request. `parentId` (card 1ae4f88c) is `string | null`:
 // null CLEARS the parent, and the key is omitted entirely when the field wasn't touched.
+// The four relation kinds (card 03d9db6e) ride the same shape — see RelationPatch for the whole-set
+// replace rule and why an untouched kind must be omitted rather than echoed back.
 type TaskEditPatch = {
   title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean;
   repoKey?: string | null; parentId?: string | null; baseVersion?: number;
-};
+} & RelationPatch;
 // A live lane's card order lives beside `prio` in components/priority — see that comment for why it
 // is not in this file.
 // Done columns sort most-recently-done first. `updatedAt` (ISO string → lexical compare is chronological)
@@ -207,6 +214,14 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     for (const t of allTasks) m.set(t.id, t.title);
     return m;
   }, [allTasks]);
+  //  · the drawer's relation picker (card 03d9db6e) needs a lane as well as a title, so it gets its own
+  //    projection rather than a second map. Built off the UNFILTERED list for the same reason as
+  //    titleById above: a card hidden by the board's search filter is still a legitimate link target,
+  //    and "relations are same-project only" is the daemon's rule — not "relations are visible-only".
+  const pickerCards = useMemo<PickerCard[]>(
+    () => allTasks.map((t) => ({ id: t.id, title: t.title, columnKey: t.columnKey })),
+    [allTasks],
+  );
   const shownTasks = allTasks.filter((t) =>
     taskMatchesSearch(t, q) &&
     (priFilter.size === 0 || priFilter.has(prio(t))) &&
@@ -268,7 +283,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           repos={repos} primaryRepoPath={project?.repoPath ?? ""}
           trailersOff={commitTrailersOff(project?.config?.orchestration)}
           links={taskLinks(detail)} linksUnavailable={taskDetail.isError && !detail}
-          columns={board.data?.columns ?? []} titleById={titleById} onOpenTask={setOpenTaskId}
+          columns={board.data?.columns ?? []} titleById={titleById} cards={pickerCards} onOpenTask={setOpenTaskId}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
           saveError={edit.error as TaskUpdateConflictError | null}
           onDismissConflict={() => edit.reset()}
@@ -837,11 +852,13 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
+function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
   { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
     /** Whether this project writes NO reserved merge trailers, so a missing landing proves nothing. */
     trailersOff: boolean;
-    links: TaskLinks; linksUnavailable: boolean; columns: KanbanColumn[]; titleById: Map<string, string>; onOpenTask: (id: string) => void;
+    links: TaskLinks; linksUnavailable: boolean; columns: KanbanColumn[]; titleById: Map<string, string>;
+    /** Every card on the loaded board, for the relation picker (card 03d9db6e). */
+    cards: PickerCard[]; onOpenTask: (id: string) => void;
     onClose: () => void; onSave: (patch: TaskEditPatch) => void; saving: boolean; saveError: TaskUpdateConflictError | null; onDismissConflict: () => void;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
@@ -852,8 +869,10 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   // Which registered repo this card targets. "" = primary. Only editable when the project HAS a
   // registry — see the Repo field below.
   const [repoKey, setRepoKey] = useState<string>(task.repoKey ?? "");
-  // Parent (card 1ae4f88c) — the ONE hierarchy write this drawer offers, keyed by the 8-char prefix the
-  // rest of Loom names cards by. Relation editing is deliberately absent (owner's "no overkill").
+  // Parent (card 1ae4f88c) — keyed by the 8-char prefix the rest of Loom names cards by. It was once the
+  // ONE hierarchy write this drawer offered ("no overkill"); card 03d9db6e added the four relation kinds
+  // below it, on the owner's own ask. This control is unchanged by that: a typed id/prefix with a named
+  // resolution line is still the right affordance for a single-valued field on a board of thousands.
   //
   // NOT seeded into state at mount: `links.parentId` rides on the single-task read, which resolves AFTER
   // this component mounts, so a mount-time initializer captures `null` and never catches up — the field
@@ -864,6 +883,20 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   // cards never set. One line here, editor on demand.
   const [parentDraft, setParentDraft] = useState<string | null>(null);
   const [parentEditing, setParentEditing] = useState(false);
+  // Relations (card 03d9db6e) — the SAME fall-through shape as parentDraft above, and for the same
+  // reason: `links.relations` rides on the single-task read, which resolves AFTER this component mounts,
+  // so a mount-time initializer captures EMPTY arrays and never catches up — every kind would read as
+  // empty and compare as a pending CLEAR of every edge on the card. `null` means untouched: the editor
+  // is handed `relationBase` until the first edit, which snapshots the draft off it.
+  //
+  // Once snapshotted, the 4s detail poll no longer moves it. Deliberate: the write is a whole-set
+  // replace, so a staged set IS the user's intended set for the kinds they touched — while a kind they
+  // never touched is omitted from the patch entirely, so an agent's concurrent write to a DIFFERENT kind
+  // still survives their Save.
+  const relationBase = useMemo(() => relationBaseline(links), [links]);
+  const [relationDraft, setRelationDraft] = useState<RelationDraft | null>(null);
+  const relations = relationDraft ?? relationBase;
+  const relationsChanged = relationsDirty(relations, relationBase);
   const parentServer = links.parentId ? links.parentId.slice(0, 8) : "";
   const parentInput = parentDraft ?? parentServer;
   const parentRes = resolveParentInput(parentInput, task.id, titleById);
@@ -874,7 +907,10 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   // entry) open rather than swallowing it.
   const wasSaving = useRef(false);
   useEffect(() => {
-    if (wasSaving.current && !saving && !saveError) { setParentDraft(null); setParentEditing(false); }
+    // The relation draft is dropped on the same edge and for the same reason: the write landed, so the
+    // server value it would be diffed against is now the staged value — keeping the draft would leave
+    // the dialog looking dirty forever after a successful Save.
+    if (wasSaving.current && !saving && !saveError) { setParentDraft(null); setParentEditing(false); setRelationDraft(null); }
     wasSaving.current = saving;
   }, [saving, saveError]);
   // What a Save would actually persist — null clears the parent. `undefined` means "don't touch it": an
@@ -895,7 +931,8 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
     || (repoKey || null) !== (task.repoKey ?? null)
     // An unresolvable parent entry counts as dirty too — it's an edit in progress, so the close guard must
     // still fire rather than letting a typed-but-unsaveable value vanish on Esc.
-    || parentChanged || (parentBlocked && parentDraft !== null);
+    || parentChanged || (parentBlocked && parentDraft !== null)
+    || relationsChanged;
   // Card 0b36702e: the version this drawer instance actually LOADED — captured ONCE (this initializer
   // runs only at mount, since `key={task.id}` on the caller never remounts this component for the same
   // card), never re-derived from a later prop refresh. This is deliberate: `task` is a prop, so if we
@@ -914,6 +951,12 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   }, [task.version, dirty]);
   // The fresh task the server returned alongside a 409 — null unless the last save attempt conflicted.
   const saveConflict = saveError?.conflict ? (saveError.current ?? null) : null;
+  // Where the last refusal belongs on screen (card 03d9db6e). The structure validator names the field or
+  // the cycle in the message itself, so a refusal can be shown AT the control that caused it instead of
+  // only in the generic line beside Save — a message like "attach it to <id> (its own parent) instead" is
+  // actionable, and an actionable message half a panel away from its control reads as a mystery. Every
+  // scope it recognises has a home below; `null` (anything it doesn't) still falls through to that line.
+  const relationErr = saveError && !saveConflict ? relationErrorTarget(saveError.message) : null;
   // Guard every path OUT of this card against silently discarding unsaved edits. When dirty, the request
   // arms an in-drawer confirm (mirroring the delete two-step) instead of leaving; when clean it leaves
   // immediately, zero extra friction. Two kinds of exit share one pending-nav state so the guard can't be
@@ -1041,7 +1084,9 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <Button onClick={() => setPendingNav(null)}>Cancel</Button>
           </div>
         )}
-        {/* Card-context section: parent / children / relations, for the dossier drawer.
+        {/* Card-context section: the parent, the children, and the relations this card cannot write
+            about itself. The four WRITABLE kinds moved to the Relations editor below when it shipped
+            (card 03d9db6e) — see hasTaskContextLinks for why the gate had to move with them.
 
             @decision 1ae4f88c — sits directly under the dossier header, above the edit body, and
             reserves no loading placeholder: that would flash an empty panel on every drawer open for
@@ -1056,7 +1101,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
           </div>
         )}
-        {hasTaskLinks(links) && (
+        {hasTaskContextLinks(links) && (
           <TaskLinksBlock links={links} columns={columns} titleById={titleById} onOpenTask={requestOpen} />
         )}
         {/* Dossier body: LEFT = task editing, RIGHT = connected-requests rail. When the rail is collapsed
@@ -1086,6 +1131,18 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
               </button>
             );
           })}
+        </div>
+        {/* ── RELATIONS (card 03d9db6e) — the owner's "UI Features in board card dialog for users to set
+            and adjust Task relations". The heading is authored HERE, like every other section label in
+            this dialog, so the PARENT control below falls under it: parent is part of the same card
+            graph, and leaving it heading-less above the section read as a stray line under PRIORITY.
+            Its own control is unchanged and NOT rebuilt inside the editor — a second parent editor
+            would be a second place for the same write to diverge. */}
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+          <span style={labelStyle}>Relations</span>
+          <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+            same board only · staged until you save
+          </span>
         </div>
         {/* Parent — a card id or any unambiguous PREFIX, empty to clear. A plain field rather than a
             picker: this board runs to thousands of cards, so a <select>/datalist of every one is a DOM
@@ -1144,6 +1201,24 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             )}
           </div>
         )}
+        {/* A parentId refusal the client could not have caught — the depth cap, or a parent on another
+            project's board. The resolution line above only ever speaks for what THIS board can resolve,
+            so a server refusal needs its own line here rather than the footer's generic one. */}
+        {relationErr?.scope === "parent" && saveError && (
+          <span role="alert" data-testid="parent-server-error"
+            style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4, marginTop: -4 }}>
+            {saveError.message}
+          </span>
+        )}
+        {/* The four kinds this card can write about ITSELF, staged onto the same Save as every other
+            field here. The read-only links block above keeps what it CANNOT (children's parentage lives
+            on the child; `discoveries` is the inverse of another card's `discoveredFrom`). A server
+            refusal is placed at the row — or, for a cycle, the section — it names, rather than only in
+            the generic line beside Save: see relationErrorTarget, which decides placement, never wording. */}
+        <TaskRelationsEditor selfId={task.id} links={links} draft={relations} baseline={relationBase}
+          cards={cards} columns={columns} titleById={titleById}
+          saveErrorMessage={saveError && !saveConflict ? saveError.message : null}
+          onChange={setRelationDraft} onOpenTask={requestOpen} />
         {/* Target repo (multi-repo epic 49136451, phase 3). Rendered ONLY when the project has a
             registry — a single-repo project's drawer is byte-identical to before. Shows the RESOLVED
             absolute path of whatever is currently selected, which is the thing a human actually needs to
@@ -1282,14 +1357,23 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             // be sent at all, so this drawer keeps saving cleanly against a daemon without the hierarchy
             // write route (card 3df86c87) as long as nobody touches the Parent field.
             ...(parentChanged ? { parentId: parentPatch } : {}),
+            // Only the relation kinds that actually CHANGED (card 03d9db6e) — same omit-an-untouched-field
+            // rule as repoKey/parentId above, and load-bearing here rather than merely tidy: each kind is
+            // a whole-set replace, so echoing an untouched one back would re-declare a `released:true`
+            // edge the baseline deliberately dropped.
+            ...relationPatch(relations, relationBase),
             // baseVersion (card 0b36702e): the version THIS drawer loaded, never re-fetched at save time —
             // see loadedVersion's own doc above for why that distinction is the entire fix.
             baseVersion: loadedVersion,
           })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
-            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); }}>Reset</Button>
+            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); setRelationDraft(null); }}>Reset</Button>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
-          {saveError && !saveConflict && (
+          {/* The catch-all failure line. A refusal the Relations section has already placed at the row
+              (or section) it names is suppressed HERE rather than printed twice — one message, shown at
+              the control the human has to go fix. `relationErrorTarget` returning null (anything it does
+              not recognise) falls through to this line, so nothing is ever swallowed. */}
+          {saveError && !saveConflict && !relationErr && (
             <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
           )}
           {/* Card 0b36702e's "detect-and-warn" remedy: a stale save doesn't clobber — it surfaces the fresh
@@ -1307,7 +1391,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
                 setTitle(saveConflict.title); setBody(saveConflict.body ?? "");
                 setPriority(prio(saveConflict)); setHeld(saveConflict.held ?? false);
                 setDeferred(saveConflict.deferred ?? false); setRepoKey(saveConflict.repoKey ?? "");
-                setParentDraft(null); setParentEditing(false);
+                setParentDraft(null); setParentEditing(false); setRelationDraft(null);
                 setLoadedVersion(saveConflict.version);
                 onDismissConflict();
               }}>Reload</Button>
@@ -1315,6 +1399,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
                 title, body, priority, held, deferred,
                 ...(repoKey !== (task.repoKey ?? "") ? { repoKey: repoKey || null } : {}),
                 ...(parentChanged ? { parentId: parentPatch } : {}),
+                ...relationPatch(relations, relationBase),
               })}>Overwrite anyway</Button>
             </div>
           )}

@@ -24,8 +24,8 @@ import type { BoardTask, Task } from "@loom/shared";
  * happens to be done.
  *
  * @decision 3df86c87 — never send a `released:true` item back in a `blockedBy`/`blocks` write: it
- * re-declares dead deferral history as a live edge. Nothing here writes those fields today; a future
- * relation editor must filter them out.
+ * re-declares dead deferral history as a live edge. That editor now exists (card 03d9db6e): the filter
+ * lives in `lib/taskRelationsEdit`'s `relationBaseline`, which is the only thing that builds a write set.
  */
 export type TaskRef = { id: string; title: string; columnKey: string; resolved: boolean; released: boolean };
 
@@ -158,9 +158,23 @@ export function taskLinks(task: Task | null | undefined): TaskLinks {
   };
 }
 
-/** True when the drawer's Links block has anything to render (else it renders nothing at all). */
-export function hasTaskLinks(l: TaskLinks): boolean {
-  return l.parent !== null || l.children.total > 0 || RELATION_KINDS.some((k) => l.relations[k].length > 0);
+/**
+ * The relation buckets the drawer's read-only CONTEXT block still draws. The four kinds a card can write
+ * about ITSELF moved to the drawer's relation editor when that shipped (card 03d9db6e) — showing them in
+ * both places put the same edge on screen twice, ~200px apart, once with a remove control and once
+ * without. What is left is what this card genuinely cannot change from here: `discoveries` is the inverse
+ * of another card's `discoveredFrom`, and a child's parentage lives on the child.
+ */
+export const CONTEXT_RELATION_KINDS: RelationKind[] = ["discoveries"];
+
+/**
+ * True when the drawer's read-only context block has anything to render (else it renders nothing at all).
+ *
+ * Deliberately NOT "does this card have any link": a card whose only edge is a `blockedBy` has links, but
+ * they are the editor's to draw, and gating the block on them would render an empty bordered box.
+ */
+export function hasTaskContextLinks(l: TaskLinks): boolean {
+  return l.parent !== null || l.children.total > 0 || CONTEXT_RELATION_KINDS.some((k) => l.relations[k].length > 0);
 }
 
 /**

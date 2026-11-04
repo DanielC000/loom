@@ -84,9 +84,18 @@ const linksBlock = (page: Page) => page.getByTestId("task-links");
  * is genuinely ambiguous rather than merely fragile.
  */
 const linkSection = (page: Page, key: string) => page.getByTestId(`links-${key}`);
-/** The clickable link to a given card WITHIN one section, addressed by its accessible name. */
-const linkTo = (page: Page, section: string, id: string) =>
-  linkSection(page, section).getByRole("button", { name: new RegExp(`^Open card ${id.slice(0, 8)} `) });
+/**
+ * One section of the drawer's relation EDITOR (card 03d9db6e). The four WRITABLE kinds — blockedBy,
+ * blocks, related, discoveredFrom — moved out of the read-only block above and into the editor when it
+ * shipped, so that this dialog does not show the same edge twice, once with a remove control and once
+ * without. Their assertions below moved with them; the facts asserted are unchanged.
+ */
+const editSection = (page: Page, key: string) => page.getByTestId(`relations-edit-${key}`);
+/** The clickable link to a given card WITHIN one section (read-only block or editor row). */
+const linkIn = (scope: Locator, id: string) =>
+  scope.getByRole("button", { name: new RegExp(`^Open card ${id.slice(0, 8)} `) });
+const linkTo = (page: Page, section: string, id: string) => linkIn(linkSection(page, section), id);
+const editLinkTo = (page: Page, kind: string, id: string) => linkIn(editSection(page, kind), id);
 /**
   * The open drawer's card id, read off the dossier header — the observable for "which card am I on".
   *
@@ -194,22 +203,31 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
 
   const block = linksBlock(page);
   await expect(block).toBeVisible();
-  // Every section the contract defines for this card, each naming its target.
+  // The read-only block carries what this card cannot write about itself.
   await expect(block.getByText("Parent", { exact: true })).toBeVisible();
   await expect(block.getByText("Children", { exact: true })).toBeVisible();
-  await expect(block.getByText("Blocked by", { exact: true })).toBeVisible();
-  await expect(block.getByText("Related", { exact: true })).toBeVisible();
-  await expect(block.getByText("Discovered from", { exact: true })).toBeVisible();
   await expect(block.getByText("0/1 done", { exact: true })).toBeVisible();
-  // The RESOLVED blocker is present as history, explicitly marked — not dropped, and not shown as live.
-  await expect(block.getByText("(resolved)", { exact: true })).toBeVisible();
-  await expect(linkTo(page, "blockedBy", doneChild.id)).toBeVisible();
-  // …and the LIVE blocker sits in the same section, unmuted.
-  await expect(linkTo(page, "blockedBy", blocker.id)).toBeVisible();
-  // The parent link is in the Parent section; the SAME epic also appears under Discovered from, which is
-  // correct and is exactly why both are addressed per-section rather than by name alone.
   await expect(linkTo(page, "parent", epic.id)).toBeVisible();
-  await expect(linkTo(page, "discoveredFrom", epic.id)).toBeVisible();
+  // …and NOT the writable kinds, which the editor owns — the same edge must not appear in both, once
+  // with a remove control and once without (card 03d9db6e).
+  for (const label of ["Blocked by", "Related", "Discovered from"]) {
+    await expect(block.getByText(label, { exact: true })).toHaveCount(0);
+  }
+  await expect(linkSection(page, "blockedBy")).toHaveCount(0);
+
+  // Every writable section the contract defines for this card, each naming its target, in the editor.
+  const editor = dialog.getByTestId("task-relations-editor");
+  await expect(editor.getByText("Blocked by", { exact: true })).toBeVisible();
+  await expect(editor.getByText("Related", { exact: true })).toBeVisible();
+  await expect(editor.getByText("Discovered from", { exact: true })).toBeVisible();
+  // The RESOLVED blocker is present as history, explicitly marked — not dropped, and not shown as live.
+  await expect(editor.getByText("(resolved)", { exact: true })).toBeVisible();
+  await expect(editLinkTo(page, "blockedBy", doneChild.id)).toBeVisible();
+  // …and the LIVE blocker sits in the same section, unmuted.
+  await expect(editLinkTo(page, "blockedBy", blocker.id)).toBeVisible();
+  // The parent link is in the block's Parent section; the SAME epic also appears under Discovered from
+  // in the editor, which is correct and is exactly why both are addressed per-section, not by name.
+  await expect(editLinkTo(page, "discoveredFrom", epic.id)).toBeVisible();
   // A card that HAS a parent shows it as ONE line with edit/clear, not an open field — and the open
   // field is absent from the DOM until one of those is clicked.
   const summary = dialog.getByTestId("parent-summary");
@@ -249,16 +267,17 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   // ── CLICK-THROUGH parent → child → blocker: the third hop the DoD names ───────────────────────────
   await linkTo(page, "children", openChild.id).click();
   await expect.poll(() => openCardId(page)).toBe(openChild.id.slice(0, 8));
-  await linkTo(page, "blockedBy", blocker.id).click();
+  // The editor's own chips click through exactly like the read-only block's links do.
+  await editLinkTo(page, "blockedBy", blocker.id).click();
   await expect.poll(() => openCardId(page)).toBe(blocker.id.slice(0, 8));
 
   // ── THE REVERSE DIRECTION, which only real data produces ──────────────────────────────────────────
   // "Both directions are computed in this one call": the blocker's OWN drawer names what it blocks, from
   // an edge nobody wrote on this card. The route-mocked version of this spec could not have caught a
   // missing reverse edge at all, because the mock only ever returned what it was handed.
-  await expect(linkTo(page, "blocks", openChild.id)).toBeVisible();
+  await expect(editLinkTo(page, "blocks", openChild.id)).toBeVisible();
   // This blocker sits in To Do, so the edge is LIVE — `resolved` is derived from the BLOCKER's column.
-  await expect(linksBlock(page).getByText("(resolved)", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByTestId("task-relations-editor").getByText("(resolved)", { exact: true })).toHaveCount(0);
   await shoot(dialog, "board-hierarchy-drawer-blocker.png");
 
   // ── The `blocks` direction renders from the same field ────────────────────────────────────────────────
@@ -268,8 +287,8 @@ test("board cards show parent, child progress and a blocked marker; the drawer l
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await cardTitleText(page, doneChildTitle).click();
   await expect.poll(() => openCardId(page)).toBe(doneChild.id.slice(0, 8));
-  await expect(linkTo(page, "blocks", openChild.id)).toBeVisible();
-  await expect(linksBlock(page).getByText("(resolved)", { exact: true })).toHaveCount(1);
+  await expect(editLinkTo(page, "blocks", openChild.id)).toBeVisible();
+  await expect(dialog.getByTestId("task-relations-editor").getByText("(resolved)", { exact: true })).toHaveCount(1);
 });
 
 test("the drawer's Parent field resolves an id prefix, names the resolved card, and refuses a bad one", async ({ page, loomDaemon }) => {

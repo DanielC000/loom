@@ -2,22 +2,22 @@
 //
 // Two surfaces, deliberately asymmetric in weight:
 //   · BoardCardHierarchy — ONE optional 10px meta line on a board card. The owner's primary board is the
-//     Overview-embedded one, so this is the surface that must NOT grow: it renders nothing at all unless
-//     the card genuinely has a parent, children or an open blocker, which most cards don't.
-//   · TaskLinksBlock — the full picture in the card drawer, where there IS room: parent, the children
-//     list with progress, and all five relation buckets, every item clickable through to that card.
+//     Overview-embedded one, so this surface must NOT grow: it renders nothing at all unless the card
+//     genuinely has a parent, children or an open blocker — which most cards don't.
+//   · TaskLinksBlock — the card's read-only CONTEXT in the drawer: the parent, the children list with
+//     progress, and the buckets this card cannot write about itself, each clickable through. The four
+//     WRITABLE kinds live in components/taskRelationsEditor (03d9db6e); drawing them here too said it twice.
 //
-// Glyph vocabulary matches the board's existing one (⠿ grip, ≣ body, ⑂ repo, ✓ shipped): ↳ parent,
-// ⊞ children, ⊘ blocked. Colour is the established signal palette, nothing new — amber for "waiting on
-// something" (the blocked marker is plain amber TEXT, never a filled badge, so it can't be confused with
-// the filled amber `held` badge beside it), cyan for links/metadata, phosphor only for genuine
-// completion, textDim/textMuted for context.
+// Glyphs match the board's own (⠿ grip, ≣ body, ⑂ repo, ✓ shipped): ↳ parent, ⊞ children, ⊘ blocked.
+// Colour is the established signal palette — amber for "waiting on something" (plain TEXT, never a filled
+// badge, so it can't be confused with the filled amber `held` badge beside it), cyan for links, phosphor
+// only for completion, textDim/textMuted for context.
 import type { CSSProperties, ReactNode } from "react";
 import type { KanbanColumn } from "@loom/shared";
 import { Badge, Meter } from "./ui";
 import { color, columnTone, font, radius } from "../theme";
 import {
-  RELATION_KINDS, RESOLVABLE_KINDS, splitResolved,
+  CONTEXT_RELATION_KINDS, RESOLVABLE_KINDS, splitResolved,
   type BoardHierarchy, type RelationKind, type TaskLinks, type TaskRef,
 } from "../lib/taskHierarchy";
 
@@ -106,12 +106,10 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
   titleById: Map<string, string>;
   onOpenTask: (id: string) => void;
 }) {
-  const { blockedBy, blocks, related, discoveredFrom, discoveries } = links.relations;
   const allDone = links.children.total > 0 && links.children.done >= links.children.total;
-  const buckets: [RelationKind, TaskRef[]][] = [
-    ["blockedBy", blockedBy], ["blocks", blocks], ["related", related],
-    ["discoveredFrom", discoveredFrom], ["discoveries", discoveries],
-  ];
+  // Only the buckets this card cannot write about itself (card 03d9db6e moved the other four into the
+  // drawer's relation editor — see CONTEXT_RELATION_KINDS for why they are not also drawn here).
+  const buckets: [RelationKind, TaskRef[]][] = CONTEXT_RELATION_KINDS.map((k) => [k, links.relations[k]]);
   // The label/items pair is `display: contents` so both land directly on the outer grid. The items div
   // carries `data-testid="links-<key>"` because the SAME card can legitimately appear in two sections at
   // once (an epic that is both this card's parent AND where it was discovered from), so the per-section
@@ -185,7 +183,11 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
 // One clickable link to another card: glyph · title · lane chip. A target that isn't on the loaded board
 // (archived, or filtered out of this project's list) renders as PLAIN TEXT with a tooltip saying so —
 // never as a button that silently does nothing when clicked.
-function TaskLinkRow({ ref_, columns, titleById, onOpenTask, glyph, tone, suffix, muted }: {
+//
+// Exported for the drawer's relation EDITOR (components/taskRelationsEditor, card 03d9db6e): a staged
+// chip is this same row plus a remove control, so reusing it is what keeps the editable and read-only
+// views of the same edge from drifting apart visually.
+export function TaskLinkRow({ ref_, columns, titleById, onOpenTask, glyph, tone, suffix, muted }: {
   ref_: TaskRef;
   columns: KanbanColumn[];
   titleById: Map<string, string>;

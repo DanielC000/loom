@@ -373,7 +373,13 @@ export interface TaskUpdateConflictError extends Error { conflict?: true; curren
  */
 export type TaskUpdatePatch =
   Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">>
-  & { parentId?: string | null; baseVersion?: number };
+  & { parentId?: string | null; baseVersion?: number }
+  // The four relation kinds this card can write about itself (card 03d9db6e). Declared here for the same
+  // reason as `parentId` above, and each is a WHOLE-SET REPLACE of that kind — so a caller must omit an
+  // untouched kind entirely rather than echoing it back. `discoveredFrom` is single-valued (null clears).
+  // `discoveries` is absent on purpose: it is the inverse of another card's `discoveredFrom`, so no field
+  // on this card's body can change it.
+  & { blockedBy?: string[]; blocks?: string[]; related?: string[]; discoveredFrom?: string | null };
 
 // POST /api/tasks/:id — see api.updateTask's own doc for the `baseVersion` contract. Mirrors postErr's
 // verbatim-`{error}`-surfacing convention, PLUS lifts `conflict`/`current` onto the thrown Error (same
