@@ -11,7 +11,7 @@ import { LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
 import { canonicalGit, withTimeout } from "../git/bounded.js";
 import { comparisonKey } from "../projects/repos.js";
-import { writeJsonAtomic } from "../pty/claude-config.js";
+import { writeJsonAtomic } from "../write-json-atomic.js";
 
 const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
 // CR round 3 (card 31f997e7): a SEPARATE sidecar file, never merged into MANIFEST's own shape — keeps
@@ -1259,8 +1259,10 @@ export function injectSkills(
   }
 
   manifest.set(sessionId, placed); // record ONLY what I actually injected (never the repo's own / collisions)
-  // Atomic manifest write via the shared `writeJsonAtomic` (card 4c2a0bfd — reused from
-  // pty/claude-config.ts rather than hand-rolled): a torn write here corrupts the shared per-session
+  // Atomic manifest write via the shared `writeJsonAtomic` (card 4c2a0bfd — in ../write-json-atomic.js,
+  // a tiny dependency-free module; also re-exported from pty/claude-config.ts, its original home, for
+  // that file's own existing callers — see that card's "moved" note): a torn write here corrupts the
+  // shared per-session
   // record — readManifest then has to discard it, losing every concurrent session's claims — AND, unlike
   // this file's own old fixed `.tmp` suffix, writeJsonAtomic's unique pid+random tmp name closes the
   // cross-process same-tmp-name collision two daemons sharing one cwd could hit (see
