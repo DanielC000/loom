@@ -606,6 +606,18 @@ export function isLogMessageContentEnabled(): boolean {
 }
 
 /**
+ * Card c8eeda93: opt-in to the OLD behaviour of forwarding the DAEMON's own inherited `ANTHROPIC_*` (and
+ * `AWS_BEARER_TOKEN_BEDROCK`) env into every claude/codex session. Default OFF — an inherited
+ * `ANTHROPIC_API_KEY` would silently flip the whole fleet to per-token billing and `ANTHROPIC_BASE_URL`
+ * would silently reroute it. Read from the daemon's real `process.env` ONLY (never a project `sessionEnv`,
+ * never an agent-writable surface), at call time, literal `"1"` only. See
+ * `docs/decisions/c8eeda93-anthropic-env-gateway-subscription-boundary.md`.
+ */
+export function isPassAnthropicEnvEnabled(): boolean {
+  return process.env.LOOM_PASS_ANTHROPIC_ENV === "1";
+}
+
+/**
  * Card C1 (Codescape fleet-daemon wiring epic `369dde3c`, LOOM_DEV-gated): the ONE shared working
  * directory BOTH `codescape ingest` and `codescape serve` must be spawned from — both commands resolve
  * their `.codescape` state dir relative to `process.cwd()`, so ingest and serve sharing this exact cwd is

@@ -25,7 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv, assertUnderOsTmpdir } from "./_guard.mjs"; // arms the Db backstop (LOOM_TEST=1) too
 import { mkdtempManaged, finishAndExit, registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitForJsonFile } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -58,6 +58,9 @@ process.env.LOOM_CODEX_BIN = wrapperPath;
 
 const envOutputFile = path.join(tmpHome, "spawned-env.json");
 process.env.FIXTURE_ENV_OUTPUT_FILE = envOutputFile;
+// Card c8eeda93: positive-control canary — an inherited ANTHROPIC_API_KEY must NOT reach the real child.
+delete process.env.LOOM_PASS_ANTHROPIC_ENV;
+process.env.ANTHROPIC_API_KEY = "sk-CANARY-real-child-c8eeda93";
 
 // Positive-control setup for the CLAUDECODE/CLAUDE_CODE_* scrub check below: set them non-empty on THIS
 // process's own env BEFORE spawning, so a later "absent from the child" assertion proves the scrub
@@ -122,8 +125,7 @@ const pty = host.createCodexPty(opts);
 
 let spawnedEnv;
 try {
-  await waitUntil(() => fs.existsSync(envOutputFile), { label: "fixture's env dump file to appear" });
-  spawnedEnv = JSON.parse(fs.readFileSync(envOutputFile, "utf8"));
+  spawnedEnv = await waitForJsonFile(envOutputFile, { label: "fixture's env dump file to appear" });
 } finally {
   try { pty.kill(); } catch { /* best-effort */ }
 }
@@ -147,6 +149,7 @@ check("the scratch dir was actually created on disk (mirrors createPty's own eag
 // --- the CLAUDECODE/CLAUDE_CODE_* scrub is ALSO now live on the codex path (positive-controlled above) ---
 check("CLAUDECODE is scrubbed from the real codex child env (positive-controlled: was '1' on this process's own env)", !("CLAUDECODE" in spawnedEnv));
 check("CLAUDE_CODE_ENTRYPOINT (a CLAUDE_CODE_* var) is scrubbed from the real codex child env", !("CLAUDE_CODE_ENTRYPOINT" in spawnedEnv));
+check("[c8eeda93] the daemon's inherited ANTHROPIC_API_KEY (canary) is ABSENT from the real codex child env", !("ANTHROPIC_API_KEY" in spawnedEnv) && !JSON.stringify(spawnedEnv).includes("sk-CANARY-real-child"));
 
 // --- negative control: LOOM_OBSIDIAN_PREFLIGHT must be ABSENT when autostart is off (this spawn's own opts
 // never set LOOM_OBSIDIAN_AUTOSTART) — proves the obsidian block below only fires when it's meant to ------
@@ -179,8 +182,7 @@ const optsObsidian = {
 const ptyObsidian = host.createCodexPty(optsObsidian);
 let spawnedEnvObsidian;
 try {
-  await waitUntil(() => fs.existsSync(envOutputFileObsidian), { label: "obsidian-variant fixture's env dump file to appear" });
-  spawnedEnvObsidian = JSON.parse(fs.readFileSync(envOutputFileObsidian, "utf8"));
+  spawnedEnvObsidian = await waitForJsonFile(envOutputFileObsidian, { label: "obsidian-variant fixture's env dump file to appear" });
 } finally {
   try { ptyObsidian.kill(); } catch { /* best-effort */ }
 }
@@ -205,8 +207,7 @@ const optsProj = {
 const ptyProj = host.createCodexPty(optsProj);
 let spawnedEnvProj;
 try {
-  await waitUntil(() => fs.existsSync(envOutputFileProj), { label: "project-id-variant fixture's env dump file to appear" });
-  spawnedEnvProj = JSON.parse(fs.readFileSync(envOutputFileProj, "utf8"));
+  spawnedEnvProj = await waitForJsonFile(envOutputFileProj, { label: "project-id-variant fixture's env dump file to appear" });
 } finally {
   try { ptyProj.kill(); } catch { /* best-effort */ }
 }

@@ -21,7 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv, assertUnderOsTmpdir } from "./_guard.mjs"; // arms the Db backstop (LOOM_TEST=1) too
 import { mkdtempManaged, finishAndExit, registerForCleanup } from "./_tmp-fixture.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitForJsonFile } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -81,6 +81,10 @@ const PROJECT_ID = "claude-spawn-env-test-project-id";
 const spawnCwd = fs.mkdtempSync(path.join(tmpHome, "cwd-"));
 const envOutputFile = path.join(tmpHome, "spawned-env.json");
 process.env.FIXTURE_ENV_OUTPUT_FILE = envOutputFile;
+// Card c8eeda93: positive-control canary — an inherited ANTHROPIC_API_KEY on THIS (daemon-stand-in) process
+// must NOT reach the real child. Hatch explicitly unset so the scrub is the default path under test.
+delete process.env.LOOM_PASS_ANTHROPIC_ENV;
+process.env.ANTHROPIC_API_KEY = "sk-CANARY-real-child-c8eeda93";
 
 const opts = {
   sessionId: SESSION_ID, cwd: spawnCwd, role: "worker", projectId: PROJECT_ID,
@@ -92,12 +96,14 @@ host.spawn(opts);
 
 let spawnedEnv;
 try {
-  await waitUntil(() => fs.existsSync(envOutputFile), { label: "fixture's env dump file to appear (claude harness)" });
-  spawnedEnv = JSON.parse(fs.readFileSync(envOutputFile, "utf8"));
+  // Polls until the JSON PARSES (the fixture's writeFileSync can be observed half-written); bounded, and a
+  // timeout THROWS (fails the test) rather than hanging.
+  spawnedEnv = await waitForJsonFile(envOutputFile, { label: "fixture's env dump file to appear (claude harness)" });
 } finally {
   try { host.stop(SESSION_ID, "hard"); } catch { /* best-effort */ }
 }
 
+check("[c8eeda93] the daemon's inherited ANTHROPIC_API_KEY (canary) is ABSENT from the real claude child env", !("ANTHROPIC_API_KEY" in (spawnedEnv ?? {})) && !JSON.stringify(spawnedEnv ?? {}).includes("sk-CANARY-real-child"));
 const expectedWorkDir = projectWorkDir(PROJECT_ID);
 check("[5eace211] LOOM_PROJECT_WORK_DIR reaches the real CLAUDE harness child env, matching projectWorkDir(projectId)", spawnedEnv?.LOOM_PROJECT_WORK_DIR === expectedWorkDir);
 check("[5eace211] the project work dir was actually created on disk (ensureProjectWorkDir's mkdir)", fs.existsSync(expectedWorkDir) && fs.statSync(expectedWorkDir).isDirectory());
@@ -112,8 +118,7 @@ const optsNoproj = { ...opts, sessionId: SESSION_ID_NOPROJ, cwd: spawnCwdNoproj,
 host.spawn(optsNoproj);
 let spawnedEnvNoproj;
 try {
-  await waitUntil(() => fs.existsSync(envOutputFileNoproj), { label: "fixture's env dump file to appear (no-projectId variant)" });
-  spawnedEnvNoproj = JSON.parse(fs.readFileSync(envOutputFileNoproj, "utf8"));
+  spawnedEnvNoproj = await waitForJsonFile(envOutputFileNoproj, { label: "fixture's env dump file to appear (no-projectId variant)" });
 } finally {
   try { host.stop(SESSION_ID_NOPROJ, "hard"); } catch { /* best-effort */ }
 }

@@ -39,7 +39,7 @@ import { transcriptRootReadDenyRules, otherProjectTranscriptDenyRules } from "./
 import { withLoomHomeWriteDenyForSpawn } from "./loom-home-deny.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled, ensureProjectWorkDir, projectWorkDirEnv } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled, isPassAnthropicEnvEnabled, ensureProjectWorkDir, projectWorkDirEnv } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -4725,6 +4725,18 @@ export function preflightWindowsCommandLine(
   };
 }
 
+/** True for an env-var NAME that can redirect or re-bill a claude session: any `ANTHROPIC_*` (case-insensitive,
+ * since Windows env names are) plus `AWS_BEARER_TOKEN_BEDROCK`. Deliberately NOT `AWS_*`/`GOOGLE_*`/proxy vars —
+ * those have legitimate non-claude uses for every child and cannot divert claude without the (already
+ * scrubbed) `CLAUDE_CODE_USE_*` switches. Card c8eeda93. */
+export function isAnthropicSpawnEnvKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  return upper.startsWith("ANTHROPIC_") || upper === "AWS_BEARER_TOKEN_BEDROCK";
+}
+
+/** Process-lifetime latch for buildSpawnEnv's silent-scrub diagnostic (card c8eeda93): one line per daemon process. */
+let anthropicScrubLogged = false;
+
 /** Assemble the environment for a `claude` worker pty — extracted as a PURE, testable seam mirroring
  * buildMcpServers / buildSpawnArgs. All vars below are set BEFORE the sessionEnv merge, so a deliberate
  * project override still wins.
@@ -4736,9 +4748,23 @@ export function buildSpawnEnv(
   processEnv: Record<string, string | undefined>,
   sessionEnv: Record<string, string>,
   spawnCwd: string,
+  // The LOOM_PASS_ANTHROPIC_ENV hatch, resolved by the caller via isPassAnthropicEnvEnabled() (a parameter, not
+  // an ambient process.env read, so this stays a pure seam). Defaults to the safe value: scrub.
+  passAnthropic = false,
 ): Record<string, string> {
   const env: Record<string, string> = {};
+  // @decision c8eeda93 — the DAEMON's inherited ANTHROPIC_* (+ AWS_BEARER_TOKEN_BEDROCK) never reaches a
+  // session unless the human-only LOOM_PASS_ANTHROPIC_ENV=1 hatch is set; a project sessionEnv entry still wins.
+  const passedAnthropicKeys: string[] = [];
+  const scrubbedAnthropicKeys: string[] = [];
   for (const [k, v] of Object.entries(processEnv)) {
+    if (isAnthropicSpawnEnvKey(k)) {
+      if (!passAnthropic) {
+        if (v !== undefined) scrubbedAnthropicKeys.push(k);
+        continue;
+      }
+      if (v !== undefined) passedAnthropicKeys.push(k);
+    }
     // Card a50b8afd: scrub any LOOM_MCP_TOKEN inherited from the DAEMON's own process env — the only
     // legitimate source of this value is the explicit, per-spawn mint-and-assign line in createPty/
     // createCodexPty, which runs AFTER this function returns. Without this, a stray inherited value would
@@ -4762,6 +4788,20 @@ export function buildSpawnEnv(
   env.LOOM_WORKTREE = spawnCwd;
   env.PYTHONIOENCODING = "utf-8";
   env.PYTHONUTF8 = "1";
+  // Loud, once-per-spawn, KEY NAMES ONLY (never a value): the session will bill per token / use another endpoint.
+  const sessionAnthropicKeys = Object.keys(sessionEnv).filter((k) => isAnthropicSpawnEnvKey(k));
+  if (sessionAnthropicKeys.length > 0) {
+    console.warn(`[pty] cwd=${spawnCwd} project sessionEnv sets ${sessionAnthropicKeys.join(", ")} — this session will NOT use the subscription login (per-token billing and/or a rerouted endpoint)`);
+  }
+  if (passedAnthropicKeys.length > 0) {
+    console.warn(`[pty] cwd=${spawnCwd} LOOM_PASS_ANTHROPIC_ENV=1 — forwarding the daemon's own ${passedAnthropicKeys.join(", ")} into this session (per-token billing and/or a rerouted endpoint)`);
+  }
+  // Silent-scrub diagnostic: ONCE PER DAEMON PROCESS (a latch, not per spawn — every spawn would repeat the same
+  // fact), KEY NAMES ONLY. Without it an operator who exported ANTHROPIC_* for a gateway sees sessions silently ignore it.
+  if (scrubbedAnthropicKeys.length > 0 && !anthropicScrubLogged) {
+    anthropicScrubLogged = true;
+    console.warn(`[pty] not forwarding the daemon's inherited ${scrubbedAnthropicKeys.join(", ")} into sessions (subscription login stays in force); set LOOM_PASS_ANTHROPIC_ENV=1 to forward them, or use the project's sessionEnv for a per-project gateway (logged once per daemon process)`);
+  }
   // @decision fbb6e8ec — scrub EVERY sessionEnv-sourced key matching CLAUDE_CONFIG_DIR, never just the
   // first (win32's case-insensitivity lets more than one spelling coexist in one sessionEnv object), via
   // the SAME shared predicate the write-time validator (mcp/platform.ts) uses.
@@ -7131,7 +7171,7 @@ export class PtyHost {
     // so a deliberate `opts.sessionEnv` entry (human/Lead-set) always wins on a name collision — buildSpawnEnv
     // itself stays pure/DB-free; the merge happens here, at the call site, same as createPty's below.
     const credentialEnv = opts.projectId ? this.resolveCredentialSessionEnv(opts.projectId) : {};
-    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd);
+    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd, isPassAnthropicEnvEnabled());
     // Card 9346ed5b: mirror createPty's obsidian-preflight block (see that method's own comment for the
     // full contract). buildSpawnEnv (since 8d828fa4, above) merges opts.sessionEnv, so LOOM_OBSIDIAN_AUTOSTART
     // now reaches a codex spawn's env where it previously never arrived at all — but createCodexPty never set
@@ -9155,7 +9195,7 @@ export class PtyHost {
     // Card 82b22817: see createCodexPty's identical comment above buildSpawnEnv there — the credential
     // merge spreads FIRST so a deliberate opts.sessionEnv entry always wins on a name collision.
     const credentialEnv = opts.projectId ? this.resolveCredentialSessionEnv(opts.projectId) : {};
-    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd);
+    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd, isPassAnthropicEnvEnabled());
     applyMcpTokenEnv(env, mcpToken, tokenRidesEnv);
     // Obsidian auto-start: when the resolved config turned it on (LOOM_OBSIDIAN_AUTOSTART rode in via
     // sessionEnv → obsidianSessionEnv), hand the vault preflight helper its ABSOLUTE path so a vault skill

@@ -5,6 +5,13 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 ## [Unreleased]
 
 ### Changed
+- **Breaking: Loom no longer forwards `ANTHROPIC_*` variables from the daemon's own environment into
+  Claude sessions.** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` and the rest (plus
+  `AWS_BEARER_TOKEN_BEDROCK`) are now stripped, so an exported key can no longer silently switch your fleet
+  from your subscription to per-token billing or reroute it to another endpoint. **Upgrade note:** if you
+  relied on this, set `LOOM_PASS_ANTHROPIC_ENV=1` in the daemon's environment, or set the variable per
+  project via `sessionEnv`. Loom logs the variable names (never values) whenever a session is launched with
+  them.
 - **Your "Platform" agent is now a full Platform Lead.** The standing "Platform" agent — who already
   creates and configures your projects, agents and profiles — now also spawns and oversees sessions and
   triages your board, cross-project: the same capability as the developer edition's Platform Lead, minus a
