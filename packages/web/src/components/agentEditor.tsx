@@ -27,6 +27,17 @@ import { color, font, radius, fs } from "../theme";
 // <select> hides that group), and the agent list row's tooltip (card 57deed24).
 export const PLAIN_BIND_GROUP_LABEL = "role not conferred — binds as a plain session";
 
+/**
+ * The startup-prompt field's sizing, shared by the create form and the editor (card 5e628a76): it takes
+ * whatever height the host frame leaves (`flex-grow`), never shrinks below a real floor, and stays
+ * user-resizable. `flex-basis:auto` (not `flex:1`'s `0%`) is what makes the drag handle work: a
+ * dragged `height` becomes the basis, where a `0%` basis would silently ignore it.
+ */
+const PROMPT_FIELD_SIZE = {
+  flex: "1 0 auto", height: "min(360px, 40vh)", minHeight: 160,
+  width: "100%", boxSizing: "border-box", resize: "vertical",
+} as const;
+
 /** The profile shape this editor's bind dropdown needs. `ProfileSummary` satisfies it. */
 export type EditorProfile = { id: string; name: string; role: string | null; icon: string | null };
 
@@ -102,7 +113,7 @@ export function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { nam
     <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }} data-testid="agent-create-form">
       <Input placeholder="agent name" value={name} onChange={(e) => setName(e.target.value)} aria-label="Agent name" />
       <textarea
-        style={{ flex: 1, minHeight: 200, width: "100%", boxSizing: "border-box", resize: "none", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: 8, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5 }}
+        style={{ ...PROMPT_FIELD_SIZE, background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: 8, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5 }}
         placeholder="startup prompt (injected as the first turn of each new session)"
         value={startupPrompt} onChange={(e) => setPrompt(e.target.value)} />
       <div style={{ display: "flex", gap: 8 }}>
@@ -267,7 +278,7 @@ export function AgentEditor(
         onKeyDown={modEnterSubmit(dirty && !saving, () => onSavePrompt(prompt))}
         data-testid={`agent-prompt-${agent.id}`}
         style={{
-          flex: 1, minHeight: 0, width: "100%", boxSizing: "border-box", resize: "none",
+          ...PROMPT_FIELD_SIZE,
           fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
           background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8,
         }} />

@@ -395,4 +395,47 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     // And it is the PAGE's pane, not a dialog — the frame is the host's call, the editor is shared.
     await expect(page.getByTestId("atlas-agent-editor")).toHaveCount(0);
   });
+
+  // Card 5e628a76: the dialog is near full-viewport and the prompt field takes most of its height,
+  // at desktop AND narrow widths, and the field's drag handle really resizes it. Measured on the
+  // pre-fix build (fixed sha 2a9c3628): panel 760×500 / prompt 80px tall at 1440×900, prompt 60px at
+  // 420 — every floor below fails there.
+  for (const vp of [{ width: 1440, height: 900, minPanelW: 1200, minPrompt: 300 },
+                    { width: 420, height: 860, minPanelW: 380, minPrompt: 240 }]) {
+    test(`switch ON: the editor dialog fills a ${vp.width}px viewport and its prompt field grows and resizes`, async ({ page, loomDaemon }) => {
+      const seeded = await seedRoster(loomDaemon);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      await seedAtlasOn(page);
+      await pinProject(page, seeded.project.id);
+      await page.goto(loomDaemon.baseURL + "/agents");
+      await page.getByTestId(`atlas-agent-card-${seeded.plain.id}`).getByTestId(`atlas-agent-edit-${seeded.plain.id}`).click();
+      const dialog = page.getByTestId("atlas-agent-editor");
+      const prompt = dialog.getByTestId(`agent-prompt-${seeded.plain.id}`);
+      await expect(prompt).toBeVisible();
+
+      const panel = (await dialog.locator("> div").boundingBox())!;
+      expect(panel.width, "dialog panel width").toBeGreaterThanOrEqual(vp.minPanelW);
+      expect(panel.x + panel.width, "the panel stays inside the viewport").toBeLessThanOrEqual(vp.width);
+      expect(panel.height, "dialog panel height").toBeGreaterThanOrEqual(vp.height * 0.8);
+      const before = (await prompt.boundingBox())!;
+      expect(before.height, "prompt field height").toBeGreaterThanOrEqual(vp.minPrompt);
+
+      // Typing lands in the field and arms Save — the field is live, not just large.
+      await prompt.fill("line one\nline two");
+      await expect(prompt).toHaveValue("line one\nline two");
+      await expect(dialog.getByTestId(`agent-save-${seeded.plain.id}`)).toBeEnabled();
+
+      // Drag the native resize grip (bottom-right corner) down: the field must get TALLER. Under the
+      // old `flex:1` (0% basis) a dragged height was ignored even with `resize` enabled.
+      await expect(prompt).toHaveCSS("resize", "vertical");
+      const gx = before.x + before.width - 3, gy = before.y + before.height - 3;
+      await page.mouse.move(gx, gy);
+      await page.mouse.down();
+      await page.mouse.move(gx, gy + 150, { steps: 8 });
+      await page.mouse.up();
+      await expect.poll(async () => (await prompt.boundingBox())!.height,
+        { message: "dragging the resize grip did not grow the prompt field" })
+        .toBeGreaterThan(before.height + 100);
+    });
+  }
 });

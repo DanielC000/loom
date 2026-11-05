@@ -358,11 +358,14 @@ export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quick
  * scrolls, and a non-`visible` overflow on one axis computes to `auto` on the other, so an
  * absolutely-positioned panel would be clipped on BOTH.
  */
-function AtlasAgentDialog({ testId, label, width, maxHeight, onClose, children }: {
+function AtlasAgentDialog({ testId, label, width, maxHeight, height, scrimPadding = "10vh 16px", onClose, children }: {
   testId: string;
   label: string;
   width: string;
   maxHeight: string;
+  /** A FIXED panel height, for a dialog whose body should fill the frame rather than size to content. */
+  height?: string;
+  scrimPadding?: string;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -374,9 +377,9 @@ function AtlasAgentDialog({ testId, label, width, maxHeight, onClose, children }
   return (
     <div onClick={onClose} role="dialog" aria-modal aria-label={label} data-testid={testId}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
-        alignItems: "flex-start", justifyContent: "center", padding: "10vh 16px", overflowY: "auto" }}>
+        alignItems: "flex-start", justifyContent: "center", padding: scrimPadding, overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width, maxHeight, background: color.panel,
+        style={{ width, maxHeight, height, background: color.panel,
           border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: 14,
           display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
         {children}
@@ -518,18 +521,21 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
   const creating = editing === null;
   const title = creating ? "New agent" : "Edit agent";
   return (
-    <AtlasAgentDialog testId="atlas-agent-editor" label={title} width="min(760px, 94vw)" maxHeight="82vh" onClose={onClose}>
+    // Near full-viewport (owner wish, card 5e628a76): a FIXED height, not a content-sized cap, so the
+    // prompt field below has real room to grow into. Capped so a wide monitor still reads as a dialog.
+    <AtlasAgentDialog testId="atlas-agent-editor" label={title} width="min(1280px, 100%)"
+      height="min(1000px, calc(100dvh - 48px))" maxHeight="calc(100dvh - 48px)" scrimPadding="24px clamp(8px, 2vw, 24px)"
+      onClose={onClose}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <SectionLabel style={{ margin: 0 }}>{title}</SectionLabel>
         <span style={{ flex: 1 }} />
         <Button variant="ghost" data-testid="atlas-agent-editor-close" aria-label="Close the agent editor"
           title="Close" onClick={onClose} style={{ padding: "0 8px", lineHeight: 1.2 }}>×</Button>
       </div>
-      {/* A REAL `minHeight`, not just `flex:1`. The panel above is content-sized (its own `maxHeight`
-          is a cap, not a height), so a `flex:1` child inside it resolves to its content — which is
-          what collapsed the prompt textarea to a single line the first time this was eyeballed. The
-          floor is what AgentEditor's own `flex:1` textarea then grows into. */}
-      <div style={{ display: "flex", flexDirection: "column", minHeight: "min(440px, 50vh)", flex: 1, overflowY: "auto" }}>
+      {/* `flex:1` + `minHeight:0` inside the panel's FIXED height: this body takes everything below the
+          header and scrolls itself, and AgentEditor's prompt textarea grows into it. (A content-sized
+          panel is what once collapsed the textarea to one line; the fixed height above prevents that.) */}
+      <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1, overflowY: "auto" }}>
         {creating ? (
           <AgentForm onCreate={(b) => create.mutate(b)} pending={create.isPending} onCancel={onClose} />
         ) : agent ? (
