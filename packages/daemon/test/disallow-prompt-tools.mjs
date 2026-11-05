@@ -7,7 +7,7 @@
 // (card 7a624213, HARNESS_SCHEDULING_TOOLS — see disallow-harness-scheduling-tools.mjs) — this file's own
 // exact-equality checks account for that UNION rather than re-deriving it; `run` does NOT (see that file).
 // Run: node test/disallow-prompt-tools.mjs
-import { buildSpawnArgs, disallowedToolsForRole, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS } from "../dist/pty/host.js";
+import { buildSpawnArgs, disallowedToolsForRole, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS, WORKER_UNUSED_HARNESS_TOOLS } from "../dist/pty/host.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -37,8 +37,10 @@ for (const role of ["worker", "setup", "auditor", "workspace-auditor", "run", "a
 check("role 'run': human-prompt disallow list is EXACTLY HUMAN_PROMPT_TOOLS (nothing else)",
   JSON.stringify(disallowedToolsForRole("run")) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
 for (const role of ["worker", "setup", "workspace-auditor", "assistant"]) {
-  check(`role '${role}': human-prompt disallow list is EXACTLY HUMAN_PROMPT_TOOLS + HARNESS_SCHEDULING_TOOLS`,
-    JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS]));
+  // card 61b3a150: worker alone also carries WORKER_UNUSED_HARNESS_TOOLS, last.
+  const extra = role === "worker" ? WORKER_UNUSED_HARNESS_TOOLS : [];
+  check(`role '${role}': human-prompt disallow list is EXACTLY HUMAN_PROMPT_TOOLS + HARNESS_SCHEDULING_TOOLS${role === "worker" ? " + WORKER_UNUSED_HARNESS_TOOLS" : ""}`,
+    JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...extra]));
 }
 // OUT of scope for the HUMAN-PROMPT disallow specifically: manager/orchestrator + the human-driven
 // platform lead never get AskUserQuestion/ExitPlanMode/EnterPlanMode disallowed (a manager legitimately
@@ -58,7 +60,7 @@ for (const role of [null, undefined]) {
   const a = disallowedToolsForRole("worker");
   a.push("Mutated");
   check("disallowedToolsForRole returns a fresh array (no shared-state mutation)",
-    disallowedToolsForRole("worker").length === HUMAN_PROMPT_TOOLS.length + HARNESS_SCHEDULING_TOOLS.length);
+    disallowedToolsForRole("worker").length === HUMAN_PROMPT_TOOLS.length + HARNESS_SCHEDULING_TOOLS.length + WORKER_UNUSED_HARNESS_TOOLS.length);
 }
 
 // --- buildSpawnArgs: the flag is emitted + ordered correctly -----------------------------------
@@ -103,10 +105,10 @@ for (const role of [null, undefined]) {
   check("empty disallow list: argv byte-identical to the no-arg argv", JSON.stringify(withEmpty) === JSON.stringify(base));
   check("undefined disallow: argv byte-identical to the no-arg argv", JSON.stringify(withUndef) === JSON.stringify(base));
   // And the worker argv differs from the plain argv ONLY by the inserted flag+names (9 extra tokens:
-  // the flag + 3 human-prompt names + 5 harness-scheduling names — see HARNESS_SCHEDULING_TOOLS).
+  // the flag + 3 human-prompt + 5 harness-scheduling + 2 worker-unused names; the count is derived below).
   const workerTools = disallowedToolsForRole("worker");
   const worker = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", disallowedTools: workerTools });
-  check("worker argv = plain argv + exactly 9 inserted tokens (flag + 8 names)", worker.length === base.length + 1 + workerTools.length);
+  check("worker argv = plain argv + exactly 11 inserted tokens (flag + 10 names)", workerTools.length === 10 && worker.length === base.length + 1 + workerTools.length);
 }
 
 // Resume path (no prompt): the disallow still threads, --resume still leads, no `--` separator emitted.

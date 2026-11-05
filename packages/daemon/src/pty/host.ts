@@ -4360,6 +4360,17 @@ export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", 
  */
 export const HARNESS_SCHEDULING_TOOLS: readonly string[] = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger"];
 
+/**
+ * Heavy harness tools a `worker` never uses — a PROMPT-SIZE disallow, a different class than the
+ * hazard-driven lists above: nothing here is dangerous, these are inline (non-deferred) tool schemas
+ * (`Artifact` publishes a claude.ai page; `Workflow` orchestrates sub-agents outside Loom's depth-1
+ * model) that ride every call's cached prefix for nothing. ESTIMATED ~5-6K tokens per call, unmeasured.
+ * Worker only; codex has no per-tool lever.
+ *
+ * @decision 61b3a150 — worker role only; every other role's argv stays byte-identical.
+ */
+export const WORKER_UNUSED_HARNESS_TOOLS: readonly string[] = ["Artifact", "Workflow"];
+
 // Card b1da256d: LOOM_DRIVEN_ROLES/BOOT_DIALOG_DETECTOR_ROLES now live in @loom/shared (so
 // packages/web can read them too) — re-exported here for every existing importer of this module.
 export { LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES };
@@ -4393,6 +4404,7 @@ export function disallowedToolsForRole(role?: SessionRole | null): string[] {
     default:
       break; // platform / run / operator / plain — human-driven, owner-interactive, or untouched by design (see HARNESS_SCHEDULING_TOOLS's own doc)
   }
+  if (role === "worker") out.push(...WORKER_UNUSED_HARNESS_TOOLS);
   return out;
 }
 

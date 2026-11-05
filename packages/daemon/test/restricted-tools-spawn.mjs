@@ -48,7 +48,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 delete process.env.CLAUDE_CONFIG_DIR;
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildSpawnArgs, disallowedToolsForRole, disallowedToolsForSpawn, RESTRICTED_NATIVE_TOOLS, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS } = await import("../dist/pty/host.js");
+const { PtyHost, buildSpawnArgs, disallowedToolsForRole, disallowedToolsForSpawn, RESTRICTED_NATIVE_TOOLS, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS, WORKER_UNUSED_HARNESS_TOOLS } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -85,7 +85,7 @@ for (const role of ["worker", "assistant", "manager", null, undefined]) {
 {
   const merged = disallowedToolsForSpawn("worker", true);
   check("(P) ON worker: union = human-prompt + harness-scheduling tools + restricted native set (role tools first)",
-    eq(merged, [...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...RESTRICTED]));
+    eq(merged, [...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...WORKER_UNUSED_HARNESS_TOOLS, ...RESTRICTED]));
   check("(P) ON worker: every restricted native tool present", RESTRICTED.every((t) => merged.includes(t)));
   check("(P) ON worker: the human-prompt disallow is STILL present (union, not replacement)",
     HUMAN_PROMPT_TOOLS.every((t) => merged.includes(t)));
@@ -263,7 +263,7 @@ try {
   check("(e2e) spawnWorker(restricted rig): spawn opts.restrictedTools === true", oWRW?.restrictedTools === true);
   check("(e2e) spawnWorker(restricted rig): DB row persists restricted_tools=1", db.getSession(wRW.id).restrictedTools === true);
   check("(e2e) spawnWorker(restricted rig): the worker disallow list unions human-prompt + harness-scheduling + restricted set",
-    eq(disallowedToolsForSpawn(oWRW.role, oWRW.restrictedTools), [...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...RESTRICTED]));
+    eq(disallowedToolsForSpawn(oWRW.role, oWRW.restrictedTools), [...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...WORKER_UNUSED_HARNESS_TOOLS, ...RESTRICTED]));
 
   // RECYCLE the restricted worker → the successor carries the restriction from the old row.
   host.capture.length = 0;

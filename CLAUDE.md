@@ -241,6 +241,11 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
     sessions (an owner-interactive terminal may legitimately use `/loop`). **Codex parity: nothing to deny
     and no lever to deny it with** — codex's own tool surface has no equivalent under any name, and
     `createCodexPty` has no `--disallowedTools`-equivalent lever at all (see that method's own doc).
+  - **Worker-only prompt-size disallow** (`WORKER_UNUSED_HARNESS_TOOLS`, `pty/host.ts`, card `61b3a150`;
+    record `docs/decisions/61b3a150-*.md`): `role:"worker"` ALSO spawns with the inline harness tools
+    `Artifact` and `Workflow` removed — not a hazard, a cached-prefix cut (ESTIMATED ~5-6K tokens/call,
+    unmeasured until a before/after first-call comparison exists). No other role gets it; deferred
+    tools gain nothing (name line only); codex untouched.
   - **The startup/kickoff prompt does NOT ride argv, for ANY role (card 0050a17e).** Putting it on argv hit the Windows `CreateProcess` 32766-character ceiling (`WINDOWS_COMMAND_LINE_LIMIT`) and refused spawns outright. Every role boots with **no trailing prompt**, then the SAME text is delivered once the session reaches `ready` via `submit()` (`scheduleKickoffGuarantee`; the PRIMARY delivery path). The text is captured SYNCHRONOUSLY at `markReady` (`submit()` overwrites `live.lastPrompt`, so a late capture would swap in other text), but DELIVERY waits for `logLandedMode`'s footer-read and the plan-mode auto-heal to settle, so it is NOT next-tick: a deliberate ~500ms-to-~4s latency floor, not to be re-optimized. `Live.lastPrompt` is still seeded SYNCHRONOUSLY at `spawn()` so a crash before the first `submit()` leaves something to re-submit; removing it reopens that window. `preflightWindowsCommandLine` (pty/host.ts) still guards what remains on argv (settings path, inline `--mcp-config` JSON, `--disallowedTools`). `memory.budgetTokens` is no longer coupled to the argv ceiling (the digest rides the post-ready `submit()` payload) but still competes for the engine's turn-1 token budget. Full reasoning: `docs/decisions/0050a17e-kickoff-prompt-is-delivered-post-ready-never-on-argv.md`.
 - **Engine session id** captured via the SessionStart hook → `packages/daemon/assets/hook-relay.mjs` →
   `/internal/hook`; persisted on receipt. New session delivers the topic startup prompt post-ready via

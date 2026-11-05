@@ -10,7 +10,7 @@
 // disallow-harness-scheduling-tools-real-spawn.mjs for the real-spawn proof that a real claude actually
 // honors this (this file only proves the pure argv-construction layer).
 // Run: node test/disallow-harness-scheduling-tools.mjs
-import { buildSpawnArgs, disallowedToolsForRole, HARNESS_SCHEDULING_TOOLS, HUMAN_PROMPT_TOOLS, TASK_TRACKING_TOOLS } from "../dist/pty/host.js";
+import { buildSpawnArgs, disallowedToolsForRole, HARNESS_SCHEDULING_TOOLS, HUMAN_PROMPT_TOOLS, TASK_TRACKING_TOOLS, WORKER_UNUSED_HARNESS_TOOLS } from "../dist/pty/host.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,8 +41,8 @@ for (const role of ["platform", "run", "operator", null, undefined]) {
 
 // --- Exact composition per role: harness-scheduling rides LAST in the union (human-prompt, then
 // task-tracking, then harness-scheduling — see disallowedToolsForRole's own switch order) -------------
-check("role 'worker': EXACTLY human-prompt + harness-scheduling (no task-tracking)",
-  JSON.stringify(disallowedToolsForRole("worker")) === JSON.stringify([...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS]));
+check("role 'worker': EXACTLY human-prompt + harness-scheduling + worker-unused (card 61b3a150; no task-tracking)",
+  JSON.stringify(disallowedToolsForRole("worker")) === JSON.stringify([...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...WORKER_UNUSED_HARNESS_TOOLS]));
 check("role 'manager': EXACTLY task-tracking + harness-scheduling (no human-prompt)",
   JSON.stringify(disallowedToolsForRole("manager")) === JSON.stringify([...TASK_TRACKING_TOOLS, ...HARNESS_SCHEDULING_TOOLS]));
 check("role 'auditor': EXACTLY human-prompt + task-tracking + harness-scheduling (all three)",
@@ -58,7 +58,7 @@ check("role 'platform': EXACTLY task-tracking (harness-scheduling deliberately e
   const a = disallowedToolsForRole("worker");
   a.push("Mutated");
   check("disallowedToolsForRole returns a fresh array (no shared-state mutation)",
-    disallowedToolsForRole("worker").length === HUMAN_PROMPT_TOOLS.length + HARNESS_SCHEDULING_TOOLS.length);
+    disallowedToolsForRole("worker").length === HUMAN_PROMPT_TOOLS.length + HARNESS_SCHEDULING_TOOLS.length + WORKER_UNUSED_HARNESS_TOOLS.length);
 }
 
 // --- buildSpawnArgs: the flag is emitted + ordered correctly, on a role with ONLY this dimension -------
@@ -99,6 +99,22 @@ check("role 'platform': EXACTLY task-tracking (harness-scheduling deliberately e
   check("resume manager: --disallowedTools present with the harness-scheduling tools", HARNESS_SCHEDULING_TOOLS.every((t) => args.includes(t)));
   check("resume manager: no `--` separator (no prompt)", !args.includes("--"));
 }
+
+// --- Card 61b3a150: WORKER_UNUSED_HARNESS_TOOLS (Artifact, Workflow) — worker ONLY ---------------------
+check("WORKER_UNUSED_HARNESS_TOOLS = Artifact + Workflow exactly",
+  JSON.stringify([...WORKER_UNUSED_HARNESS_TOOLS]) === JSON.stringify(["Artifact", "Workflow"]));
+check("worker: Artifact + Workflow disallowed", WORKER_UNUSED_HARNESS_TOOLS.every((t) => disallowedToolsForRole("worker").includes(t)));
+for (const role of ["setup", "auditor", "workspace-auditor", "assistant", "manager", "platform", "run", "operator", null, undefined]) {
+  check(`role '${String(role)}': NO worker-unused tool disallowed (byte-identical on this dimension)`,
+    WORKER_UNUSED_HARNESS_TOOLS.every((t) => !disallowedToolsForRole(role).includes(t)));
+}
+check("worker argv: Artifact + Workflow sit inside the --disallowedTools run, before --strict-mcp-config", (() => {
+  const tools = disallowedToolsForRole("worker");
+  const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "x", disallowedTools: tools });
+  const d = args.indexOf("--disallowedTools");
+  return WORKER_UNUSED_HARNESS_TOOLS.every((t) => { const i = args.indexOf(t); return i > d && i < args.indexOf("--strict-mcp-config"); });
+})());
+// Codex parity: createCodexPty never reads disallowedTools (see the 7a624213 record), so nothing to assert beyond that.
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — worker/setup/auditor/workspace-auditor/assistant/manager spawn with ScheduleWakeup/CronCreate/CronDelete/CronList/RemoteTrigger disallowed, riding the SAME --disallowedTools flag (no new flag, no argv position change); platform/run/operator/plain stay byte-identical on this dimension. See disallow-harness-scheduling-tools-real-spawn.mjs for the real-spawn proof."
