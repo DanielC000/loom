@@ -38,8 +38,10 @@ process.on("unhandledRejection", (reason) => {
 const { runSshExecCommand, fetchHostKeyFingerprint, computeHostKeyFingerprint, MAX_TIMEOUT_MS } = await import("../dist/connections/ssh.js");
 
 // ============ fixture: a throwaway loopback ssh2.Server =================================================
-const hostKeyPair = utils.generateKeyPairSync("ed25519");
-const clientKeyPair = utils.generateKeyPairSync("ed25519");
+// ssh2 1.17.0's ed25519 generator is malformed 1 time in 256 (card 28c304b2) — see _ssh-test-keys.mjs.
+const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs");
+const hostKeyPair = generateParseableEd25519(utils);
+const clientKeyPair = generateParseableEd25519(utils);
 const allowedPubKey = utils.parseKey(clientKeyPair.public);
 
 // The fingerprint computed INDEPENDENTLY of fetchHostKeyFingerprint/runSshExecCommand's own host-verifier
@@ -258,7 +260,7 @@ check("key-leak scan setup: the marker is a real substring of its OWN key's base
 // Self-test (Code Review round 2 #3): two INDEPENDENTLY generated ed25519 keys must give DIFFERENT
 // markers — proves the marker tracks each key's own varying secret, not the constant container header
 // every unencrypted ed25519 key shares (the old `slice(20,70)` would have given the SAME value for both).
-const secondKeyPairForMarkerSelfTest = utils.generateKeyPairSync("ed25519");
+const secondKeyPairForMarkerSelfTest = generateParseableEd25519(utils);
 const secondKeyMarker = keyMarkerFor(secondKeyPairForMarkerSelfTest.private);
 check("key-leak scan setup self-test: two generated keys give DIFFERENT markers", secondKeyMarker !== KEY_MARKER);
 
@@ -556,7 +558,7 @@ try {
     // (the host-key check passes; authentication itself fails).
     const fixture = startTestSshServer();
     const port = await fixture.listen();
-    const wrongKeyPair = utils.generateKeyPairSync("ed25519");
+    const wrongKeyPair = generateParseableEd25519(utils);
     const authFailResult = await runSshExecCommand({
       host: "127.0.0.1",
       port,

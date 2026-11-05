@@ -132,7 +132,8 @@ try {
     // ===== (5) a brand-new ssh connection registers + round-trips against the migrated DB =====
     const { createSshConnection, getSshPrivateKeyForUse, updateSshConnectionConfig } = await import("../dist/connections/store.js");
     const sshDefault = (await import("ssh2")).default;
-    const unenc = sshDefault.utils.generateKeyPairSync("ed25519");
+    const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs"); // ssh2's ed25519 generator is malformed 1/256 (card 28c304b2)
+    const unenc = generateParseableEd25519(sshDefault.utils);
     const created = createSshConnection(db, {
       name: "New Homelab Host", host: "10.0.0.10", user: "loom",
       privateKey: unenc.private, hostKeyFingerprint: "SHA256:" + "B".repeat(43),

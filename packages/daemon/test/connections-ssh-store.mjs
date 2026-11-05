@@ -58,8 +58,10 @@ const dbFile = (name) => path.join(tmpHome, name);
 
 // --- Fixture keys — pure-JS generated, no `ssh-keygen` binary needed. ---------------------------------
 const PASSPHRASE = "correct-horse-battery-staple";
-const unenc = sshUtils.generateKeyPairSync("ed25519");
-const enc = sshUtils.generateKeyPairSync("ed25519", { passphrase: PASSPHRASE, cipher: "aes256-ctr" });
+// ssh2 1.17.0's ed25519 generator emits a malformed key 1 time in 256 (card 28c304b2) — see _ssh-test-keys.mjs.
+const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs");
+const unenc = generateParseableEd25519(sshUtils);
+const enc = generateParseableEd25519(sshUtils, { passphrase: PASSPHRASE, cipher: "aes256-ctr" });
 // A real, format-valid host-key fingerprint — doesn't need to correspond to any real server for this
 // card's scope (the connect-time compare belongs to the exec core, card f6647205); format validity is
 // what this layer checks.
@@ -211,7 +213,7 @@ try {
     // SOURCE KEY's secret material, not to the per-connection random checkint (two connections sharing
     // the SAME source key legitimately share the SAME seed-derived markers — that's expected, not a bug;
     // this control uses a wholly independent key to isolate real cross-contamination from that). ---
-    const otherKeyConn = createSshConnection(db, { name: "Unrelated Key", host: "10.0.0.99", user: "loom", privateKey: sshUtils.generateKeyPairSync("ed25519").private, hostKeyFingerprint: FINGERPRINT });
+    const otherKeyConn = createSshConnection(db, { name: "Unrelated Key", host: "10.0.0.99", user: "loom", privateKey: generateParseableEd25519(sshUtils).private, hostKeyFingerprint: FINGERPRINT });
     const otherDecrypted = getSshPrivateKeyForUse(db, otherKeyConn.id);
     check("(cross-key control) this connection's markers are absent from an UNRELATED key's own decrypted/stored key", !anyMarkerIn(KEY_MARKERS, otherDecrypted));
     deleteConnection(db, otherKeyConn.id);

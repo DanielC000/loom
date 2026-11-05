@@ -509,7 +509,8 @@ check("(guard) an oauth2 connection bound to an unknown slug is unaffected (unkn
 // requiresConnection capability grant too — same reasoning as the oauth2 case above: the secret is never a
 // header-injectable static value, so a static env injection would either silently inject the private key
 // (never-echo violation) or (pre-fix) nothing at all. ------------------------------------------------
-const sshKey = sshDefault.utils.generateKeyPairSync("ed25519");
+const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs"); // ssh2's ed25519 generator is malformed 1/256 (card 28c304b2)
+const sshKey = generateParseableEd25519(sshDefault.utils);
 const sshConn = createSshConnection(db3, {
   name: "Guard SSH", host: "10.0.0.20", user: "loom", privateKey: sshKey.private, hostKeyFingerprint: "SHA256:" + "C".repeat(43),
 });
