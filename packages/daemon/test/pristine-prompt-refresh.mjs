@@ -34,14 +34,28 @@ const platformSeed = await import("../dist/platform/seed.js");
 // The commit whose seeded prompts every list's first entry must equal, byte for byte.
 const BASE_SHA = "3a70c6c7";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const showAtBase = (file) => {
-  try { return execFileSync("git", ["--no-pager", "show", `${BASE_SHA}:${file}`], { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
+const showAt = (sha, file) => {
+  try { return execFileSync("git", ["--no-pager", "show", `${sha}:${file}`], { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
   catch { return null; } // sha not present (shallow clone): reported as an explicit SKIP below
 };
+const showAtBase = (file) => showAt(BASE_SHA, file);
 const literalAtBase = (src, name) => {
   const m = new RegExp(`const ${name} = \`([\\s\\S]*?)\`;\\n`).exec(src);
   return m ? new Function(`return \`${m[1]}\``)() : null; // same cooking as the compiler gives the source literal
 };
+
+// Older shipped texts appended after each list's first entry (card c08055cc), each pinned byte-exact at the FIXED
+// first-parent-of-main sha that shipped it. `index` is the entry's position in the list.
+const OLDER_PINS = [
+  { label: "WORKSPACE_AUDITOR_PROMPT", sha: "aecc6551", index: 1 },
+  { label: "WORKSPACE_AUDITOR_PROMPT", sha: "838ddedc", index: 2 },
+  { label: "COMPANION_PROMPT", sha: "38188873", index: 1 },
+  { label: "PLATFORM_LEAD_PROMPT", sha: "a8622f82", index: 1 },
+  { label: "PLATFORM_LEAD_PROMPT", sha: "85f4c1db", index: 2 },
+  { label: "PLATFORM_AUDIT_PROMPT", sha: "a8622f82", index: 1 },
+  { label: "PLATFORM_AUDIT_PROMPT", sha: "4ee722e2", index: 2 },
+  { label: "PLATFORM_AUDIT_PROMPT", sha: "85f4c1db", index: 3 },
+];
 
 // ---- the six prompts under test ----
 const SETUP_FILE = "packages/daemon/src/setup/seed.ts";
@@ -149,8 +163,40 @@ for (const p of PROMPTS) {
   // Every prompt in this table has been trimmed once, so its first prior differs from the current text: the
   // pristine -> upgraded loop above must have run at least once (else it passed vacuously).
   check(`[${p.label}] at least one stale prior was exercised (${stale.length} of ${p.priors.length} listed) - the upgrade loop was not vacuous`, stale.length >= 1 && p.priors[0] !== p.current);
-  check(`[${p.label}] the current text is SHORTER than the first prior (a trim, not a rewrite)`, p.current.length < p.priors[0].length);
+  check(`[${p.label}] the first prior differs from the current text (the list was introduced by an edit)`, p.priors[0] !== p.current);
+  check(`[${p.label}] no prior value is listed twice`, new Set(p.priors).size === p.priors.length);
+
+  // (4b) each older appended entry == the text shipped at ITS fixed sha
+  for (const pin of OLDER_PINS.filter((x) => x.label === p.label)) {
+    const src = showAt(pin.sha, p.file);
+    if (src === null) { console.log(`SKIP  [${p.label}] sha ${pin.sha} not present in this checkout; byte-exactness of PRIOR_VALUES[${pin.index}] NOT verified here`); continue; }
+    const shipped = literalAtBase(src, p.label);
+    check(`[${p.label}] literal found at ${pin.sha} (extraction sanity)`, typeof shipped === "string" && shipped.length > 200);
+    check(`[${p.label}] PRIOR_VALUES[${pin.index}] is byte-identical to the text shipped at ${pin.sha}`, p.priors[pin.index] === shipped);
+    // Behavioural, independent of list position: an install holding exactly the text shipped at that sha moves to current.
+    setPrompt(c, p.agent, shipped);
+    const moved = c.run();
+    check(`[${p.label}] an install holding the text shipped at ${pin.sha} is refreshed to the current text`, agentOf(c, p.agent).startupPrompt === p.current && moved.includes(p.agent));
+  }
+  check(`[${p.label}] every OLDER_PINS entry for it points at an existing list index`, OLDER_PINS.filter((x) => x.label === p.label).every((x) => x.index < p.priors.length));
+  if (OLDER_PINS.some((x) => x.label === p.label)) {
+    check(`[${p.label}] list length == 1 + pinned older entries (no unpinned prior)`, p.priors.length === 1 + OLDER_PINS.filter((x) => x.label === p.label).length);
+  }
   setPrompt(c, p.agent, p.current);
+}
+
+// A byte-identical prior under a bundled agent NAME in a NON-reserved project is never touched: the refresh only
+// ever looks inside the reserved home.
+for (const [where, c, bundledNames] of [
+  ["setup", ctx.setup, [[setupSeed.SETUP_AUDITOR_AGENT_NAME, setupSeed.WORKSPACE_AUDITOR_PROMPT_PRIOR_VALUES[0]], [setupSeed.COMPANION_AGENT_NAME, setupSeed.COMPANION_PROMPT_PRIOR_VALUES[0]]]],
+  ["platform", ctx.platform, [["Platform Lead", platformSeed.PLATFORM_LEAD_PROMPT_PRIOR_VALUES[0]], ["Platform Auditor", platformSeed.PLATFORM_AUDIT_PROMPT_PRIOR_VALUES[0]]]],
+]) {
+  const pid = `plain-${where}`;
+  c.db.insertProject({ id: pid, name: `Plain ${where}`, repoPath: home, vaultPath: home, config: {}, createdAt: new Date().toISOString(), archivedAt: null, reserved: false, referenceRepos: [], noGateByDesign: false, denyGlobs: [], repos: [], vaultOnly: true });
+  bundledNames.forEach(([name, prior], i) => c.db.insertAgent({ id: `${pid}-${i}`, projectId: pid, name, startupPrompt: prior, position: i, profileId: null, endpoint: false, ioSchema: null }));
+  c.run();
+  check(`(${where}) byte-identical priors under bundled names in a NON-reserved project stay untouched`,
+    bundledNames.every(([, prior], i) => c.db.getAgent(`${pid}-${i}`).startupPrompt === prior));
 }
 
 // A prior text only matches under ITS OWN agent name: a Companion row carrying the Operator's prior is not refreshed.
