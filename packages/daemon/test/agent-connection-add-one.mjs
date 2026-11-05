@@ -9,13 +9,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       whole-list route tolerates unknown ids — asymmetry is deliberate); bad body -> 400; bad agent -> 404.
 //       Also the extracted validator is behaviour-preserving on the whole-list route for the capability
 //       cases (oauth2-bound requiresConnection capability, codex-profiled capability grant).
-//   (3) CONCURRENCY: a whole-list write that lands BETWEEN the add-one's read and its write must not be
-//       lost. Driven by an INTERLEAVE HOOK on the real better-sqlite3 handle: after the first read
-//       statement the add-one's Db method issues (and before its first write), a whole-list write lands.
-//       The correct implementation is ONE UPDATE statement — it issues no read before its write, so the
-//       hook has no gap to fire in and both writes survive; a read-then-write mutant is hit by the hook and
-//       loses the whole-list grant (that is the RED this test exists to show).
-//   (4) NO MCP SURFACE: no tool on any built MCP router is named like an add-agent-connection writer.
+//       (2d) codex parity on the add-one: existing capability + codex profile -> 400, text byte-equal to whole-list.
+//       (2e) the pending credential binding is flipped to 'applied' by the add-one (real Question -> answer -> add-one).
+//   (3) STRUCTURAL GUARDS on the Db method (NOT a race reproduction): better-sqlite3 is synchronous, so two
+//       requests can never truly interleave inside one process. The REAL race was the web client's
+//       GET-then-POST of the whole list; that is guarded by the web-side check in packages/web/test
+//       (the Settings grant mutation calls api.addAgentConnection, not updateAgent). What (3a)-(3c) pin is
+//       that Db.addAgentConnection issues no read-before-write gap: an INTERLEAVE HOOK on the real handle fires
+//       a whole-list write after the method's first read statement; the correct ONE-UPDATE implementation has
+//       no such gap, a read-then-write mutant is hit by the hook and loses the grant (3c is the control).
+//   (4) NO MCP SURFACE: the real guard is validateAgentPatch(allowCredentialGrants:false) on the MCP write
+//       paths PLUS no built MCP tools/list inputSchema declaring `connections`; asserted here on the BUILT
+//       tools/list of several routers. The src/mcp source-text scan is kept only as a secondary tripwire.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-connection-add-one.mjs
 import path from "node:path";
@@ -118,8 +123,43 @@ const listOf = (agentId) => db.getAgent(agentId).connections ?? [];
   // The whole-list route also refuses a bad connections SHAPE exactly as before.
   check("(2) whole-list connections shape error unchanged", (await wholeList("agentP", { connections: [1] })).statusCode === 400);
 
-  // markBindingsAppliedForAgent runs on the add-one: covered end-to-end by e2e/pending-bindings.spec.ts
-  // (needs a real filed credential Question, which this fixture does not create).
+  // (2d) card 3c18328b item 4: CODEX PARITY on the add-one route. An agent that ALREADY carries a capability
+  // and is bound to a codex profile: a connections-only add-one is refused 400 with codex text BYTE-EQUAL to
+  // the whole-list route's response for the same post-add list (the validator reads existing.capabilities).
+  mkAgent("agentCodexCap", { profileId: "profCodex" });
+  db.updateAgent("agentCodexCap", { capabilities: [{ slug: "addone-cap" }] });
+  const wlCodex = await wholeList("agentCodexCap", { connections: [connG1.id] });
+  const aoCodex = await addOne("agentCodexCap", connG1.id);
+  check("(2d) codex+existing-capability agent: whole-list connections write is 400 naming codex", wlCodex.statusCode === 400 && /codex/.test(JSON.parse(wlCodex.body).error));
+  check("(2d) ...and the add-one is 400 too", aoCodex.statusCode === 400);
+  check("(2d) ...with BYTE-EQUAL error text on both routes", JSON.parse(aoCodex.body).error === JSON.parse(wlCodex.body).error);
+  check("(2d) the refused add-one did NOT land", J(listOf("agentCodexCap")) === J([]));
+}
+
+// ===================== (2e) the pending binding is marked APPLIED by the add-one (card 3c18328b item 1) =====================
+// Real flow: a credential Question filed by a session OF the agent is answered (provisions a Connection, binding
+// stays 'pending'), then the add-one grant must flip it to 'applied'. RED = delete the markBindingsAppliedForAgent
+// call at the add-one route while keeping the route.
+{
+  const { buildQuestionAsk } = await import("../dist/mcp/questionTool.js");
+  db.insertProfile({ id: "profBind", name: "Bind Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  mkAgent("agentBind");
+  db.insertSession({
+    id: "sessBind", projectId: "pA", agentId: "agentBind", engineSessionId: "eng-bind", title: null, cwd: "pA",
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager",
+  });
+  const built = buildQuestionAsk(
+    { type: "credential", title: "Need a token", body: "test ask", provisionTo: { connection: { name: "Bind Me", host: "bind.example" }, binding: { profileId: "profBind" } } },
+    { sessionId: "sessBind", projectId: "pA", db, role: "manager" },
+  );
+  if ("error" in built) throw new Error(`buildQuestionAsk: ${built.error}`);
+  db.insertQuestion({ ...built.question, id: "cred-bind" });
+  const ans = await app.inject({ method: "POST", url: "/api/questions/cred-bind/answer", payload: { secret: "sek-bind" } });
+  const provId = db.getQuestion("cred-bind").provisionConnectionId;
+  check("(2e) setup: the credential answer provisioned a connection and left the binding 'pending'", ans.statusCode === 200 && !!provId && db.getQuestion("cred-bind").provisionBindingState === "pending");
+  const grant = await addOne("agentBind", provId);
+  check("(2e) the add-one grant of the provisioned connection -> 200", grant.statusCode === 200 && listOf("agentBind").includes(provId));
+  check("(2e) the pending binding is now 'applied' (markBindingsAppliedForAgent ran on the add-one route)", db.getQuestion("cred-bind").provisionBindingState === "applied");
 }
 
 // ===================== (3) concurrency: an interleaved whole-list write is not lost =====================
@@ -154,13 +194,13 @@ function installInterleave(targetDb, agentId, wholeListConnections, methodName =
   return state;
 }
 {
-  // (3a) Real HTTP-level concurrency: both requests in flight together — both grants survive.
+  // (3a) STRUCTURAL smoke (not a race): two injected requests in flight together; sync sqlite serialises them.
   mkAgent("agentRace");
   const [w, a] = await Promise.all([wholeList("agentRace", { connections: [connG2.id] }), addOne("agentRace", connG1.id)]);
   check("(3a) concurrent whole-list + add-one: both 200", w.statusCode === 200 && a.statusCode === 200);
   check("(3a) the add-one grant survives alongside the whole-list write", listOf("agentRace").includes(connG1.id));
 
-  // (3b) Interleaved: a whole-list write lands between the add-one's read and its write.
+  // (3b) STRUCTURAL guard on the Db method: a hook-injected whole-list write lands between the add-one's read and its write.
   mkAgent("agentInterleave");
   db.updateAgent("agentInterleave", { connections: [connA.id] });
   const st = installInterleave(db, "agentInterleave", [connA.id, connG2.id]);
@@ -207,8 +247,62 @@ function installInterleave(targetDb, agentId, wholeListConnections, methodName =
   // Control: the SAME extraction pattern must find a tool known to be registered (platform.ts agent_update).
   const platformNames = [...readFileSync(path.join(mcpDir, "platform.ts"), "utf8").matchAll(/registerTool\(\s*["'`]([^"'`]+)["'`]/g)].map((m) => m[1]);
   check("(4) CONTROL: the registration-name pattern finds the known tool 'agent_update' in platform.ts", platformNames.includes("agent_update"));
-  check(`(4) scanned ${scanned} src/mcp/*.ts files (source-text scan, not a tools/list probe) — none references addAgentConnection, the add-one route, or an add/grant-connection tool name`, scanned > 5 && offenders.length === 0);
+  check(`(4) secondary tripwire: scanned ${scanned} src/mcp/*.ts files (source-text scan, weak) — none references addAgentConnection, the add-one route, or an add/grant-connection tool name`, scanned > 5 && offenders.length === 0);
   if (offenders.length) console.log("      offenders:", offenders.join(", "));
+}
+
+// ===================== (4b) BUILT tools/list: no router tool inputSchema declares `connections` =====================
+// Card 3c18328b item 3. The real guard against an agent-callable connection-grant writer is that no MCP tool
+// can even NAME a `connections` argument (and validateAgentPatch runs allowCredentialGrants:false on MCP).
+{
+  const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+  const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+  const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
+  const { TaskMcpRouter } = await import("../dist/mcp/server.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const listTools = async (server) => {
+    const client = new Client({ name: "add-one-surface", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    const tools = (await client.listTools()).tools;
+    await client.close();
+    return tools;
+  };
+  // Every property key (at any depth) declared in a JSON-schema fragment.
+  const propKeys = (s, out = new Set()) => {
+    if (!s || typeof s !== "object") return out;
+    if (s.properties && typeof s.properties === "object") for (const [k, v] of Object.entries(s.properties)) { out.add(k); propKeys(v, out); }
+    for (const v of Object.values(s)) if (v && typeof v === "object") propKeys(v, out);
+    return out;
+  };
+  const withConnections = (tools) => tools.filter((t) => propKeys(t.inputSchema).has("connections")).map((t) => t.name);
+  // Control 1: the scanner flags a synthetic tool that declares `connections` (nested too).
+  check("(4b) CONTROL: the scanner flags a synthetic tool declaring `connections` (top-level and nested)",
+    J(withConnections([{ name: "bad_top", inputSchema: { properties: { connections: {} } } }, { name: "bad_nested", inputSchema: { properties: { patch: { properties: { connections: {} } } } } }, { name: "ok", inputSchema: { properties: { name: {} } } }])) === J(["bad_top", "bad_nested"]));
+  const savedDev = process.env.LOOM_DEV;
+  const surfaces = [];
+  try {
+    const orch = new OrchestrationMcpRouter(db, {});
+    surfaces.push(["orchestration manager", await listTools(orch.buildServer("sessBind", "manager"))]);
+    surfaces.push(["orchestration worker", await listTools(orch.buildServer("sessBind", "worker"))]);
+    surfaces.push(["loom-tasks", await listTools(new TaskMcpRouter(db, {}).buildServer("pA", "sessBind"))]);
+    surfaces.push(["setup", await listTools(new SetupMcpRouter(db, {}).buildServer("s-setup"))]);
+    for (const dev of ["1", undefined]) {
+      if (dev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = dev;
+      surfaces.push([`platform (LOOM_DEV=${dev ?? "unset"})`, await listTools(new PlatformMcpRouter(db, {}).buildServer("s-platform"))]);
+    }
+  } finally {
+    if (savedDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedDev;
+  }
+  // Control 2: the real corpus is non-trivial and contains agent-writing tools (the thing this guards).
+  const platformTools = surfaces.find(([n]) => n.startsWith("platform"))[1];
+  check("(4b) CONTROL: the built platform surface lists agent_update with real properties", propKeys(platformTools.find((t) => t.name === "agent_update")?.inputSchema).size > 0);
+  for (const [name, tools] of surfaces) {
+    check(`(4b) ${name}: ${tools.length} built tools, none declares a \`connections\` input property`, tools.length > 3 && withConnections(tools).length === 0);
+    const hits = withConnections(tools);
+    if (hits.length) console.log("      tools declaring `connections`:", hits.join(", "));
+  }
 }
 
 db.close();
