@@ -51,7 +51,7 @@ import { reconcileCompanionBindingRoutes, companionRouteBlockReason } from "../c
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
-import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnectionConfig, validateSshHost } from "../connections/store.js";
+import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnectionConfig, validateSshHost, SshConnectionInputError } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { fetchHostKeyFingerprint } from "../connections/ssh.js";
@@ -2850,6 +2850,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // api-key/bearer's single opaque `secret`. Human-only loopback, same trust posture as every connection
   // write — no MCP path. The private key never appears in this route's response (createSshConnection
   // returns ConnectionMetadata only). ---
+  // A caller-correctable input error -> 400 with its fixed text; anything else (envelope key-file fs errors
+  // naming the secret-key path, sqlite faults) is a server fault -> fixed 500. Only the error's NAME is
+  // logged server-side — never its message (which can carry a path) and never any request/key material.
+  const sendSshConnectionError = (reply: FastifyReply, err: unknown, op: "create" | "update") => {
+    if (err instanceof SshConnectionInputError) return reply.code(400).send({ error: err.message });
+    console.error(`[gateway] ssh connection ${op} failed (server fault): ${err instanceof Error ? err.name : typeof err}`);
+    return reply.code(500).send({ error: "could not save the connection" });
+  };
   app.post("/api/connections/ssh", async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     if (typeof b.name !== "string" || typeof b.host !== "string" || typeof b.user !== "string" || typeof b.privateKey !== "string" || typeof b.hostKeyFingerprint !== "string") {
@@ -2867,7 +2875,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       });
       return reply.code(201).send(created);
     } catch (err) {
-      return reply.code(400).send({ error: (err as Error).message });
+      return sendSshConnectionError(reply, err, "create");
     }
   });
 
@@ -2905,7 +2913,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       });
       return reply.code(200).send(updated);
     } catch (err) {
-      return reply.code(400).send({ error: (err as Error).message });
+      return sendSshConnectionError(reply, err, "update");
     }
   });
 

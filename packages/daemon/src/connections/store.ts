@@ -20,6 +20,13 @@ import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { stripSshKeyPassphrase } from "./sshKey.js";
 import type { ConnectionRow } from "../db.js";
 import { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } from "@loom/shared";
+
+/** A caller-correctable input problem from the ssh create/update paths — its message is FIXED text safe to
+ *  show the caller (never submission-derived; see sshKey.ts's allowlist). Anything thrown that is NOT this
+ *  (fs/envelope/sqlite faults) is a server fault: the REST routes answer it with a fixed 500, never its text. */
+export class SshConnectionInputError extends Error {
+  constructor(message: string) { super(message); this.name = "SshConnectionInputError"; }
+}
 import type { ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug, SshCommandRule } from "@loom/shared";
 
 /** The narrow db surface this module needs (mirrors CompanionConfigStore's shape in companion/store.ts). */
@@ -310,9 +317,9 @@ export function createSshConnection(
   keyPath?: string,
 ): ConnectionMetadata {
   const v = validateSshConnectionInput(input);
-  if (!v.ok) throw new Error(v.error);
+  if (!v.ok) throw new SshConnectionInputError(v.error);
   const stripped = stripSshKeyPassphrase(input.privateKey, input.passphrase);
-  if (!stripped.ok) throw new Error(stripped.error);
+  if (!stripped.ok) throw new SshConnectionInputError(stripped.error);
   const row = db.createConnection({
     name: input.name.trim(),
     host: input.host.trim(),
@@ -355,17 +362,17 @@ export function updateSshConnectionConfig(
   patch: { readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[] },
 ): ConnectionMetadata {
   const row = db.getConnection(id);
-  if (!row || row.authScheme !== "ssh") throw new Error("no ssh connection with that id");
+  if (!row || row.authScheme !== "ssh") throw new SshConnectionInputError("no ssh connection with that id");
   const readOnly = patch.readOnly === undefined ? row.sshReadOnly : patch.readOnly;
-  if (typeof readOnly !== "boolean") throw new Error("readOnly, when given, must be a boolean");
+  if (typeof readOnly !== "boolean") throw new SshConnectionInputError("readOnly, when given, must be a boolean");
   const allow = patch.commandAllowlist === undefined
     ? { ok: true as const, value: parseSshRuleListColumn(row.sshCommandAllowlist) }
     : validateSshCommandRuleList(patch.commandAllowlist, "commandAllowlist");
-  if (!allow.ok) throw new Error(allow.error);
+  if (!allow.ok) throw new SshConnectionInputError(allow.error);
   const risky = patch.riskyCommandPatterns === undefined
     ? { ok: true as const, value: parseSshRuleListColumn(row.sshRiskyPatterns) }
     : validateSshCommandRuleList(patch.riskyCommandPatterns, "riskyCommandPatterns");
-  if (!risky.ok) throw new Error(risky.error);
+  if (!risky.ok) throw new SshConnectionInputError(risky.error);
   db.updateSshConnectionConfig(id, { readOnly, commandAllowlist: JSON.stringify(allow.value), riskyPatterns: JSON.stringify(risky.value) });
   return getConnectionMetadata(db, id)!;
 }

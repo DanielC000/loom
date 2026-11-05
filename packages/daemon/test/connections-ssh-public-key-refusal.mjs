@@ -61,7 +61,26 @@ const PUBLIC_ROWS = [
   ["rsa OpenSSH public key line", rsa.public, bodyMarker(rsa.public)],
   ["SPKI 'BEGIN PUBLIC KEY' PEM", spkiPem, bodyMarker(spkiPem)],
 ];
+// Card b919b6fd: ssh2 messages that interpolate text DECODED FROM THE SUBMISSION (keyParser.js :478, :484, :493,
+// :831/:838, :1314/:1387). Each fixture plants a distinctive marker where ssh2 reads it; the 400 body must not
+// carry it. Fixtures are synthetic envelopes — no real key material anywhere.
+const sshStr = (s) => { const b = Buffer.from(s); const l = Buffer.alloc(4); l.writeUInt32BE(b.length); return Buffer.concat([l, b]); };
+const opensshArmor = (body) => "-----BEGIN OPENSSH PRIVATE KEY-----\n" + body.toString("base64").replace(/.{1,70}/g, "$&\n").trimEnd() + "\n-----END OPENSSH PRIVATE KEY-----";
+const MAGIC = Buffer.from("openssh-key-v1\0", "binary");
+const pad = Buffer.alloc(40, 1);
+const CIPHER_MARKER = "LEAKCIPHERMARKER", KDF_MARKER = "LEAKKDFMARKER", DEK_MARKER = "LEAKDEKMARKER", PUBTYPE_MARKER = "LEAKPUBTYPEMARKER";
+const cipherKey = opensshArmor(Buffer.concat([MAGIC, sshStr(CIPHER_MARKER), sshStr("none"), sshStr(""), pad]));
+const kdfKey = opensshArmor(Buffer.concat([MAGIC, sshStr("aes256-ctr"), sshStr(KDF_MARKER), sshStr(""), pad]));
+const dekKey = `-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: ${DEK_MARKER},00112233445566778899AABBCCDDEEFF\n\n${Buffer.alloc(48, 7).toString("base64")}\n-----END RSA PRIVATE KEY-----`;
+const pubTypeKey = `ssh-${PUBTYPE_MARKER} ${Buffer.concat([sshStr(`ssh-${PUBTYPE_MARKER}`), sshStr("x")]).toString("base64")}`;
+const GENERIC = "invalid private key: could not read this private key";
 const OTHER_ROWS = [
+  ["ssh2 cipher-name echo (:484)", cipherKey, GENERIC, CIPHER_MARKER],
+  ["ssh2 kdf-name echo (:493)", kdfKey, GENERIC, KDF_MARKER],
+  ["ssh2 PEM DEK-Info cipher echo (:831)", dekKey, GENERIC, DEK_MARKER],
+  // Observed: ssh2 answers this shape "Unsupported key format" (no echo) — the :1314/:1387 echo is not reachable from
+  // here, so assert marker-absence only; the allowlist would collapse the echoing wording anyway.
+  ["ssh2 public-key-type echo (:1314/:1387)", pubTypeKey, null, PUBTYPE_MARKER],
   ["empty string", "", "privateKey must be a non-empty string of at most 8192 characters", null],
   ["whitespace only", "  \n\t ", "privateKey must be a non-empty string of at most 8192 characters", null],
   ["PEM of another type (CERTIFICATE)", certLikePem, null, bodyMarker(certLikePem)],
@@ -114,6 +133,33 @@ try {
   check("direct: the public key line is refused with the fixed text", stripSshKeyPassphrase(edPubLine, undefined).error === PUBLIC_KEY_REFUSAL);
 
   check("no refused submission wrote a row", db.listConnections().length === countAfterControl);
+
+  // Positive control (marker mechanism): each planted marker really IS in the submitted text.
+  for (const [label, key, , marker] of OTHER_ROWS.slice(0, 4)) check(`(positive control) marker is in the submitted text (raw or base64-decoded): ${label}`, key.includes(marker) || Buffer.from(key.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""), "base64").includes(marker));
+  // Every allowlisted message still passes through: encrypted key with no / a wrong passphrase.
+  const encKp = genKey("ed25519", { passphrase: "pp-for-allowlist-control", cipher: "aes256-ctr" });
+  check("allowlist: encrypted key, no passphrase -> ssh2's fixed 'no passphrase given' text still forwarded", /no passphrase given/.test(stripSshKeyPassphrase(encKp.private, undefined).error ?? ""));
+  check("allowlist: encrypted key, wrong passphrase -> fixed 'bad passphrase' text still forwarded", /bad passphrase/i.test(stripSshKeyPassphrase(encKp.private, "wrong").error ?? ""));
+  // NIT: a valid private key with a public-key PEM block appended is NOT refused as "a public key".
+  // (ssh2 itself may still reject the concatenation as unparseable; the NIT is only that it is not misnamed "a public key".)
+  check("armor: private key + appended PUBLIC KEY block is NOT refused as 'that is a public key'", stripSshKeyPassphrase(rsa.private + "\n" + spkiPem, undefined).error !== PUBLIC_KEY_REFUSAL);
+
+  // MINOR: a server fault is a fixed 500 that names no path; a caller error stays a 400 with its fixed text.
+  const putBad = await app.inject({ method: "PUT", url: "/api/connections/no-such-id/ssh", payload: { readOnly: true } });
+  check("PUT unknown id -> 400 fixed validation text", putBad.statusCode === 400 && JSON.parse(putBad.payload).error === "no ssh connection with that id");
+  const { SECRET_KEY_PATH } = await import("../dist/paths.js");
+  fs.mkdirSync(path.dirname(SECRET_KEY_PATH), { recursive: true });
+  const goodKeyBytes = fs.existsSync(SECRET_KEY_PATH) ? fs.readFileSync(SECRET_KEY_PATH) : null;
+  fs.writeFileSync(SECRET_KEY_PATH, Buffer.alloc(5, 1)); // wrong length -> envelope throws "envelope key at <path> has unexpected length"
+  const origErr = console.error; const logged = []; console.error = (...a) => { logged.push(a.join(" ")); };
+  let faultRes;
+  try { faultRes = await post(ed.private); } finally { console.error = origErr; if (goodKeyBytes) fs.writeFileSync(SECRET_KEY_PATH, goodKeyBytes); }
+  console.log(`  [observed] envelope fault: status=${faultRes.statusCode} body=${faultRes.payload}`);
+  check("envelope-key fault -> 500", faultRes.statusCode === 500);
+  check("envelope-key fault -> fixed text", JSON.parse(faultRes.payload).error === "could not save the connection");
+  check("envelope-key fault: body names no secret-key path / 'envelope' / tmp home", !/envelope|unexpected length|loom-ssh-pub|secret/i.test(faultRes.payload));
+  check("envelope-key fault: server log lines carry no path or key marker", logged.length > 0 && logged.every((l) => !l.includes(tmpHome) && !l.includes(bodyMarker(ed.private))));
+  check("envelope-key fault wrote no row", db.listConnections().length === countAfterControl);
 
   await app.close();
   db.close();

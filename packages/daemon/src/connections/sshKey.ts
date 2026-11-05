@@ -32,22 +32,40 @@ function sshUint32(n: number): Buffer {
 // compare alone — see the decision record's "self-verify" section for why.
 
 /**
- * `ssh2`'s own key-parser error messages are mostly static strings, but a handful interpolate bytes
- * decoded straight from the SUBMITTED key text — e.g. a corrupt/truncated key fails with `Unsupported
- * OpenSSH key magic: ${magic}`, where `magic` is the first 15 raw decoded bytes of whatever was
- * submitted (`keyParser.js`'s `OpenSSH_Private.parse`). Echoing one of these verbatim into a REST 400
- * would leak a fragment of the submission (potentially real key bytes, for a near-valid/garbled key) to
- * whatever logs or displays that response. Every OTHER parse-failure message `ssh2` returns (malformed /
- * no-passphrase / bad-passphrase-integrity-check) is a fixed string with no interpolated content, so it's
- * safe to pass through unchanged — classify only the unsafe shapes away.
+ * `ssh2`'s key-parser error messages are mostly static strings, but several interpolate bytes decoded
+ * straight from the SUBMITTED key text (`Unsupported OpenSSH key magic: ${magic}`, `Unsupported cipher for
+ * OpenSSH key: ${cipherName}`, `Cipher (${cipherName}) not supported ...` from a PEM DEK-Info header, ...).
+ * Echoing one into a REST 400 would leak a fragment of the submission to whatever logs or displays the
+ * response. So this is an ALLOWLIST, not a denylist: only these exact, fixed strings (each verified against
+ * ssh2@1.17.0's `lib/protocol/keyParser.js`, line numbers below) are forwarded; ANY other message — including
+ * a wording a future ssh2 adds — collapses to one generic fallback. Re-audit the list on an ssh2 bump.
  */
-const SSH2_ECHOES_SUBMISSION_BYTES_RE = /^Unsupported (OpenSSH (key magic|cipher for OpenSSH key|kdf name for OpenSSH key|private key type|OpenSSH public key type)|private key EC OID)/;
+const SSH2_FIXED_PARSE_ERRORS: ReadonlySet<string> = new Set([
+  "Malformed OpenSSH private key", // :475 etc.
+  "Malformed OpenSSH private key. Bad passphrase?", // :887-889 (errMsg + ". Bad passphrase?")
+  "Encrypted private OpenSSH key detected, but no passphrase given", // :495
+  "Failed to generate information to decrypt key", // :533
+  "OpenSSH key integrity check failed -- bad passphrase?", // :632
+  "OpenSSH key integrity check failed", // :635
+  "Malformed encrypted OpenSSH private key", // :845
+  "Encrypted OpenSSH private key detected, but no passphrase given", // :847
+  "Encrypted PPK private key detected, but no passphrase given", // :1046
+  "PPK private key integrity check failed -- bad passphrase?", // :1112
+  "PPK private key integrity check failed", // :1116
+  "Malformed PPK private key", // :1134
+  "Malformed PPK public key", // :1128
+  "Malformed OpenSSH public key", // :1211
+  "Malformed RFC4716 public key", // :1247
+  "Unsupported key format", // :1476
+]);
+const GENERIC_PARSE_ERROR = "could not read this private key";
 function classifySshParseError(message: string): string {
-  return SSH2_ECHOES_SUBMISSION_BYTES_RE.test(message) ? "unrecognized or corrupt private key format" : message;
+  return SSH2_FIXED_PARSE_ERRORS.has(message) ? message : GENERIC_PARSE_ERROR;
 }
 
 const PUBLIC_KEY_REFUSAL = "that is a public key; paste the PRIVATE key file";
 const PEM_PUBLIC_KEY_ARMOR_RE = /-----BEGIN (?:RSA |EC |DSA )?PUBLIC KEY-----/;
+const PEM_PRIVATE_KEY_ARMOR_RE = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 const NO_STORABLE_FORM_REFUSAL = "could not produce a storable form of this key";
 
 const ED25519_PKCS8_DER_LEN = 48; // RFC 8410 — fixed length for every Ed25519 PKCS8 PrivateKeyInfo, no optional fields.
@@ -106,7 +124,8 @@ export function stripSshKeyPassphrase(privateKey: unknown, passphrase: unknown):
     return { ok: false, error: "passphrase, when given, must be a string" };
   }
   // PEM public-key armor (SPKI / PKCS#1) is not parsed by ssh2 at all ("Unsupported key format"), so name it here.
-  if (PEM_PUBLIC_KEY_ARMOR_RE.test(privateKey)) return { ok: false, error: PUBLIC_KEY_REFUSAL };
+  // A private-key armor anywhere wins (a valid private key with a public block appended is still a private key).
+  if (!PEM_PRIVATE_KEY_ARMOR_RE.test(privateKey) && PEM_PUBLIC_KEY_ARMOR_RE.test(privateKey)) return { ok: false, error: PUBLIC_KEY_REFUSAL };
   const parsed = sshUtils.parseKey(privateKey, passphrase || undefined);
   if (parsed instanceof Error) {
     // ssh2's own message distinguishes "encrypted, no passphrase given" from "bad passphrase" from
