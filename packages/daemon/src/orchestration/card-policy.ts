@@ -98,7 +98,7 @@ export async function evaluateCardPolicies(input: {
   phase: PolicyPhase;
   evidence: PolicyEvidence;
   /**
-   * Policy ids that have EVER matched this card (the Db's sticky `card_policy_matches`). Enforced as the UNION of these
+   * Policy ids that have EVER matched this card (the Db's project-scoped sticky `card_policy_matches_v2`). Enforced as the UNION of these
    * and the live title match, so retitling a card out of a selector never drops its policy. An id whose policy no
    * longer exists in the stored list is simply never reached (the loop iterates the configured policies), so a policy
    * the owner deleted stops applying.

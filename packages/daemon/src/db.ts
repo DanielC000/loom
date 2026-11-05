@@ -1537,6 +1537,17 @@ CREATE TABLE IF NOT EXISTS card_policy_matches (
   recorded_at TEXT NOT NULL,
   PRIMARY KEY (task_id, policy_id)
 );
+-- Project-scoped sticky matches (card f330faee): policy ids are per-project config, so a sticky row is only
+-- meaningful against the project whose config named that id. The (task_id, policy_id) table above is LEGACY: it is
+-- no longer written or read after migrateCardPolicyMatchesV2 backfills this one (kept only so a downgrade still has
+-- its data). CREATE TABLE only (no migrated column, no extra index).
+CREATE TABLE IF NOT EXISTS card_policy_matches_v2 (
+  task_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  policy_id TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, project_id, policy_id)
+);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
 -- worker_session_id, ts, kind are all ORIGINAL columns on this table (present since its very first
 -- CREATE TABLE, unlike a later ALTER-added column) — so, like idx_orch_events_mgr above, these two are
@@ -1761,6 +1772,8 @@ const ARCHIVED_AT_BACKFILL_KEY = "archived_at_backfill_done";
 const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
 /** app_meta marker for the one-shot legacy `deferred_until_task_id` column → `task_relations` backfill (card 3df86c87). */
 const DEFERRAL_EDGES_BACKFILL_MARKER = "task_deferral_edges_backfill_done";
+/** app_meta one-shot marker for the legacy `card_policy_matches` → `card_policy_matches_v2` backfill (card f330faee). */
+const CARD_POLICY_MATCHES_V2_BACKFILL_MARKER = "card_policy_matches_v2_backfill_done";
 /** app_meta one-shot marker for the profile→agent credential-grant fan-out (card afe1bc90). */
 export const CREDENTIAL_GRANT_FANOUT_MARKER = "profile_credential_grants_fanout_done";
 /** app_meta key holding the fan-out's durable JSON summary ({@link CredentialGrantFanoutSummary}) the notice card reads. */
@@ -3147,6 +3160,28 @@ export class Db {
     this.migratePurgeLegacySessionEnvHistory();
     this.migratePurgeLegacyAlertWebhookHistory();
     this.migrateUsageSamples();
+    this.migrateCardPolicyMatchesV2();
+  }
+
+  /**
+   * Card f330faee: backfill the project-scoped sticky table from the legacy (task_id, policy_id) one, attributing
+   * each legacy row to the card's CURRENT project. ONE-SHOT: an `app_meta` marker is checked FIRST and stamped
+   * LAST in the SAME transaction as the copy (the `backfillDeferralEdgesOnce` pattern), so a crash mid-boot
+   * re-runs the whole thing and a completed run is never repeated — a re-run would re-derive rows from the
+   * never-consumed legacy table against a card's NEW project after a later relocation. The legacy table is left
+   * untouched (a downgrade still reads it). This is the ONE place that table is read.
+   * Named residual: a card relocated BEFORE this fix has its source-project rows attributed to its current
+   * project (the old table recorded no project), which keeps the pre-fix over-enforcement until a human waiver.
+   */
+  private migrateCardPolicyMatchesV2(): void {
+    if (this.getMeta(CARD_POLICY_MATCHES_V2_BACKFILL_MARKER)) return;
+    this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT OR IGNORE INTO card_policy_matches_v2 (task_id, project_id, policy_id, recorded_at)
+         SELECT m.task_id, t.project_id, m.policy_id, m.recorded_at FROM card_policy_matches m JOIN tasks t ON t.id = m.task_id`,
+      ).run();
+      this.setMeta(CARD_POLICY_MATCHES_V2_BACKFILL_MARKER, new Date().toISOString());
+    })();
   }
 
   /**
@@ -9460,6 +9495,12 @@ export class Db {
       this.db.prepare(
         "UPDATE questions SET project_id=? WHERE task_id = ? OR (length(task_id) = 8 AND ? LIKE task_id || '-%')",
       ).run(patch.projectId, id, id);
+      // Card f330faee: sticky card-policy matches are project-scoped (card_policy_matches_v2), so the source
+      // project's rows stay behind under the source key (a later move back restores them) and are never read
+      // against the destination. Record the destination's own selector matches for the card's CURRENT title here,
+      // in the same transaction, so no relocate can land without it.
+      const moved = this.db.prepare("SELECT title FROM tasks WHERE id = ?").get(id) as Row | undefined;
+      if (moved) this.recordTitlePolicyMatches(id, patch.projectId, moved.title as string);
     })();
   }
   /** PERMANENTLY delete a task card. Idempotent on a missing id (DELETE … WHERE matches nothing). HUMAN-only
@@ -11208,16 +11249,16 @@ export class Db {
        ON CONFLICT(task_id, policy_id, requirement_kind) DO UPDATE SET reason = excluded.reason, waived_by = excluded.waived_by, created_at = excluded.created_at`,
     ).run(w);
   }
-  /** Card 9623e943: policy ids that have EVER matched this card (sticky; see the card_policy_matches table). */
-  listCardPolicyMatches(taskId: string): string[] {
-    return (this.db.prepare("SELECT policy_id FROM card_policy_matches WHERE task_id = ?").all(taskId) as Row[]).map((r) => r.policy_id as string);
+  /** Card 9623e943: policy ids that have EVER matched this card within `projectId` (sticky; see card_policy_matches_v2). */
+  listCardPolicyMatches(taskId: string, projectId: string): string[] {
+    return (this.db.prepare("SELECT policy_id FROM card_policy_matches_v2 WHERE task_id = ? AND project_id = ?").all(taskId, projectId) as Row[]).map((r) => r.policy_id as string);
   }
-  /** Card 9623e943: add (never remove) sticky policy matches for a card. Idempotent. */
-  recordCardPolicyMatches(taskId: string, policyIds: readonly string[]): void {
+  /** Card 9623e943: add (never remove) sticky policy matches for a card under `projectId`. Idempotent. */
+  recordCardPolicyMatches(taskId: string, projectId: string, policyIds: readonly string[]): void {
     if (policyIds.length === 0) return;
-    const ins = this.db.prepare("INSERT OR IGNORE INTO card_policy_matches (task_id, policy_id, recorded_at) VALUES (?, ?, ?)");
+    const ins = this.db.prepare("INSERT OR IGNORE INTO card_policy_matches_v2 (task_id, project_id, policy_id, recorded_at) VALUES (?, ?, ?, ?)");
     const now = new Date().toISOString();
-    for (const id of new Set(policyIds)) ins.run(taskId, id, now);
+    for (const id of new Set(policyIds)) ins.run(taskId, projectId, id, now);
   }
   /**
    * Card 9623e943: record which of the project's stored card policies match `title` for this card. Called by every
@@ -11229,7 +11270,7 @@ export class Db {
     if (raw === undefined) return;
     const parsed = parseCardPolicies(raw);
     if (!parsed.ok) return;
-    this.recordCardPolicyMatches(taskId, matchingCardPolicyIds(parsed.policies, { id: taskId, title }));
+    this.recordCardPolicyMatches(taskId, projectId, matchingCardPolicyIds(parsed.policies, { id: taskId, title }));
   }
   /** Card 9623e943: returns true when a waiver row existed and was removed. */
   deleteCardPolicyWaiver(taskId: string, policyId: string, requirementKind: string): boolean {

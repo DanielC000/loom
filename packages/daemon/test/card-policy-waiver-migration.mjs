@@ -33,6 +33,7 @@ const dbFile = path.join(tmpHome, "legacy.db");
   raw.exec("DROP TABLE card_policy_waivers");
   check("(setup) the reference schema also HAS card_policy_matches (sticky matches) before we drop it", !!raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='card_policy_matches'").get());
   raw.exec("DROP TABLE card_policy_matches");
+  raw.exec("DROP TABLE card_policy_matches_v2"); // card f330faee: the project-scoped successor is also absent in a pre-card file
   check("(precondition) the legacy file has NO card_policy_waivers table", !raw.prepare("SELECT 1 FROM sqlite_master WHERE name='card_policy_waivers'").get());
   check("(precondition) the legacy file still holds the real rows", raw.prepare("SELECT count(*) AS c FROM tasks").get().c === 1 && raw.prepare("SELECT count(*) AS c FROM projects").get().c === 1);
   raw.close();
@@ -60,15 +61,15 @@ if (!db) { console.log(`\n${failures} check(s) FAILED.`); await finishAndExit(1)
 // ── sticky card-policy matches (card_policy_matches) on the same pre-card file ───────────────────────────
 {
   const raw = new Database(dbFile, { readonly: true });
-  const cols = raw.prepare("PRAGMA table_info(card_policy_matches)").all();
-  check("(7) card_policy_matches now exists on the pre-card database with exactly (task_id, policy_id, recorded_at)", cols.map((c) => c.name).sort().join() === "policy_id,recorded_at,task_id");
-  check("(7) its primary key is (task_id, policy_id) and it carries NO index of its own", cols.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name).join() === "task_id,policy_id" && !raw.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='card_policy_matches' AND sql IS NOT NULL").get());
+  const cols = raw.prepare("PRAGMA table_info(card_policy_matches_v2)").all();
+  check("(7) card_policy_matches_v2 now exists on the pre-card database with exactly (task_id, project_id, policy_id, recorded_at)", cols.map((c) => c.name).sort().join() === "policy_id,project_id,recorded_at,task_id");
+  check("(7) its primary key is (task_id, project_id, policy_id) and it carries NO index of its own", cols.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name).join() === "task_id,project_id,policy_id" && !raw.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='card_policy_matches_v2' AND sql IS NOT NULL").get());
   raw.close();
-  check("(7) a legacy card has no recorded matches yet", db.listCardPolicyMatches("legacy-t").length === 0);
+  check("(7) a legacy card has no recorded matches yet", db.listCardPolicyMatches("legacy-t", "legacy-p").length === 0);
   db.updateTask("legacy-t", { title: "retitled to bare prose" }); // the OLD feat title's match is recorded by the title chokepoint before it applies
-  check("(7) a title write on the migrated DB records the OLD title's match (p1), and it survives a second retitle", db.listCardPolicyMatches("legacy-t").join() === "p1" && (db.updateTask("legacy-t", { title: "again" }), db.listCardPolicyMatches("legacy-t").join() === "p1"));
-  db.recordCardPolicyMatches("legacy-t", ["p1", "p1", "p9"]);
-  check("(7) recording is idempotent and add-only", db.listCardPolicyMatches("legacy-t").sort().join() === "p1,p9");
+  check("(7) a title write on the migrated DB records the OLD title's match (p1), and it survives a second retitle", db.listCardPolicyMatches("legacy-t", "legacy-p").join() === "p1" && (db.updateTask("legacy-t", { title: "again" }), db.listCardPolicyMatches("legacy-t", "legacy-p").join() === "p1"));
+  db.recordCardPolicyMatches("legacy-t", "legacy-p", ["p1", "p1", "p9"]);
+  check("(7) recording is idempotent and add-only", db.listCardPolicyMatches("legacy-t", "legacy-p").sort().join() === "p1,p9");
 }
 
 db.upsertCardPolicyWaiver({ taskId: "legacy-t", policyId: "p1", requirementKind: "approved-request", reason: "r", waivedBy: "human", createdAt: now });
@@ -80,7 +81,7 @@ db.close();
 
 let db2, threw2 = null;
 try { db2 = new Db(dbFile); } catch (e) { threw2 = e; }
-check("(5) a SECOND open is idempotent (no throw) and keeps the waiver data AND the sticky matches", threw2 === null && db2?.listCardPolicyWaivers("legacy-t").length === 1 && db2?.listCardPolicyMatches("legacy-t").length === 2);
+check("(5) a SECOND open is idempotent (no throw) and keeps the waiver data AND the sticky matches", threw2 === null && db2?.listCardPolicyWaivers("legacy-t").length === 1 && db2?.listCardPolicyMatches("legacy-t", "legacy-p").length === 2);
 db2?.close();
 
 console.log(failures === 0 ? "\n✅ ALL PASS — card_policy_waivers migrates onto a pre-card database" : `\n${failures} check(s) FAILED.`);

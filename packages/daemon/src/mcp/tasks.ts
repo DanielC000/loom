@@ -826,7 +826,7 @@ export type TaskWithRequests = TaskWithMerged & TaskRelationView & { requests: T
 async function taskPolicyView(db: Db, projectId: string, task: Pick<Task, "id" | "title">): Promise<ReturnType<typeof policyView> | undefined> {
   const raw = (db.getProject(projectId)?.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
   const never = (): never => { throw new Error("merge-phase evidence is not read by tasks_get"); };
-  const ev = await evaluateCardPolicies({ rawPolicies: raw, task, phase: "spawn", evidence: { ...dbPolicyEvidence(db, projectId), codeReview: never, checkpoint: never }, stickyPolicyIds: raw === undefined || (Array.isArray(raw) && raw.length === 0) ? undefined : new Set(db.listCardPolicyMatches(task.id)) });
+  const ev = await evaluateCardPolicies({ rawPolicies: raw, task, phase: "spawn", evidence: { ...dbPolicyEvidence(db, projectId), codeReview: never, checkpoint: never }, stickyPolicyIds: raw === undefined || (Array.isArray(raw) && raw.length === 0) ? undefined : new Set(db.listCardPolicyMatches(task.id, projectId)) });
   return ev.verdicts.length > 0 ? policyView(ev) : undefined;
 }
 

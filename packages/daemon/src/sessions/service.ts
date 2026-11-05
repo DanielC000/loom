@@ -26292,9 +26292,9 @@ export class SessionService {
   /** Card 9623e943: evaluate this task's card policies for a phase (RAW stored override; see card-policy.ts). */
   private async evaluateTaskPolicies(project: Project, task: Task, phase: PolicyPhase, worker?: Session, pinnedTip?: string): Promise<PolicyEvaluation> {
     const raw = (project.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
-    const ev = await evaluateCardPolicies({ rawPolicies: raw, task: { id: task.id, title: task.title }, phase, evidence: this.buildCardPolicyEvidence(project, task, worker, pinnedTip), stickyPolicyIds: Array.isArray(raw) && raw.length === 0 || raw === undefined ? undefined : new Set(this.db.listCardPolicyMatches(task.id)) });
+    const ev = await evaluateCardPolicies({ rawPolicies: raw, task: { id: task.id, title: task.title }, phase, evidence: this.buildCardPolicyEvidence(project, task, worker, pinnedTip), stickyPolicyIds: Array.isArray(raw) && raw.length === 0 || raw === undefined ? undefined : new Set(this.db.listCardPolicyMatches(task.id, project.id)) });
     // Sticky: every policy that matched this card now (by live title or by record) stays recorded, so no later retitle can drop it.
-    this.db.recordCardPolicyMatches(task.id, ev.verdicts.map((v) => v.policyId).filter((id) => id !== "(config)"));
+    this.db.recordCardPolicyMatches(task.id, project.id, ev.verdicts.map((v) => v.policyId).filter((id) => id !== "(config)"));
     return ev;
   }
 
