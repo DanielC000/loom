@@ -123,8 +123,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
   });
   const events = useQuery({
     queryKey: ["orchestrationEvents", run.id],
-    queryFn: () => api.orchestrationEvents(run.id),
-    refetchInterval: live ? 6000 : false,
+    queryFn: () => api.orchestrationEvents(run.id), // pushed over /ws/fleet — no poll (card 670b2081)
   });
   const evs = events.data ?? [];
 

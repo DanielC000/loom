@@ -255,11 +255,13 @@ check("the exited tier polls far more slowly than the live tier, and WorkspaceHo
     "WorkspaceHome no longer reads the exited tier — the 5afd71bd gap is reopened");
   assert.ok(src.includes("refetchInterval: PULSE_EXITED_REFETCH_MS"),
     "WorkspaceHome must poll the exited tier through the shared constant, not a literal of its own");
-  assert.equal((src.match(/refetchInterval:\s*3000/g) ?? []).length, 1,
-    "exactly one 3s pulse fan-out may exist in WorkspaceHome — a second is the unbounded widening");
+  // Card 670b2081: the LIVE tier is no longer polled at all (its lists are patched from the /ws/fleet event
+  // push), so the count of 3s intervals is 0 — a reappearing one is the poll this card removed.
+  assert.equal((src.match(/refetchInterval:\s*3000/g) ?? []).length, 0,
+    "no 3s pulse poll may exist in WorkspaceHome — the live tier rides the /ws/fleet event push");
   // POSITIVE CONTROL on that last count: the pattern must be shown capable of matching the file it is
   // asserted against, so a renamed option can never make the count pass by matching nothing.
-  assert.ok(/refetchInterval:\s*\d+/.test(src),
+  assert.ok(/refetchInterval:\s*\w+/.test(src),
     "positive control: the refetchInterval pattern matches nothing in WorkspaceHome, so the count above is vacuous");
 });
 

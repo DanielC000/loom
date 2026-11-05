@@ -910,6 +910,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // amortize, and pause/resume are rare human/system actions, not a bursty stream, so a synchronous
   // broadcast per mutation is enough. `broadcast()`'s own per-socket loop is already inert with no fleet
   // socket connected (nothing to send to), matching the "no work when nobody's listening" discipline.
+  // Card 670b2081: orchestration events ride the same socket. `active` is asked at append time so the
+  // wire projection costs nothing with no fleet socket attached; dispatch is the Db's tx-deferred queue
+  // (rollback emits nothing, commit emits once) and is independent of the alert-webhook's listener slot.
+  deps.db.eventObserver = {
+    active: () => fleetHub.size > 0,
+    notify: (event) => fleetHub.broadcast({ t: "event", managerId: event.managerSessionId, event }),
+  };
   deps.control.statusChangeListener = () => {
     fleetHub.broadcast({ t: "status", pausedScopes: deps.control.pausedScopes(), schedulerEnabled: deps.schedulerEnabled ?? false });
   };
@@ -7611,9 +7618,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // until a client attaches (no dirty accumulation / no send target with zero sockets connected).
   // schedulerEnabled never changes after boot (a fixed const — see GatewayDeps' own doc), so only
   // pausedScopes actually varies post-boot; the `status` message still carries both fields, matching
-  // what the REST endpoint below returns. EVENT is still pending C7 (broadcastEvent has no call sites
-  // yet). The socket handler itself just registers the socket, sends the hello handshake, and
-  // records/clears the caller's per-manager event subscriptions on the hub for that later card to read.
+  // what the REST endpoint below returns. EVENT (card 670b2081): Db.eventObserver → fleetHub.broadcast →
+  // `event` to EVERY fleet socket (not per-manager: the kind-keyed attention feeds are cross-session). The
+  // per-manager `sub:events` bookkeeping below is retained but nothing reads it. The socket handler itself
+  // registers the socket and sends the hello handshake.
   // See gateway/fleet-hub.ts.
   app.get("/ws/fleet", { websocket: true }, (socket: WebSocket, req) => {
     // Card 3c205fb5: see the matching comment on /ws/term above — same registration, same reason.

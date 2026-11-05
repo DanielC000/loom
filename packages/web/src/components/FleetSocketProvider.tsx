@@ -1,8 +1,9 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { ServerFleetMessage, SessionListItem } from "@loom/shared";
+import type { OrchestrationEvent, ServerFleetMessage, SessionListItem } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
+import { applyOrchEvent, invalidateOrchEventQueries } from "../lib/orchEvents";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { createReconnectBackoff, createRefusalEpisode, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
 import { WEB_BUNDLE_QUERY_KEY } from "../lib/newBuild";
@@ -28,6 +29,12 @@ import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
  *    flight, applying them after the seed lands — closes the seed↔first-delta race idempotently.
  *  - Disconnected fallback: while the socket is down, a slow poll keeps the cache from going stale until
  *    the next reconnect's re-seed takes over.
+ *
+ * Card 670b2081 adds the THIRD feed to this same socket: orchestration `event` frames, patched into the
+ * event-list caches (lib/orchEvents.ts) in place of the ~14 per-page `refetchInterval` polls of
+ * `GET /api/orchestration/events`. Same lifecycle rules: on EVERY (re)open all event lists are re-read once
+ * (frames that land during that read are buffered and replayed after it, deduped by event id — so nothing
+ * is lost and nothing double-applies), and the one disconnected-only fallback timer re-reads them too.
  *
  * Renders nothing — it's a side-effect-only sibling, not a context provider (no consumer reads anything
  * off it directly; they all just `useQuery(["allSessions"])` as before and this keeps that cache warm).
@@ -107,6 +114,12 @@ export function FleetSocketProvider() {
     // False until the socket has opened once. The FIRST seed may share the consumers' own cold-load fetch
     // (see seedStatus); every seed after a DROP must be a real HTTP read.
     let reconnecting = false;
+    // Event feed (card 670b2081). While the open-time re-read is in flight, frames are buffered (wire order)
+    // and replayed afterwards: an in-flight response may predate a frame, so applying it live would be
+    // overwritten when the response lands. `eventResyncGen` voids a resync that a later close/open superseded.
+    let eventsResyncing = false;
+    let bufferedEvents: OrchestrationEvent[] = [];
+    let eventResyncGen = 0;
 
     const writeStatus = (s: OrchestrationStatus) => {
       qc.setQueryData<OrchestrationStatus>(ORCH_STATUS_QUERY_KEY, s);
@@ -129,7 +142,25 @@ export function FleetSocketProvider() {
         api.orchestrationStatus()
           .then((s) => { if (!disposed) writeStatus(s); })
           .catch((err) => log("status fallback poll failed, will retry", err));
+        invalidateOrchEventQueries(qc).catch((err) => log("event fallback poll failed, will retry", err));
       }, FALLBACK_POLL_MS);
+    };
+
+    // Re-reads every event list on (re)open — the event feed's seed. Runs on the FIRST open too: a list read
+    // at mount can predate the socket's registration, and with no poll left nothing else would close that gap.
+    const resyncEvents = () => {
+      eventsResyncing = true;
+      bufferedEvents = [];
+      const gen = ++eventResyncGen;
+      invalidateOrchEventQueries(qc)
+        .catch((err) => log("event resync failed", err))
+        .finally(() => {
+          if (disposed || gen !== eventResyncGen) return;
+          const pending = bufferedEvents;
+          bufferedEvents = [];
+          eventsResyncing = false;
+          for (const e of pending) applyOrchEvent(qc, e);
+        });
     };
 
     // Re-seeds the cache from a fresh REST fetch, buffering any deltas that arrive mid-fetch and replaying
@@ -218,6 +249,7 @@ export function FleetSocketProvider() {
         log("connected");
         seed();
         seedStatus(reconnecting);
+        resyncEvents();
         // Card e98bf784 — a RECONNECT (never the first connect) is the strongest "the daemon restarted"
         // signal this app has, and a restart is exactly when a rebuilt web bundle appears. Re-ask what is
         // being served so a tab still running the old bundle can offer a reload. Cheap by construction:
@@ -238,7 +270,12 @@ export function FleetSocketProvider() {
           writeStatus(frame);
           return;
         }
-        if (msg.t !== "session:upsert" && msg.t !== "session:remove") return; // hello / event (event is C7)
+        if (msg.t === "event") {
+          if (eventsResyncing) bufferedEvents.push(msg.event);
+          else applyOrchEvent(qc, msg.event);
+          return;
+        }
+        if (msg.t !== "session:upsert" && msg.t !== "session:remove") return; // hello
         if (seeding) { buffered.push(msg); return; }
         qc.setQueryData<SessionListItem[]>(["allSessions"], (prev) => applyFleetDelta(prev ?? [], msg));
       };
@@ -249,6 +286,9 @@ export function FleetSocketProvider() {
         buffered = [];
         statusSeeding = false;
         statusDeltaDuringSeed = null;
+        eventsResyncing = false;
+        bufferedEvents = [];
+        eventResyncGen++;
         // Card f8d2684d: a 1008 close is TERMINAL — classified FIRST (shared policy, lib/socketReconnect).
         //
         // @decision 04314fbc — a terminal close must also stop the two SEED retry loops, not only the

@@ -115,8 +115,9 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/ws/term/:sessionId" },
   { method: "GET", pattern: "/ws/companion/:sessionId" },
   // C2 of the WS delta-push umbrella (1efde4ba): pushes the SAME data GET /api/sessions already serves
-  // Tier-1 (no new exposure) — see the route's own doc comment in gateway/server.ts. NO event data flows
-  // over this route yet (that's C7); a `sub:events` message in this card is bookkeeping only.
+  // Tier-1 (no new exposure) — see the route's own doc comment in gateway/server.ts. Orchestration events
+  // (card 670b2081) also flow over it: the SAME rows GET /api/orchestration/events serves, which is Tier-1
+  // too, behind the same gateway-token check — so no client gains a read it did not already have.
   { method: "GET", pattern: "/ws/fleet" },
   // --- Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI legitimately needs.
   //     Promoted DELIBERATELY, one at a time — nothing here writes, executes, or lifecycles anything. ---

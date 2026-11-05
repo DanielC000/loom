@@ -3119,7 +3119,17 @@ export class Db {
   private eventListener?: (evt: OrchestrationEvent) => void;
   /** @decision 87b1c8a1 — notifications queued by `appendEvent` while a transaction is open; flushed by
    *  {@link Db.prototype.runInTransaction} after its OWN (non-nested) commit, dropped on rollback. */
-  private pendingEventNotifications: OrchestrationEvent[] = [];
+  private pendingEventNotifications: Array<{ evt: OrchestrationEvent; wire: OrchestrationEvent | null }> = [];
+  /**
+   * Second, independent post-commit event sink (card 670b2081) — the gateway wires it with a direct
+   * assignment, like {@link Db.sessionChangeListener}, to push each event over `/ws/fleet`. SEPARATE from
+   * `eventListener` (the alert-webhook's single slot, never disturbed). Rides the SAME tx-deferred queue
+   * (87b1c8a1): a rollback emits nothing, a commit emits once. `notify` receives the row projected by the
+   * SAME `toOrchestrationEvent` the REST route returns (so it carries the durable-audit `projectId` stamp
+   * and `null`-normalised fields); `active()` is asked at append time so the projection costs nothing with
+   * no fleet socket attached. Faults are contained per sink.
+   */
+  eventObserver?: { active: () => boolean; notify: (evt: OrchestrationEvent) => void };
   /**
    * Post-commit session change-feed hook (C3 of the WS delta-push umbrella, 1efde4ba) — the gateway
    * wires this with a direct assignment (`db.sessionChangeListener = (id) => fleetHub.markSessionDirty(id)`
@@ -8314,18 +8324,33 @@ export class Db {
         if (projectId) detail = { ...(detail ?? {}), projectId };
       } catch { /* best-effort stamp — never break the audit write itself over a lookup fault */ }
     }
+    const detailJson = detail === undefined ? null : JSON.stringify(detail);
     this.db.prepare(
       `INSERT INTO orchestration_events (id,ts,manager_session_id,worker_session_id,task_id,kind,detail_json,seq)
        VALUES (@id,@ts,@managerSessionId,@workerSessionId,@taskId,@kind,@detailJson,@seq)`,
     ).run({
       id: evt.id, ts: evt.ts, managerSessionId: evt.managerSessionId,
       workerSessionId: evt.workerSessionId ?? null, taskId: evt.taskId ?? null,
-      kind: evt.kind, detailJson: detail === undefined ? null : JSON.stringify(detail), seq,
+      kind: evt.kind, detailJson, seq,
     });
+    // Card 670b2081 — the wire projection goes through the SAME row→event function the REST routes use
+    // (never a hand-built copy), and only when a fleet socket is actually attached.
+    let wire: OrchestrationEvent | null = null;
+    if (this.eventObserver) {
+      try {
+        if (this.eventObserver.active()) {
+          wire = toOrchestrationEvent({
+            id: evt.id, ts: evt.ts, manager_session_id: evt.managerSessionId,
+            worker_session_id: evt.workerSessionId ?? null, task_id: evt.taskId ?? null,
+            kind: evt.kind, detail_json: detailJson,
+          });
+        }
+      } catch { /* observer faults never break the audit write */ }
+    }
     // @decision 87b1c8a1 — inside a transaction this INSERT isn't durable yet (a later statement can
     // still roll it back), so queue the notification; runInTransaction flushes it on a real commit.
     if (this.db.inTransaction) {
-      this.pendingEventNotifications.push(evt);
+      this.pendingEventNotifications.push({ evt, wire });
     } else {
       // @decision 87b1c8a1 — runtime tripwire: the queue must already be empty outside any
       // transaction (the last runInTransaction call either flushed or truncated it); a non-empty queue
@@ -8337,21 +8362,26 @@ export class Db {
           "runInTransaction's flush/truncate discipline (see docs/decisions/87b1c8a1-defer-pin-events-until-commit.md)",
         );
       }
-      if (this.eventListener) {
-        try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
-      }
+      this.dispatchEventNotification(evt, wire);
     }
     return seq;
+  }
+  /** Fire both post-commit sinks, each in its own try/catch so one sink's fault can neither break the
+   *  audit write nor starve the other (the alert-webhook slot and the fleet observer are independent). */
+  private dispatchEventNotification(evt: OrchestrationEvent, wire: OrchestrationEvent | null): void {
+    if (this.eventListener) {
+      try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
+    }
+    if (wire && this.eventObserver) {
+      try { this.eventObserver.notify(wire); } catch { /* observer faults never break the audit write */ }
+    }
   }
   /** Fire every queued listener notification, in order, then clear the queue — called ONLY by
    *  {@link Db.prototype.runInTransaction} after its own real commit. */
   private flushPendingEventNotifications(): void {
     const pending = this.pendingEventNotifications;
     this.pendingEventNotifications = [];
-    if (!this.eventListener) return;
-    for (const evt of pending) {
-      try { this.eventListener(evt); } catch { /* listener faults never break the audit write */ }
-    }
+    for (const { evt, wire } of pending) this.dispatchEventNotification(evt, wire);
   }
   /**
    * The next value from the never-reused `orchestration_event_seq` AUTOINCREMENT counter — see the

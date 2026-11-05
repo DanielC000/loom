@@ -155,7 +155,7 @@ export default function WorkspaceHome() {
   const exitedManagers = useMemo(() => pulseExitedManagers(sessions), [sessions]);
   const eventQs = useQueries({
     queries: [
-      ...managers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
+      ...managers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id) })), // live tier: pushed over /ws/fleet, no poll (card 670b2081)
       ...exitedManagers.map((m) => ({
         queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id),
         refetchInterval: PULSE_EXITED_REFETCH_MS,

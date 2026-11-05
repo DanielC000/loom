@@ -122,7 +122,7 @@ function SessionNodeState({ s }: { s: SessionNodeRow }) {
 // stays live while the manager drills its workers; mounted only while the Timeline tab is active, so it
 // never fans out a query per manager.
 export function ManagerTimeline({ managerId }: { managerId: string }) {
-  const events = useQuery({ queryKey: ["orchEvents", managerId], queryFn: () => api.orchestrationEvents(managerId), refetchInterval: 2000, placeholderData: keepPreviousData });
+  const events = useQuery({ queryKey: ["orchEvents", managerId], queryFn: () => api.orchestrationEvents(managerId), placeholderData: keepPreviousData });
   const list = events.data ?? [];
   return (
     <Panel grid style={{ maxHeight: 440, overflow: "auto" }}>

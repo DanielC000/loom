@@ -116,8 +116,7 @@ export default function MissionControl() {
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
       queryKey: ["orchEvents", m.id],
-      queryFn: () => api.orchestrationEvents(m.id),
-      refetchInterval: 3000,
+      queryFn: () => api.orchestrationEvents(m.id), // kept live by the /ws/fleet event push — no poll (card 670b2081)
     })),
   });
   const allEvents = eventQueries

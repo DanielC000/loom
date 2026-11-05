@@ -258,7 +258,7 @@ export default function ProjectHome() {
   const exitedManagers = useMemo(() => pulseExitedManagers(all), [all]);
   const eventQs = useQueries({
     queries: [
-      ...liveManagers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id), refetchInterval: 3000 })),
+      ...liveManagers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id) })), // live tier: pushed over /ws/fleet, no poll (card 670b2081)
       ...exitedManagers.map((m) => ({
         queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id),
         refetchInterval: PULSE_EXITED_REFETCH_MS,

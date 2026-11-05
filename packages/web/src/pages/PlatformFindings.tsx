@@ -35,8 +35,7 @@ export function PlatformFindings({ edition, projectId }: { edition: PlatformEdit
   // run's findings still appear, where a session-list join would silently have dropped them.
   const events = useQuery({
     queryKey: ["orchestrationEventsByKinds", edition.findingEventKind],
-    queryFn: () => api.orchestrationEventsByKinds([edition.findingEventKind]),
-    refetchInterval: 8000,
+    queryFn: () => api.orchestrationEventsByKinds([edition.findingEventKind]), // pushed over /ws/fleet — no poll (card 670b2081)
   });
   // The SAME key + fetcher RunHistory and the Board tab use, so this shares their cache entry rather
   // than issuing a third read of the same board.

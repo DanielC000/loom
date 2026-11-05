@@ -469,7 +469,10 @@ export type ServerFleetMessage =
   | { t: "session:upsert"; session: SessionListItem & { pendingMerge: PendingMerge | null } }
   | { t: "session:remove"; id: string }
   | { t: "status"; pausedScopes: string[]; schedulerEnabled: boolean }
-  | { t: "event"; managerId: string; event: OrchestrationEvent & { seq: number } };
+  // `event` is EXACTLY the row `GET /api/orchestration/events` returns (card 670b2081: same projection
+  // function, no `seq`, nothing added) and goes to every fleet socket; `managerId` just repeats
+  // `event.managerSessionId` for a consumer that wants the key without reaching into the row.
+  | { t: "event"; managerId: string; event: OrchestrationEvent };
 
 /** Client → server fleet subscription messages (a future `/ws/fleet`, not wired up by this card). */
 export type ClientFleetMessage =

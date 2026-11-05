@@ -297,7 +297,8 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   const bootStuckEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "claude_boot_dialog_stuck", "claude_boot_dialog_resolved"],
     queryFn: () => api.orchestrationEventsByKinds(["claude_boot_dialog_stuck", "claude_boot_dialog_resolved"]),
-    refetchInterval: 4000,
+    // No refetchInterval on any orchestration-event list (card 670b2081): FleetSocketProvider patches them
+    // from the `/ws/fleet` event push, re-reads on every (re)connect, and polls only while the socket is down.
   });
   const bootStuckEvents = bootStuckEventsQuery.data ?? [];
 
@@ -312,7 +313,6 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   const vaultLockEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "vault_index_lock_stale", "vault_index_lock_cleared"],
     queryFn: () => api.orchestrationEventsByKinds(["vault_index_lock_stale", "vault_index_lock_cleared"]),
-    refetchInterval: 15000,
   });
   const activeVaultLocks = activeVaultLockAlerts(vaultLockEventsQuery.data ?? []);
 
@@ -325,7 +325,6 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   const codexGapEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "codex_isolation_gap_disclosed"],
     queryFn: () => api.orchestrationEventsByKinds(["codex_isolation_gap_disclosed"]),
-    refetchInterval: 15000,
   });
   const activeCodexGaps = activeCodexIsolationGapAlerts(codexGapEventsQuery.data ?? []);
 
@@ -335,7 +334,6 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   const recycleConsolidatedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "recycle_split_lineage_consolidated"],
     queryFn: () => api.orchestrationEventsByKinds(["recycle_split_lineage_consolidated"]),
-    refetchInterval: 15000,
   });
   const activeRecycleConsolidated = activeRecycleLineageConsolidatedAlerts(
     recycleConsolidatedEventsQuery.data ?? [],
@@ -354,19 +352,16 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   const crashLoopAbandonedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "session_recovery_abandoned"],
     queryFn: () => api.orchestrationEventsByKinds(["session_recovery_abandoned"]),
-    refetchInterval: 15000,
   });
   const crashLoopRecoveredEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "session_recovered"],
     queryFn: () => api.orchestrationEventsByKinds(["session_recovered"]),
-    refetchInterval: 15000,
   });
 
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
       queryKey: ["orchEvents", m.id],
       queryFn: () => api.orchestrationEvents(m.id),
-      refetchInterval: 4000,
     })),
   });
   // Round 2 (Code Review e5290bc2 MAJOR), reaffirmed by card 43084723: do NOT fold bootStuckEvents into
@@ -430,7 +425,6 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   const contextExhaustedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "manager_context_exhausted"],
     queryFn: () => api.orchestrationEventsByKinds(["manager_context_exhausted"]),
-    refetchInterval: 4000,
   });
   // Unlike context_escalated/idle_escalated above (one-shot episodes with no "cleared" event),
   // exhaustion is a SESSION STATE (`Session.contextExhaustedAt`, cleared in place by a human /compact or
@@ -469,7 +463,6 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   const kickoffDroppedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "manager_kickoff_dropped", "manager_kickoff_dropped_resolved"],
     queryFn: () => api.orchestrationEventsByKinds(["manager_kickoff_dropped", "manager_kickoff_dropped_resolved"]),
-    refetchInterval: 4000,
   });
   const activeKickoffDropped = activeKickoffDroppedAlerts(kickoffDroppedEventsQuery.data ?? [],
     (sessionId) => all.find((s) => s.id === sessionId)?.processState === "live");
