@@ -219,7 +219,9 @@ try {
     // capability slipped onto an agent-facing tool, which this still catches.
     const grantsConnectionCapability = (tools) => tools.some((t) => {
       const d = t.description ?? "";
-      return /connection/i.test(d) && !/reject|human-only/i.test(d);
+      // `refus` joins `reject|human-only` (card afe1bc90): profile_delete's description (added by caca806c)
+      // names agent-level connections only to say the delete is REFUSED because of them — a refusal signal.
+      return /connection/i.test(d) && !/reject|refus|human-only/i.test(d);
     });
 
     const managerTools = await listOf(orch.buildServer("mgr-1", "manager"));
