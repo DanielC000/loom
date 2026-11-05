@@ -37,6 +37,22 @@ import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
+/** Shared description text for the propose/confirm flow every confirm-first tool renders; interpolated
+ *  identically into each tool's `description`, so the rendered text is unchanged. */
+const CONFIRM_REQUEST_TEXT =
+  "Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any " +
+  "prompt/token — just tell the owner you've requested their confirmation) and returns " +
+  "{status:'proposed', expiresAt}";
+/** The `expiresAt` explanation, in the wording shared by decision_resolve, board_create, board_update and board_relocate. */
+const CONFIRM_EXPIRY_TEXT =
+  " — expiresAt is an epoch-ms timestamp; tell the owner the request clears itself around then (about 5 " +
+  "minutes out) if they don't confirm. ";
+/** The `expiresAt` explanation, in the wording shared by authored_content_grant and session_spawn. */
+const CONFIRM_EXPIRY_AUTO_CLEAR_TEXT =
+  " — expiresAt is an epoch-ms timestamp; tell the owner this request will clear itself automatically " +
+  "around then (about 5 minutes out) if they don't confirm it, so a mis-worded or abandoned request " +
+  "never lingers or needs manual cleanup. ";
+
 /** The lever catalog (Framework §4). Only `session-status` is BUILT by this card — the rest are named here
  *  so the grants REST validator (gateway/server.ts) can reject an unknown/typo'd slug now, before their
  *  own cards land, without a REST change per lever. */
@@ -771,11 +787,8 @@ const DECISIONS_RELAY: CompanionCapability = {
           "author it yourself. An ORDINARY (\"general\") decision resolves IMMEDIATELY once the owner " +
           "has recently confirmed something in this chat ({status:'resolved'}) — no per-action code needed " +
           "while that trust window stays warm. Otherwise (a cold window, a deploy/irreversible decision, or " +
-          "this grant configured to always confirm) it does NOT resolve on the first call: Loom sends a " +
-          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
-          "token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner the " +
-          "request clears itself around then (about 5 minutes out) if they don't confirm. " +
+          "this grant configured to always confirm) it does NOT resolve on the first call: " +
+          CONFIRM_REQUEST_TEXT + CONFIRM_EXPIRY_TEXT +
           "Only once the owner replies to THAT message do you call decision_resolve AGAIN with the SAME " +
           "arguments to actually commit it ({status:'resolved'}) — Loom detects the owner's confirming reply " +
           "itself. A mismatched confirm reply returns {status:'confirm-mismatch'} — tell the owner to reply " +
@@ -1233,11 +1246,8 @@ const BOARD_REACH: CompanionCapability = {
           "than quoting the owner verbatim. This creates the card IMMEDIATELY " +
           "({status:'created'}) once the owner has recently confirmed something in this chat — no per-" +
           "action code needed while that trust window stays warm. Otherwise (a cold window, or this grant " +
-          "configured to always confirm) it does NOT create the card on the first call: Loom sends a " +
-          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
-          "token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner the " +
-          "request clears itself around then (about 5 minutes out) if they don't confirm. " +
+          "configured to always confirm) it does NOT create the card on the first call: " +
+          CONFIRM_REQUEST_TEXT + CONFIRM_EXPIRY_TEXT +
           "Only once the owner replies to THAT message do you call " +
           "board_create AGAIN with the SAME arguments to actually create it ({status:'created'}) — Loom " +
           "detects the owner's confirming reply itself. A mismatched confirm reply returns " +
@@ -1401,10 +1411,8 @@ const BOARD_REACH: CompanionCapability = {
           "update IMMEDIATELY ({status:'updated'}) once the owner has recently confirmed something in " +
           "this chat — no per-action code needed while that trust window stays warm. Otherwise (a cold " +
           "window, or this grant configured to always confirm) it does NOT apply the update on the first " +
-          "call: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT see or " +
-          "relay any prompt/token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner the " +
-          "request clears itself around then (about 5 minutes out) if they don't confirm. " +
+          "call: " +
+          CONFIRM_REQUEST_TEXT + CONFIRM_EXPIRY_TEXT +
           "Only once the owner replies to THAT message do " +
           "you call board_update AGAIN with the SAME arguments to actually apply it ({status:'updated'}) " +
           "— Loom detects the owner's confirming reply itself. A mismatched confirm reply returns " +
@@ -1613,11 +1621,8 @@ const BOARD_REACH: CompanionCapability = {
           "board_update call on that project only; \"session\" keeps it granted for the rest of this " +
           "conversation (until reset/recycle). This tool never authors or creates/updates a card itself " +
           "— it ALWAYS requires the owner's explicit confirmation, even inside an otherwise-warm trust " +
-          "window: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT see " +
-          "or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
-          "returns {status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner " +
-          "this request will clear itself automatically around then (about 5 minutes out) if they don't " +
-          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
+          "window: " +
+          CONFIRM_REQUEST_TEXT + CONFIRM_EXPIRY_AUTO_CLEAR_TEXT +
           "Only once the owner replies to THAT message do you call " +
           "authored_content_grant AGAIN with the SAME arguments to actually apply it " +
           "({status:'granted'}) — Loom detects the owner's confirming reply itself. A mismatched confirm " +
@@ -1693,11 +1698,8 @@ const BOARD_REACH: CompanionCapability = {
           "rejected, and relocating to the card's own current project is rejected as a no-op. The card " +
           "keeps its column if it exists on the destination board, else it falls back to the " +
           "destination's landing column. This is the single HIGHEST-friction tool you have — it NEVER " +
-          "applies on the first call, even inside an otherwise-warm trust window: Loom sends a " +
-          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
-          "token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner the " +
-          "request clears itself around then (about 5 minutes out) if they don't confirm. " +
+          "applies on the first call, even inside an otherwise-warm trust window: " +
+          CONFIRM_REQUEST_TEXT + CONFIRM_EXPIRY_TEXT +
           "Only once the owner replies to THAT message do you call board_relocate " +
           "AGAIN with the SAME arguments to actually relocate it ({status:'relocated'}) — Loom detects " +
           "the owner's confirming reply itself. A mismatched confirm reply returns " +
@@ -2550,12 +2552,8 @@ const SESSION_SPAWN: CompanionCapability = {
           "MUST be \"manager\" or \"plain\" ONLY — a platform/auditor/setup/operator/worker session can " +
           "NEVER be spawned here (no self-elevation; any other role value is rejected outright). THE " +
           "single highest-risk tool you have: this ALWAYS requires a fresh owner confirmation, even " +
-          "inside an otherwise-warm trust window — it does NOT spawn on the first call: Loom sends a " +
-          "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
-          "token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner this " +
-          "request will clear itself automatically around then (about 5 minutes out) if they don't " +
-          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
+          "inside an otherwise-warm trust window — it does NOT spawn on the first call: " +
+          CONFIRM_REQUEST_TEXT + CONFIRM_EXPIRY_AUTO_CLEAR_TEXT +
           "Only once the owner replies to THAT message do you call session_spawn " +
           "AGAIN with the SAME arguments to actually spawn it ({status:'spawned'}) — Loom detects the " +
           "owner's confirming reply itself. A mismatched confirm reply returns " +
@@ -2780,9 +2778,7 @@ const GIT_PUSH: CompanionCapability = {
           "silent no-op. An ORDINARY commit resolves IMMEDIATELY once the owner has recently confirmed " +
           "something in this chat ({status:'committed'}) — no per-call confirmation needed while that " +
           "trust window stays warm. Otherwise (a cold window, or this grant configured to always " +
-          "confirm) Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT " +
-          "see or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
-          "returns {status:'proposed', expiresAt}. Only once the owner replies to THAT message do you " +
+          "confirm) " + CONFIRM_REQUEST_TEXT + ". Only once the owner replies to THAT message do you " +
           "call git_commit AGAIN with the SAME arguments to actually commit it ({status:'committed'}). " +
           "A successful commit MAY also carry a `warning` string (e.g. already-staged file(s) got swept " +
           "in); tell the owner plainly, in your own words, without naming any specific file. " +
@@ -2888,9 +2884,7 @@ const GIT_PUSH: CompanionCapability = {
           "single OUTWARD-facing tool in this lever (git_commit stays local; nothing leaves the box " +
           "until this runs). `target` selects WHICH repo (see git_commit's own doc). THIS ALWAYS " +
           "requires a fresh owner confirmation, even inside an otherwise-warm trust window — it does NOT " +
-          "push on the first call: Loom sends a confirmation request DIRECTLY to the owner's chat itself " +
-          "(you do NOT see or relay any prompt/token — just tell the owner you've requested their " +
-          "confirmation) and returns {status:'proposed', expiresAt}. The confirm text names the branch, " +
+          "push on the first call: " + CONFIRM_REQUEST_TEXT + ". The confirm text names the branch, " +
           "how many commits are about to publish, and the latest commit's subject line, so the owner " +
           "sees what's about to leave the box before approving. Only once the owner replies to THAT " +
           "message do you call git_push AGAIN with the SAME arguments to actually push it " +
