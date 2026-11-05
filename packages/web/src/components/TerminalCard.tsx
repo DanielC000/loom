@@ -12,6 +12,7 @@ import { HarnessTag } from "./HarnessPicker";
 import { TerminalPane } from "./Terminal";
 import { TranscriptPane } from "./TranscriptPane";
 import { Composer } from "./Composer";
+import { McpActivity } from "./McpActivity";
 import { SessionQueue } from "./SessionQueue";
 import { SessionWakes } from "./SessionWakes";
 import { SessionTaskCard } from "./SessionTaskCard";
@@ -462,6 +463,14 @@ export function TerminalCard({
           {composerNode}
         </section>
       ) : composerNode}
+      {/* The session's Loom MCP activity (card a9a7140c): the session page only, so the Overview grid's
+          tiles and the classic cards keep their height. Keyed so a reused node never shows A's filters
+          or open rows under B. */}
+      {atlasNode && (
+        <section className="loom-atlas-nodesec" data-testid="session-node-mcp" aria-label="Loom MCP activity">
+          <McpActivity key={session.id} sessionId={session.id} harness={session.harness} busy={!!session.busy} />
+        </section>
+      )}
     </div>
   );
 

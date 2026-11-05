@@ -2072,6 +2072,350 @@ button.loom-atlas-node.is-branch.is-open {
   }
 }
 
+/* ── Session Loom MCP activity strip (card a9a7140c, direction B · Ledger) ────────────────────
+   Shape AND colour per subsystem, so nothing is read off colour alone. No time or duration column:
+   the transcript carries neither (lib/mcpActivity.ts). */
+.loom-mcp {
+  container-type: inline-size;
+  container-name: mcp;
+  border: 1px solid var(--loom-border);
+  border-radius: var(--loom-radius);
+  background: var(--loom-panel-2);
+  min-width: 0;
+}
+.loom-mcp-lab {
+  font-family: var(--loom-font-head);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--loom-text-muted);
+  flex-shrink: 0;
+}
+.loom-mcp-muted { color: var(--loom-text-muted); }
+.loom-mcp-empty-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--loom-text-dim);
+}
+.loom-mcp-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 14px;
+  width: 100%;
+  padding: 8px 10px 9px 12px;
+  background: none;
+  border: 0;
+  border-radius: var(--loom-radius);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.loom-mcp-bar:hover { background: color-mix(in oklab, var(--loom-panel-2), var(--loom-text) 3%); }
+.loom-mcp-bar:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-mcp-l1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--loom-text-muted);
+  white-space: nowrap;
+}
+.loom-mcp-beads { display: inline-flex; gap: 3px; align-items: center; min-width: 0; overflow: hidden; }
+.loom-mcp-more { font-size: 10px; color: var(--loom-text-muted); margin-right: 2px; }
+.loom-mcp-bead {
+  width: 14px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 3px;
+  border: 1px solid var(--loom-border-strong);
+  background: var(--loom-panel);
+}
+.loom-mcp-bead.error { border-color: var(--loom-red); background: color-mix(in oklab, var(--loom-red) 18%, transparent); }
+.loom-mcp-bead.pending { border-color: var(--loom-cyan); border-style: dashed; }
+.loom-mcp-bead .loom-mcp-gl { transform: scale(0.75); }
+.loom-mcp-bead .loom-mcp-gl.gate { transform: rotate(45deg) scale(0.62); }
+.loom-mcp-l2 {
+  grid-column: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  white-space: nowrap;
+  animation: loom-mcp-arrive 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.loom-mcp-say {
+  font-family: var(--loom-font-head);
+  font-size: 15px;
+  letter-spacing: -0.005em;
+  color: var(--loom-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.loom-mcp-say b, .loom-mcp-s b {
+  font-family: var(--loom-font-mono);
+  font-weight: 500;
+  color: var(--loom-cyan);
+}
+.loom-mcp-say b { font-size: 13px; }
+.loom-mcp-tail { color: var(--loom-text-dim); }
+.loom-mcp-meta { font-size: 11px; color: var(--loom-text-muted); flex-shrink: 0; }
+.loom-mcp-ocx { font-size: 12px; font-weight: 600; flex-shrink: 0; }
+.loom-mcp-ocx.ok { color: var(--loom-phosphor); }
+.loom-mcp-ocx.error { color: var(--loom-red); }
+.loom-mcp-ocx.pending { color: var(--loom-cyan); }
+.loom-mcp-right {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--loom-text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.loom-mcp-errn { color: var(--loom-red); }
+.loom-mcp-chev {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--loom-text-muted);
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.loom-mcp.open .loom-mcp-chev { transform: rotate(180deg); }
+@keyframes loom-mcp-arrive {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Subsystem glyphs. */
+.loom-mcp-gl { display: inline-block; width: 9px; height: 9px; flex-shrink: 0; box-sizing: border-box; }
+.loom-mcp-gl.board { background: var(--loom-cyan); border-radius: 1px; }
+.loom-mcp-gl.fleet { background: var(--loom-phosphor); border-radius: 50%; }
+.loom-mcp-gl.gate { background: var(--loom-amber); transform: rotate(45deg) scale(0.82); }
+.loom-mcp-gl.memory { border: 2px solid var(--loom-cyan); border-radius: 50%; }
+.loom-mcp-gl.inbox { border: 2px solid var(--loom-amber); border-radius: 1px; }
+.loom-mcp-gl.self { border: 2px solid var(--loom-text-dim); border-radius: 50%; }
+
+/* Expanded: facet rail + turn-grouped log. */
+.loom-mcp-x {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  border-top: 1px solid var(--loom-border);
+}
+.loom-mcp-facets {
+  border-right: 1px solid var(--loom-border);
+  padding: 10px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.loom-mcp-fh {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+  font-family: var(--loom-font-head);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--loom-text-muted);
+}
+.loom-mcp-fh button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--loom-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--loom-cyan);
+}
+.loom-mcp-search {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--loom-panel);
+  border: 1px solid var(--loom-border-strong);
+  border-radius: var(--loom-radius);
+  color: var(--loom-text);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.loom-mcp-search::placeholder { color: var(--loom-text-muted); }
+.loom-mcp-search:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: 1px; }
+.loom-mcp-fr {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 24px;
+  gap: 6px;
+  align-items: center;
+  width: calc(100% + 8px);
+  margin: 0 -4px;
+  padding: 3px 4px;
+  background: none;
+  border: 0;
+  border-radius: var(--loom-radius-sm);
+  cursor: pointer;
+  color: var(--loom-text-dim);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+}
+.loom-mcp-fr:hover { background: var(--loom-panel); color: var(--loom-text); }
+.loom-mcp-fr:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -1px; }
+.loom-mcp-fr[aria-pressed="true"] { background: var(--loom-panel); color: var(--loom-text); box-shadow: inset 2px 0 0 var(--loom-text); }
+.loom-mcp-nm { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.loom-mcp-nm > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loom-mcp-bar3 { height: 3px; border-radius: 2px; background: var(--loom-border); position: relative; overflow: hidden; }
+.loom-mcp-bar3 i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--loom-text-muted); }
+.loom-mcp-n { text-align: right; color: var(--loom-text-muted); font-variant-numeric: tabular-nums; }
+.loom-mcp-bar3 i.board, .loom-mcp-bar3 i.memory, .loom-mcp-stack i.board, .loom-mcp-stack i.memory { background: var(--loom-cyan); }
+.loom-mcp-bar3 i.fleet, .loom-mcp-stack i.fleet, .loom-mcp-bar3 i.ok { background: var(--loom-phosphor); }
+.loom-mcp-bar3 i.gate, .loom-mcp-bar3 i.inbox, .loom-mcp-stack i.gate, .loom-mcp-stack i.inbox { background: var(--loom-amber); }
+.loom-mcp-bar3 i.self, .loom-mcp-stack i.self { background: var(--loom-text-dim); }
+.loom-mcp-bar3 i.error, .loom-mcp-stack i.error { background: var(--loom-red); }
+.loom-mcp-bar3 i.pending { background: var(--loom-cyan); }
+.loom-mcp-stack i.pending { background: none; outline: 1px dashed var(--loom-cyan); outline-offset: -1px; }
+
+.loom-mcp-log { min-width: 0; max-height: 520px; overflow: auto; padding-bottom: 6px; }
+.loom-mcp-none { margin: 0; padding: 18px 12px; color: var(--loom-text-muted); font-size: 11.5px; }
+.loom-mcp-turnh {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px 6px;
+  background: var(--loom-panel-2);
+  border-bottom: 1px solid var(--loom-border);
+  font-size: 11px;
+  color: var(--loom-text-muted);
+  white-space: nowrap;
+}
+.loom-mcp-tn { font-family: var(--loom-font-head); font-size: 12px; font-weight: 600; color: var(--loom-text); }
+.loom-mcp-stack { margin-left: auto; display: flex; gap: 1px; width: 90px; height: 5px; flex-shrink: 0; }
+.loom-mcp-stack i { flex: 1; height: 100%; border-radius: 1px; }
+.loom-mcp-ent {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) minmax(0, 170px) 16px;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 6px 12px;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--loom-border);
+  color: var(--loom-text-dim);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.loom-mcp-ent:hover, .loom-mcp-ent[aria-expanded="true"] { background: var(--loom-panel); }
+.loom-mcp-ent:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-mcp-ent.error { box-shadow: inset 2px 0 0 var(--loom-red); }
+.loom-mcp-ent.error .loom-mcp-s { color: color-mix(in oklab, var(--loom-red) 55%, var(--loom-text)); }
+.loom-mcp-s {
+  font-family: var(--loom-font-head);
+  font-size: 13px;
+  color: var(--loom-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loom-mcp-s b { font-size: 11.5px; }
+.loom-mcp-tool { color: var(--loom-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.loom-mcp-ob {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  padding: 6px 12px 12px 36px;
+  border-bottom: 1px solid var(--loom-border);
+  background: var(--loom-panel);
+  animation: loom-mcp-arrive 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.loom-mcp-obmeta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 10.5px;
+  color: var(--loom-text-muted);
+}
+.loom-mcp-obmeta b { color: var(--loom-text-dim); font-weight: 500; }
+.loom-mcp-subh {
+  margin-bottom: 4px;
+  font-family: var(--loom-font-head);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--loom-text-muted);
+}
+.loom-mcp-blk {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--loom-panel-2);
+  border: 1px solid var(--loom-border);
+  border-radius: var(--loom-radius);
+  font-family: var(--loom-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--loom-text-dim);
+}
+.loom-mcp-blk.error { color: var(--loom-red); border-color: color-mix(in oklab, var(--loom-red) 40%, var(--loom-border)); }
+.loom-mcp-blk.pending { color: var(--loom-text-muted); }
+.loom-mcp-links { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; }
+.loom-mcp-links .loom-mcp-subh { margin: 0; }
+.loom-mcp-lk {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--loom-border-strong);
+  border-radius: var(--loom-radius-sm);
+  color: var(--loom-text);
+}
+.loom-mcp-lk span { color: var(--loom-text-muted); }
+
+@container mcp (max-width: 700px) {
+  .loom-mcp-x { grid-template-columns: minmax(0, 1fr); }
+  .loom-mcp-facets {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 18px;
+    border-right: 0;
+    border-bottom: 1px solid var(--loom-border);
+    padding-bottom: 10px;
+  }
+  .loom-mcp-facets > div { min-width: 150px; }
+  .loom-mcp-facets > .loom-mcp-fq { min-width: 170px; }
+  .loom-mcp-ent { grid-template-columns: 14px minmax(0, 1fr) 16px; }
+  .loom-mcp-ent .loom-mcp-tool { display: none; }
+  .loom-mcp-ob { padding-left: 12px; grid-template-columns: minmax(0, 1fr); }
+  .loom-mcp-say { font-size: 14px; }
+  .loom-mcp-meta, .loom-mcp-stack { display: none; }
+  .loom-mcp-log { max-height: 680px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loom-mcp-l2, .loom-mcp-ob { animation: none; }
+  .loom-mcp-chev { transition: none; }
+}
+
 /* ── Atlas Companion node (card e2af6ad7) ─────────────────────────────────────────────
    The node column itself: the companion picker, the Chat/Manage/Terminal tab row, then the
    active panel. No card wrapper — the Atlas frame's own crumb bar and <h1> are the chrome,
