@@ -20,7 +20,7 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { OrchestrationConfig } from "@loom/shared";
 import { api } from "../lib/api";
-import { color, font, radius, tone as toneMap, type Tone } from "../theme";
+import { color, font, radius, tone as toneMap, type Tone, fs } from "../theme";
 import { Badge, Button, Chip, Input, Meter, Segmented } from "./ui";
 import { AttentionRow } from "./fleet";
 import { dismissAttention } from "../lib/attention";
@@ -81,13 +81,13 @@ export function TickTrack({ used, interval, tone, nextGated }: {
       style={{ display: "inline-flex", gap: 4, alignItems: "center", flex: "none" }}>
       {Array.from({ length: interval }, (_, i) => (
         <span key={i} style={{
-          width: 7, height: 7, borderRadius: 7, flex: "none", display: "block",
+          width: 7, height: 7, borderRadius: radius.base, flex: "none", display: "block",
           background: i < filled ? toneMap[tone] : color.borderStrong,
         }} />
       ))}
       {nextGated && (
         <span style={{
-          width: 7, height: 7, borderRadius: 7, flex: "none", display: "block",
+          width: 7, height: 7, borderRadius: radius.base, flex: "none", display: "block",
           background: "transparent", boxShadow: `inset 0 0 0 1px ${toneMap[tone]}`,
         }} />
       )}
@@ -98,8 +98,8 @@ export function TickTrack({ used, interval, tone, nextGated }: {
 /** "3 / 5 ungated" — the fraction, in the state's own tone. */
 function Counter({ used, interval, tone }: { used: number; interval: number | null; tone: Tone }) {
   return (
-    <span data-testid="merge-gate-counter" style={{ fontFamily: font.mono, fontSize: 13, color: toneMap[tone], whiteSpace: "nowrap", flex: "none" }}>
-      {used} <span style={{ color: color.textMuted, fontSize: 11 }}>/ {interval ?? "—"} ungated</span>
+    <span data-testid="merge-gate-counter" style={{ fontFamily: font.mono, fontSize: fs.body, color: toneMap[tone], whiteSpace: "nowrap", flex: "none" }}>
+      {used} <span style={{ color: color.textMuted, fontSize: fs.sm }}>/ {interval ?? "—"} ungated</span>
     </span>
   );
 }
@@ -111,7 +111,7 @@ function Counter({ used, interval, tone }: { used: number; interval: number | nu
 export function VerdictStrip({ recent }: { recent: MergeGateVerdict[] }) {
   const shown = recent.slice(-RECENT_VERDICT_CAP);
   if (shown.length === 0) {
-    return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>no periodic gates yet</span>;
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>no periodic gates yet</span>;
   }
   const label = `Last ${shown.length} periodic ${shown.length === 1 ? "gate" : "gates"}: ${shown.map((v) => v.result).join(", ")}`;
   // `result` is already the word for each kind ("pass" / "fail" / "cleared"), so the label stays truthful
@@ -126,7 +126,7 @@ export function VerdictStrip({ recent }: { recent: MergeGateVerdict[] }) {
           <b key={`${v.at}-${i}`} title={m.title} data-verdict={m.kind}
             style={{
               width: 16, height: 16, borderRadius: radius.sm, display: "grid", placeItems: "center",
-              fontFamily: font.mono, fontSize: 11, fontWeight: 400, lineHeight: 1,
+              fontFamily: font.mono, fontSize: fs.mono, fontWeight: 400, lineHeight: 1,
               border: `1px solid ${c}`, color: c,
               ...(m.kind === "fail" ? { background: "var(--loom-red-dim, transparent)" } : null),
             }}>
@@ -190,7 +190,7 @@ export function CadenceControls({ draft, onChange, idPrefix, layout }: {
           {!disabled && <Hint>merges</Hint>}
         </div>
         {err && <span id={`${fieldId}-error`} role="alert" data-testid="merge-gate-interval-error"
-          style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>{err}</span>}
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>{err}</span>}
         {disabled && (
           <Hint>
             {draft.cadence === "every"
@@ -231,7 +231,7 @@ export function CadenceWeakening({ cadence, interval }: { cadence: MergeGateCade
   return (
     <div data-testid={note.tone === "danger" ? "merge-gate-warn-never" : "merge-gate-warn-interval"}
       style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: color.panel2 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: c, lineHeight: 1.6 }}>{note.text}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: c, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );
 }
@@ -296,7 +296,7 @@ export function CommitMessageWeakening({ k, value }: { k: CommitMessageKey; valu
   return (
     <div data-testid={k === "trailers" ? "commit-trailers-warn" : "commit-log-body-warn"}
       style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${note.tone === "busy" ? c : color.border}`, borderRadius: radius.base, background: color.panel2 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: c, lineHeight: 1.6 }}>{note.text}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: c, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );
 }
@@ -391,17 +391,17 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
         borderBottomLeftRadius: editing ? 0 : radius.base,
         borderBottomRightRadius: editing ? 0 : radius.base,
       }}>
-        <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textDim }}>
           Merge gate
         </span>
         <Badge tone={read.tone} data-testid="merge-gate-badge" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-          {read.glow && <span aria-hidden style={{ width: 8, height: 8, borderRadius: 8, background: t, boxShadow: `0 0 6px ${t}`, display: "inline-block" }} />}
+          {read.glow && <span aria-hidden style={{ width: 8, height: 8, borderRadius: radius.base, background: t, boxShadow: `0 0 6px ${t}`, display: "inline-block" }} />}
           {read.badge}
         </Badge>
         {showTrack && <TickTrack used={s.ungatedSinceLastPass} interval={s.interval} tone={read.tone} nextGated={s.nextLandingGated} />}
         {showTrack && <Counter used={s.ungatedSinceLastPass} interval={s.interval} tone={read.tone} />}
         <span className="loom-gate-msg" data-testid="merge-gate-sentence" title={read.sentence}
-          style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
           {read.sentence}
         </span>
         <span className="loom-gate-spacer" aria-hidden />
@@ -450,7 +450,7 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
               <Hint>last pass {ago(s.lastPassAt)}</Hint>
             </div>
             <div style={{ marginLeft: "auto", alignSelf: "center", display: "flex", gap: 8, alignItems: "center" }}>
-              {save.isError && <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>{errorText(save.error)}</span>}
+              {save.isError && <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>{errorText(save.error)}</span>}
               <Button variant="primary" data-testid="merge-gate-save"
                 disabled={!cadenceDraftValid(draft) || !dirty || save.isPending}
                 title={!dirty ? "No cadence change to save" : undefined}
@@ -542,12 +542,12 @@ function LiveCounterRow({ status: s }: { status: MergeGateStatus }) {
   const showTrack = s.cadence === "interval" && !isEscalatedFailure(s);
   return (
     <div data-testid="merge-gate-live" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>now</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Now</span>
       {showTrack && <TickTrack used={s.ungatedSinceLastPass} interval={s.interval} tone={read.tone} nextGated={s.nextLandingGated} />}
-      <span style={{ fontFamily: font.mono, fontSize: 13, color: toneMap[read.tone] }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.body, color: toneMap[read.tone] }}>
         {showTrack
-          ? <>{s.ungatedSinceLastPass} <span style={{ fontSize: 11, color: color.textMuted }}>/ {s.interval} ungated since the last passing gate</span></>
-          : <>{s.ungatedSinceLastPass} <span style={{ fontSize: 11, color: color.textMuted }}>{s.ungatedSinceLastPass === 1 ? "merge" : "merges"} landed unverified since the last passing gate</span></>}
+          ? <>{s.ungatedSinceLastPass} <span style={{ fontSize: fs.sm, color: color.textMuted }}>/ {s.interval} ungated since the last passing gate</span></>
+          : <>{s.ungatedSinceLastPass} <span style={{ fontSize: fs.sm, color: color.textMuted }}>{s.ungatedSinceLastPass === 1 ? "merge" : "merges"} landed unverified since the last passing gate</span></>}
       </span>
       <span style={{ flex: 1 }} />
       <VerdictStrip recent={s.recent} />
@@ -564,14 +564,14 @@ function LiveCounterRow({ status: s }: { status: MergeGateStatus }) {
 
 function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
   return (
-    <label htmlFor={htmlFor} style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim }}>
+    <label htmlFor={htmlFor} style={{ fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim }}>
       {children}
     </label>
   );
 }
 
 function Hint({ children }: { children: React.ReactNode }) {
-  return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{children}</span>;
+  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{children}</span>;
 }
 
 // Re-exported for the surfaces that only need the classification, not the whole strip.

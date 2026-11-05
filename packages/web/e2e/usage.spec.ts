@@ -94,7 +94,7 @@ test("usage page renders a seeded interactive-session usage sample instead of th
   // The empty-state copy for the Interactive-sessions plane is gone, replaced by the seeded totals.
   await expect(page.getByText("No interactive-session usage in this window")).toHaveCount(0);
   await expect(page.getByText("$4.56", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("samples", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Samples", { exact: true }).first()).toBeVisible();
 
   // The Agent Runs plane is untouched by a usage-sample seed (a distinct, never-summed plane) — its
   // empty state still holds, proving the seed landed in the RIGHT table only.

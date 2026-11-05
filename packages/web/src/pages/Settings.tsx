@@ -59,7 +59,7 @@ import { ArchivedProjects, ProjectManage, useProjectLifecycleWrites } from "../c
 import { cadenceConfigWrite, commitMessageConfigWrite, commitMessageDraftFrom, intervalError, type CommitMessageDraft } from "../lib/mergeGate";
 import { type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
-import { color, font, tone, type Tone } from "../theme";
+import { color, font, tone, type Tone, fs, radius } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 import { SshConnectionFields, SshConnectionRowDetail, buildSshCreateBody, emptySshDraft, type SshDraft } from "../components/sshConnection";
 import { PASS_ENV_MAX_KEYS, duplicatePassEnvIndexes, passEnvEntryError, validatePassEnv } from "../lib/passEnv";
@@ -117,7 +117,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
       </div>
     ) : (
       <Panel>
-        <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
+        <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.body, margin: 0 }}>
           No active project. Pick one in the header to edit its config.
         </p>
       </Panel>
@@ -299,13 +299,13 @@ function InterfacePanel() {
 }
 
 const fieldLabel = {
-  fontFamily: font.head as string, fontSize: 11, fontWeight: 700 as const,
-  textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim,
+  fontFamily: font.head as string, fontSize: fs.sm, fontWeight: 700 as const,
+  color: color.textDim,
 };
 const ta = {
   width: "100%", boxSizing: "border-box" as const, resize: "vertical" as const,
-  fontFamily: font.mono, fontSize: 13, lineHeight: 1.5,
-  background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
+  fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+  background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8,
 };
 
 function parseLines(text: string): string[] {
@@ -348,7 +348,7 @@ function RepoPathEditor({ project }: { project: Project }) {
   return (
     <Panel>
       <SectionLabel>Repository Binding</SectionLabel>
-      <p style={{ color: color.amber, fontSize: 12, margin: "0 0 12px", fontFamily: font.mono, lineHeight: 1.5 }}>
+      <p style={{ color: color.amber, fontSize: fs.mono, margin: "0 0 12px", fontFamily: font.mono, lineHeight: 1.5 }}>
         ⚠ Rebinding repoints <strong>ALL</strong> of this project's git operations — worktrees, diffs,
         merges, branches, log — to the new repository. Change it only when you mean to move the project to
         a different checkout.
@@ -365,11 +365,11 @@ function RepoPathEditor({ project }: { project: Project }) {
           {save.isPending ? "Saving…" : "Rebind"}
         </Button>
         {dirty
-          ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
-          : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+          ? <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+          : <span style={{ color: color.phosphor, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
         {save.isError && (
-          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+          <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
             {errorText(save.error)}
           </span>
         )}
@@ -380,9 +380,9 @@ function RepoPathEditor({ project }: { project: Project }) {
           MANAGER sessions (no worktree at all, worktreePath:null) — kept role-neutral rather than
           "worktree session(s)" so it reads correctly for either refusal. */}
       {liveSessions && liveSessions.length > 0 && (
-        <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.red}`, borderRadius: 6 }}>
+        <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.red}`, borderRadius: radius.sm }}>
           <Hint>stop these live session(s) first, then retry:</Hint>
-          <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
             {liveSessions.map((s) => (
               <li key={s.sessionId}>
                 <span style={{ color: color.text }}>{s.sessionId}</span>
@@ -423,7 +423,7 @@ function ProjectLifecyclePanel({ project }: { project: Project | null }) {
   if (!project) {
     return (
       <Panel>
-        <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, margin: 0 }}>
+        <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.body, margin: 0 }}>
           No active project. Pick one in the header to manage it.
         </p>
       </Panel>
@@ -432,7 +432,7 @@ function ProjectLifecyclePanel({ project }: { project: Project | null }) {
   return (
     <Panel>
       <SectionLabel>Name &amp; vault</SectionLabel>
-      <p style={{ color: color.textMuted, fontSize: 12, margin: "0 0 4px", fontFamily: font.mono, lineHeight: 1.5 }}>
+      <p style={{ color: color.textMuted, fontSize: fs.mono, margin: "0 0 4px", fontFamily: font.mono, lineHeight: 1.5 }}>
         Rename this project, re-point or unbind its vault, edit its repo lists — or retire it.
       </p>
       <ProjectManage key={project.id} project={project} collapsible={false}
@@ -468,7 +468,7 @@ function ArchivedProjectsPanel() {
   const { restore, remove } = useProjectLifecycleWrites();
   return (
     <Panel>
-      <p style={{ color: color.textMuted, fontSize: 12, margin: "0 0 2px", fontFamily: font.mono, lineHeight: 1.5 }}>
+      <p style={{ color: color.textMuted, fontSize: fs.mono, margin: "0 0 2px", fontFamily: font.mono, lineHeight: 1.5 }}>
         An archived project has only left the tree — its agents, sessions, board and runs are all still
         there. Restore puts it back. Delete destroys all of it, permanently.
       </p>
@@ -1171,7 +1171,7 @@ function ConfigEditor({ project }: { project: Project }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <Panel>
-        <p style={{ color: color.textMuted, fontSize: 11, margin: "0 0 4px", fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: "0 0 4px", fontFamily: font.mono, lineHeight: 1.5 }}>
           Editing <span style={{ color: color.text }}>{project.name}</span>. Each field overrides the
           platform default; leave it blank / <em>inherit</em> to fall back. The hint shows the current
           effective value.
@@ -1297,8 +1297,8 @@ function ConfigEditor({ project }: { project: Project }) {
             note="fewest items that must survive · a floor, never an exact count · ignored while the heading is blank" />
         </div>
         {rotationWeakenings.length > 0 && (
-          <div role="status" style={{ marginTop: 12, padding: "8px 10px", border: `1px solid ${color.amber}`, borderRadius: 6, background: color.panel2 }}>
-            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.6 }}>
+          <div role="status" style={{ marginTop: 12, padding: "8px 10px", border: `1px solid ${color.amber}`, borderRadius: radius.sm, background: color.panel2 }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, lineHeight: 1.6 }}>
               This save weakens the rotation guard: {rotationWeakenings.join(" · ")}. No agent can make this
               change, and re-adding it later is a fresh decision, not an undo.
             </span>
@@ -1360,8 +1360,8 @@ function ConfigEditor({ project }: { project: Project }) {
         </div>
         {/* DoD-6 — the unencrypted-storage warning, at the point of ENTRY rather than in a panel footer,
             because it has to be read before a private key gets pasted, not after. */}
-        <div role="note" style={{ marginTop: 10, padding: "8px 10px", border: `1px solid ${color.amber}`, borderRadius: 6, background: color.panel2 }}>
-          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.6 }}>
+        <div role="note" style={{ marginTop: 10, padding: "8px 10px", border: `1px solid ${color.amber}`, borderRadius: radius.sm, background: color.panel2 }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, lineHeight: 1.6 }}>
             ⚠ A value typed here is stored <strong>unencrypted</strong> in this project's config row, and is
             readable by any surface that can read the project's config. This is the right tool for a
             non-secret variable, and only an honest stopgap for a real secret — prefer the encrypted
@@ -1399,13 +1399,13 @@ function ConfigEditor({ project }: { project: Project }) {
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
-          ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
-          : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+          ? <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+          : <span style={{ color: color.phosphor, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         {/* Card 65aa951c. A field the human has NOT touched silently adopts whatever landed while this
             page was open — that is just the truth arriving. A field they ARE editing cannot be adopted,
             so Save will overwrite the other write: name those, with the two real options. */}
         {liveConflicts.length > 0 && (
-          <span data-testid="config-conflict-notice" style={{ color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span data-testid="config-conflict-notice" style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
             changed elsewhere since you opened this: {liveConflicts.map((f) => PROJECT_CONFIG_FIELD_LABELS[f]).join(", ")} — Save keeps your version
           </span>
         )}
@@ -1413,11 +1413,11 @@ function ConfigEditor({ project }: { project: Project }) {
         {/* An out-of-range timeout takes the error slot: it's what's blocking Save, and it states the
             limit in the field's own unit — unlike a stale server error still quoting raw ms. */}
         {blockingErrors.length > 0 ? (
-          <span role="alert" style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+          <span role="alert" style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
             {blockingErrors.join(" · ")}
           </span>
         ) : save.isError && (
-          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+          <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
             {errorText(save.error)}
           </span>
         )}
@@ -1505,7 +1505,7 @@ function GlobalConfigEditor() {
     return <Panel><Hint>loading daemon config…</Hint></Panel>;
   }
   if (isError || !data) {
-    return <Panel><span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/platform/config"}</span></Panel>;
+    return <Panel><span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/platform/config"}</span></Panel>;
   }
   return <GlobalConfigForm override={data.override} resolved={data.resolved} />;
 }
@@ -1902,11 +1902,11 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <Panel>
-        <p style={{ color: color.amber, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.amber, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Watcher cadences and git/provision timeouts take effect after a daemon restart. Rate-limit and
           webhook values apply immediately.
         </p>
-        <p style={{ color: color.textMuted, fontSize: 11, margin: "6px 0 0", fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: "6px 0 0", fontFamily: font.mono, lineHeight: 1.5 }}>
           Daemon-wide (not per-project). Each field overrides the platform default; leave it blank /
           <em> inherit</em> to fall back. The hint shows the current effective value.
         </p>
@@ -1944,7 +1944,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             blocks it. Names both fields rather than pointing at one by position. */}
         {loopBreakerClamp && (
           <span role="status" data-testid="loop-breaker-clamp-note"
-            style={{ display: "block", marginTop: 10, color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            style={{ display: "block", marginTop: 10, color: color.amber, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
             Backoff base sits above Backoff ceiling — it saves as entered, but the daemon will back off by
             no more than {loopBreakerClamp}.
           </span>
@@ -2040,7 +2040,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
                   onChange={() => toggleNotification(kind)}
                   style={{ marginTop: 2, accentColor: "var(--loom-phosphor)", width: 16, height: 16, flexShrink: 0 }} />
                 <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                  <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontSize: 13,
+                  <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontSize: fs.body,
                     color: notify ? color.text : color.textMuted }}>{label}</span>
                   <Hint style={{ lineHeight: 1.5 }}>{hint}</Hint>
                 </span>
@@ -2224,7 +2224,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         <SectionLabel>Remote Access</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Bind host (read-only — set via remoteAccess.bindHost)</span>
-          <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>
             {resolved.remoteAccess.enabled ? resolved.remoteAccess.bindHost : "disabled (loopback only)"}
           </span>
         </div>
@@ -2248,17 +2248,17 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
-          ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
-          : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+          ? <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+          : <span style={{ color: color.phosphor, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
         {/* A blocked Save is never silent about WHICH entry blocks it — the range errors take the error
             slot ahead of any server error, mirroring the project form's own blockingErrors row. */}
         {globalRangeErrors.length > 0 ? (
-          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+          <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
             {globalRangeErrors.join(" · ")}
           </span>
         ) : save.isError && (
-          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+          <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
             {errorText(save.error)}
           </span>
         )}
@@ -2372,7 +2372,7 @@ function ConnectionsPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Panel>
-        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Owner-only credentials for connecting Loom to external services. Secrets are encrypted at rest
           and never shown again after creation. There is no agent-facing tool that can read, list, or use
           them directly — an allowlisted session can only reach one THROUGH the authenticated_request tool.
@@ -2387,10 +2387,10 @@ function ConnectionsPanel() {
         </div>
 
         {isLoading && <Hint>loading connections…</Hint>}
-        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/connections"}</span>}
+        {isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/connections"}</span>}
 
         {adding && (
-          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm }}>
             <ConnectionForm
               pending={create.isPending || createOAuth.isPending || createSsh.isPending}
               error={(create.error ? errorText(create.error) : null) ?? (createOAuth.error ? errorText(createOAuth.error) : null) ?? (createSsh.error ? errorText(createSsh.error) : null)}
@@ -2405,16 +2405,16 @@ function ConnectionsPanel() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {rows.length === 0 && !adding && !isLoading && (
-            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No connections yet.</span>
+            <span style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono }}>No connections yet.</span>
           )}
           {rows.map((c) => {
             const status = c.authScheme === "oauth2" ? oauthStatus(c) : null;
             return (
-              <div key={c.id} data-testid={`connection-row-${c.id}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
-                <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
+              <div key={c.id} data-testid={`connection-row-${c.id}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{c.name}</span>
                 {/* An ssh row names its full user@host:port target on its own detail line below. */}
-                {c.authScheme !== "ssh" && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.host}</span>}
-                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                {c.authScheme !== "ssh" && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{c.host}</span>}
+                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
                   {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
                 </span>
                 <Badge tone={c.projectId ? "info" : "live"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
@@ -2432,14 +2432,14 @@ function ConnectionsPanel() {
                 {c.authScheme === "oauth2" && c.scopes && c.scopes.length > 0 && (
                   <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                     {c.scopes.map((s) => (
-                      <span key={s} title={s} style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 4, padding: "1px 5px" }}>
+                      <span key={s} title={s} style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 5px" }}>
                         {scopeLabel(s)}
                       </span>
                     ))}
                   </span>
                 )}
                 <span style={{ flex: 1 }} />
-                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(c.createdAt).toLocaleString()}</span>
+                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{new Date(c.createdAt).toLocaleString()}</span>
                 {c.authScheme === "oauth2" && (
                   <Button variant="ghost" disabled={consent.isPending} onClick={() => consent.mutate(c.id)}>
                     {c.connected && !c.needsReauth ? "Reconnect" : "Connect"}
@@ -2495,7 +2495,7 @@ function PendingBindingsPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Panel>
-        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           When you answer a credential an agent asked for, Loom stores the secret and creates a Connection —
           but it never grants that Connection to an agent on its own. Each grant an agent requested waits
           here for your explicit approval. "Review &amp; grant" asks you to confirm granting the connection to
@@ -2511,38 +2511,38 @@ function PendingBindingsPanel() {
         </div>
 
         {isLoading && <Hint>loading pending bindings…</Hint>}
-        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/pending-bindings"}</span>}
+        {isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/pending-bindings"}</span>}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {rows.length === 0 && !isLoading && !isError && (
-            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No pending bindings — nothing waiting for your approval.</span>
+            <span style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono }}>No pending bindings — nothing waiting for your approval.</span>
           )}
           {rows.map((b) => (
-            <div key={b.questionId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
-              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{b.connectionName}</span>
-              {b.connectionHost && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{b.connectionHost}</span>}
-              <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>→</span>
-              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.cyan }}>{b.agentName}</span>
+            <div key={b.questionId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{b.connectionName}</span>
+              {b.connectionHost && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{b.connectionHost}</span>}
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>→</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.cyan }}>{b.agentName}</span>
               <Badge tone="muted">profile {b.profileName}</Badge>
               <Badge tone="info">{b.projectName}</Badge>
               {b.alreadyGranted && <Badge tone="live">Granted</Badge>}
               <span style={{ flex: 1 }} />
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(b.requestedAt).toLocaleString()}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{new Date(b.requestedAt).toLocaleString()}</span>
               {!b.alreadyGranted && b.agentId && confirming !== b.questionId && (
                 <Button variant="primary" onClick={() => setConfirming(b.questionId)}>Review &amp; grant</Button>
               )}
               {!b.alreadyGranted && !b.agentId && (
-                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>requesting agent was deleted — nothing to grant</span>
+                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>requesting agent was deleted — nothing to grant</span>
               )}
               {!b.alreadyGranted && b.agentId && confirming === b.questionId && (
                 <div data-testid={`pending-binding-confirm-${b.questionId}`} style={{ display: "flex", alignItems: "center", gap: 8, flexBasis: "100%", flexWrap: "wrap" }}>
-                  <span style={{ fontFamily: font.mono, fontSize: 12, color: color.amber }}>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber }}>
                     Grant {b.connectionName} to agent {b.agentName} only? It reaches only a session spawned fresh afterward.
                   </span>
                   <Button variant="primary" disabled={grant.isPending || !allAgentsForGrant.isSuccess}
                     onClick={() => grant.mutate({ agentId: b.agentId!, connectionId: b.connectionId })}>Grant</Button>
                   <Button variant="ghost" disabled={grant.isPending} onClick={() => setConfirming(null)}>Cancel</Button>
-                  {grant.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(grant.error as Error)}</span>}
+                  {grant.isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(grant.error as Error)}</span>}
                 </div>
               )}
             </div>
@@ -2767,7 +2767,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={fieldLabel}>Read scopes</span>
             {GOOGLE_ANALYTICS_SCOPE_PRESETS.map((p) => (
-              <label key={p.key} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, cursor: "pointer" }}>
+              <label key={p.key} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, cursor: "pointer" }}>
                 <input
                   type="checkbox"
                   checked={!!gaScopes[p.key]}
@@ -2775,8 +2775,8 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
                   style={{ accentColor: color.phosphor, width: 15, height: 15, marginTop: 1, flexShrink: 0 }}
                 />
                 <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                  <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{p.label}</span>
-                  <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{p.description}</span>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{p.label}</span>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{p.description}</span>
                 </span>
               </label>
             ))}
@@ -2856,7 +2856,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
       )}
 
       {(localErr || error || validateSonar.error) && (
-        <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>
+        <div style={{ fontSize: fs.mono, color: color.red, fontFamily: font.mono }}>
           {localErr ?? error ?? errorText(validateSonar.error)}
         </div>
       )}
@@ -2915,7 +2915,7 @@ function ProjectLinksPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Panel>
-        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Link two projects to let their managers message each other directly (the <code>peer_message</code> tool) —
           e.g. to answer contract questions without hand-relaying them through the Platform Lead. A manager can
           reach ONLY a project linked here; there is no agent-facing way to create a link.
@@ -2926,7 +2926,7 @@ function ProjectLinksPanel() {
         <SectionLabel style={{ margin: "0 0 8px" }}>Links ({rows.length})</SectionLabel>
 
         {isLoading && <Hint>loading project links…</Hint>}
-        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/project-links"}</span>}
+        {isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/project-links"}</span>}
 
         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
           {/* A native <select> auto-sizes its CLOSED box to its widest <option> text (card 7539206b) —
@@ -2952,19 +2952,19 @@ function ProjectLinksPanel() {
             Link
           </Button>
         </div>
-        {create.error && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, display: "block", marginBottom: 8 }}>{errorText(create.error)}</span>}
+        {create.error && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono, display: "block", marginBottom: 8 }}>{errorText(create.error)}</span>}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {rows.length === 0 && !isLoading && (
-            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No project links yet.</span>
+            <span style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono }}>No project links yet.</span>
           )}
           {rows.map((l) => (
-            <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
-              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{nameFor(l.projectAId)}</span>
+            <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{nameFor(l.projectAId)}</span>
               <span style={{ color: color.textDim }}>↔</span>
-              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{nameFor(l.projectBId)}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{nameFor(l.projectBId)}</span>
               <span style={{ flex: 1 }} />
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(l.createdAt).toLocaleString()}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{new Date(l.createdAt).toLocaleString()}</span>
               <Button variant="danger" disabled={remove.isPending}
                 onClick={() => { if (window.confirm(`Unlink "${nameFor(l.projectAId)}" and "${nameFor(l.projectBId)}"? Their managers will no longer be able to peer_message each other.`)) remove.mutate(l.id); }}>
                 Unlink
@@ -3100,14 +3100,14 @@ function NodeModulesReclaimPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Panel>
-        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Loom keeps a worker's worktree on disk after its session ends, and each one can hold a full
           <code style={{ color: color.cyan }}> node_modules</code> install. This clears
           <strong style={{ color: color.text }}> only the node_modules directory</strong> from worktrees
           whose sessions are all finished and unresumable — never the worktree itself, its branch, or any
           git state. A worktree that is reused later reinstalls on its own.
         </p>
-        <p style={{ color: color.textMuted, fontSize: 12, margin: "8px 0 0", fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: "8px 0 0", fontFamily: font.mono, lineHeight: 1.5 }}>
           This covers every project on this daemon, not just the one selected in the header. Sizes are
           measured as each tree is removed, so nothing here estimates what you will get back before it runs
           — the figure you see afterwards is a real measurement.
@@ -3118,7 +3118,7 @@ function NodeModulesReclaimPanel() {
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
           <SectionLabel style={{ margin: 0 }}>Reclaimable worktrees ({entries.length})</SectionLabel>
           <span style={{ flex: 1 }} />
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
             idle at least
             <Input type="number" min={0} value={minAgeText} aria-label="Minimum idle hours" style={{ width: 66 }}
               onChange={(e) => { setMinAgeText(e.target.value); setSelected([]); resetArming(); }} />
@@ -3132,14 +3132,14 @@ function NodeModulesReclaimPanel() {
 
         {listing.isLoading && <Hint>scanning for reclaimable worktrees…</Hint>}
         {listing.isError && (
-          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>
+          <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>
             {(listing.error as Error)?.message ?? "failed to load /api/worktrees/node-modules-reclaimable"}
           </span>
         )}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {entries.length === 0 && !listing.isLoading && !listing.isError && (
-            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>
+            <span style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono }}>
               Nothing to reclaim — no finished worktree has been idle this long with node_modules still on disk.
             </span>
           )}
@@ -3149,7 +3149,7 @@ function NodeModulesReclaimPanel() {
               <label key={e.worktreePath}
                 style={{
                   display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 10px", cursor: "pointer",
-                  background: color.panel2, borderRadius: 6,
+                  background: color.panel2, borderRadius: radius.sm,
                   border: `1px solid ${on ? color.red : color.border}`,
                 }}>
                 <input type="checkbox" checked={on} disabled={busy} onChange={() => toggle(e.worktreePath)}
@@ -3157,13 +3157,13 @@ function NodeModulesReclaimPanel() {
                 <span style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0, flex: 1 }}>
                   {/* The FULL path, wrapped rather than truncated: it is the exact string the reclaim acts
                       on, and the owner's only way to recognise which worktree this is. */}
-                  <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, wordBreak: "break-all", lineHeight: 1.45 }}>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, wordBreak: "break-all", lineHeight: 1.45 }}>
                     {e.worktreePath}
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <Badge tone="info">{e.projectName}</Badge>
-                    <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>{idleLabel(e.ageHours)}</span>
-                    <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+                    <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>{idleLabel(e.ageHours)}</span>
+                    <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
                       last active {new Date(e.lastActivityAt).toLocaleString()}
                     </span>
                   </span>
@@ -3193,18 +3193,18 @@ function NodeModulesReclaimPanel() {
             and local, and is the ONLY place the POST can be fired from. A bare button is never enough for
             an irreversible delete on the owner's own machine. */}
         {confirming && chosen.length > 0 && (
-          <div role="status" style={{ marginTop: 10, padding: 10, border: `1px solid ${color.red}`, borderRadius: 6, background: color.panel2, display: "flex", flexDirection: "column", gap: 8 }}>
-            <span style={{ fontFamily: font.mono, fontSize: 13, color: color.red, lineHeight: 1.5 }}>
+          <div role="status" style={{ marginTop: 10, padding: 10, border: `1px solid ${color.red}`, borderRadius: radius.sm, background: color.panel2, display: "flex", flexDirection: "column", gap: 8 }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.red, lineHeight: 1.5 }}>
               Permanently delete node_modules from {chosen.length} {chosen.length === 1 ? "worktree" : "worktrees"} on this machine. This cannot be undone.
             </span>
             <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 170, overflowY: "auto" }}>
               {chosen.map((e) => (
-                <span key={e.worktreePath} style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>
+                <span key={e.worktreePath} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>
                   {e.worktreePath}<span style={{ color: color.textMuted }}>\node_modules</span>
                 </span>
               ))}
             </div>
-            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.5 }}>
               Branches, commits and the worktrees themselves are left untouched. Loom re-checks eligibility
               as it runs, so anything that went live since the scan is skipped rather than deleted.
             </span>
@@ -3220,7 +3220,7 @@ function NodeModulesReclaimPanel() {
         )}
 
         {reclaim.isError && (
-          <span style={{ display: "block", marginTop: 8, color: color.red, fontSize: 12, fontFamily: font.mono }}>
+          <span style={{ display: "block", marginTop: 8, color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>
             {errorText(reclaim.error) ?? "reclaim failed"}
           </span>
         )}
@@ -3240,14 +3240,14 @@ function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclai
     <div data-testid="reclaim-result" style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <StatusPill tone={clean ? "live" : "busy"} label="last reclaim" />
-        <span style={{ fontFamily: font.mono, fontSize: 13, color: clean ? color.text : color.amber, lineHeight: 1.5 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: clean ? color.text : color.amber, lineHeight: 1.5 }}>
           {reclaimHeadline(result)}
         </span>
         <span style={{ flex: 1 }} />
         <Button variant="ghost" onClick={onDismiss}>Dismiss</Button>
       </div>
       {result.sizeTruncatedCount > 0 && (
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.5 }}>
           {result.sizeTruncatedCount} {result.sizeTruncatedCount === 1 ? "tree was" : "trees were"} too large to
           measure completely, so the total above is a lower bound — the real figure is higher.
         </span>
@@ -3268,15 +3268,15 @@ function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclai
           ].filter((line): line is string => !!line);
           return (
             <div key={`${r.outcome}:${r.worktreePath}`} data-testid="reclaim-row" data-outcome={r.outcome}
-              style={{ display: "flex", flexDirection: "column", gap: 3, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+              style={{ display: "flex", flexDirection: "column", gap: 3, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <Badge tone={o.tone}>{o.label}</Badge>
-                <span style={{ fontFamily: font.mono, fontSize: 12, color: o.tone === "live" ? color.text : tone[o.tone] }}>{freed}</span>
+                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: o.tone === "live" ? color.text : tone[o.tone] }}>{freed}</span>
                 {r.projectName && <Badge tone="muted">{r.projectName}</Badge>}
               </div>
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>{r.worktreePath}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>{r.worktreePath}</span>
               {noteLines.map((line, i) => (
-                <span key={i} style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>{line}</span>
+                <span key={i} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.5 }}>{line}</span>
               ))}
             </div>
           );
@@ -3336,7 +3336,7 @@ function PollJobsPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Panel>
-        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Scheduled local polls. On each due tick Loom fetches a connection's endpoint and, on an item it
           hasn't seen since the previous poll, wakes an existing session or spawns a fresh one with the new
           item(s) as its kickoff. Owner-managed only — there is no agent-facing tool that can read or edit
@@ -3358,11 +3358,11 @@ function PollJobsPanel() {
         </div>
 
         {jobs.isLoading && <Hint>loading poll jobs…</Hint>}
-        {jobs.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(jobs.error as Error)?.message ?? "failed to load /api/poll-jobs"}</span>}
+        {jobs.isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{(jobs.error as Error)?.message ?? "failed to load /api/poll-jobs"}</span>}
         {noConns && <Hint>no connections yet — add one in the Connections section above before creating a poll job.</Hint>}
 
         {adding && (
-          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm }}>
             <PollJobForm connections={conns} sessions={sessionOpts} agents={agentOpts}
               agentsLoading={agents.isLoading} sessionsLoading={sessions.isLoading}
               pending={create.isPending} error={create.error ? errorText(create.error) : null}
@@ -3372,11 +3372,11 @@ function PollJobsPanel() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {rows.length === 0 && !adding && !jobs.isLoading && (
-            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No poll jobs yet.</span>
+            <span style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono }}>No poll jobs yet.</span>
           )}
           {rows.map((job) => (
             editingId === job.id ? (
-              <div key={job.id} style={{ padding: 12, background: color.panel2, border: `1px solid ${color.phosphor}`, borderRadius: 6 }}>
+              <div key={job.id} style={{ padding: 12, background: color.panel2, border: `1px solid ${color.phosphor}`, borderRadius: radius.sm }}>
                 <PollJobForm initial={job} connections={conns} sessions={sessionOpts} agents={agentOpts}
                   agentsLoading={agents.isLoading} sessionsLoading={sessions.isLoading}
                   connName={connName(job.connectionId)}
@@ -3404,19 +3404,19 @@ function PollJobRow({ job, connName, target, toggling, deleting, onEdit, onToggl
   const [confirmDel, setConfirmDel] = useState(false);
   const failing = job.consecutiveFailures > 0;
   return (
-    <div style={{ padding: "10px 12px", background: color.panel2, border: `1px solid ${failing ? color.amber : color.border}`, borderRadius: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+    <div style={{ padding: "10px 12px", background: color.panel2, border: `1px solid ${failing ? color.amber : color.border}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 6 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{connName}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{connName}</span>
         <Chip label={job.method} value={job.path} />
         <span style={{ flex: 1 }} />
         <Badge tone={job.enabled ? "live" : "muted"}>{job.enabled ? "enabled" : "disabled"}</Badge>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
         <span>every {job.intervalMs / 1000}s</span>
         <span>{job.mode} → <span style={{ color: color.textDim }}>{target}</span></span>
         <span>items: {job.itemsPath || "(root)"} · id: {job.idPath || "(none)"}</span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono }}>
         <span style={{ color: color.textDim }}>last polled · <span style={{ color: color.text }}>{fmtWhen(job.lastPolledAt)}</span></span>
         {failing && (
           <span style={{ color: color.amber }}>{job.consecutiveFailures} consecutive failure{job.consecutiveFailures === 1 ? "" : "s"}</span>
@@ -3435,7 +3435,7 @@ function PollJobRow({ job, connName, target, toggling, deleting, onEdit, onToggl
         <span style={{ flex: 1 }} />
         {confirmDel ? (
           <>
-            <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>delete this poll job?</span>
+            <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>delete this poll job?</span>
             <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
             <Button onClick={() => setConfirmDel(false)}>Cancel</Button>
           </>
@@ -3504,7 +3504,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text, fontSize: 13 }}>
+      <strong style={{ fontFamily: font.head, color: color.text, fontSize: fs.body }}>
         {editing ? "Edit poll job" : "New poll job"}
       </strong>
 
@@ -3530,14 +3530,14 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Path</span>
           <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/notifications" spellCheck={false} />
-          {path.trim().length > 0 && !pathValid && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Path must start with "/".</span>}
+          {path.trim().length > 0 && !pathValid && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>Path must start with "/".</span>}
         </label>
       </div>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Poll interval (seconds)</span>
         <Input value={intervalSec} onChange={(e) => setIntervalSec(e.target.value)} inputMode="numeric" min={minSec} type="number" placeholder={String(minSec)} />
-        {intervalSec.trim().length > 0 && !intervalValid && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Minimum {minSec}s (the poll cadence floor).</span>}
+        {intervalSec.trim().length > 0 && !intervalValid && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>Minimum {minSec}s (the poll cadence floor).</span>}
       </label>
 
       <div className="loom-field-grid loom-field-grid-2" style={{ gap: 10 }}>
@@ -3568,7 +3568,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
             <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents —" : "— select an agent —"}</option>
             {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
           </Select>
-          {noAgents && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
+          {noAgents && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
         </label>
       ) : (
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -3577,16 +3577,16 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
             <option value="">{sessionsLoading ? "Loading sessions…" : noSessions ? "— no sessions —" : "— select a session —"}</option>
             {sessions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
           </Select>
-          {noSessions && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>No sessions exist yet — start one before targeting a wake.</span>}
+          {noSessions && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one before targeting a wake.</span>}
         </label>
       )}
 
-      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.body, color: color.text }}>
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         Enabled
       </label>
 
-      {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
+      {(localErr || error) && <div style={{ fontSize: fs.mono, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
 
       <div style={{ display: "flex", gap: 8 }}>
         <Button variant="primary" onClick={submit} disabled={pending || !valid}>
@@ -3634,7 +3634,7 @@ function CapabilitiesPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Panel>
-        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           The catalog of MCP capabilities a Profile can grant a session — the two Loom-shipped builtins plus
           any you add here. Owner-only: there is no agent-facing tool that can create, edit, or delete a
           capability.
@@ -3649,10 +3649,10 @@ function CapabilitiesPanel() {
         </div>
 
         {isLoading && <Hint>loading capabilities…</Hint>}
-        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/capabilities"}</span>}
+        {isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/capabilities"}</span>}
 
         {adding && (
-          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+          <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm }}>
             <CapabilityForm pending={create.isPending} error={create.error ? errorText(create.error) : null}
               onSubmit={(v) => create.mutate(v)} onCancel={() => { setAdding(false); create.reset(); }} />
           </div>
@@ -3660,7 +3660,7 @@ function CapabilitiesPanel() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {rows.length === 0 && !adding && !isLoading && (
-            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No capabilities yet.</span>
+            <span style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono }}>No capabilities yet.</span>
           )}
           {rows.map((c) => {
             // A builtin is not a `capability_defs` row, so it has no id to PATCH and no `passEnv` concept
@@ -3672,13 +3672,13 @@ function CapabilitiesPanel() {
             const names = c.passEnv ?? [];
             const open = openPassEnv === c.slug;
             return (
-              <div key={c.slug} style={{ background: color.panel2, border: `1px solid ${open ? color.borderStrong : color.border}`, borderRadius: 6 }}>
+              <div key={c.slug} style={{ background: color.panel2, border: `1px solid ${open ? color.borderStrong : color.border}`, borderRadius: radius.sm }}>
                 {/* flexWrap + the description's minWidth:0 keep each row inside the panel at phone width: a
                     nowrap ellipsised flex item defaults to `min-width: auto`, so it refuses to shrink below
                     its FULL text width and pushes the row (and the page) sideways instead of ellipsising. */}
                 <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, padding: "8px 10px" }}>
-                  <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
-                  <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{c.kind}</span>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{c.name}</span>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>{c.kind}</span>
                   {/* The title carries the one thing a reader might wonder about the missing env control
                       below — cheaper than a second badge saying "n/a" on every builtin row forever. */}
                   {c.builtin && (
@@ -3696,7 +3696,7 @@ function CapabilitiesPanel() {
                       ambient env · {names.length}
                     </Badge>
                   )}
-                  <span style={{ flex: 1, minWidth: 0, color: color.textMuted, fontSize: 12, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.description}</span>
+                  <span style={{ flex: 1, minWidth: 0, color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.description}</span>
                   {editable && (
                     <Button variant={open ? "primary" : "default"} data-testid={`capability-passenv-toggle-${c.slug}`}
                       aria-expanded={open} title={`Edit which ambient env vars reach ${c.name}`}
@@ -3797,7 +3797,7 @@ function PassEnvEditor({ capability, onSaved, onClose }: {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
         {rows.length === 0 ? (
-          <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>
             No extra variables — this capability launches with the base allowlist only.
           </span>
         ) : (
@@ -3824,13 +3824,13 @@ function PassEnvEditor({ capability, onSaved, onClose }: {
                 </div>
                 {err && (
                   <span data-testid={`passenv-error-${capability.slug}-${i}`} role="alert"
-                    style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4 }}>{err}</span>
+                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.4 }}>{err}</span>
                 )}
                 {/* Not an error: the daemon ACCEPTS a repeat and silently collapses it. Said out loud so a
                     row doesn't just disappear on save with nothing having explained why. */}
                 {!err && dupe && (
                   <span data-testid={`passenv-dupe-${capability.slug}-${i}`}
-                    style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.4 }}>
+                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.4 }}>
                     Already listed above — saving keeps one copy.
                   </span>
                 )}
@@ -3857,7 +3857,7 @@ function PassEnvEditor({ capability, onSaved, onClose }: {
           rule the mirror above has drifted from still reads correctly. */}
       {(preflight || save.error) && (
         <span data-testid={`passenv-save-error-${capability.slug}`} role="alert"
-          style={{ fontFamily: font.mono, fontSize: 12, color: color.red, lineHeight: 1.5 }}>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.5 }}>
           {preflight ?? errorText(save.error)}
         </span>
       )}
@@ -3982,18 +3982,18 @@ function CapabilityForm({ pending, error, onSubmit, onCancel }: {
             <Input value={argsText} onChange={(e) => setArgsText(e.target.value)} spellCheck={false} />
           </label>
           {kind === "command" && (
-            <div style={{ padding: 10, background: color.panel, border: `1px solid ${color.amber}`, borderRadius: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+            <div style={{ padding: 10, background: color.panel, border: `1px solid ${color.amber}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 2 }}>
               <span style={{ ...fieldLabel, color: color.amber }}>This launches a host process you control</span>
-              <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+              <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
                 A session granted this capability spawns the command above directly (no shell — args are
                 passed as an argv array, never a shell string). Loom trusts it because you typed it: the same
                 model as the project Gate Command. Only add a command you'd run yourself.
               </span>
             </div>
           )}
-          <div style={{ padding: 10, background: color.panel, border: `1px solid ${color.amber}`, borderRadius: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ padding: 10, background: color.panel, border: `1px solid ${color.amber}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 2 }}>
             <span style={{ ...fieldLabel, color: color.amber }}>No automatic .env protection here</span>
-            <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
+            <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
               Loom's built-in protection against a tool reading secrets out of a project's own .env files
               applies only to the one capability Loom ships with it already in place. A row you add here —
               including one that launches shadcn, or any other tool that auto-loads .env files — runs
@@ -4008,12 +4008,12 @@ function CapabilityForm({ pending, error, onSubmit, onCancel }: {
         <Input value={toolAllowlistText} onChange={(e) => setToolAllowlistText(e.target.value)} placeholder="e.g. mcp__gh-mcp__list_issues" spellCheck={false} />
       </label>
 
-      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.body, color: color.text }}>
         <input type="checkbox" checked={wantsScratchDir} onChange={(e) => setWantsScratchDir(e.target.checked)} />
         Wants a scratch dir (passed --output-dir at spawn time)
       </label>
 
-      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.body, color: color.text }}>
         <input type="checkbox" checked={requiresConnection} onChange={(e) => setRequiresConnection(e.target.checked)} />
         Requires a bound connection (credential injected into the server's env)
       </label>
@@ -4024,7 +4024,7 @@ function CapabilityForm({ pending, error, onSubmit, onCancel }: {
         </label>
       )}
 
-      {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
+      {(localErr || error) && <div style={{ fontSize: fs.mono, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
 
       <div style={{ display: "flex", gap: 8 }}>
         <Button variant="primary" onClick={submit} disabled={pending}>{pending ? "Saving…" : "Create capability"}</Button>
@@ -4056,7 +4056,7 @@ function RotationMarkersEditor({ markers, set, effectiveCount }:
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
       {markers.length === 0 ? (
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>
           No protected markers — this seat's resume doc is unchecked.
         </span>
       ) : (
@@ -4069,7 +4069,7 @@ function RotationMarkersEditor({ markers, set, effectiveCount }:
               onChange={(e) => edit(i, { note: e.target.value })}
               aria-label={`Marker ${i + 1} note`} style={{ flex: "3 1 220px", minWidth: 0 }} />
             <label style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
-              fontFamily: font.mono, fontSize: 11, color: m.caseSensitive ? color.text : color.textMuted }}>
+              fontFamily: font.mono, fontSize: fs.mono, color: m.caseSensitive ? color.text : color.textMuted }}>
               <input type="checkbox" checked={m.caseSensitive ?? false}
                 onChange={(e) => edit(i, { caseSensitive: e.target.checked })}
                 aria-label={`Marker ${i + 1} case-sensitive`} />
@@ -4192,7 +4192,7 @@ function SessionEnvEditor({ rows, set }: { rows: SessionEnvRow[]; set: (r: Sessi
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
       {rows.length === 0 ? (
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>
           No session environment variables — sessions spawn with the inherited environment only.
         </span>
       ) : (
@@ -4201,10 +4201,10 @@ function SessionEnvEditor({ rows, set }: { rows: SessionEnvRow[]; set: (r: Sessi
           if (r.removed) {
             return (
               <div key={id} data-testid={`senv-row-${id}`} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "4px 0" }}>
-                <span style={{ fontFamily: font.mono, fontSize: 13, color: color.textMuted, textDecoration: "line-through" }}>
+                <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.textMuted, textDecoration: "line-through" }}>
                   {r.storedName}
                 </span>
-                <span data-testid={`senv-staged-${id}`} style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>
+                <span data-testid={`senv-staged-${id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>
                   will be removed on Save
                 </span>
                 <Button variant="ghost" data-testid={`senv-undo-${id}`} aria-label={`Undo removing ${r.storedName}`}
@@ -4228,7 +4228,7 @@ function SessionEnvEditor({ rows, set }: { rows: SessionEnvRow[]; set: (r: Sessi
               {/* Fixed width + right-aligned: the indicator's text length varies per row ("2377 chars"
                   vs "40 chars" vs "new"), and letting it size to content drags each row's inputs to a
                   different x — a visibly ragged column down the list. */}
-              <span data-testid={`senv-indicator-${id}`} style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, whiteSpace: "nowrap", minWidth: 104, textAlign: "right" }}>
+              <span data-testid={`senv-indicator-${id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, whiteSpace: "nowrap", minWidth: 104, textAlign: "right" }}>
                 {r.storedName !== null ? `set · ${r.storedLength} chars` : "new"}
               </span>
               <Button variant="ghost" data-testid={`senv-remove-${id}`}
@@ -4303,7 +4303,7 @@ function Field({ children, hint }: { children: ReactNode; hint?: string }) {
   );
 }
 function Hint({ children, style }: { children: ReactNode; style?: CSSProperties }) {
-  return <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, ...style }}>{children}</span>;
+  return <span style={{ color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono, ...style }}>{children}</span>;
 }
 function effHint(v: unknown): string {
   return `effective: ${String(v)}`;
@@ -4343,7 +4343,7 @@ function MsField({ label, value, set, effectiveMs, defMs, unit, note, bounds }:
         style={err ? { borderColor: color.red } : undefined} />
       <Hint>{effHint(`${effectiveMs / div}${unit}`)}</Hint>
       {bounds && <Hint>{msRangeHint(bounds, unit)}</Hint>}
-      {err && <span role="alert" style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{err}</span>}
+      {err && <span role="alert" style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{err}</span>}
       {note && <Hint>{note}</Hint>}
     </label>
   );

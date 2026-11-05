@@ -6,7 +6,7 @@
 // above it), not a new modal system: an amber hairline panel in the normal flow, one line of consequence,
 // a bounded Project / Agent list, and the two real choices. No new colour system, no overlay.
 import { Badge, Button, Panel, SectionLabel } from "./ui";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 import { grantKeyList, GRANT_REACH_UNKNOWN, type GrantSavePlan } from "../lib/profileGrantReach";
 
 /** How many agent rows render before collapsing into a "+N more" tail. The daemon caps its own audit
@@ -28,12 +28,12 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
       style={{ boxShadow: `inset 0 0 0 1px ${color.busy}`, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Badge tone="busy">grant</Badge>
-        <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 12, color: color.text }}>
+        <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>
           This save widens what agents can do
         </strong>
       </div>
 
-      <p style={{ margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: color.text }}>
+      <p style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
         You are granting <strong style={{ color: color.amber }}>{grantKeyList(plan.addedKeys)}</strong> on this profile.
         {" "}
         {unknown ? GRANT_REACH_UNKNOWN : (
@@ -50,7 +50,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
       {/* Role carries a from/to VALUE a bare key name can't express (card be447b3f) — shown as its own
           line rather than folded into grantKeyList's prose clause. */}
       {plan.roleChange && (
-        <p data-testid="grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6, color: color.text }}>
+        <p data-testid="grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
           Role changes from <strong style={{ color: color.amber }}>{plan.roleChange.from ?? "none"}</strong>
           {" "}to <strong style={{ color: color.amber }}>{plan.roleChange.to ?? "none"}</strong>.
         </p>
@@ -62,7 +62,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
           <ul data-testid="grant-reach-agents"
             style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
             {shown.map((a) => (
-              <li key={a.id} style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>
+              <li key={a.id} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>
                 <span style={{ color: color.textDim }}>{a.projectName}</span>
                 <span style={{ color: color.textMuted }}> / </span>
                 {a.name}
@@ -70,7 +70,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
             ))}
           </ul>
           {hidden > 0 && (
-            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>+{hidden} more</span>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>+{hidden} more</span>
           )}
         </div>
       )}

@@ -27,7 +27,7 @@ import { WorkspaceReplay } from "../components/workspaceReplay";
 import { isCompanionSession } from "../lib/sessions";
 import { workspaceRunningSessions, workspaceSessionsSummary } from "../lib/workspaceSessions";
 import { SessionTerminalList, type SessionListTestIds } from "../components/sessionTerminals";
-import { color, font, type Tone } from "../theme";
+import { color, font, type Tone, fs } from "../theme";
 import { useNavigate } from "react-router-dom";
 
 // THE WORKSPACE ROOT NODE — cards fd99b2d7 (Atlas P2-1) and 41eab0eb (the cross-project surfaces as
@@ -717,7 +717,7 @@ function ProjectGrid({ projects, boards, liveByProject, lastMerge, sessions, onO
         {/* Names the node that actually holds project creation now that the Projects page is retired
             (card 5afd71bd) — and the "New project ↗" control directly above this panel is the link,
             so the copy points at it by name rather than repeating it as a second anchor. */}
-        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12.5 }}>
+        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>
           No projects yet — create one with guided setup on the Platform node.
         </span>
       </Panel>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { RequestsInbox, RequestHistory } from "../components/requests";
 import { useFrameOwnsNodeIdentity } from "../lib/atlasNodeHead";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // The INBOX page (card 695ebab0; renamed from "Requests" by card 59fa6403) — the cross-project
 // "waiting on me" + FYI queue plus a searchable History of consumed requests. A god-eye destination like
@@ -20,7 +20,7 @@ export default function RequestsPage() {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
         {ownIdentity && (
-          <span data-testid="page-identity" style={{ fontFamily: font.head, fontSize: 16, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text, marginRight: 12 }}>Inbox</span>
+          <span data-testid="page-identity" style={{ fontFamily: font.head, fontSize: fs.lg, color: color.text, marginRight: 12 }}>Inbox</span>
         )}
         <TabButton label="Waiting on me" active={tab === "inbox"} onClick={() => setTab("inbox")} />
         <TabButton label="History" active={tab === "history"} onClick={() => setTab("history")} />
@@ -34,7 +34,7 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
   return (
     <button onClick={onClick}
       style={{ background: active ? color.panel2 : "transparent", border: `1px solid ${active ? color.phosphor : color.border}`,
-        borderRadius: radius.sm, padding: "4px 12px", cursor: "pointer", fontFamily: font.mono, fontSize: 12,
+        borderRadius: radius.sm, padding: "4px 12px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
         color: active ? color.phosphor : color.textDim }}>
       {label}
     </button>

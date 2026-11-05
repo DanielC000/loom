@@ -11,7 +11,7 @@
 // threads inset to a 4-unit margin so the mark stays square / favicon-safe.
 
 import type { CSSProperties } from "react";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // The four interlaced threads. Each `d` is a thread drawn as two segments with a gap where it
 // passes *under* the crossing thread (plain weave: every crossing flips which thread is on top).
@@ -61,7 +61,7 @@ export function Logo({ size = 20 }: { size?: number }) {
         style={{
           fontFamily: font.head,
           fontWeight: 600,
-          fontSize: 16,
+          fontSize: fs.lg,
           letterSpacing: "0.12em",
           color: color.text,
         }}

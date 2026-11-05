@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { collapse, diffLines } from "../lib/lineDiff";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // "What changed": a computed line diff of base → shipped (green additions / red removals). Long
 // unchanged runs collapse to a fold so the eye lands on the change. The texts this renders (a SKILL.md,
@@ -11,11 +11,11 @@ import { color, font, radius } from "../theme";
 export function LineDiff({ base, shipped }: { base: string; shipped: string }) {
   const rows = useMemo(() => collapse(diffLines(base, shipped)), [base, shipped]);
   if (rows.every((r) => r.t === " " || r.t === "fold")) {
-    return <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No textual change.</span>;
+    return <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No textual change.</span>;
   }
   return (
     <pre style={{ margin: 0, maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
-      fontFamily: font.mono, fontSize: 12, lineHeight: 1.5,
+      fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5,
       background: color.panel, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8 }}>
       {rows.map((r, i) => {
         if (r.t === "fold") return <div key={i} style={{ color: color.textMuted }}>{`  ⋯ ${r.n} unchanged ${r.n === 1 ? "line" : "lines"}`}</div>;

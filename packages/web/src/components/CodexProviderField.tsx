@@ -1,5 +1,5 @@
 import type { CodexProvider } from "@loom/shared";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 import { Input } from "./ui";
 
 // The codex model-provider endpoint editor (card 2ef54430), shown on the Profiles editor only while the
@@ -20,8 +20,8 @@ export function CodexProviderField({ value, onChange, connections }: {
 }) {
   const mode = modeOf(value);
   const usable = connections.filter((c) => c.authScheme === undefined || c.authScheme === "api-key" || c.authScheme === "bearer");
-  const label = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
-  const select = { background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: 12 };
+  const label = { fontFamily: font.head as string, fontSize: fs.sm, fontWeight: 700, color: color.textDim };
+  const select = { background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.mono };
   const setMode = (m: Mode) => {
     if (m === "default") return onChange(null);
     if (m === "custom") return onChange({ id: value && modeOf(value) === "custom" ? value.id : "", baseUrl: "", connectionId: "" });
@@ -53,7 +53,7 @@ export function CodexProviderField({ value, onChange, connections }: {
               {usable.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.host}</option>)}
             </select>
           </label>
-          <span style={{ fontFamily: font.mono, fontSize: 11, lineHeight: 1.5, color: color.amber }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.amber }}>
             Spend surface: sessions under this rig send their work to that endpoint and bill the connection's key.
             https only (http is allowed to a loopback host); the URL host must equal the connection's host.
           </span>

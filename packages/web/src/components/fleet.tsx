@@ -6,11 +6,12 @@ import { api } from "../lib/api";
 import { attentionKindLabel, isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
 import { harnessOf } from "../lib/harnessFields";
+import { sentenceCase } from "../lib/textCase";
 import { DecisionStateChip } from "./decisions";
 import { HarnessTag } from "./HarnessPicker";
 import { useOpenRequest } from "./requests";
 import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
-import { color, font, radius, tone, toneFill, type Tone } from "../theme";
+import { color, font, radius, tone, toneFill, type Tone, fs } from "../theme";
 
 // The pure roll-up math lives in lib/fleet.ts (JSX-free, so the hermetic node test can import it); the
 // widgets re-export it so existing consumers (Overview) keep importing from the components/fleet barrel.
@@ -30,9 +31,9 @@ export function sessionStatus(s: SessionListItem): { tone: Tone; label: string; 
 
 export function Stat({ label, value, tone: t = "live" }: { label: string; value: number; tone?: Tone }) {
   return (
-    <span style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: 4, padding: "4px 12px", minWidth: 64 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 20, color: tone[t] }}>{value}</span>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
+    <span style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "4px 12px", minWidth: 64 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.h1, color: tone[t] }}>{value}</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
     </span>
   );
 }
@@ -67,14 +68,14 @@ function UsageGauge({ label, window: w }: { label: string; window: UsageWindow }
   const util = Math.round(w.utilization);
   const t = usageTone(w.utilization);
   return (
-    <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 12px", minWidth: 132 }}>
+    <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
       <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-        <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: 14, color: tone[t] }}>{util}%</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[t] }}>{util}%</span>
       </span>
       <Meter value={util} max={100} tone={t} width={110} />
-      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>resets in {resetCountdown(w.resetsAt)}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>resets in {resetCountdown(w.resetsAt)}</span>
     </div>
   );
 }
@@ -88,8 +89,8 @@ export function PlanUsageStrip() {
     const reason = data && !data.available ? data.reason : usage.isLoading ? "loading…" : "no data";
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>plan usage</span>
-        <span title={reason} style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>unavailable</span>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Plan usage</span>
+        <span title={reason} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>unavailable</span>
       </div>
     );
   }
@@ -102,20 +103,20 @@ export function PlanUsageStrip() {
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>plan usage</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Plan usage</span>
       {data.fiveHour && <UsageGauge label="5h session" window={data.fiveHour} />}
       <UsageGauge label="7d weekly" window={data.sevenDay} />
       {data.sevenDayOpus && <UsageGauge label="7d opus" window={data.sevenDayOpus} />}
       {data.sevenDaySonnet && <UsageGauge label="7d sonnet" window={data.sevenDaySonnet} />}
       {extra?.isEnabled && (
-        <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 12px", minWidth: 132 }}>
+        <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
           <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-            <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>extra usage</span>
+            <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Extra usage</span>
             <span style={{ flex: 1 }} />
-            <span style={{ fontFamily: font.mono, fontSize: 14, color: tone[usageTone(extraUtil)] }}>{Math.round(extraUtil)}%</span>
+            <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[usageTone(extraUtil)] }}>{Math.round(extraUtil)}%</span>
           </span>
           <Meter value={extraUtil} max={100} tone={usageTone(extraUtil)} width={110} />
-          <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
             {extra.usedCredits ?? 0}/{extra.monthlyLimit ?? "—"} credits
           </span>
         </div>
@@ -187,9 +188,9 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   // always did, attributes and inline styles included.
   const dot = <Dot tone={item.tone} glow={item.tone === "busy"} />;
   const kindLabel = (
-    <span style={{ fontFamily: font.ui, fontSize: 12, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" }}>{attentionKindLabel(item.kind)}</span>
+    <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" }}>{attentionKindLabel(item.kind)}</span>
   );
-  const textBase = { fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" } as const;
+  const textBase = { fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" } as const;
   /* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
      (the isolation-gap `reason` strings run to a paragraph each) — so hover reveals `hoverText` when
      a kind supplies it, else the full untruncated `text`. `text` still has to stand alone: a reader
@@ -210,7 +211,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   const dismissButton = onDismiss && (
     <Button variant="ghost" onClick={onDismiss} aria-label="Dismiss this alert"
       title={`${item.dismissHint || DISMISS_FALLBACK_HINT} ${DISMISS_INVARIANT}`}
-      style={{ padding: "0 6px", fontSize: 15, lineHeight: 1 }}>×</Button>
+      style={{ padding: "0 6px", fontSize: fs.lg, lineHeight: 1 }}>×</Button>
   );
   const head = (
     <>
@@ -236,7 +237,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   const frame = {
     border: `1px solid ${color.border}`,
     borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`,
-    borderRadius: 4, padding: "6px 10px", marginBottom: 6,
+    borderRadius: radius.sm, padding: "6px 10px", marginBottom: 6,
   };
   // ── The BAND shape (card d0d430d4) ───────────────────────────────────────────────────────────
   // The one-line shape below cannot hold this row's fixed parts in a ~300px band column. Before this
@@ -335,7 +336,7 @@ function SnoozeButton({ questionId }: { questionId: string }) {
         if (ms) snooze.mutate(ms);
         e.target.value = "";
       }}
-      style={{ fontFamily: font.mono, fontSize: 11, background: color.panel, color: color.text,
+      style={{ fontFamily: font.mono, fontSize: fs.mono, background: color.panel, color: color.text,
         border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "2px 4px", cursor: "pointer" }}>
       <option value="" disabled>Snooze…</option>
       <option value="1d">1 day</option>
@@ -374,8 +375,8 @@ export function ContextUsage({ ctxInputTokens, model, unmeasured = null }: {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={`${ctx.toLocaleString()} input tokens · ${Math.round((ctx / win) * 100)}% of the ${(win / 1000).toFixed(0)}k window`}>
       <Meter value={ctx} max={win} tone={hot ? "busy" : "accent"} width={60} />
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: hot ? color.amber : color.textMuted }}>{Math.round((ctx / win) * 100)}%</span>
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: hot ? color.amber : color.textMuted }}>{Math.round((ctx / win) * 100)}%</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
     </span>
   );
 }
@@ -388,7 +389,7 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
   const ctx = s.ctxInputTokens ?? 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 0", flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: star ? color.phosphor : color.text, fontWeight: star ? 700 : 400 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: star ? color.phosphor : color.text, fontWeight: star ? 700 : 400 }}>
         {star ? "★ " : ""}{star ? "mgr " : "w:"}{s.id.slice(0, 8)}
       </span>
       {/* Which vendor CLI this session actually runs — grouped with the id because it's an identity
@@ -404,11 +405,11 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
           straight to the answer page — derived from the SAME pending-decision signal as the inbox + bell. */}
       {decision && (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: 11, color: color.cyan,
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: fs.mono, color: color.cyan,
             border: `1px solid ${color.cyan}`, borderRadius: radius.sm, padding: "1px 7px" }}>
             <Dot tone="info" />{decision.count} decision{decision.count === 1 ? "" : "s"} · waiting on you
           </span>
-          <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11 }} onClick={() => openRequest(decision.questionId)}>Answer →</Button>
+          <Button variant="primary" style={{ padding: "1px 8px", fontSize: fs.sm }} onClick={() => openRequest(decision.questionId)}>Answer →</Button>
         </span>
       )}
       {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} />}
@@ -439,7 +440,7 @@ export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
   const hot = wc.ratio > CONTEXT_WARN_RATIO;
   if (total.reporting === 0) return null;
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 11 }}
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono }}
       title={`${total.tokens.toLocaleString()} input tokens in context across ${total.reporting} reporting session${total.reporting === 1 ? "" : "s"} (subscription usage, not an API $ bill)`}>
       <span style={{ color: color.textMuted }}>consumption</span>
       <span style={{ color: color.text }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
@@ -526,13 +527,13 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       {/* header: roll-up dot + name + expand */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Dot tone={roll.tone} glow={roll.glow} />
-        <span style={{ fontFamily: font.head, fontSize: 13, textTransform: "uppercase", letterSpacing: "0.06em", color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={name}>{name}</span>
+        <span style={{ fontFamily: font.head, fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={name}>{name}</span>
         <span style={{ flex: 1 }} />
         <Button variant="ghost" style={{ padding: "0 6px" }} title="Expand" onClick={onExpand}>⤢</Button>
       </div>
 
       {/* running / archived split — the "both-in-one" summary. Archived reads as clearly secondary. */}
-      <div style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, whiteSpace: "nowrap" }}>
+      <div style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, whiteSpace: "nowrap" }}>
         running {running.length}
         {archived.length > 0 && <span style={{ color: color.textDim }}> · archived {archived.length}</span>}
       </div>
@@ -549,7 +550,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
 
       {/* worker-state composition bar + legend */}
       <CompBar buckets={buckets} />
-      <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: 10 }}>
+      <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: fs.xs }}>
         <span style={{ color: color.amber }}>busy {buckets.busy}</span>
         <span style={{ color: color.phosphor }}>idle {buckets.idle}</span>
         {buckets.rl > 0 && <span style={{ color: color.red }}>rl {buckets.rl}</span>}
@@ -559,22 +560,22 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
 
       {/* worst-case context pressure */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted, width: 28 }}>ctx</span>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted, width: 28 }}>ctx</span>
         <Meter value={wc.ctx} max={wc.window || 1} tone={ctxHot ? "busy" : "accent"} width={110} />
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: ctxHot ? color.amber : color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: ctxHot ? color.amber : color.textMuted }}>
           {wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}
         </span>
       </div>
 
       {/* busiest / most-recent manager hint — a held decision takes over the footer with an Answer → jump */}
       <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-        <div style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: 11, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <div style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {topMgr && topSt
             ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: decision ? color.cyan : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
             : <span style={{ color: color.textMuted }}>no live manager</span>}
         </div>
         {decision && (
-          <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11, flexShrink: 0 }}
+          <Button variant="primary" style={{ padding: "1px 8px", fontSize: fs.sm, flexShrink: 0 }}
             onClick={() => openRequest(decision.questionId)}>Answer →</Button>
         )}
       </div>
@@ -613,7 +614,7 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
         data-testid="inactive-fleet"
         aria-expanded={open}
         title={open ? "Hide inactive projects" : "Show inactive projects"}
-        style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, padding: "2px 6px" }}>
+        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 6px" }}>
         {open ? "▾" : "▸"} {projects.length} inactive project{projects.length === 1 ? "" : "s"}
       </Button>
       {open && (
@@ -624,7 +625,7 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
               attention={0} onExpand={() => { /* no live sessions to expand into */ }} muted />
           ))}
           {overflow > 0 && (
-            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
               +{overflow} more inactive
             </span>
           )}
@@ -647,14 +648,14 @@ export function EventRow({ e, projectName }: { e: OrchestrationEvent; projectNam
   const detail = `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : ""}${e.taskId ? ` t:${e.taskId.slice(0, 8)}` : ""}`;
   return (
     <div data-testid="activity-event"
-      style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: 12, padding: "2px 0", borderBottom: `1px solid ${color.border}` }}>
+      style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: fs.sm, padding: "2px 0", borderBottom: `1px solid ${color.border}` }}>
       <span data-testid="activity-event-time" style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0 }}>
         {new Date(e.ts).toLocaleTimeString()}
       </span>
       {projectName && (
         <span title={projectName} data-testid="activity-event-project"
           style={{ flexShrink: 1000, minWidth: 0, maxWidth: 116, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            fontSize: 10, color: color.textMuted, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 5px" }}>
+            fontSize: fs.xs, color: color.textMuted, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 5px" }}>
           {projectName}
         </span>
       )}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // Scoped in-document find for the Vault markdown viewer. Ctrl/Cmd+F opens this bar ONLY when the doc
 // view is the active region (focus or last pointer inside the scroll container) — otherwise the
@@ -199,12 +199,12 @@ export default function DocFind({ containerRef, registry, docKey }: {
           placeholder="Find in document…" aria-label="Find in document"
           style={{
             background: color.panel2, color: color.text, border: `1px solid ${color.border}`,
-            borderRadius: radius.sm, padding: "3px 8px", width: 200, fontFamily: font.mono, fontSize: 12, outline: "none",
+            borderRadius: radius.sm, padding: "3px 8px", width: 200, fontFamily: font.mono, fontSize: fs.mono, outline: "none",
           }}
         />
         <span
           aria-live="polite"
-          style={{ fontFamily: font.mono, fontSize: 11, color: matches.length ? color.textDim : color.textMuted, minWidth: 44, textAlign: "center", whiteSpace: "nowrap" }}
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: matches.length ? color.textDim : color.textMuted, minWidth: 44, textAlign: "center", whiteSpace: "nowrap" }}
         >
           {count}
         </span>

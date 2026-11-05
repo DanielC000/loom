@@ -5,7 +5,7 @@ import type { SessionListItem, SessionRole, Schedule, BoardTask } from "@loom/sh
 import { api } from "../lib/api";
 import { TranscriptPane } from "./TranscriptPane";
 import { Panel, Button, StatusPill, Chip } from "./ui";
-import { color, font } from "../theme";
+import { color, font, fs, radius } from "../theme";
 import { canResumeSession } from "../lib/sessions";
 
 // A platform/home agent's RUN HISTORY — every RUN of a given `role` is a session of that role in a
@@ -73,7 +73,7 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
   }, [sessions, archived.data, role]);
 
   if (runs.length === 0) {
-    return <Panel style={{ padding: 12 }}><span style={{ color: color.textMuted, fontSize: 12 }}>{emptyLabel}</span></Panel>;
+    return <Panel style={{ padding: 12 }}><span style={{ color: color.textMuted, fontSize: fs.sm }}>{emptyLabel}</span></Panel>;
   }
   // Newest-first is preserved, so a LIVE run (top of the sort) always stays in the default window.
   const visible = showAll ? runs : runs.slice(0, DEFAULT_VISIBLE);
@@ -86,8 +86,8 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
       ))}
       {runs.length > DEFAULT_VISIBLE && (
         <button onClick={() => setShowAll((v) => !v)}
-          style={{ alignSelf: "flex-start", background: "transparent", border: `1px solid ${color.border}`, borderRadius: 4,
-            padding: "4px 10px", cursor: "pointer", fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+          style={{ alignSelf: "flex-start", background: "transparent", border: `1px solid ${color.border}`, borderRadius: radius.sm,
+            padding: "4px 10px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
           {showAll ? "Show fewer" : `Show all (${runs.length})`}
         </button>
       )}
@@ -151,9 +151,9 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
     <Panel style={{ padding: 0 }}>
       <div onClick={onToggle} title={open ? "Collapse" : "Expand to read this session’s transcript"}
         style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", cursor: "pointer", flexWrap: "wrap" }}>
-        <span style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: 12 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: fs.mono }}>{open ? "▾" : "▸"}</span>
         <StatusPill tone={status.tone} glow={status.glow} label={status.label} />
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>{fmt(run.createdAt)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{fmt(run.createdAt)}</span>
         <Chip label="dur" value={fmtDur(run.createdAt, end)} />
         <Chip label={fired ? "cron" : "trigger"} value={trigger} tone={fired ? "info" : "muted"} />
         {run.model && <Chip label="model" value={run.model} />}
@@ -167,36 +167,36 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
             title={previewOnly
               ? "Preview only on a dev install — acting here is disabled"
               : "Resume this exited session (brings it back live)"}
-            style={{ padding: "2px 8px", fontSize: 11, color: color.cyan, borderColor: color.border }}>
+            style={{ padding: "2px 8px", fontSize: fs.sm, color: color.cyan, borderColor: color.border }}>
             {resumeM.isPending ? "resuming…" : "Resume"}
           </Button>
         )}
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>last · {fmt(run.lastActivity)} · {run.id.slice(0, 8)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>last · {fmt(run.lastActivity)} · {run.id.slice(0, 8)}</span>
       </div>
 
       {resumeM.isError && (
-        <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: fs.mono, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
           resume failed: {errorText(resumeM.error)}
         </div>
       )}
 
       {run.lastError && (
-        <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        <div style={{ padding: "0 10px 8px 30px", color: color.red, fontFamily: font.mono, fontSize: fs.mono, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
           {run.lastError}
         </div>
       )}
 
       {showFindings && findings.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: "0 10px 8px 30px" }}>
-          <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>findings</span>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>Findings</span>
           {findings.map((f) => {
             const task = tasks.find((t) => t.id === f.taskId);
             const title = task?.title ?? (f.detail?.title as string | undefined) ?? "finding";
             const severity = f.detail?.severity as string | undefined;
             return (
               <span key={f.id} title={task ? title : `${title} (no longer on the board)`}
-                style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: font.mono, fontSize: 11,
-                  border: `1px solid ${task ? color.cyan : color.border}`, borderRadius: 4, padding: "1px 6px",
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: font.mono, fontSize: fs.mono,
+                  border: `1px solid ${task ? color.cyan : color.border}`, borderRadius: radius.sm, padding: "1px 6px",
                   color: task ? color.cyan : color.textMuted, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {severity && <span style={{ color: color.amber }}>{severity}</span>}
                 {title}{!task && " ·gone"}
@@ -207,7 +207,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
       )}
 
       {open && (
-        <div style={{ height: 420, margin: "0 10px 10px 30px", border: `1px solid ${color.border}`, borderRadius: 4, overflow: "hidden" }}>
+        <div style={{ height: 420, margin: "0 10px 10px 30px", border: `1px solid ${color.border}`, borderRadius: radius.sm, overflow: "hidden" }}>
           <TranscriptPane sessionId={run.id} />
         </div>
       )}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button, Dot } from "./ui";
-import { color, font, wash } from "../theme";
+import { color, font, wash, fs } from "../theme";
 import { api } from "../lib/api";
 import { WEB_BUNDLE_QUERY_KEY, isDismissed, isSuperseded, markDismissed, ownBundle } from "../lib/newBuild";
 
@@ -45,7 +45,7 @@ export function NewBuildNotice() {
     <div role="status" data-testid="new-build-notice"
       style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, padding: "7px 20px",
         background: wash(color.info, 8), borderBottom: `1px solid ${color.cyan}`,
-        fontFamily: font.mono, fontSize: 12.5 }}>
+        fontFamily: font.mono, fontSize: fs.mono }}>
       <Dot tone="info" glow />
       {/* Flexes rather than sitting at its natural width so that at narrow widths it keeps the Dot
           company on the first row and wraps INTERNALLY, instead of being pushed whole onto the next
@@ -66,7 +66,7 @@ export function NewBuildNotice() {
         <button data-testid="new-build-notice-dismiss" onClick={() => { markDismissed(served); setDismissed(true); }}
           title="dismiss" aria-label="dismiss"
           style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer",
-            fontFamily: font.mono, fontSize: 15, lineHeight: 1, minWidth: 44, minHeight: 44 }}>
+            fontFamily: font.mono, fontSize: fs.lg, lineHeight: 1, minWidth: 44, minHeight: 44 }}>
           ×
         </button>
       </span>

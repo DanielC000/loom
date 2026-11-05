@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useFrameOwnsNodeIdentity } from "../lib/atlasNodeHead";
 import { SectionLabel, Segmented, Meter, Chip, Badge } from "../components/ui";
-import { color, font, radius, tone, wash, type Tone } from "../theme";
+import { color, font, radius, tone, wash, type Tone, fs } from "../theme";
 
 // Memory — the read-only, per-project window into project_memory: the durable knowledge the fleet writes
 // and recalls via the `memory` MCP (memory_write/read/list/forget). Wired to the real read surface
@@ -45,7 +45,7 @@ function RecallBadge({ count, max }: { count: number; max: number }) {
   const nColor = f >= 0.66 ? color.phosphor : f >= 0.33 ? color.cyan : color.text;
   return (
     <span title={`Recalled ${count} time${count === 1 ? "" : "s"} into agent context`}
-      style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: font.mono, fontSize: 11, color: color.textDim, whiteSpace: "nowrap" }}>
+      style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, whiteSpace: "nowrap" }}>
       <span aria-hidden style={{ color: color.textMuted }}>↺</span>
       <span style={{ color: nColor, fontWeight: 500 }}>{count}</span>
     </span>
@@ -55,11 +55,11 @@ function RecallBadge({ count, max }: { count: number; max: number }) {
 // ── Minimal markdown → React (headings, bullet lists, inline `code` / **bold** / [[wikilink]]) ───────
 // React escapes text children by default, so agent-written note content can never inject markup — this
 // renders to real elements, never dangerouslySetInnerHTML. Matches the mockup's small renderer.
-const h3Style: CSSProperties = { fontFamily: font.head, fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: color.textDim, margin: "16px 0 7px" };
-const pStyle: CSSProperties = { margin: "0 0 10px", color: color.text, fontSize: 12.5, lineHeight: 1.65 };
+const h3Style: CSSProperties = { fontFamily: font.head, fontSize: fs.body, fontWeight: 700, color: color.textDim, margin: "16px 0 7px" };
+const pStyle: CSSProperties = { margin: "0 0 10px", color: color.text, fontSize: fs.sm, lineHeight: 1.65 };
 const ulStyle: CSSProperties = { margin: "0 0 10px", paddingLeft: 18 };
-const liStyle: CSSProperties = { color: color.text, fontSize: 12.5, lineHeight: 1.6, marginBottom: 4 };
-const codeStyle: CSSProperties = { fontFamily: font.mono, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 4px", fontSize: 11.5, color: color.amber };
+const liStyle: CSSProperties = { color: color.text, fontSize: fs.sm, lineHeight: 1.6, marginBottom: 4 };
+const codeStyle: CSSProperties = { fontFamily: font.mono, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 4px", fontSize: fs.mono, color: color.amber };
 
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
@@ -124,16 +124,16 @@ function PinCard({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; 
         boxShadow: selected ? `inset 0 0 0 1px ${color.phosphorDim}, inset 2px 0 0 ${color.amber}` : `inset 2px 0 0 ${color.amber}`,
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontFamily: font.head, fontWeight: 600, fontSize: 13, color: color.text, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
-        <span aria-hidden title="Pinned — always injected" style={{ color: color.amber, fontSize: 12, flexShrink: 0 }}>★</span>
+        <span style={{ fontFamily: font.head, fontWeight: 600, fontSize: fs.body, color: color.text, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+        <span aria-hidden title="Pinned — always injected" style={{ color: color.amber, fontSize: fs.sm, flexShrink: 0 }}>★</span>
       </div>
-      <span style={{ fontSize: 11, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.key}</span>
+      <span style={{ fontSize: fs.sm, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.key}</span>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 1 }}>
         <RecallBadge count={entry.retrievalCount} max={max} />
         <Meter value={entry.retrievalCount} max={max} tone={magTone(entry.retrievalCount, max)} width={64} />
         <span style={{ flex: 1 }} />
         <span title="Injected into every agent kickoff"
-          style={{ fontFamily: font.mono, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.07em", color: color.amber, border: `1px solid ${wash(color.busy, 40)}`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap" }}>always</span>
+          style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.amber, border: `1px solid ${wash(color.busy, 40)}`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap" }}>always</span>
       </div>
     </div>
   );
@@ -152,17 +152,17 @@ function NoteRow({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; 
         background: selected ? color.panel : "transparent",
         boxShadow: selected ? `inset 2px 0 0 ${color.phosphor}` : "none",
       }}>
-      <span aria-hidden title={entry.pinned ? "Pinned" : undefined} style={{ textAlign: "center", color: color.amber, fontSize: 11 }}>{entry.pinned ? "★" : ""}</span>
+      <span aria-hidden title={entry.pinned ? "Pinned" : undefined} style={{ textAlign: "center", color: color.amber, fontSize: fs.sm }}>{entry.pinned ? "★" : ""}</span>
       <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-        <span style={{ fontFamily: font.head, fontWeight: 500, fontSize: 13, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
-        <span style={{ fontSize: 11, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.key}</span>
+        <span style={{ fontFamily: font.head, fontWeight: 500, fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+        <span style={{ fontSize: fs.sm, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.key}</span>
       </span>
       <span className="memory-row-recall" style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
         <RecallBadge count={entry.retrievalCount} max={max} />
         <span className="memory-meter"><Meter value={entry.retrievalCount} max={max} tone={magTone(entry.retrievalCount, max)} width={56} /></span>
       </span>
-      <span style={{ fontSize: 11, color: color.textMuted, textAlign: "right", whiteSpace: "nowrap" }} title={fmtDateFull(entry.updatedAt)}>{fmtDate(entry.updatedAt)}</span>
-      <span className="memory-caret" aria-hidden style={{ color: selected ? color.phosphor : color.textMuted, fontSize: 12, textAlign: "center" }}>▸</span>
+      <span style={{ fontSize: fs.sm, color: color.textMuted, textAlign: "right", whiteSpace: "nowrap" }} title={fmtDateFull(entry.updatedAt)}>{fmtDate(entry.updatedAt)}</span>
+      <span className="memory-caret" aria-hidden style={{ color: selected ? color.phosphor : color.textMuted, fontSize: fs.sm, textAlign: "center" }}>▸</span>
     </div>
   );
 }
@@ -178,7 +178,7 @@ function BacklinksSection({ backlinks, onOpenKey }: { backlinks: ProjectMemoryEn
     <div style={{ padding: "12px 16px", borderTop: `1px solid ${color.border}` }}>
       <SectionLabel style={{ margin: "0 0 8px" }}>Linked from</SectionLabel>
       {backlinks.keys.length === 0 ? (
-        <span style={{ fontSize: 11.5, color: color.textMuted }}>No notes link here.</span>
+        <span style={{ fontSize: fs.sm, color: color.textMuted }}>No notes link here.</span>
       ) : (
         <>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -186,14 +186,14 @@ function BacklinksSection({ backlinks, onOpenKey }: { backlinks: ProjectMemoryEn
               <button key={k} onClick={() => onOpenKey(k)} title={`Open [[${k}]]`}
                 style={{
                   background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm,
-                  color: color.cyan, fontFamily: font.mono, fontSize: 11, padding: "2px 7px", cursor: "pointer",
+                  color: color.cyan, fontFamily: font.mono, fontSize: fs.mono, padding: "2px 7px", cursor: "pointer",
                 }}>
                 [[{k}]]
               </button>
             ))}
           </div>
           {backlinks.totalFound > backlinks.keys.length && (
-            <span style={{ display: "block", marginTop: 6, fontSize: 10.5, color: color.textMuted }}>
+            <span style={{ display: "block", marginTop: 6, fontSize: fs.xs, color: color.textMuted }}>
               showing {backlinks.keys.length} of {backlinks.totalFound} inbound links
             </span>
           )}
@@ -214,10 +214,10 @@ function NoteDetail({ entry, max, onClose, onOpenKey }: { entry: ProjectMemoryEn
     }}>
       <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${color.border}`, background: color.panel2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <span style={{ fontFamily: font.head, fontWeight: 700, fontSize: 16, color: color.text, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{entry.title || entry.key}</span>
+          <span style={{ fontFamily: font.head, fontWeight: 700, fontSize: fs.lg, color: color.text, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{entry.title || entry.key}</span>
           {entry.pinned && <Badge tone="busy">★ Pinned</Badge>}
           <button onClick={onClose} title="Close" aria-label="Close entry"
-            style={{ background: "transparent", border: `1px solid ${color.borderStrong}`, color: color.textDim, borderRadius: radius.base, cursor: "pointer", padding: "2px 8px", fontFamily: font.mono, fontSize: 13, flexShrink: 0 }}>✕</button>
+            style={{ background: "transparent", border: `1px solid ${color.borderStrong}`, color: color.textDim, borderRadius: radius.base, cursor: "pointer", padding: "2px 8px", fontFamily: font.mono, fontSize: fs.body, flexShrink: 0 }}>✕</button>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
           <Chip label="key" value={entry.key} tone="info" />
@@ -230,8 +230,8 @@ function NoteDetail({ entry, max, onClose, onOpenKey }: { entry: ProjectMemoryEn
         <Markdown src={entry.text} />
       </div>
       <BacklinksSection backlinks={entry.backlinks} onOpenKey={onOpenKey} />
-      <div style={{ padding: "10px 16px", borderTop: `1px solid ${color.border}`, background: color.panel2, display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: color.textMuted }}>
-        <span aria-hidden style={{ width: 6, height: 6, borderRadius: 6, background: color.textMuted, flexShrink: 0 }} />
+      <div style={{ padding: "10px 16px", borderTop: `1px solid ${color.border}`, background: color.panel2, display: "flex", alignItems: "center", gap: 8, fontSize: fs.sm, color: color.textMuted }}>
+        <span aria-hidden style={{ width: 6, height: 6, borderRadius: radius.sm, background: color.textMuted, flexShrink: 0 }} />
         <span>Read-only — written &amp; forgotten by the fleet&apos;s memory MCP</span>
       </div>
     </div>
@@ -297,10 +297,10 @@ export default function Memory() {
     <div style={{ display: "flex", alignItems: "flex-end", gap: 20, marginBottom: 20, flexWrap: "wrap" }}>
       {ownIdentity && (
         <div data-testid="page-identity" style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
-          <h1 style={{ fontFamily: font.head, fontWeight: 700, fontSize: 22, letterSpacing: "0.02em", color: color.text, margin: 0, display: "inline-flex", alignItems: "center", gap: 10 }}>
-            <span aria-hidden style={{ color: color.phosphor, fontSize: 18 }}>◈</span> Memory
+          <h1 style={{ fontFamily: font.head, fontWeight: 700, fontSize: fs.h1, letterSpacing: "0.02em", color: color.text, margin: 0, display: "inline-flex", alignItems: "center", gap: 10 }}>
+            <span aria-hidden style={{ color: color.phosphor, fontSize: fs.lg }}>◈</span> Memory
           </h1>
-          <span style={{ color: color.textDim, fontSize: 12.5, maxWidth: "62ch" }}>
+          <span style={{ color: color.textDim, fontSize: fs.sm, maxWidth: "62ch" }}>
             The durable knowledge your fleet writes and recalls — <b style={{ color: color.text, fontWeight: 500 }}>{entries.length}</b>{" "}
             {entries.length === 1 ? "entry" : "entries"}{projectName ? <> in <b style={{ color: color.text, fontWeight: 500 }}>{projectName}</b></> : null}. Read-only; agents write via the <b style={{ color: color.text, fontWeight: 500 }}>memory</b> MCP.
           </span>
@@ -309,17 +309,17 @@ export default function Memory() {
       <span style={{ flex: 1 }} />
       {showSearch && (
         <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
-          <span aria-hidden style={{ position: "absolute", left: 10, color: color.textMuted, fontSize: 13, pointerEvents: "none" }}>⌕</span>
+          <span aria-hidden style={{ position: "absolute", left: 10, color: color.textMuted, fontSize: fs.body, pointerEvents: "none" }}>⌕</span>
           <input value={search} onChange={(e) => setSearch(e.target.value)} className="loom-field"
             placeholder="Search titles & content…" aria-label="Search Memory"
-            style={{ background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "7px 10px 7px 30px", fontFamily: font.mono, fontSize: 13, width: 260 }} />
+            style={{ background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "7px 10px 7px 30px", fontFamily: font.mono, fontSize: fs.body, width: 260 }} />
         </div>
       )}
     </div>
   );
 
   const footStrip = (
-    <div style={{ marginTop: 26, paddingTop: 12, borderTop: `1px solid ${color.border}`, color: color.textMuted, fontSize: 11, display: "flex", gap: 18, flexWrap: "wrap" }}>
+    <div style={{ marginTop: 26, paddingTop: 12, borderTop: `1px solid ${color.border}`, color: color.textMuted, fontSize: fs.sm, display: "flex", gap: 18, flexWrap: "wrap" }}>
       <span><b style={{ color: color.textDim, fontWeight: 500 }}>◈ Memory</b> · per-project shared memory</span>
       <span><b style={{ color: color.textDim, fontWeight: 500 }}>{entries.length}</b> entries · <b style={{ color: color.textDim, fontWeight: 500 }}>{pinnedCount}</b> pinned</span>
       <span>Recall = how often the fleet pulls an entry into context</span>
@@ -328,21 +328,21 @@ export default function Memory() {
 
   let bodyContent: ReactNode;
   if (!projectId) {
-    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.textMuted, fontSize: 12.5 }}>Select a project to view its Memory.</div>;
+    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.textMuted, fontSize: fs.sm }}>Select a project to view its Memory.</div>;
   } else if (q.isLoading) {
-    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.textMuted, fontSize: 12.5 }}>Loading…</div>;
+    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.textMuted, fontSize: fs.sm }}>Loading…</div>;
   } else if (q.isError) {
-    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.red, fontSize: 12.5 }}>Couldn&apos;t load this project&apos;s Memory.</div>;
+    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.red, fontSize: fs.sm }}>Couldn&apos;t load this project&apos;s Memory.</div>;
   } else if (entries.length === 0) {
     // Empty state — a project whose fleet hasn't written any memory yet.
     bodyContent = (
       <div style={{ border: `1px dashed ${color.borderStrong}`, borderRadius: radius.base, padding: "54px 32px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 14, marginTop: 8 }}>
-        <span aria-hidden style={{ fontSize: 32, color: color.textMuted }}>◈</span>
-        <h2 style={{ fontFamily: font.head, fontWeight: 600, fontSize: 16, color: color.text, margin: 0 }}>No Memory yet</h2>
-        <p style={{ color: color.textDim, fontSize: 12.5, maxWidth: "52ch", margin: 0, lineHeight: 1.6 }}>
+        <span aria-hidden style={{ fontSize: fs.kpi, color: color.textMuted }}>◈</span>
+        <h2 style={{ fontFamily: font.head, fontWeight: 600, fontSize: fs.lg, color: color.text, margin: 0 }}>No Memory yet</h2>
+        <p style={{ color: color.textDim, fontSize: fs.sm, maxWidth: "52ch", margin: 0, lineHeight: 1.6 }}>
           This project&apos;s fleet hasn&apos;t written any memory. As agents work, they capture durable facts, decisions, and hard-won gotchas with <code style={{ ...codeStyle, color: color.cyan }}>memory_write</code> — and those entries are recalled back into future agents&apos; context automatically.
         </p>
-        <span style={{ fontSize: 11, color: color.textMuted }}>Pinned entries are always injected · unpinned entries surface by relevance</span>
+        <span style={{ fontSize: fs.sm, color: color.textMuted }}>Pinned entries are always injected · unpinned entries surface by relevance</span>
       </div>
     );
   } else {
@@ -353,8 +353,8 @@ export default function Memory() {
           <>
             <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "4px 0 12px" }}>
               <SectionLabel style={{ margin: 0, display: "inline-flex", alignItems: "center", gap: 8 }}>
-                <span aria-hidden style={{ color: color.amber, fontSize: 12 }}>★</span> Pinned
-                <span style={{ fontFamily: font.mono, fontWeight: 400, letterSpacing: "0.02em", textTransform: "none", color: color.textMuted, fontSize: 11 }}>always in agent context</span>
+                <span aria-hidden style={{ color: color.amber, fontSize: fs.sm }}>★</span> Pinned
+                <span style={{ fontFamily: font.mono, fontWeight: 400, letterSpacing: "0.02em", textTransform: "none", color: color.textMuted, fontSize: fs.mono }}>always in agent context</span>
               </SectionLabel>
             </div>
             <div className="memory-pinned-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10, marginBottom: 26 }}>
@@ -368,17 +368,17 @@ export default function Memory() {
         <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "4px 0 12px" }}>
           <SectionLabel style={{ margin: 0, display: "inline-flex", alignItems: "center", gap: 8 }}>
             {term ? "Results" : "All entries"}
-            <span style={{ fontFamily: font.mono, fontWeight: 400, letterSpacing: "0.02em", textTransform: "none", color: color.textMuted, fontSize: 11 }}>{sorted.length}{term ? ` of ${entries.length}` : ""}</span>
+            <span style={{ fontFamily: font.mono, fontWeight: 400, letterSpacing: "0.02em", textTransform: "none", color: color.textMuted, fontSize: fs.mono }}>{sorted.length}{term ? ` of ${entries.length}` : ""}</span>
           </SectionLabel>
           <span style={{ flex: 1 }} />
-          <span style={{ color: color.textMuted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>Sort</span>
+          <span style={{ color: color.textMuted, fontSize: fs.xs }}>Sort</span>
           <Segmented<SortKey> value={sort} onChange={setSort} ariaLabel="Sort entries"
             items={[{ key: "recall", label: "Recall" }, { key: "recent", label: "Recent" }, { key: "title", label: "Title" }]} />
         </div>
 
         {sorted.length > 0 ? (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: ROW_COLS, gap: 12, padding: "0 10px 7px", color: color.textMuted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em" }}>
+            <div style={{ display: "grid", gridTemplateColumns: ROW_COLS, gap: 12, padding: "0 10px 7px", color: color.textMuted, fontSize: fs.xs }}>
               <span /><span>Entry</span><span style={{ textAlign: "right" }}>Recall</span><span style={{ textAlign: "right" }}>Updated</span><span className="memory-caret" style={{ textAlign: "center" }} aria-hidden>▸</span>
             </div>
             <div style={{ borderTop: `1px solid ${color.border}` }}>
@@ -388,7 +388,7 @@ export default function Memory() {
             </div>
           </>
         ) : (
-          <div style={{ padding: "34px 10px", textAlign: "center", color: color.textMuted, fontSize: 12.5 }}>No entries match “{search.trim()}”.</div>
+          <div style={{ padding: "34px 10px", textAlign: "center", color: color.textMuted, fontSize: fs.sm }}>No entries match “{search.trim()}”.</div>
         )}
       </div>
     );

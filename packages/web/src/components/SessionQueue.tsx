@@ -6,7 +6,7 @@ import {
   setQueueEditing, setQueueExpanded,
 } from "../lib/queueDrafts";
 import { Button, Dot } from "./ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // ── SessionQueue — the "ledger bar" for a session's QUEUED inbound messages ─────────────────────────
 //
@@ -143,22 +143,22 @@ export function SessionQueue({
         }}
       >
         <Dot tone="busy" />
-        <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted, flexShrink: 0 }}>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted, flexShrink: 0 }}>
           Queued <span style={{ color: color.amber }}>({pending.length})</span>
         </span>
         {expanded ? (
-          <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>
-            manage · reorder · edit
+          <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>
+            Manage · reorder · edit
           </span>
         ) : (
           <>
-            <span style={{ fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted, flexShrink: 0 }}>next</span>
-            <span title={pending[0]!.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+            <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted, flexShrink: 0 }}>Next</span>
+            <span title={pending[0]!.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
               {peek}
             </span>
           </>
         )}
-        <span aria-hidden style={{ marginLeft: "auto", flexShrink: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>
+        <span aria-hidden style={{ marginLeft: "auto", flexShrink: 0, color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono }}>
           {expanded ? "▾" : "▸"}
         </span>
       </div>
@@ -226,10 +226,10 @@ function QueueRow({
     return (
       <div style={rowStyle} title={`${m.text}\n\n(worker / agent message — read-only)`}>
         <Dot tone="info" />
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
           {preview}
         </span>
-        <span style={{ fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>worker</span>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>worker</span>
       </div>
     );
   }
@@ -254,13 +254,13 @@ function QueueRow({
       <span
         onClick={editable ? onEditStart : undefined}
         title={editable ? m.text : `${m.text}\n\n(Loom nudge — remove or reorder, not editable)`}
-        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim, cursor: editable ? "text" : "default" }}
+        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, cursor: editable ? "text" : "default" }}
       >
         {preview}
       </span>
       {editable
         ? <IconBtn title="Edit this queued message" disabled={busy} onClick={onEditStart}>✎</IconBtn>
-        : <span style={{ fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>loom</span>}
+        : <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>loom</span>}
       <IconBtn title="Remove from queue" variant="danger" disabled={busy} onClick={onDelete}>✕</IconBtn>
     </div>
   );
@@ -291,11 +291,11 @@ function QueueEditor({ sessionId, entryId, initial, busy, onSave, onCancel }: {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
           else if (e.key === "Escape") { e.preventDefault(); onCancel(); }
         }}
-        style={{ flex: 1, minWidth: 0, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "4px 6px", fontFamily: font.mono, fontSize: 11 }}
+        style={{ flex: 1, minWidth: 0, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: "4px 6px", fontFamily: font.mono, fontSize: fs.mono }}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <Button variant="primary" disabled={!draft.trim() || busy} onClick={submit} style={{ padding: "2px 8px", fontSize: 11 }}>Save</Button>
-        <Button disabled={busy} onClick={onCancel} style={{ padding: "2px 8px", fontSize: 11 }}>Cancel</Button>
+        <Button variant="primary" disabled={!draft.trim() || busy} onClick={submit} style={{ padding: "2px 8px", fontSize: fs.sm }}>Save</Button>
+        <Button disabled={busy} onClick={onCancel} style={{ padding: "2px 8px", fontSize: fs.sm }}>Cancel</Button>
       </div>
     </div>
   );
@@ -309,7 +309,7 @@ function IconBtn({ title, disabled, variant, onClick, children }: { title: strin
       title={title}
       disabled={disabled}
       onClick={onClick}
-      style={{ padding: "0 6px", fontSize: 12, lineHeight: "20px", minWidth: 0 }}
+      style={{ padding: "0 6px", fontSize: fs.sm, lineHeight: "20px", minWidth: 0 }}
     >
       {children}
     </Button>

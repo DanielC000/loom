@@ -4,7 +4,7 @@ import { useAttention, attentionKindLabel, attentionOpenTarget, isAnswerableRequ
 import { useOpenRequest } from "./requests";
 import { atlasRetirementFor, useVisibleNavPages } from "../nav";
 import { useAtlasUi } from "../lib/atlasUi";
-import { color, font } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // Ctrl/Cmd-K fuzzy launcher: jump to any page, or open the target of a pending attention item — a merge
 // request opens the review panel, every other alert opens the session it concerns (attentionOpenTarget).
@@ -69,18 +69,18 @@ export function CommandPalette() {
     <div onClick={() => setOpen(false)}
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: "12vh", zIndex: 1000 }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: 560, maxWidth: "90vw", background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4 }}>
+        style={{ width: 560, maxWidth: "90vw", background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm }}>
         <input autoFocus value={q} onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && commands[0]) go(commands[0].run); }}
           placeholder="Jump to…  (Esc to close)"
-          style={{ width: "100%", boxSizing: "border-box", background: color.panel2, color: color.text, border: "none", borderBottom: `1px solid ${color.border}`, padding: "10px 12px", fontFamily: font.mono, fontSize: 14, outline: "none" }} />
+          style={{ width: "100%", boxSizing: "border-box", background: color.panel2, color: color.text, border: "none", borderBottom: `1px solid ${color.border}`, padding: "10px 12px", fontFamily: font.mono, fontSize: fs.body, outline: "none" }} />
         <div style={{ maxHeight: "50vh", overflow: "auto" }}>
-          {commands.length === 0 && <div style={{ padding: 12, color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No matches.</div>}
+          {commands.length === 0 && <div style={{ padding: 12, color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No matches.</div>}
           {commands.map((c, i) => (
             <button key={i} onClick={() => go(c.run)}
-              style={{ display: "flex", width: "100%", textAlign: "left", justifyContent: "space-between", gap: 8, background: "transparent", border: "none", borderBottom: `1px solid ${color.border}`, color: color.text, padding: "8px 12px", fontFamily: font.mono, fontSize: 13, cursor: "pointer" }}>
+              style={{ display: "flex", width: "100%", textAlign: "left", justifyContent: "space-between", gap: 8, background: "transparent", border: "none", borderBottom: `1px solid ${color.border}`, color: color.text, padding: "8px 12px", fontFamily: font.mono, fontSize: fs.body, cursor: "pointer" }}>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
-              <span style={{ color: color.textMuted, fontSize: 11 }}>{c.hint}</span>
+              <span style={{ color: color.textMuted, fontSize: fs.sm }}>{c.hint}</span>
             </button>
           ))}
         </div>

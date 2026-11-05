@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import { ATTACHMENT_GLYPH, ATTACHMENT_VIEWER_MAX_BYTES, attachmentDetail, formatAttachmentSize } from "../lib/questions";
 import { Button } from "./ui";
 import Markdown from "./Markdown";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // The in-app reader for a Request's markdown/text attachment (card c7f999f4). The owner's ask: Open must
 // not download the file, it must show it in a large dialog. The bytes come through the SAME serving route
@@ -97,11 +97,11 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
           boxSizing: "border-box", overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px 10px 16px",
           borderBottom: `1px solid ${color.border}`, flexWrap: "wrap" }}>
-          <span aria-hidden style={{ fontSize: 14, color: color.textDim, width: 16, textAlign: "center" }}>{ATTACHMENT_GLYPH[a.kind]}</span>
+          <span aria-hidden style={{ fontSize: fs.body, color: color.textDim, width: 16, textAlign: "center" }}>{ATTACHMENT_GLYPH[a.kind]}</span>
           <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "baseline", gap: 10 }}>
-            <h2 id={titleId} style={{ margin: 0, fontFamily: font.mono, fontSize: 13, fontWeight: 600, color: color.text,
+            <h2 id={titleId} style={{ margin: 0, fontFamily: font.mono, fontSize: fs.body, fontWeight: 600, color: color.text,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.label}>{a.label}</h2>
-            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, whiteSpace: "nowrap" }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, whiteSpace: "nowrap" }}>
               {kindWord} · {attachmentDetail(a)}
             </span>
           </div>
@@ -125,7 +125,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
           )}
           {load.state === "ready" && a.kind !== "markdown" && (
             <pre data-testid="attachment-viewer-text" style={{ margin: 0, padding: "16px 20px 32px", fontFamily: font.mono,
-              fontSize: 12.5, lineHeight: 1.6, color: color.text, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              fontSize: fs.mono, lineHeight: 1.6, color: color.text, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
               {load.text.length === 0 ? <span style={{ color: color.textMuted }}>(empty file)</span> : load.text}
             </pre>
           )}
@@ -138,7 +138,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
 
 function ViewerNote({ children, tone }: { children: ReactNode; tone?: string }) {
   return (
-    <div role="status" style={{ padding: "48px 24px", textAlign: "center", fontFamily: font.mono, fontSize: 12,
+    <div role="status" style={{ padding: "48px 24px", textAlign: "center", fontFamily: font.mono, fontSize: fs.mono,
       lineHeight: 1.6, color: tone ?? color.textMuted }}>{children}</div>
   );
 }
@@ -148,7 +148,7 @@ function ViewerNote({ children, tone }: { children: ReactNode; tone?: string }) 
  *  link, so there the bytes are fetched through the api client and saved from an object URL. */
 function DownloadAction({ questionId, a, remote }: { questionId: string; a: QuestionAttachment; remote: boolean }) {
   const [busy, setBusy] = useState(false);
-  const style = { padding: "2px 10px", fontSize: 11, whiteSpace: "nowrap" as const };
+  const style = { padding: "2px 10px", fontSize: fs.sm, whiteSpace: "nowrap" as const };
   if (!remote) {
     return (
       <a data-testid="attachment-viewer-download" className="loom-btn loom-btn-default"

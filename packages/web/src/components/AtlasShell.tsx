@@ -17,7 +17,7 @@ import { useLatchedSession } from "../lib/useLatchedSession";
 import { setAtlasUi } from "../lib/atlasUi";
 import { useActiveProject } from "../lib/activeProject";
 import { api } from "../lib/api";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // The Atlas shell — cards 757c80dd (P1-0, the frame) and 8cbb2ac2 (P1-1, the nodes). What Atlas is,
 // and which card builds what: docs/plans/atlas-ui/02-architecture.md + 03-decomposition.md.
@@ -392,7 +392,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 className={`loom-atlas-crumblist${collapsibleTrail ? " is-collapsible" : ""}`
                   + `${trailOpen ? " is-open" : ""}`}
                 style={{ display: "flex", alignItems: "center", listStyle: "none", margin: 0, padding: 0,
-                  overflow: "hidden", fontFamily: font.mono, fontSize: 11.5, color: color.textMuted }}>
+                  overflow: "hidden", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
                 {crumbs.map((crumb, i) => {
                   const last = i === crumbs.length - 1;
                   return (
@@ -456,7 +456,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
           </div>
 
           <div className="loom-atlas-nodehead">
-            <h1 style={{ margin: 0, fontFamily: font.head, fontWeight: 600, fontSize: 17, letterSpacing: "0.02em",
+            <h1 style={{ margin: 0, fontFamily: font.head, fontWeight: 600, fontSize: fs.lg, letterSpacing: "0.02em",
               color: color.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heading}
             </h1>
@@ -547,7 +547,7 @@ function AtlasEmptyNode() {
       <SectionLabel style={{ margin: "0 0 10px" }}>Nothing here yet</SectionLabel>
       {/* Copy stays position-neutral on purpose: the tree rail moves above the content below the
           narrow breakpoint (styles/global.css), so "the tree on the left" would be false on a phone. */}
-      <p style={{ margin: 0, color: color.textDim, fontFamily: font.mono, fontSize: 13, lineHeight: 1.7 }}>
+      <p style={{ margin: 0, color: color.textDim, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
         This address has no node in the Atlas preview yet. Pick a destination from the entity tree, or
         switch back to the classic UI for anything the preview has not reached.
       </p>

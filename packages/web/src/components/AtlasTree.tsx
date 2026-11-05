@@ -44,7 +44,7 @@ import { standingOperators } from "../lib/atlasAgents";
 import { groupSessionRows } from "../lib/sessions";
 import { workspaceRunningSessions } from "../lib/workspaceSessions";
 import { api } from "../lib/api";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // Scope is depth (round 2's rule, kept by the approved round-4 IA): a destination lives at the
 // shallowest node that contains everything it spans. `NAV_PAGES[i].scoped` already records exactly
@@ -723,7 +723,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
             {/* Deliberately a HINT, not a gate — see above. The branch below it holds only what is
                 RUNNING since card 4a0ad464, and with no project there is nothing to run, so the hint
                 is what the empty branch means rather than a caveat on a list of surfaces. */}
-            <p style={{ margin: "6px 10px 0", color: color.textMuted, fontFamily: font.mono, fontSize: 11.5, lineHeight: 1.6 }}>
+            <p style={{ margin: "6px 10px 0", color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
               No project yet. Create one on the Platform node and its agents appear here.
             </p>
           </>

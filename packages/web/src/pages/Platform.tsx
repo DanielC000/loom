@@ -4,7 +4,7 @@ import { api } from "../lib/api";
 import { PlatformView } from "./PlatformView";
 import { developerEdition, endUserEdition } from "./platformEdition";
 import { PreviewOnlyProvider } from "../lib/previewOnly";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // The single consolidated Platform page — ONE nav tab → one /platform route. It renders ONE of two
 // view-components decided by EDITION, where the edition signal is the SAME one useVisibleNavPages uses:
@@ -94,7 +94,7 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
     // tell you it could be changed. The control keeps its intrinsic width (`flexShrink: 0`) and the
     // caption takes the next line instead.
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>View as</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.sm, color: color.textDim }}>View as</span>
       <div role="group" aria-label="Preview edition"
         style={{ display: "inline-flex", flexShrink: 0, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, overflow: "hidden" }}>
         {options.map((o) => {
@@ -103,7 +103,7 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
             <button key={o.key} onClick={() => onChange(o.key)} aria-pressed={active}
               title={o.key === "developer" ? "The dev Loom Platform surface" : "Preview the shipping end-user surface (client-side only)"}
               style={{
-                fontFamily: font.mono, fontSize: 12, padding: "4px 14px", cursor: "pointer", border: "none",
+                fontFamily: font.mono, fontSize: fs.mono, padding: "4px 14px", cursor: "pointer", border: "none",
                 background: active ? color.phosphor : "transparent",
                 color: active ? color.bg : color.textDim,
                 fontWeight: active ? 700 : 400,
@@ -113,7 +113,7 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
           );
         })}
       </div>
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
         client-side preview — your real platform capability is unchanged
       </span>
     </div>

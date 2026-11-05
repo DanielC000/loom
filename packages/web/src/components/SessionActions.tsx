@@ -1,6 +1,6 @@
 import type { Session } from "@loom/shared";
 import { Button } from "./ui";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 import { canResumeSession } from "../lib/sessions";
 
 // The per-session quick-action cluster — Clear-rate-limit / Fork / Stop / Resume — with its
@@ -50,7 +50,7 @@ export function SessionActions({
       {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"
         onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>}
       {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}
-      {s.resumability === "dead" && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>dead</span>}
+      {s.resumability === "dead" && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>dead</span>}
     </>
   );
 }

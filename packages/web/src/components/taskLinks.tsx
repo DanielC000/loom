@@ -15,7 +15,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import type { KanbanColumn } from "@loom/shared";
 import { Badge, Meter } from "./ui";
-import { color, columnTone, font, radius } from "../theme";
+import { color, columnTone, font, radius, fs } from "../theme";
 import {
   CONTEXT_RELATION_KINDS, RESOLVABLE_KINDS, splitResolved,
   type BoardHierarchy, type RelationKind, type TaskLinks, type TaskRef,
@@ -36,7 +36,7 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
   const complete = h.childCount > 0 && h.childDone >= h.childCount;
   return (
     <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", alignItems: "baseline", columnGap: 8, rowGap: 2,
-      fontFamily: font.mono, fontSize: 10, lineHeight: 1.4 }}>
+      fontFamily: font.mono, fontSize: fs.xs, lineHeight: 1.4 }}>
       {h.blockedByOpen > 0 && (
         <span style={{ ...metaItem, maxWidth: 150, color: color.amber }}
           title={h.blockedByFirst
@@ -95,8 +95,7 @@ const RELATION_HINT: Record<RelationKind, string> = {
 };
 
 const linkLabel: CSSProperties = {
-  fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-  letterSpacing: "0.1em", color: color.textDim, paddingTop: 2, whiteSpace: "nowrap",
+  fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textDim, paddingTop: 2, whiteSpace: "nowrap",
 };
 
 export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
@@ -128,7 +127,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
       border: `1px solid ${color.border}`, borderRadius: radius.base }}>
       {links.children.total > 0 && row("Children", `${links.children.done} of ${links.children.total} done`,
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11,
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono,
             color: allDone ? color.phosphor : color.textDim }}>
             <span>{links.children.done}/{links.children.total} done</span>
             <Meter value={links.children.done} max={links.children.total} width={56} tone={allDone ? "live" : "info"} />
@@ -145,7 +144,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
           )}
           {/* Say so when the list is capped, rather than letting it read as the whole set. */}
           {links.children.total > links.children.items.length && (
-            <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
               showing {links.children.items.length} of {links.children.total}
             </span>
           )}
@@ -203,13 +202,13 @@ export function TaskLinkRow({ ref_, columns, titleById, onOpenTask, glyph, tone,
     <>
       <span aria-hidden style={{ flexShrink: 0, color: color.textMuted }}>{glyph}</span>
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ref_.title}</span>
-      {suffix && <span style={{ flexShrink: 0, color: color.textMuted, fontSize: 10 }}>{suffix}</span>}
-      {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: 9, padding: "0 5px" }}>{col.label}</Badge>}
+      {suffix && <span style={{ flexShrink: 0, color: color.textMuted, fontSize: fs.xs }}>{suffix}</span>}
+      {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: fs.xs, padding: "0 5px" }}>{col.label}</Badge>}
     </>
   );
   const shared: CSSProperties = {
     display: "flex", alignItems: "center", gap: 5, minWidth: 0, textAlign: "left",
-    fontFamily: font.mono, fontSize: 12, color: textColor,
+    fontFamily: font.mono, fontSize: fs.mono, color: textColor,
   };
   if (!openable) {
     return (

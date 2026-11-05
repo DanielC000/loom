@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { SessionRole } from "@loom/shared";
 import { Button } from "./ui";
-import { color, font } from "../theme";
+import { color, font, radius, fs } from "../theme";
 import { useDismissable } from "../lib/useDismissable";
 
 // Spawn split-button: the primary action spawns from the agent's profile (no role → the profile's role
@@ -41,7 +41,7 @@ export function SpawnControls({ profileRole, onSpawn, pending }:
         // `minWidth` is now only a floor for the two short labels.
         <div data-testid="spawn-role-menu"
           style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 20, minWidth: 170,
-            background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4, overflow: "hidden",
+            background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, overflow: "hidden",
             display: "flex", flexDirection: "column" }}>
           {/* Each item states NO `color`: ghost supplies --loom-text-dim at rest and lifts it to
               --loom-text on hover, and an inline colour here shadows that hover rule outright (this used
@@ -51,7 +51,7 @@ export function SpawnControls({ profileRole, onSpawn, pending }:
             <button key={o.label} disabled={pending} onClick={() => { setOpen(false); onSpawn(o.role); }}
               className="loom-btn loom-btn-ghost"
               style={{ textAlign: "left", background: "transparent", border: "none", whiteSpace: "nowrap",
-                fontFamily: font.mono, fontSize: 12, padding: "6px 10px", cursor: "pointer" }}>
+                fontFamily: font.mono, fontSize: fs.mono, padding: "6px 10px", cursor: "pointer" }}>
               {o.label}
             </button>
           ))}

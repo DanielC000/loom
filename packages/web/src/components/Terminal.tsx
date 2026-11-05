@@ -11,7 +11,7 @@ import { useIsCompanionSession } from "../lib/companionGuard";
 import { getResolvedTheme, subscribeResolvedTheme } from "../lib/themePref";
 import { xtermTheme } from "../lib/xtermTheme";
 import { Dot } from "./ui";
-import { color, font, space } from "../theme";
+import { color, font, space, fs } from "../theme";
 import "@xterm/xterm/css/xterm.css";
 import "./Terminal.css";
 
@@ -602,7 +602,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             display: "flex", alignItems: "center", gap: space(2),
             padding: `${space(1)} ${space(2)}`,
             background: color.panel2, borderBottom: `1px solid ${color.border}`,
-            fontFamily: font.mono, fontSize: 11, lineHeight: 1.5, color: color.textDim,
+            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.textDim,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >
@@ -627,7 +627,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             display: "flex", alignItems: "center", gap: space(2),
             padding: `${space(1)} ${space(2)}`,
             background: color.panel2, borderTop: `1px solid ${color.border}`,
-            fontFamily: font.mono, fontSize: 11, lineHeight: 1.5, color: color.textDim,
+            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.textDim,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >

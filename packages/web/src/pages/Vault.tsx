@@ -8,7 +8,7 @@ import { VaultDownloadLink, VaultImage, useVaultAsset } from "../components/Vaul
 import DocFind from "../components/DocFind";
 import { Panel, Button, Input } from "../components/ui";
 import { errorText } from "../lib/loopbackCredential";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // Vault browser + file viewer/editor. The left pane is a real collapsible folder TREE built from the
 // flat VaultEntry[] (dirs included); the right pane is a type-aware viewer — Markdown (with inline
@@ -234,7 +234,7 @@ export default function Vault() {
                     // `role="status"` makes the state audible — `aria-busy` on the body only suppresses
                     // announcements, it never announces anything itself.
                     <span role="status" data-testid="vault-loading-indicator"
-                      style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12, minWidth: 0 }}>
+                      style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, minWidth: 0 }}>
                       Loading {baseName(file)}…
                     </span>
                   )}
@@ -314,7 +314,7 @@ function Row({ depth, active, onClick, children }: { depth: number; active?: boo
         background: active ? color.phosphorDim : "transparent", cursor: "pointer",
         border: "none", borderLeft: `2px solid ${active ? color.phosphor : "transparent"}`,
         padding: "3px 8px", paddingLeft: 6 + depth * 14,
-        fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.4,
+        fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.4,
       }}>
       {children}
     </button>
@@ -354,13 +354,13 @@ function Breadcrumb({ path, onDir }: { path: string; onDir: (dir: string) => voi
   const fileName = parts[parts.length - 1] ?? path;
   const dirs = parts.slice(0, -1);
   return (
-    <span style={{ fontFamily: font.mono, fontSize: 13, display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: 2, minWidth: 0 }}>
+    <span style={{ fontFamily: font.mono, fontSize: fs.body, display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: 2, minWidth: 0 }}>
       {dirs.map((seg, i) => {
         const dirPath = parts.slice(0, i + 1).join("/");
         return (
           <span key={dirPath} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
             <button onClick={() => onDir(dirPath)} className="loom-crumb"
-              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: color.textMuted, fontFamily: font.mono, fontSize: 13 }}>{seg}</button>
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: color.textMuted, fontFamily: font.mono, fontSize: fs.body }}>{seg}</button>
             <span style={{ color: color.textMuted }}>/</span>
           </span>
         );
@@ -416,7 +416,7 @@ function ContentView({ projectId, path, kind, content, loading, stale, files, on
         AssetImage={AssetImage}
       />
     )
-    : <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 13, color: color.text }}>{content}</pre>;
+    : <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{content}</pre>;
   return (
     <div className="loom-fade" aria-busy={stale} data-testid="vault-body" style={stale ? { opacity: 0.5 } : undefined}>
       {body}
@@ -454,8 +454,8 @@ function BinaryCard({ projectId, path, note }: { projectId: string; path: string
           <path d="M4 1.5 h5 L13 5.5 V14 a.5 .5 0 0 1-.5 .5 h-8 A.5 .5 0 0 1 4 14 Z" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
           <path d="M9 1.5 V5.5 H13" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
         </svg>
-        <div style={{ fontFamily: font.mono, fontSize: 13, color: color.text, marginBottom: 4, wordBreak: "break-all" }}>{name}</div>
-        <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, marginBottom: 16 }}>
+        <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, marginBottom: 4, wordBreak: "break-all" }}>{name}</div>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, marginBottom: 16 }}>
           {note ?? `Binary file${ext ? ` · .${ext}` : ""}`} · {head.isLoading ? "…" : humanSize(head.data?.size ?? null)}
         </div>
         <VaultDownloadLink projectId={projectId} path={path}>Download file</VaultDownloadLink>
@@ -478,9 +478,9 @@ function ReadError({ error, onRetry, retrying }: { error: unknown; onRetry: () =
           <path d="M8 4.8 V8.9" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
           <circle cx="8" cy="11.1" r="0.75" fill="currentColor" />
         </svg>
-        <div style={{ fontFamily: font.mono, fontSize: 13, color: color.text, marginBottom: 6 }}>Unable to read this note</div>
-        <div style={{ fontFamily: font.mono, fontSize: 12, color: color.red, marginBottom: 6, wordBreak: "break-word" }}>{errorText(error)}</div>
-        <div style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textMuted, marginBottom: 16, lineHeight: 1.6 }}>
+        <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, marginBottom: 6 }}>Unable to read this note</div>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, marginBottom: 6, wordBreak: "break-word" }}>{errorText(error)}</div>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, marginBottom: 16, lineHeight: 1.6 }}>
           It may have been renamed, moved, or deleted since this tree was loaded.
         </div>
         <Button variant="primary" disabled={retrying} onClick={onRetry}>{retrying ? "Retrying…" : "Retry"}</Button>
@@ -496,7 +496,7 @@ function DeleteButton({ name, onDelete, deleting }: { name: string; onDelete: ()
   if (!confirm) return <Button variant="danger" onClick={() => setConfirm(true)}>Delete</Button>;
   return (
     <>
-      <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>delete?</span>
+      <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>delete?</span>
       <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
       <Button onClick={() => setConfirm(false)}>Cancel</Button>
     </>
@@ -514,13 +514,13 @@ function VaultEditor({ content, onSave, saving, onCancel }:
       <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false}
         style={{
           flex: 1, minHeight: 320, width: "100%", boxSizing: "border-box", resize: "none",
-          fontFamily: font.mono, fontSize: 13, lineHeight: 1.5,
-          background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 10,
+          fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+          background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 10,
         }} />
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(text)}>{saving ? "Saving…" : "Save"}</Button>
         <Button onClick={onCancel}>Cancel</Button>
-        {dirty && <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>}
+        {dirty && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>}
       </div>
     </div>
   );

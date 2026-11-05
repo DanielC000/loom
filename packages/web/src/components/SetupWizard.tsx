@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import type { Profile, RepoRegistryEntry } from "@loom/shared";
 import { api, type SetupTemplate, type TemplateApplyResult } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { color, font, radius, wash } from "../theme";
+import { color, font, radius, wash, fs } from "../theme";
 import { Button, Input } from "./ui";
 import { LogoMark } from "./Logo";
 import { roleDisplay, roleColor } from "../lib/roleDisplay";
@@ -177,7 +177,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
       <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 24px 30px" }}>
         <span style={{ position: "absolute", left: 24, top: 20, display: "inline-flex", alignItems: "center", gap: 9, color: color.phosphor }}>
           <LogoMark size={20} />
-          <span style={{ fontFamily: font.head, fontWeight: 600, fontSize: 15, letterSpacing: "0.12em", color: color.text }}>loom</span>
+          <span style={{ fontFamily: font.head, fontWeight: 600, fontSize: fs.lg, letterSpacing: "0.12em", color: color.text }}>loom</span>
         </span>
         <Stepper step={step} compact={narrow} />
         <button
@@ -186,7 +186,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
           style={{
             position: "absolute", right: 24, top: 18, background: "transparent", border: "none",
             color: color.textMuted, cursor: apply.isPending ? "default" : "pointer", fontFamily: font.mono,
-            fontSize: 18, lineHeight: 1, padding: 4,
+            fontSize: fs.lg, lineHeight: 1, padding: 4,
           }}
         >×</button>
       </div>
@@ -238,18 +238,18 @@ function WizardBody({ onClose }: { onClose: () => void }) {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>Step {step} of 4</span>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>Step {step} of 4</span>
             {step === 1 && (
               <Button variant="primary" disabled={!canContinueFrom1} onClick={() => setStep(2)}
-                style={{ padding: "6px 14px", fontSize: 13 }}>Continue →</Button>
+                style={{ padding: "6px 14px", fontSize: fs.body }}>Continue →</Button>
             )}
             {step === 2 && (
               <Button variant="primary" disabled={!canContinueFrom2} onClick={() => setStep(3)}
-                style={{ padding: "6px 14px", fontSize: 13 }}>Continue →</Button>
+                style={{ padding: "6px 14px", fontSize: fs.body }}>Continue →</Button>
             )}
             {step === 3 && (
               <Button variant="primary" disabled={apply.isPending} onClick={() => apply.mutate()}
-                style={{ padding: "6px 14px", fontSize: 13 }}>
+                style={{ padding: "6px 14px", fontSize: fs.body }}>
                 {apply.isPending ? "Applying…" : "Apply template →"}
               </Button>
             )}
@@ -276,16 +276,15 @@ function Stepper({ step, compact }: { step: Step; compact?: boolean }) {
           <div key={cap} style={{ display: "flex", alignItems: "center" }}>
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, width: stepW }}>
               <span style={{
-                width: bub, height: bub, borderRadius: bub, display: "grid", placeItems: "center",
-                fontFamily: font.mono, fontSize: compact ? 12 : 13, fontWeight: 700,
+                width: bub, height: bub, borderRadius: radius.pill, display: "grid", placeItems: "center",
+                fontFamily: font.mono, fontSize: compact ? fs.sm : fs.body, fontWeight: 700,
                 border: `1px solid ${state === "todo" ? color.borderStrong : color.phosphor}`,
                 color: state === "current" ? color.bg : state === "done" ? color.phosphor : color.textMuted,
                 background: state === "current" ? color.phosphor : color.bg,
                 boxShadow: state === "current" ? `0 0 0 5px ${color.phosphorDim}` : undefined,
               }}>{state === "done" ? "✓" : n}</span>
               <span style={{
-                fontFamily: font.mono, fontSize: compact ? 9 : 11, letterSpacing: "0.03em", textTransform: "uppercase",
-                color: state === "current" ? color.text : state === "done" ? color.textDim : color.textMuted,
+                fontFamily: font.mono, fontSize: compact ? fs.xs : fs.mono, color: state === "current" ? color.text : state === "done" ? color.textDim : color.textMuted,
               }}>{cap}</span>
             </div>
             {i < STEP_CAPS.length - 1 && (
@@ -302,8 +301,8 @@ function Stepper({ step, compact }: { step: Step; compact?: boolean }) {
 function Heading({ title, lede }: { title: string; lede: string }) {
   return (
     <div style={{ textAlign: "center", marginBottom: 28 }}>
-      <h1 style={{ fontFamily: font.head, fontSize: 26, fontWeight: 700, margin: 0, letterSpacing: "0.01em", color: color.text }}>{title}</h1>
-      <p style={{ fontFamily: font.mono, fontSize: 13, color: color.textDim, lineHeight: 1.65, margin: "12px auto 0", maxWidth: 600 }}>{lede}</p>
+      <h1 style={{ fontFamily: font.head, fontSize: fs.kpi, fontWeight: 700, margin: 0, letterSpacing: "0.01em", color: color.text }}>{title}</h1>
+      <p style={{ fontFamily: font.mono, fontSize: fs.body, color: color.textDim, lineHeight: 1.65, margin: "12px auto 0", maxWidth: 600 }}>{lede}</p>
     </div>
   );
 }
@@ -314,14 +313,14 @@ function RosterRow({ agentName, profile, topBorder }: { agentName: string; profi
   const d = roleDisplay(role);
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 10, padding: "8px 0", fontFamily: font.mono, fontSize: 12.5,
+      display: "flex", alignItems: "center", gap: 10, padding: "8px 0", fontFamily: font.mono, fontSize: fs.mono,
       borderTop: topBorder ? `1px solid ${color.border}` : undefined,
     }}>
-      <span aria-hidden style={{ width: 8, height: 8, borderRadius: 8, flexShrink: 0, background: roleColor(role) }} />
+      <span aria-hidden style={{ width: 8, height: 8, borderRadius: radius.base, flexShrink: 0, background: roleColor(role) }} />
       <span style={{ flex: 1, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{agentName}</span>
       {profile?.browserTesting && <RigBadge tone={color.cyan}>browser</RigBadge>}
       {profile?.noCommit && <RigBadge tone={color.textMuted}>no-commit</RigBadge>}
-      <span style={{ fontFamily: font.mono, fontSize: 11, letterSpacing: "0.05em", textTransform: "uppercase", color: roleColor(role), flexShrink: 0 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: roleColor(role), flexShrink: 0 }}>
         {d.sigil} {d.short}
       </span>
     </div>
@@ -333,8 +332,7 @@ function RosterRow({ agentName, profile, topBorder }: { agentName: string; profi
 function RigBadge({ tone, children }: { tone: string; children: ReactNode }) {
   return (
     <span style={{
-      fontFamily: font.mono, fontSize: 10, letterSpacing: "0.04em", textTransform: "uppercase",
-      color: tone, border: `1px solid ${tone}`, borderRadius: radius.sm, padding: "0 5px", flexShrink: 0, opacity: 0.85,
+      fontFamily: font.mono, fontSize: fs.xs, color: tone, border: `1px solid ${tone}`, borderRadius: radius.sm, padding: "0 5px", flexShrink: 0, opacity: 0.85,
     }}>{children}</span>
   );
 }
@@ -349,8 +347,8 @@ function StepTemplate({
   return (
     <div>
       <Heading title="Choose your team" lede="A workflow template stands up a ready-to-run set of agents and seeds a starter card. Pick the shape that fits — you can always add or remove agents later." />
-      {loading && <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 13, textAlign: "center" }}>Loading templates…</p>}
-      {error && <p style={{ color: color.red, fontFamily: font.mono, fontSize: 13, textAlign: "center" }}>Couldn’t load templates — is the daemon reachable?</p>}
+      {loading && <p style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.body, textAlign: "center" }}>Loading templates…</p>}
+      {error && <p style={{ color: color.red, fontFamily: font.mono, fontSize: fs.body, textAlign: "center" }}>Couldn’t load templates — is the daemon reachable?</p>}
       {!loading && !error && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
@@ -360,12 +358,12 @@ function StepTemplate({
             ))}
           </div>
           {/* The subtle "start empty" escape hatch. */}
-          <div style={{ textAlign: "center", marginTop: 18, fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>
+          <div style={{ textAlign: "center", marginTop: 18, fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
             Prefer to build your own?{" "}
             <button
               onClick={() => onChoose("empty")} aria-pressed={choice === "empty"}
               style={{
-                background: "transparent", border: "none", cursor: "pointer", fontFamily: font.mono, fontSize: 12,
+                background: "transparent", border: "none", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
                 padding: 0, color: choice === "empty" ? color.phosphor : color.cyan,
                 textDecoration: choice === "empty" ? "underline" : "none",
               }}
@@ -393,14 +391,14 @@ function TemplateCard({
     >
       <div style={{ padding: "18px 20px 14px" }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-          <span style={{ flex: 1, fontFamily: font.head, fontSize: 17, fontWeight: 600, color: color.text }}>{template.name}</span>
+          <span style={{ flex: 1, fontFamily: font.head, fontSize: fs.lg, fontWeight: 600, color: color.text }}>{template.name}</span>
           <span aria-hidden style={{
-            width: 18, height: 18, borderRadius: 18, flexShrink: 0, marginTop: 2,
+            width: 18, height: 18, borderRadius: radius.pill, flexShrink: 0, marginTop: 2,
             border: `1px solid ${selected ? color.phosphor : color.borderStrong}`,
             background: selected ? `radial-gradient(circle, ${color.phosphor} 0 4px, transparent 5px)` : "transparent",
           }} />
         </div>
-        <p style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, lineHeight: 1.55, margin: "8px 0 0" }}>{template.description}</p>
+        <p style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.55, margin: "8px 0 0" }}>{template.description}</p>
       </div>
       <div style={{ padding: "0 20px 4px" }}>
         {template.agents.map((a, i) => (
@@ -409,7 +407,7 @@ function TemplateCard({
       </div>
       <div style={{
         marginTop: "auto", padding: "12px 20px", borderTop: `1px solid ${color.border}`, background: color.panel2,
-        display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: font.mono, fontSize: 11.5, color: color.textDim,
+        display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim,
       }}>
         <span>stands up <b style={{ color: color.phosphor }}>{n} agent{n === 1 ? "" : "s"}</b></span>
         <span>+ {template.boardSeed.count} starter card{template.boardSeed.count === 1 ? "" : "s"}</span>
@@ -491,15 +489,15 @@ function ReferenceReposField({ repos, onChange }: { repos: string[]; onChange: (
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6, paddingTop: 16, borderTop: `1px solid ${color.border}` }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <label style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: color.textDim }}>
+        <label style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
           Reference repos <span style={{ color: color.textMuted, textTransform: "none", letterSpacing: 0 }}>· optional</span>
         </label>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
           Read-only sibling repos agents can consult. Absolute git paths — never committed to.
         </span>
       </div>
       {repos.length === 0 ? (
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>None — this project reads only its primary repo.</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>None — this project reads only its primary repo.</span>
       ) : (
         repos.map((r, i) => (
           <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -533,15 +531,15 @@ function RegisteredReposField({ repos, onChange }: { repos: RepoRegistryEntry[];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6, paddingTop: 16, borderTop: `1px solid ${color.border}` }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <label style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: color.textDim }}>
+        <label style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
           Registered repos <span style={{ color: color.textMuted, textTransform: "none", letterSpacing: 0 }}>· optional</span>
         </label>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
           Additional writable repos. Give each a short key — a card targets one repo by its key. One task, one repo.
         </span>
       </div>
       {repos.length === 0 ? (
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>None — every card targets this project's primary repo.</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>None — every card targets this project's primary repo.</span>
       ) : (
         repos.map((r, i) => (
           <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -557,7 +555,7 @@ function RegisteredReposField({ repos, onChange }: { repos: RepoRegistryEntry[];
         ))
       )}
       {repos.length > 0 && (
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.5 }}>
           A repo with no gate command merges as <span style={{ color: color.amber }}>unverified</span> — it does not fall back to another repo's gate.
         </span>
       )}
@@ -574,14 +572,14 @@ function SegButton({ on, onClick, title, sub }: { on: boolean; onClick: () => vo
       onClick={onClick} role="tab" aria-selected={on}
       style={{
         display: "flex", flexDirection: "column", gap: 4, textAlign: "left", cursor: "pointer",
-        fontFamily: font.mono, fontSize: 13, padding: 12, borderRadius: radius.base,
+        fontFamily: font.mono, fontSize: fs.body, padding: 12, borderRadius: radius.base,
         background: color.panel2, color: on ? color.text : color.textDim,
         border: `1px solid ${on ? color.phosphor : color.borderStrong}`,
         boxShadow: on ? `inset 0 0 0 1px ${color.phosphorDim}` : undefined,
       }}
     >
       <span>{title}</span>
-      <small style={{ fontSize: 11, color: on ? color.textDim : color.textMuted }}>{sub}</small>
+      <small style={{ fontSize: fs.sm, color: on ? color.textDim : color.textMuted }}>{sub}</small>
     </button>
   );
 }
@@ -589,9 +587,9 @@ function SegButton({ on, onClick, title, sub }: { on: boolean; onClick: () => vo
 function Field({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-      <label style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: color.textDim }}>{label}</label>
+      <label style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>{label}</label>
       {children}
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{hint}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{hint}</span>
     </div>
   );
 }
@@ -621,7 +619,7 @@ function StepReview({
               {vaultPath && <ReceiptLine k="vault" v={vaultPath} mono />}
             </>
           ) : (
-            <p style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, margin: "2px 0 0", lineHeight: 1.5 }}>
+            <p style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, margin: "2px 0 0", lineHeight: 1.5 }}>
               Loom will create and git-initialize a new directory for this project in a Loom-managed folder.
             </p>
           )}
@@ -636,7 +634,7 @@ function StepReview({
         <ReceiptSection title={isEmpty ? "Template · none" : `Template · ${template?.name ?? ""}`}
           note={isEmpty ? "an empty project — add agents later" : `→ ${template?.agents.length ?? 0} agents`}>
           {isEmpty ? (
-            <p style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textMuted, margin: "2px 0 0", lineHeight: 1.5 }}>
+            <p style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, margin: "2px 0 0", lineHeight: 1.5 }}>
               No template — a blank project. You can define agents and profiles afterward from the Projects page.
             </p>
           ) : (
@@ -649,7 +647,7 @@ function StepReview({
         {!isEmpty && template && template.boardSeed.count > 0 && (
           <ReceiptSection title={`Starter board card${template.boardSeed.count === 1 ? "" : "s"}`}>
             {template.boardSeed.titles.map((title, i) => (
-              <p key={title + i} style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, margin: i === 0 ? "2px 0 0" : "4px 0 0", lineHeight: 1.5 }}>
+              <p key={title + i} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, margin: i === 0 ? "2px 0 0" : "4px 0 0", lineHeight: 1.5 }}>
                 “{title}”
               </p>
             ))}
@@ -658,7 +656,7 @@ function StepReview({
 
         {needsBrowserInstall && (
           <div style={{ padding: "14px 22px", borderTop: `1px solid ${color.border}`, background: wash(color.info, 6) }}>
-            <p style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, margin: 0, lineHeight: 1.55 }}>
+            <p style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, margin: 0, lineHeight: 1.55 }}>
               <b>Browser rigs</b> — {browserRigs.join(" + ")} drive a headless browser. They need a one-time{" "}
               <code style={{ background: color.panel2, padding: "1px 5px", borderRadius: radius.sm, color: color.text }}>npx playwright install chromium</code>{" "}
               before their first run.
@@ -667,7 +665,7 @@ function StepReview({
         )}
       </div>
       {error && (
-        <p role="alert" style={{ maxWidth: 640, margin: "14px auto 0", fontFamily: font.mono, fontSize: 12, color: color.red, textAlign: "center" }}>{error}</p>
+        <p role="alert" style={{ maxWidth: 640, margin: "14px auto 0", fontFamily: font.mono, fontSize: fs.mono, color: color.red, textAlign: "center" }}>{error}</p>
       )}
     </div>
   );
@@ -676,7 +674,7 @@ function StepReview({
 function ReceiptSection({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
   return (
     <div style={{ padding: "16px 22px", borderTop: `1px solid ${color.border}` }}>
-      <h4 style={{ fontFamily: font.head, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim, margin: "0 0 10px" }}>
+      <h4 style={{ fontFamily: font.head, fontSize: fs.sm, color: color.textDim, margin: "0 0 10px" }}>
         {title}{note && <span style={{ color: color.textMuted, fontWeight: 400, letterSpacing: "0.02em" }}>&nbsp;&nbsp;{note}</span>}
       </h4>
       {children}
@@ -686,7 +684,7 @@ function ReceiptSection({ title, note, children }: { title: string; note?: strin
 
 function ReceiptLine({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
-    <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: 12.5, padding: "5px 0" }}>
+    <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: fs.mono, padding: "5px 0" }}>
       <span style={{ color: color.textMuted, width: 64, flexShrink: 0 }}>{k}</span>
       <span style={{ color: mono ? color.textDim : color.text, overflowWrap: "anywhere" }}>{v}</span>
     </div>
@@ -702,11 +700,11 @@ function StepDone({
   return (
     <div style={{ textAlign: "center", paddingTop: 8 }}>
       <div style={{
-        width: 66, height: 66, borderRadius: 66, display: "inline-grid", placeItems: "center", marginBottom: 20,
-        border: `1.5px solid ${color.phosphor}`, color: color.phosphor, background: color.phosphorDim, fontSize: 30,
+        width: 66, height: 66, borderRadius: radius.pill, display: "inline-grid", placeItems: "center", marginBottom: 20,
+        border: `1.5px solid ${color.phosphor}`, color: color.phosphor, background: color.phosphorDim, fontSize: fs.kpi,
       }}>✓</div>
-      <h1 style={{ fontFamily: font.head, fontSize: 26, fontWeight: 700, margin: 0, color: color.text }}>{projectName} is ready</h1>
-      <p style={{ fontFamily: font.mono, fontSize: 13, color: color.textDim, lineHeight: 1.65, margin: "12px auto 0", maxWidth: 520 }}>
+      <h1 style={{ fontFamily: font.head, fontSize: fs.kpi, fontWeight: 700, margin: 0, color: color.text }}>{projectName} is ready</h1>
+      <p style={{ fontFamily: font.mono, fontSize: fs.body, color: color.textDim, lineHeight: 1.65, margin: "12px auto 0", maxWidth: 520 }}>
         {agentCount > 0
           ? "Your team is standing by. The Orchestrator can pick up the starter card as soon as you spawn it."
           : "Your empty project is ready. Define its agents and profiles from the Projects page whenever you like."}
@@ -719,9 +717,9 @@ function StepDone({
       </div>
 
       <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-        <Button variant="primary" onClick={onBoard} style={{ padding: "7px 16px", fontSize: 13 }}>Go to the board →</Button>
+        <Button variant="primary" onClick={onBoard} style={{ padding: "7px 16px", fontSize: fs.body }}>Go to the board →</Button>
         {agentCount > 0 && (
-          <Button onClick={onSpawn} style={{ padding: "7px 16px", fontSize: 13 }} title="Open the project's fleet to spawn the Orchestrator">
+          <Button onClick={onSpawn} style={{ padding: "7px 16px", fontSize: fs.body }} title="Open the project's fleet to spawn the Orchestrator">
             Spawn the Orchestrator
           </Button>
         )}
@@ -733,8 +731,8 @@ function StepDone({
 function Stat({ n, check, label }: { n?: number; check?: boolean; label: string }) {
   return (
     <div style={{ border: `1px solid ${color.border}`, borderRadius: radius.base, padding: "14px 22px", background: color.panel }}>
-      <b style={{ display: "block", fontFamily: font.head, fontSize: 24, color: color.phosphor }}>{check ? "✓" : n}</b>
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>{label}</span>
+      <b style={{ display: "block", fontFamily: font.head, fontSize: fs.h1, color: color.phosphor }}>{check ? "✓" : n}</b>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>{label}</span>
     </div>
   );
 }

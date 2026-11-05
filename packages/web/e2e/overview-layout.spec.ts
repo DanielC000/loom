@@ -125,7 +125,7 @@ test.describe("project Overview — Attention list caps + collapses (unbounded-g
     // count visible rows by it.
     const rows = page.locator("main").getByText("Decision needed", { exact: true });
     const header = page.locator("main").getByText(/^Attention \(/);
-    const statTile = page.locator("main").getByText("attention", { exact: true }).locator("..");
+    const statTile = page.locator("main").getByText("Attention", { exact: true }).locator("..");
     const showMore = page.getByRole("button", { name: `Show ${total - ATTENTION_CAP} more` });
     const collapse = page.getByRole("button", { name: "Collapse" });
 
@@ -220,7 +220,7 @@ test.describe("project Overview — Agents spawn grid excludes worker-role agent
 
     // The SESSION-derived "active workers" header stat still counts the live worker (grid filter didn't
     // regress it). The Stat renders the value + label as sibling spans in one container.
-    const workersStat = page.locator("main").getByText("active workers", { exact: true }).locator("..");
+    const workersStat = page.locator("main").getByText("Active workers", { exact: true }).locator("..");
     await expect(workersStat).toContainText("1");
   });
 });
@@ -254,7 +254,7 @@ test.describe("project Overview — Fleet accordion caps the archived fold-in + 
     await page.goto(`${loomDaemon.baseURL}/overview`);
 
     // The header "archived" Stat shows the TRUE server-side total (12), never the capped fold-in slice.
-    const archivedStat = page.locator("main").getByText("archived", { exact: true }).locator("..");
+    const archivedStat = page.locator("main").getByText("Archived", { exact: true }).locator("..");
     await expect(archivedStat).toContainText(String(archivedCount));
 
     // The Fleet accordion is expanded by default. It renders the live manager + ONLY the 10 most-recent

@@ -6,7 +6,7 @@ import { EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
 import { api } from "../lib/api";
 import { useAllAgentLabels } from "../lib/useAllAgents";
 import { Panel, Button, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 function fmt(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "—";
@@ -80,7 +80,7 @@ export default function EventTriggers() {
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Event Triggers</SectionLabel>
         <StatusPill tone="live" label="dispatcher active" glow />
-        <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
           React to internal orchestration events. When an event of the chosen kind fires — optionally
           scoped to one project — the trigger wakes an existing session or spawns a fresh agent. The
           dispatcher is always on; changes apply on the next matching event.
@@ -90,18 +90,17 @@ export default function EventTriggers() {
 
       <div style={{ marginTop: 12, overflowX: "auto" }}>
         {rows.length === 0 ? (
-          <p style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono, padding: "20px 4px" }}>
+          <p style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono, padding: "20px 4px" }}>
             No event triggers yet. Create one to wake or spawn an agent when an orchestration event fires.
           </p>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: fs.mono }}>
             <thead>
               <tr>
                 {["Event kind", "Scope", "Mode", "Target", "Last fired", "Status", ""].map((h, i) => (
                   <th key={h || "actions"} style={{
                     textAlign: i === 5 || i === 6 ? "right" : "left",
-                    color: color.textDim, fontFamily: font.head, fontSize: 10, fontWeight: 700,
-                    textTransform: "uppercase", letterSpacing: "0.08em",
+                    color: color.textDim, fontFamily: font.head, fontSize: fs.xs, fontWeight: 700,
                     padding: "0 12px 8px", borderBottom: `1px solid ${color.border}`, whiteSpace: "nowrap",
                   }}>{h}</th>
                 ))}
@@ -114,7 +113,7 @@ export default function EventTriggers() {
                   style={{ cursor: "pointer", borderBottom: `1px solid ${color.border}` }}>
                   <td style={{ padding: "10px 12px", color: color.text, fontWeight: 600, whiteSpace: "nowrap" }}>
                     {humanizeKind(t.eventKind)}
-                    <span style={{ display: "block", color: color.cyan, fontWeight: 400, fontSize: 11 }}>{t.eventKind}</span>
+                    <span style={{ display: "block", color: color.cyan, fontWeight: 400, fontSize: fs.sm }}>{t.eventKind}</span>
                   </td>
                   <td style={{ padding: "10px 12px", color: t.projectId ? color.textDim : color.textMuted, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{projectName(t.projectId)}</td>
                   <td style={{ padding: "10px 12px" }}>
@@ -132,7 +131,7 @@ export default function EventTriggers() {
                       style={{
                         cursor: "pointer", background: "transparent", border: `1px solid ${t.enabled ? color.phosphor : color.borderStrong}`,
                         color: t.enabled ? color.phosphor : color.textMuted, borderRadius: radius.sm,
-                        fontFamily: font.mono, fontSize: 10, letterSpacing: "0.06em", padding: "2px 8px", textTransform: "uppercase",
+                        fontFamily: font.mono, fontSize: fs.xs, padding: "2px 8px",
                       }}>{t.enabled ? "On" : "Off"}</button>
                   </td>
                   <td style={{ padding: "10px 12px", textAlign: "right", whiteSpace: "nowrap" }}>
@@ -166,7 +165,7 @@ export default function EventTriggers() {
 
 // ── The create/edit modal ─────────────────────────────────────────────────────────────────────────
 
-const fieldLabel = { fontFamily: font.head as string, fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: color.textDim };
+const fieldLabel = { fontFamily: font.head as string, fontSize: fs.sm, fontWeight: 700, color: color.textDim };
 
 function EventTriggerModal({
   mode, projects, agents, agentsLoading, sessions, sessionsLoading,
@@ -241,7 +240,7 @@ function EventTriggerModal({
         style={{ width: 620, maxWidth: "92vw", background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, display: "flex", flexDirection: "column", gap: 14, padding: 18 }}>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>
+          <strong style={{ fontFamily: font.head, color: color.text }}>
             {editing ? "Edit event trigger" : "New event trigger"}
           </strong>
           <span style={{ flex: 1 }} />
@@ -289,8 +288,8 @@ function EventTriggerModal({
               <option value="">{sessionsLoading ? "Loading sessions…" : noSessions ? "— no sessions available —" : "— select a session —"}</option>
               {sessions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
             </Select>
-            {noSessions && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>No sessions exist yet — start one first, or use Spawn instead.</span>}
-            {!targetSessionId && !noSessions && !sessionsLoading && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Wake mode requires a target session.</span>}
+            {noSessions && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one first, or use Spawn instead.</span>}
+            {!targetSessionId && !noSessions && !sessionsLoading && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>Wake mode requires a target session.</span>}
           </label>
         ) : (
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -299,20 +298,20 @@ function EventTriggerModal({
               <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents available —" : "— select an agent —"}</option>
               {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
             </Select>
-            {noAgents && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
-            {!agentId && !noAgents && !agentsLoading && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Spawn mode requires a target agent.</span>}
+            {noAgents && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
+            {!agentId && !noAgents && !agentsLoading && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>Spawn mode requires a target agent.</span>}
           </label>
         )}
 
         {/* Enabled */}
         <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ accentColor: "var(--loom-phosphor)", width: 16, height: 16 }} />
-          <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontFamily: font.mono, fontWeight: 400, fontSize: 12, color: color.textDim }}>
+          <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontFamily: font.mono, fontWeight: 400, fontSize: fs.mono, color: color.textDim }}>
             Enabled {enabled ? <Chip value="on" tone="live" /> : <Chip value="off" tone="muted" />}
           </span>
         </label>
 
-        {mutError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(mutError)}</span>}
+        {mutError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(mutError)}</span>}
 
         {/* Actions */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
@@ -323,7 +322,7 @@ function EventTriggerModal({
           <span style={{ flex: 1 }} />
           {editing && (confirmDel ? (
             <>
-              <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>delete?</span>
+              <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>delete?</span>
               <Button variant="danger" disabled={deleting} onClick={() => onDelete(existing!.id)}>Confirm</Button>
               <Button onClick={() => setConfirmDel(false)}>Keep</Button>
             </>

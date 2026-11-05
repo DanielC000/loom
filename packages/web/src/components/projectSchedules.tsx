@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { Schedule } from "@loom/shared";
 import { api } from "../lib/api";
 import { Panel, SectionLabel, Chip } from "./ui";
-import { color, font } from "../theme";
+import { color, font, fs, radius } from "../theme";
 
 // THE PROJECT'S CRON SCHEDULES, read-only — one component, two mounts.
 //
@@ -30,11 +30,11 @@ export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string
   const mine = (schedules.data ?? []).filter((s) => agentIds.has(s.agentId));
   if (mine.length === 0) {
     return (
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
-        <span style={{ textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Schedules</span>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+        <span style={{ color: color.textDim }}>Schedules</span>
         <span>· none —</span>
         <button onClick={() => navigate("/automation")} title="Create a schedule on the Automation page"
-          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.cyan, fontFamily: font.mono, fontSize: 11 }}>
+          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.cyan, fontFamily: font.mono, fontSize: fs.mono }}>
           add one on the Automation page →
         </button>
       </div>
@@ -52,13 +52,13 @@ export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string
 
 function ScheduleRow({ s, agentName }: { s: Schedule; agentName: string }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim,
-      border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 8px" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim,
+      border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 8px" }}>
       <span style={{ color: color.cyan }}>{s.cron}</span>
       <Chip label="agent" value={agentName} />
-      <span style={{ fontSize: 10, color: s.kind === "auditor" ? color.phosphor : color.amber }}>kind:{s.kind}</span>
+      <span style={{ fontSize: fs.xs, color: s.kind === "auditor" ? color.phosphor : color.amber }}>kind:{s.kind}</span>
       <span style={{ flex: 1 }}>next · {s.nextFireAt ? new Date(s.nextFireAt).toLocaleString() : "—"}</span>
-      <span style={{ fontSize: 9, color: s.enabled ? color.phosphor : color.textMuted }}>{s.enabled ? "ON" : "OFF"}</span>
+      <span style={{ fontSize: fs.xs, color: s.enabled ? color.phosphor : color.textMuted }}>{s.enabled ? "ON" : "OFF"}</span>
     </div>
   );
 }

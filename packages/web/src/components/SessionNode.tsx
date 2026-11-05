@@ -14,7 +14,7 @@ import { ReviewSurface } from "./ReviewSurface";
 import { EventRow } from "./fleet";
 import { HarnessTag } from "./HarnessPicker";
 import { Meter, Panel, StatusPill } from "./ui";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // The ATLAS session node — card 525c8ad9 (Atlas P2-7), owner decision "B · Inline" (request 36787441).
 // Design source: the vault's `Mockups/2026-10-21 Atlas session node/` (B-inline.html + README).
@@ -55,7 +55,7 @@ function ctxReadout(s: SessionNodeRow) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
       <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "busy" : "accent"} width={60} />
-      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
         {(ctx / 1000).toFixed(1)}k ctx · {pct}%
       </span>
     </span>
@@ -126,7 +126,7 @@ export function ManagerTimeline({ managerId }: { managerId: string }) {
   const list = events.data ?? [];
   return (
     <Panel grid style={{ maxHeight: 440, overflow: "auto" }}>
-      {list.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
+      {list.length === 0 && <span style={{ color: color.textMuted, fontSize: fs.sm }}>No events yet.</span>}
       {list.map((e) => <EventRow key={e.id} e={e} />)}
     </Panel>
   );

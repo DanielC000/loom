@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Wake } from "@loom/shared";
 import { api } from "../lib/api";
 import { Dot } from "./ui";
-import { color, font } from "../theme";
+import { color, font, fs, radius } from "../theme";
 
 // Shows a session's pending scheduled wake-ups / nudges (the wake_me primitive) under its terminal,
 // each cancellable. Renders nothing when there are none, so it stays out of the way.
@@ -29,7 +29,7 @@ export function SessionWakes({
   if (list.length === 0) return null;
   return (
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>Wakes</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Wakes</span>
       {list.map((w) => <WakeChip key={w.id} w={w} sessionId={sessionId} onCancelled={bulkMode ? onCancelled : undefined} />)}
     </div>
   );
@@ -44,12 +44,12 @@ function WakeChip({ w, sessionId, onCancelled }: { w: Wake; sessionId: string; o
   const inMs = new Date(w.wakeAt).getTime() - Date.now();
   return (
     <span title={`"${w.note}"\nfires ${new Date(w.wakeAt).toLocaleString()} (scheduled ${new Date(w.createdAt).toLocaleString()})`}
-      style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.border}`, borderRadius: 4, padding: "1px 6px 1px 8px", fontFamily: font.mono, fontSize: 11, color: color.textDim, maxWidth: 320 }}>
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 6px 1px 8px", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, maxWidth: 320 }}>
       <Dot tone="info" />
       <span style={{ color: color.cyan, whiteSpace: "nowrap" }}>wake {relTime(inMs)}</span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {w.note}</span>
       <button onClick={() => cancel.mutate()} disabled={cancel.isPending} title="Cancel this wake"
-        style={{ background: "none", border: "none", color: color.textMuted, cursor: "pointer", padding: "0 2px", marginLeft: 2, fontFamily: font.mono, fontSize: 13, lineHeight: 1 }}>×</button>
+        style={{ background: "none", border: "none", color: color.textMuted, cursor: "pointer", padding: "0 2px", marginLeft: 2, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1 }}>×</button>
     </span>
   );
 }

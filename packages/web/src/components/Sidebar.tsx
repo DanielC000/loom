@@ -17,7 +17,7 @@ import { useAttention } from "../lib/attention";
 import { isCompanionSession } from "../lib/sessions";
 import { isUnread } from "../lib/questions";
 import { useDismissable } from "../lib/useDismissable";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 const PIN_KEY = "loom.railPinned";
 
@@ -89,13 +89,13 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
         onMouseEnter={() => setHoveredId(p.id)} onMouseLeave={() => setHoveredId((h) => (h === p.id ? null : h))}
         style={{ display: "inline-flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
           background: hoveredId === p.id ? color.panel2 : "transparent", border: "none", cursor: "pointer",
-          color: selected ? color.phosphor : color.text, fontFamily: font.mono, fontSize: 13, padding: "6px 12px" }}>
+          color: selected ? color.phosphor : color.text, fontFamily: font.mono, fontSize: fs.body, padding: "6px 12px" }}>
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
         {count > 0 && (
           <span title={`${count} live session${count === 1 ? "" : "s"}`}
-            style={{ display: "inline-flex", alignItems: "center", gap: 5, flex: "none", color: color.textDim, fontSize: 11 }}>
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, flex: "none", color: color.textDim, fontSize: fs.sm }}>
             {count}
-            <span style={{ width: 8, height: 8, borderRadius: 8, background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }} />
+            <span style={{ width: 8, height: 8, borderRadius: radius.base, background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }} />
           </span>
         )}
       </button>

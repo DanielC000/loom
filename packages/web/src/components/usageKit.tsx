@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import type { SessionUsageTotals } from "@loom/shared";
 import { Badge, Select } from "./ui";
-import { color, font, tone, type Tone } from "../theme";
+import { sentenceCase } from "../lib/textCase";
+import { color, font, tone, type Tone, fs, radius } from "../theme";
 
 // THE USAGE KIT — the token/cost formatting, the historical window control, and the small presentational
 // primitives SHARED by every usage surface.
@@ -100,7 +101,7 @@ export function WindowSelect({ value, onChange, testId }: {
 export function SectionHead({ title, tag, tagTone }: { title: string; tag: string; tagTone: Tone }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${color.border}`, paddingBottom: 6 }}>
-      <span style={{ fontFamily: font.head, fontSize: 14, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.text }}>{title}</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.body, fontWeight: 700, color: color.text }}>{title}</span>
       <Badge tone={tagTone}>{tag}</Badge>
     </div>
   );
@@ -110,7 +111,7 @@ export function SectionHead({ title, tag, tagTone }: { title: string; tag: strin
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
       {children}
     </label>
   );
@@ -119,9 +120,9 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 export function Stat({ label, value, tone: t = "live", testId }: { label: string; value: string; tone?: Tone; testId?: string }) {
   return (
     <span data-testid={testId}
-      style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: 4, padding: "4px 12px", minWidth: 72 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 20, color: tone[t] }}>{value}</span>
-      <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>{label}</span>
+      style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "4px 12px", minWidth: 72 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.h1, color: tone[t] }}>{value}</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
     </span>
   );
 }
@@ -140,9 +141,9 @@ export function RowName({ name, subtitle, width = 160, maxWidth = 200, indent = 
 }) {
   return (
     <span style={{ display: "flex", flexDirection: "column", minWidth: width, maxWidth, overflow: "hidden", paddingLeft: indent }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
       {subtitle && (
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
       )}
     </span>
   );
@@ -167,8 +168,8 @@ function SegToggle<T extends "tokens" | "cost">({ value, onChange, lead }: {
   const items = [{ key: "cost", label: "Cost" }, { key: "tokens", label: "Tokens" }] as const;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>{lead}</span>
-      <span style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: 4, overflow: "hidden" }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>{lead}</span>
+      <span style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.sm, overflow: "hidden" }}>
         {items.map((it) => {
           const active = value === it.key;
           return (
@@ -176,8 +177,8 @@ function SegToggle<T extends "tokens" | "cost">({ value, onChange, lead }: {
               style={{
                 background: active ? color.phosphorDim : "transparent",
                 color: active ? color.phosphor : color.textDim,
-                border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: 11,
-                cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em",
+                border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: fs.mono,
+                cursor: "pointer",
               }}>
               {it.label}
             </button>

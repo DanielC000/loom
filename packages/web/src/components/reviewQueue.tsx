@@ -4,7 +4,7 @@ import type { SessionListItem } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
 import { analyzeDiff, riskTone, type DiffAnalysis } from "../lib/diff";
 import { Panel, Button, Chip, Dot, SectionLabel } from "./ui";
-import { color, font, radius, tone } from "../theme";
+import { color, font, radius, tone, fs } from "../theme";
 
 // MISSION CONTROL CENTERPIECE — the review/merge gate as a fast-triage surface. Each worker branch
 // awaiting a human merge becomes a rich card: an auto-summary line, diff stats, a risk badge, and the
@@ -104,13 +104,13 @@ const MERGE_TITLE =
  */
 export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
   if (merge.data?.pending) {
-    return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.cyan }}>still running — {merge.data.reason}</span>;
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan }}>still running — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === false) {
-    return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>rejected — {merge.data.reason}</span>;
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>rejected — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === true) {
-    return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.phosphor }}>
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.phosphor }}>
       {merge.data.commitSubject ? `merged — ${merge.data.commitSubject}` : "merged"}
     </span>;
   }
@@ -164,20 +164,20 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
     <Panel style={{ display: "flex", flexDirection: "column", gap: 8, borderLeft: `3px solid ${accent}` }}>
       {/* identity */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>w:{workerId.slice(0, 8)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>w:{workerId.slice(0, 8)}</span>
         {worker?.taskId && <Chip label="task" value={worker.taskId.slice(0, 8)} />}
         <span style={{ flex: 1 }} />
-        {worker?.projectName && <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>{worker.projectName}</span>}
+        {worker?.projectName && <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{worker.projectName}</span>}
       </div>
-      {worker?.branch && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{worker.branch} → main</span>}
+      {worker?.branch && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{worker.branch} → main</span>}
 
       {/* auto-summary + stats */}
-      {loading && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>loading diff…</span>}
-      {error && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.red }}>diff unavailable (no branch / merged)</span>}
+      {loading && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>loading diff…</span>}
+      {error && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>diff unavailable (no branch / merged)</span>}
       {analysis && (
         <>
-          <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.45 }}>{analysis.headline}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: 12 }}>
+          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.45 }}>{analysis.headline}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono }}>
             <span style={{ color: color.text }}>{analysis.files.length} file{analysis.files.length === 1 ? "" : "s"}</span>
             {analysis.totalInsertions > 0 && <span style={{ color: color.phosphor }}>+{analysis.totalInsertions}</span>}
             {analysis.totalDeletions > 0 && <span style={{ color: color.red }}>−{analysis.totalDeletions}</span>}
@@ -191,10 +191,10 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
           {topRisk.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 2, borderTop: `1px solid ${color.border}`, paddingTop: 6 }}>
               {topRisk.map((f) => (
-                <div key={f.path} style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11 }}>
+                <div key={f.path} style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono }}>
                   <Dot tone={riskTone(f.risk)} glow={f.risk === "high"} />
                   <span style={{ color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={`${f.path} — ${f.reasons.join(", ")}`}>{f.path}</span>
-                  <span style={{ color: tone[riskTone(f.risk)], fontSize: 9, textTransform: "uppercase", letterSpacing: "0.06em" }}>{f.risk}</span>
+                  <span style={{ color: tone[riskTone(f.risk)], fontSize: fs.xs }}>{f.risk}</span>
                 </div>
               ))}
             </div>

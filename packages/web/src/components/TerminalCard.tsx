@@ -17,7 +17,7 @@ import { SessionQueue } from "./SessionQueue";
 import { SessionWakes } from "./SessionWakes";
 import { SessionTaskCard } from "./SessionTaskCard";
 import { Panel, Button, SectionLabel, StatusPill } from "./ui";
-import { font, color, radius } from "../theme";
+import { font, color, radius, fs } from "../theme";
 
 // ── <TerminalCard> — the ONE base every live-session terminal card is built on ────────────────────
 //
@@ -152,7 +152,7 @@ export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProj
   const prefix = `${showProject ? `${s.projectName} · ` : ""}${s.agentName}${s.role ? ` · ${s.role}` : ""}`;
   const shortId = s.id.slice(0, 8);
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
       <StatusPill tone={s.busy ? "busy" : "live"} glow={s.busy} label={s.busy ? "busy" : "idle"} style={{ flexShrink: 0 }} />
       {/* Same rule as FleetRow — codex always, claude only in a mixed-harness view.
           @decision b8e52cfe — never badge claude in a single-harness view.

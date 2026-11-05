@@ -8,7 +8,7 @@ import { useOpenRequest } from "../components/requests";
 import { REQUEST_TYPE_ORDER, requestAttentionLabel } from "../lib/questions";
 import { useState } from "react";
 import { Panel, SectionLabel, Badge, Button } from "../components/ui";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 import { Stat, PlanUsageStrip, AttentionRow, FleetRow, FleetCard, EventRow, WaveConsumption, InactiveFleet } from "../components/fleet";
 import { archivedOnlyProjects, fleetProjectNames, replayRoots, resolveAttentionProjectId, GLOBAL_ACTIVITY_CAP } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
@@ -284,7 +284,7 @@ export default function MissionControl() {
               return (
                 <Panel key={pn} style={{ gridColumn: "1 / -1" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{pn}</span>
+                    <span style={{ fontFamily: font.head, color: color.text }}>{pn}</span>
                     <span style={{ flex: 1 }} />
                     <WaveConsumption sessions={[...projManagers, ...projWorkers]} />
                     <Button variant="ghost" style={{ padding: "0 6px" }} title="Collapse" onClick={() => toggleExpanded(pn)}>⤡</Button>
@@ -299,7 +299,7 @@ export default function MissionControl() {
                   ))}
                   {looseWorkers.map((w) => <FleetRow key={w.id} s={w} />)}
                   {projManagers.length === 0 && looseWorkers.length === 0 && (
-                    <span style={{ color: color.textMuted, fontSize: 12 }}>idle — no live manager</span>
+                    <span style={{ color: color.textMuted, fontSize: fs.sm }}>idle — no live manager</span>
                   )}
                 </Panel>
               );
@@ -315,7 +315,7 @@ export default function MissionControl() {
         <div>
           <SectionLabel>Activity</SectionLabel>
           <Panel grid style={{ maxHeight: "62vh", overflow: "auto" }}>
-            {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
+            {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: fs.sm }}>No events yet.</span>}
             {allEvents.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
           </Panel>
         </div>
@@ -331,12 +331,12 @@ export default function MissionControl() {
         <button type="button" onClick={toggleReplay} aria-expanded={replayOpen} className="loom-btn"
           title={replayOpen ? "Collapse Wave replay" : "Expand Wave replay — scrub & compare wave audit timelines"}
           style={{ display: "flex", alignItems: "baseline", gap: 8, width: "100%", textAlign: "left", background: "transparent",
-            border: "none", cursor: "pointer", padding: "4px 0 8px", fontFamily: font.head, fontSize: 11, fontWeight: 700,
-            textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
+            border: "none", cursor: "pointer", padding: "4px 0 8px", fontFamily: font.head, fontSize: fs.sm, fontWeight: 700,
+            color: color.textDim }}>
           <span style={{ color: color.textMuted }}>{replayOpen ? "▾" : "▸"}</span>
           Wave replay
           {!replayOpen && (
-            <span style={{ fontFamily: font.mono, fontSize: 11, fontWeight: 400, textTransform: "none",
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 400, textTransform: "none",
               letterSpacing: 0, color: color.textMuted }}>
               scrub &amp; compare wave audit timelines
             </span>

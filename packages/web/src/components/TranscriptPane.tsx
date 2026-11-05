@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, type TranscriptTurn } from "../lib/api";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 import { Badge, Button, Input } from "./ui";
 
 type RoleFilter = "all" | "user" | "assistant" | "tool_result" | "system";
@@ -114,7 +114,7 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
 
 function RoleChip({ label, current, onPick }: { label: RoleFilter; current: RoleFilter; onPick: (r: RoleFilter) => void }) {
   return (
-    <Button variant={current === label ? "primary" : "ghost"} onClick={() => onPick(label)} style={{ textTransform: "uppercase" }}>
+    <Button variant={current === label ? "primary" : "ghost"} onClick={() => onPick(label)}>
       {label.replace("_", " ")}
     </Button>
   );
@@ -130,8 +130,8 @@ const ROLE_LABEL: Record<TranscriptTurn["role"], string> = { user: "user", assis
 function Turn({ turn, q }: { turn: TranscriptTurn; q: string }) {
   return (
     <div style={{ marginBottom: 12 }}>
-      <div style={{ fontSize: 11, textTransform: "uppercase", color: ROLE_COLOR[turn.role], marginBottom: 2 }}>{ROLE_LABEL[turn.role]}</div>
-      <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 13, color: color.text }}>
+      <div style={{ fontSize: fs.sm, color: ROLE_COLOR[turn.role], marginBottom: 2 }}>{ROLE_LABEL[turn.role]}</div>
+      <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.body, color: color.text }}>
         {highlight(turn.text, q)}
       </pre>
     </div>

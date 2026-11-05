@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Button, Select, StatusPill, Panel, SectionLabel, Chip } from "./ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang, voiceLangOptions } from "../lib/useVoiceLang";
 import { getDraft, setDraft, clearDraft } from "../lib/composerDrafts";
@@ -142,7 +142,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             // `minWidth: 0` overrides the UA's intrinsic textarea width (~232px at this font), which is
             // otherwise a hard floor this flex item cannot shrink past — the column's own basis above
             // is what picks the wrap point, not this floor.
-            style={{ flex: 1, minWidth: 0, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: 13 }}
+            style={{ flex: 1, minWidth: 0, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: fs.body }}
           />
           {/* Two-icon cluster in the bottom-right corner: the presets (Spark) trigger + the expand
               button, both ghost, absolutely positioned so they add ZERO height to the composer.
@@ -314,7 +314,7 @@ function LargeEditor({
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Compose a longer message…  (Ctrl/Cmd+Enter to send)"
-            style={{ flex: 1, minHeight: 320, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: 4, padding: "10px 12px", fontFamily: font.mono, fontSize: 13, lineHeight: 1.5 }}
+            style={{ flex: 1, minHeight: 320, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: "10px 12px", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5 }}
           />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 8 }}>
             <div>{voiceCluster}</div>
@@ -349,7 +349,7 @@ function MicButton({ speech }: { speech: SpeechRecognitionApi }) {
     >
       <span
         className={listening ? "loom-mic-pulse" : undefined}
-        style={{ width: 7, height: 7, borderRadius: 7, display: "inline-block", background: listening ? color.red : color.phosphor }}
+        style={{ width: 7, height: 7, borderRadius: radius.base, display: "inline-block", background: listening ? color.red : color.phosphor }}
       />
       {listening ? "Stop" : requesting ? "starting…" : "Voice"}
     </Button>
@@ -370,7 +370,7 @@ function VoiceLangSelect({ lang, setLang, disabled }: { lang: string; setLang: (
       value={lang}
       disabled={disabled}
       onChange={(e) => setLang(e.target.value)}
-      style={{ flex: 1, minWidth: 0, fontSize: 11, padding: "2px 4px" }}
+      style={{ flex: 1, minWidth: 0, fontSize: fs.sm, padding: "2px 4px" }}
     >
       {all.map((o) => (
         <option key={o.tag} value={o.tag}>{o.label}</option>
@@ -413,7 +413,7 @@ function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionA
   // Nothing to say → render nothing, so the composer sits flush against the card's bottom edge.
   if (!node) return null;
   return (
-    <div data-testid="composer-status" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: 10, minHeight: 16 }}>
+    <div data-testid="composer-status" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: fs.xs, minHeight: 16 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
     </div>
   );

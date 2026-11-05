@@ -9,7 +9,7 @@ import {
 } from "../lib/releasedSkills";
 import { LineDiff } from "./LineDiff";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 // Released skill copies at ONE project's shared doctrine dir, over card 8b38b920's three human-only REST
 // routes. Loom injects its skills into each session's `<cwd>/.claude/skills`; when it can no longer prove
@@ -88,13 +88,13 @@ function ReleasedSkillsBody({ project }: { project: Project }) {
 
         {list.isLoading && <Prose>reading this project's doctrine directory…</Prose>}
         {list.isError && (
-          <span data-testid="released-skills-list-error" style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>
+          <span data-testid="released-skills-list-error" style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>
             {errorText(list.error)}
           </span>
         )}
 
         {!list.isLoading && !list.isError && released.length === 0 && (
-          <span data-testid="released-skills-empty" style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>
+          <span data-testid="released-skills-empty" style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono }}>
             Nothing frozen — Loom is still managing every skill it injected here.
           </span>
         )}
@@ -135,22 +135,22 @@ function ReleasedRow({ projectId, entry, open, onToggle, onReadopted }: {
         title={open ? `Hide ${entry.name}` : `Review what differs in ${entry.name}`}
         style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "transparent", border: "none",
           padding: "8px 10px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span aria-hidden style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
+        <span aria-hidden style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
         {/* WRAPPED, never truncated or clipped: the name is the identifier the reader needs in full to
             know which copy this row is (same reasoning as the reclaim panel's full worktree path). A
             `flexShrink: 0` here clipped a long name clean off the row at 390px. */}
-        <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text, wordBreak: "break-all", minWidth: 0 }}>{entry.name}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, wordBreak: "break-all", minWidth: 0 }}>{entry.name}</span>
         <Badge tone={reasonTone}>{entry.reason}</Badge>
         {trackedLabel && <Badge tone="danger">{trackedLabel}</Badge>}
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, flexShrink: 0 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, flexShrink: 0 }}>
           {releasedAgeLabel(entry.firstSeenAt)}
         </span>
       </button>
       <div style={{ padding: "0 10px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
         <Prose>{releaseReasonGloss(entry.reason)}</Prose>
         {blocked && (
-          <span role="status" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.5 }}>
+          <span role="status" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.5 }}>
             Re-adopting is refused: {blocked}.
           </span>
         )}
@@ -212,7 +212,7 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
   if (diff.isError || !reviewed) {
     return (
       <Body>
-        <span data-testid="released-skill-diff-error" style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>
+        <span data-testid="released-skill-diff-error" style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>
           {errorText(diff.error) || "Couldn't read this copy."}
         </span>
       </Body>
@@ -228,10 +228,10 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
   return (
     <Body>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
           on disk now: <span style={{ color: color.textDim }}>{shortFingerprint(reviewed.currentFingerprint)}</span>
         </span>
-        <span data-testid="released-skill-diff-summary" style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+        <span data-testid="released-skill-diff-summary" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
           {reviewed.files.length === 1
             ? `${changed.length} of 1 file differs from the store`
             : `${changed.length} of ${reviewed.files.length} files differ from the store`}
@@ -273,7 +273,7 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
       {readopt.error && (
         <div data-testid="readopt-error" role="status"
           style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-            color: color.red, fontFamily: font.mono, fontSize: 12, lineHeight: 1.5,
+            color: color.red, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5,
             border: `1px solid ${color.red}`, borderRadius: radius.sm, padding: "6px 8px" }}>
           <span style={{ flex: 1, minWidth: 0 }}>{errorText(readopt.error)}</span>
           <Button variant="ghost" disabled={diff.isFetching} onClick={reReadCopy}>
@@ -295,7 +295,7 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
         // this really is unrecoverable from here. The amber "attention" tone would understate it.
         <div role="status" style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8,
           border: `1px solid ${color.red}`, borderRadius: radius.sm, background: color.panel }}>
-          <span style={{ fontFamily: font.mono, fontSize: 12, color: color.red, lineHeight: 1.5 }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.5 }}>
             Replace this project's copy of <strong>{entry.name}</strong> with the current store copy?
             {changed.length === 1 && " The file above is overwritten, and that cannot be undone from here."}
             {changed.length > 1 && ` The ${changed.length} files above are overwritten, and that cannot be undone from here.`}
@@ -341,19 +341,19 @@ function FileRow({ projectId, name, path, open, onToggle }: {
         title={open ? `Hide ${path}` : `Show what differs in ${path}`}
         style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "transparent", border: "none",
           padding: "6px 8px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span aria-hidden style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>{path}</span>
+        <span aria-hidden style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{path}</span>
       </button>
       {open && (
         <div style={{ padding: "0 8px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
           {!d ? (
             file.isLoading
               ? <Prose>loading this file…</Prose>
-              : <span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>{errorText(file.error) || "Couldn't load this file."}</span>
+              : <span style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(file.error) || "Couldn't load this file."}</span>
           ) : (
             <>
-              <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                store copy → copy on disk
+              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+                Store copy → copy on disk
               </span>
               <LineDiff base={d.store ?? ""} shipped={d.onDisk ?? ""} />
               {d.store === null && <Prose>Only this project's copy has this file — the store does not, so re-adopting removes it.</Prose>}
@@ -371,7 +371,7 @@ const Body = ({ children }: { children: ReactNode }) => (
 );
 
 const Prose = ({ children, style }: { children: ReactNode; style?: CSSProperties }) => (
-  <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.55, ...style }}>
+  <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.55, ...style }}>
     {children}
   </p>
 );

@@ -6,7 +6,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { KeyAdmin } from "../components/KeyAdmin";
 import { Panel, Button, SectionLabel, StatusPill, Chip, Segmented } from "../components/ui";
-import { color, font, tone, type Tone } from "../theme";
+import { color, font, tone, type Tone, fs, radius } from "../theme";
 
 // Agent Runs R4b — the project-scoped Runs observability view. Reads R4a's HUMAN run REST
 // (GET /api/projects/:id/runs[/:runId], POST .../cancel — unauthed loopback, full AgentRun rows
@@ -109,7 +109,7 @@ function RunsView({ projectId }: { projectId: string }) {
         </div>
         <div style={{ maxHeight: "76vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 }}>
           {rows.length === 0 && (
-            <p style={{ color: color.textMuted, fontSize: 13 }}>
+            <p style={{ color: color.textMuted, fontSize: fs.body }}>
               No runs yet. An agent run is an ephemeral, structured invocation started over the keyed Run
               REST — they appear here newest-first as callers fire them.
             </p>
@@ -126,7 +126,7 @@ function RunsView({ projectId }: { projectId: string }) {
       <div>
         <SectionLabel>{selected ? `Run · ${selected.id.slice(0, 8)}` : "Run detail"}</SectionLabel>
         <Panel style={{ height: "76vh", padding: 12, overflowY: "auto" }}>
-          {!selected && <span style={{ color: color.textMuted, fontSize: 12 }}>Select a run to view its input, result, usage, and transcript.</span>}
+          {!selected && <span style={{ color: color.textMuted, fontSize: fs.sm }}>Select a run to view its input, result, usage, and transcript.</span>}
           {selected && <RunDetail run={selected} agentName={agentName(selected.agentId)}
             onCancel={() => cancel.mutate(selected.id)} cancelling={cancel.isPending} />}
         </Panel>
@@ -149,9 +149,9 @@ function CapRejections({ events, agentName }: { events: RunEvent[]; agentName: (
             <Panel key={e.id} style={{ padding: "6px 10px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <StatusPill tone="danger" label="429" />
-                <span style={{ fontSize: 12, color: color.text }}>{capLabel} cap</span>
+                <span style={{ fontSize: fs.sm, color: color.text }}>{capLabel} cap</span>
                 <span style={{ flex: 1 }} />
-                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{ts(e.createdAt)}</span>
+                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{ts(e.createdAt)}</span>
               </div>
               <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <Chip label="key" value={e.keyId ? e.keyId.slice(0, 8) : "—"} />
@@ -175,7 +175,7 @@ function RunRow({ run, selected, agentName, onSelect, onCancel, cancelling }:
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusPill tone={statusTone[run.status]} label={run.status} glow={inFlight} />
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{run.id.slice(0, 8)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{run.id.slice(0, 8)}</span>
       </div>
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Chip label="agent" value={agentName} tone="info" />
@@ -184,7 +184,7 @@ function RunRow({ run, selected, agentName, onSelect, onCancel, cancelling }:
         {run.endedAt && <Chip label="ended" value={ts(run.endedAt)} />}
       </div>
       {p && (
-        <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: 11, color: run.error ? color.red : color.textDim,
+        <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.mono, color: run.error ? color.red : color.textDim,
           whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={p}>
           {run.error ? "✗ " : "↳ "}{p}
         </div>
@@ -234,7 +234,7 @@ function RunDetail({ run, agentName, onCancel, cancelling }:
           <pre style={{ ...preStyle, color: color.red }}>{run.error}</pre>
         </Field>
       )}
-      {run.webhookUrl && <Field label="Webhook"><span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, wordBreak: "break-all" }}>{run.webhookUrl}</span></Field>}
+      {run.webhookUrl && <Field label="Webhook"><span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, wordBreak: "break-all" }}>{run.webhookUrl}</span></Field>}
 
       {/* Transcript: the run's retained conversation via the RUN-scoped transcript route — live engine
           JSONL while in-flight, else the retained snapshot (transcriptRef). The session-transcript route
@@ -242,17 +242,17 @@ function RunDetail({ run, agentName, onCancel, cancelling }:
       <Field label={`Transcript${run.transcriptRef ? " · retained" : ""}`}>
         {run.sessionId
           ? (
-            <div style={{ height: "40vh", border: `1px solid ${color.border}`, borderRadius: 4 }}>
+            <div style={{ height: "40vh", border: `1px solid ${color.border}`, borderRadius: radius.sm }}>
               <TranscriptPane sessionId={run.sessionId} runRef={{ projectId: run.projectId, runId: run.id }} />
             </div>
           )
-          : <span style={{ color: color.textMuted, fontSize: 12 }}>No session — the run failed before one was minted.</span>}
+          : <span style={{ color: color.textMuted, fontSize: fs.sm }}>No session — the run failed before one was minted.</span>}
       </Field>
     </div>
   );
 }
 
-const preStyle = { whiteSpace: "pre-wrap" as const, wordBreak: "break-word" as const, margin: 0, fontFamily: font.mono, fontSize: 12, color: color.text };
+const preStyle = { whiteSpace: "pre-wrap" as const, wordBreak: "break-word" as const, margin: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text };
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (

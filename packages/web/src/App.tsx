@@ -17,7 +17,7 @@ import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionK
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider } from "./lib/activeProject";
 import { useAtlasUi } from "./lib/atlasUi";
-import { color, font, radius, shadow, tone, wash } from "./theme";
+import { color, font, radius, shadow, tone, wash, fs } from "./theme";
 import { Dot } from "./components/ui";
 import { page } from "./ui";
 import { errorText } from "./lib/loopbackCredential";
@@ -51,7 +51,7 @@ function UpdateBanner() {
 
   return (
     <div role="status" style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 20px",
-      background: wash(color.busy, 8), borderBottom: `1px solid ${color.amber}`, fontFamily: font.mono, fontSize: 12.5 }}>
+      background: wash(color.busy, 8), borderBottom: `1px solid ${color.amber}`, fontFamily: font.mono, fontSize: fs.mono }}>
       <Dot tone="busy" glow />
       {started ? (
         <span style={{ color: color.amber }}>
@@ -66,14 +66,14 @@ function UpdateBanner() {
           </span>
           <span style={{ flex: 1 }} />
           {mut.isError && !started && (
-            <span title={errorText(mut.error)} style={{ color: color.red, fontSize: 11 }}>update failed — see daemon log</span>
+            <span title={errorText(mut.error)} style={{ color: color.red, fontSize: fs.sm }}>update failed — see daemon log</span>
           )}
           <Button variant="primary" disabled={mut.isPending} onClick={() => mut.mutate()}
-            style={{ padding: "4px 12px", fontSize: 12 }}>
+            style={{ padding: "4px 12px", fontSize: fs.sm }}>
             {mut.isPending ? "Starting…" : "Update & restart"}
           </Button>
           <button onClick={dismiss} title="dismiss until the next release"
-            style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: 15, lineHeight: 1, padding: "0 2px" }}>×</button>
+            style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: fs.lg, lineHeight: 1, padding: "0 2px" }}>×</button>
         </>
       )}
     </div>
@@ -199,7 +199,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
         display: "flex", alignItems: "center", gap: 8,
         background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${c}`,
         borderRadius: radius.base, padding: "7px 11px", boxShadow: shadow.pop,
-        cursor: "pointer", fontFamily: font.mono, fontSize: 12,
+        cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
       }}>
@@ -208,7 +208,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
       <span style={{ color: color.textDim }}>{count === 1 ? "request needs you" : "requests need you"}</span>
       <span aria-hidden style={{ color: color.textMuted }}>→ inbox</span>
       <button onClick={(e) => { e.stopPropagation(); onDismiss(); }} title="dismiss" aria-label="dismiss"
-        style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: 14, lineHeight: 1, padding: 0, marginLeft: 2 }}>×</button>
+        style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1, padding: 0, marginLeft: 2 }}>×</button>
     </div>
   );
 }
@@ -234,11 +234,11 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
       }}>
       <Dot tone={item.tone} glow={item.tone === "busy" || item.tone === "danger"} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: font.ui, fontSize: 12, fontWeight: 600, color: c }}>{attentionKindLabel(item.kind)}</div>
-        <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, marginTop: 3, wordBreak: "break-word" }}>{item.text}</div>
+        <div style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: c }}>{attentionKindLabel(item.kind)}</div>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, marginTop: 3, wordBreak: "break-word" }}>{item.text}</div>
       </div>
       <button onClick={(e) => { e.stopPropagation(); onDismiss(); }} title="dismiss"
-        style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+        style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1, padding: 0 }}>×</button>
     </div>
   );
 }
@@ -278,19 +278,19 @@ function FirstRunWelcome() {
         style={{ width: 480, maxWidth: "92vw", background: color.panel, border: `1px solid ${color.borderStrong}`,
           borderRadius: radius.base, padding: "26px 26px 22px", boxShadow: shadow.pop,
           borderTop: `3px solid ${color.phosphor}` }}>
-        <div style={{ fontFamily: font.head, fontSize: 20, color: color.text, letterSpacing: "0.01em" }}>Welcome to Loom</div>
-        <p style={{ color: color.textDim, fontFamily: font.mono, fontSize: 13, lineHeight: 1.6, margin: "12px 0 22px" }}>
+        <div style={{ fontFamily: font.head, fontSize: fs.h1, color: color.text, letterSpacing: "0.01em" }}>Welcome to Loom</div>
+        <p style={{ color: color.textDim, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.6, margin: "12px 0 22px" }}>
           Loom weaves real Claude Code sessions, your docs, and tasks into one workspace. Let’s stand up your first
           project — pick a workflow template, point Loom at a repo, and get a ready-to-run team in a few quick steps.
         </p>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <Button variant="primary" onClick={() => setWizardOpen(true)} style={{ padding: "6px 14px", fontSize: 13 }}>Start guided setup →</Button>
-          <Button onClick={goSetup} style={{ padding: "6px 14px", fontSize: 13 }} title="Hand the reins to the Platform agent instead">Open Platform</Button>
+          <Button variant="primary" onClick={() => setWizardOpen(true)} style={{ padding: "6px 14px", fontSize: fs.body }}>Start guided setup →</Button>
+          <Button onClick={goSetup} style={{ padding: "6px 14px", fontSize: fs.body }} title="Hand the reins to the Platform agent instead">Open Platform</Button>
           {/*
             @decision 6cefdf25 — do not dim this label with an inline `color`: it shadows the ghost
             variant's own hover rule and leaves the button inert. The `loom-btn-muted` class does it.
           */}
-          <Button variant="ghost" className="loom-btn-muted" onClick={dismiss} style={{ padding: "6px 12px", fontSize: 13 }}>Maybe later</Button>
+          <Button variant="ghost" className="loom-btn-muted" onClick={dismiss} style={{ padding: "6px 12px", fontSize: fs.body }}>Maybe later</Button>
         </div>
       </div>
     </div>

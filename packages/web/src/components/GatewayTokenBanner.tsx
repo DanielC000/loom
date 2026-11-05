@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button, Dot, Input } from "./ui";
-import { color, font, radius, wash } from "../theme";
+import { color, font, radius, wash, fs } from "../theme";
 import {
   clearGatewayLock, dismissGatewayLinkOutcome, gatewayLinkCopy, gatewayLinkOutcome, gatewayLock, gatewayTokenRevoked,
   getGatewayToken, pendingGatewayToken, retryPendingGatewayToken, storeVerifiedGatewayToken,
@@ -93,7 +93,7 @@ export function GatewayTokenBanner() {
 
   return (
     <div role="status" style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "9px 20px",
-      background: wash(color.danger, 7), borderBottom: `1px solid ${color.red}`, fontFamily: font.mono, fontSize: 12.5 }}>
+      background: wash(color.danger, 7), borderBottom: `1px solid ${color.red}`, fontFamily: font.mono, fontSize: fs.mono }}>
       <Dot tone="danger" glow style={{ marginTop: 4, flex: "0 0 auto" }} />
       <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
         <span style={{ color: color.text }}>

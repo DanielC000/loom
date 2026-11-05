@@ -93,7 +93,7 @@ export function Button({
         borderRadius: radius.base,
         padding: "4px 12px",
         fontFamily: font.ui,
-        fontSize: 13,
+        fontSize: fs.body,
         fontWeight: 500,
         cursor: rest.disabled ? "not-allowed" : "pointer",
         ...style,
@@ -113,7 +113,7 @@ type FieldFontProps = { mono?: boolean };
 const fieldStyle = (mono: boolean | undefined): CSSProperties => ({
   padding: "4px 8px",
   fontFamily: mono ? font.mono : font.ui,
-  fontSize: mono ? fs.mono : 13,
+  fontSize: mono ? fs.mono : fs.body,
 });
 
 export function Input({ style, className, mono, ...rest }: InputHTMLAttributes<HTMLInputElement> & FieldFontProps) {
@@ -139,7 +139,7 @@ export function Dot({ tone: t, glow: _glow, title, style, ...rest }: DotProps) {
     <span
       {...rest}
       title={title}
-      style={{ width: 8, height: 8, borderRadius: 8, background: toneFill[t], display: "inline-block", flexShrink: 0, ...style }}
+      style={{ width: 8, height: 8, borderRadius: radius.base, background: toneFill[t], display: "inline-block", flexShrink: 0, ...style }}
     />
   );
 }
@@ -189,7 +189,7 @@ export function PresetAccentDots({ accents, title, style, ...rest }: PresetAccen
   return (
     <span {...rest} aria-hidden title={title} style={{ display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0, ...style }}>
       {accents.map((a, i) => (
-        <span key={i} style={{ width: 8, height: 8, borderRadius: 8, flexShrink: 0, background: a ?? color.border }} />
+        <span key={i} style={{ width: 8, height: 8, borderRadius: radius.base, flexShrink: 0, background: a ?? color.border }} />
       ))}
     </span>
   );
@@ -202,7 +202,7 @@ type ChipProps = { label?: string; value: ReactNode; tone?: Tone } & HTMLAttribu
 
 export function Chip({ label, value, tone: t, style, ...rest }: ChipProps) {
   return (
-    <span {...rest} style={{ display: "inline-flex", gap: 4, alignItems: "baseline", fontFamily: font.mono, fontSize: 11, background: color.surface2, borderRadius: radius.pill, padding: "1px 8px", minWidth: 0, maxWidth: "100%", ...style }}>
+    <span {...rest} style={{ display: "inline-flex", gap: 4, alignItems: "baseline", fontFamily: font.mono, fontSize: fs.xs, background: color.surface2, borderRadius: radius.pill, padding: "1px 8px", minWidth: 0, maxWidth: "100%", ...style }}>
       {label && <span style={{ color: color.textMuted, flexShrink: 0 }}>{label}</span>}
       <span style={{ color: t ? tone[t] : color.text, minWidth: 0, overflowWrap: "anywhere" }}>{value}</span>
     </span>
@@ -227,7 +227,7 @@ export function SectionLabel({ children, style, ...rest }: SectionLabelProps) {
 export function Meter({ value, max, tone: t = "accent", width = 80 }: { value: number; max: number; tone?: Tone; width?: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
   return (
-    <span style={{ display: "inline-block", width, height: 3, background: color.track, borderRadius: 2, overflow: "hidden", verticalAlign: "middle" }}>
+    <span style={{ display: "inline-block", width, height: 3, background: color.track, borderRadius: radius.pill, overflow: "hidden", verticalAlign: "middle" }}>
       <span style={{ display: "block", height: "100%", width: `${pct * 100}%`, background: toneFill[t] }} />
     </span>
   );
@@ -321,11 +321,11 @@ export function Segmented<T extends string>({
 export function StaleStartupPromptWarning({ warnings }: { warnings: StalePromptWarning[] | undefined }) {
   if (!warnings || warnings.length === 0) return null;
   return (
-    <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.amber}`, borderRadius: 6 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+    <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.amber}`, borderRadius: radius.sm }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
         these agent startup prompts still reference the OLD value — edit them manually if that's a problem:
       </span>
-      <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>
+      <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
         {warnings.map((w) => (
           <li key={w.agentId}>
             <span style={{ color: color.text }}>{w.agentName}</span>

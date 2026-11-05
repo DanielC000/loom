@@ -43,7 +43,7 @@ import {
   rosterCardLabel, rosterRows, taskTitlesById, writeRosterScope, type RosterScope,
 } from "../lib/atlasProjectOverview";
 import { PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt } from "../nav";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 /** The Sessions card's `aria-controls` target — one region, because there is only ever one mount. */
 const PROJECT_SESSION_TERMINAL_REGION = "atlas-project-session-terminal";
@@ -272,7 +272,7 @@ export default function ProjectHome() {
   if (!projectId) {
     return (
       <Panel style={{ maxWidth: 560, padding: "18px 20px" }} data-testid="atlas-project-empty">
-        <p style={{ margin: 0, color: color.textDim, fontFamily: font.mono, fontSize: 13, lineHeight: 1.7 }}>
+        <p style={{ margin: 0, color: color.textDim, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
           No project is active yet. Pick one in the entity tree — this node is whichever project the tree has open.
         </p>
       </Panel>

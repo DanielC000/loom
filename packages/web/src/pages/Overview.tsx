@@ -27,7 +27,7 @@ import { attentionItemInProject } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
 import { MergeGateStrip, MergeGateAttention, mergeGateAttentionCount, useMergeGateStatus } from "../components/mergeGate";
 import { HarnessMixProvider } from "../components/HarnessPicker";
-import { color, font, tone } from "../theme";
+import { color, font, tone, fs, radius } from "../theme";
 import { RoleBadge } from "../lib/roleDisplay";
 import { errorText } from "../lib/loopbackCredential";
 
@@ -184,7 +184,7 @@ export default function Overview() {
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Overview
           <Badge tone="info">{project?.name ?? "…"}</Badge>
-          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
             the active project at a glance · switch the project in the header to rescope
           </span>
         </SectionLabel>
@@ -196,11 +196,11 @@ export default function Overview() {
             <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "busy" : "muted"} />
             <Stat label="archived" value={archived.data?.total ?? 0} tone="muted" />
           </div>
-          <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 12px", minWidth: 132 }}>
+          <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
             <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-              <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>worst context</span>
+              <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Worst context</span>
               <span style={{ flex: 1 }} />
-              <span style={{ fontFamily: font.mono, fontSize: 14, color: tone[ctxPct >= 80 ? "busy" : "live"] }}>{wc.ctx > 0 ? `${ctxPct}%` : "—"}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[ctxPct >= 80 ? "busy" : "live"] }}>{wc.ctx > 0 ? `${ctxPct}%` : "—"}</span>
             </span>
             <Meter value={wc.ctx} max={wc.window || 1} tone={ctxPct >= 80 ? "busy" : "accent"} width={110} />
           </div>
@@ -219,7 +219,7 @@ export default function Overview() {
         <SectionLabel>Agents</SectionLabel>
         {projectAgents.length === 0 ? (
           <Panel style={{ padding: 12 }}>
-            <span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>
+            <span style={{ color: color.amber, fontFamily: font.mono, fontSize: fs.mono }}>
               No manually-spawnable agents — workers are dispatched by a manager, not spawned here. Create one on the Projects page.
             </span>
           </Panel>
@@ -296,7 +296,7 @@ export default function Overview() {
       <section>
         <SectionLabel>Activity</SectionLabel>
         <Panel grid style={{ maxHeight: "60vh", overflow: "auto" }}>
-          {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
+          {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: fs.sm }}>No events yet.</span>}
           {allEvents.slice(0, 100).map((e) => <EventRow key={e.id} e={e} />)}
         </Panel>
       </section>
@@ -338,7 +338,7 @@ function OtherAttentionList({ items }: { items: AttentionItem[] }) {
         <div style={{ marginTop: 2 }}>
           <Button variant="ghost" onClick={() => setExpanded((v) => !v)}
             title={expanded ? "Collapse to the first few alerts" : "Show every alert in this project"}
-            style={{ padding: "2px 8px", fontFamily: font.mono, fontSize: 11 }}>
+            style={{ padding: "2px 8px", fontFamily: font.mono, fontSize: fs.mono }}>
             {expanded ? "Collapse" : `Show ${overflow} more`}
           </Button>
         </div>
@@ -380,7 +380,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
       data-testid={`agent-control-${agent.id}`}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <RoleBadge role={role} />
-        <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
+        <strong style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {live && pill && <StatusPill tone={pill.pending ? "busy" : "live"} glow={pill.pending} label={pill.label} />}
       </div>
@@ -396,7 +396,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
-      {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
+      {spawn.isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
     </Panel>
   );
 }
@@ -465,7 +465,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
   return (
     <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {rowCount > 0 && (
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
           {rowCount} session{rowCount === 1 ? "" : "s"}
         </span>
       )}
@@ -484,7 +484,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
           <FleetCockpitRow key={w.id} s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
         ))}
         {managers.length === 0 && looseWorkers.length === 0 && (
-          <span style={{ color: color.textMuted, fontSize: 12 }}>idle — no live manager</span>
+          <span style={{ color: color.textMuted, fontSize: fs.sm }}>idle — no live manager</span>
         )}
       </div>
       {/* The accordion folds in only the most-recent archived rows (ARCHIVED_FOLD_CAP); everything older
@@ -492,7 +492,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
       {archivedHidden > 0 && (
         <Button variant="ghost" onClick={() => navigate("/archive")}
           title="Browse this project's full archive"
-          style={{ alignSelf: "flex-start", padding: "2px 8px", fontFamily: font.mono, fontSize: 11 }}>
+          style={{ alignSelf: "flex-start", padding: "2px 8px", fontFamily: font.mono, fontSize: fs.mono }}>
           {archivedHidden} more archived → Archive
         </Button>
       )}
@@ -512,7 +512,7 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <button onClick={onToggle} title={open ? "Collapse this session" : "Expand to this session's cockpit"}
           style={{ background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
-            color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: 12 }}>
+            color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: fs.mono }}>
           {open ? "▾" : "▸"}
         </button>
         <div style={{ flex: 1, minWidth: 0 }}><FleetRow s={s} star={star} /></div>
@@ -569,11 +569,11 @@ function WorkerDiffPanel({ workerId }: { workerId: string }) {
   const diff = useQuery({ ...workerDiffQuery(workerId), placeholderData: keepPreviousData });
   return (
     <Panel style={{ maxHeight: 440, overflow: "auto" }}>
-      {diff.isLoading && <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>}
-      {diff.isError && <span style={{ color: color.red, fontSize: 12 }}>No diff (worker has no branch, or it was merged/removed).</span>}
+      {diff.isLoading && <span style={{ color: color.textMuted, fontSize: fs.sm }}>Loading diff…</span>}
+      {diff.isError && <span style={{ color: color.red, fontSize: fs.sm }}>No diff (worker has no branch, or it was merged/removed).</span>}
       {diff.data && (
         <>
-          <div style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <span>{diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}</span>
             {diff.data.uncommitted && <Badge tone="busy">live · incl. uncommitted</Badge>}
             {diff.data.merged && <Badge tone="live">merged → landed diff</Badge>}

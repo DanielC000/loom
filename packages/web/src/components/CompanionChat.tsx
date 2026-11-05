@@ -14,7 +14,7 @@ import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCr
 import { createReconnectBackoff, createRefusalEpisode, handleSocketClose } from "../lib/socketReconnect";
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
-import { color, font, radius, wash } from "../theme";
+import { color, font, radius, wash, fs } from "../theme";
 
 // Feature-detect mic support ONCE at module load (Companion Voice epic, VOICE-P4 inbound) — Safari/older
 // browsers or a non-HTTPS/non-loopback origin may lack getUserMedia or MediaRecorder entirely; the mic
@@ -645,7 +645,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           spellCheck
           aria-label="Message"
           style={{
-            flex: 1, resize: "none", fontFamily: font.mono, fontSize: 13, lineHeight: 1.5,
+            flex: 1, resize: "none", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
             background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`,
             borderRadius: radius.base, padding: "8px 12px",
           }}
@@ -697,7 +697,7 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
       <Avatar label={initials(title)} />
       <span
         style={{
-          flex: 1, minWidth: 0, fontFamily: font.head, fontSize: 13, fontWeight: 600,
+          flex: 1, minWidth: 0, fontFamily: font.head, fontSize: fs.body, fontWeight: 600,
           color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}
       >
@@ -755,20 +755,20 @@ function MessageRow({ msg, title, grouped, groupEnd, time, delivery }: {
       <div style={{ display: "flex", flexDirection: "column", minWidth: 0, maxWidth: "78%", alignItems: you ? "flex-end" : "flex-start" }}>
         {!grouped && (
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, margin: "0 4px 4px", maxWidth: "100%" }}>
-            <span style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: color.textDim, whiteSpace: "nowrap" }}>
+            <span style={{ fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim, whiteSpace: "nowrap" }}>
               {you ? "You" : title}
             </span>
             {badge && (
-              <span style={{ fontFamily: font.mono, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.05em", color: color.cyan, border: `1px solid ${wash(color.info, 30)}`, borderRadius: 3, padding: "0 5px", background: wash(color.info, 10) }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.cyan, border: `1px solid ${wash(color.info, 30)}`, borderRadius: radius.sm, padding: "0 5px", background: wash(color.info, 10) }}>
                 {badge}
               </span>
             )}
-            {time && <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, whiteSpace: "nowrap" }}>{time}</span>}
+            {time && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, whiteSpace: "nowrap" }}>{time}</span>}
           </div>
         )}
         <Bubble msg={msg} you={you} groupEnd={groupEnd} />
         {you && groupEnd && delivery && (
-          <div style={{ display: "flex", flexDirection: "row-reverse", alignItems: "center", gap: 6, margin: "4px 5px 0", fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+          <div style={{ display: "flex", flexDirection: "row-reverse", alignItems: "center", gap: 6, margin: "4px 5px 0", fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
             <span style={{ color: color.phosphor, letterSpacing: "-1px" }} aria-hidden>{delivery === "delivered" ? "✓✓" : "✓"}</span>
             <span>{(badge ? `via ${badge}` : "in-app")} · {delivery}</span>
           </div>
@@ -784,7 +784,7 @@ function Bubble({ msg, you, groupEnd }: { msg: ChatMessage; you: boolean; groupE
     <div
       className="loom-chat-in"
       style={{
-        maxWidth: "100%", padding: "9px 13px", borderRadius: 12, fontFamily: font.mono, fontSize: 13,
+        maxWidth: "100%", padding: "9px 13px", borderRadius: radius.lg, fontFamily: font.mono, fontSize: fs.body,
         lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color.text,
         background: you ? color.phosphorDim : color.panel2,
         border: `1px solid ${you ? wash(color.live, 22) : color.border}`,
@@ -837,15 +837,15 @@ function EventLine({ msg, time, title }: { msg: ChatMessage; time: string; title
       <span
         style={{
           display: "inline-flex", alignItems: "center", gap: 9, maxWidth: "82%", padding: "6px 12px",
-          borderRadius: 999, border: `1px solid ${wash(color.busy, 28)}`, background: wash(color.busy, 9),
-          fontFamily: font.mono, fontSize: 11.5, color: color.textDim, lineHeight: 1.45,
+          borderRadius: radius.pill, border: `1px solid ${wash(color.busy, 28)}`, background: wash(color.busy, 9),
+          fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.45,
         }}
       >
-        <span style={{ fontFamily: font.head, fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.09em", color: color.amber, whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.amber, whiteSpace: "nowrap" }}>
           ⟡ {title}
         </span>
         <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{msg.text}</span>
-        {time && <span style={{ color: color.textMuted, fontSize: 10, whiteSpace: "nowrap" }}>{time}</span>}
+        {time && <span style={{ color: color.textMuted, fontSize: fs.xs, whiteSpace: "nowrap" }}>{time}</span>}
       </span>
     </div>
   );
@@ -863,10 +863,10 @@ function JumpToLatest({ show, unread, onClick }: { show: boolean; unread: number
       tabIndex={show ? 0 : -1}
       className={`loom-chat-jump${show ? " is-shown" : ""}`}
     >
-      <span aria-hidden style={{ color: color.phosphor, fontSize: 13 }}>↓</span>
+      <span aria-hidden style={{ color: color.phosphor, fontSize: fs.body }}>↓</span>
       Jump to latest
       {unread > 0 && (
-        <span style={{ fontFamily: font.head, fontWeight: 700, fontSize: 10, color: color.bg, background: color.phosphor, borderRadius: 999, padding: "1px 7px", letterSpacing: "0.02em" }}>
+        <span style={{ fontFamily: font.head, fontWeight: 700, fontSize: fs.xs, color: color.bg, background: color.phosphor, borderRadius: radius.pill, padding: "1px 7px", letterSpacing: "0.02em" }}>
           {unread} new
         </span>
       )}
@@ -881,8 +881,8 @@ function Avatar({ label, blank, rowGap }: { label: string; blank?: boolean; rowG
     <div
       aria-hidden
       style={{
-        width: 28, height: 28, borderRadius: 7, flexShrink: 0, ...(rowGap ? { marginTop: 20 } : null),
-        display: "grid", placeItems: "center", fontFamily: font.head, fontWeight: 700, fontSize: 11,
+        width: 28, height: 28, borderRadius: radius.base, flexShrink: 0, ...(rowGap ? { marginTop: 20 } : null),
+        display: "grid", placeItems: "center", fontFamily: font.head, fontWeight: 700, fontSize: fs.sm,
         letterSpacing: "0.02em",
         ...(blank
           ? { background: "transparent", border: "1px solid transparent", color: "transparent" }
@@ -917,7 +917,7 @@ function MediaAttachment({ media, spaced }: { media: InboundMedia; spaced: boole
         <img
           src={src}
           alt={media.fileName}
-          style={{ display: "block", maxWidth: "100%", maxHeight: 320, borderRadius: 8, border: `1px solid ${color.border}` }}
+          style={{ display: "block", maxWidth: "100%", maxHeight: 320, borderRadius: radius.base, border: `1px solid ${color.border}` }}
         />
       </a>
     );
@@ -927,9 +927,9 @@ function MediaAttachment({ media, spaced }: { media: InboundMedia; spaced: boole
       href={src}
       download={media.fileName}
       style={{
-        display: "flex", alignItems: "center", gap: 8, marginTop, padding: "8px 10px", borderRadius: 8,
+        display: "flex", alignItems: "center", gap: 8, marginTop, padding: "8px 10px", borderRadius: radius.base,
         border: `1px solid ${color.border}`, background: color.panel2, color: color.text, textDecoration: "none",
-        fontFamily: font.mono, fontSize: 12,
+        fontFamily: font.mono, fontSize: fs.mono,
       }}
     >
       <span aria-hidden style={{ opacity: 0.7 }}>📎</span>
@@ -943,12 +943,12 @@ function TypingIndicator({ title }: { title: string }) {
   return (
     <div style={{ display: "flex", gap: 10, marginTop: 14, alignItems: "flex-start" }} aria-label={`${title} is replying`} role="status">
       <Avatar label={initials(title)} rowGap={false} />
-      <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "10px 13px", borderRadius: 12, borderBottomLeftRadius: 4, background: color.panel2, border: `1px solid ${color.border}` }}>
+      <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "10px 13px", borderRadius: radius.lg, borderBottomLeftRadius: 4, background: color.panel2, border: `1px solid ${color.border}` }}>
         {[0, 1, 2].map((i) => (
           <span
             key={i}
             className="loom-typing-dot"
-            style={{ width: 5, height: 5, borderRadius: 5, background: color.textDim, animationDelay: `${i * 0.18}s` }}
+            style={{ width: 5, height: 5, borderRadius: radius.pill, background: color.textDim, animationDelay: `${i * 0.18}s` }}
           />
         ))}
       </div>
@@ -960,11 +960,11 @@ function TypingIndicator({ title }: { title: string }) {
 function EmptyState({ connected, title }: { connected: boolean; title: string }) {
   return (
     <div style={{ margin: "auto", textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center", color: color.textMuted, padding: 40, maxWidth: 340 }}>
-      <span aria-hidden style={{ width: 52, height: 52, borderRadius: 12, display: "grid", placeItems: "center", fontSize: 22, color: color.phosphor, background: color.phosphorDim, border: `1px solid ${wash(color.live, 30)}` }}>◇</span>
-      <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 12, color: color.textDim }}>
+      <span aria-hidden style={{ width: 52, height: 52, borderRadius: radius.lg, display: "grid", placeItems: "center", fontSize: fs.h1, color: color.phosphor, background: color.phosphorDim, border: `1px solid ${wash(color.live, 30)}` }}>◇</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.sm, color: color.textDim }}>
         Say hello
       </span>
-      <span style={{ fontSize: 12, lineHeight: 1.7 }}>
+      <span style={{ fontSize: fs.sm, lineHeight: 1.7 }}>
         {connected
           ? `Start a conversation with ${title}. Messages and replies show up here — grouped by sender, marked by time, and always anchored to the latest.`
           : `Connecting to ${title}…`}
@@ -983,7 +983,7 @@ function notice(t: "busy" | "muted" | "danger"): CSSProperties {
     display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
     border: `1px solid ${accent}`, borderRadius: radius.base,
     background: t === "busy" ? wash(color.busy, 6) : t === "danger" ? wash(color.danger, 7) : color.panel2,
-    fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, color: t === "muted" ? color.textMuted : color.textDim,
+    fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: t === "muted" ? color.textMuted : color.textDim,
   };
 }
 
@@ -1105,17 +1105,17 @@ function HistoryRow({ active, primary, secondary, count, live, onClick }: {
     >
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
         {live && <Dot tone="live" glow />}
-        <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: active ? color.text : color.textDim }}>
+        <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: active ? color.text : color.textDim }}>
           {primary}
         </span>
         {count !== undefined && (
           <>
             <span style={{ flex: 1 }} />
-            <span style={{ fontSize: 10, color: color.textMuted }}>{count} msg{count === 1 ? "" : "s"}</span>
+            <span style={{ fontSize: fs.xs, color: color.textMuted }}>{count} msg{count === 1 ? "" : "s"}</span>
           </>
         )}
       </span>
-      <span style={{ fontSize: 11, lineHeight: 1.4, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <span style={{ fontSize: fs.sm, lineHeight: 1.4, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {secondary}
       </span>
     </button>
@@ -1140,7 +1140,7 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Button variant="ghost" onClick={onBack} style={{ padding: "4px 8px" }} title="Return to the live chat">← Live chat</Button>
-        <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: fs.sm, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.data ? formatConversationTime(q.data.conversation.startedAt) : "Conversation"}
         </span>
         <StatusPill tone="info" label="read-only" />
@@ -1148,11 +1148,11 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
 
       <div style={{ flex: 1, minHeight: 0, maxHeight: SCROLL_MAX_HEIGHT, overflowY: "auto", display: "flex", flexDirection: "column", padding: "6px 14px 10px" }}>
         {q.isLoading ? (
-          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>Loading…</div>
+          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>Loading…</div>
         ) : q.isError ? (
-          <div style={{ margin: "auto", color: color.red, fontFamily: font.mono, fontSize: 12 }}>{(q.error as Error).message}</div>
+          <div style={{ margin: "auto", color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>{(q.error as Error).message}</div>
         ) : timeline.length === 0 ? (
-          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>This conversation has no messages.</div>
+          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>This conversation has no messages.</div>
         ) : (
           <Timeline items={timeline} title={title} />
         )}

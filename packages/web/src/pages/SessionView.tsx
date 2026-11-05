@@ -9,7 +9,7 @@ import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import { SessionNode } from "../components/SessionNode";
 import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, SectionLabel, StatusPill } from "../components/ui";
-import { color, font, fs } from "../theme";
+import { color, font, fs, radius } from "../theme";
 
 // Deep-linkable SINGLE-session view (/session/:id) — the destination a non-merge attention alert
 // (STUCK-BUSY / CRASH-LOOPED / MANAGER ASLEEP / QUEUE DRAINED / CONTEXT OVERFLOW) opens
@@ -55,7 +55,7 @@ export default function SessionView() {
       <Button onClick={() => navigate(-1)}>← back</Button>
       <span style={{ fontFamily: font.ui, fontSize: fs.lg, fontWeight: 600, letterSpacing: "-0.01em", color: color.text }}>{label}</span>
       {session && (
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
           {session.projectName} · {session.agentName}{session.role ? ` · ${session.role}` : ""} · {session.id.slice(0, 8)}
         </span>
       )}
@@ -115,20 +115,20 @@ export default function SessionView() {
       <Panel style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <StatusPill tone="muted" label={session.processState} />
-          <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
             last active {new Date(session.lastActivity).toLocaleString()}
           </span>
         </div>
         {session.lastError ? (
           <div>
             <SectionLabel style={{ marginTop: 0 }}>Last error</SectionLabel>
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: font.mono, fontSize: 12,
-              color: color.red, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 4, padding: "8px 10px" }}>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: font.mono, fontSize: fs.mono,
+              color: color.red, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "8px 10px" }}>
               {session.lastError}
             </pre>
           </div>
         ) : (
-          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No error recorded — the session exited cleanly.</span>
+          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No error recorded — the session exited cleanly.</span>
         )}
         <div>
           <Button variant="primary" onClick={openArchive}>View transcript in Archive →</Button>

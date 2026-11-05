@@ -15,7 +15,7 @@ import {
   Field, MetricToggle, RowName, SectionHead, SortToggle, Stat, TIMESPANS, WindowSelect,
   fmtRatio, fmtTokens, fmtUsd, ratioTone, sessionTotalTokens, sinceIsoFor, type Timespan,
 } from "../components/usageKit";
-import { color, font, tone, type Tone } from "../theme";
+import { color, font, tone, type Tone, fs } from "../theme";
 
 // USAGE — a god-eye page split into THREE deliberately separate, distinctly-labeled planes:
 //
@@ -141,7 +141,7 @@ export default function Usage() {
           <WindowSelect value={span} onChange={setSpan} />
         </Field>
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
           Project filters all three sections. Window governs the two historical sections (Interactive
           sessions &amp; Agent&nbsp;Runs) — live occupancy is always now.
         </span>
@@ -167,7 +167,7 @@ export default function Usage() {
           <Stat label="est. ctx cost" value={fmtUsd(totalCost)} tone="live" />
           <Stat label="rate-limited" value={String(rateLimited.length)} tone={rateLimited.length ? "danger" : "muted"} />
           <span style={{ flex: 1 }} />
-          <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
             "ctx in use" = current context size, not cumulative spend. Cost is an estimate of one input
             pass at list rates — relative gauge only.
           </span>
@@ -200,12 +200,12 @@ export default function Usage() {
               return (
                 <Panel key={pn} style={{ marginBottom: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{pn}</span>
+                    <span style={{ fontFamily: font.head, color: color.text }}>{pn}</span>
                     <Chip label="ctx" value={fmtTokens(projCtx)} tone="info" />
                     <Chip label="est." value={fmtUsd(projCost)} />
                     {projLimited > 0 && <Badge tone="danger">{projLimited} rate-limited</Badge>}
                     <span style={{ flex: 1 }} />
-                    <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{rows.length} session{rows.length === 1 ? "" : "s"}</span>
+                    <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{rows.length} session{rows.length === 1 ? "" : "s"}</span>
                   </div>
                   {rows.map((s) => <UsageRow key={s.id} s={s} />)}
                 </Panel>
@@ -240,7 +240,7 @@ function UsageRow({ s, showProject }: { s: SessionListItem; showProject?: boolea
   const limited = isRateLimited(s);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, minWidth: 132 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, minWidth: 132 }}>
         <span style={{ color: s.role === "manager" ? color.phosphor : color.textDim }}>{s.role === "manager" ? "★ " : ""}{s.role ?? "session"}</span>{" "}
         <span style={{ color: color.textMuted }}>{s.id.slice(0, 8)}</span>
       </span>
@@ -250,12 +250,12 @@ function UsageRow({ s, showProject }: { s: SessionListItem; showProject?: boolea
       {limited && <Badge tone="danger">rate-limited</Badge>}
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 96, textAlign: "right" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 96, textAlign: "right" }}>
           {fmtTokens(ctx)} / {fmtTokens(win)}
         </span>
         <Meter value={ctx} max={win} tone={t} width={90} />
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[t], minWidth: 36, textAlign: "right" }}>{pct}%{rawPct > 100 ? "+" : ""}</span>
-        {cost != null && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 52, textAlign: "right" }}>{fmtUsd(cost)} est.</span>}
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[t], minWidth: 36, textAlign: "right" }}>{pct}%{rawPct > 100 ? "+" : ""}</span>
+        {cost != null && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 52, textAlign: "right" }}>{fmtUsd(cost)} est.</span>}
       </span>
     </div>
   );
@@ -277,7 +277,7 @@ function HistorySection({
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionHead title="Agent Runs" tag={window} tagTone="info" />
-      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
         Cumulative BILLED token + cost totals from finished Agent Runs — not the live occupancy above, and
         not interactive-session usage. Cost meters relative spend; runs whose model had no recorded price
         count $0.
@@ -285,16 +285,16 @@ function HistorySection({
 
       {query.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading run history…</span></Panel>}
       {query.isError && (
-        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>Couldn't load run history: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
+        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>Couldn't load run history: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
       )}
 
       {!query.isLoading && !query.isError && totals && (
         totals.runs === 0 ? (
           <Panel style={{ padding: 20 }}>
-            <div style={{ fontFamily: font.head, fontSize: 13, color: color.textDim, marginBottom: 6 }}>
+            <div style={{ fontFamily: font.head, fontSize: fs.body, color: color.textDim, marginBottom: 6 }}>
               No agent runs in this window
             </div>
-            <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
+            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
               No Agent Runs recorded for {scopeName} in this window ({window}). Interactive Claude Code
               sessions aren't tracked here — only API-style Agent Runs persist usage history. Try a wider
               window, or this stays empty until a run completes.
@@ -337,7 +337,7 @@ function HistorySection({
               </div>
               <Panel>
                 {data!.byAgent.length === 0 && (
-                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No per-agent rows.</span>
+                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No per-agent rows.</span>
                 )}
                 {(() => {
                   const max = Math.max(...data!.byAgent.map(totalTokens), 1);
@@ -369,9 +369,9 @@ function HistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: str
       <Chip label="runs" value={String(row.runs)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         {max != null && <Meter value={tok} max={max} tone="info" width={90} />}
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 64, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, minWidth: 64, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
   );
@@ -400,7 +400,7 @@ function SessionUsageSection({
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionHead title="Interactive sessions" tag="est. consumption · over time" tagTone="busy" />
-      <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
         Your interactive-session usage over time — cumulative tokens + an ESTIMATE of what they'd cost on
         metered API, sampled token-free from session transcripts. On a flat Claude subscription this is what
         you're consuming, not a separate bill — distinct from the live occupancy snapshot below (current
@@ -409,16 +409,16 @@ function SessionUsageSection({
 
       {query.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading interactive-session usage…</span></Panel>}
       {query.isError && (
-        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>Couldn't load interactive-session usage: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
+        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>Couldn't load interactive-session usage: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
       )}
 
       {!query.isLoading && !query.isError && totals && (
         totals.samples === 0 ? (
           <Panel style={{ padding: 20 }}>
-            <div style={{ fontFamily: font.head, fontSize: 13, color: color.textDim, marginBottom: 6 }}>
+            <div style={{ fontFamily: font.head, fontSize: fs.body, color: color.textDim, marginBottom: 6 }}>
               No interactive-session usage in this window
             </div>
-            <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
+            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
               No interactive-session usage recorded for {scopeName} in this window ({window}). Try a
               wider window, or this fills in as the owner's sessions run and the daemon samples them.
             </div>
@@ -434,7 +434,7 @@ function SessionUsageSection({
               <Stat label="cache hit" value={fmtRatio(totals.cacheHitRatio)} tone={ratioTone(totals.cacheHitRatio)} />
               <Stat label="samples" value={fmtTokens(totals.samples)} tone="muted" />
             </div>
-            <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5 }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5 }}>
               "cache hit" = cache_read / (cache_read + cache_creation + input) across this whole scope/window —
               a warm, byte-stable session startup prefix keeps this near 100%; a broken prefix (re-paying the
               prefix as cache_creation every turn) collapses it toward 0%. Blended across every sampled
@@ -470,7 +470,7 @@ function SessionUsageSection({
               </div>
               <Panel>
                 {data!.byAgent.length === 0 && (
-                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No per-agent rows.</span>
+                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No per-agent rows.</span>
                 )}
                 {(() => {
                   const max = Math.max(...data!.byAgent.map(sessionTotalTokens), 1);
@@ -494,7 +494,7 @@ function SessionUsageSection({
               <SectionLabel>By session · cache hit ratio</SectionLabel>
               <Panel>
                 {data!.bySession.length === 0 && (
-                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No per-session rows.</span>
+                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No per-session rows.</span>
                 )}
                 {data!.bySession.map((s) => <SessionRatioRow key={s.sessionId} row={s} />)}
               </Panel>
@@ -517,9 +517,9 @@ function SessionHistoryRow({ name, subtitle, row, max }: { name: string; subtitl
       <Chip label="samples" value={fmtTokens(row.samples)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         {max != null && <Meter value={tok} max={max} tone="info" width={90} />}
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
   );
@@ -534,7 +534,7 @@ function SessionRatioRow({ row }: { row: SessionUsageSession }) {
   const isManager = row.role === "manager";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, minWidth: 160, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, minWidth: 160, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ color: isManager ? color.phosphor : color.textDim }}>{isManager ? "★ " : ""}{row.role ?? "session"}</span>{" "}
         <span style={{ color: color.textMuted }}>{row.sessionId.slice(0, 8)}</span>
       </span>
@@ -542,8 +542,8 @@ function SessionRatioRow({ row }: { row: SessionUsageSession }) {
       <Chip label="samples" value={fmtTokens(row.samples)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: tone[ratioTone(row.cacheHitRatio)], minWidth: 44, textAlign: "right", fontWeight: 700 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[ratioTone(row.cacheHitRatio)], minWidth: 44, textAlign: "right", fontWeight: 700 }}>
           {fmtRatio(row.cacheHitRatio)}
         </span>
       </span>
@@ -576,7 +576,7 @@ function ByDayChart({
     <div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
         <SectionLabel style={{ margin: 0 }}>By day</SectionLabel>
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
           {byDay.length} day{byDay.length === 1 ? "" : "s"} · peak {fmtVal(peak)}
         </span>
         <span style={{ flex: 1 }} />
@@ -604,12 +604,12 @@ function ByDayChart({
             );
           })}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
           <span>{first ?? ""}</span>
           <span>{first && last && first !== last ? last : ""}</span>
         </div>
         {allTime && (
-          <div style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: 8 }}>
+          <div style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5, marginTop: 8 }}>
             Early points are coarse — one backfilled sample per session at its last activity — and get finer
             going forward as the daemon samples live sessions on an interval.
           </div>

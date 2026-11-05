@@ -15,7 +15,7 @@ import {
   Field, RowName, SectionHead, SortToggle, Stat, TIMESPANS, WindowSelect,
   fmtRatio, fmtTokens, fmtUsd, ratioTone, sinceIsoFor, type Timespan,
 } from "../components/usageKit";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // THE PROJECT NODE'S USAGE TAB — card 30266229, the owner's Atlas feedback item (verbatim): `Add new
 // per project "Usage" tab. - Breakdown usage by tasks and related tasks too.`
@@ -94,7 +94,7 @@ export default function ProjectUsage() {
 
       {usageQ.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading usage…</span></Panel>}
       {usageQ.isError && (
-        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: 12 }}>
+        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>
           Couldn't load usage: {(usageQ.error as Error)?.message ?? "unknown error"}
         </span></Panel>
       )}
@@ -102,10 +102,10 @@ export default function ProjectUsage() {
       {!usageQ.isLoading && !usageQ.isError && (
         part.total.samples === 0 ? (
           <Panel style={{ padding: 20 }} data-testid="project-usage-empty">
-            <div style={{ fontFamily: font.head, fontSize: 13, color: color.textDim, marginBottom: 6 }}>
+            <div style={{ fontFamily: font.head, fontSize: fs.body, color: color.textDim, marginBottom: 6 }}>
               No usage recorded in this window
             </div>
-            <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
+            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
               No interactive-session usage recorded for {project?.name ?? "this project"} in this window
               ({spanMeta.window}). Try a wider window, or this fills in as this project's sessions run and
               the daemon samples them.
@@ -125,7 +125,7 @@ export default function ProjectUsage() {
               <SectionLabel>By task</SectionLabel>
               <Panel data-testid="project-usage-tasks">
                 {roots.length === 0 && (
-                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>
+                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>
                     No usage in this window resolved to a task.
                   </span>
                 )}
@@ -148,7 +148,7 @@ export default function ProjectUsage() {
                   row={part.unattributed} peak={peak} />
                 {!part.balanced && (
                   <div data-testid="project-usage-residual"
-                    style={{ fontFamily: font.mono, fontSize: 11, color: color.red, paddingTop: 6 }}>
+                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, paddingTop: 6 }}>
                     {fmtUsd(part.residual.costUsd)} / {fmtTokens(taskTotalTokens(part.residual))} tok of
                     this window's total is in none of the rows above — the breakdown is incomplete.
                   </div>
@@ -211,7 +211,7 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
         title={expanded ? `Collapse ${title}` : `Expand ${title}`}
         style={{
           background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
-          marginLeft: depth * 14, fontFamily: font.mono, fontSize: 11,
+          marginLeft: depth * 14, fontFamily: font.mono, fontSize: fs.mono,
           color: expanded ? color.phosphor : color.textDim, minWidth: 14, textAlign: "left",
         }}>
         {expanded ? "▾" : "▸"}
@@ -238,10 +238,10 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
           wrapped figure line starts at the row's left edge and the column alignment every row is read
           down disappears exactly where it is hardest to scan. */}
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         <Meter value={tok} max={peak} tone="info" width={90} />
         <span data-testid={`project-usage-cost-${short}`}
-          style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(node.rolled.costUsd)}</span>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(node.rolled.costUsd)}</span>
       </span>
     </div>
   );
@@ -272,7 +272,7 @@ function RelationRows({ taskId, rolled }: { taskId: string; rolled: Map<string, 
   return (
     <>
       <div data-testid={`project-usage-relations-${taskId.slice(0, 8)}`}
-        style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, padding: "6px 0 2px", paddingLeft: 28, letterSpacing: "0.04em" }}>
+        style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, padding: "6px 0 2px", paddingLeft: 28, letterSpacing: "0.04em" }}>
         RELATED CARDS — counted on their own rows, never added to the figure above
       </div>
       {rows.map((r) => <RelationRow key={`${r.kind}:${r.ref.id}`} kind={r.kind} ref_={r.ref} totals={r.totals} />)}
@@ -296,10 +296,10 @@ function RelationRow({ kind, ref_, totals }: { kind: RelationKind; ref_: TaskRef
         subtitle={short} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>
           {totals.samples === 0 ? "no usage" : `${fmtTokens(tok)} tok`}
         </span>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: totals.samples === 0 ? color.textMuted : color.amber, minWidth: 72, textAlign: "right" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: totals.samples === 0 ? color.textMuted : color.amber, minWidth: 72, textAlign: "right" }}>
           {totals.samples === 0 ? "—" : fmtUsd(totals.costUsd)}
         </span>
       </span>
@@ -319,9 +319,9 @@ function BucketRow({ label, hint, row, peak, testId }: {
       <RowName width={240} maxWidth={560} name={label} subtitle={hint} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         <Meter value={tok} max={peak} tone="muted" width={90} />
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
   );
@@ -329,7 +329,7 @@ function BucketRow({ label, hint, row, peak, testId }: {
 
 function Note({ children, indent = 0, tone: t }: { children: ReactNode; indent?: number; tone?: "danger" }) {
   return (
-    <div style={{ fontFamily: font.mono, fontSize: 11, color: t === "danger" ? color.red : color.textMuted, padding: "4px 0", paddingLeft: indent }}>
+    <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: t === "danger" ? color.red : color.textMuted, padding: "4px 0", paddingLeft: indent }}>
       {children}
     </div>
   );
@@ -343,7 +343,7 @@ function Note({ children, indent = 0, tone: t }: { children: ReactNode; indent?:
 function UsageDisclosure({ balanced, present }: { balanced: boolean; present: boolean }) {
   return (
     <div data-testid="project-usage-disclosure"
-      style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.6, maxWidth: 720 }}>
+      style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.6, maxWidth: 720 }}>
       Cost is an ESTIMATE of what these tokens would cost on metered API, not a bill — on a flat
       subscription it meters what you consumed. A review-only worker's usage lands in Unattributed if
       its spawn carried no task. A manager works many cards over one session, so its usage is never

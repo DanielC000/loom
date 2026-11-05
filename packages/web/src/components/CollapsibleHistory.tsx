@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // A history section that's collapsed by default — the Lead/Auditor run logs get long, so tuck them
 // away until the human asks. Reuses the AgentPromptEditor disclosure idiom (▾/▸ chevron, phosphor when
@@ -16,11 +16,11 @@ export function CollapsibleHistory({ title, hint, children }: { title: string; h
         title={open ? `Collapse ${title}` : `Expand ${title}`}
         style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none",
           padding: 0, margin: "4px 0 8px", cursor: "pointer", textAlign: "left", width: "100%" }}>
-        <span aria-hidden style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: 12, width: 10 }}>{open ? "▾" : "▸"}</span>
-        <span style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
+        <span aria-hidden style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: fs.mono, width: 10 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim }}>
           {title}
         </span>
-        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
           {hint}
         </span>
       </button>

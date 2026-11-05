@@ -6,7 +6,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { ContextUsage } from "../components/fleet";
 import { Panel, Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
-import { color, font, tone } from "../theme";
+import { color, font, tone, fs } from "../theme";
 import { roleDisplay } from "../lib/roleDisplay";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 
@@ -106,15 +106,15 @@ export default function Archive() {
         />
         <div style={{ maxHeight: "70vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 }}>
           {!projectId && (
-            <p style={{ color: color.textMuted, fontSize: 13 }}>No project selected.</p>
+            <p style={{ color: color.textMuted, fontSize: fs.body }}>No project selected.</p>
           )}
           {projectId && rows.length === 0 && !searching && (
-            <p style={{ color: color.textMuted, fontSize: 13 }}>
+            <p style={{ color: color.textMuted, fontSize: fs.body }}>
               No archived sessions in this project. Sessions are archived automatically when they exit.
             </p>
           )}
           {projectId && rows.length === 0 && searching && (
-            <p style={{ color: color.textMuted, fontSize: 13 }}>No archived sessions match “{query}”.</p>
+            <p style={{ color: color.textMuted, fontSize: fs.body }}>No archived sessions match “{query}”.</p>
           )}
           {nodes.map((n) => (
             <TreeNodeView key={n.session.id} node={n} forceOpen={searching}
@@ -135,7 +135,7 @@ export default function Archive() {
       <div>
         <SectionLabel>{selected ? `Transcript · ${selected.id.slice(0, 8)}` : "Transcript"}</SectionLabel>
         <Panel style={{ height: "76vh", padding: 6 }}>
-          {!selected && <span style={{ color: color.textMuted, fontSize: 12 }}>Select an archived session to view its stored transcript.</span>}
+          {!selected && <span style={{ color: color.textMuted, fontSize: fs.sm }}>Select an archived session to view its stored transcript.</span>}
           {/* Always attempt the real read rather than gating on `snapshotExists` — that flag is only a
               cheap, bulk-computed hint about the ARCHIVE snapshot and can be false while a transcript is
               still readable from the raw engine JSONL (a failed on-exit snapshot, card 0138c09b); the
@@ -209,8 +209,8 @@ function TreeNodeView({ node, forceOpen, sessionId, onSelect, onRestore, restori
               width: 26, flexShrink: 0, cursor: "pointer", padding: 0,
               background: "transparent", border: "none", color: color.textMuted, fontFamily: font.mono,
             }}>
-            <span style={{ fontSize: 12 }}>{open ? "▾" : "▸"}</span>
-            <span style={{ fontSize: 11, color: color.textDim }}>{node.children.length}</span>
+            <span style={{ fontSize: fs.sm }}>{open ? "▾" : "▸"}</span>
+            <span style={{ fontSize: fs.sm, color: color.textDim }}>{node.children.length}</span>
           </button>
         ) : (
           <span style={{ width: 26, flexShrink: 0 }} />
@@ -245,7 +245,7 @@ function ArchiveRow({ s, selected, onSelect, onRestore, restoring, onDelete, del
   return (
     <Panel selected={selected} onClick={onSelect} style={{ padding: "8px 10px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: 12, color: tone[t], fontWeight: s.role === "manager" ? 700 : 400 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[t], fontWeight: s.role === "manager" ? 700 : 400 }}>
           {s.role === "manager" ? "★ " : ""}{s.id.slice(0, 8)} · {roleDisplay(s.role).short}
         </span>
         <span style={{ flex: 1 }} />

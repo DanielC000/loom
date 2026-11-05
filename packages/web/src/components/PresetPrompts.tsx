@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
 import { api } from "../lib/api";
 import { Button, SectionLabel } from "./ui";
-import { color, font, radius, shadow, wash } from "../theme";
+import { color, font, radius, shadow, wash, fs } from "../theme";
 
 // Preset Prompts — the composer's "Spark" popover. A GLOBAL list of label+prompt presets (one shared
 // store, same on every composer — keyed without the sessionId so the cache is shared). Clicking a preset
@@ -95,7 +95,7 @@ function SuggestionsSection() {
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4, paddingTop: 8,
       borderTop: `1px solid ${color.border}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span aria-hidden style={{ width: 6, height: 6, borderRadius: "50%", background: color.cyan, flex: "0 0 auto" }} />
+        <span aria-hidden style={{ width: 6, height: 6, borderRadius: radius.pill, background: color.cyan, flex: "0 0 auto" }} />
         <SectionLabel style={{ margin: 0 }}>Suggested from your usage</SectionLabel>
       </div>
       {list.map((s) => <SuggestionRow key={s.id} suggestion={s} />)}
@@ -143,16 +143,16 @@ export function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggesti
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, border: `1px solid ${color.border}`,
       borderRadius: radius.sm, padding: 8, background: color.panel2 }}>
-      <span style={{ fontFamily: font.mono, fontSize: 12, fontWeight: 600, color: color.text }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 600, color: color.text }}>
         {suggestion.label}
       </span>
       <span title={suggestion.prompt}
-        style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, lineHeight: 1.4,
+        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.4,
           display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
         {suggestion.prompt}
       </span>
       {suggestion.rationale && (
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.cyan, lineHeight: 1.4 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, lineHeight: 1.4 }}>
           {suggestion.rationale}
         </span>
       )}
@@ -185,10 +185,10 @@ function PresetRow({ preset, onInsert, onEdit }: {
       <button type="button" onClick={onInsert} disabled={del.isPending} title={preset.prompt}
         className="loom-btn loom-btn-default"
         style={{ flex: 1, minWidth: 0, textAlign: "left", fontFamily: font.mono,
-          fontSize: 12, padding: "5px 8px", borderRadius: radius.base,
+          fontSize: fs.mono, padding: "5px 8px", borderRadius: radius.base,
           overflow: "hidden", display: "flex", flexDirection: "column", gap: 2 }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.label}</span>
-        <span style={{ color: color.textMuted, fontSize: 11, lineHeight: 1.35, overflow: "hidden",
+        <span style={{ color: color.textMuted, fontSize: fs.sm, lineHeight: 1.35, overflow: "hidden",
           textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.prompt}</span>
       </button>
       <IconButton label={`Edit ${preset.label}`} onClick={onEdit} disabled={del.isPending}>✎</IconButton>
@@ -248,21 +248,20 @@ function PresetForm({ preset, onDone }: { preset?: PresetPrompt; onDone: () => v
 const fieldStyle = {
   width: "100%", boxSizing: "border-box" as const, background: color.panel2, color: color.text,
   border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "4px 8px",
-  fontFamily: font.mono, fontSize: 12,
+  fontFamily: font.mono, fontSize: fs.mono,
 };
 
 function FieldLabel({ text, children }: { text: string; children: ReactNode }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-        letterSpacing: "0.08em", color: color.textMuted }}>{text}</span>
+      <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textMuted }}>{text}</span>
       {children}
     </label>
   );
 }
 
 function Muted({ children, tone }: { children: ReactNode; tone?: "danger" }) {
-  return <span style={{ fontFamily: font.mono, fontSize: 11, color: tone === "danger" ? color.red : color.textMuted, padding: "2px 0" }}>{children}</span>;
+  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone === "danger" ? color.red : color.textMuted, padding: "2px 0" }}>{children}</span>;
 }
 
 // @decision 6cefdf25 — do not restate the variant's own `color` inline here, even to the identical
@@ -274,7 +273,7 @@ function IconButton({ label, onClick, disabled, danger, children }: {
   return (
     <button type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}
       className={`loom-btn loom-btn-${danger ? "danger" : "ghost"}`}
-      style={{ padding: "0 7px", fontFamily: font.mono, fontSize: 13, lineHeight: 1, borderRadius: radius.base,
+      style={{ padding: "0 7px", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1, borderRadius: radius.base,
         // @decision db040811 — a raw `loom-btn-<variant>` element that wants no visible border must
         // state it: the variant classes now carry the rest border-color, not just `.loom-btn`.
         border: "1px solid transparent" }}>

@@ -15,7 +15,7 @@ import { LogoMark } from "../components/Logo";
 import { looksLikeCron } from "./Schedules";
 import { useAtlasUi } from "../lib/atlasUi";
 import { PlatformFindings } from "./PlatformFindings";
-import { color, font } from "../theme";
+import { color, font, fs, radius } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 import { roleDisplay } from "../lib/roleDisplay";
 import {
@@ -183,11 +183,11 @@ function ClassicPlatformLayout({
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Platform
           <Badge tone="info">{project.name}</Badge>
-          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
             {edition.copy.header.mutedSpan}
           </span>
         </SectionLabel>
-        <p style={{ color: color.textMuted, fontSize: 11, margin: "4px 0 0", fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
+        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: "4px 0 0", fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
           {edition.copy.header.paragraph}
         </p>
       </div>
@@ -348,7 +348,7 @@ function AtlasPlatformLayout({
                   DOM, not an alternative placement. Muted body copy, NOT a heading: the node head above
                   owns the identity, this only explains it. */}
               <p data-testid="platform-explainer"
-                style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
+                style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5, maxWidth: 760 }}>
                 {edition.copy.header.paragraph}
               </p>
               <GuidedSetupLauncher onStart={() => setWizardOpen(true)} />
@@ -417,12 +417,12 @@ function GuidedSetupLauncher({ onStart }: { onStart: () => void }) {
     }}>
       <span style={{ color: color.phosphor, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
       <div style={{ flex: 1, minWidth: 220 }}>
-        <div style={{ fontFamily: font.head, fontSize: 14, color: color.text }}>New project from a template</div>
-        <div style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textMuted, marginTop: 3, lineHeight: 1.5 }}>
+        <div style={{ fontFamily: font.head, fontSize: fs.body, color: color.text }}>New project from a template</div>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, marginTop: 3, lineHeight: 1.5 }}>
           Pick a workflow template, point Loom at a repo, and get a ready-to-run team plus a starter board card — in four quick steps.
         </div>
       </div>
-      <Button variant="primary" onClick={onStart} style={{ padding: "6px 14px", fontSize: 13, flexShrink: 0 }}>
+      <Button variant="primary" onClick={onStart} style={{ padding: "6px 14px", fontSize: fs.body, flexShrink: 0 }}>
         Start guided setup →
       </Button>
     </Panel>
@@ -514,7 +514,7 @@ function AuditorCadenceFormSection({ edition, previewOnly, auditor }:
       <SectionLabel>{edition.copy.auditorScheduleLabel}</SectionLabel>
       {auditor
         ? <Panel style={{ padding: 12, maxWidth: 620 }}><AuditorScheduleInline agent={auditor} previewOnly={previewOnly} /></Panel>
-        : <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>No Auditor agent — cannot schedule.</span></Panel>}
+        : <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: fs.mono }}>No Auditor agent — cannot schedule.</span></Panel>}
     </section>
   );
 }
@@ -561,7 +561,7 @@ function PlatformBoardSection({ edition, project, deepLinks }:
     <section>
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {edition.copy.board.label}
-        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
           {edition.copy.board.hint}
         </span>
       </SectionLabel>
@@ -611,7 +611,7 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
   const tone = roleDisplay(role).tone;
 
   if (!agent) {
-    return <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>{card.missingLabel}</span></Panel>;
+    return <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: fs.mono }}>{card.missingLabel}</span></Panel>;
   }
   const live = session?.processState === "live";
   const spawnDisabled = !!previewDisabled || !!roleUnknown || gate(edition, { live, pending: spawn.isPending });
@@ -623,10 +623,10 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Badge tone={tone}>{card.badgeLabel}</Badge>
-        <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
+        <strong style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {showLiveCount && liveCount > 0 && (
-          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11 }}>{liveCount} live</span>
+          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>{liveCount} live</span>
         )}
         {live
           ? <StatusPill tone={session!.busy ? "busy" : "live"} glow={session!.busy} label={session!.busy ? "busy" : "idle"} />
@@ -642,8 +642,8 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
-      {previewDisabled && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>{PREVIEW_DISABLED_NOTE}</span>}
-      {spawn.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
+      {previewDisabled && <span style={{ color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono }}>{PREVIEW_DISABLED_NOTE}</span>}
+      {spawn.isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
       {/* View / edit this reserved-home agent's startup prompt (the spawn kickoff). Readable in a preview,
           never writable — the editor's own Ctrl/Cmd+Enter is a save trigger the buttons don't cover. */}
       <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={[edition.homeQueryKey]}
@@ -686,7 +686,7 @@ function HistorySection({ collapsed, copy, children }: { collapsed: boolean; cop
     <section>
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {copy.title}
-        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
+        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
           {copy.hint}
         </span>
       </SectionLabel>
@@ -720,32 +720,32 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
   });
 
-  if (!auditorId) return <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: 12 }}>No Auditor agent — cannot schedule.</span></Panel>;
+  if (!auditorId) return <Panel style={{ padding: 12 }}><span style={{ color: color.amber, fontFamily: font.mono, fontSize: fs.mono }}>No Auditor agent — cannot schedule.</span></Panel>;
   // Surface schedules targeting the Auditor agent (any kind), so an existing cadence is always visible.
   const mine = (schedules.data ?? []).filter((s) => s.agentId === auditorId);
   const cronValid = looksLikeCron(cron);
 
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-      <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+      <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
         Put the Auditor on a cadence — each fire boots the read-and-file-only Auditor to scan recent transcripts
         and file findings to the board. Reading many transcripts costs tokens, so favour a sparse cadence.
       </p>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {mine.map((s) => <AuditorScheduleRow key={s.id} s={s} onToggle={(enabled) => toggle.mutate({ id: s.id, enabled })}
           onRemove={() => remove.mutate(s.id)} busy={toggle.isPending || remove.isPending} />)}
-        {mine.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No auditor schedule yet.</span>}
+        {mine.length === 0 && <span style={{ color: color.textMuted, fontSize: fs.sm }}>No auditor schedule yet.</span>}
       </div>
       {/* Wraps at a phone width — unwrapped, the cron field and the field-order hint squeezed the button
           until its label clipped to "Add", which is the one control in the row that must stay readable.
           (The single-form variant's own row already wraps; this matches it.) */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" spellCheck={false} style={{ width: 160 }} />
-        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 10 }}>min hour dom mon dow</span>
+        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.xs }}>min hour dom mon dow</span>
         <Button variant="primary" disabled={!cronValid || create.isPending} onClick={() => create.mutate()}>
           {create.isPending ? "Adding…" : "Add cadence"}
         </Button>
-        {create.isError && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{errorText(create.error).includes("400") ? "Daemon rejected the cron expression." : errorText(create.error)}</span>}
+        {create.isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(create.error).includes("400") ? "Daemon rejected the cron expression." : errorText(create.error)}</span>}
       </div>
     </Panel>
   );
@@ -754,12 +754,12 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
 function AuditorScheduleRow({ s, onToggle, onRemove, busy }:
   { s: Schedule; onToggle: (enabled: boolean) => void; onRemove: () => void; busy: boolean }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: 12, color: color.textDim,
-      border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 8px" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim,
+      border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 8px" }}>
       <span style={{ color: color.cyan }}>{s.cron}</span>
-      <span style={{ fontSize: 10, color: s.kind === "auditor" ? color.phosphor : color.amber }}>kind:{s.kind}</span>
+      <span style={{ fontSize: fs.xs, color: s.kind === "auditor" ? color.phosphor : color.amber }}>kind:{s.kind}</span>
       <span style={{ flex: 1 }}>next · {fmt(s.nextFireAt)}</span>
-      <span style={{ fontSize: 9, color: s.enabled ? color.phosphor : color.textMuted }}>{s.enabled ? "ON" : "OFF"}</span>
+      <span style={{ fontSize: fs.xs, color: s.enabled ? color.phosphor : color.textMuted }}>{s.enabled ? "ON" : "OFF"}</span>
       <Button style={{ padding: "0 8px" }} disabled={busy} onClick={() => onToggle(!s.enabled)}>{s.enabled ? "Disable" : "Enable"}</Button>
       <Button variant="danger" style={{ padding: "0 8px" }} disabled={busy} onClick={onRemove}>Delete</Button>
     </div>
@@ -809,10 +809,10 @@ function AuditorScheduleInlineForm({ agentId, existing, previewOnly }:
   return (
     <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 11, fontWeight: 700, color: color.textDim }}>Run automatically</span>
+        <span style={{ fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim }}>Run automatically</span>
         {existing && <Badge tone={existing.enabled ? "live" : "muted"}>{existing.enabled ? "on" : "paused"}</Badge>}
       </div>
-      <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+      <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
         Review your workspace on a schedule, not just on demand — each fire spawns a fresh read-only run.
         Reading transcripts costs tokens, so favour a sparse cadence. Schedules run only while the
         scheduler is enabled (Settings › Scheduler).
@@ -825,7 +825,7 @@ function AuditorScheduleInlineForm({ agentId, existing, previewOnly }:
         display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * *" spellCheck={false}
           readOnly={held} disabled={held} style={{ width: 150 }} />
-        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 10 }}>min hour dom mon dow</span>
+        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.xs }}>min hour dom mon dow</span>
         {existing ? (
           <>
             <Button variant="primary" disabled={held || !cronValid || !dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : "Save"}</Button>
@@ -836,10 +836,10 @@ function AuditorScheduleInlineForm({ agentId, existing, previewOnly }:
           <Button variant="primary" disabled={held || !cronValid || create.isPending} title={held ? PREVIEW_DISABLED_TITLE : undefined} onClick={() => create.mutate()}>{create.isPending ? "Scheduling…" : "Schedule"}</Button>
         )}
       </fieldset>
-      {held && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>{PREVIEW_DISABLED_NOTE}</span>}
-      {!cronValid && cron.trim().length > 0 && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
-      {existing && <span style={{ color: color.textDim, fontFamily: font.mono, fontSize: 11 }}>next · {fmt(existing.nextFireAt)}</span>}
-      {err && <span style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{err.message.includes("400") ? "Daemon rejected the cron expression." : err.message}</span>}
+      {held && <span style={{ color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono }}>{PREVIEW_DISABLED_NOTE}</span>}
+      {!cronValid && cron.trim().length > 0 && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
+      {existing && <span style={{ color: color.textDim, fontFamily: font.mono, fontSize: fs.mono }}>next · {fmt(existing.nextFireAt)}</span>}
+      {err && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{err.message.includes("400") ? "Daemon rejected the cron expression." : err.message}</span>}
     </div>
   );
 }

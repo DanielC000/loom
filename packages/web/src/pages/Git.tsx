@@ -5,7 +5,7 @@ import type { RepoRegistryEntry } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, SectionLabel, Dot, Button, Input } from "../components/ui";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // Git view: branches + commit log (read), plus WRITE actions — checkout, create-branch, commit
 // (stage-all + message), and push. Writes go through the daemon's HUMAN-only REST surface (no agent
@@ -75,17 +75,17 @@ export default function Git() {
         <>
           {feedback && (
             <Panel style={{ marginTop: 12, background: feedback.ok ? color.liveSoft : color.dangerSoft }}>
-              <span style={{ fontFamily: font.mono, fontSize: 12, color: feedback.ok ? color.liveText : color.danger }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: feedback.ok ? color.liveText : color.danger }}>
                 {feedback.ok ? "✓ " : "✗ "}{feedback.text}
               </span>
               {feedback.warning && (
-                <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: 12, color: color.amber, marginTop: 6 }}>
+                <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, marginTop: 6 }}>
                   ⚠ {feedback.warning}
                 </div>
               )}
               {feedback.mainlineTrustRisk && (
                 <div data-mainline-trust-prompt style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
-                  <span style={{ fontFamily: font.mono, fontSize: 12, color: color.amber }}>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber }}>
                     ⚠ This commit landed on the branch Loom trusts for merges — landing trust will freeze
                     on the next landing unless you re-adopt this head.
                   </span>
@@ -159,7 +159,7 @@ export default function Git() {
           {project && project.repos.length > 0 && (
             <Panel>
               <SectionLabel>Registered Repos</SectionLabel>
-              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
                 writable · a card targets one by its key
               </span>
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
@@ -193,7 +193,7 @@ function branchButtonStyle(c: string, busy: boolean) {
   return {
     display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none",
     cursor: busy ? "default" : "pointer", padding: 0, textAlign: "left" as const,
-    fontFamily: font.mono, fontSize: 12, color: c,
+    fontFamily: font.mono, fontSize: fs.mono, color: c,
   };
 }
 
@@ -232,7 +232,7 @@ function BranchList({ data, busy, onCheckout }: {
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
         <Input aria-label="Filter branches" placeholder="filter branches…" value={query}
           onChange={(e) => setQuery(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
-        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, whiteSpace: "nowrap" }}>
           {q === "" ? `${data.all.length} branches` : `${otherShown} of ${otherTotal} match`}
         </span>
       </div>
@@ -245,7 +245,7 @@ function BranchList({ data, busy, onCheckout }: {
           <button title="current branch" disabled style={{ ...branchButtonStyle(color.phosphor, true), cursor: "default" }}>
             <Dot tone="live" glow />{current}
           </button>
-          <span style={{ fontFamily: font.mono, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
             current
           </span>
         </div>
@@ -264,7 +264,7 @@ function BranchList({ data, busy, onCheckout }: {
         <div style={{ marginTop: named.length > 0 ? 12 : 0, paddingTop: named.length > 0 ? 10 : 0, borderTop: named.length > 0 ? `1px solid ${color.border}` : "none" }}>
           <button onClick={() => setWorkersOpen((o) => !o)}
             aria-expanded={showWorkers}
-            style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
             <span style={{ color: color.phosphor }}>{showWorkers ? "▾" : "▸"}</span>
             worker branches ({q === "" ? workers.length : `${workersShown.length} of ${workers.length}`})
           </button>
@@ -292,7 +292,7 @@ function CommitTable({ commits }: { commits: { hash: string; date: string; messa
     return <Hint>no commits yet</Hint>;
   }
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: 13 }}>
+    <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: fs.body }}>
       <tbody>
         {commits?.map((c) => (
           <tr key={c.hash} style={{ borderTop: `1px solid ${color.border}` }}>
@@ -322,7 +322,7 @@ function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index
       <button onClick={() => setOpen((o) => !o)}
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: 0,
-          fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+          fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
         <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>{path}
       </button>
       {open && (
@@ -353,11 +353,11 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
       <button onClick={() => setOpen((o) => !o)}
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: 0,
-          fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+          fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
         <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>
         <span style={{ color: color.cyan }}>{entry.key}</span>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.path}</span>
-        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11, color: entry.gateCommand ? color.textMuted : color.amber }}
+        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: fs.sm, color: entry.gateCommand ? color.textMuted : color.amber }}
           title={entry.gateCommand
             ? `This repo's own gate command — the merge gate and a worker's run_gate both run this here`
             : "No gate command configured — work merged here is reported unverified. It does not fall back to this project's gate command."}>
@@ -378,9 +378,9 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
 // panels and both secondary (reference/registered repo) panels, so the four surfaces render consistently
 // instead of three different not-quite-matching shapes (card 60b53c8d).
 function ErrorLine({ error }: { error: unknown }) {
-  return <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(error)}</span>;
+  return <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(error)}</span>;
 }
 
 function Hint({ children }: { children: ReactNode }) {
-  return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{children}</span>;
+  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{children}</span>;
 }

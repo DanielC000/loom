@@ -13,7 +13,7 @@ import type { CSSProperties } from "react";
 import type { KanbanColumn } from "@loom/shared";
 import { Badge, Button, Input, Select } from "./ui";
 import { TaskLinkRow } from "./taskLinks";
-import { color, columnTone, font, radius } from "../theme";
+import { color, columnTone, font, radius, fs } from "../theme";
 import type { TaskLinks, TaskRef } from "../lib/taskHierarchy";
 import {
   EDITABLE_RELATION_KINDS, EDIT_RELATION_HINT, EDIT_RELATION_LABEL, isSingleValueKind,
@@ -25,8 +25,7 @@ import {
 const PICKER_LIMIT = 8;
 
 const sectionLabel: CSSProperties = {
-  fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-  letterSpacing: "0.1em", color: color.textDim,
+  fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textDim,
 };
 
 /**
@@ -106,7 +105,7 @@ export function TaskRelationsEditor({
           rather than to one row. Verbatim — the validator's own wording already says what to drop. */}
       {errorTarget?.scope === "graph" && saveErrorMessage && (
         <span role="alert" data-testid="relations-error-graph"
-          style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4 }}>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.4 }}>
           {saveErrorMessage}
         </span>
       )}
@@ -130,7 +129,7 @@ export function TaskRelationsEditor({
                 ))}
                 {errorTarget?.scope === "kind" && errorTarget.kind === kind && saveErrorMessage && (
                   <span role="alert" data-testid={`relations-error-${kind}`}
-                    style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4 }}>
+                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.4 }}>
                     {saveErrorMessage}
                   </span>
                 )}
@@ -156,7 +155,7 @@ export function TaskRelationsEditor({
         // Negative margin cancels the ghost button's own left padding so its text sits on the same
         // vertical rule as the labels above, exactly like the Parent field's "Set parent…" link.
         <div>
-          <Button variant="ghost" data-testid="relations-add-open" style={{ fontSize: 11, padding: "2px 6px", marginLeft: -6 }}
+          <Button variant="ghost" data-testid="relations-add-open" style={{ fontSize: fs.sm, padding: "2px 6px", marginLeft: -6 }}
             onClick={() => setPicking("blockedBy")}>＋ Add relation…</Button>
         </div>
       )}
@@ -191,7 +190,7 @@ function RelationChip({ kind, ref_, columns, titleById, onOpenTask, onRemove }: 
           tone={!history && kind === "blockedBy" ? color.amber : undefined} />
       </span>
       {onRemove && (
-        <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11, padding: "1px 6px", lineHeight: 1.2 }}
+        <Button variant="ghost" style={{ flexShrink: 0, fontSize: fs.sm, padding: "1px 6px", lineHeight: 1.2 }}
           aria-label={`Unlink ${EDIT_RELATION_LABEL[kind]} ${ref_.id.slice(0, 8)} — ${ref_.title}`}
           title={`Unlink ${ref_.id.slice(0, 8)} (staged — takes effect on Save)`}
           onClick={onRemove}>×</Button>
@@ -231,17 +230,17 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
       style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px", minWidth: 0,
         background: color.panel2, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-        <Select value={kind} aria-label="Relation kind" style={{ fontSize: 12, padding: "3px 6px" }}
+        <Select value={kind} aria-label="Relation kind" style={{ fontSize: fs.sm, padding: "3px 6px" }}
           onChange={(e) => onKindChange(e.target.value as EditableRelationKind)}>
           {EDITABLE_RELATION_KINDS.map((k) => (
             <option key={k} value={k}>{EDIT_RELATION_LABEL[k]}</option>
           ))}
         </Select>
-        <span style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: 10, color: color.textMuted,
+        <span style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {EDIT_RELATION_HINT[kind]}
         </span>
-        <Button variant="ghost" style={{ flexShrink: 0, fontSize: 11, padding: "1px 6px" }}
+        <Button variant="ghost" style={{ flexShrink: 0, fontSize: fs.sm, padding: "1px 6px" }}
           aria-label="Close the card picker" title="Close the card picker" onClick={onClose}>×</Button>
       </div>
       <Input value={query} onChange={(e) => setQuery(e.target.value)} spellCheck={false} autoFocus
@@ -271,7 +270,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
       <div id={listId} role="listbox" aria-label={`Cards to link as ${EDIT_RELATION_LABEL[kind]}`}
         style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: 176, overflowY: "auto", minWidth: 0 }}>
         {matches.length === 0 ? (
-          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
             {total === 0 && query.trim() === ""
               ? "no other cards on this board yet"
               : "no card on this board matches that title or id"}
@@ -285,20 +284,20 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
               onClick={() => { onPick(c.id); setQuery(""); }}
               title={`Link card ${c.id.slice(0, 8)} — ${c.title}`}
               style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, textAlign: "left", cursor: "pointer",
-                fontFamily: font.mono, fontSize: 12, padding: "3px 5px", borderRadius: radius.sm,
+                fontFamily: font.mono, fontSize: fs.mono, padding: "3px 5px", borderRadius: radius.sm,
                 color: active ? color.text : color.textDim,
                 background: active ? color.panel : "transparent",
                 border: `1px solid ${active ? color.borderStrong : "transparent"}` }}>
-              <span style={{ flexShrink: 0, color: color.textMuted, fontSize: 10 }}>{c.id.slice(0, 8)}</span>
+              <span style={{ flexShrink: 0, color: color.textMuted, fontSize: fs.xs }}>{c.id.slice(0, 8)}</span>
               <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</span>
-              {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: 9, padding: "0 5px" }}>{col.label}</Badge>}
+              {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: fs.xs, padding: "0 5px" }}>{col.label}</Badge>}
             </button>
           );
         })}
       </div>
       {/* Say so when the list is capped rather than letting 8 rows read as the whole board. */}
       {total > matches.length && (
-        <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
           showing {matches.length} of {total} — keep typing to narrow
         </span>
       )}

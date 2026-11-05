@@ -1,5 +1,5 @@
 import { Button } from "./ui";
-import { color, font, radius, tone } from "../theme";
+import { color, font, radius, tone, fs } from "../theme";
 import { dismissAtlasUiExternalChange, useAtlasUiExternalChange } from "../lib/atlasUi";
 
 // Offers a cross-tab UI-preference change instead of applying it (card 757c80dd). lib/atlasUi.ts's
@@ -22,14 +22,14 @@ export function AtlasSwitchNotice() {
         display: "flex", alignItems: "center", gap: 10,
         background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${tone.info}`,
         borderRadius: radius.base, padding: "9px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
-        fontFamily: font.mono, fontSize: 12,
+        fontFamily: font.mono, fontSize: fs.mono,
       }}>
       <span style={{ color: color.textDim }}>The UI preference changed in another tab.</span>
       <Button data-testid="atlas-switch-notice-reload" onClick={() => window.location.reload()}
         style={{ padding: "4px 10px", whiteSpace: "nowrap" }}>Reload to apply</Button>
       <button onClick={dismissAtlasUiExternalChange} title="dismiss" aria-label="dismiss"
         style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer",
-          fontFamily: font.mono, fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+          fontFamily: font.mono, fontSize: fs.body, lineHeight: 1, padding: 0 }}>×</button>
     </div>
   );
 }

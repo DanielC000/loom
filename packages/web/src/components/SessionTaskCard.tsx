@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Task } from "@loom/shared";
 import { Button, SectionLabel } from "./ui";
-import { color, font } from "../theme";
+import { color, font, radius, fs } from "../theme";
 import { PRIORITY_META, PriorityChip, prio } from "./priority";
 
 // A SLIM read-only strip shown under a /terminals session tile's title line, naming the board task
@@ -21,9 +21,9 @@ export function SessionTaskCard({ task }: { task: Task }) {
         onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
         style={{
           display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
-          border: `1px solid ${hover ? color.borderStrong : color.border}`, borderRadius: 4,
+          border: `1px solid ${hover ? color.borderStrong : color.border}`, borderRadius: radius.sm,
           padding: "2px 6px", marginBottom: 4, background: color.panel2,
-          fontFamily: font.mono, fontSize: 11, color: color.text,
+          fontFamily: font.mono, fontSize: fs.mono, color: color.text,
         }}>
         <PriorityChip priority={prio(task)} />
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{task.title}</span>
@@ -43,7 +43,7 @@ function ReadOnlyTaskDrawer({ task, onClose }: { task: Task; onClose: () => void
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  const labelStyle = { fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim } as const;
+  const labelStyle = { fontFamily: font.head, fontSize: fs.xs, color: color.textDim } as const;
   const body = task.body?.trim();
   return (
     <div onClick={onClose}
@@ -56,18 +56,18 @@ function ReadOnlyTaskDrawer({ task, onClose }: { task: Task; onClose: () => void
           <Button onClick={onClose} title="Close (Esc)">✕</Button>
         </div>
         <span style={labelStyle}>Title</span>
-        <div style={{ fontFamily: font.mono, fontSize: 13, lineHeight: 1.5, color: color.text }}>{task.title}</div>
+        <div style={{ fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5, color: color.text }}>{task.title}</div>
         <span style={labelStyle}>Priority</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <PriorityChip priority={prio(task)} />
-          <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>{PRIORITY_META[prio(task)].label}</span>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>{PRIORITY_META[prio(task)].label}</span>
         </div>
         <span style={labelStyle}>Description</span>
         <div style={{
           flex: 1, minHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
-          fontFamily: font.mono, fontSize: 13, lineHeight: 1.5,
+          fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
           background: color.panel2, color: body ? color.text : color.textMuted,
-          border: `1px solid ${color.border}`, borderRadius: 6, padding: 8, boxSizing: "border-box",
+          border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8, boxSizing: "border-box",
         }}>{body || "No description."}</div>
       </div>
     </div>

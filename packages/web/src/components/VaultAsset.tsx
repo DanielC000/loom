@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { isRemoteOrigin } from "../lib/gatewayCredential";
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 import { DOWNLOAD_BLOB_TYPE, assetFileName, vaultAssetMode, viewSource } from "../lib/vaultAsset";
-import { color, font, radius } from "../theme";
+import { color, font, radius, fs } from "../theme";
 
 /**
  * The React half of the vault raw-asset story — see `lib/vaultAsset.ts` for the mode decision and
@@ -107,9 +107,9 @@ export function VaultImage({ projectId, path, alt, className, style }: {
 }) {
   const asset = useVaultAsset(projectId, path, "view");
   if (asset.status === "error") {
-    return <span className="md-broken" title={asset.message} style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>{alt || assetFileName(path)}</span>;
+    return <span className="md-broken" title={asset.message} style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>{alt || assetFileName(path)}</span>;
   }
-  if (asset.status === "loading") return <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>…</span>;
+  if (asset.status === "loading") return <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>…</span>;
   return <img className={className} src={asset.url} alt={alt} style={style} loading="lazy" />;
 }
 
@@ -167,7 +167,7 @@ export function VaultDownloadLink({ projectId, path, children, style }: {
   const shared: CSSProperties = {
     display: "inline-block", textDecoration: "none",
     borderRadius: radius.base, padding: "6px 14px",
-    fontFamily: font.mono, fontSize: 12, ...style,
+    fontFamily: font.mono, fontSize: fs.mono, ...style,
   };
 
   return (
@@ -182,7 +182,7 @@ export function VaultDownloadLink({ projectId, path, children, style }: {
           {children}
         </a>
       )}
-      {error && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: 11.5, color: color.red, wordBreak: "break-word" }}>{error}</div>}
+      {error && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.red, wordBreak: "break-word" }}>{error}</div>}
     </>
   );
 }

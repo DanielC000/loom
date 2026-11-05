@@ -1,4 +1,4 @@
-import { color, font, radius, tone, wash } from "../theme";
+import { color, font, radius, tone, wash, fs } from "../theme";
 import { type DiffLineKind, type FileDiff, hunkLineKind, rawPatchLineKind, riskTone, statusGlyph } from "../lib/diff";
 import { Dot } from "./ui";
 
@@ -20,7 +20,7 @@ const KIND_COLOR: Record<DiffLineKind, string> = {
 export function DiffView({ patch }: { patch: string }) {
   const lines = patch.split("\n");
   return (
-    <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.5 }}>
+    <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
       {lines.map((ln, i) => (
         <div key={i} style={{ color: KIND_COLOR[rawPatchLineKind(ln)] }}>{ln || " "}</div>
       ))}
@@ -31,10 +31,10 @@ export function DiffView({ patch }: { patch: string }) {
 // The hunks of ONE file, rendered with per-line coloring + a faint hunk-header band. Pulled out so
 // the collapsible FileDiffBlock can show/hide it without re-laying the lines.
 function FileHunks({ file }: { file: FileDiff }) {
-  if (file.binary) return <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "8px 10px" }}>Binary file — no text diff.</div>;
-  if (file.hunks.length === 0) return <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "8px 10px" }}>No textual changes.</div>;
+  if (file.binary) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "8px 10px" }}>Binary file — no text diff.</div>;
+  if (file.hunks.length === 0) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "8px 10px" }}>No textual changes.</div>;
   return (
-    <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, padding: "4px 10px 8px" }}>
+    <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, padding: "4px 10px 8px" }}>
       {file.hunks.map((h, hi) => (
         <div key={hi}>
           <div style={{ color: color.cyan, background: wash(color.info, 6), margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
@@ -61,7 +61,7 @@ export function FileDiffBlock({ file, open, onToggle, anchorId }: { file: FileDi
         style={{
           display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
           background: color.panel2, border: "none", borderBottom: open ? `1px solid ${color.border}` : "none",
-          padding: "6px 10px", cursor: "pointer", fontFamily: font.mono, fontSize: 12,
+          padding: "6px 10px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
         }}
         title={open ? "Collapse" : "Expand"}
       >
@@ -83,7 +83,7 @@ export function FileDiffBlock({ file, open, onToggle, anchorId }: { file: FileDi
 export function StatusGlyph({ status }: { status: FileDiff["status"] }) {
   const c = status === "added" ? color.phosphor : status === "deleted" ? color.red : status === "renamed" ? color.cyan : color.textDim;
   return (
-    <span title={status} style={{ fontFamily: font.mono, fontSize: 11, fontWeight: 700, color: c, width: 12, textAlign: "center", flexShrink: 0 }}>
+    <span title={status} style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: c, width: 12, textAlign: "center", flexShrink: 0 }}>
       {statusGlyph(status)}
     </span>
   );
@@ -100,7 +100,7 @@ export function FileOverviewRow({ file, onJump }: { file: FileDiff; onJump: () =
       style={{
         display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
         background: "transparent", border: "none", padding: "3px 6px", cursor: "pointer",
-        fontFamily: font.mono, fontSize: 12, borderRadius: radius.sm,
+        fontFamily: font.mono, fontSize: fs.mono, borderRadius: radius.sm,
       }}
       title={file.reasons.length ? `${file.risk} risk — ${file.reasons.join("; ")}` : `${file.risk} risk`}
     >
@@ -110,7 +110,7 @@ export function FileOverviewRow({ file, onJump }: { file: FileDiff; onJump: () =
       {file.insertions > 0 && <span style={{ color: color.phosphor, flexShrink: 0 }}>+{file.insertions}</span>}
       {file.deletions > 0 && <span style={{ color: color.red, flexShrink: 0 }}>−{file.deletions}</span>}
       {file.risk !== "low" && (
-        <span style={{ color: tone[t], textTransform: "uppercase", fontSize: 9, letterSpacing: "0.08em", flexShrink: 0 }}>{file.risk}</span>
+        <span style={{ color: tone[t], fontSize: fs.xs, flexShrink: 0 }}>{file.risk}</span>
       )}
     </button>
   );
