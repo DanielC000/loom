@@ -7,16 +7,19 @@
  * Audit protocol (`ssh_command_run` events, two rows per call joined by a shared `callId`):
  *   1. an ATTEMPT row is written FIRST, before any step that can throw — if it cannot be written the call is
  *      refused and nothing runs;
- *   2. every path after that (refused / error / ran) writes an OUTCOME row. An attempt row with no outcome
- *      row means the daemon died mid-call.
+ *   2. every path after that (refused / held / error / ran) writes an OUTCOME row. An attempt row with no
+ *      outcome row means the daemon died mid-call. A risky-pattern match is `held` (an owner Request was
+ *      filed or is already pending); a `ran` row of an approved command carries `approvalRequestId`.
  * Command text lives ONLY in these event rows — never in a log line.
  *
  * @decision a3d5c7f4 — the attempt row precedes every throwable step, every caught path writes an outcome
  * row, and the private key, ssh2's error text and output bodies never reach a row or a returned error.
  */
 import { randomUUID } from "node:crypto";
-import type { ConnectionsGuardConfig, OrchestrationEvent, Session } from "@loom/shared";
-import { getConnectionMetadata, getSshPrivateKeyForUse, isConnectionUsableByProject, type ConnectionsDbStore } from "./store.js";
+import type { ConnectionsGuardConfig } from "@loom/shared";
+import type { Db } from "../db.js";
+import { getConnectionMetadata, getSshPrivateKeyForUse, isConnectionUsableByProject } from "./store.js";
+import { claimSshApproval, fileSshApprovalRequest, resolveSshApproval, type SshApprovalResolution } from "./sshApproval.js";
 import { runSshExecCommand, MAX_TIMEOUT_MS, type SshExecInput, type SshExecResult } from "./ssh.js";
 import { evaluateSshCommandPolicy, sshTargetShapeError, SSH_MAX_COMMAND_LENGTH } from "./sshPolicy.js";
 
@@ -24,10 +27,8 @@ import { evaluateSshCommandPolicy, sshTargetShapeError, SSH_MAX_COMMAND_LENGTH }
 const SSH_EXEC_MAX_OUTPUT_BYTES = 65_536;
 
 export interface SshExecDeps {
-  db: ConnectionsDbStore & {
-    appendEvent(evt: OrchestrationEvent): number;
-    getSession(id: string): Session | undefined;
-  };
+  /** The real `Db`: the hold files and reads owner Requests through it. */
+  db: Db;
   sessionId: string;
   projectId: string;
   guard: ConnectionsGuardConfig;
@@ -40,7 +41,7 @@ export interface SshExecDeps {
 
 export type SshExecToolResult =
   | { ok: true; exitCode: number | null; stdout: string; stderr: string; truncated: boolean }
-  | { ok: false; error: string; reason?: string; kind?: string };
+  | { ok: false; error: string; reason?: string; kind?: string; status?: "awaiting-owner-approval"; approvalRequestId?: string };
 
 // --- per-connection rate limiter (in-memory; counts only GENUINE dispatches) ----------------------------
 const sshRateState = new Map<string, number[]>();
@@ -84,7 +85,7 @@ export async function performSshExec(
     return { ok: false, error: "ssh_exec is unavailable: the audit record could not be written", reason: "audit-unavailable" };
   }
 
-  let target: { connectionId: string | null; host: string | null; port: number | null; user: string | null } =
+  let target: { connectionId: string | null; host: string | null; port: number | null; user: string | null; approvalRequestId?: string; approvalScope?: string } =
     { connectionId: null, host: null, port: null, user: null };
   // 2. Every path below funnels through finish(), which writes the OUTCOME row (best-effort, never throws).
   const finish = (result: SshExecToolResult, detail: Record<string, unknown>): SshExecToolResult => {
@@ -116,6 +117,28 @@ export async function performSshExec(
     if (shapeError) return refuse(shapeError, "invalid-connection-target");
     if (!meta.hostKeyFingerprint || !Number.isInteger(meta.port)) return refuse("ssh connection is incomplete", "connection-incomplete");
 
+    // A risky match HOLDS the command: nothing is dispatched on the policy verdict alone. Resolve the owner's
+    // decision for this EXACT (connection, command) first; only an authorized, unlapsed approval continues.
+    let approval: Extract<SshApprovalResolution, { kind: "approved" }> | null = null;
+    if (verdict.requiresApproval) {
+      const now = (deps.now ?? Date.now)();
+      const res = resolveSshApproval(db, projectId, sessionId, meta, command, now);
+      const held = (questionId: string, text: string): SshExecToolResult =>
+        finish(
+          { ok: false, error: text, reason: "risky-pattern-requires-approval", status: "awaiting-owner-approval", approvalRequestId: questionId },
+          { outcome: "held", reason: "risky-pattern-requires-approval", approvalRequestId: questionId },
+        );
+      if (res.kind === "pending") return held(res.questionId, `awaiting owner approval (request ${res.questionId}); call ssh_exec again with the IDENTICAL command once the owner has decided`);
+      if (res.kind === "denied") return refuse(`the owner denied this exact command; it will not run and no new request is filed until ${res.until} or until the owner clears the denial`, "ssh-approval-denied", { approvalRequestId: res.questionId });
+      if (res.kind === "lapsed") return refuse("the owner's approval for this exact command has expired; calling again files a new request", "ssh-approval-lapsed", { approvalRequestId: res.questionId });
+      if (res.kind === "none") {
+        const filed = fileSshApprovalRequest(db, projectId, sessionId, meta, command);
+        if (!filed.ok) return refuse(filed.error, filed.reason);
+        return held(filed.questionId, `awaiting owner approval (request ${filed.questionId}); this command matches a risky pattern and was NOT run. Call ssh_exec again with the IDENTICAL command once the owner has decided`);
+      }
+      approval = res;
+    }
+
     if (!checkSshRateLimit(meta.id, deps.guard, (deps.now ?? Date.now)())) {
       return refuse("rate limit exceeded for this connection", "rate-limited");
     }
@@ -123,6 +146,15 @@ export async function performSshExec(
     let privateKey: string | undefined;
     try { privateKey = getSshPrivateKeyForUse(db, meta.id, deps.keyPath); } catch { privateKey = undefined; }
     if (!privateKey) return finish({ ok: false, error: "ssh key unavailable", reason: "key-unavailable" }, { outcome: "error", errorKind: "key-unavailable" });
+
+    // Spend the approval LAST, immediately before dispatch, so a refusal above never burns a once-grant and
+    // two racing calls can never both run it.
+    if (approval) {
+      if (!claimSshApproval(db, approval, (deps.now ?? Date.now)())) {
+        return refuse("this approval was already used; calling again files a new request", "ssh-approval-used", { approvalRequestId: approval.question.id });
+      }
+      target = { ...target, approvalRequestId: approval.question.id, approvalScope: approval.scope };
+    }
 
     const result = await (deps.runner ?? runSshExecCommand)({
       host: meta.host, port: meta.port!, user: meta.user!, privateKey,

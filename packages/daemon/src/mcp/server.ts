@@ -881,8 +881,11 @@ export class TaskMcpRouter {
               "shell syntax is always refused (no `;` `&` `|` backticks `$()` redirection, quotes, globbing, " +
               "newlines or non-ASCII), read-only connections accept only a short list of read verbs (this limits " +
               "which verbs run, not what the server-side user can read), an owner " +
-              "allowlist may further restrict commands, and risky commands (reboot, rm, service control, …) are " +
-              "refused. Output is size-capped, the call is time-bounded and rate-limited per connection, and every " +
+              "allowlist may further restrict commands. A risky command (reboot, rm, service control, …) is NOT run: " +
+              "it is held, the owner is asked to approve that exact text, and you get {ok:false, status:" +
+              "\"awaiting-owner-approval\", approvalRequestId}. Once the owner authorizes it, call again with the " +
+              "IDENTICAL command; any changed text needs its own approval, and a denied or expired approval refuses. " +
+              "Output is size-capped, the call is time-bounded and rate-limited per connection, and every " +
               "call — run or refused — is audited. This Loom-side filtering is defense-in-depth only: the real " +
               "security boundary is the server-side dedicated least-privileged user the owner provisions. " +
               "A refusal returns {ok:false, reason}; a failed connection says whether the host was unreachable or " +

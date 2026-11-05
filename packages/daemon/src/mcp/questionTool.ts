@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, resolveConfig, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
+import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, SSH_APPROVAL_ACTION_PREFIX, resolveConfig, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
 import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db, StoredQuestionAttachment } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
@@ -116,13 +116,18 @@ export interface QuestionAskInput {
  */
 export function buildQuestionAsk(
   input: QuestionAskInput,
-  ctx: { sessionId: string; projectId: string; db: Db; role: SessionRole },
+  ctx: { sessionId: string; projectId: string; db: Db; role: SessionRole; /** daemon-internal callers only (connections/sshApproval.ts) — never set from an MCP tool */ daemonFiled?: boolean },
 ): { question: Question } | { error: string } {
   const type: QuestionType = input.type ?? "decision";
   const body = resolveAlias(input.body, input.detail);
   if (body === undefined) return { error: "body (or detail) is required" };
   if (type === "permission" && !input.action?.trim()) {
     return { error: 'type:"permission" requires a non-empty `action` describing what you want authorized' };
+  }
+  // Reserved: only the daemon files an ssh_exec hold. A hand-built one would let an agent mint its own
+  // approval target; matched on the trimmed, case-folded text so spacing/case cannot dodge the prefix.
+  if (!ctx.daemonFiled && type === "permission" && input.action!.trim().toLowerCase().startsWith(SSH_APPROVAL_ACTION_PREFIX)) {
+    return { error: "this `action` text is reserved for the daemon's own ssh command holds — choose a different description" };
   }
   if (input.provisionTo && !PROVISIONING_ROLES.includes(ctx.role)) {
     return { error: `provisionTo (auto-provisioning) is restricted to ${PROVISIONING_ROLES.join("/")} roles` };
@@ -381,8 +386,22 @@ function permissionGrant(q: Question): { scope: PermissionScope | null; expiresA
   return {
     scope: q.decidedScope,
     expiresAt: q.decidedExpiresAt,
-    lapsed: q.decidedExpiresAt !== null && new Date(q.decidedExpiresAt).getTime() < Date.now(),
+    lapsed: isPermissionLapsed(q.decidedExpiresAt),
   };
+}
+
+/** True for a daemon-filed ssh_exec hold's action text (the reserved prefix). */
+export function isSshApprovalAction(action: string | null | undefined): boolean {
+  return typeof action === "string" && action.startsWith(SSH_APPROVAL_ACTION_PREFIX);
+}
+
+/** A decided grant's expiry has passed. The ONE lapse predicate: `permissionGrant` (advisory display) and the
+ *  `ssh_exec` hold's redemption (`connections/sshApproval.ts`, which ENFORCES it) both call this, so the two
+ *  can never disagree. `null` (no expiry) never lapses; an unparseable value fails closed as lapsed. */
+export function isPermissionLapsed(decidedExpiresAt: string | null, nowMs: number = Date.now()): boolean {
+  if (decidedExpiresAt === null) return false;
+  const t = new Date(decidedExpiresAt).getTime();
+  return Number.isNaN(t) || t < nowMs;
 }
 
 /** A profile field's live value counts as "set" — the generic presence check `computeFulfillment` below
@@ -679,6 +698,9 @@ export function amendQuestionForAgent(
   if (patch.title === undefined && patch.body === undefined && patch.options === undefined) {
     return { error: "at least one of title/body/options is required" };
   }
+  if (isSshApprovalAction(question.permissionAction)) {
+    return { error: "this request is a daemon-filed ssh command hold; it cannot be amended" };
+  }
   if (patch.options !== undefined && question.type !== "decision") {
     return { error: `options can only be amended on a "decision" request (this one is type:"${question.type}")` };
   }
@@ -803,6 +825,9 @@ export function resolveQuestionForAgent(
   }
   if (question.state !== "pending") {
     return { error: `question is already ${question.state}, not pending` };
+  }
+  if (isSshApprovalAction(question.permissionAction)) {
+    return { error: "an ssh command hold can only be answered by the owner in the decision inbox — question_resolve refuses it" };
   }
   if (question.type === "credential") {
     return {

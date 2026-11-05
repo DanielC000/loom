@@ -128,7 +128,7 @@ import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
 import type { MergeGateOutcomeEntry } from "@loom/shared";
 import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
-import { unionConnections, unionCapabilities } from "@loom/shared";
+import { unionConnections, unionCapabilities, SSH_APPROVAL_ACTION_PREFIX } from "@loom/shared";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig, isProjectMemoryExpired, projectedAttachmentKind } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
@@ -1407,6 +1407,7 @@ CREATE TABLE IF NOT EXISTS questions (
                                             -- on decision='authorize' (fix(mcp): persist/surface scope+expiry)
   decided_expires_at TEXT,                 -- absolute ISO expiry paired with decided_scope; advisory only —
                                             -- see Question.decidedExpiresAt's doc
+  answered_via TEXT,                       -- 'human' only when the human REST answer route wrote the answer
   credential_env_var TEXT,
   secret_blob TEXT,                        -- envelope ciphertext (v1:iv:tag:ct), 'credential' type only —
                                             -- NEVER mapped into the Question object (see toQuestion)
@@ -2608,6 +2609,7 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // false lapsed:true (see its own doc).
   decided_scope: "TEXT",
   decided_expires_at: "TEXT",
+  answered_via: "TEXT",
   credential_env_var: "TEXT",
   secret_blob: "TEXT",
   // Credential auto-provisioning v1 (card 193de09e). provision_target is the ask-time JSON
@@ -10565,6 +10567,42 @@ export class Db {
     const r = this.db.prepare("SELECT * FROM questions WHERE id = ?").get(id) as Row | undefined;
     return r ? toQuestion(r) : undefined;
   }
+  /** Every `type:"permission"` Request in `projectId` whose ask-time `permission_action` is EXACTLY `action`
+   *  (any state), newest first. The `ssh_exec` hold's lookup (`connections/sshApproval.ts`): the action text
+   *  is the immutable exact-command binding, so equality here IS the binding check. */
+  listPermissionQuestionsByAction(projectId: string, action: string): Question[] {
+    return (this.db.prepare(
+      "SELECT * FROM questions WHERE project_id = ? AND type = 'permission' AND permission_action = ? ORDER BY created_at DESC",
+    ).all(projectId, action) as Row[]).map(toQuestion);
+  }
+  /** Still-`pending` `type:"permission"` Requests in `projectId` whose `permission_action` starts with the
+   *  literal `prefix` (substr compare — no LIKE wildcards), oldest first. The `ssh_exec` hold's per-connection cap. */
+  listPendingPermissionQuestionsByActionPrefix(projectId: string, prefix: string): Question[] {
+    return (this.db.prepare(
+      "SELECT * FROM questions WHERE project_id = ? AND type = 'permission' AND state = 'pending' AND substr(permission_action, 1, ?) = ? ORDER BY created_at ASC",
+    ).all(projectId, prefix.length, prefix) as Row[]).map(toQuestion);
+  }
+  /** One-shot claim of an AUTHORIZED permission answer: 'answered' → 'consumed' (stamping consumed_at) only
+   *  while the row is still 'answered' with chosen_option = `authorizeOption`. Returns true iff exactly one
+   *  row changed, so two racing redemptions can never both win. */
+  claimApprovedQuestion(id: string, authorizeOption: string, consumedAt: string): boolean {
+    return this.db.prepare(
+      "UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ? AND type = 'permission' AND state = 'answered' AND answered_via = 'human' AND chosen_option = ?",
+    ).run(consumedAt, id, authorizeOption).changes === 1;
+  }
+  /** Owner CLEAR of an answered/consumed ssh-approval Request: -> 'cancelled' (revokes a standing grant, ends a deny
+   *  cooldown). Human-only REST route only. True iff changed. */
+  clearSshApprovalQuestion(id: string, clearedAt: string): boolean {
+    return this.db.prepare(
+      `UPDATE questions SET state = 'cancelled', cancelled_reason = 'cleared by owner', cancelled_by = 'human', cancelled_at = ?
+       WHERE id = ? AND type = 'permission' AND state IN ('answered', 'consumed') AND substr(permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) = '${SSH_APPROVAL_ACTION_PREFIX}'`,
+    ).run(clearedAt, id).changes === 1;
+  }
+  /** Mark an 'answered' Request 'consumed' (it was delivered to its asker some other way). True iff changed. */
+  acknowledgeAnsweredQuestion(id: string, consumedAt: string): boolean {
+    return this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ? AND state = 'answered'")
+      .run(consumedAt, id).changes === 1;
+  }
   /** An asking manager's own questions (any state), newest first — for a future project/session inbox read. */
   listQuestionsForSession(sessionId: string): Question[] {
     return (this.db.prepare("SELECT * FROM questions WHERE session_id = ? ORDER BY created_at DESC").all(sessionId) as Row[])
@@ -10589,13 +10627,13 @@ export class Db {
    */
   answerQuestion(
     id: string,
-    patch: { chosenOption: string | null; note: string | null; answeredAt: string; decidedScope?: PermissionScope | null; decidedExpiresAt?: string | null },
+    patch: { chosenOption: string | null; note: string | null; answeredAt: string; decidedScope?: PermissionScope | null; decidedExpiresAt?: string | null; answeredVia?: "human" | null },
   ): Question | undefined {
     const existing = this.getQuestion(id);
     if (!existing || existing.state !== "pending" || existing.type === "credential") return undefined;
     this.db.prepare(
-      "UPDATE questions SET state = 'answered', chosen_option = ?, note = ?, answered_at = ?, decided_scope = ?, decided_expires_at = ? WHERE id = ?",
-    ).run(patch.chosenOption, patch.note, patch.answeredAt, patch.decidedScope ?? null, patch.decidedExpiresAt ?? null, id);
+      "UPDATE questions SET state = 'answered', chosen_option = ?, note = ?, answered_at = ?, decided_scope = ?, decided_expires_at = ?, answered_via = ? WHERE id = ?",
+    ).run(patch.chosenOption, patch.note, patch.answeredAt, patch.decidedScope ?? null, patch.decidedExpiresAt ?? null, patch.answeredVia ?? null, id);
     return this.getQuestion(id);
   }
   /**
@@ -10629,7 +10667,7 @@ export class Db {
     if (!existing || existing.state !== "pending" || existing.type !== "credential") return undefined;
     this.db.transaction(() => {
       this.db.prepare(
-        "UPDATE questions SET state = 'answered', secret_blob = ?, answered_at = ?, provision_connection_id = ?, provision_binding_state = ? WHERE id = ?",
+        "UPDATE questions SET state = 'answered', secret_blob = ?, answered_at = ?, provision_connection_id = ?, provision_binding_state = ?, answered_via = 'human' WHERE id = ?",
       ).run(
         patch.secretBlob,
         patch.answeredAt,
@@ -10873,7 +10911,7 @@ export class Db {
    * answered, but the asking manager hasn't pulled it. Oldest-first.
    */
   listAnsweredStuckQuestions(beforeIso: string): Question[] {
-    return (this.db.prepare("SELECT * FROM questions WHERE state = 'answered' AND answered_at <= ? ORDER BY answered_at")
+    return (this.db.prepare(`SELECT * FROM questions WHERE state = 'answered' AND answered_at <= ? AND (permission_action IS NULL OR substr(permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY answered_at`)
       .all(beforeIso) as Row[]).map(toQuestion);
   }
   /**
@@ -11023,7 +11061,7 @@ export class Db {
    */
   pullAnsweredQuestions(sessionId: string, consumedAt: string): Question[] {
     return this.db.transaction((): Question[] => {
-      const rows = (this.db.prepare("SELECT * FROM questions WHERE session_id = ? AND state = 'answered' ORDER BY answered_at")
+      const rows = (this.db.prepare(`SELECT * FROM questions WHERE session_id = ? AND state = 'answered' AND (permission_action IS NULL OR substr(permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY answered_at`)
         .all(sessionId) as Row[]).map(toQuestion);
       if (rows.length === 0) return rows;
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
@@ -11054,7 +11092,7 @@ export class Db {
       // CONSTRUCTION, with no separate `type` filter needed. Do not re-add one.
       const rows = (this.db.prepare(
         `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
-         WHERE s.agent_id = ? AND q.state = 'answered' ORDER BY q.answered_at`,
+         WHERE s.agent_id = ? AND q.state = 'answered' AND (q.permission_action IS NULL OR substr(q.permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY q.answered_at`,
       ).all(agentId) as Row[]).map(toQuestion);
       if (rows.length === 0) return rows;
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
@@ -11087,7 +11125,7 @@ export class Db {
       // pullAnsweredQuestionsForAgent's sibling query above; keep both in sync if this ever changes.
       const rows = (this.db.prepare(
         `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
-         WHERE s.agent_id = ? AND q.state = 'answered' ORDER BY q.answered_at`,
+         WHERE s.agent_id = ? AND q.state = 'answered' AND (q.permission_action IS NULL OR substr(q.permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY q.answered_at`,
       ).all(agentId) as Row[]).map(toQuestion);
       if (rows.length === 0) return { consumed: rows, remaining: 0 };
       const consumed: Question[] = [];
@@ -12826,6 +12864,7 @@ function toQuestion(r0: unknown): Question {
     permissionExpiresAt: (r.permission_expires_at as string | null) ?? null,
     decidedScope: (r.decided_scope as PermissionScope | null) ?? null,
     decidedExpiresAt: (r.decided_expires_at as string | null) ?? null,
+    answeredVia: (r.answered_via as "human" | null) ?? null,
     credentialEnvVar: (r.credential_env_var as string | null) ?? null,
     // Card 82b22817: a SIZE AS STORED only, derived from the ciphertext's own length — never the
     // plaintext, and NEVER a decryptability/delivery check (code-review correction: `secretEnvelopeByteLength`

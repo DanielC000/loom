@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { QuestionAttachment, QuestionInboxItem, QuestionType, PermissionScope } from "@loom/shared";
-import { PERMISSION_SCOPES } from "@loom/shared";
+import { PERMISSION_SCOPES, SSH_APPROVAL_ACTION_PREFIX } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { isRemoteOrigin } from "../lib/gatewayCredential";
@@ -1009,6 +1009,9 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
     const ms = PERMISSION_EXPIRY_MS[expiry];
     return ms ? new Date(Date.now() + ms).toISOString() : undefined;
   };
+  // An ssh command hold's standing grant must carry an expiry (the daemon rejects one without): no "no expiry" choice.
+  const isSsh = (q.permissionAction ?? "").startsWith(SSH_APPROVAL_ACTION_PREFIX);
+  const sshNeedsExpiry = isSsh && scope === "standing" && !expiry;
   const authorize = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "authorize", { scope, expiresAt: expiresAtIso(), note: note.trim() || undefined }));
   const deny = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "deny", { note: note.trim() || undefined }));
   const pending = authorize.isPending || deny.isPending;
@@ -1037,7 +1040,7 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
           {PERMISSION_SCOPES.map((s) => {
             const selected = scope === s;
             return (
-              <Panel key={s} selected={selected} onClick={() => setScope(s)}
+              <Panel key={s} selected={selected} onClick={() => { setScope(s); if (s === "standing" && isSsh && !expiry) setExpiry("24h"); }}
                 style={{ flex: 1, cursor: "pointer", display: "flex", flexDirection: "column", gap: 3 }}>
                 <span style={{ fontFamily: font.mono, fontSize: 13, color: selected ? color.phosphor : color.text }}>{s}</span>
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
@@ -1050,8 +1053,10 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontFamily: font.mono, fontSize: 12, color: scope === "standing" ? color.textDim : color.textMuted }}>Expiry</span>
           <Select value={expiry} disabled={scope !== "standing"} onChange={(e) => setExpiry(e.target.value)}
-            title={scope === "standing" ? "Optional expiry for a standing grant" : "Enable by choosing the standing scope"}>
-            <option value="">no expiry</option>
+            title={scope === "standing" ? (isSsh ? "A standing ssh grant needs an expiry" : "Optional expiry for a standing grant") : "Enable by choosing the standing scope"}
+            data-testid="permission-expiry">
+            {!isSsh && <option value="">no expiry</option>}
+            {isSsh && <option value="" disabled>choose an expiry</option>}
             <option value="24h">24 hours</option>
             <option value="7d">7 days</option>
             <option value="30d">30 days</option>
@@ -1063,7 +1068,7 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2}
           placeholder="add context for the manager…" style={textareaStyle} />
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <Button variant="primary" disabled={pending} onClick={() => authorize.mutate()}>{authorize.isPending ? "Authorizing…" : "Authorize"}</Button>
+          <Button variant="primary" disabled={pending || sshNeedsExpiry} onClick={() => authorize.mutate()}>{authorize.isPending ? "Authorizing…" : "Authorize"}</Button>
           <Button variant="danger" disabled={pending} onClick={() => deny.mutate()}>{deny.isPending ? "Denying…" : "Deny"}</Button>
           <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>Sends your decision to agent {q.sessionId.slice(0, 8)}.</span>
         </div>

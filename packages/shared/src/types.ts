@@ -3670,8 +3670,9 @@ export interface SshCommandRule {
 /** The shipped, owner-editable default risky-command pattern list for a NEW `ssh` connection (design
  *  record a3d5c7f4, open question #4 — a sane default the owner can edit per connection rather than being
  *  required to write one from scratch). Prefix-matched against the trimmed command text. Deliberately
- *  conservative — these flag likely-destructive/disruptive verbs for owner confirmation; they are NOT the
- *  connection's security boundary (the command allowlist, when the owner sets one, is). */
+ *  conservative — a match HOLDS the command until the owner approves that exact text in the decision inbox;
+ *  the list is a word-level screen, NOT the connection's security boundary (the server-side least-privileged
+ *  user is). Applies to NEW connections only; an existing connection keeps the list it was saved with. */
 export const DEFAULT_SSH_RISKY_COMMAND_PATTERNS: readonly SshCommandRule[] = [
   { kind: "prefix", pattern: "rm " },
   { kind: "prefix", pattern: "rm -" },
@@ -3684,6 +3685,39 @@ export const DEFAULT_SSH_RISKY_COMMAND_PATTERNS: readonly SshCommandRule[] = [
   { kind: "prefix", pattern: "docker compose up" },
   { kind: "prefix", pattern: "docker rm" },
   { kind: "prefix", pattern: "docker kill" },
+  { kind: "prefix", pattern: "docker stop" },
+  { kind: "prefix", pattern: "docker restart" },
+  { kind: "prefix", pattern: "docker pause" },
+  { kind: "prefix", pattern: "docker exec" },
+  { kind: "prefix", pattern: "docker run" },
+  { kind: "prefix", pattern: "docker volume rm" },
+  { kind: "prefix", pattern: "docker volume prune" },
+  { kind: "prefix", pattern: "docker network rm" },
+  { kind: "prefix", pattern: "docker image rm" },
+  { kind: "prefix", pattern: "docker container rm" },
+  { kind: "prefix", pattern: "docker container prune" },
+  { kind: "prefix", pattern: "docker compose stop" },
+  { kind: "prefix", pattern: "docker compose restart" },
+  { kind: "prefix", pattern: "docker compose rm" },
+  { kind: "prefix", pattern: "docker compose kill" },
+  { kind: "prefix", pattern: "docker compose run" },
+  { kind: "prefix", pattern: "docker compose exec" },
+  { kind: "prefix", pattern: "docker container stop" },
+  { kind: "prefix", pattern: "docker container restart" },
+  { kind: "prefix", pattern: "docker container kill" },
+  { kind: "prefix", pattern: "docker container exec" },
+  { kind: "prefix", pattern: "docker image prune" },
+  { kind: "prefix", pattern: "docker-compose down" },
+  { kind: "prefix", pattern: "docker-compose stop" },
+  { kind: "prefix", pattern: "docker-compose rm" },
+  { kind: "prefix", pattern: "docker-compose kill" },
+  { kind: "prefix", pattern: "docker-compose run" },
+  { kind: "prefix", pattern: "docker-compose exec" },
+  { kind: "prefix", pattern: "halt" },
+  { kind: "prefix", pattern: "init 0" },
+  { kind: "prefix", pattern: "telinit 0" },
+  { kind: "prefix", pattern: "killall" },
+  { kind: "prefix", pattern: "crontab -r" },
   { kind: "prefix", pattern: "docker system prune" },
   { kind: "prefix", pattern: "mkfs" },
   { kind: "prefix", pattern: "dd " },
@@ -4094,6 +4128,11 @@ export type PermissionScope = (typeof PERMISSION_SCOPES)[number];
  *  `questionPullItem` derives its `approved` boolean by comparing against this SAME const) — a single
  *  shared source so the write-side validation and the read-side derivation can never drift apart. */
 export const PERMISSION_ANSWERS = ["authorize", "deny"] as const;
+
+/** The `permissionAction` prefix of a daemon-filed `ssh_exec` risky-command hold. Reserved: only the daemon may
+ *  file such a Request, no agent tool may ask, resolve, amend or pull one, and only the human REST answer
+ *  route (which stamps `answeredVia:"human"`) can authorize it. */
+export const SSH_APPROVAL_ACTION_PREFIX = "ssh_exec connection=";
 export type PermissionAnswer = (typeof PERMISSION_ANSWERS)[number];
 
 /**
@@ -4259,6 +4298,11 @@ export interface Question {
    *  never itself revokes, blocks, or re-checks a grant against it — the asking manager must read
    *  `lapsed` and honor it. */
   decidedExpiresAt: string | null;
+  /** Generic provenance of the answer (nothing ssh-specific): `"human"` means the human-only REST answer route
+   *  (`POST /api/questions/:id/answer`) wrote it, and ONLY that route ever stamps it. Null for every agent
+   *  path (`question_resolve`, the companion's decision resolve) and for any pre-field row. Any gate that must
+   *  not be self-approved by an agent (the `ssh_exec` hold today) keys on it. */
+  answeredVia?: "human" | null;
   /** `type:"credential"` ask-time payload — the env var / config key name the agent expects the secret
    *  under once granted (a display hint, not itself wired to injection — see Question's own doc). Null for
    *  every other type. */

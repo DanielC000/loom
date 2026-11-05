@@ -55,6 +55,8 @@ import { listConnections, createConnection, deleteConnection, getConnectionMetad
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { fetchHostKeyFingerprint } from "../connections/ssh.js";
+import { sshApprovalAnswerNudge, sshApprovalConnectionId, sshApprovalNudgeTarget } from "../connections/sshApproval.js";
+import { isSshApprovalAction } from "../mcp/questionTool.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, updateCapabilityDefPassEnv, requirePassEnvKey, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, validateColumnOrder, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
@@ -6935,7 +6937,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const isAuthorize = body.decision === PERMISSION_ANSWERS[0];
       const decidedScope = isAuthorize ? (body.scope ?? "once") : null;
       const decidedExpiresAt = isAuthorize && decidedScope === "standing" ? (body.expiresAt ?? null) : null;
-      updated = deps.db.answerQuestion(id, { chosenOption: body.decision, note, answeredAt, decidedScope, decidedExpiresAt });
+      // An ssh_exec hold's standing grant MUST carry an expiry: it authorizes a command to run unattended
+      // repeatedly, so "forever" is not an offered choice. Refused here, before anything is written.
+      if (isSshApprovalAction(question.permissionAction) && isAuthorize && decidedScope === "standing" && decidedExpiresAt === null) {
+        return reply.code(400).send({ error: "a standing approval for an ssh command must carry an expiresAt" });
+      }
+      // `answeredVia:"human"` is stamped ONLY here (the human-only REST route); an ssh_exec hold is
+      // redeemed only against a row carrying it, so no agent path (question_resolve etc.) can authorize one.
+      updated = deps.db.answerQuestion(id, { chosenOption: body.decision, note, answeredAt, decidedScope, decidedExpiresAt, answeredVia: "human" });
     } else {
       // 'decision' / 'input' — today's exact validation, byte-identical for existing callers.
       const body = (req.body ?? {}) as { chosenOption?: string | null; note?: string };
@@ -6957,7 +6966,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       } else if (!hasNote) {
         return reply.code(400).send({ error: "an answer is required — pick an option or type a note" });
       }
-      updated = deps.db.answerQuestion(id, { chosenOption, note, answeredAt });
+      updated = deps.db.answerQuestion(id, { chosenOption, note, answeredAt, answeredVia: "human" });
     }
     if (!updated) return reply.code(400).send({ error: "question was answered concurrently" });
     // Best-effort push nudge — the answer is ALREADY durably persisted above; a torn-down asking-manager
@@ -6977,11 +6986,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // updated.sessionId if the asking session row or a live agent session can't be resolved
       // (defensive — the FK on questions.session_id makes a missing asker row unreachable in practice).
       const asker = deps.db.getSession(updated.sessionId);
-      const target = (asker && deps.db.getLiveSessionForAgent(asker.agentId)?.id) ?? updated.sessionId;
+      // An ssh_exec hold is filed by a WORKER, which has no question_pull: it gets its own nudge, only to a
+      // session that is live for the filing agent (a gone filer is dropped — the Request stays in history).
+      const sshNudge = sshApprovalAnswerNudge(updated, deps.db.getConnection(sshApprovalConnectionId(updated) ?? "")?.name ?? null);
+      const sshTarget = sshNudge !== null ? sshApprovalNudgeTarget(deps.db, updated) : null;
+      if (sshNudge !== null && sshTarget === null) return reply.send(updated); // filer + recycle chain gone: nothing to nudge
+      const target = sshTarget ?? (asker && deps.db.getLiveSessionForAgent(asker.agentId)?.id) ?? updated.sessionId;
       // Card f75a2202: append the request-answered deferred-trigger appendix (see that function's own
       // doc) — a card bound to THIS request via deferredUntilEvent gets a pointer the moment it's
       // answered, mirroring deferredTriggerNotice's gate-fail-naming sibling.
-      const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.` +
+      const nudge = (sshNudge ?? `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`) +
         requestAnsweredTriggerNotice(deps.db, updated.projectId, updated.id);
       // Tagged with the question id (questionId) so a LATER question_pull that consumes this question in
       // the same batch as others can purge this exact nudge if it's still queued when it goes stale
@@ -6989,6 +7003,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       deps.pty.enqueueStdin(target, nudge, "human", undefined, undefined, "agent", updated.id);
     } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
     return reply.send(updated);
+  });
+  // Owner CLEAR of an ANSWERED ssh_exec hold (human-only REST, never an MCP tool): revokes a standing grant
+  // early and ends a deny's 24h cooldown, so the next identical call files a fresh hold. Audited.
+  app.post("/api/questions/:id/clear-ssh-approval", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const q = deps.db.getQuestion(id);
+    if (!q) return reply.code(404).send({ error: "question not found" });
+    if (!isSshApprovalAction(q.permissionAction)) return reply.code(400).send({ error: "not an ssh command approval" });
+    const clearedAt = new Date().toISOString();
+    if (!deps.db.clearSshApprovalQuestion(id, clearedAt)) {
+      return reply.code(409).send({ error: `only an answered ssh approval can be cleared (this one is ${q.state}); dismiss a pending one instead` });
+    }
+    try {
+      deps.db.appendEvent({
+        id: randomUUID(), ts: clearedAt, managerSessionId: "", workerSessionId: q.filedBySessionId ?? "",
+        kind: "ssh_command_run",
+        detail: { phase: "approval-cleared", projectId: q.projectId, approvalRequestId: id, connectionId: sshApprovalConnectionId(q), scope: q.decidedScope, decision: q.chosenOption },
+      });
+    } catch { /* the clear itself is already persisted */ }
+    return reply.send(deps.db.getQuestion(id));
   });
   // Human dismiss (card feat(orchestration): question_cancel + dismiss) — the missing exit from a
   // moot/superseded pending Request, mirroring the preset-suggestion store's existing human Adopt/Dismiss

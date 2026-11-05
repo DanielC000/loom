@@ -233,7 +233,7 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={fieldLabel}>Refuse these commands</span>
+        <span style={fieldLabel}>Hold these commands for my approval</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span data-testid="ssh-risky-summary" style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>
             {draft.riskyCommandPatterns.length} pattern{draft.riskyCommandPatterns.length === 1 ? "" : "s"}
@@ -244,11 +244,11 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
             <Button variant="ghost" onClick={() => patch({ riskyCommandPatterns: DEFAULT_SSH_RISKY_COMMAND_PATTERNS.map((r) => ({ ...r })) })}>Restore default</Button>
           )}
         </div>
-        {/* @decision a3d5c7f4 — describes ssh_exec as it is TODAY: a match is refused, never held for approval. Card f7d70f75 must rewrite this copy when the owner-approval hold ships. */}
-        <Hint>An agent's command that matches one of these is refused and logged. A way to approve one is planned.</Hint>
+        {/* @decision a3d5c7f4 — describes ssh_exec as it is: a match is HELD and waits for the owner's approval of that exact command; keep this copy in step with the tool. */}
+        <span data-testid="ssh-risky-hint"><Hint>An agent's command that matches one of these does not run: it waits for your approval in the decision inbox, and runs only if you approve that exact text. This is a word screen to decide when to ask you, not a security boundary.</Hint></span>
         {riskyOpen && (
           <SshRuleList rules={draft.riskyCommandPatterns} onChange={(v) => patch({ riskyCommandPatterns: v })} testId="ssh-risky"
-            emptyText="No patterns: no command is refused for matching one." />
+            emptyText="No patterns: no command waits for your approval for matching one." />
         )}
       </div>
     </>
@@ -267,7 +267,7 @@ export function buildSshCreateBody(name: string, host: string, d: SshDraft, proj
   if (!SSH_FINGERPRINT_RE.test(d.fingerprint.trim())) return { ok: false, error: "Pin the host key fingerprint: paste it, or fetch it from the host and confirm." };
   const allow = cleanSshRules(d.commandAllowlist, "Command allowlist");
   if (!allow.ok) return allow;
-  const risky = cleanSshRules(d.riskyCommandPatterns, "Refuse these commands");
+  const risky = cleanSshRules(d.riskyCommandPatterns, "Hold these commands for my approval");
   if (!risky.ok) return risky;
   return {
     ok: true,
@@ -302,7 +302,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
     setLocalErr(null);
     const a = cleanSshRules(allow, "Command allowlist");
     if (!a.ok) { setLocalErr(a.error); return; }
-    const r = cleanSshRules(risky, "Refuse these commands");
+    const r = cleanSshRules(risky, "Hold these commands for my approval");
     if (!r.ok) { setLocalErr(r.error); return; }
     save.mutate({ readOnly, commandAllowlist: a.value, riskyCommandPatterns: r.value });
   };
@@ -315,7 +315,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
         <span data-testid={`ssh-target-${c.id}`} style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.user}@{c.host}:{c.port}</span>
         {c.readOnly ? <Badge tone="phosphor">Read-only</Badge> : <Badge tone="amber">Read-write</Badge>}
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
-          {allowN === 0 ? "no allowlist" : `${allowN} allowed`} · {riskyN} refused
+          {allowN === 0 ? "no allowlist" : `${allowN} allowed`} · {riskyN} held for approval
         </span>
         <span title={c.hostKeyFingerprint} data-testid={`ssh-fingerprint-${c.id}`} style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
           pinned {c.hostKeyFingerprint ? `${c.hostKeyFingerprint.slice(0, 19)}…` : "—"}
@@ -341,8 +341,8 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
             <SshRuleList rules={allow} onChange={setAllow} testId={`ssh-edit-allowlist-${c.id}`} emptyText="No allowlist: any command read-only mode permits." />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={fieldLabel}>Refuse these commands</span>
-            <SshRuleList rules={risky} onChange={setRisky} testId={`ssh-edit-risky-${c.id}`} emptyText="No patterns: no command is refused for matching one." />
+            <span style={fieldLabel}>Hold these commands for my approval</span>
+            <SshRuleList rules={risky} onChange={setRisky} testId={`ssh-edit-risky-${c.id}`} emptyText="No patterns: no command waits for your approval for matching one." />
           </div>
           {(localErr || save.error) && <span role="alert" style={{ ...hintStyle, color: color.red }}>{localErr ?? errorText(save.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>

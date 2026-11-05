@@ -3,7 +3,7 @@
 // SAME profile does not get it.
 //
 // Each claim is measured against real state, never against "a control rendered":
-//   1. SAFE DEFAULTS. Read-only starts ticked and the refuse-these-commands list starts as the shipped default — both
+//   1. SAFE DEFAULTS. Read-only starts ticked and the hold-these-commands-for-approval list starts as the shipped default — both
 //      asserted in the form AND in the row the daemon actually stored.
 //   2. NO SILENT TOFU. "Fetch from host" only DISPLAYS a fingerprint; the pin field stays empty until the
 //      explicit "Pin this fingerprint" click. The displayed value is compared to one computed
@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, test, type Locator, type Page } from "./fixtures/daemon";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -147,7 +147,17 @@ test("create an ssh connection with a confirmed pin, then grant it to one agent 
     // ── 1. Safe defaults, in the form.
     const readOnly = page.locator("label", { hasText: "Read-only" }).locator('input[type="checkbox"]').first();
     await expect(readOnly).toBeChecked();
-    await expect(page.getByTestId("ssh-risky-summary")).toHaveText("16 patterns · Loom's default list");
+    // The count comes from the SHIPPED constant (compiled shared dist), never a literal that drifts when the list grows.
+    const { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } = (await import(pathToFileURL(path.resolve(__dirname, "..", "..", "shared", "dist", "index.js")).href)) as { DEFAULT_SSH_RISKY_COMMAND_PATTERNS: unknown[] };
+    const defaultRiskyCount = DEFAULT_SSH_RISKY_COMMAND_PATTERNS.length;
+    expect(defaultRiskyCount, "control: the imported default list is a real, non-trivial list").toBeGreaterThan(16);
+    await expect(page.getByTestId("ssh-risky-summary")).toHaveText(`${defaultRiskyCount} patterns · Loom's default list`);
+    // The risky-list copy must say a match WAITS for approval (not that it is refused), and that it is not a boundary.
+    const riskyHint = page.getByTestId("ssh-risky-hint");
+    await expect(riskyHint).toContainText("waits for your approval in the decision inbox");
+    await expect(riskyHint).toContainText("not a security boundary");
+    await expect(riskyHint, "the retired 'refused' copy must be gone").not.toContainText("refused");
+    await expect(page.getByText("Hold these commands for my approval", { exact: true })).toBeVisible();
     await expect(field(page, "Port")).toHaveValue("22");
     await shot(formRoot(page), "1-empty-form");
 
@@ -190,7 +200,7 @@ test("create an ssh connection with a confirmed pin, then grant it to one agent 
     const stored = (await findStored())!;
     connId = stored.id;
     expect(stored).toMatchObject({ authScheme: "ssh", readOnly: true, hostKeyFingerprint: server.fingerprint, projectId: project.id });
-    expect(stored.riskyCommandPatterns).toHaveLength(16);
+    expect(stored.riskyCommandPatterns).toHaveLength(defaultRiskyCount);
     const row = page.getByTestId(`connection-row-${stored.id}`);
     await expect(row).toBeVisible();
     await expect(page.getByTestId(`ssh-target-${stored.id}`)).toHaveText(`loom@127.0.0.1:${server.port}`);

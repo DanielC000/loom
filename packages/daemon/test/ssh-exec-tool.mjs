@@ -162,6 +162,7 @@ try {
     check("1d session granted only a non-ssh connection: ssh_exec ABSENT (authenticated_request present)", !bTools.some((t) => t.name === "ssh_exec") && bTools.some((t) => t.name === "authenticated_request"));
     const desc = gTools.find((t) => t.name === "ssh_exec")?.description ?? "";
     check("1e description says Loom-side filtering is defense-in-depth and the boundary is a least-privileged server user", /defense-in-depth/.test(desc) && /least-privileged/.test(desc));
+    check("1e2 description says a risky command is HELD for owner approval of the exact text (awaiting-owner-approval), not refused", /held/.test(desc) && /awaiting-owner-approval/.test(desc) && /IDENTICAL/.test(desc) && !/risky commands \(reboot[^)]*\) are\s+refused/.test(desc));
     check("1f description lists the granted ssh connections (id/name/host) and never key material", desc.includes(roConn.id) && !desc.includes(MARKER_A));
     check("1g description cites no card/decision ids", !/a3d5c7f4|699fdbd9|f6647205|f9972a3d|f7d70f75|b9b34a35|afe1bc90/.test(desc));
     check("1h authenticated_request's usable list never includes an ssh id", !(gTools.find((t) => t.name === "authenticated_request")?.description ?? "").includes(roConn.id));
@@ -209,17 +210,9 @@ try {
       ["read-only: hostname with arg", roConn, "hostname newname", "not-read-only-verb"],
       ["read-only: date -s", roConn, "date -s 2020-01-01", "not-read-only-verb"],
       ["read-only: docker run", roConn, "docker run alpine", "not-read-only-verb"],
-      ["read-only: systemctl restart", roConn, "systemctl restart nginx", "risky-pattern-requires-approval"],
+      // A risky command on a READ-ONLY connection is refused outright: owner approval never widens read-only.
+      ["read-only: systemctl restart (approval cannot widen read-only)", roConn, "systemctl restart nginx", "not-read-only-verb"],
       ["allowlist regex: not matching", rxConn, "cat /etc/hostname", "not-in-allowlist"],
-      ["risky: reboot", rwConn, "reboot", "risky-pattern-requires-approval"],
-      ["risky: sudo reboot", rwConn, "sudo reboot", "risky-pattern-requires-approval"],
-      ["risky: /sbin/reboot", rwConn, "/sbin/reboot", "risky-pattern-requires-approval"],
-      ["risky: env prefix", rwConn, "FOO=1 reboot", "risky-pattern-requires-approval"],
-      ["risky: nice reboot", rwConn, "nice reboot", "risky-pattern-requires-approval"],
-      ["risky: systemctl --force reboot", rwConn, "systemctl --force reboot", "risky-pattern-requires-approval"],
-      ["risky: rm -rf", rwConn, "rm -rf /tmp/x", "risky-pattern-requires-approval"],
-      ["risky: docker compose down (extra spaces)", rwConn, "docker  compose   down", "risky-pattern-requires-approval"],
-      ["risky: regex-allowlisted but risky", rxConn, "ls reboot", "risky-pattern-requires-approval"],
       ["empty", rwConn, "   ", "invalid-command"],
     ];
     const metaShapes = [";", "&&", "||", "|", "&", "`id`", "$(id)", "${IFS}", ">", "<", ">>", "2>&1", "\\", "'", '"', "*", "?", "[a]", "~", "#", "!", "{a,b}", "^", "ls\treboot"];
@@ -245,6 +238,23 @@ try {
     check(`3 none of the ${refusedCases.length} refusals reached the runner`, calls.length === 0);
     check("3 none reached the loopback server either", serverFlags.execs.length === execsBefore);
     // exemption + flip: the same stack lets a clean command through
+    // Risky commands on a read-write connection are HELD (not refused): not run, owner Request filed, audited as `held`.
+    // Pending holds per connection are capped, so each case clears the previous Request first (cap has its own test).
+    const clearHolds = () => { for (const q of db.db.prepare("SELECT id FROM questions WHERE state = 'pending' AND type = 'permission'").all()) db.cancelQuestion(q.id, { reason: "test cleanup", cancelledBy: "human" }); };
+    for (const [label, conn, command] of [
+      ["reboot", rwConn, "reboot"], ["sudo reboot", rwConn, "sudo reboot"], ["/sbin/reboot", rwConn, "/sbin/reboot"],
+      ["env prefix", rwConn, "FOO=1 reboot"], ["nice reboot", rwConn, "nice reboot"], ["systemctl --force reboot", rwConn, "systemctl --force reboot"],
+      ["rm -rf", rwConn, "rm -rf /tmp/x"], ["docker compose down (extra spaces)", rwConn, "docker  compose   down"],
+      ["regex-allowlisted but risky", rxConn, "ls reboot"],
+    ]) {
+      clearHolds();
+      const r = await direct(conn, command);
+      const outcome = lastOutcome(command);
+      check(`3 risky ${label}: held, not run`, r.ok === false && r.reason === "risky-pattern-requires-approval" && r.status === "awaiting-owner-approval" && typeof r.approvalRequestId === "string");
+      check(`3 risky ${label}: audited (outcome=held, request id)`, outcome?.outcome === "held" && outcome.approvalRequestId === r.approvalRequestId);
+    }
+    clearHolds();
+    check("3 none of the held risky commands reached the runner", calls.length === 0);
     const okRun = await direct(rwConn, "systemctl status nginx");
     check("3 (flip control) systemctl with an exact read-only subcommand passes the risky check and DOES reach the runner", okRun.ok === true && calls.length === 1);
     const okRo = await direct(roConn, "ls /tmp");
@@ -258,8 +268,8 @@ try {
   // ============ 3b. option-value shifting: a subcommand is NEVER inferred past an option ============
   {
     const shifted = [
-      ["systemctl -o cat stop sshd", "risky-pattern-requires-approval"],
-      ["systemctl -p status disable sshd", "risky-pattern-requires-approval"],
+      ["systemctl -o cat stop sshd", "not-read-only-verb"],
+      ["systemctl -p status disable sshd", "not-read-only-verb"],
       ["docker -l info stop db", "not-read-only-verb"],
       ["docker -l info run --privileged -v /:/h alpine chroot /h touch /h/pwn", "not-read-only-verb"],
       ["docker --log-level info compose down", "not-read-only-verb"],
@@ -275,14 +285,15 @@ try {
     }
     // the same shapes on a read-WRITE connection must still not slip past the risky exemption
     const rwShift = await direct(rwConn, "systemctl -o cat stop sshd");
-    check("3b systemctl exemption is dropped when an option precedes the subcommand (read-write connection)", rwShift.ok === false && rwShift.reason === "risky-pattern-requires-approval");
+    check("3b systemctl exemption is dropped when an option precedes the subcommand (read-write connection): HELD, not run", rwShift.ok === false && rwShift.reason === "risky-pattern-requires-approval" && rwShift.status === "awaiting-owner-approval");
+    for (const q of db.db.prepare("SELECT id FROM questions WHERE state = 'pending' AND type = 'permission'").all()) db.cancelQuestion(q.id, { reason: "test cleanup", cancelledBy: "human" });
     check("3b none of the shifted shapes reached the runner", calls.length === 0);
 
     // tightened read-only list: removed verbs refused, the narrow forms still pass (flip controls)
     for (const [command, reason] of [
       ["file -C -m x", "not-read-only-verb"], ["docker logs web", "not-read-only-verb"], ["docker inspect web", "not-read-only-verb"],
       ["docker ps --format x", "not-read-only-verb"], ["systemctl status -l nginx", "not-read-only-verb"],
-      ["systemctl show nginx", "risky-pattern-requires-approval"], ["systemctl status a b", "not-read-only-verb"],
+      ["systemctl show nginx", "not-read-only-verb"], ["systemctl status a b", "not-read-only-verb"],
     ]) {
       const r = await direct(roConn, command);
       check(`3b read-only list: ${command} refused as ${reason}`, r.ok === false && r.reason === reason);
