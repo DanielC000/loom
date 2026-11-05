@@ -26,3 +26,10 @@ Decision c8eeda93 scrubs the DAEMON's inherited `ANTHROPIC_*` / `AWS_BEARER_TOKE
 - Do not edit, rewrite or delete any settings file the scan finds — owner/project files are never touched.
 - Do not fork the key predicate into a second copy; extend `isClaudeRoutingEnvKey`.
 - Do not widen the scan to managed/enterprise settings paths without a new decision; Loom cannot neutralize them either way.
+- Do not measure the oversize cap on the DECODED string: invalid UTF-8 inflates on decode (`0xFF` → U+FFFD, +2 bytes), so the fs seam returns the raw `Buffer` and the cap is compared on its byte length.
+
+## Follow-up (card 37f7b100)
+
+- **Finding labels.** User-level findings are labelled `settings.json` / `settings.local.json`, relative to the resolved user settings dir (`claudeUserSettingsDir()`), not `.claude/settings.json` — the label base is that dir itself, whether it is `$CLAUDE_CONFIG_DIR` or `<home>/.claude`. Worktree-level findings keep the `.claude/settings*.json` form (labelled relative to the worktree cwd).
+- **Oversize check.** `ScanFsSeam.readCapped` returns the raw bytes read; `oversize:<label>` is decided on that byte count before decoding, so an at-cap file with invalid UTF-8 is scanned, not misreported as oversize. Still fail-closed: an over-cap or unreadable file is never reported clean.
+- **`.claude` literal.** `claudeUserSettingsDir()` builds the unset-case path from `CLAUDE_DOCTRINE_DIR` (`pty/claude-dirname.ts`, a leaf) instead of a hand-written literal; the resolved path is unchanged.

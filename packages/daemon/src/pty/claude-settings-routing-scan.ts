@@ -80,8 +80,9 @@ export function sanitizeKeyNames(keys: string[]): string[] {
 }
 
 export interface ScanFsSeam {
-  /** Read up to `maxBytes` of `file` as utf8. Rejects with an errno-coded error (ENOENT = absent). */
-  readCapped(file: string, maxBytes: number): Promise<string>;
+  /** Read up to `maxBytes` RAW bytes of `file` (the caller compares byte counts before decoding). Rejects with
+   *  an errno-coded error (ENOENT = absent). */
+  readCapped(file: string, maxBytes: number): Promise<Buffer>;
 }
 
 const realFs: ScanFsSeam = {
@@ -90,7 +91,7 @@ const realFs: ScanFsSeam = {
     try {
       const buf = Buffer.alloc(maxBytes);
       const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
-      return buf.subarray(0, bytesRead).toString("utf8");
+      return buf.subarray(0, bytesRead);
     } finally {
       await fh.close().catch(() => {});
     }
@@ -113,9 +114,10 @@ export async function scanSettingsDir(
     const label = path.relative(labelBase, file).split(path.sep).join("/");
     try {
       // Read ONE byte past the cap so an oversize file is distinguishable from a truncated-but-valid one.
-      const text = await fsSeam.readCapped(file, maxBytes + 1);
-      if (Buffer.byteLength(text, "utf8") > maxBytes) { failure ??= `oversize:${label}`; continue; }
-      const keys = routingKeysInSettingsText(text);
+      const raw = await fsSeam.readCapped(file, maxBytes + 1);
+      // Compare RAW byte counts: decoding first would inflate invalid UTF-8 (0xFF -> U+FFFD, +2 bytes).
+      if (raw.length > maxBytes) { failure ??= `oversize:${label}`; continue; }
+      const keys = routingKeysInSettingsText(raw.toString("utf8"));
       if (keys === null) { failure ??= `unparseable:${label}`; continue; }
       if (keys.length) findings.push({ file: label, keys: sanitizeKeyNames(keys) });
     } catch (e) {

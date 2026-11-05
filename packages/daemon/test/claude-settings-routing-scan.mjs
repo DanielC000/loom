@@ -73,6 +73,34 @@ write(path.join(exBase, ".claude"), "settings.json", exact);
 const exactRes = await scan.scanSettingsDir(path.join(exBase, ".claude"), exBase, undefined, Buffer.byteLength(exact));
 check("byte cap boundary: file of exactly maxBytes is scanned, not oversize", exactRes.available === true && exactRes.findings.length === 1, JSON.stringify(exactRes));
 
+// byte case: an at-cap file with a lone 0xFF (invalid utf8 → decodes to U+FFFD, +2 bytes) must be compared by
+// RAW bytes — scanned (finding reported), not misreported oversize. One byte past the cap is still oversize.
+const ffHead = Buffer.from('{"env":{"ANTHROPIC_API_KEY":"');
+const ffTail = Buffer.from('"}}');
+const ffBuf = Buffer.concat([ffHead, Buffer.from([0xff]), ffTail]);
+const ffBase = path.join(tmp, "ff");
+fs.mkdirSync(path.join(ffBase, ".claude"), { recursive: true });
+fs.writeFileSync(path.join(ffBase, ".claude", "settings.json"), ffBuf);
+const ffRes = await scan.scanSettingsDir(path.join(ffBase, ".claude"), ffBase, undefined, ffBuf.length);
+check("raw-byte cap: at-cap file with a lone 0xFF is scanned (finding), NOT oversize", ffRes.available === true && ffRes.findings.length === 1 && ffRes.findings[0].keys.join() === "ANTHROPIC_API_KEY", JSON.stringify(ffRes));
+const ffOver = await scan.scanSettingsDir(path.join(ffBase, ".claude"), ffBase, undefined, ffBuf.length - 1);
+check("raw-byte cap: same file one byte over the cap → oversize (fail-closed)", ffOver.available === false && /^oversize:/.test(ffOver.reason ?? ""), JSON.stringify(ffOver));
+
+// claudeUserSettingsDir (transcript-root feeder): resolved path pinned to the literal pre-refactor value
+// for CLAUDE_CONFIG_DIR unset and set (the `.claude` literal was replaced by the CLAUDE_DOCTRINE_DIR constant).
+{
+  const { claudeUserSettingsDir } = await import("../dist/pty/claude-config.js");
+  const prior = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    delete process.env.CLAUDE_CONFIG_DIR;
+    check("claudeUserSettingsDir unset → <home>/.claude (byte-identical to the old literal)", claudeUserSettingsDir() === path.join(os.homedir(), ".claude"), claudeUserSettingsDir());
+    process.env.CLAUDE_CONFIG_DIR = path.join(tmp, "cfgdir");
+    check("claudeUserSettingsDir set → the dir itself", claudeUserSettingsDir() === path.join(tmp, "cfgdir"), claudeUserSettingsDir());
+  } finally {
+    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prior;
+  }
+}
+
 // (3b) log-injection hardening: key names come from worker-writable files
 const FORGED = "ANTHROPIC_X\n[boot] FORGED";
 const ESC = "ANTHROPIC_Y\u001b[31m";
@@ -160,7 +188,7 @@ const clogs = [];
 console.warn = (...a) => { clogs.push(a.join(" ")); };
 let done;
 const doneP = new Promise((r) => { done = r; });
-scan.kickWorktreeSettingsRoutingScan("sess-clean", cleanWt, { readCapped: async (f, m) => { try { return await fs.promises.readFile(f, "utf8"); } finally { if (f.endsWith("settings.local.json")) done(); } } });
+scan.kickWorktreeSettingsRoutingScan("sess-clean", cleanWt, { readCapped: async (f, m) => { try { return await fs.promises.readFile(f); } finally { if (f.endsWith("settings.local.json")) done(); } } });
 await doneP;
 await new Promise((r) => setImmediate(r));
 console.warn = origWarn;

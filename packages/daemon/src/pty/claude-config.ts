@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import { resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 import { normForCompare, containmentForms } from "../git/worktrees.js";
 import { WORKTREES_DIR } from "../paths.js";
+import { CLAUDE_DOCTRINE_DIR } from "./claude-dirname.js";
 // Card 4c2a0bfd: writeJsonAtomic/__setRenameSyncForTest/transientFsRetryLimit/isTransientFsError/
 // sleepSync moved to ../write-json-atomic.ts (dependency-free — node builtins only). Re-exported below so
 // every existing caller/test of this file keeps working byte-for-byte; also imported for plain internal
@@ -39,7 +40,7 @@ export function claudeConfigHome(): string {
 export function claudeUserSettingsDir(): string {
   return process.env.CLAUDE_CONFIG_DIR
     ? claudeConfigHome()
-    : path.join(claudeConfigHome(), ".claude");
+    : path.join(claudeConfigHome(), CLAUDE_DOCTRINE_DIR);
 }
 
 /**
