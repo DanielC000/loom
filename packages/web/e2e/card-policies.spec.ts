@@ -152,6 +152,32 @@ test.describe("Card policies (card 61d32daf)", () => {
     ]);
   });
 
+  test("a corrupt stored list can be repaired: Save is enabled with an empty draft and unsets the key (card 740eacf5)", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(uniq("cp-corrupt"));
+    await pinActiveProject(page, project.id);
+    // The daemon's own validator refuses to STORE a bad list, so the corrupt value is injected into what the page READS
+    // (GET /api/projects); the save still goes to the real daemon, and its PATCH body is what is asserted.
+    let corrupt = true;
+    await page.route("**/api/projects", async (route) => {
+      if (route.request().method() !== "GET" || !corrupt) return route.continue();
+      const res = await route.fetch();
+      const rows = (await res.json()) as Array<{ id: string; config?: { orchestration?: Record<string, unknown> } }>;
+      for (const r of rows) if (r.id === project.id) r.config = { ...(r.config ?? {}), orchestration: { ...(r.config?.orchestration ?? {}), cardPolicies: "not-a-list" } };
+      await route.fulfill({ response: res, json: rows });
+    });
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+    const editor = page.getByTestId("card-policies-editor");
+    await expect(editor.getByText("can’t be read")).toBeVisible();
+    const save = editor.getByTestId("card-policy-save");
+    await expect(save).toBeEnabled(); // an empty draft over a corrupt store is the repair
+    const patched = page.waitForRequest((r) => r.method() === "PATCH" && r.url().includes(`/api/projects/${project.id}/config`));
+    corrupt = false;
+    await save.click();
+    const body = (await patched).postDataJSON() as { unset?: string[] };
+    expect(body.unset).toContain("orchestration.cardPolicies");
+    await expect(editor.getByText("saved", { exact: true })).toBeVisible();
+  });
+
   test("a failed status read shows a quiet 'unavailable' note instead of reading as nothing blocking", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("cp-down"));
     await loomDaemon.createTask(project.id, { title: `feat(web): ${uniq("down target")}`, columnKey: "in_progress" });

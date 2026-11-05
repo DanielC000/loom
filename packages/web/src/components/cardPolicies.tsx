@@ -176,7 +176,8 @@ export function CardPoliciesEditor({ project }: { project: Project }) {
   const [baseline, setBaseline] = useState(() => draftsSignature(seed.ok ? seed.drafts : []));
   const [justSaved, setJustSaved] = useState(false);
   const built = buildPolicies(drafts);
-  const dirty = draftsSignature(drafts) !== baseline;
+  // A corrupt stored list is always saveable, even as an empty draft: that save is the repair.
+  const dirty = draftsSignature(drafts) !== baseline || !seed.ok;
   const ids = previewIds(drafts);
 
   const save = useMutation({
