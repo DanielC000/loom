@@ -4218,7 +4218,14 @@ export function attachmentKindForFilename(filename: string): QuestionAttachmentK
 /** The kind a STORED attachment row is projected with on every read. A row written before the
  *  `"markdown"`/`"text"` kinds existed carries `"other"`; it is upgraded from its own daemon-written
  *  `storedFilename` — and ONLY to one of those two viewer kinds, never to `"image"`/`"html"`, so this read
- *  path can never widen what a stored row renders as beyond a plain-text viewer. */
+ *  path can never widen what a stored row renders as beyond a plain-text viewer.
+ *
+ *  KNOWN, DELIBERATE DIFFERENCE from copy time: `attachmentKindForFilename("/x/.md")` is `"other"` (a bare
+ *  dotfile has no extension), but a stored filename is `${n}-${basename}`, so `"0-.md"` has a dot past
+ *  index 0 and projects as `"markdown"`. Aligning them would mean stripping the daemon's own `${n}-`
+ *  prefix here, coupling this read path to the store's naming. Left unaligned because the divergence is
+ *  harmless: it needs a source file literally named `.md`/`.txt`, and the only effect is that its already
+ *  stored plain-text bytes open in the text viewer rather than download. */
 export function projectedAttachmentKind(stored: QuestionAttachmentKind, storedFilename: string): QuestionAttachmentKind {
   if (stored !== "other") return stored;
   const derived = attachmentKindForFilename(storedFilename);

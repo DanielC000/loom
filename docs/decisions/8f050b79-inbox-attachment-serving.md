@@ -88,8 +88,9 @@ error oracles, a future side-effecting GET) is real and tracked, not closed by t
 
 ## SVG — decided upstream, not by this route
 
-`deriveAttachmentKind` (`mcp/attachments.ts`, card `432765ab`) classifies by extension at copy time, and
-its `IMAGE_EXTENSIONS` set (`.png/.jpg/.jpeg/.gif/.webp`) deliberately excludes `.svg` — an SVG is
+`deriveAttachmentKind` (`mcp/attachments.ts`, card `432765ab`) classifies by extension at copy time, via
+the shared `attachmentKindForFilename` (`@loom/shared`, one extension table), whose `"image"` entries
+(`.png/.jpg/.jpeg/.gif/.webp`) deliberately exclude `.svg` — an SVG is
 scriptable, so it is already stored as `kind:"other"`, server-derived, never client-supplied. By the time
 this route serves it, SVG falls into the same "other → download" branch as any other binary: forced
 `Content-Disposition: attachment`, `application/octet-stream` Content-Type (this route's

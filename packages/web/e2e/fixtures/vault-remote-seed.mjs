@@ -70,6 +70,12 @@ if (process.env.LOOM_E2E_SEED_QUESTION) {
   const attachmentInputs = [
     { label: "gate-strip.png", bytes: PNG_SQUARE, imageDimensions: { width: 64, height: 64 } },
     { label: "mockup.html", bytes: Buffer.from(HTML_MOCKUP, "utf8"), imageDimensions: null },
+    // Card 08a3a908: a markdown file (opens in the in-app viewer on a remote origin) and a text file one byte
+    // over the viewer's 2 MiB cap (must say "Too large" and never be fetched). 2 * 1024 * 1024 mirrors
+    // ATTACHMENT_VIEWER_MAX_BYTES (packages/web/src/lib/questions.ts) — a literal here, since this script
+    // cannot import web source; the spec asserts the "Too large" note, so a drift fails loudly.
+    { label: "notes.md", bytes: Buffer.from("# remote-notes-heading\n\nbody line for the viewer\n", "utf8"), imageDimensions: null },
+    { label: "big-log.txt", bytes: Buffer.alloc(2 * 1024 * 1024 + 1, 0x61), imageDimensions: null },
   ];
   const seededAttachments = attachmentInputs.map((a, i) => {
     const storedFilename = `${i}-${sanitizeBasename(a.label)}`;

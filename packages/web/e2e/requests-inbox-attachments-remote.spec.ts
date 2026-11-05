@@ -35,6 +35,8 @@ test.use({ launchOptions: { args: [`--host-resolver-rules=MAP ${PROXY_HOST} 127.
 const REQUEST_TITLE = "76227b26-remote-attachments-ask";
 const IMAGE_LABEL = "gate-strip.png";
 const HTML_LABEL = "mockup.html";
+const MD_LABEL = "notes.md";
+const BIG_LABEL = "big-log.txt";
 
 interface Rig { origin: string; token: string; loopbackURL: string; projectId: string; questionId: string; stop: () => Promise<void> }
 
@@ -187,10 +189,10 @@ test.describe("inbox attachment manifest on a remote (proxied) origin (card 7622
     await expect(dialog.getByTestId("attachment-preview-frame")).toHaveCount(0);
   });
 
-  test("(3) Open is disabled on both rows, with the remote-access reason", async ({ page }) => {
+  test("(3) Open is disabled on the image and html rows, with the remote-access reason", async ({ page }) => {
     const dialog = await openRemoteInboxDialog(page);
     const rows = dialog.getByTestId("attachment-row");
-    await expect(rows).toHaveCount(2);
+    await expect(rows).toHaveCount(4);
 
     for (const label of [IMAGE_LABEL, HTML_LABEL]) {
       const row = rows.filter({ hasText: label });
@@ -204,6 +206,41 @@ test.describe("inbox attachment manifest on a remote (proxied) origin (card 7622
     // And the pane's own Open action agrees — it is the SAME action, not a second implementation that
     // could drift from the row's.
     await expect(dialog.getByTestId("attachment-preview").getByTestId("attachment-open")).toBeDisabled();
+  });
+
+  test("(5) a markdown attachment opens in the viewer on a remote origin and reaches ready (card 08a3a908)", async ({ page }) => {
+    const dialog = await openRemoteInboxDialog(page);
+    const mdRow = dialog.getByTestId("attachment-row").filter({ hasText: MD_LABEL });
+    // A viewer kind is fetched THROUGH the api client (credential on a header), so unlike image/html rows its
+    // Open action is live on this origin.
+    const open = mdRow.getByTestId("attachment-open");
+    await expect(open).toBeEnabled();
+    await open.click();
+
+    const viewer = page.getByTestId("attachment-viewer");
+    await expect(viewer).toHaveAttribute("data-viewer-kind", "markdown");
+    const body = viewer.getByTestId("attachment-viewer-body");
+    // READY, not merely open: the rendered markdown heading is the file's real content, so a 401 (the
+    // "Couldn't load" note) or a stuck "Loading…" cannot satisfy this.
+    await expect(body.getByRole("heading", { name: "remote-notes-heading" })).toBeVisible();
+    await expect(body).toContainText("body line for the viewer");
+    await expect(body).not.toContainText(/Couldn.t load/);
+    await expect(body).not.toContainText(/\b401\b/);
+  });
+
+  test("(6) a text attachment over the 2 MiB cap says \"Too large\" and its bytes are never fetched (card 08a3a908)", async ({ page }) => {
+    const attachmentGets: string[] = [];
+    page.on("request", (r) => { if (r.method() === "GET" && /\/attachments\/[^/?]+$/.test(new URL(r.url()).pathname)) attachmentGets.push(new URL(r.url()).pathname); });
+
+    const dialog = await openRemoteInboxDialog(page);
+    const bigRow = dialog.getByTestId("attachment-row").filter({ hasText: BIG_LABEL });
+    await bigRow.getByTestId("attachment-open").click();
+
+    const viewer = page.getByTestId("attachment-viewer");
+    // The note is the observable event the no-fetch assertion below is anchored to: it is rendered from the
+    // row's sizeBytes alone, before any effect could have issued a request.
+    await expect(viewer.getByRole("status")).toContainText("Too large to preview");
+    expect(attachmentGets.filter((p) => p.endsWith("/attachments/3")), `the over-cap attachment must not be fetched; saw ${JSON.stringify(attachmentGets)}`).toHaveLength(0);
   });
 
   test("(4) no Bearer token ever appears in a URL — the credential rides a header, never a query string", async ({ page }) => {

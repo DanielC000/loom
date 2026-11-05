@@ -1037,8 +1037,9 @@ export const api = {
   // `vaultRawUrl`'s shape, and carries the same ⚠️ ONLY LOADABLE AS-IS ON LOOPBACK caveat for the same
   // reason: the route is Tier-1, i.e. Bearer-only on a remote origin, and a browser attaches no header to
   // any of those. `questionAttachmentBlob` is the same bytes fetched THROUGH this client so
-  // `withGatewayAuth` can attach the credential a bare load cannot — used only for a raster image (see
-  // decision 19b7cf7a for which preview modes may use it, and which must never). ---
+  // `withGatewayAuth` can attach the credential a bare load cannot — used for a raster image's preview and
+  // for the text viewer's remote Download (see decision 19b7cf7a for which preview modes may use it, and
+  // which must never). `questionAttachmentText` below is the viewer's bounded string read. ---
   questionAttachmentUrl: (questionId: string, attachmentId: string) => questionAttachmentPath(questionId, attachmentId),
   questionAttachmentBlob: async (questionId: string, attachmentId: string): Promise<{ blob: Blob; contentType: string | null }> => {
     const url = questionAttachmentPath(questionId, attachmentId);
