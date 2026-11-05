@@ -1,4 +1,5 @@
 import type { Question, QuestionAttachment, QuestionAttachmentKind, QuestionType } from "@loom/shared";
+import { SSH_APPROVAL_ACTION_PREFIX, SSH_DENY_COOLDOWN_MS } from "@loom/shared";
 import type { Tone } from "../theme";
 
 // Pure (JSX-free) helpers for the manager→human DECISION INBOX web surfaces (card 8701bdbb, child B):
@@ -225,6 +226,25 @@ export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note
     default: // decision
       return q.chosenOption ? `chose ${q.chosenOption}` : q.note ? `“${q.note}”` : "—";
   }
+}
+
+// The owner's "take it back" action on an ANSWERED ssh_exec hold (card a56270da), or null when there is
+// nothing to clear. Mirrors what still governs on the daemon (connections/sshApproval.ts): only an answered
+// row the human REST route wrote counts; a deny governs for SSH_DENY_COOLDOWN_MS after the answer; a grant
+// governs until it lapses. A pending, consumed, cancelled or lapsed row, and every non-ssh row, gets null.
+export type SshClearAction = "clear-denial" | "revoke";
+export function sshClearAction(
+  q: Pick<Question, "type" | "state" | "permissionAction" | "chosenOption" | "answeredAt" | "answeredVia" | "decidedExpiresAt">,
+  nowMs: number,
+): SshClearAction | null {
+  if (q.type !== "permission" || q.state !== "answered" || q.answeredVia !== "human") return null;
+  if (!(q.permissionAction ?? "").startsWith(SSH_APPROVAL_ACTION_PREFIX)) return null;
+  if (q.chosenOption === "authorize") {
+    const expires = q.decidedExpiresAt ? Date.parse(q.decidedExpiresAt) : NaN;
+    return Number.isFinite(expires) && nowMs >= expires ? null : "revoke";
+  }
+  const answered = Date.parse(q.answeredAt ?? "");
+  return Number.isFinite(answered) && nowMs < answered + SSH_DENY_COOLDOWN_MS ? "clear-denial" : null;
 }
 
 // ── Request ATTACHMENTS (epic 7d1d66ab, Direction B "Manifest" — the owner's pick on request 0bbf7d1b) ──

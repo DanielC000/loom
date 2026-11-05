@@ -388,6 +388,9 @@ export interface LoomDaemon {
     /** (card 65294dcc) Omitted ⇒ null. The ONLY way a spec can seed a row that matches a lastError-prefix-
      *  keyed web derivation (isOrphanedFleet/isCrashLooped in packages/web/src/lib/attention.ts). */
     lastError?: string;
+    /** (card a56270da) The session-row connection grant — the only way a spec can give a seeded session a
+     *  row-keyed tool such as `ssh_exec`. Omitted ⇒ none, byte-identical to every existing call. */
+    connections?: string[];
   }) => Promise<SeededLiveSession>;
   /**
    * Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind via POST
@@ -846,7 +849,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
           parentSessionId: opts.parentSessionId, taskId, branch: opts.branch, title: opts.title,
           ptyGeometry: opts.ptyGeometry, ptyBytes: opts.ptyBytes,
           model: opts.model, ctxInputTokens: opts.ctxInputTokens, harness: opts.harness,
-          processState: opts.processState, lastError: opts.lastError,
+          processState: opts.processState, lastError: opts.lastError, connections: opts.connections,
         }],
         wakes: opts.wake ? [{ sessionId, note: wakeNote }] : [],
       });

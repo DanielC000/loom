@@ -125,6 +125,8 @@ The form's risky-pattern section (`packages/web/src/components/sshConnection.tsx
 
 **Rate limit:** per connection, in memory, reusing `platform.connections` (`rateLimitMax`/`rateLimitWindowMs`); only calls that pass every policy check and are about to dispatch count.
 
+**Clearing an answered hold (card `a56270da`).** The Requests inbox offers the owner the clear route on an answered ssh hold row only: "Clear denial" on a deny still inside its 24h cooldown, "Revoke" on an authorize that has not lapsed (an unspent `once` or a standing grant). Each asks for an inline confirm before it posts. Pending rows, consumed or lapsed rows, and every non-ssh permission row get no such button. The route is **Tier 1**, the same tier as the answer route. A remote owner who can grant a standing ssh grant must be able to revoke it, and clearing never authorizes anything: a revoke only removes authority, and a cleared deny only means the next identical call files a fresh hold, which still needs an owner answer through the same Tier-1 answer route. Keeping it at Tier 0 bought no safety and left a remote owner able to grant but not take back.
+
 ## Do not
 
 - Do not describe a risky-pattern match in the Connections UI or the tool text as "refused": it is HELD for the owner's approval of that exact command, and the list is a word screen, not a boundary.
@@ -144,6 +146,7 @@ The form's risky-pattern section (`packages/web/src/components/sshConnection.tsx
 - Do not perform a silent trust-on-first-use host-key pin — the fingerprint must be captured and explicitly human-confirmed at connection-create time; refuse, never silently re-pin, on a later mismatch.
 - Do not implement the risky-command confirm gate as a new synchronous/blocking primitive — reuse `question_ask(type:"permission")`, re-validated on redemption against the exact command text, never a cached generic approval.
 - Do not register `ssh_exec`'s MCP mount on a Tier-1 or Tier-2 route in `gateway/trust-tier.ts` — it stays Tier 0 (loopback-only) by the existing default-deny, same as every other `/mcp*` mount.
+- Do not drop `POST /api/questions/:id/clear-ssh-approval` below the answer route's tier, and do not let it authorize anything: it may only revoke a grant or end a deny early.
 - Do not store the SSH key's original passphrase anywhere (decision 5 above) — it is stripped once at creation, in-memory only.
 - Do not default a new SSH connection to read-write (decision 1 above) — it defaults read-only; the owner unticks it per connection.
 - Do not build a host-group construct (decision 3 above) — one Connection row is one SSH host.

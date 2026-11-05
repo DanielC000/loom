@@ -56,6 +56,7 @@ import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, Pe
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { fetchHostKeyFingerprint } from "../connections/ssh.js";
 import { sshApprovalAnswerNudge, sshApprovalConnectionId, sshApprovalNudgeTarget } from "../connections/sshApproval.js";
+import { performSshExec } from "../connections/sshExec.js";
 import { isSshApprovalAction } from "../mcp/questionTool.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, updateCapabilityDefPassEnv, requirePassEnvKey, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -3643,6 +3644,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // respelling the union: harness-adapter-claude-literal-guard forbids a bare vendor literal here,
           // and referencing the shared type is what keeps this from drifting when the union grows.
           harness?: Session["harness"];
+          // The session-row connection grant (card a56270da) — the ONLY way an e2e spec can give a seeded
+          // session a tool like `ssh_exec`, which the task MCP registers off this row (never the agent or
+          // profile). Omitted ⇒ [] ⇒ byte-identical to every existing seed call.
+          connections?: string[];
         }[];
         // A pending scheduled wake for a session — the ONLY way an e2e spec can make the SessionWakes
         // sub-panel render (it draws nothing when empty). DB-backed (insertWake), so it round-trips
@@ -3809,6 +3814,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // spawn, and boot already happened before a spec's project exists). Direct db.setMeta write under
         // the SAME mainlineWatermarkKey shape resetMainlineWatermark/checkMainlineMove already read.
         mainlineWatermarks?: { projectId: string; repoKey?: string; branch: string; sha: string }[];
+        // (card a56270da) One `ssh_exec` call AS a seeded session, through the SAME `performSshExec` core the
+        // task MCP tool calls, reading that session's own row grant. A seeded session has no live pty, so
+        // it can never pass the `/mcp*` per-session token + liveness hook; this lets a spec observe what the
+        // tool does next (held / refused / dispatched) without minting a token. Each result is echoed in order.
+        sshExecCalls?: { sessionId: string; connectionId: string; command: string }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -3994,6 +4004,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           model: s.model ?? null,
           ctxInputTokens: s.ctxInputTokens ?? null,
           harness: s.harness,
+          ...(Array.isArray(s.connections) ? { connections: s.connections.filter((c): c is string => typeof c === "string") } : {}),
         };
         deps.db.insertSession(row);
         liveSessionIds.push(id);
@@ -4249,12 +4260,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.db.setMeta(mainlineWatermarkKey(w.projectId, repoKey), JSON.stringify({ branch: w.branch, sha: w.sha }));
         mainlineWatermarkIds.push(`${w.projectId}:${repoKey}`);
       }
+      const sshExecResults: unknown[] = [];
+      for (const c of b.sshExecCalls ?? []) {
+        const session = typeof c.sessionId === "string" ? deps.db.getSession(c.sessionId) : undefined;
+        if (!session) return reply.code(400).send({ error: "sshExecCalls[].sessionId must name an existing session" });
+        const guard = resolveConfig(undefined, deps.db.getPlatformConfig()).platform.connections;
+        sshExecResults.push(await performSshExec({ db: deps.db, sessionId: session.id, projectId: session.projectId, guard }, session.connections ?? [], { connectionId: c.connectionId, command: c.command }));
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds, companionTurnsRun,
         companionMessageIds,
         liveSessionIds, wakeIds, enqueued, respawnedSessionIds, archivedSessionIds, orchestrationEventIds, questionIds,
-        projectMemoryIds, scheduleDeferralIds, rawProjectConfigIds, mainlineWatermarkIds,
+        projectMemoryIds, scheduleDeferralIds, rawProjectConfigIds, mainlineWatermarkIds, sshExecResults,
       });
     });
 

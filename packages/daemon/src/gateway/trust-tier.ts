@@ -95,6 +95,8 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   // --- Answer / steer (first-person human actions on an already-running session) ---
   { method: "POST", pattern: "/api/questions/:id/answer" },
   { method: "POST", pattern: "/api/questions/:id/dismiss" },
+  // @decision a3d5c7f4 — Tier-1 to match the answer route: clearing an ssh hold only revokes a grant or re-arms the ask, never authorizes.
+  { method: "POST", pattern: "/api/questions/:id/clear-ssh-approval" },
   // The open-tracking stamp (card 8f050b79) is a first-person human action on a Request, same class as
   // answer/dismiss just above — Tier-1 for the same reason. Automatically swept into the loopback-secret
   // bearer guard too (gateway/server.ts's `isGuardedApiWrite`, see decision 9ccedbee): it's a non-GET

@@ -176,7 +176,7 @@ try {
     // Inbox attachment serving (card 8f050b79) — same class as the question reads/answer-dismiss just
     // above; see docs/decisions/8f050b79-inbox-attachment-serving.md.
     "GET /api/questions/:id/attachments/:attachmentId", "POST /api/questions/:id/attachments/:attachmentId/opened",
-    "POST /api/questions/:id/answer", "POST /api/questions/:id/dismiss", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
+    "POST /api/questions/:id/answer", "POST /api/questions/:id/dismiss", "POST /api/questions/:id/clear-ssh-approval", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
     "POST /api/sessions/:id/stop", "POST /api/sessions/:id/resume", "POST /api/sessions/:id/rate-limit/clear",
     "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId", "GET /ws/fleet",
     // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.

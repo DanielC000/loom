@@ -6,6 +6,7 @@ import { PERMISSION_SCOPES, SSH_APPROVAL_ACTION_PREFIX } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { isRemoteOrigin } from "../lib/gatewayCredential";
+import { errorText } from "../lib/loopbackCredential";
 import { usePreviewOnly } from "../lib/previewOnly";
 import { viewBlobType } from "../lib/vaultAsset";
 import { Panel, Button, Dot, SectionLabel, Badge, Select } from "./ui";
@@ -15,7 +16,7 @@ import {
   isDecisionWatchdog, isUnread, relativeAge,
   REQUEST_TYPE_TONE, REQUEST_TYPE_ORDER,
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
-  requestProvenanceText,
+  requestProvenanceText, sshClearAction, type SshClearAction,
   ATTACHMENT_CHIP_GLYPH, ATTACHMENT_GLYPH, attachmentCountChip, attachmentDetail, attachmentOpenRefusal,
   attachmentPreviewMode, attachmentStateChip, isViewerKind,
 } from "../lib/questions";
@@ -133,6 +134,64 @@ function DismissButton({ q }: { q: QuestionInboxItem }) {
       }}>
       {dismiss.isPending ? "Dismissing…" : "Dismiss"}
     </Button>
+  );
+}
+
+// ── Clear / Revoke an ANSWERED ssh_exec hold (card a56270da) ────────────────────────────────────────
+// The owner's way to take back an ssh answer early: end a deny's 24h cooldown, or revoke a grant before it
+// lapses. Offered only where `sshClearAction` says the answer still governs. A two-step INLINE confirm, not
+// window.confirm: the strip says what happens next in the row it applies to, and the safe choice ("Keep")
+// takes focus. After the clear lands the row leaves the inbox (it is now history, "cleared by owner").
+const SSH_CLEAR_COPY: Record<SshClearAction, { trigger: string; title: string; confirm: string; pending: string }> = {
+  "clear-denial": {
+    trigger: "Clear denial",
+    title: "End this denial early: the agent's next identical call asks you again instead of being refused",
+    confirm: "Clear denial",
+    pending: "Clearing…",
+  },
+  revoke: {
+    trigger: "Revoke",
+    title: "Revoke this approval before it lapses: the command will not run again without a fresh approval",
+    confirm: "Revoke grant",
+    pending: "Revoking…",
+  },
+};
+
+function sshClearPrompt(action: SshClearAction, q: QuestionInboxItem): string {
+  if (action === "clear-denial") return "Clear this denial? The agent's next identical call files a new request for your approval instead of being refused.";
+  return q.decidedScope === "standing"
+    ? "Revoke this standing grant? The command stops running unattended; the next identical call files a new request for your approval."
+    : "Revoke this approval? The command will not run on it; the next identical call files a new request for your approval.";
+}
+
+function SshClearConfirm({ q, action, onCancel }: { q: QuestionInboxItem; action: SshClearAction; onCancel: () => void }) {
+  const qc = useQueryClient();
+  const clear = useMutation({
+    mutationFn: () => api.clearSshApproval(q.id),
+    meta: { inlineError: true }, // surfaced inline in the confirm strip, never also as a modal
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["openQuestions"] });
+      qc.invalidateQueries({ queryKey: ["question", q.id] });
+    },
+  });
+  const copy = SSH_CLEAR_COPY[action];
+  return (
+    <div role="group" aria-label={copy.trigger} data-testid="ssh-clear-confirm"
+      onKeyDown={(e) => { if (e.key === "Escape" && !clear.isPending) { e.stopPropagation(); onCancel(); } }}
+      style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 4, paddingTop: 8, borderTop: `1px solid ${color.border}` }}>
+      <span style={{ flex: "1 1 260px", minWidth: 0, fontSize: 12, color: color.textDim }}>{sshClearPrompt(action, q)}</span>
+      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+        <Button autoFocus variant="ghost" disabled={clear.isPending} onClick={onCancel}>Keep</Button>
+        <Button variant={action === "revoke" ? "danger" : "primary"} disabled={clear.isPending} onClick={() => clear.mutate()}>
+          {clear.isPending ? copy.pending : copy.confirm}
+        </Button>
+      </div>
+      {clear.isError && (
+        <span role="alert" style={{ flexBasis: "100%", fontFamily: font.mono, fontSize: 11, color: color.red }}>
+          Could not clear it: {errorText(clear.error)}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -463,6 +522,8 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
   const typeTone = REQUEST_TYPE_TONE[q.type];
   const edge = q.state === "pending" ? tone[typeTone] : watchdog ? color.amber : "transparent";
   const metaDot = q.state === "pending" ? typeTone : watchdog ? "busy" : "muted";
+  const clearAction = sshClearAction(q, now);
+  const [confirmingClear, setConfirmingClear] = useState(false);
   return (
     // `data-testid` + `data-question-id`: an e2e needs to scope an assertion to ONE row, and filtering a
     // bare `div` by its title text matches every ANCESTOR container too — which silently widens the scope
@@ -493,9 +554,20 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
                 <Button variant="primary" onClick={() => onOpen(q.id)}>{requestActionLabel(q.type)}</Button>
               </div>
             )
-            : watchdog
-              ? <NudgeMgrButton q={q} />
-              : <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>}
+            : clearAction
+              ? (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Button variant="ghost" disabled={confirmingClear} title={SSH_CLEAR_COPY[clearAction].title}
+                    aria-expanded={confirmingClear} data-testid="ssh-clear"
+                    onClick={() => setConfirmingClear(true)}>
+                    {SSH_CLEAR_COPY[clearAction].trigger}
+                  </Button>
+                  <Button variant="default" onClick={() => onOpen(q.id)}>View</Button>
+                </div>
+              )
+              : watchdog
+                ? <NudgeMgrButton q={q} />
+                : <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>}
         </div>
       </div>
       {/* second line: the type-colored hint (pending) or the recorded outcome (answered/consumed). */}
@@ -507,6 +579,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
           {requestOutcome(q)}
         </span>
       )}
+      {clearAction && confirmingClear && <SshClearConfirm q={q} action={clearAction} onCancel={() => setConfirmingClear(false)} />}
     </Panel>
   );
 }

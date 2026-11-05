@@ -4133,6 +4133,9 @@ export const PERMISSION_ANSWERS = ["authorize", "deny"] as const;
  *  file such a Request, no agent tool may ask, resolve, amend or pull one, and only the human REST answer
  *  route (which stamps `answeredVia:"human"`) can authorize it. */
 export const SSH_APPROVAL_ACTION_PREFIX = "ssh_exec connection=";
+/** A denied ssh hold keeps refusing identical calls for this long after the owner's answer (or until the owner
+ *  clears it). Shared so the Requests UI offers "Clear denial" only while the deny still governs. */
+export const SSH_DENY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 export type PermissionAnswer = (typeof PERMISSION_ANSWERS)[number];
 
 /**

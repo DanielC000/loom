@@ -9,7 +9,7 @@
  * rebuilt from the CURRENT connection row; never by connection alone, a prefix, or the amendable title/body.
  */
 import { createHash } from "node:crypto";
-import { PERMISSION_ANSWERS, SSH_APPROVAL_ACTION_PREFIX, type ConnectionMetadata, type Question } from "@loom/shared";
+import { PERMISSION_ANSWERS, SSH_APPROVAL_ACTION_PREFIX, SSH_DENY_COOLDOWN_MS, type ConnectionMetadata, type Question } from "@loom/shared";
 import type { Db } from "../db.js";
 import { buildQuestionAsk, appendQuestionAskedEvent, isPermissionLapsed } from "../mcp/questionTool.js";
 
@@ -42,7 +42,7 @@ export type SshApprovalResolution =
 type ApprovalDb = Pick<Db, "listPermissionQuestionsByAction" | "getSession" | "acknowledgeAnsweredQuestion">;
 
 /** A deny governs identical calls for this long after the owner answered (or until the owner clears it). */
-export const SSH_DENY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+export { SSH_DENY_COOLDOWN_MS };
 
 /** Is `filerId` the caller itself or a session the caller was recycled from? (Never a sibling session of the
  *  same agent: concurrent workers on one agent must not see each other's holds.) */

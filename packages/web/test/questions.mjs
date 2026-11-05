@@ -9,7 +9,7 @@ import {
   requestAttentionLabel, requestOutcome,
   requestFilerLabel, requestRoutedLabel, requestProvenanceText,
   formatAttachmentSize, attachmentDetail, attachmentCountChip, attachmentStateChip,
-  attachmentPreviewMode, attachmentOpenRefusal, isViewerKind, ATTACHMENT_VIEWER_MAX_BYTES,
+  attachmentPreviewMode, attachmentOpenRefusal, isViewerKind, ATTACHMENT_VIEWER_MAX_BYTES, sshClearAction,
 } from "../src/lib/questions.ts";
 
 let pass = 0;
@@ -263,6 +263,22 @@ check("card c7f999f4: markdown/text kinds open in the in-app viewer, on either o
   }
   assert.equal(attachmentPreviewMode({ kind: "other", available: true }, true), "download");
   assert.equal(ATTACHMENT_VIEWER_MAX_BYTES, 2 * 1024 * 1024);
+});
+
+check("sshClearAction: only an answered, human-stamped ssh hold that still governs offers clear/revoke", () => {
+  const ssh = {
+    type: "permission", state: "answered", answeredVia: "human", chosenOption: "deny", answeredAt: ago(60_000),
+    decidedExpiresAt: null, permissionAction: 'ssh_exec connection=c1 target=u@h:22 pin=ab command="reboot"',
+  };
+  assert.equal(sshClearAction(ssh, NOW), "clear-denial");
+  assert.equal(sshClearAction({ ...ssh, answeredAt: ago(25 * 3_600_000) }, NOW), null, "a deny past its 24h cooldown no longer governs");
+  assert.equal(sshClearAction({ ...ssh, chosenOption: "authorize" }, NOW), "revoke", "an unspent once grant");
+  assert.equal(sshClearAction({ ...ssh, chosenOption: "authorize", decidedExpiresAt: new Date(NOW + 3_600_000).toISOString() }, NOW), "revoke", "a live standing grant");
+  assert.equal(sshClearAction({ ...ssh, chosenOption: "authorize", decidedExpiresAt: ago(1) }, NOW), null, "a lapsed grant");
+  for (const state of ["pending", "consumed", "cancelled"]) assert.equal(sshClearAction({ ...ssh, state }, NOW), null, state);
+  assert.equal(sshClearAction({ ...ssh, answeredVia: null }, NOW), null, "not written by the human answer route");
+  assert.equal(sshClearAction({ ...ssh, permissionAction: "git push origin main" }, NOW), null, "a non-ssh permission row");
+  assert.equal(sshClearAction({ ...ssh, type: "decision" }, NOW), null);
 });
 
 console.log(`\n${pass} passed — decision-inbox helpers`);

@@ -749,10 +749,13 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
 // human-only loopback REST with no MCP path. On top of c7f999f4: 224→227 total, reads unchanged at 98, 126→129 writes.
 // Card 67c43038 added one more WRITE (`reorderProjectColumns`, PUT /api/projects/:id/columns/order), so the
 // merged tree is 228 total / 98 reads / 130 writes.
-check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair, card dec4959a's updateCapabilityPassEnv write, card 75ea3f73's released-skill three reads + one write, card c7f999f4's questionAttachmentText, card b5565d4c's three ssh-connection writes and card 67c43038's reorderProjectColumns write (98 reads / 130 writes / 228 members)", () => {
-  assert.equal(API_MEMBERS.total, 228, `api.ts now has ${API_MEMBERS.total} members, not 228`);
+// Card a56270da added one WRITE (`clearSshApproval`, postErr, POST /api/questions/:id/clear-ssh-approval —
+// the Requests inbox's Clear/Revoke on an answered ssh hold): 228→229 total, reads unchanged at 98, 130→131 writes.
+check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair, card dec4959a's updateCapabilityPassEnv write, card 75ea3f73's released-skill three reads + one write, card c7f999f4's questionAttachmentText, card b5565d4c's three ssh-connection writes, card 67c43038's reorderProjectColumns write and card a56270da's clearSshApproval write (98 reads / 131 writes / 229 members)", () => {
+  assert.equal(API_MEMBERS.total, 229, `api.ts now has ${API_MEMBERS.total} members, not 229`);
   assert.equal(API_MEMBERS.reads.size, 98, `api.ts now has ${API_MEMBERS.reads.size} reads, not 98`);
-  assert.equal(API_MEMBERS.writes.size, 130, `api.ts now has ${API_MEMBERS.writes.size} writes, not 130`);
+  assert.equal(API_MEMBERS.writes.size, 131, `api.ts now has ${API_MEMBERS.writes.size} writes, not 131`);
+  assert.ok(API_MEMBERS.writes.has("clearSshApproval"), "api.clearSshApproval must classify as a WRITE (card a56270da)");
   assert.ok(API_MEMBERS.writes.has("reorderProjectColumns"), "api.reorderProjectColumns must classify as a WRITE (card 67c43038)");
   for (const m of ["createSshConnection", "fetchSshHostFingerprint", "updateSshConnection"]) {
     assert.ok(API_MEMBERS.writes.has(m), `api.${m} must classify as a WRITE (card b5565d4c)`);

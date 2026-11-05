@@ -951,6 +951,10 @@ export const api = {
   // via postErr like every other answer route above). Returns the cancelled Question (state:"cancelled").
   dismissQuestion: (id: string, reason?: string) =>
     postErr<Question>(`/api/questions/${encodeURIComponent(id)}/dismiss`, reason ? { reason } : {}),
+  // Owner clear of an ANSWERED ssh_exec hold (POST /api/questions/:id/clear-ssh-approval): revokes a grant
+  // early or ends a deny's cooldown, so the next identical call files a fresh hold. Returns the cleared row.
+  clearSshApproval: (id: string) =>
+    postErr<Question>(`/api/questions/${encodeURIComponent(id)}/clear-ssh-approval`, {}),
   // Human durable snooze (POST /api/questions/:id/acknowledge, card 889ae619 iii-a) — a SNOOZE, not a
   // retirement: `state` stays 'pending' (still answerable), only the attention queue's STALE presentation
   // is suppressed until `until`. `until` MUST be an absolute ISO timestamp computed by the caller (this
