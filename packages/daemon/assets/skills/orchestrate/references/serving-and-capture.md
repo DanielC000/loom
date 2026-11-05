@@ -22,80 +22,49 @@ them reinvent an ephemeral server.
 
 ## Launching a live dev server against a worktree
 
-To eyeball a **live dev server** you launch yourself against a worker's worktree (not a static
-artifact) — never hand-hunt `netstat`/`taskkill` for the listener PID afterward: grepping its output for
-a STATE WORD (e.g. `LISTENING`) silently false-zeros on a non-English OS locale, and even the
-correctly-localized word can still false-zero under an OEM/console codepage mismatch — there is no safe
-text fallback (a port/PID grep is unaffected by either). And a kill scoped to anything but the worktree
-path — name, port, session id, or project id — can reach a
-process you never spawned — another dev server, an unrelated project, or even the self-hosting daemon.
-An id looks precise, which is exactly why it's the dangerous one: it matches every worktree that id
-has ever touched, not just the one you mean. Launch it through the **bundled** helper instead — it
-records the EXACT child pid it spawns and tears down only that pid (never a name/port/id search).
-**`<worktree-dir>` must be an ABSOLUTE path in every call (start AND stop)** — a relative one resolves
-against the helper's own process cwd, which can silently drift between your `start` and a later `stop`
-and key the same worktree under two different tracking files; the helper refuses a relative `<dir>`
-outright rather than guess. `node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir>
--- <command...>` prints
-the pid, then waits briefly for the command's own startup banner (e.g. Vite's `Local:
-http://localhost:5173/`) to appear in its captured log and prints the **actual bound URL** — built from
-the host the command's own banner reported, not a guessed one, and the port it really bound, not
-necessarily the one it was asked for (a dev server commonly steps to the next free port under
-contention). That URL is recorded to the helper's tracking file (`url`, alongside the raw `host`/`port`
-it was built from) — treat that **recorded URL as the starting point** for eyeballing via Playwright, not
-as a given: **the recorded value can itself be wrong.** On a host where OTHER browser-capable workers may
-be running their own dev servers concurrently, confirm the recorded port is actually owned by YOUR tracked
-pid before trusting what you see (the printed startup banner, or the listening socket's owning pid
-confirmed to trace UPWARD — via each process's parent pid, hop by hop — to the pid your launcher printed;
-do NOT enumerate the launcher's descendants downward instead, since on Windows pid recycling plus a
-parent pid left uncleared when its own parent exits can let a downward closure silently adopt unrelated
-processes that merely reuse that pid number. Don't stop at one hop either: an intermediate shim between
-the launcher and the real listener is common, and a walk that stops early lands on the shim and falsely
-"proves" ownership of the wrong process). **Matching by worktree path is not
-available on every OS — check before relying on it:** Windows exposes no readable
-current-working-directory for a running process (not in the process-listing API, and a launch-time
-working-directory parameter is not a readback of one), so path-matching only works on a platform that
-exposes it (e.g. Linux's `/proc/<pid>/cwd`). And two Windows fields that LOOK like ownership proof aren't:
-a process's working-set/memory-size field is memory, not a path, and its executable/image-path field is
-identical for every sibling running the same app — neither discriminates YOUR instance from a sibling's.
-Skip this cross-check on a solo-worker host where nothing else could own the port. **A sibling's instance
-of the same app renders identically — nothing on screen distinguishes
-"my fixture" from "a sibling's fixture" — so an unverified port yields a plausible, screenshot-able,
-completely wrong result:** a worker has been caught one step from driving another worker's dev server and
-reporting that app's data as its own corpus. 🔴 **Never
-reassemble a URL from the bare port yourself** (`http://127.0.0.1:<port>` or `http://localhost:<port>`) —
-the host a server actually answers on is that server's own choice, not something a consumer can safely
-guess: the same port can be reachable at one loopback address and refuse the other on a perfectly healthy
-server, so a guessed host can fail with a connection error that reads as "the server didn't start" against
-a server that's fine. If an older tracking file has no `url` (written before this helper recorded one),
-`stop` the tracked server and `start` it again for a fresh tracking file that includes one, or read the
-helper's own printed log directly for the server's startup banner in the meantime.
+To eyeball a **live dev server** you launch yourself against a worker's worktree, never hand-hunt
+`netstat`/`taskkill` for the listener PID: grepping for a STATE WORD (e.g. `LISTENING`) silently
+false-zeros on a non-English locale or an OEM/console codepage mismatch (a port/PID grep is unaffected).
+Launch through the **bundled** helper: it records the EXACT child pid and tears down only that pid.
+**`<worktree-dir>` must be an ABSOLUTE path in every call (start AND stop)**: a relative one resolves
+against the helper's cwd, which can drift between calls and key one worktree under two tracking files;
+the helper refuses a relative `<dir>`. `node .claude/skills/orchestrate/scripts/dev-server.mjs start
+<worktree-dir> -- <command...>` prints the pid, waits briefly for the command's startup banner (e.g.
+Vite's `Local: http://localhost:5173/`), and prints the **actual bound URL**, built from the host the
+banner reported and the port it really bound (a dev server commonly steps to the next free port). It is
+recorded in the tracking file (`url`, plus raw `host`/`port`). Treat the **recorded URL as the starting
+point**, not a given: **it can itself be wrong.** Where OTHER browser-capable workers may run dev
+servers, confirm the port is owned by YOUR tracked pid (the startup banner, or the listening socket's
+owning pid traced UPWARD via parent pids, hop by hop, to the pid your launcher printed; never
+enumerate descendants downward, since on Windows pid recycling can adopt unrelated processes; don't
+stop at one hop, since an intermediate shim would falsely prove ownership). **Matching by worktree
+path is not available on every OS:** Windows exposes no readable cwd for a running process, so it works
+only where `/proc/<pid>/cwd` exists; a working-set/memory-size field is memory, not a path, and the
+executable path is identical for every sibling running the same app. Skip this cross-check on a
+solo-worker host. **A sibling's instance renders identically, so an unverified port yields a plausible,
+screenshot-able, wrong result.** 🔴 **Never reassemble a URL from the bare port**
+(`http://127.0.0.1:<port>` / `http://localhost:<port>`): one port can answer at one loopback address
+and refuse the other on a healthy server, which reads as "the server didn't start." If an older
+tracking file has no `url`, `stop` and `start` again, or read the helper's printed log for the banner.
 
-**A `url: null` you just started waiting on can mean three different things — check `portDetectionFailed`
-before you decide which:** (1) detection is still in flight (both `portDetectionFailed` and
-`detectionEndedAt` absent) — re-read the tracking file shortly; (2) detection gave up for good
-(`portDetectionFailed: true` + `detectionEndedAt` present) — the helper stopped watching the moment
-`start` exited and nothing will ever fill `url` in, so don't keep re-reading; (3) the tracked pid itself
-is no longer alive — the child died at spawn and there's no server to eyeball at all. **The sanctioned
-fallback for case (2): read the helper's own `logFile` for the child's startup banner yourself — via the
-tracking file's `logFile` field (or the path `start` printed), i.e. selected by the launcher's own
-printed id, never by grepping every `loom-dev-server-*.log` under the OS temp dir and picking whichever
-one's CONTENTS match what you expected:** a stale log from a different, unrelated worktree is
-indistinguishable from confirmation once selected that way, because a sweep scoped by your own hypothesis
-can only return an artifact that agrees with it. The same trap catches any search narrowed by what you
-already expect — a log sweep, a board/column filter, a grep scoped to a guess — none of them can surface
-disconfirming evidence. Then
-`node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
-merge for that worktree. `stop` refuses a recorded pid that is no longer the supervisor it launched, tree-kills the rest, and prints `Verified: port N is free.` — if it instead exits nonzero with `STILL IN USE`, something outside the tracked tree (a launcher that already exited) holds the port: read the pid from that server's own log/tooling and stop it by that pid, never by port.
-A dev server left running is exactly what makes `worker_merge_confirm`'s
-`git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by
-tracked handle before you request the merge avoids that. **Scope any process match to its worktree
-path and nothing else — not image name (`taskkill /IM node.exe`), not port, not a session id, not a
-project id.** Image name and port are obviously broad; an id looks precise, which is exactly why it's
-the dangerous one — a match on a shared session or project id segment can surface every worktree that
-id has ever touched, not just the one you mean. A host-wide by-name kill has previously taken down the
-entire self-hosting daemon, and a killed peer process doesn't announce itself as a kill — it reads as
-an unrelated failure and gets misdiagnosed as one.
+**A `url: null` can mean three things; check `portDetectionFailed` first:** (1) detection in flight
+(`portDetectionFailed` and `detectionEndedAt` both absent): re-read shortly; (2) detection gave up
+(`portDetectionFailed: true` + `detectionEndedAt`): nothing will ever fill `url`, don't re-read; (3)
+the tracked pid is no longer alive: the child died at spawn. **Fallback for (2): read the helper's own
+`logFile` (tracking file field, or the path `start` printed), selected by the launcher's printed id,
+never by grepping every `loom-dev-server-*.log` under the OS temp dir for matching CONTENTS**: a stale
+log from an unrelated worktree is indistinguishable from confirmation once chosen that way, and any
+search narrowed by what you expect (log sweep, board filter, grep scoped to a guess) can't surface
+disconfirming evidence. Then `node .claude/skills/orchestrate/scripts/dev-server.mjs stop
+<worktree-dir>` before requesting a merge for that worktree. `stop` refuses a recorded pid that is no
+longer the supervisor it launched, tree-kills the rest, and prints `Verified: port N is free.`; on
+nonzero exit with `STILL IN USE`, something outside the tracked tree (a launcher that already exited)
+holds the port: read the pid from that server's own log/tooling and stop it by that pid, never by
+port. A dev server left running makes `worker_merge_confirm`'s `git worktree remove` fail on Windows
+(the live process holds the dir open). **Scope any process match to its worktree path and nothing
+else: not image name (`taskkill /IM node.exe`), not port, not a session id, not a project id** (an id
+looks precise but matches every worktree it ever touched). A host-wide by-name kill has taken down an
+entire self-hosting daemon, and a killed peer reads as an unrelated failure.
 
 ## Printing served HTML to PDF
 

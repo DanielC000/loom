@@ -4,71 +4,53 @@ The core doctrine (the loop, step 8) carries the binding rule — active doc ~15
 ~400, check size BEFORE each rewrite, rotate rather than trim-and-lose. This file carries the exact
 procedure and the incident behind the budget.
 
-Keep the ACTIVE doc comfortably inside ONE `Read` page: target ~150 lines, hard-cap ~400 lines
-(~40KB), well under the 256KB / ~25k-token Read caps — a doc that exceeds them breaks a successor's
-very first read (real incident: an Orchestrator Log grew to 266KB / 906 lines of mostly-superseded
-provenance and broke `Read` twice, blocking cold resume until hand-trimmed). **Count lines from the
-`Read` tool's own line numbers** — if you've already opened the doc, the correct total is right there
-at zero extra cost — or the file size in bytes; a shell line-count may report only non-empty lines, so
-verify what yours counts before trusting it. Carry forward only CURRENT state. **Check size BEFORE
-each rewrite, not after:** before you write, glance at whether the doc is already near the hard-cap —
-if it is, ROTATE FIRST, then write the new content into the fresh doc. Don't wait for the write that
-finally crosses the cap; by then a cold successor may already be reading a broken file.
+Keep the ACTIVE doc inside ONE `Read` page: target ~150 lines, hard-cap ~400 lines (~40KB), well under
+the 256KB / ~25k-token Read caps; a larger doc breaks a successor's very first read (a log that grew
+to 266KB / 906 lines of superseded provenance broke `Read` twice and blocked cold resume). **Count
+lines from the `Read` tool's own line numbers** (free if you've opened the doc) or the byte size; a
+shell line-count may skip empty lines, so verify what yours counts. Carry forward only CURRENT state.
+**Check size BEFORE each rewrite, not after:** if the doc is near the hard-cap, ROTATE FIRST, then
+write into the fresh doc.
 **When a rewrite would push the doc past the budget, ROTATE rather than trim-and-lose:** (1) move the
-current doc to a dated archive sibling — `<name>.archive/<YYYY-MM-DD>-NN.md` — old notes preserved
-intact, nothing deleted; (2) start a FRESH active doc holding only the live state plus a one-line
-pointer ("older provenance in `<name>.archive/`, newest first"). A successor always reads the small
-active doc; the history stays retrievable in the archive.
+current doc to a dated archive sibling, `<name>.archive/<YYYY-MM-DD>-NN.md`, intact; (2) start a FRESH
+active doc holding only live state plus a one-line pointer ("older provenance in `<name>.archive/`,
+newest first").
 
-**"The rotation is where rules die."** A rewrite can silently drop a durable rule that was only ever
-carried as a line in this doc — nobody notices until a successor needs it and it's gone. If your project
-has configured a protected-marker set (`orchestration.rotationMarkers`, and optionally
-`rotationLiveCommitmentsHeading`/`rotationLiveCommitmentsFloor` on a numbered "live commitments"-style
-section), call the **`resume_doc_check`** MCP tool before promoting a rotated doc — it resolves and
-reads YOUR resume doc itself (no path to get wrong) and refuses (`ok:false`, naming the missing token)
-if the new doc silently dropped one. Call it with no arguments any time, not just at a rotation. **Read
-its response before trusting a green:** `configured:false` means this project hasn't set up any
-protection yet — that's not a pass, it's nothing having been checked at all. And even a real pass is a
-narrow one — its own `honestLimitNote` says why: every check is an exact-substring grep, proving a
-token's literal text survived, never that no meaning survived a rewording.
+**"The rotation is where rules die."** A rewrite can silently drop a durable rule that was only carried
+as a line in this doc. If your project configured a protected-marker set (`orchestration.rotationMarkers`,
+and optionally `rotationLiveCommitmentsHeading`/`rotationLiveCommitmentsFloor` on a numbered "live
+commitments"-style section), call the **`resume_doc_check`** MCP tool before promoting a rotated doc.
+It resolves and reads YOUR resume doc itself (no path to get wrong) and refuses (`ok:false`, naming the
+missing token) if the new doc dropped one. Call it with no arguments any time. **Read its response
+before trusting a green:** `configured:false` means nothing was checked, not a pass; and even a real
+pass is narrow (its `honestLimitNote`): every check is an exact-substring grep, proving a token's text
+survived, never that its meaning did.
 
-**The LIVE-COMMITMENTS section is normally located by heading-text search — that has a real hazard, and
-a marker closes it.** By default `rotationLiveCommitmentsHeading` is matched against the first heading
-line that CONTAINS it — a heading elsewhere in the doc that merely CITES that text (and happens to
-appear earlier) can silently win over the real section, undercounting it. Set
-`orchestration.rotationLiveCommitmentsMarker` (e.g. an HTML comment like `<!-- loom:live-commitments -->`,
-placed on its own line above the section heading or inline on it) to anchor on that explicit token
-instead. Once a marker is configured, there is **NO fallback to heading-text search** if it's missing
-from a given text — a doc that dropped the marker fails loud rather than silently re-locating the section
-by the fragile heading match. If the marker's literal text occurs more than once, the response carries a
-loud `liveCommitments.markerAmbiguous`/`markerOccurrences` plus a top-level `markerAmbiguityWarning` —
-never a silent first-match.
+**The LIVE-COMMITMENTS section is normally located by heading-text search, which has a hazard a marker
+closes.** `rotationLiveCommitmentsHeading` matches the first heading line that CONTAINS it, so an
+earlier heading that merely CITES that text can win and undercount. Set
+`orchestration.rotationLiveCommitmentsMarker` (e.g. `<!-- loom:live-commitments -->`, on its own line
+above the heading or inline) to anchor on that token. Once set, there is **NO fallback to heading
+search**: a doc that dropped the marker fails loud. If the marker occurs more than once, the response
+carries `liveCommitments.markerAmbiguous`/`markerOccurrences` plus `markerAmbiguityWarning`, never a
+silent first-match.
 
-**Read the per-leg fields too, not just the overall `ok`.** `archiveCheck` and `byteCheck` report on an
-archive path / a pre-edit byte count you optionally supplied, and both DO drive the overall `ok` when
-checked. `rulesCheck` reports whether an optional rules-file union source you supplied was actually read
-— it deliberately does NOT drive `ok`, so a green overall `ok` never proves the rules file was consulted;
-only `rulesCheck: {checked:true, ok:true}` does that. `markerSources` names which text satisfied each
-marker (`"active"` or `"rules"`) — a `"rules"` source is positive proof that file was read, but only when
-at least one marker is exclusive to the rules file; if every marker also lives in the active doc, every
-source reads `"active"` and tells you nothing.
+**Read the per-leg fields, not just the overall `ok`.** `archiveCheck` and `byteCheck` (on an archive
+path / pre-edit byte count you supplied) DO drive `ok`. `rulesCheck` (whether an optional rules-file
+union source was read) deliberately does NOT: only `rulesCheck: {checked:true, ok:true}` proves the
+rules file was consulted. `markerSources` names which text satisfied each marker (`"active"` or
+`"rules"`); `"rules"` proves that file was read only when at least one marker is exclusive to it
+(otherwise everything reads `"active"`).
 
-**If you've grown a SECOND (or more) durable, non-rotating doctrine file** — a rules file living outside
-this rotating doc — you don't have to pick just one: pass every one of them at once as a `rulesPaths`
-array (alongside, or instead of, the single `rulesPath`) and the union spans all of them, for both markers
-and the numbered live-commitments section. Each supplied file gets its own `rulesChecks` entry so a
-missing/unreadable one is never silently dropped, and `markerSources`/the floor's `source` field then
-names that SPECIFIC file's own path rather than the generic `"rules"` label. Watch for
-`rulesUnreadableWarning`, a top-level field present whenever ANY supplied rules file (singular or plural)
-could not be read — loud, but like `rulesCheck` it does NOT drive `ok` on its own, so a bad path never
-just quietly stops contributing without you noticing. If nothing is configured yet
-and you want this protection, add markers via your own project's config (additive-only from a manager
-session — you can grow the list but not shrink it; ask the human/Lead for a removal). This is a Loom
-daemon capability, not a doc convention — you don't need to build anything to use it.
+**With a SECOND (or more) durable, non-rotating doctrine file** outside this rotating doc, pass all of
+them as a `rulesPaths` array (alongside or instead of `rulesPath`); the union spans all, for markers
+and the live-commitments section. Each gets its own `rulesChecks` entry, and `markerSources`/the
+floor's `source` names that file's path. `rulesUnreadableWarning` is present whenever ANY supplied rules
+file could not be read; like `rulesCheck` it does NOT drive `ok`. If nothing is configured and you want
+this protection, add markers via your project's config (additive-only from a manager session; ask the
+human/Lead to remove). It's a daemon capability; you build nothing.
 
-**Before adding a new rule to this file, check it against one axis: does it have its own moment of need
-that fires independently of a rotation being due?** A procedure you follow *when you rotate* fits here.
-A standing obligation — something that must hold on every rewrite of the doc, with no trigger of its own
-— does not: this file is read on demand, only when a rotation comes due, so a rule whose real moment of
-need is unrelated to that event may never get read at all. That kind belongs in the core doctrine itself,
-even as just a line or two, not here.
+**Before adding a rule to this file, ask whether it has its own moment of need independent of a
+rotation being due.** A procedure you follow *when you rotate* fits here. A standing obligation that
+holds on every rewrite does not (this file is read only when a rotation comes due), so it belongs in
+the core doctrine, even as a line or two.
