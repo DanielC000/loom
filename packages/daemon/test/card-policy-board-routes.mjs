@@ -5,6 +5,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      that does not write the list alone;
 //  (G) GET /api/tasks/:id/policy and GET /api/projects/:id/card-policy-status render the SAME view tasks_get carries
 //      (one evaluator), with the badge count = unmet + unreadable, and nothing at all for a project with no policy.
+import { randomUUID } from "node:crypto";
 import { useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
@@ -132,12 +133,26 @@ e.db.insertTask({ id: foreign, projectId: otherProj, title: "feat(x): foreign", 
   check("(B2) the fixture exercised matched, sticky-only, cardIds-only and waived cards (plus earlier feat cards) and omitted the rest", evaluated >= 4 && [matched, stickyOnly, idOnly, waivedCard].every((id) => id in batched) && !(unmatched in batched) && !(bare in batched));
   check("(B3) sticky-only card is counted (retitled out of its selector)", batched[stickyOnly]?.blocking === 1);
   check("(B4) waived requirement is not blocking, total unchanged", batched[waivedCard]?.blocking === 0 && batched[waivedCard]?.total === 2 && batched[matched]?.blocking === 1);
+
+  // (B5) the unreadable-config case: every card gets the one `config` verdict, per taskPolicyView and per the batch.
+  e.setPolicies("not-a-list");
+  const bad = (await getStatus()).json().tasks;
+  let badEqual = true, badCount = 0;
+  for (const t of e.db.listTasks(e.projId)) {
+    const view = await taskPolicyView(e.db, e.projId, t);
+    const want = view ? { blocking: view.filter((r) => r.status === "unmet" || r.status === "unreadable").length, total: view.length } : undefined;
+    if (JSON.stringify(bad[t.id]) !== JSON.stringify(want)) { badEqual = false; console.log("   MISMATCH(unreadable)", t.id, JSON.stringify(bad[t.id]), JSON.stringify(want)); }
+    if (want?.blocking === 1) badCount++;
+  }
+  check("(B5) unreadable stored list: every card's batched entry equals taskPolicyView's", badEqual && badCount === e.db.listTasks(e.projId).length && badCount > 0);
 }
 
 // ── (S) a deleted card's exact id already stored for that policy does not block later saves ──────────────
 {
-  const gone = e.addTask("gone", "chore(cpf): will be deleted");
-  const keep = e.addTask("keep", "chore(cpf): stays");
+  // Real task ids are UUIDs: the stored-ref allowance only honours a FULL id (shape-checked), so these cards use UUIDs.
+  const addUuidTask = (title) => { const id = randomUUID(); e.db.insertTask({ id, projectId: e.projId, title, body: "", columnKey: "in_progress", position: 1, createdAt: e.now, updatedAt: e.now }); return id; };
+  const gone = addUuidTask("chore(cpf): will be deleted");
+  const keep = addUuidTask("chore(cpf): stays");
   const ok = await patch({ orchestration: { cardPolicies: withCards([gone, keep]) } });
   check("(S0) both ids stored while both cards exist", ok.statusCode === 200 && stored()?.[0]?.match?.cardIds?.length === 2);
   e.db.deleteTask(gone);
@@ -149,6 +164,13 @@ e.db.insertTask({ id: foreign, projectId: otherProj, title: "feat(x): foreign", 
   check("(S3) a PREFIX of the deleted id is not accepted (only the exact stored full id)", prefixOfGone.statusCode === 400);
   const otherPolicy = await patch({ orchestration: { cardPolicies: [policy({ id: "other-pol", match: { cardIds: [gone] }, require: [{ kind: "approved-request" }] })] } });
   check("(S4) the same id under a DIFFERENT policy id is not covered by the first policy's stored entry", otherPolicy.statusCode === 400);
+  // (S5) a SHORT prefix stored directly (as a pre-61d32daf config could hold) for a since-deleted card is NOT carried forward by a re-save.
+  const shortGone = addUuidTask("chore(cpf): short ref will be deleted");
+  const shortRef = shortGone.slice(0, 10);
+  e.db.setProjectConfig(e.projId, { orchestration: { cardPolicies: withCards([shortRef]) } });
+  e.db.deleteTask(shortGone);
+  const shortResave = await patch({ orchestration: { cardPolicies: withCards([shortRef]) } });
+  check("(S5) a stored short prefix whose card is gone is refused on re-save (not carried forward)", shortResave.statusCode === 400 && /matches no card/.test(shortResave.json().error ?? ""));
 }
 
 // ── (C) project CREATE refuses cardIds (a new project has no cards), on both human POST routes ─────────────

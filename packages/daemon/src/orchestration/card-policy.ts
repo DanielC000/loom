@@ -60,18 +60,56 @@ export const INVESTIGATE_CHECKPOINT_KICKOFF_PARAGRAPH =
  *
  * @decision 9623e943 — the affirmative predicate is permission-only on purpose; never widen it to free text.
  */
+type PolicyQuestionRow = { type: string; state: string; chosenOption: string | null; decidedExpiresAt?: string | null; answeredVia?: "human" | null; permissionAction?: string | null };
+
+/**
+ * The ONE affirmative predicate, shared by the per-card reader and the batched board reader (card f9a774c4): a
+ * second copy would let the two drift, and the human-path check below is the trust boundary (an agent can write
+ * `chosenOption` through question_resolve, so only a human-path answer counts).
+ */
+function permissionRequestAuthorizes(q: PolicyQuestionRow, nowMs: number): boolean {
+  const lapsed = isPermissionLapsed(q.decidedExpiresAt ?? null, nowMs); // the ONE shared lapse predicate (an unparseable value fails closed as lapsed)
+  return q.type === "permission" && (q.state === "answered" || q.state === "consumed") && q.chosenOption === PERMISSION_ANSWERS[0] && q.answeredVia === "human" && !isSshApprovalAction(q.permissionAction) && !lapsed;
+}
+const NO_AUTHORIZING_REQUEST = "no answered permission Request with an affirmative answer is linked to this card";
+
 export function dbPolicyEvidence(
-  db: { listQuestionsForTask(projectId: string, taskId: string): { type: string; state: string; chosenOption: string | null; decidedExpiresAt?: string | null; answeredVia?: "human" | null; permissionAction?: string | null }[]; listCardPolicyWaivers(taskId: string, projectId: string): { policyId: string; requirementKind: string }[] },
+  db: { listQuestionsForTask(projectId: string, taskId: string): PolicyQuestionRow[]; listCardPolicyWaivers(taskId: string, projectId: string): { policyId: string; requirementKind: string }[] },
   projectId: string,
   nowMs: () => number = Date.now,
 ): Pick<PolicyEvidence, "authorizedPermissionRequest" | "waived"> {
   return {
     authorizedPermissionRequest: (taskId) => {
-      const lapsed = (q: { decidedExpiresAt?: string | null }): boolean => isPermissionLapsed(q.decidedExpiresAt ?? null, nowMs()); // the ONE shared lapse predicate (an unparseable value fails closed as lapsed)
-      const hit = db.listQuestionsForTask(projectId, taskId).some((q) => q.type === "permission" && (q.state === "answered" || q.state === "consumed") && q.chosenOption === PERMISSION_ANSWERS[0] && q.answeredVia === "human" && !isSshApprovalAction(q.permissionAction) && !lapsed(q));
-      return { met: hit, detail: hit ? "" : "no answered permission Request with an affirmative answer is linked to this card" };
+      const hit = db.listQuestionsForTask(projectId, taskId).some((q) => permissionRequestAuthorizes(q, nowMs()));
+      return { met: hit, detail: hit ? "" : NO_AUTHORIZING_REQUEST };
     },
     waived: (taskId, policyId, kind) => db.listCardPolicyWaivers(taskId, projectId).some((w) => w.policyId === policyId && w.requirementKind === kind),
+  };
+}
+
+/**
+ * Card f9a774c4 — {@link dbPolicyEvidence} for the board's whole-project read: both DB evidence sets are fetched ONCE
+ * (project-keyed, `project_id = ?`) instead of per card. Same answers per card as the per-card reader: the question
+ * lookup mirrors `listQuestionsForTask`'s WHERE (exact `task_id`, or a legacy 8-char prefix followed by `-`, matched
+ * case-insensitively like its LIKE) and the affirmative check is the shared {@link permissionRequestAuthorizes}.
+ */
+export function batchedDbPolicyEvidence(
+  db: { listAnsweredPermissionQuestionsForProject(projectId: string): Map<string, PolicyQuestionRow[]>; listCardPolicyWaiversForProject(projectId: string): Map<string, { policyId: string; requirementKind: string }[]> },
+  projectId: string,
+  nowMs: () => number = Date.now,
+): Pick<PolicyEvidence, "authorizedPermissionRequest" | "waived"> {
+  const byTask = db.listAnsweredPermissionQuestionsForProject(projectId);
+  const waivers = db.listCardPolicyWaiversForProject(projectId);
+  const byLegacyPrefix = new Map<string, PolicyQuestionRow[]>();
+  for (const [k, rows] of byTask) if (k.length === 8) byLegacyPrefix.set(k.toLowerCase(), [...(byLegacyPrefix.get(k.toLowerCase()) ?? []), ...rows]);
+  return {
+    authorizedPermissionRequest: (taskId) => {
+      const now = nowMs();
+      const legacy = taskId.length > 8 && taskId[8] === "-" ? byLegacyPrefix.get(taskId.slice(0, 8).toLowerCase()) : undefined;
+      const hit = (byTask.get(taskId) ?? []).some((q) => permissionRequestAuthorizes(q, now)) || (legacy ?? []).some((q) => permissionRequestAuthorizes(q, now));
+      return { met: hit, detail: hit ? "" : NO_AUTHORIZING_REQUEST };
+    },
+    waived: (taskId, policyId, kind) => (waivers.get(taskId) ?? []).some((w) => w.policyId === policyId && w.requirementKind === kind),
   };
 }
 
@@ -84,6 +122,8 @@ export function policyIdIsConfigured(project: { config?: unknown }, policyId: st
   const parsed = parseCardPolicies(raw);
   return parsed.ok && parsed.policies.some((p) => p.id === policyId);
 }
+
+const FULL_TASK_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Card 61d32daf — resolve every `match.cardIds` entry of a policy list being WRITTEN to the full id of one existing
@@ -105,7 +145,8 @@ export function resolveCardPolicyCardIds(
       const r = resolveIdPrefix([...tasks], ref);
       // An EXACT full id already stored for this same policy stays valid after its card is deleted, so one dead entry
       // never blocks every later whole-list save. A new, prefix or other policy's entry still has to resolve.
-      if (r.kind === "none" && storedCardIds?.get(p.id)?.has(ref)) { if (!full.includes(ref)) full.push(ref); continue; }
+      // Only a FULL id qualifies (card f9a774c4): a short prefix stored before 61d32daf would otherwise be carried forward unresolved.
+      if (r.kind === "none" && FULL_TASK_ID_RE.test(ref) && storedCardIds?.get(p.id)?.has(ref)) { if (!full.includes(ref)) full.push(ref); continue; }
       if (r.kind === "ambiguous") return { ok: false, error: `card policy '${p.id}': card id '${ref}' is ambiguous (matches ${r.ids.join(", ")}); use more characters or the full id` };
       if (r.kind === "none") return { ok: false, error: `card policy '${p.id}': card id '${ref}' matches no card on this project` };
       if (!full.includes(r.record.id)) full.push(r.record.id);

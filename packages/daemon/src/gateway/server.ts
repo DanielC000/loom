@@ -17,7 +17,7 @@ import { buildServedStatus, currentWebBundle } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
-import { dbPolicyEvidence, evaluateProjectCardPolicyStatus, policyIdIsConfigured, projectStoresCardPolicies, resolveWrittenCardPolicyIds } from "../orchestration/card-policy.js";
+import { batchedDbPolicyEvidence, evaluateProjectCardPolicyStatus, policyIdIsConfigured, projectStoresCardPolicies, resolveWrittenCardPolicyIds } from "../orchestration/card-policy.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives, pageTranscript, type TranscriptTurn } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
@@ -6590,7 +6590,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const never = (): never => { throw new Error("merge-phase evidence is not read by tasks_get"); };
     const tasks = await evaluateProjectCardPolicyStatus({
       project: p, tasks: deps.db.listTaskIdTitles(p.id), stickyByTask: deps.db.listCardPolicyMatchesForProject(p.id),
-      evidence: { ...dbPolicyEvidence(deps.db, p.id), codeReview: never, checkpoint: never },
+      evidence: { ...batchedDbPolicyEvidence(deps.db, p.id), codeReview: never, checkpoint: never },
     });
     return { tasks };
   });

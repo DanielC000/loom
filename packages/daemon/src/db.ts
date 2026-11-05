@@ -11334,6 +11334,37 @@ export class Db {
       reason: r.reason as string, waivedBy: r.waived_by as string, createdAt: r.created_at as string,
     }));
   }
+  /** Card f9a774c4: every waiver of ONE project in a single query (`project_id = ?`, same scope as listCardPolicyWaivers), keyed by task id. */
+  listCardPolicyWaiversForProject(projectId: string): Map<string, { policyId: string; requirementKind: string }[]> {
+    const out = new Map<string, { policyId: string; requirementKind: string }[]>();
+    for (const r of this.db.prepare("SELECT task_id, policy_id, requirement_kind FROM card_policy_waivers_v2 WHERE project_id = ?").all(projectId) as Row[]) {
+      const k = r.task_id as string;
+      let a = out.get(k);
+      if (!a) { a = []; out.set(k, a); }
+      a.push({ policyId: r.policy_id as string, requirementKind: r.requirement_kind as string });
+    }
+    return out;
+  }
+  /**
+   * Card f9a774c4: batched sibling of listQuestionsForTask for the card-policy status read — the answered|consumed
+   * permission Requests of ONE project (`project_id = ?`) in one query, keyed by the RAW stored `task_id` (a full id OR
+   * a legacy 8-char prefix; the caller matches exactly as listQuestionsForTask's WHERE does). Only the type/state
+   * pre-filter is applied here: the affirmative predicate (chosen option, human-path answer, expiry, ssh) stays the ONE
+   * shared JS predicate in orchestration/card-policy.ts.
+   */
+  listAnsweredPermissionQuestionsForProject(projectId: string): Map<string, Question[]> {
+    const out = new Map<string, Question[]>();
+    for (const r of this.db.prepare(
+      "SELECT * FROM questions WHERE project_id = ? AND type = 'permission' AND state IN ('answered','consumed') AND task_id IS NOT NULL ORDER BY created_at",
+    ).all(projectId) as Row[]) {
+      const q = toQuestion(r);
+      const k = r.task_id as string;
+      let a = out.get(k);
+      if (!a) { a = []; out.set(k, a); }
+      a.push(q);
+    }
+    return out;
+  }
   /**
    * Card 9623e943: the ONE reader of `sessions.review_of_task_id` besides the usage sampler (docs/decisions/
    * 9623e943-*.md amends aaacafe4). Read-only; used solely by the card-policy code-review evidence reader.
