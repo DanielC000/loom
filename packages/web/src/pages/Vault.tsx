@@ -211,7 +211,10 @@ export default function Vault() {
               style={{ marginBottom: 6 }}
             />
             <div style={{ flex: 1, overflow: "auto", margin: "0 -2px" }}>
-              {nodes.length === 0 && <p style={{ color: color.textMuted, padding: 8 }}>Empty vault folder.</p>}
+              {/* Card 4729d007: "empty" is a claim about a tree that LOADED — never about one that is pending or errored. */}
+              {tree.isPending && <p style={{ color: color.textMuted, padding: 8 }}>Loading…</p>}
+              {tree.isError && <p role="alert" style={{ color: color.textMuted, padding: 8 }}>Could not load the vault tree ({tree.error instanceof Error ? tree.error.message : "error"}).</p>}
+              {tree.isSuccess && nodes.length === 0 && <p style={{ color: color.textMuted, padding: 8 }}>Empty vault folder.</p>}
               {nodes.length > 0 && visible && visible.size === 0 && <p style={{ color: color.textMuted, padding: 8 }}>No files match “{query.trim()}”.</p>}
               <TreeView nodes={nodes} depth={0} expanded={expanded} visible={visible} active={file} onToggle={toggle} onSelect={openFile} />
             </div>

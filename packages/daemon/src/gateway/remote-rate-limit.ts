@@ -144,7 +144,12 @@ export interface RemoteRateLimiter {
   allowProxyPreAuth(nowMs: number): boolean;
   /** Throttle (429) — never lock — presented-but-invalid tokens on the proxy class: `PROXY_FAILED_AUTH_PER_MIN` a minute. */
   allowProxyFailedAuth(nowMs: number): boolean;
+  /** Card 4729d007 — whole seconds (>=1, ceil) until the named bucket next frees a slot, for a `Retry-After` header on
+   *  a refusal from it. `key` is the raw ip / token (ignored for the shared proxy buckets). Read-only. */
+  retryAfterSecs(bucket: RetryBucket, key: string, nowMs: number): number;
 }
+
+export type RetryBucket = "ip" | "token" | "proxyPre" | "proxyFail" | "ipFail";
 
 /** Failed token verifications per minute the trusted-proxy class tolerates before the FAILURE path answers 429. A
  *  browser holding a wrong token fires several parallel requests, so this is deliberately not tiny; a valid token is
@@ -170,5 +175,13 @@ export function createRemoteRateLimiter(policy: RemoteRateLimitPolicy): RemoteRa
     allowRequest(ip, nowMs) { return ipWindow.allow(`ip:${rateLimitKeyForIp(ip)}`, policy.perIpPerMin, nowMs); },
     allowIpPreAuth(ip, nowMs) { return ipWindow.allow(`ip:${rateLimitKeyForIp(ip)}`, policy.perIpPerMin, nowMs); },
     allowIpFailedAuth(ip, nowMs) { return ipFailWindow.allow(`ip:${rateLimitKeyForIp(ip)}`, policy.authFailLockout.maxAttempts, nowMs); },
+    retryAfterSecs(bucket, key, nowMs) {
+      const ms = bucket === "token" ? tokenWindow.retryAfterMs(`token:${key}`, nowMs)
+        : bucket === "proxyPre" ? proxyPreAuthWindow.retryAfterMs("proxy", nowMs)
+        : bucket === "proxyFail" ? proxyFailWindow.retryAfterMs("proxy", nowMs)
+        : bucket === "ipFail" ? ipFailWindow.retryAfterMs(`ip:${rateLimitKeyForIp(key)}`, nowMs)
+        : ipWindow.retryAfterMs(`ip:${rateLimitKeyForIp(key)}`, nowMs);
+      return Math.max(1, Math.ceil(ms / 1000));
+    },
   };
 }

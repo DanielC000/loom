@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { FleetSocketProvider } from "./components/FleetSocketProvider";
 import { isCredentialGuardMessage } from "./lib/loopbackCredential";
+import { RateLimitedError } from "./lib/rateLimitBackoff";
 import { initThemePref } from "./lib/themePref";
 
 // Re-apply the colour theme (index.html's inline script already set it before first paint) and start
@@ -21,6 +22,9 @@ initThemePref();
 // call-site `onError` shows a SECOND modal for the same failure (v5 runs both), and a mutation that
 // renders inline without `meta.inlineError` gives the user an inline message AND a modal.
 const queryClient = new QueryClient({
+  // Card 4729d007: the shared fetch layer already spent a full ~60s retry budget on a 429 (lib/rateLimitBackoff),
+  // so react-query's own 3 retries must not multiply it. Everything else keeps react-query's default of 3.
+  defaultOptions: { queries: { retry: (count, err) => !(err instanceof RateLimitedError) && count < 3 } },
   mutationCache: new MutationCache({
     onError: (err, _vars, _ctx, mutation) => {
       // eslint-disable-next-line no-console

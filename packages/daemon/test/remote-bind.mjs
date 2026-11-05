@@ -191,6 +191,20 @@ const buildApp = (db, overrides = {}) => buildServer({
   for (let i = 1; i <= 5; i++) results.push(lim.allowIpFailedAuth(`2001:db8:9:9::${i}`, T0));
   check(`(7e) 5 failed attempts from 5 addresses in ONE /64 hit the shared maxAttempts:2 throttle (got ${results.join(",")})`, results.join(",") === "true,true,false,false,false");
   check("(7e) ...while a different /64 is unaffected", lim.allowIpFailedAuth("2001:db8:9:a::1", T0) === true);
+  // Card 4729d007: retryAfterSecs is exact against a controlled clock — the failed-auth window here is 600s, the request
+  // windows 60s, and it is ceil'd to whole seconds with a floor of 1.
+  const rl = createRemoteRateLimiter({ perIpPerMin: 2, perTokenPerMin: 2, authFailLockout: { maxAttempts: 1, windowMs: 600_000, lockoutMs: 900_000 } });
+  rl.allowToken("tk", T0); rl.allowToken("tk", T0 + 10_000); const tokenRefused = rl.allowToken("tk", T0 + 20_000);
+  check("(7f) token bucket: refused at +20s with hits at +0s/+10s → Retry-After 40s (oldest ages out at +60s)", tokenRefused === false && rl.retryAfterSecs("token", "tk", T0 + 20_000) === 40);
+  check("(7f) fractional remainder rounds UP (40.5s → 41), never down to a too-early retry", rl.retryAfterSecs("token", "tk", T0 + 19_500) === 41);
+  check("(7f) an unknown key floors at 1 (never 0, which would mean 'retry immediately')", rl.retryAfterSecs("token", "never-seen", T0) === 1);
+  rl.allowIpFailedAuth("203.0.113.9", T0); rl.allowIpFailedAuth("203.0.113.9", T0 + 1_000);
+  // The default is sized to a measured UI (one idle remote tab ~85-115 req/min, navigating ~196/min; card 4729d007): a
+  // valid-token UI draws on perTokenPerMin ONLY, so only that was raised — perIp stays 120 (least privilege).
+  const { PLATFORM_DEFAULTS } = await import("@loom/shared");
+  check(`(7g) remoteAccess default caps: perTokenPerMin 600 (UI headroom), perIpPerMin still 120 (got ${PLATFORM_DEFAULTS.remoteAccess.rateLimit?.perTokenPerMin}/${PLATFORM_DEFAULTS.remoteAccess.rateLimit?.perIpPerMin})`,
+    PLATFORM_DEFAULTS.remoteAccess.rateLimit?.perTokenPerMin === 600 && PLATFORM_DEFAULTS.remoteAccess.rateLimit?.perIpPerMin === 120);
+  check("(7f) failed-auth bucket reports ITS OWN 600s window, not the 60s request window", rl.retryAfterSecs("ipFail", "203.0.113.9", T0 + 1_000) === 599);
 }
 
 // ===================== (4) tightened validator: bindHost shape + rateLimit bounds ==========================
@@ -334,6 +348,11 @@ try {
   check("(2) requests 1-10 within the perIpPerMin:10 cap all reach auth (401, not 429 — the ip cap itself isn't tripped yet)", underCap);
   const c11 = await capReq();
   check("(2) the 11th request within the same minute → 429 (sliding-window ip cap, distinct from the auth failure throttle)", c11.statusCode === 429 && JSON.parse(c11.body).error === "rate limit exceeded");
+  // Card 4729d007: the 429 names when a slot frees. Sane = a whole number of seconds in [1, 60] (the window is 60s;
+  // the refusing request was made ~now, so the oldest hit is at most 60s from ageing out, and at least 1 by the ceil).
+  const c11RetryAfter = c11.headers["retry-after"];
+  check(`(2r) the ip-cap 429 carries Retry-After as whole seconds in [1,60] (got ${JSON.stringify(c11RetryAfter)})`,
+    typeof c11RetryAfter === "string" && /^\d+$/.test(c11RetryAfter) && Number(c11RetryAfter) >= 1 && Number(c11RetryAfter) <= 60);
   const capIpValid = await appOn.inject({ method: "GET", url: "/api/version", remoteAddress: capIp, headers: { host: REMOTE_BIND_HOST, authorization: `Bearer ${GOOD_TOKEN}` } });
   check("(2ii) a VALID token from an ip whose pre-auth cap is exhausted is NOT gated by it (200, verify-first — the ip cap only meters unverified requests)", capIpValid.statusCode === 200);
 
@@ -366,10 +385,16 @@ try {
   try {
     const statuses = [];
     let lastBody = "";
+    let lastHeaders = {};
+    const okHeaders = [];
     for (let i = 0; i < 4; i++) {
       const r = await appCap.inject({ method: "GET", url: "/api/version", remoteAddress: `203.0.113.${100 + i}`, headers: { host: REMOTE_BIND_HOST, authorization: `Bearer ${CAP_TOKEN}` } });
-      statuses.push(r.statusCode); lastBody = r.body;
+      statuses.push(r.statusCode); lastBody = r.body; lastHeaders = r.headers;
+      if (r.statusCode === 200) okHeaders.push(r.headers["retry-after"]);
     }
+    const ra = lastHeaders["retry-after"];
+    check(`(2s) the per-TOKEN-cap 429 carries Retry-After as whole seconds in [1,60] (got ${JSON.stringify(ra)}), and a 200 carries none`,
+      typeof ra === "string" && /^\d+$/.test(ra) && Number(ra) >= 1 && Number(ra) <= 60 && okHeaders.every((h) => h === undefined));
     check(`(2i) perTokenPerMin+1 valid-token requests from DIFFERENT ips: the first 3 are 200 and the last is 429 "rate limit exceeded" (got ${statuses.join(",")})`,
       statuses.slice(0, 3).every((c) => c === 200) && statuses[3] === 429 && JSON.parse(lastBody).error === "rate limit exceeded");
   } finally {

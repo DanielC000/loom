@@ -9,6 +9,7 @@ import { AtlasSwitchNotice } from "./components/AtlasSwitchNotice";
 import { CommandPalette } from "./components/CommandPalette";
 import { SetupWizard } from "./components/SetupWizard";
 import { CredentialBanner } from "./components/CredentialBanner";
+import { RateLimitBanner } from "./components/RateLimitBanner";
 import { GatewayTokenBanner } from "./components/GatewayTokenBanner";
 import { NewBuildNotice } from "./components/NewBuildNotice";
 import { RequestModalProvider } from "./components/requests";
@@ -319,6 +320,7 @@ function ShellBanners() {
     <>
       <CredentialBanner />
       <GatewayTokenBanner />
+      <RateLimitBanner />
       <UpdateBanner />
       <NewBuildNotice />
     </>

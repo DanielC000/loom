@@ -662,9 +662,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // shared/config.ts), but a defensive fallback keeps this hook from ever throwing on a malformed
     // override that slipped past validation.
     const rateLimitPolicy = remoteAccessConfig.rateLimit ?? {
-      perIpPerMin: 120, perTokenPerMin: 120, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 },
+      perIpPerMin: 120, perTokenPerMin: 600, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 },
     };
     const rateLimiter = createRemoteRateLimiter(rateLimitPolicy);
+    // Card 4729d007: every limiter 429 names when the window next frees a slot, so the web client waits exactly that
+    // long instead of guessing (it still falls back to its own backoff when the header is absent).
+    const tooManyRequests = (reply: FastifyReply, retryAfterSecs: number, body: Record<string, unknown>) =>
+      reply.code(429).header("retry-after", String(retryAfterSecs)).send(body);
     app.addHook("onRequest", async (req, reply) => {
       const cls = classOf(req);
       const ip = peerAddressOf(req.raw); // rate-limit KEY only — the trust decision is `cls`
@@ -693,7 +697,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // request can never grant Tier-1 access either — isolation by construction, not a denylist check.
         // Still runs through the per-ip sliding-window cap for basic edge DoS protection; the route's own
         // per-endpoint HMAC verify (webhooks/ingress.ts) is the real authorization gate.
-        if (!rateLimiter.allowRequest(ip, Date.now())) return reply.code(429).send({ error: "rate limit exceeded" });
+        if (!rateLimiter.allowRequest(ip, Date.now())) return tooManyRequests(reply, rateLimiter.retryAfterSecs("ip", ip, Date.now()), { error: "rate limit exceeded" });
         return;
       }
       // Tier 1: require a valid gateway token on a remote request (Phase B: gateway_tokens, verified via
@@ -732,10 +736,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // the owner, the owner's success used to reset the guesser's count, and tokens are 256-bit so a lockout adds no
       // brute-force protection. A valid token meets only its own per-token cap and never touches a failure counter; a
       // success never resets one. ONE sequence, parameterised only by the counters, so the two paths cannot drift.
-      const verifyThenThrottle = (opts: { preAuth: (at: number) => boolean; failed: (at: number) => boolean; failedMsg: string }) => {
+      const verifyThenThrottle = (opts: { preAuth: (at: number) => boolean; failed: (at: number) => boolean; failedMsg: string; preAuthRetry: (at: number) => number; failedRetry: (at: number) => number }) => {
         const at = Date.now();
         if (!wsProtocolRejected && verifyGatewayToken(token)) {
-          if (!rateLimiter.allowToken(token as string, at)) return reply.code(429).send({ error: "rate limit exceeded" });
+          if (!rateLimiter.allowToken(token as string, at)) return tooManyRequests(reply, rateLimiter.retryAfterSecs("token", token as string, at), { error: "rate limit exceeded" });
           // Card 3c205fb5: stash the authenticating token's id on THIS request so the WS route handler
           // (same request object, reached right after this hook returns) can register the real socket in
           // gatewayTokenSockets — the registry a later revoke/pause/rotate/delete uses to close it.
@@ -745,7 +749,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           }
           return;
         }
-        if (!opts.preAuth(at)) return reply.code(429).send({ error: "rate limit exceeded" });
+        if (!opts.preAuth(at)) return tooManyRequests(reply, opts.preAuthRetry(at), { error: "rate limit exceeded" });
         // Only a non-empty PRESENTED credential that fails to verify counts as a credential-guessing signal — an
         // entirely absent token is ordinary unauthenticated first contact. A rejected WS subprotocol offer DID
         // present a (malformed) credential, so it counts the same as a wrong one.
@@ -753,7 +757,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // is reached ONLY for a request whose token just FAILED verification (never a valid one), so "this browser needs a
         // (new) gateway token" is true of it — and a stale/revoked token on a shared ip (a guesser filled the bucket) would
         // otherwise lose the actionable banner signal, since the web client used to key on 401 alone. `error` is unchanged.
-        if ((wsProtocolRejected || token) && !opts.failed(at)) return reply.code(429).send({ error: opts.failedMsg, code: GATEWAY_TOKEN_REQUIRED_BODY.code });
+        if ((wsProtocolRejected || token) && !opts.failed(at)) return tooManyRequests(reply, opts.failedRetry(at), { error: opts.failedMsg, code: GATEWAY_TOKEN_REQUIRED_BODY.code });
         // Card b855c37d: `code` + `hint` are ADDITIVE — `error` stays byte-identical so every string-matcher
         // keeps working. Absent and wrong tokens get the identical body (no oracle), and the hint states only
         // what any 401 already implies; it names no path, secret, or `loom open` pointer (that pointer is the
@@ -763,9 +767,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Trusted-proxy class: every caller shares one local socket address, so ONE shared pre-auth bucket and ONE shared
       // failed-auth bucket (PROXY_FAILED_AUTH_PER_MIN) — nothing is keyed by ip. Direct listener: keyed per ip.
       if (sharedPeer) {
-        return verifyThenThrottle({ preAuth: (at) => rateLimiter.allowProxyPreAuth(at), failed: (at) => rateLimiter.allowProxyFailedAuth(at), failedMsg: "too many failed attempts — try again shortly" });
+        return verifyThenThrottle({ preAuth: (at) => rateLimiter.allowProxyPreAuth(at), failed: (at) => rateLimiter.allowProxyFailedAuth(at), failedMsg: "too many failed attempts — try again shortly", preAuthRetry: (at) => rateLimiter.retryAfterSecs("proxyPre", "", at), failedRetry: (at) => rateLimiter.retryAfterSecs("proxyFail", "", at) });
       }
-      return verifyThenThrottle({ preAuth: (at) => rateLimiter.allowIpPreAuth(ip, at), failed: (at) => rateLimiter.allowIpFailedAuth(ip, at), failedMsg: "too many failed attempts — try again later" });
+      return verifyThenThrottle({ preAuth: (at) => rateLimiter.allowIpPreAuth(ip, at), failed: (at) => rateLimiter.allowIpFailedAuth(ip, at), failedMsg: "too many failed attempts — try again later", preAuthRetry: (at) => rateLimiter.retryAfterSecs("ip", ip, at), failedRetry: (at) => rateLimiter.retryAfterSecs("ipFail", ip, at) });
     });
   }
 

@@ -1932,9 +1932,11 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // Access-story Phase A: OFF + loopback by default — ships inert (see RemoteAccessConfig). The
   // rateLimit default is carried here too (Phase C) so it applies the moment a human flips `enabled`
   // without also having to specify tunables — harmless while disabled.
+  // @decision 4729d007 — perTokenPerMin is sized to a measured remote UI (a valid-token UI draws on it, never on
+  // perIpPerMin); keep gateway/server.ts's fallback literal in sync, and do not raise perIpPerMin for UI reasons.
   remoteAccess: {
     enabled: false, bindHost: "127.0.0.1",
-    rateLimit: { perIpPerMin: 120, perTokenPerMin: 120, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } },
+    rateLimit: { perIpPerMin: 120, perTokenPerMin: 600, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } },
   },
   // Default vendor CLI (card 66b1b40d): claude, workers-only — today's behavior. See HarnessConfig.
   harness: { default: "claude", scope: "workers" },

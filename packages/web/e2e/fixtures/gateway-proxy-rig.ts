@@ -81,7 +81,13 @@ export interface GatewayProxyRig {
   stop: () => Promise<void>;
 }
 
-export async function startGatewayProxyRig(): Promise<GatewayProxyRig> {
+export interface GatewayProxyRigOptions {
+  /** Override the remote per-ip / per-token request caps (card 4729d007). The window is the daemon's fixed 60s.
+   *  The auth-fail throttle is kept at its platform default. Omitted = the platform default caps. */
+  rateLimit?: { perIpPerMin: number; perTokenPerMin: number };
+}
+
+export async function startGatewayProxyRig(opts: GatewayProxyRigOptions = {}): Promise<GatewayProxyRig> {
   const scratch = mkdtempSync(path.join(tmpdir(), "loom-e2e-gwproxy-"));
   const home = path.join(scratch, "home");
   mkdirSync(home, { recursive: true });
@@ -121,7 +127,7 @@ export async function startGatewayProxyRig(): Promise<GatewayProxyRig> {
   let token: string;
   try {
     token = execFileSync(process.execPath, [SEED_SCRIPT], {
-      env: { ...process.env, LOOM_HOME: home, LOOM_TEST: "1", LOOM_E2E_REMOTE_ACCESS: JSON.stringify({ enabled: true, bindHost: "127.0.0.1", proxyPort: 0, trustedProxyOrigins: [origin] }) },
+      env: { ...process.env, LOOM_HOME: home, LOOM_TEST: "1", LOOM_E2E_REMOTE_ACCESS: JSON.stringify({ enabled: true, bindHost: "127.0.0.1", proxyPort: 0, trustedProxyOrigins: [origin], ...(opts.rateLimit ? { rateLimit: { ...opts.rateLimit, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } } } : {}) }) },
       encoding: "utf8",
       timeout: SEED_SCRIPT_TIMEOUT_MS,
     }).trim();

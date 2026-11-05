@@ -13,6 +13,7 @@ import type { MergeGateStatus } from "./mergeGate";
 // Card 093981dd — the loopback credential's storage + the "writes are locked" signal (JSX-free, so it
 // stays unit-testable without a DOM renderer).
 import { captureTokenFromUrl, getLoopbackToken, isCredentialGuardFailure, noteCredentialLock } from "./loopbackCredential";
+import { fetchWithRateLimitBackoff } from "./rateLimitBackoff";
 import { captureGatewayTokenFromUrl, gatewayAuthHeaders, isGatewayTokenRequired, isRemoteOrigin, noteGatewayLock, withGatewayAuth } from "./gatewayCredential";
 
 // A one-time DM-pairing enrollment code, returned ONCE by the mint endpoint (the store keeps only a
@@ -257,7 +258,9 @@ function authHeaders(): Record<string, string> {
  */
 async function guardedFetch(url: string, init?: RequestInit): Promise<Response> {
   // Card 4cbbc343: on a proxied origin EVERY request (reads too) carries the gateway token; loopback is untouched.
-  const r = await fetch(url, withGatewayAuth(init));
+  // Card 4729d007: an idempotent read refused by the remote rate limit waits and retries here, ONCE for the whole
+  // app, instead of every query retrying instantly; exhausted retries throw RateLimitedError (an error, not data).
+  const r = await fetchWithRateLimitBackoff(url, init, () => fetch(url, withGatewayAuth(init)));
   if (r.status === 401 || r.status === 429) {
     void r.clone().json()
       .then((j: { error?: string; code?: string }) => {
