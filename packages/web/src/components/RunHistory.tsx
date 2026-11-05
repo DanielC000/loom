@@ -129,9 +129,9 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
   const evs = events.data ?? [];
 
   // Status: archived (archivedAt set) → live (running) → exited.
-  const status: { label: string; tone: "phosphor" | "cyan" | "muted"; glow?: boolean } =
-    run.archivedAt ? { label: "archived", tone: "cyan" }
-      : live ? { label: "live", tone: "phosphor", glow: true }
+  const status: { label: string; tone: "live" | "info" | "muted"; glow?: boolean } =
+    run.archivedAt ? { label: "archived", tone: "info" }
+      : live ? { label: "live", tone: "live", glow: true }
         : { label: "exited", tone: "muted" };
 
   // Trigger: a schedule_fired event → its scheduleId resolved to the schedule's cron (fall back to the
@@ -155,11 +155,11 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
         <StatusPill tone={status.tone} glow={status.glow} label={status.label} />
         <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>{fmt(run.createdAt)}</span>
         <Chip label="dur" value={fmtDur(run.createdAt, end)} />
-        <Chip label={fired ? "cron" : "trigger"} value={trigger} tone={fired ? "cyan" : "muted"} />
+        <Chip label={fired ? "cron" : "trigger"} value={trigger} tone={fired ? "info" : "muted"} />
         {run.model && <Chip label="model" value={run.model} />}
         {run.ctxInputTokens != null && <Chip label="ctx" value={run.ctxInputTokens.toLocaleString()} />}
         {run.ctxTurns != null && <Chip label="turns" value={run.ctxTurns} />}
-        {showFindings && <Chip label="filed" value={findings.length} tone={findings.length ? "phosphor" : "muted"} />}
+        {showFindings && <Chip label="filed" value={findings.length} tone={findings.length ? "live" : "muted"} />}
         <span style={{ flex: 1 }} />
         {canResume && (
           <Button variant="ghost" disabled={previewOnly || resumeM.isPending}

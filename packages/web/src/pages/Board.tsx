@@ -15,7 +15,7 @@ import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } fro
 import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
-import { color, columnTone, font, radius, shadow, tone, type Tone } from "../theme";
+import { color, columnTone, font, fs, radius, shadow, tone, toneSoft, toneText, type Tone } from "../theme";
 // Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
 // structurally and defaults every one of them, so a response without them renders exactly as before.
 import { boardHierarchy, hasBoardHierarchy, hasTaskContextLinks, resolveParentInput, taskLinks, type TaskLinks, type TaskRef } from "../lib/taskHierarchy";
@@ -812,7 +812,7 @@ function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilte
 // A worker bound to this task → show its live status + branch (links the board to the spine).
 function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: boolean } {
   if (w.processState !== "live") return { tone: "muted", label: w.processState };
-  return w.busy ? { tone: "amber", label: "working", glow: true } : { tone: "phosphor", label: "idle" };
+  return w.busy ? { tone: "busy", label: "working", glow: true } : { tone: "live", label: "idle" };
 }
 
 // Direction C — the merge-gate hairline sweep meter + live timer (card 7b7fa6d; the merged/rejected/
@@ -852,10 +852,10 @@ function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null 
   if (!pm) return null;
   if (pm.state === "running") {
     if (pm.gatePhase === "queued") return { state: "queued", tone: "muted", label: "queued", startedAt: pm.startedAt };
-    return { state: "running", tone: "amber", label: "merging", startedAt: pm.startedAt };
+    return { state: "running", tone: "busy", label: "merging", startedAt: pm.startedAt };
   }
-  if (pm.state === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
-  if (pm.outcome === "cancelled") return { state: "cancelled", tone: "cyan", label: "cancelled", startedAt: pm.startedAt };
+  if (pm.state === "failed") return { state: "failed", tone: "danger", label: "failed", startedAt: pm.startedAt };
+  if (pm.outcome === "cancelled") return { state: "cancelled", tone: "info", label: "cancelled", startedAt: pm.startedAt };
   // Card 99a1cf6f: "stale-base" (a benign canonical-main-moved rejection, `ConfirmMergeResult
   // .gateBaseInvalidated`) renders identically to an ordinary "rejected" — nothing landed either way, and
   // the board has no reason to teach a viewer the internal cache-eviction taxonomy. Without this, an
@@ -863,8 +863,8 @@ function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null 
   // REJECTED branch as a successful green merge.
   // Card c59165b8: ONLY a "merged" (or absent, legacy/synthetic "done") outcome may render green; any other string, including one this
   // build does not know yet ("gate-tip-moved", "worktree-dirty", a future outcome), renders as rejected — never as a successful merge.
-  if (pm.outcome !== undefined && pm.outcome !== "merged") return { state: "rejected", tone: "amber", label: "rejected", startedAt: pm.startedAt };
-  return { state: "merged", tone: "phosphor", label: "merged", startedAt: pm.startedAt }; // "merged", or a legacy/synthetic "done" with no outcome
+  if (pm.outcome !== undefined && pm.outcome !== "merged") return { state: "rejected", tone: "busy", label: "rejected", startedAt: pm.startedAt };
+  return { state: "merged", tone: "live", label: "merged", startedAt: pm.startedAt }; // "merged", or a legacy/synthetic "done" with no outcome
 }
 
 // Live M:SS elapsed since `startedAt`, ticking once a second. Shown only while the gate is RUNNING — it's
@@ -885,15 +885,20 @@ function MergeTimer({ startedAt }: { startedAt: string }) {
   );
 }
 
-// The merge-state pill for the worker row: a StatusPill-shaped unit (dot + uppercase label) that also
-// carries the live timer INLINE while running. Bundling the timer into the pill (rather than a separate
-// far-right flex item) is what keeps the merging card the SAME height as a plain worker card — both rows
-// then hold exactly two flex items (pill + branch chip), so they wrap identically on a tight lane. Mirrors
-// StatusPill's own styling so it reads as one system.
+// The merge-state pill for the worker row: a StatusPill-shaped capsule (dot + label) that also carries
+// the live timer INLINE while running. Bundling the timer into the pill (rather than a separate far-right
+// flex item) is what keeps the merging card the SAME height as a plain worker card — both rows then hold
+// exactly two flex items (pill + branch chip), so they wrap identically on a tight lane. Mirrors
+// StatusPill's own capsule chrome (components/ui) property for property, so it reads as one system AND
+// is the same height as the StatusPill it replaces — board-merge-meter.spec.ts compares the two cards.
 function MergePill({ merge }: { merge: MergeDisplay }) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: tone[merge.tone], textTransform: "uppercase", letterSpacing: "0.06em" }}>
-      <Dot tone={merge.tone} glow />
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 9px 4px 8px", borderRadius: radius.pill,
+      background: toneSoft[merge.tone], color: toneText[merge.tone], fontFamily: font.ui, fontSize: fs.sm, fontWeight: 500,
+      lineHeight: 1, whiteSpace: "nowrap",
+    }}>
+      <Dot tone={merge.tone} style={{ width: 6, height: 6 }} />
       <span>{merge.label}</span>
       {(merge.state === "running" || merge.state === "queued") && <MergeTimer startedAt={merge.startedAt} />}
     </span>
@@ -1047,7 +1052,7 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
                 ? <MergePill merge={merge} />
                 : <>
                     <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
-                    {worker.branch && <Chip label="branch" value={worker.branch} tone="cyan" />}
+                    {worker.branch && <Chip label="branch" value={worker.branch} tone="info" />}
                   </>}
             </div>
           )}
@@ -1443,7 +1448,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
         {linksUnavailable && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.textMuted,
             fontFamily: font.mono, fontSize: 11 }}>
-            <Dot tone="amber" />
+            <Dot tone="busy" />
             <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
           </div>
         )}
@@ -2036,7 +2041,7 @@ function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
   else if (status === "requesting") node = <span style={{ color: color.textDim }}>requesting microphone…</span>;
   else if (status === "listening") node = (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-      <StatusPill tone="red" label="rec" glow />
+      <StatusPill tone="danger" label="rec" glow />
       {interim
         ? <span style={{ color: color.textMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{interim}…</span>
         : <span style={{ color: color.textDim }}>listening — speak, then Stop</span>}

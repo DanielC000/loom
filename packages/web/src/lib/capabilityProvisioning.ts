@@ -47,9 +47,9 @@ export type CapabilityProvisionReason =
 /** One-line human summary per provisioning state — its signal tone + label. */
 export const PROVISION_STATE_META: Record<CapabilityProvisioning["state"], { tone: Tone; label: string }> = {
   idle: { tone: "muted", label: "not provisioned yet" },
-  installing: { tone: "amber", label: "installing…" },
-  ready: { tone: "phosphor", label: "ready" },
-  failed: { tone: "red", label: "install failed" },
+  installing: { tone: "busy", label: "installing…" },
+  ready: { tone: "live", label: "ready" },
+  failed: { tone: "danger", label: "install failed" },
 };
 
 /** The env var that turns provisioning off per kind — the three are NOT one flag, so a `disabled` status

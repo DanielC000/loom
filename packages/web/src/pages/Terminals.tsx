@@ -312,7 +312,7 @@ function RowHeader({ row }: { row: SessionRow }) {
     const workers = row.list.length - 1;
     return (
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <StatusPill tone={m.busy ? "amber" : "phosphor"} glow={m.busy} label="manager" />
+        <StatusPill tone={m.busy ? "busy" : "live"} glow={m.busy} label="manager" />
         <span style={{ fontFamily: font.mono, textTransform: "none", letterSpacing: 0 }}>
           {m.projectName} · {m.agentName} · {m.id.slice(0, 8)}
         </span>
@@ -396,7 +396,7 @@ function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => voi
       maximizable
       title={
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-          <StatusPill tone="phosphor" label="shell" />
+          <StatusPill tone="live" label="shell" />
           <span title={`${t.command}\n${t.cwd}`}>{t.label} · {t.id.slice(0, 8)}</span>
         </span>
       }

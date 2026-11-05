@@ -99,9 +99,9 @@ export function PlatformFindings({ edition, projectId }: { edition: PlatformEdit
 // `detail` is the daemon's own free-form event payload, so every read of it is defensive: a severity it
 // does not recognise is rendered as-is rather than dropped or coerced to a tone it never meant.
 const SEVERITY_TONE: Record<string, Tone> = {
-  critical: "red",
-  high: "red",
-  medium: "amber",
+  critical: "danger",
+  high: "danger",
+  medium: "busy",
   low: "muted",
 };
 
@@ -118,7 +118,7 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
   const frozenTitle = typeof detail?.title === "string" ? detail.title : undefined;
   const title = boardTitle ?? frozenTitle ?? "finding";
   const severity = typeof detail?.severity === "string" ? detail.severity : undefined;
-  const tone: Tone = severity ? SEVERITY_TONE[severity] ?? "cyan" : "muted";
+  const tone: Tone = severity ? SEVERITY_TONE[severity] ?? "info" : "muted";
 
   return (
     <Panel data-testid="platform-finding"

@@ -397,7 +397,7 @@ function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionA
   } else if (status === "listening") {
     node = (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-        <StatusPill tone="red" label="rec" glow />
+        <StatusPill tone="danger" label="rec" glow />
         {interim
           ? <span style={{ color: color.textMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{interim}…</span>
           : <span style={{ color: color.textDim }}>listening — speak, then Stop</span>}

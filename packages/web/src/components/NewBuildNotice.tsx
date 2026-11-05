@@ -46,7 +46,7 @@ export function NewBuildNotice() {
       style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, padding: "7px 20px",
         background: wash(color.info, 8), borderBottom: `1px solid ${color.cyan}`,
         fontFamily: font.mono, fontSize: 12.5 }}>
-      <Dot tone="cyan" glow />
+      <Dot tone="info" glow />
       {/* Flexes rather than sitting at its natural width so that at narrow widths it keeps the Dot
           company on the first row and wraps INTERNALLY, instead of being pushed whole onto the next
           row and leaving the Dot stranded alone. */}

@@ -326,7 +326,7 @@ export function AgentEditor(
               <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
-                  {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
+                  {c.requiresConnection && <Badge tone="info">needs connection</Badge>}
                 </span>
                 {checked && c.requiresConnection && (
                   <>

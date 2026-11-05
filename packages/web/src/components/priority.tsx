@@ -6,9 +6,9 @@ import { color, font, tone, type Tone } from "../theme";
 // Shared so the board card/drawer and the /terminals session task card render the SAME priority
 // styling from one source (don't fork the priority look across pages).
 export const PRIORITY_META: Record<TaskPriority, { tone: Tone; label: string; short: string }> = {
-  p0: { tone: "red", label: "Critical", short: "P0" },
-  p1: { tone: "amber", label: "High", short: "P1" },
-  p2: { tone: "cyan", label: "Normal", short: "P2" },
+  p0: { tone: "danger", label: "Critical", short: "P0" },
+  p1: { tone: "busy", label: "High", short: "P1" },
+  p2: { tone: "info", label: "Normal", short: "P2" },
   p3: { tone: "muted", label: "Low", short: "P3" },
 };
 

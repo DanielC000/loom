@@ -210,8 +210,8 @@ export function analyzeDiff(patch: string, numstat?: DiffNumstat): DiffAnalysis 
 }
 
 // Risk → signal tone (matches the theme's Tone vocabulary; imported where rendered).
-export const riskTone = (r: RiskLevel): "red" | "amber" | "muted" =>
-  r === "high" ? "red" : r === "medium" ? "amber" : "muted";
+export const riskTone = (r: RiskLevel): "danger" | "busy" | "muted" =>
+  r === "high" ? "danger" : r === "medium" ? "busy" : "muted";
 
 // Status → a compact single-letter glyph for the file overview (A/D/R/M).
 export const statusGlyph = (s: FileDiff["status"]): string =>

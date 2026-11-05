@@ -23,7 +23,7 @@ type SortKey = "recall" | "recent" | "title";
 // recalled → phosphor, mid → cyan, rarely → muted. Mirrors the mockup's hi/mid/low thresholds.
 function magTone(count: number, max: number): Tone {
   const f = max > 0 ? count / max : 0;
-  return f >= 0.66 ? "phosphor" : f >= 0.33 ? "cyan" : "muted";
+  return f >= 0.66 ? "live" : f >= 0.33 ? "info" : "muted";
 }
 
 // The app ships in English only, so pin the locale (an undefined locale would render the viewer's system
@@ -215,15 +215,15 @@ function NoteDetail({ entry, max, onClose, onOpenKey }: { entry: ProjectMemoryEn
       <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${color.border}`, background: color.panel2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <span style={{ fontFamily: font.head, fontWeight: 700, fontSize: 16, color: color.text, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{entry.title || entry.key}</span>
-          {entry.pinned && <Badge tone="amber">★ Pinned</Badge>}
+          {entry.pinned && <Badge tone="busy">★ Pinned</Badge>}
           <button onClick={onClose} title="Close" aria-label="Close entry"
             style={{ background: "transparent", border: `1px solid ${color.borderStrong}`, color: color.textDim, borderRadius: radius.base, cursor: "pointer", padding: "2px 8px", fontFamily: font.mono, fontSize: 13, flexShrink: 0 }}>✕</button>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-          <Chip label="key" value={entry.key} tone="cyan" />
+          <Chip label="key" value={entry.key} tone="info" />
           <Chip label="↺ recall" value={entry.retrievalCount} tone={t} />
           <Chip label="updated" value={fmtDate(entry.updatedAt)} />
-          <Chip label="state" value={entry.pinned ? "always-injected" : "relevance-injected"} tone={entry.pinned ? "phosphor" : undefined} />
+          <Chip label="state" value={entry.pinned ? "always-injected" : "relevance-injected"} tone={entry.pinned ? "live" : undefined} />
         </div>
       </div>
       <div style={{ padding: "15px 16px 18px", overflowY: "auto" }}>

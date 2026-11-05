@@ -77,7 +77,7 @@ function BriefCell({ reading, open, onToggle, onClose }: {
   // it — the same shape `KpiTile` uses, and the same `.loom-kpi-pop` chrome, which is already shared
   // with the fleet-controls pop-over rather than copied per call site.
   const ref = useDismissable<HTMLDivElement>(open, onClose);
-  const t = reading.tone ?? "phosphor";
+  const t = reading.tone ?? "live";
   const popId = `atlas-brief-pop-${reading.key}`;
   const body = (
     <>
@@ -121,7 +121,7 @@ function BriefCell({ reading, open, onToggle, onClose }: {
 
 /** The trailing cell of the briefing line — a reading plus its own chart, which no pop-over could
  *  improve on, so it is a plain readout rather than a fifth button. */
-export function BriefTrailing({ label, value, sub, tone: t = "phosphor", children, testId }: {
+export function BriefTrailing({ label, value, sub, tone: t = "live", children, testId }: {
   label: string; value: ReactNode; sub?: ReactNode; tone?: Tone; children: ReactNode; testId?: string;
 }) {
   return (

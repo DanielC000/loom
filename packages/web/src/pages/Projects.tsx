@@ -206,7 +206,7 @@ export default function Projects() {
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontFamily: font.head, fontSize: 15, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedProject.name}</span>
                 {(liveByProject.get(selectedProject.id) ?? 0) > 0 && (
-                  <span title={`${liveByProject.get(selectedProject.id)} live session${liveByProject.get(selectedProject.id) === 1 ? "" : "s"}`}><Dot tone="phosphor" glow /></span>
+                  <span title={`${liveByProject.get(selectedProject.id)} live session${liveByProject.get(selectedProject.id) === 1 ? "" : "s"}`}><Dot tone="live" glow /></span>
                 )}
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
@@ -317,7 +317,7 @@ function ProjectRow({ name, selected, live, onClick }: { name: string; selected:
   return (
     <ListRow selected={selected} onClick={onClick} title={name}>
       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
-      {live > 0 && <span title={`${live} live session${live === 1 ? "" : "s"}`}><Dot tone="phosphor" glow /></span>}
+      {live > 0 && <span title={`${live} live session${live === 1 ? "" : "s"}`}><Dot tone="live" glow /></span>}
     </ListRow>
   );
 }
@@ -342,7 +342,7 @@ function AgentRow(
     <ListRow selected={selected} onClick={onClick}
       title={role ? `${name} · ${role}${bindsPlain ? ` (${PLAIN_BIND_GROUP_LABEL})` : ""}` : name}>
       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
-      {live > 0 && <span title={`${live} live session${live === 1 ? "" : "s"}`}><Dot tone="phosphor" glow /></span>}
+      {live > 0 && <span title={`${live} live session${live === 1 ? "" : "s"}`}><Dot tone="live" glow /></span>}
       {icon && <span aria-hidden>{icon}</span>}
       {role && (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10, color: bindsPlain ? color.textMuted : roleColor(roleKey), fontFamily: font.mono }}>
@@ -402,8 +402,8 @@ function ProjectForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: st
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
-      <Input placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
-      <Input placeholder="vault path (optional)" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+      <Input mono placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
+      <Input mono placeholder="vault path (optional)" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
       <label style={{ display: "flex", flexDirection: "column", gap: 4, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
         board preset
         <Select value={presetId} onChange={(e) => setPreset(e.target.value)} aria-label="Board preset">

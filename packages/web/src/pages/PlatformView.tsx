@@ -182,7 +182,7 @@ function ClassicPlatformLayout({
       <div>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Platform
-          <Badge tone="cyan">{project.name}</Badge>
+          <Badge tone="info">{project.name}</Badge>
           <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
             {edition.copy.header.mutedSpan}
           </span>
@@ -295,7 +295,7 @@ function AtlasPlatformLayout({
   // it) and WHAT that home is. Constant across tabs, like every other node's pills (card 5968d7e0) —
   // the scope phrase is identity, not a per-tab reading, so it must not move when a tab does.
   const headPills: NodeHeadPill[] = [
-    { key: "home", text: project.name, tone: "cyan", title: "The reserved home this node resolved to" },
+    { key: "home", text: project.name, tone: "info", title: "The reserved home this node resolved to" },
     // The PILL phrasing, never the classic page's full caption: MEASURED at 420px the full span is
     // 462px of text in a 388px box. A pill that wide now ellipsises (card 359bcdaa), but an ellipsised
     // clause is still a clause the reader cannot read, so the short phrasing stays. The caption rides
@@ -473,14 +473,14 @@ function PlatformSessionsSection({ edition, previewOnly, homeSessions, operatorL
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {edition.copy.operatorSessionLabel}
-          {operatorLive && <StatusPill tone={operatorLive.busy ? "amber" : "phosphor"} glow={operatorLive.busy} label={operatorLive.busy ? "busy" : "idle"} />}
+          {operatorLive && <StatusPill tone={operatorLive.busy ? "busy" : "live"} glow={operatorLive.busy} label={operatorLive.busy ? "busy" : "idle"} />}
         </SectionLabel>
         <SingleSession session={operatorLive} empty={edition.copy.operatorSessionEmpty} previewOnly={previewOnly} />
       </section>
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {edition.copy.auditorSessionLabel}
-          {auditorLive && <StatusPill tone={auditorLive.busy ? "amber" : "phosphor"} glow={auditorLive.busy} label={auditorLive.busy ? "busy" : "idle"} />}
+          {auditorLive && <StatusPill tone={auditorLive.busy ? "busy" : "live"} glow={auditorLive.busy} label={auditorLive.busy ? "busy" : "idle"} />}
         </SectionLabel>
         <SingleSession session={auditorLive} empty={edition.copy.auditorSessionEmpty}
           stopTitle={edition.copy.auditorCard.stopTitle} previewOnly={previewOnly} />
@@ -629,7 +629,7 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
           <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11 }}>{liveCount} live</span>
         )}
         {live
-          ? <StatusPill tone={session!.busy ? "amber" : "phosphor"} glow={session!.busy} label={session!.busy ? "busy" : "idle"} />
+          ? <StatusPill tone={session!.busy ? "busy" : "live"} glow={session!.busy} label={session!.busy ? "busy" : "idle"} />
           : <StatusPill tone="muted" label="offline" />}
       </div>
       <div style={{ display: "flex", gap: 8 }}>
@@ -810,7 +810,7 @@ function AuditorScheduleInlineForm({ agentId, existing, previewOnly }:
     <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 11, fontWeight: 700, color: color.textDim }}>Run automatically</span>
-        {existing && <Badge tone={existing.enabled ? "phosphor" : "muted"}>{existing.enabled ? "on" : "paused"}</Badge>}
+        {existing && <Badge tone={existing.enabled ? "live" : "muted"}>{existing.enabled ? "on" : "paused"}</Badge>}
       </div>
       <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
         Review your workspace on a schedule, not just on demand — each fire spawns a fresh read-only run.

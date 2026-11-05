@@ -348,7 +348,7 @@ function KpiTile({ item, open, align, onToggle, onClose }: {
   // The wrapper holds BOTH the trigger and the panel, which is what makes outside-click correct —
   // clicking inside the pop-over must not close it. Escape closes too (useDismissable).
   const ref = useDismissable<HTMLDivElement>(open, onClose);
-  const t = item.tone ?? "phosphor";
+  const t = item.tone ?? "live";
   const popId = `atlas-kpi-pop-${item.key}`;
   const body = (
     <>
@@ -484,7 +484,7 @@ export function AtlasNodeHead({ pills, actions }: { pills: NodeHeadPill[]; actio
 
 /** One compact figure+label pill — the shape the dashboard disclosure's collapsed summary row states
  *  its counts in (card 44f725fe). Deliberately NOT a button: the full-size tiles own the breakdowns. */
-export function KpiPill({ value, label, tone: t = "phosphor", title, testId }: {
+export function KpiPill({ value, label, tone: t = "live", title, testId }: {
   value: ReactNode;
   label: ReactNode;
   tone?: Tone;
@@ -595,7 +595,10 @@ export function BandPanel({ label, count, action, children, style, testId }: {
   testId?: string;
 }) {
   return (
-    <Panel data-testid={testId} className="loom-bandpanel" style={style}>
+    // Horizontal padding stays at the pre-Graphite 12px, not the kit Panel's 16: the band's five tracks
+    // are budgeted to the pixel (card b4442d27, atlas-pulse-band-width.spec.ts), and 8px more padding on
+    // the Pulse track starves its project chip below its 1440 floor.
+    <Panel data-testid={testId} className="loom-bandpanel" style={{ paddingLeft: 12, paddingRight: 12, ...style }}>
       <div className="loom-bandhead">
         {/* nowrap on both: a band column is NARROW — MEASURED at 1440 on a 1156px content column,
             the five tracks are 287 / 220 / 152 / 135 / 321 px, so three of the five are under
@@ -694,7 +697,7 @@ export function DataRow({ label, value, tone: t, title }: {
 }
 
 /** A labelled meter row for a pop-over — a name, a bar, and the figure it measures. */
-export function MeterRow({ label, ratio, value, tone: t = "phosphor" }: {
+export function MeterRow({ label, ratio, value, tone: t = "live" }: {
   label: ReactNode; ratio: number; value: ReactNode; tone?: Tone;
 }) {
   return (
@@ -750,7 +753,7 @@ export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
   if (!usage) return <BandEmpty>Plan usage is unavailable on this daemon.</BandEmpty>;
   // Same thresholds components/fleet.tsx's own `usageTone` uses, and the same ones the CONTEXT
   // meters read: phosphor < 80% ≤ amber < 95% ≤ red.
-  const t = (u: number): Tone => (u >= 95 ? "red" : u >= 80 ? "amber" : "phosphor");
+  const t = (u: number): Tone => (u >= 95 ? "danger" : u >= 80 ? "busy" : "live");
   return (
     <>
       {usage.fiveHour && (

@@ -163,9 +163,27 @@ export function useMutedBrowserNotifications(): Set<BrowserNotificationKind> {
   return useMemo(() => new Set(muted ?? []), [muted]);
 }
 
+// The DISPLAY form of an attention item's `kind`: sentence case ("QUIET BOARD" → "Quiet board"), with
+// the few all-caps acronyms a kind can carry kept whole. `kind` itself stays the upper-case IDENTIFIER:
+// it is compared in code (`=== "MERGE REQUEST"`), ranked in Mission Control, written to the rows'
+// `data-kind` attribute and to browser-notification titles, so it must never be re-cased at the source.
+// Every on-screen label renders this instead, so the casing rule lives in exactly one place.
+const KIND_ACRONYMS = new Set(["FYI", "MCP", "CI", "PR", "SSH"]);
+export function attentionKindLabel(kind: string): string {
+  return kind
+    .split(" ")
+    .map((word, i) => {
+      if (KIND_ACRONYMS.has(word)) return word;
+      const lower = word.toLowerCase();
+      return i === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+    })
+    .join(" ");
+}
+
 export interface AttentionItem {
   key: string;
   tone: Tone;
+  // The upper-case identifier; render it through attentionKindLabel, never raw.
   kind: string;
   // Card 51a80b4d — which browser-notification toggle governs this item's desktop `Notification`.
   // REQUIRED, and typed to the shared domain, so a new item builder cannot ship a kind that silently
@@ -507,7 +525,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const qDismissKey = requestDismissKey(q, now);
     items.push(q.sessionOrphaned
       ? {
-          key: `q-${q.id}`, tone: "amber", notify: "request", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "busy", notify: "request", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           dismissKey: qDismissKey,
           dismissHint: "Hide this alert — this request can never be consumed by its asking session; it stays in the inbox for you to cancel or answer.",
@@ -515,7 +533,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
         }
       : stale
       ? {
-          key: `q-${q.id}`, tone: "red", notify: "request", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "danger", notify: "request", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           dismissKey: qDismissKey,
           dismissHint: "Hide this alert — it returns if this request's asking session dies. Snooze instead to have it re-flag itself later; the request stays pending and answerable either way.",
@@ -525,7 +543,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
           text: `${decisionAttentionText(q)} — pending since ${new Date(q.createdAt).toLocaleDateString()}, unanswered`,
         }
       : {
-          key: `q-${q.id}`, tone: "cyan", notify: "request", kind: label, questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "info", notify: "request", kind: label, questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           dismissKey: qDismissKey,
           dismissHint: "Hide this alert — it returns if this request goes stale or its asking session dies. The request stays pending and answerable in the inbox.",
@@ -566,7 +584,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const e of latestMerge.values()) {
     if (e.kind === "merge_request" && liveWorker(e.workerSessionId)) {
       items.push({
-        key: `m-${e.id}`, tone: "phosphor", notify: "merge-request", kind: "MERGE REQUEST", workerSessionId: e.workerSessionId,
+        key: `m-${e.id}`, tone: "accent", notify: "merge-request", kind: "MERGE REQUEST", workerSessionId: e.workerSessionId,
         // Card 611e76ba — the merge_request event id: filed once per review request, so a new review round
         // after a rejection (or another worker's branch) mints a new key. Hiding the alert never touches
         // the branch — it stays unmerged and reviewable at /review/<worker>.
@@ -579,7 +597,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const { event: e, sessionId: sid } of activeBootStuck) {
     const detail = (e.detail ?? {}) as { signatureName?: string | null; role?: string | null; timeoutMs?: number };
     items.push({
-      key: `bs-${e.id}`, tone: "red", notify: "boot-stuck", kind: "BOOT STUCK", sessionId: sid,
+      key: `bs-${e.id}`, tone: "danger", notify: "boot-stuck", kind: "BOOT STUCK", sessionId: sid,
       dismissKey: `bs:${e.id}`, // one claude_boot_dialog_stuck event per stuck boot episode (card 611e76ba)
       dismissHint: "Hide this alert — it returns if a session gets stuck booting again. The session itself is untouched.",
       text: `${detail.role ?? "session"} ${sid.slice(0, 8)} never reached SessionStart — possible blocking CLI dialog (${detail.signatureName ?? "none recognized"})`,
@@ -589,7 +607,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const detail = (e.detail ?? {}) as { state?: string; detail?: string; unanswered?: number };
     if (e.kind === "idle_escalated") {
       items.push({
-        key: `ie-${e.id}`, tone: "red", notify: "manager-asleep", kind: "MANAGER ASLEEP", sessionId: e.managerSessionId,
+        key: `ie-${e.id}`, tone: "danger", notify: "manager-asleep", kind: "MANAGER ASLEEP", sessionId: e.managerSessionId,
         // Card 611e76ba — idle-watcher.ts emits idle_escalated EXACTLY ONCE per episode (it flips the
         // nudge policy to 'suppressed', and the policy gate then skips this manager until real activity
         // re-arms it), so the event id is already "this manager, this sleeping episode".
@@ -599,7 +617,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       });
     } else if (detail.state === "done") {
       items.push({
-        key: `id-${e.id}`, tone: "amber", notify: "queue-drained", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
+        key: `id-${e.id}`, tone: "busy", notify: "queue-drained", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
         // Card 611e76ba — the EPISODE id, never this event's own id: a drained manager re-files
         // idle_report("done") on every nudge cycle. Falls back to the event id only if the episode map
         // somehow has no entry (it always should — this branch only runs for a done-state idle_report).
@@ -613,7 +631,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const e of latestContext.values()) {
     const detail = (e.detail ?? {}) as { unanswered?: number; pct?: number };
     items.push({
-      key: `ce-${e.id}`, tone: "red", notify: "context-overflow", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
+      key: `ce-${e.id}`, tone: "danger", notify: "context-overflow", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
       dismissKey: `ce:${e.id}`, // context_escalated escalates once per episode (card 611e76ba)
       dismissHint: "Hide this alert — it returns on the next context escalation for this manager. The manager keeps running and still needs a handoff.",
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
@@ -622,7 +640,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const { event: e } of activeContextExhausted) {
     const detail = (e.detail ?? {}) as { error?: string | null };
     items.push({
-      key: `cx-${e.id}`, tone: "red", notify: "context-overflow", kind: "CONTEXT EXHAUSTED", sessionId: e.managerSessionId,
+      key: `cx-${e.id}`, tone: "danger", notify: "context-overflow", kind: "CONTEXT EXHAUSTED", sessionId: e.managerSessionId,
       dismissKey: `cx:${e.id}`, // manager_context_exhausted fires at most once per episode (one terminal mark)
       dismissHint: "Hide this alert — it returns if this manager hits context exhaustion again. The session's queue is held; recycle it to recover.",
       text: `manager ${e.managerSessionId.slice(0, 8)} — context exhausted, the engine rejected the next prompt as too long` +
@@ -633,7 +651,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const detail = (e.detail ?? {}) as { repoPath?: string; command?: string; ageMs?: number; projectId?: string };
     const ageMin = typeof detail.ageMs === "number" ? Math.round(detail.ageMs / 60000) : null;
     items.push({
-      key: `vl-${e.id}`, tone: "red", notify: "vault-lock-stuck", kind: "VAULT LOCK STUCK",
+      key: `vl-${e.id}`, tone: "danger", notify: "vault-lock-stuck", kind: "VAULT LOCK STUCK",
       // Card 611e76ba — vault/versioner.ts files this at most once per distinct lock instance (it dedupes
       // on the lock's own mtimeMs via an on-disk marker), so the event id IS the lock instance.
       dismissKey: `vl:${e.id}`,
@@ -663,7 +681,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const agentLabel = all.find((s) => s.id === sid)?.agentName
       ?? (detail.agentId ? `agent ${detail.agentId.slice(0, 8)}` : `session ${sid.slice(0, 8)}`);
     items.push({
-      key: `cig-${e.id}`, tone: "amber", notify: "codex-isolation-gap", kind: "CODEX ISOLATION GAP", sessionId: sid,
+      key: `cig-${e.id}`, tone: "busy", notify: "codex-isolation-gap", kind: "CODEX ISOLATION GAP", sessionId: sid,
       // Card 5ced500b — this kind has NO liveness filter by design (card ed0858dc: it reports a
       // standing CONFIGURATION fact whose remedy outlives the disclosing session), and a codex run is
       // short-lived, so by the time a human looks the session is usually archived and gone from the live
@@ -689,7 +707,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const { event: e, predecessorId } of activeRecycleConsolidated) {
     const p = all.find((x) => x.id === predecessorId);
     items.push({
-      key: `rlc-${e.id}`, tone: "red", notify: "recycle-lineage-consolidated", kind: "RECYCLE LINEAGE CONSOLIDATED",
+      key: `rlc-${e.id}`, tone: "danger", notify: "recycle-lineage-consolidated", kind: "RECYCLE LINEAGE CONSOLIDATED",
       sessionId: predecessorId,
       dismissKey: `rlc:${e.id}`, // one recycle_split_lineage_consolidated event per consolidation (card 611e76ba)
       dismissHint: "Hide this alert — it returns if another recycle lineage is consolidated. The fleet still has no owner until you resume, reassign, or start a new manager.",
@@ -701,7 +719,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const detail = (e.detail ?? {}) as { count?: number; windowMs?: number };
     const windowMin = detail.windowMs ? Math.round(detail.windowMs / 60_000) : null;
     items.push({
-      key: `gr-${e.id}`, tone: "red", notify: "give-up-recovery", kind: "GIVE-UP RECOVERY", sessionId: e.managerSessionId,
+      key: `gr-${e.id}`, tone: "danger", notify: "give-up-recovery", kind: "GIVE-UP RECOVERY", sessionId: e.managerSessionId,
       dismissKey: `gr:${e.id}`, // one give_up_recovery_escalated event per episode (card 611e76ba)
       dismissHint: "Hide this alert — it returns on the next give-up-recovery episode for this manager.",
       text: `manager ${e.managerSessionId.slice(0, 8)} — submit give-up recovery fired ${detail.count ?? "?"}x${windowMin ? ` in ~${windowMin}m` : ""}; its composer submissions may be unreliable`,
@@ -714,7 +732,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     // (never applicable to the Lead's own drop, which skips that escalation entirely).
     const roleLabel = detail.role === "platform" ? "Platform Lead" : "manager";
     items.push({
-      key: `mkd-${e.id}`, tone: "red", notify: "manager-kickoff-dropped", kind: "KICKOFF DROPPED", sessionId: kdSessionId,
+      key: `mkd-${e.id}`, tone: "danger", notify: "manager-kickoff-dropped", kind: "KICKOFF DROPPED", sessionId: kdSessionId,
       dismissKey: `mkd:${e.id}`, // one manager_kickoff_dropped event per episode (card 611e76ba)
       dismissHint: `Hide this alert — it returns if this ${roleLabel.toLowerCase()}'s kickoff is dropped again. The session itself is untouched.`,
       // A manual recovery (re-sending the brief as a new message) or a daemon restart between the drop
@@ -752,7 +770,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       : `manager ${e.managerSessionId.slice(0, 8)} — quiet: ${causePhrase}` +
         (questionCount > 0 ? `; answering ${questionCount} pending Request(s) releases ${releasedCardCount} card(s)` : "");
     items.push({
-      key: `bq-${e.id}`, tone: "amber", notify: "quiet-board", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
+      key: `bq-${e.id}`, tone: "busy", notify: "quiet-board", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
       // Card 611e76ba — idle-watcher.ts emits board_quiet_cause exactly once per quiet episode, so the
       // event id is "this manager, this quiet episode": the board going quiet AGAIN after work picks back
       // up files a new event and the row returns, which is the owner's own stated expectation.
@@ -767,7 +785,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // AUTO-RESUME ABANDONED loop below already covers it. Render the bailed row only, never both.
   for (const s of all.filter((s) => showsAsRateLimited(s) && s.processState === "live")) {
     items.push({
-      key: `r-${s.id}`, tone: "red", notify: "rate-limited", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
+      key: `r-${s.id}`, tone: "danger", notify: "rate-limited", kind: "RATE-LIMITED", rateLimitSessionId: s.id,
       // Card 611e76ba — the park's own end timestamp is frozen for this park and differs for the next one,
       // so it is the state token. Hiding the row does NOT clear the park (that is the Clear/retry button).
       dismissKey: rateLimitDismissKey(s),
@@ -788,7 +806,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // RATE-LIMITED above (an exited session can never resume either way).
   for (const s of all.filter((s) => isBailed(s) && s.processState === "live")) {
     items.push({
-      key: `rb-${s.id}`, tone: "red", notify: "rate-limited", kind: "AUTO-RESUME ABANDONED", rateLimitSessionId: s.id,
+      key: `rb-${s.id}`, tone: "danger", notify: "rate-limited", kind: "AUTO-RESUME ABANDONED", rateLimitSessionId: s.id,
       // The bail's own stamp instant is frozen for this episode and differs for the next one, so it is
       // the state token — same shape as RATE-LIMITED's own dismissKey above.
       dismissKey: rateLimitBailedDismissKey(s),
@@ -806,7 +824,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     isWaitingSnoozed: isActiveWaitingSnooze(latestIdle.get(s.id)),
   }))) {
     items.push({
-      key: `s-${s.id}`, tone: "amber", notify: "stuck-busy", kind: "STUCK-BUSY", sessionId: s.id,
+      key: `s-${s.id}`, tone: "busy", notify: "stuck-busy", kind: "STUCK-BUSY", sessionId: s.id,
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
       // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
       projectId: s.projectId,
@@ -816,7 +834,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   }
   for (const s of all.filter(isCrashLooped)) {
     items.push({
-      key: `cl-${s.id}`, tone: "red", notify: "crash-looped", kind: "CRASH-LOOPED", sessionId: s.id,
+      key: `cl-${s.id}`, tone: "danger", notify: "crash-looped", kind: "CRASH-LOOPED", sessionId: s.id,
       // Card 611e76ba — same shape as STUCK-BUSY's own key, and strictly safer here: this row is `exited`,
       // so lastActivity is frozen. It advances only if a human resumes the session, so a session that
       // crash-loops AGAIN after a manual resume mints a new key and the alert returns.
@@ -839,7 +857,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   for (const { event: e, sessionId: sid } of archivedCrashLoopItems) {
     const detail = (e.detail ?? {}) as { role?: string | null; attempts?: number; projectId?: string | null };
     items.push({
-      key: `cl-${e.id}`, tone: "red", notify: "crash-looped", kind: "CRASH-LOOPED", sessionId: sid,
+      key: `cl-${e.id}`, tone: "danger", notify: "crash-looped", kind: "CRASH-LOOPED", sessionId: sid,
       // Card 5ced500b — stated directly from the event's own detail: session_recovery_abandoned is
       // already a DURABLE_AUDIT_EVENT_KINDS member, so db.ts's appendEvent backstop (9f7f2b50) stamps
       // projectId generically at write time — no daemon change was needed for this card. A row filed
@@ -860,7 +878,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     // prefix); skip it here so the same lineage never renders twice. See docs/decisions/65294dcc.
     if (recycleConsolidatedPredecessorIds.has(s.id)) continue;
     items.push({
-      key: `of-${s.id}`, tone: "red", notify: "orphaned-fleet", kind: "ORPHANED FLEET", sessionId: s.id,
+      key: `of-${s.id}`, tone: "danger", notify: "orphaned-fleet", kind: "ORPHANED FLEET", sessionId: s.id,
       // Card 611e76ba — exited row, so lastActivity is frozen for this strand and advances only on a
       // resume; exiting again while still owning live workers mints a new key.
       dismissKey: sessionEpisodeDismissKey("of", s),

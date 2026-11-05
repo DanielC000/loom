@@ -183,7 +183,7 @@ export default function Overview() {
       <div>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Overview
-          <Badge tone="cyan">{project?.name ?? "…"}</Badge>
+          <Badge tone="info">{project?.name ?? "…"}</Badge>
           <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: 11 }}>
             the active project at a glance · switch the project in the header to rescope
           </span>
@@ -193,16 +193,16 @@ export default function Overview() {
           <div style={{ display: "flex", gap: 10 }}>
             <Stat label="active managers" value={managers.length} />
             <Stat label="active workers" value={workers.length} />
-            <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "amber" : "muted"} />
+            <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "busy" : "muted"} />
             <Stat label="archived" value={archived.data?.total ?? 0} tone="muted" />
           </div>
           <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 12px", minWidth: 132 }}>
             <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
               <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>worst context</span>
               <span style={{ flex: 1 }} />
-              <span style={{ fontFamily: font.mono, fontSize: 14, color: tone[ctxPct >= 80 ? "amber" : "phosphor"] }}>{wc.ctx > 0 ? `${ctxPct}%` : "—"}</span>
+              <span style={{ fontFamily: font.mono, fontSize: 14, color: tone[ctxPct >= 80 ? "busy" : "live"] }}>{wc.ctx > 0 ? `${ctxPct}%` : "—"}</span>
             </span>
-            <Meter value={wc.ctx} max={wc.window || 1} tone={ctxPct >= 80 ? "amber" : "phosphor"} width={110} />
+            <Meter value={wc.ctx} max={wc.window || 1} tone={ctxPct >= 80 ? "busy" : "accent"} width={110} />
           </div>
         </div>
       </div>
@@ -382,7 +382,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
         <RoleBadge role={role} />
         <strong style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
-        {live && pill && <StatusPill tone={pill.pending ? "amber" : "phosphor"} glow={pill.pending} label={pill.label} />}
+        {live && pill && <StatusPill tone={pill.pending ? "busy" : "live"} glow={pill.pending} label={pill.label} />}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         {managerLive && held ? (
@@ -575,8 +575,8 @@ function WorkerDiffPanel({ workerId }: { workerId: string }) {
         <>
           <div style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <span>{diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}</span>
-            {diff.data.uncommitted && <Badge tone="amber">live · incl. uncommitted</Badge>}
-            {diff.data.merged && <Badge tone="phosphor">merged → landed diff</Badge>}
+            {diff.data.uncommitted && <Badge tone="busy">live · incl. uncommitted</Badge>}
+            {diff.data.merged && <Badge tone="live">merged → landed diff</Badge>}
           </div>
           <DiffView patch={diff.data.patch || "(no changes vs HEAD)"} />
         </>

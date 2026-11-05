@@ -65,7 +65,7 @@ export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) 
       </div>
 
       {presets.isLoading && <Muted>Loading…</Muted>}
-      {presets.isError && <Muted tone="red">Couldn't load presets.</Muted>}
+      {presets.isError && <Muted tone="danger">Couldn't load presets.</Muted>}
       {empty && <Muted>No presets yet — add one.</Muted>}
 
       {list.map((p) => editing === p.id
@@ -156,7 +156,7 @@ export function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggesti
           {suggestion.rationale}
         </span>
       )}
-      {err && <Muted tone="red">{err}</Muted>}
+      {err && <Muted tone="danger">{err}</Muted>}
       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
         <Button variant="ghost" style={{ padding: "2px 10px" }} disabled={busy}
           onClick={() => { setErr(null); dismiss.mutate(); }}>Dismiss</Button>
@@ -212,7 +212,7 @@ function PresetForm({ preset, onDone }: { preset?: PresetPrompt; onDone: () => v
       : api.createPresetPrompt({ label: label.trim(), prompt }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: PRESETS_KEY }); onDone(); },
     onError: (e) => setErr(e instanceof Error ? e.message : "Couldn't save the preset."),
-    // We render the error inline via <Muted tone="red"> below — opt out of main.tsx's global
+    // We render the error inline via <Muted tone="danger"> below — opt out of main.tsx's global
     // blocking alert so a save validation error shows once (inline), not twice (inline + modal).
     meta: { inlineError: true },
   });
@@ -233,7 +233,7 @@ function PresetForm({ preset, onDone }: { preset?: PresetPrompt; onDone: () => v
           placeholder="The prompt text sent to the session…"
           className="loom-field" style={{ ...fieldStyle, resize: "vertical", lineHeight: 1.45 }} />
       </FieldLabel>
-      {err && <Muted tone="red">{err}</Muted>}
+      {err && <Muted tone="danger">{err}</Muted>}
       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
         <Button variant="ghost" style={{ padding: "2px 10px" }} onClick={onDone}>Cancel</Button>
         <Button variant="primary" style={{ padding: "2px 10px" }} disabled={!canSave} onClick={() => save.mutate()}>
@@ -261,8 +261,8 @@ function FieldLabel({ text, children }: { text: string; children: ReactNode }) {
   );
 }
 
-function Muted({ children, tone }: { children: ReactNode; tone?: "red" }) {
-  return <span style={{ fontFamily: font.mono, fontSize: 11, color: tone === "red" ? color.red : color.textMuted, padding: "2px 0" }}>{children}</span>;
+function Muted({ children, tone }: { children: ReactNode; tone?: "danger" }) {
+  return <span style={{ fontFamily: font.mono, fontSize: 11, color: tone === "danger" ? color.red : color.textMuted, padding: "2px 0" }}>{children}</span>;
 }
 
 // @decision 6cefdf25 — do not restate the variant's own `color` inline here, even to the identical

@@ -75,7 +75,7 @@ check("a large archive is capped BEFORE it reaches the buckets, so offline can't
 
 check("fleetRollup(running) reads live state — a live manager with idle workers is 'idle'", () => {
   const set = [running({ role: "manager" }), running({ busy: false })];
-  assert.deepEqual(fleetRollup(set), { tone: "phosphor", label: "idle" });
+  assert.deepEqual(fleetRollup(set), { tone: "live", label: "idle" });
 });
 
 check("fleetRollup escalates to busy on any live busy session, and red on a live rate-limit", () => {
@@ -111,7 +111,7 @@ check("showsAsRateLimited is false once a session is ALSO bailed — only the ba
 check("fleetRollup is red on a live BAIL too, even though rateLimitedUntil is null (the bail nulled it)", () => {
   const bailedAt = new Date().toISOString();
   const rolled = fleetRollup([running({ role: "manager", rateLimitBailedAt: bailedAt, rateLimitedUntil: null })]);
-  assert.equal(rolled.tone, "red");
+  assert.equal(rolled.tone, "danger");
   assert.equal(rolled.label, "auto-resume abandoned");
 });
 

@@ -405,36 +405,37 @@ test.describe("vault raw assets on a remote (proxied) origin", () => {
 
   // ── Card aac0de44, site 2: the download control's own hover ────────────────────────────────────────
   // `VaultDownloadLink` built both of its branches from one `shared` inline style that restated
-  // `.loom-btn-primary`'s own rest chrome (`color`/`border`, the --loom-phosphor tokens, verbatim), and
-  // the <button> branch added `background: "transparent"` on top. That last one is the live defect:
-  // `.loom-btn-primary:not(:disabled):hover { background: var(--loom-phosphor-dim) }` is the variant's
-  // ONLY hover rule, so an inline `background` shadowed it completely and the remote download button was
+  // `.loom-btn-primary`'s own rest chrome (`color`/`border`, verbatim), and the <button> branch added
+  // `background: "transparent"` on top. That last one is the live defect: the variant's hover rule moves
+  // the `background`, so an inline `background` shadowed it completely and the remote download button was
   // visually inert on hover. The <a> branch set no background and hovered correctly all along — which is
   // why this needs the REMOTE origin to measure at all, and why the loopback control below is its pair.
   // Every inline chrome declaration is gone; the rest appearance is pinned first, then a real hover.
+  // Since Graphite (card 542f642f) primary is a solid cobalt fill that steps darker on hover.
   test("the remote download BUTTON hovers (its inline background no longer shadows the variant rule)", async ({ page }) => {
     await openRemoteVault(page);
     await treeRow(page, "opaque.bin").click();
 
     const button = page.getByRole("button", { name: "Download file" });
     await expect(button).toBeVisible();
-    // REST, the same tokens the deleted inline values named: --loom-phosphor on a 1px phosphor border,
-    // and `.loom-btn`'s transparent base where the inline `background: "transparent"` was.
-    const phosphor = await cssColor(page, "--loom-phosphor");
-    const phosphorDim = await cssColor(page, "--loom-phosphor-dim");
-    await expect(button).toHaveCSS("color", phosphor);
-    await expect(button).toHaveCSS("border-top-color", phosphor);
+    // REST, the primary variant's own chrome: an --loom-on-accent label on a solid --loom-accent fill
+    // with a matching 1px border. A surviving inline `background` would show here as transparent.
+    const accent = await cssColor(page, "--loom-accent");
+    const accentHover = await cssColor(page, "--loom-accent-hover");
+    const onAccent = await cssColor(page, "--loom-on-accent");
+    await expect(button).toHaveCSS("color", onAccent);
+    await expect(button).toHaveCSS("border-top-color", accent);
     await expect(button).toHaveCSS("border-top-width", "1px");
     await expect(button).toHaveCSS("border-top-style", "solid");
-    await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(button).toHaveCSS("background-color", accent);
 
-    // HOVER. `toHaveCSS` retries, so it reads the settled end state past the 80ms `.loom-btn`
-    // transition rather than an interpolated frame mid-flight.
+    // HOVER. `toHaveCSS` retries, so it reads the settled end state past the `.loom-btn` transition
+    // rather than an interpolated frame mid-flight.
     await button.hover();
-    await expect(button).toHaveCSS("background-color", phosphorDim);
-    // The fill is the whole rule — the label and border must not move with it.
-    await expect(button).toHaveCSS("color", phosphor);
-    await expect(button).toHaveCSS("border-top-color", phosphor);
+    await expect(button).toHaveCSS("background-color", accentHover);
+    // The fill and its border step together; the label must not move.
+    await expect(button).toHaveCSS("color", onAccent);
+    await expect(button).toHaveCSS("border-top-color", accentHover);
   });
 
   test("CONTROL: on the SAME daemon's loopback origin the consumers still use the plain raw URL", async ({ page }) => {
@@ -473,12 +474,13 @@ test.describe("vault raw assets on a remote (proxied) origin", () => {
     // of its own, its hover worked before the fix too. Asserting it here is what shows the fix did not
     // disturb the branch that was already correct. (`:not(:disabled)` matches an <a>: `:disabled` only
     // ever matches a form control, so the variant's hover rule reaches this element.)
-    const phosphor = await cssColor(page, "--loom-phosphor");
-    const phosphorDim = await cssColor(page, "--loom-phosphor-dim");
-    await expect(link).toHaveCSS("color", phosphor);
-    await expect(link).toHaveCSS("border-top-color", phosphor);
-    await expect(link).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    // Since Graphite (card 542f642f) that is primary's solid cobalt fill, stepping darker on hover.
+    const accent = await cssColor(page, "--loom-accent");
+    const accentHover = await cssColor(page, "--loom-accent-hover");
+    await expect(link).toHaveCSS("color", await cssColor(page, "--loom-on-accent"));
+    await expect(link).toHaveCSS("border-top-color", accent);
+    await expect(link).toHaveCSS("background-color", accent);
     await link.hover();
-    await expect(link).toHaveCSS("background-color", phosphorDim);
+    await expect(link).toHaveCSS("background-color", accentHover);
   });
 });

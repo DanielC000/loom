@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAttention, attentionOpenTarget, isAnswerableRequest } from "../lib/attention";
+import { useAttention, attentionKindLabel, attentionOpenTarget, isAnswerableRequest } from "../lib/attention";
 import { useOpenRequest } from "./requests";
 import { atlasRetirementFor, useVisibleNavPages } from "../nav";
 import { useAtlasUi } from "../lib/atlasUi";
@@ -59,7 +59,7 @@ export function CommandPalette() {
       // A REQUEST opens the shared in-place modal (the provider renders it, so the closing palette can't
       // race the mount); everything else navigates to its route. `go()` closes the palette after `run`.
       const run = isRequest ? () => openRequest(a.questionId!) : () => navigate(target);
-      return [{ label: `${verb} · ${a.kind} ${a.text}`, hint, run }];
+      return [{ label: `${verb} · ${attentionKindLabel(a.kind)} ${a.text}`, hint, run }];
     }),
   ].filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
 

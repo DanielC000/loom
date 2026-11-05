@@ -27,32 +27,32 @@ check("relativeAge formats now / minutes / hours / days", () => {
   assert.equal(relativeAge("not-a-date", NOW), "");
 });
 
-check("pending → cyan PENDING", () => {
+check("pending → info Pending", () => {
   const c = questionStateChip({ state: "pending", answeredAt: null }, NOW);
-  assert.equal(c.tone, "cyan");
-  assert.equal(c.label, "PENDING");
+  assert.equal(c.tone, "info");
+  assert.equal(c.label, "Pending");
 });
 
-check("consumed → muted CONSUMED ✓", () => {
+check("consumed → muted Consumed ✓", () => {
   const c = questionStateChip({ state: "consumed", answeredAt: ago(10 * 60_000) }, NOW);
   assert.equal(c.tone, "muted");
-  assert.equal(c.label, "CONSUMED ✓");
+  assert.equal(c.label, "Consumed ✓");
 });
 
-check("answered under the threshold → muted ANSWERED (not watchdog)", () => {
+check("answered under the threshold → muted Answered (not watchdog)", () => {
   const q = { state: "answered", answeredAt: ago(DECISION_WATCHDOG_MS - 60_000) };
   assert.equal(isDecisionWatchdog(q, NOW), false);
   const c = questionStateChip(q, NOW);
   assert.equal(c.tone, "muted");
-  assert.equal(c.label, "ANSWERED");
+  assert.equal(c.label, "Answered");
 });
 
-check("answered PAST the threshold → amber WAITING ON MGR (watchdog re-escalation)", () => {
+check("answered PAST the threshold → busy Waiting on mgr (watchdog re-escalation)", () => {
   const q = { state: "answered", answeredAt: ago(DECISION_WATCHDOG_MS + 60_000) };
   assert.equal(isDecisionWatchdog(q, NOW), true);
   const c = questionStateChip(q, NOW);
-  assert.equal(c.tone, "amber");
-  assert.equal(c.label, "WAITING ON MGR");
+  assert.equal(c.tone, "busy");
+  assert.equal(c.label, "Waiting on mgr");
 });
 
 check("a pending question is never a watchdog, even if 'old'", () => {
@@ -61,10 +61,10 @@ check("a pending question is never a watchdog, even if 'old'", () => {
 
 // question_cancel + dismiss (card feat(orchestration): question_cancel + dismiss) — the fourth terminal
 // state, reachable only from pending, never confusable with an actual answer.
-check("cancelled → red CANCELLED (never confusable with the muted answered/consumed states)", () => {
+check("cancelled → danger Cancelled (never confusable with the muted answered/consumed states)", () => {
   const c = questionStateChip({ state: "cancelled", answeredAt: null }, NOW);
-  assert.equal(c.tone, "red");
-  assert.equal(c.label, "CANCELLED");
+  assert.equal(c.tone, "danger");
+  assert.equal(c.label, "Cancelled");
 });
 
 check("a cancelled question is never a watchdog either", () => {
@@ -210,11 +210,11 @@ check("attachmentCountChip: an empty list is empty on every field (never a phant
 });
 
 check("attachmentStateChip: unavailable → new → opened <age>, in that precedence", () => {
-  assert.deepEqual(attachmentStateChip({ available: false, openedAt: null }, NOW), { tone: "red", label: "unavailable" });
+  assert.deepEqual(attachmentStateChip({ available: false, openedAt: null }, NOW), { tone: "danger", label: "unavailable" });
   // ⛔ unavailable WINS over an openedAt stamp: a file opened earlier and reaped since is gone NOW, and
   // reading "opened 4m ago" would describe bytes that no longer exist.
-  assert.deepEqual(attachmentStateChip({ available: false, openedAt: ago(4 * 60_000) }, NOW), { tone: "red", label: "unavailable" });
-  assert.deepEqual(attachmentStateChip({ available: true, openedAt: null }, NOW), { tone: "phosphor", label: "new" });
+  assert.deepEqual(attachmentStateChip({ available: false, openedAt: ago(4 * 60_000) }, NOW), { tone: "danger", label: "unavailable" });
+  assert.deepEqual(attachmentStateChip({ available: true, openedAt: null }, NOW), { tone: "live", label: "new" });
   assert.deepEqual(attachmentStateChip({ available: true, openedAt: ago(4 * 60_000) }, NOW), { tone: "muted", label: "opened 4m ago" });
   // An unparseable stamp still reads as opened — the FACT of the stamp is what the column is about.
   assert.deepEqual(attachmentStateChip({ available: true, openedAt: "not-a-date" }, NOW), { tone: "muted", label: "opened" });

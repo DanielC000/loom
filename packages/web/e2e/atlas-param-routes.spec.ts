@@ -542,11 +542,11 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     await page.locator("main").getByText("Land it").click();
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(page.locator("main").getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(page.locator("main").getByText("Answered", { exact: true })).toBeVisible();
 
     // Durable, not just optimistic: a fresh load of the same address reads the recorded choice back.
     await page.goto(`${loomDaemon.baseURL}/question/${questionId}`);
-    await expect(page.locator("main").getByText(/Answered/)).toBeVisible();
+    await expect(page.locator("main").getByText("Answered", { exact: true })).toBeVisible();
     await expect(page.locator("main").getByText("Land it")).toBeVisible();
   });
 

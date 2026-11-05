@@ -13,7 +13,7 @@ import { ALLOWLIST_NOT_READY, planEndpointAllowlist } from "../lib/endpointAllow
 // plaintext token is returned EXACTLY ONCE on create + rotate — it lives ONLY in transient component state
 // here (the OneTimeSecret panel), never in the query cache and never refetched; it's cleared on dismiss.
 
-const statusTone: Record<ApiKeyStatus, Tone> = { active: "phosphor", paused: "amber", revoked: "red" };
+const statusTone: Record<ApiKeyStatus, Tone> = { active: "live", paused: "busy", revoked: "danger" };
 const ts = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : "—");
 const capStr = (n: number | null | undefined) => (n == null ? "" : String(n));
 
@@ -164,7 +164,7 @@ function OneTimeSecret({ name, plaintext, onDismiss }: { name: string; plaintext
   return (
     <Panel style={{ padding: 14, border: `1px solid ${color.amber}`, boxShadow: `inset 0 0 0 1px ${color.amber}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <StatusPill tone="amber" label="New secret · store it now" glow />
+        <StatusPill tone="busy" label="New secret · store it now" glow />
         <span style={{ flex: 1 }} />
         <Button variant="ghost" onClick={onDismiss} title="Dismiss — the secret is cleared and can never be shown again">Dismiss</Button>
       </div>
@@ -186,7 +186,7 @@ function OneTimeSecret({ name, plaintext, onDismiss }: { name: string; plaintext
 function EndpointRow({ agent, onToggle, pending }: { agent: Agent; onToggle: () => void; pending: boolean }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <StatusPill tone={agent.endpoint ? "cyan" : "muted"} label={agent.endpoint ? "endpoint" : "off"} />
+      <StatusPill tone={agent.endpoint ? "info" : "muted"} label={agent.endpoint ? "endpoint" : "off"} />
       <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{agent.name}</span>
       <span style={{ flex: 1 }} />
       <Button variant={agent.endpoint ? "default" : "primary"} disabled={pending} onClick={onToggle}>
@@ -219,7 +219,7 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
       <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: 11, color: color.textMuted, fontFamily: font.mono }}>endpoints:</span>
         {k.endpointAgentIds.length === 0 && <span style={{ fontSize: 11, color: color.textMuted }}>none</span>}
-        {k.endpointAgentIds.map((id) => <Chip key={id} value={agentName(id)} tone="cyan" />)}
+        {k.endpointAgentIds.map((id) => <Chip key={id} value={agentName(id)} tone="info" />)}
       </div>
 
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>

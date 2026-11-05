@@ -135,32 +135,32 @@ export function readMergeGate(s: MergeGateStatus): MergeGateRead {
 
   if (isEscalatedFailure(s)) {
     return {
-      state: "failed", tone: "red", glow: true, badge: "Gate failed",
+      state: "failed", tone: "danger", glow: true, badge: "Gate failed",
       sentence: `Every merge is gated until one passes. ${behind} landed unverified behind it.`,
     };
   }
   if (s.cadence === "every") {
     return {
-      state: "every", tone: "phosphor", glow: false, badge: "Every merge",
+      state: "every", tone: "live", glow: false, badge: "Every merge",
       sentence: "Every merge runs the gate command before it lands.",
     };
   }
   if (s.cadence === "never") {
     return {
-      state: "never", tone: "red", glow: false, badge: "Never gated",
+      state: "never", tone: "danger", glow: false, badge: "Never gated",
       sentence: `${behind} ${plural(unverified, "has", "have")} landed unverified. Nothing on the default branch is being checked.`,
     };
   }
   const n = s.interval ?? 0;
   if (s.nextLandingGated) {
     return {
-      state: "due", tone: "cyan", glow: false, badge: badgeForInterval(n),
+      state: "due", tone: "info", glow: false, badge: badgeForInterval(n),
       sentence: "The next merge runs the gate. A pass resets the counter to 0; a fail keeps every merge gated.",
     };
   }
   const left = Math.max(0, n - unverified);
   return {
-    state: "counting", tone: "amber", glow: false, badge: badgeForInterval(n),
+    state: "counting", tone: "busy", glow: false, badge: badgeForInterval(n),
     sentence: left > 0
       ? `${left} more ${plural(left, "merge lands", "merges land")} ungated, then the gate runs.`
       : "The next merge runs the gate.",
@@ -294,7 +294,7 @@ export function verdictMark(v: Pick<MergeGateVerdict, "result" | "reason" | "at"
   return {
     kind: pass ? "pass" : "fail",
     glyph: pass ? "✓" : "✗",
-    tone: pass ? "phosphor" : "red",
+    tone: pass ? "live" : "danger",
     title: [`${pass ? "passed" : "failed"} ${ago(v.at, now)}`, landing ? `${landing.label} ${landing.value}` : null, range]
       .filter(Boolean).join(" · "),
   };
@@ -306,11 +306,11 @@ export function verdictMark(v: Pick<MergeGateVerdict, "result" | "reason" | "at"
  * `null` at `every`, which weakens nothing. Lives here, not in the component, so the copy is covered by the
  * same hermetic test as every other string this feature renders.
  */
-export function weakeningNote(cadence: MergeGateCadence, interval: number | null): { tone: "amber" | "red"; text: string } | null {
+export function weakeningNote(cadence: MergeGateCadence, interval: number | null): { tone: "busy" | "danger"; text: string } | null {
   if (cadence === "every") return null;
   if (cadence === "never") {
     return {
-      tone: "red",
+      tone: "danger",
       text: "No merge will run the gate command. Merges are still refused on a conflict or a dirty tree, but nothing on the default branch is verified. No agent can make this change, and turning the gate back on is a fresh decision, not an undo.",
     };
   }
@@ -322,7 +322,7 @@ export function weakeningNote(cadence: MergeGateCadence, interval: number | null
   const n = interval;
   const merges = `${n} ${plural(n, "merge", "merges")}`;
   return {
-    tone: "amber",
+    tone: "busy",
     text: `At this cadence up to ${merges} reach the default branch without ever running the gate command. When the next one fails, those ${n} are already landed, so the gate tells you something broke, not which merge broke it.`,
   };
 }
@@ -399,11 +399,11 @@ export function commitMessageConfigWrite(draft: CommitMessageDraft): {
  * weighing either switch wants to know and it is true of both: a toggle only governs what the NEXT
  * landing writes.
  */
-export function commitMessageNote(key: CommitMessageKey, value: CommitMessageSwitch): { tone: "amber" | "muted"; text: string } | null {
+export function commitMessageNote(key: CommitMessageKey, value: CommitMessageSwitch): { tone: "busy" | "muted"; text: string } | null {
   if (value === "on") return null;
   if (key === "trailers") {
     return {
-      tone: "amber",
+      tone: "busy",
       text: "With trailers off, Loom can lose track of a merge if the daemon crashes mid-landing, may show a card that already shipped as not merged, and stops auto-confirming retained batch branches for cleanup. Existing history is never rewritten, and existing retained branches may need a manual check.",
     };
   }

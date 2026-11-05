@@ -72,8 +72,8 @@ function occupancy(s: SessionListItem): number {
   return win > 0 ? ctx / win : 0;
 }
 function occupancyTone(s: SessionListItem): Tone {
-  if (isRateLimited(s)) return "red";
-  return occupancy(s) > CONTEXT_WARN_RATIO ? "amber" : "phosphor";
+  if (isRateLimited(s)) return "danger";
+  return occupancy(s) > CONTEXT_WARN_RATIO ? "busy" : "live";
 }
 
 // Total throughput across a run-usage row: every billed token class summed. The interactive-session
@@ -158,14 +158,14 @@ export default function Usage() {
 
       {/* ════ LIVE OCCUPANCY ════ */}
       <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <SectionHead title="Live occupancy" tag="live · now" tagTone="phosphor" />
+        <SectionHead title="Live occupancy" tag="live · now" tagTone="live" />
 
         {/* Aggregate strip */}
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <Stat label="sessions" value={String(all.length)} />
-          <Stat label="ctx in use" value={fmtTokens(totalCtx)} tone="cyan" />
-          <Stat label="est. ctx cost" value={fmtUsd(totalCost)} tone="phosphor" />
-          <Stat label="rate-limited" value={String(rateLimited.length)} tone={rateLimited.length ? "red" : "muted"} />
+          <Stat label="ctx in use" value={fmtTokens(totalCtx)} tone="info" />
+          <Stat label="est. ctx cost" value={fmtUsd(totalCost)} tone="live" />
+          <Stat label="rate-limited" value={String(rateLimited.length)} tone={rateLimited.length ? "danger" : "muted"} />
           <span style={{ flex: 1 }} />
           <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
             "ctx in use" = current context size, not cumulative spend. Cost is an estimate of one input
@@ -201,9 +201,9 @@ export default function Usage() {
                 <Panel key={pn} style={{ marginBottom: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
                     <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{pn}</span>
-                    <Chip label="ctx" value={fmtTokens(projCtx)} tone="cyan" />
+                    <Chip label="ctx" value={fmtTokens(projCtx)} tone="info" />
                     <Chip label="est." value={fmtUsd(projCost)} />
-                    {projLimited > 0 && <Badge tone="red">{projLimited} rate-limited</Badge>}
+                    {projLimited > 0 && <Badge tone="danger">{projLimited} rate-limited</Badge>}
                     <span style={{ flex: 1 }} />
                     <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{rows.length} session{rows.length === 1 ? "" : "s"}</span>
                   </div>
@@ -244,10 +244,10 @@ function UsageRow({ s, showProject }: { s: SessionListItem; showProject?: boolea
         <span style={{ color: s.role === "manager" ? color.phosphor : color.textDim }}>{s.role === "manager" ? "★ " : ""}{s.role ?? "session"}</span>{" "}
         <span style={{ color: color.textMuted }}>{s.id.slice(0, 8)}</span>
       </span>
-      {showProject && <Chip value={s.projectName} tone="cyan" />}
+      {showProject && <Chip value={s.projectName} tone="info" />}
       <Chip label="model" value={shortModel(s.model)} />
-      <StatusPill tone={s.processState === "live" ? "phosphor" : "muted"} label={s.processState} />
-      {limited && <Badge tone="red">rate-limited</Badge>}
+      <StatusPill tone={s.processState === "live" ? "live" : "muted"} label={s.processState} />
+      {limited && <Badge tone="danger">rate-limited</Badge>}
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 96, textAlign: "right" }}>
@@ -276,7 +276,7 @@ function HistorySection({
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <SectionHead title="Agent Runs" tag={window} tagTone="cyan" />
+      <SectionHead title="Agent Runs" tag={window} tagTone="info" />
       <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
         Cumulative BILLED token + cost totals from finished Agent Runs — not the live occupancy above, and
         not interactive-session usage. Cost meters relative spend; runs whose model had no recorded price
@@ -304,11 +304,11 @@ function HistorySection({
           <>
             {/* Aggregate strip — distinctly BILLED, never summed with live occupancy. */}
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <Stat label="runs" value={String(totals.runs)} tone="phosphor" />
-              <Stat label="input tok" value={fmtTokens(totals.inputTokens)} tone="cyan" />
-              <Stat label="output tok" value={fmtTokens(totals.outputTokens)} tone="cyan" />
+              <Stat label="runs" value={String(totals.runs)} tone="live" />
+              <Stat label="input tok" value={fmtTokens(totals.inputTokens)} tone="info" />
+              <Stat label="output tok" value={fmtTokens(totals.outputTokens)} tone="info" />
               <Stat label="cache tok" value={fmtTokens(totals.cacheCreationTokens + totals.cacheReadTokens)} tone="muted" />
-              <Stat label="cost (billed)" value={fmtUsd(totals.costUsd)} tone="amber" />
+              <Stat label="cost (billed)" value={fmtUsd(totals.costUsd)} tone="busy" />
             </div>
 
             {/* Per-project breakdown — only meaningful in the "all" scope. */}
@@ -370,7 +370,7 @@ function HistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: str
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
-        {max != null && <Meter value={tok} max={max} tone="cyan" width={90} />}
+        {max != null && <Meter value={tok} max={max} tone="info" width={90} />}
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 64, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
@@ -399,7 +399,7 @@ function SessionUsageSection({
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <SectionHead title="Interactive sessions" tag="est. consumption · over time" tagTone="amber" />
+      <SectionHead title="Interactive sessions" tag="est. consumption · over time" tagTone="busy" />
       <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
         Your interactive-session usage over time — cumulative tokens + an ESTIMATE of what they'd cost on
         metered API, sampled token-free from session transcripts. On a flat Claude subscription this is what
@@ -427,9 +427,9 @@ function SessionUsageSection({
           <>
             {/* Aggregate strip — an ESTIMATE of plan consumption, never summed with the other planes. */}
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <Stat label="est. consumption" value={fmtUsd(totals.costUsd)} tone="amber" />
-              <Stat label="input tok" value={fmtTokens(totals.inputTokens)} tone="cyan" />
-              <Stat label="output tok" value={fmtTokens(totals.outputTokens)} tone="cyan" />
+              <Stat label="est. consumption" value={fmtUsd(totals.costUsd)} tone="busy" />
+              <Stat label="input tok" value={fmtTokens(totals.inputTokens)} tone="info" />
+              <Stat label="output tok" value={fmtTokens(totals.outputTokens)} tone="info" />
               <Stat label="cache tok" value={fmtTokens(totals.cacheCreationTokens + totals.cacheReadTokens)} tone="muted" />
               <Stat label="cache hit" value={fmtRatio(totals.cacheHitRatio)} tone={ratioTone(totals.cacheHitRatio)} />
               <Stat label="samples" value={fmtTokens(totals.samples)} tone="muted" />
@@ -518,7 +518,7 @@ function SessionHistoryRow({ name, subtitle, row, max }: { name: string; subtitl
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
-        {max != null && <Meter value={tok} max={max} tone="cyan" width={90} />}
+        {max != null && <Meter value={tok} max={max} tone="info" width={90} />}
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>

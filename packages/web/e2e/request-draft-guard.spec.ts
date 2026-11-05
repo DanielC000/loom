@@ -103,7 +103,7 @@ test.describe("the Request answer dialog keeps a typed draft (card 544960ed)", (
     // A successful submit retires the draft: the recorded readout replaces the form, and the dialog is
     // freely closable again (nothing unsent is being held).
     await reopened.getByRole("button", { name: "Submit answer" }).click();
-    await expect(reopened.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(reopened.getByText("Answered", { exact: true })).toBeVisible();
     await clickBackdrop(reopened);
     await expect(reopened).toHaveCount(0);
   });

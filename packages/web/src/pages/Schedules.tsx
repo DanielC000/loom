@@ -86,7 +86,7 @@ export default function Schedules() {
         <SectionLabel style={{ margin: 0 }}>Schedules</SectionLabel>
         {orch.data && (
           <StatusPill
-            tone={orch.data.schedulerEnabled ? "phosphor" : "amber"}
+            tone={orch.data.schedulerEnabled ? "live" : "busy"}
             label={orch.data.schedulerEnabled ? "scheduler active" : "scheduler off"}
             glow={orch.data.schedulerEnabled}
           />
@@ -107,7 +107,7 @@ export default function Schedules() {
           padding: "10px 12px", border: `1px solid ${color.amber}`, borderRadius: radius.base,
           background: wash(color.busy, 6),
         }}>
-          <Badge tone="amber">scheduler off</Badge>
+          <Badge tone="busy">scheduler off</Badge>
           <p style={{ margin: 0, flex: 1, minWidth: 260, color: color.textDim, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>
             The cron scheduler is disabled, so schedules you create here are saved but{" "}
             <strong style={{ color: color.amber, fontWeight: 700 }}>will not fire</strong>. To enable it, set{" "}
@@ -158,7 +158,7 @@ export default function Schedules() {
                         lost occurrence "deferred" (which implies it will still fire imminently). */}
                     {s.enabled && s.lastDeferredAt && (
                       <div style={{ marginTop: 4, whiteSpace: "normal" }} title={`${s.lastDeferredReason?.startsWith("missed —") ? "Missed" : "Deferred"} since ${fmt(s.lastDeferredAt)}`}>
-                        <Badge tone={s.lastDeferredReason?.startsWith("missed —") ? "muted" : "amber"}>
+                        <Badge tone={s.lastDeferredReason?.startsWith("missed —") ? "muted" : "busy"}>
                           {s.lastDeferredReason?.startsWith("missed —") ? s.lastDeferredReason : `deferred: ${s.lastDeferredReason ?? "budget reached"}`}
                         </Badge>
                       </div>
@@ -568,7 +568,7 @@ function ScheduleBuilderModal({
         <div style={{ background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span style={{ color: color.phosphor, fontFamily: font.mono, fontSize: 13 }}>{cronValid ? summary : "Incomplete cron"}</span>
-            <Chip label="cron" value={cronValid ? cron : "—"} tone="cyan" />
+            <Chip label="cron" value={cronValid ? cron : "—"} tone="info" />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={{ ...fieldLabel, fontSize: 10 }}>Next runs</span>

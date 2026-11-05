@@ -13,7 +13,7 @@ import { GatewayTokenBanner } from "./components/GatewayTokenBanner";
 import { NewBuildNotice } from "./components/NewBuildNotice";
 import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
-import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionOpenTarget, isAnswerableRequest, type AttentionItem } from "./lib/attention";
+import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionKindLabel, attentionOpenTarget, isAnswerableRequest, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider } from "./lib/activeProject";
 import { useAtlasUi } from "./lib/atlasUi";
@@ -52,7 +52,7 @@ function UpdateBanner() {
   return (
     <div role="status" style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 20px",
       background: wash(color.busy, 8), borderBottom: `1px solid ${color.amber}`, fontFamily: font.mono, fontSize: 12.5 }}>
-      <Dot tone="amber" glow />
+      <Dot tone="busy" glow />
       {started ? (
         <span style={{ color: color.amber }}>
           Updating to v{q.data.latest} — the daemon is restarting. This page will reconnect shortly; reload if it doesn’t.
@@ -192,7 +192,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
     const raf = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(raf);
   }, []);
-  const c = tone.cyan;
+  const c = tone.info;
   return (
     <div onClick={onOpen} role="button" title="open the Inbox" data-testid="request-count-pill"
       style={{
@@ -203,7 +203,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
       }}>
-      <Dot tone="cyan" glow />
+      <Dot tone="info" glow />
       <span style={{ color: c, fontVariantNumeric: "tabular-nums" }}>{count}</span>
       <span style={{ color: color.textDim }}>{count === 1 ? "request needs you" : "requests need you"}</span>
       <span aria-hidden style={{ color: color.textMuted }}>→ inbox</span>
@@ -232,9 +232,9 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
       }}>
-      <Dot tone={item.tone} glow={item.tone === "amber" || item.tone === "red"} />
+      <Dot tone={item.tone} glow={item.tone === "busy" || item.tone === "danger"} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: font.mono, fontSize: 11, color: c, textTransform: "uppercase", letterSpacing: "0.06em" }}>{item.kind}</div>
+        <div style={{ fontFamily: font.ui, fontSize: 12, fontWeight: 600, color: c }}>{attentionKindLabel(item.kind)}</div>
         <div style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, marginTop: 3, wordBreak: "break-word" }}>{item.text}</div>
       </div>
       <button onClick={(e) => { e.stopPropagation(); onDismiss(); }} title="dismiss"

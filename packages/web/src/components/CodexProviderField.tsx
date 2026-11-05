@@ -40,11 +40,11 @@ export function CodexProviderField({ value, onChange, connections }: {
         <>
           <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={label}>Provider id</span>
-            <Input data-testid="codex-provider-id" value={value.id} placeholder="e.g. myhost" onChange={(e) => onChange({ ...value, id: e.target.value })} />
+            <Input mono data-testid="codex-provider-id" value={value.id} placeholder="e.g. myhost" onChange={(e) => onChange({ ...value, id: e.target.value })} />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={label}>Base URL</span>
-            <Input data-testid="codex-provider-url" value={value.baseUrl ?? ""} placeholder="https://api.example.com/v1" onChange={(e) => onChange({ ...value, baseUrl: e.target.value })} />
+            <Input mono data-testid="codex-provider-url" value={value.baseUrl ?? ""} placeholder="https://api.example.com/v1" onChange={(e) => onChange({ ...value, baseUrl: e.target.value })} />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={label}>API-key connection</span>

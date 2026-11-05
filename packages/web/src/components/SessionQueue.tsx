@@ -142,7 +142,7 @@ export function SessionQueue({
           borderRadius: radius.base, padding: "5px 8px",
         }}
       >
-        <Dot tone="amber" />
+        <Dot tone="busy" />
         <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted, flexShrink: 0 }}>
           Queued <span style={{ color: color.amber }}>({pending.length})</span>
         </span>
@@ -225,7 +225,7 @@ function QueueRow({
   if (!isMutable(m)) {
     return (
       <div style={rowStyle} title={`${m.text}\n\n(worker / agent message — read-only)`}>
-        <Dot tone="cyan" />
+        <Dot tone="info" />
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
           {preview}
         </span>
@@ -250,7 +250,7 @@ function QueueRow({
         <IconBtn title="Move up" disabled={!canUp || busy} onClick={onUp}>↑</IconBtn>
         <IconBtn title="Move down" disabled={!canDown || busy} onClick={onDown}>↓</IconBtn>
       </div>
-      <Dot tone={editable ? "amber" : "muted"} />
+      <Dot tone={editable ? "busy" : "muted"} />
       <span
         onClick={editable ? onEditStart : undefined}
         title={editable ? m.text : `${m.text}\n\n(Loom nudge — remove or reorder, not editable)`}

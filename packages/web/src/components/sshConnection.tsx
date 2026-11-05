@@ -313,7 +313,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: "100%" }}>
         <span data-testid={`ssh-target-${c.id}`} style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.user}@{c.host}:{c.port}</span>
-        {c.readOnly ? <Badge tone="phosphor">Read-only</Badge> : <Badge tone="amber">Read-write</Badge>}
+        {c.readOnly ? <Badge tone="live">Read-only</Badge> : <Badge tone="busy">Read-write</Badge>}
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
           {allowN === 0 ? "no allowlist" : `${allowN} allowed`} · {riskyN} held for approval
         </span>
@@ -323,8 +323,8 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
         {grantedTo !== null && (
           <span data-testid={`ssh-granted-${c.id}`} title={grantedTo.join(", ")}>
             {grantedTo.length === 0
-              ? <Badge tone="amber">Not granted</Badge>
-              : <Badge tone="phosphor">{`Granted to ${grantedTo.length} agent${grantedTo.length === 1 ? "" : "s"}`}</Badge>}
+              ? <Badge tone="busy">Not granted</Badge>
+              : <Badge tone="live">{`Granted to ${grantedTo.length} agent${grantedTo.length === 1 ? "" : "s"}`}</Badge>}
           </span>
         )}
         {!editing && <Button variant="ghost" onClick={open}>Edit rules</Button>}

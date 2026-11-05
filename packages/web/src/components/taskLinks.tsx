@@ -131,7 +131,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11,
             color: allDone ? color.phosphor : color.textDim }}>
             <span>{links.children.done}/{links.children.total} done</span>
-            <Meter value={links.children.done} max={links.children.total} width={56} tone={allDone ? "phosphor" : "cyan"} />
+            <Meter value={links.children.done} max={links.children.total} width={56} tone={allDone ? "live" : "info"} />
           </div>
           {/* Bounded: `items` is capped at 100 by the contract, and 100 rows would push the edit form off
               the panel. Scroll the list instead of truncating it — `done`/`total` above stay exact either

@@ -79,7 +79,7 @@ export default function EventTriggers() {
     <Panel style={{ alignSelf: "start" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Event Triggers</SectionLabel>
-        <StatusPill tone="phosphor" label="dispatcher active" glow />
+        <StatusPill tone="live" label="dispatcher active" glow />
         <p style={{ color: color.textMuted, fontSize: 11, margin: 0, fontFamily: font.mono, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
           React to internal orchestration events. When an event of the chosen kind fires — optionally
           scoped to one project — the trigger wakes an existing session or spawns a fresh agent. The
@@ -118,7 +118,7 @@ export default function EventTriggers() {
                   </td>
                   <td style={{ padding: "10px 12px", color: t.projectId ? color.textDim : color.textMuted, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{projectName(t.projectId)}</td>
                   <td style={{ padding: "10px 12px" }}>
-                    <Badge tone={t.mode === "wake" ? "cyan" : "phosphor"}>{t.mode}</Badge>
+                    <Badge tone={t.mode === "wake" ? "info" : "live"}>{t.mode}</Badge>
                   </td>
                   <td style={{ padding: "10px 12px", color: color.textDim, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{targetLabel(t)}</td>
                   <td style={{ padding: "10px 12px", color: color.textDim, whiteSpace: "nowrap" }}>{fmt(t.lastFiredAt)}</td>
@@ -308,7 +308,7 @@ function EventTriggerModal({
         <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ accentColor: "var(--loom-phosphor)", width: 16, height: 16 }} />
           <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontFamily: font.mono, fontWeight: 400, fontSize: 12, color: color.textDim }}>
-            Enabled {enabled ? <Chip value="on" tone="phosphor" /> : <Chip value="off" tone="muted" />}
+            Enabled {enabled ? <Chip value="on" tone="live" /> : <Chip value="off" tone="muted" />}
           </span>
         </label>
 

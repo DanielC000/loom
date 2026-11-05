@@ -890,9 +890,10 @@ test.describe("Atlas legacy redirects (card 82bde849)", () => {
     // and the address no longer pins it.
     //
     // Compared through innerText on BOTH sides, lowercased. `otherLabel` above was read with
-    // innerText, which folds Segmented's CSS `text-transform: uppercase` into its result ("PROFILES"),
-    // while toHaveText compares textContent ("Profiles") — so the two differ by case alone and a
-    // direct toHaveText(otherLabel) fails for a purely presentational reason.
+    // innerText, which folds any CSS `text-transform` into its result, while toHaveText compares
+    // textContent. Segmented carried `text-transform: uppercase` ("PROFILES" vs "Profiles") until the
+    // Graphite kit (card 542f642f) dropped it; reading both sides the same way keeps this immune to the
+    // casing being a styling choice again.
     await expect
       .poll(async () => (await scope().locator(PAGE_SUB_TAB(true)).innerText()).trim().toLowerCase(), {
         message: "clicking the other tab did not move the selection to it",

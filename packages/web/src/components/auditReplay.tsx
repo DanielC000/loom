@@ -21,17 +21,17 @@ function eventTone(e: AuditEvent): Tone {
   const k = e.kind;
   if (k === "worker_report") {
     const st = (e.detail as { status?: string } | null)?.status;
-    return st === "blocked" ? "amber" : st === "done" ? "phosphor" : "cyan";
+    return st === "blocked" ? "busy" : st === "done" ? "live" : "info";
   }
   if (k === "merge_rejected" || k === "worker_report_rejected" || k === "idle_escalated" ||
       k === "context_escalated" || k === "request_escalated" || k === "session_recovery_abandoned" || k === "session_died" ||
-      k === "schedule_fire_failed" || k === "worker_report_undelivered") return "red";
+      k === "schedule_fire_failed" || k === "worker_report_undelivered") return "danger";
   if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker" ||
-      k === "schedule_fire_deferred" || k === "merge_landing_started" || k === "merge_landing_aborted") return "amber";
-  if (k === "merge_done" || k === "recycle_complete" || k === "session_recovered") return "phosphor";
-  if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "cyan";
-  if (k === "deploy") return (e.detail as { ok?: boolean } | null)?.ok ? "phosphor" : "red";
-  return "cyan";
+      k === "schedule_fire_deferred" || k === "merge_landing_started" || k === "merge_landing_aborted") return "busy";
+  if (k === "merge_done" || k === "recycle_complete" || k === "session_recovered") return "live";
+  if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "info";
+  if (k === "deploy") return (e.detail as { ok?: boolean } | null)?.ok ? "live" : "danger";
+  return "info";
 }
 
 // The session that an event is "about" — its worker when present, else its manager. The timeline ships
@@ -146,8 +146,8 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
         </span>
         <span style={{ flex: 1 }} />
         <Chip label="same" value={d.summary.sameCount} />
-        <Chip label="+added" value={d.summary.addedCount} tone={d.summary.addedCount ? "phosphor" : "muted"} />
-        <Chip label="−removed" value={d.summary.removedCount} tone={d.summary.removedCount ? "red" : "muted"} />
+        <Chip label="+added" value={d.summary.addedCount} tone={d.summary.addedCount ? "live" : "muted"} />
+        <Chip label="−removed" value={d.summary.removedCount} tone={d.summary.removedCount ? "danger" : "muted"} />
         <Button variant="ghost" onClick={onClose}>Close</Button>
       </div>
 

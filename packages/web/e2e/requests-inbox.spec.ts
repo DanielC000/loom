@@ -167,7 +167,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
 
     // Authorize resolves the request — the readout flips to the answered/authorized state.
     await dialog.getByRole("button", { name: "Authorize" }).click();
-    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Answered", { exact: true })).toBeVisible();
     await expect(dialog.getByText(/authorized/)).toBeVisible();
   });
 
@@ -187,7 +187,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
 
     // Deny resolves the request — the readout flips to answered/denied (mirrors the Authorize spec above).
     await dialog.getByRole("button", { name: "Deny" }).click();
-    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Answered", { exact: true })).toBeVisible();
     await expect(dialog.getByText("denied", { exact: true })).toBeVisible();
   });
 
@@ -224,7 +224,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     expect(Date.parse(body.expiresAt!)).toBeGreaterThan(Date.now());
     expect(body.note).toBeUndefined();
 
-    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Answered", { exact: true })).toBeVisible();
     // The note was left blank, so the recorded readout falls back to the no-note phrasing — the
     // scope/expiry the human picked is persisted structurally (proven above), not shown here.
     await expect(dialog.getByText("authorized · this action", { exact: true })).toBeVisible();
@@ -277,7 +277,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await dialog.getByPlaceholder(/type your answer/).fill("Call it Atlas.");
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Answered", { exact: true })).toBeVisible();
     await expect(dialog.getByText(/Call it Atlas\./)).toBeVisible();
   });
 
@@ -319,7 +319,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await historyRow.click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText("CANCELLED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Cancelled", { exact: true })).toBeVisible();
     await expect(dialog.getByText("Cancelled · never answered")).toBeVisible();
   });
 

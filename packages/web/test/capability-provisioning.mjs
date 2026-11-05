@@ -120,9 +120,9 @@ check("capabilityReportsProvisioning agrees with provisioningSourceOf on every c
 check("all four states have a tone and a label, and only the attention ones are tinted", () => {
   assert.deepEqual(Object.keys(PROVISION_STATE_META).sort(), ["failed", "idle", "installing", "ready"]);
   assert.equal(PROVISION_STATE_META.idle.tone, "muted");
-  assert.equal(PROVISION_STATE_META.installing.tone, "amber");
-  assert.equal(PROVISION_STATE_META.ready.tone, "phosphor");
-  assert.equal(PROVISION_STATE_META.failed.tone, "red");
+  assert.equal(PROVISION_STATE_META.installing.tone, "busy");
+  assert.equal(PROVISION_STATE_META.ready.tone, "live");
+  assert.equal(PROVISION_STATE_META.failed.tone, "danger");
   for (const m of Object.values(PROVISION_STATE_META)) assert.ok(m.label.length > 0);
 });
 

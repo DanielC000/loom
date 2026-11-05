@@ -127,7 +127,7 @@ export function ProjectManage(
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Vault path</span>
-            <Input placeholder={isVaultOnly ? "vault path" : "vault path (clear + Save to unbind)"}
+            <Input mono placeholder={isVaultOnly ? "vault path" : "vault path (clear + Save to unbind)"}
               value={vaultPath} onChange={(e) => setVault(e.target.value)} />
           </label>
           {isVaultOnly && vaultTrim === "" && (
@@ -296,7 +296,7 @@ function ReferenceReposEditor({ project }: { project: Project }) {
       ) : (
         repos.map((r, i) => (
           <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <Input placeholder="/absolute/path/to/repo" value={r} onChange={(e) => edit(i, e.target.value)}
+            <Input mono placeholder="/absolute/path/to/repo" value={r} onChange={(e) => edit(i, e.target.value)}
               aria-label={`Reference repo ${i + 1}`} style={{ flex: 1 }} />
             <Button variant="ghost" title="Remove this reference repo" aria-label={`Remove reference repo ${i + 1}`}
               onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
@@ -394,17 +394,17 @@ function RepoRegistryEditor({ project }: { project: Project }) {
         repos.map((r, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <div style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap" }}>
-              <Input placeholder="key" value={r.key} onChange={(e) => edit(i, { key: e.target.value })}
+              <Input mono placeholder="key" value={r.key} onChange={(e) => edit(i, { key: e.target.value })}
                 aria-label={`Repo ${i + 1} key`} style={{ flex: "0 1 120px", minWidth: 0 }} />
-              <Input placeholder="/absolute/path/to/repo" value={r.path} onChange={(e) => edit(i, { path: e.target.value })}
+              <Input mono placeholder="/absolute/path/to/repo" value={r.path} onChange={(e) => edit(i, { path: e.target.value })}
                 aria-label={`Repo ${i + 1} path`} style={{ flex: "2 1 200px", minWidth: 0 }} />
-              <Input placeholder="gate command (optional)" value={r.gateCommand ?? ""} onChange={(e) => edit(i, { gateCommand: e.target.value })}
+              <Input mono placeholder="gate command (optional)" value={r.gateCommand ?? ""} onChange={(e) => edit(i, { gateCommand: e.target.value })}
                 aria-label={`Repo ${i + 1} gate command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
               <Button variant="ghost" title="Remove this repo" aria-label={`Remove repo ${i + 1}`}
                 onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap", paddingLeft: 126 }}>
-              <Input placeholder="ungated landing check command (optional)" value={r.ungatedLandingCheckCommand ?? ""}
+              <Input mono placeholder="ungated landing check command (optional)" value={r.ungatedLandingCheckCommand ?? ""}
                 onChange={(e) => edit(i, { ungatedLandingCheckCommand: e.target.value })}
                 aria-label={`Repo ${i + 1} ungated landing check command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
             </div>

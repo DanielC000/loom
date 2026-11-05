@@ -227,9 +227,9 @@ export function cadenceDraftFrom(override: Partial<OrchestrationConfig> | undefi
 export function CadenceWeakening({ cadence, interval }: { cadence: MergeGateCadence; interval: number | null }) {
   const note = weakeningNote(cadence, interval);
   if (!note) return null;
-  const c = note.tone === "red" ? color.red : color.amber;
+  const c = note.tone === "danger" ? color.red : color.amber;
   return (
-    <div data-testid={note.tone === "red" ? "merge-gate-warn-never" : "merge-gate-warn-interval"}
+    <div data-testid={note.tone === "danger" ? "merge-gate-warn-never" : "merge-gate-warn-interval"}
       style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: color.panel2 }}>
       <span style={{ fontFamily: font.mono, fontSize: 11, color: c, lineHeight: 1.6 }}>{note.text}</span>
     </div>
@@ -292,10 +292,10 @@ export function CommitMessagePanel({ draft, onChange }: {
 export function CommitMessageWeakening({ k, value }: { k: CommitMessageKey; value: CommitMessageSwitch }) {
   const note = commitMessageNote(k, value);
   if (!note) return null;
-  const c = note.tone === "amber" ? color.amber : color.textMuted;
+  const c = note.tone === "busy" ? color.amber : color.textMuted;
   return (
     <div data-testid={k === "trailers" ? "commit-trailers-warn" : "commit-log-body-warn"}
-      style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${note.tone === "amber" ? c : color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+      style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${note.tone === "busy" ? c : color.border}`, borderRadius: radius.base, background: color.panel2 }}>
       <span style={{ fontFamily: font.mono, fontSize: 11, color: c, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );
@@ -417,8 +417,8 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
         {failure && (
           <>
             {landing && <Chip label={landing.label} value={landing.value} />}
-            <Chip label="failed" value={ago(failure.at)} tone="red" />
-            {range && <Chip label="bisect" value={range} tone="red" />}
+            <Chip label="failed" value={ago(failure.at)} tone="danger" />
+            {range && <Chip label="bisect" value={range} tone="danger" />}
           </>
         )}
         {read.state === "failed" && (
@@ -487,7 +487,7 @@ export function MergeGateAttention({ status }: { status: MergeGateStatus | null 
     <div data-testid="merge-gate-attention">
       <AttentionRow
         item={{
-          key: `merge-gate-failed:${failure?.at ?? ""}`, tone: "red", kind: "MERGE GATE", text,
+          key: `merge-gate-failed:${failure?.at ?? ""}`, tone: "danger", kind: "MERGE GATE", text,
           dismissKey,
           dismissHint: "Hide this alert — it returns when a later periodic gate fails. The default branch stays unverified and every merge stays gated until one passes.",
         }}
@@ -527,7 +527,7 @@ export function MergeGateCadencePanel({ projectId, draft, onChange }: {
     <div data-testid="merge-gate-panel" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <CadenceControls draft={draft} onChange={onChange} idPrefix="settings" layout="stack" />
       <Hint>effective: {effective} · human-set only</Hint>
-      <div style={{ marginTop: 8, paddingLeft: 13, borderLeft: `2px solid ${toneMap[draft.cadence === "every" ? "phosphor" : draft.cadence === "never" ? "red" : "amber"]}`, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ marginTop: 8, paddingLeft: 13, borderLeft: `2px solid ${toneMap[draft.cadence === "every" ? "live" : draft.cadence === "never" ? "danger" : "busy"]}`, display: "flex", flexDirection: "column", gap: 10 }}>
         {s && <LiveCounterRow status={s} />}
         {!s && <Hint>live counter unavailable — this daemon does not report merge-gate state</Hint>}
         <CadenceWeakening cadence={draft.cadence} interval={draft.cadence === "interval" ? (Number(draft.intervalRaw.trim()) || null) : null} />

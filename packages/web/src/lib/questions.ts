@@ -49,20 +49,20 @@ export interface StateChipSpec { tone: Tone; label: string; }
 
 // The lifecycle chip (surface 4): pending (cyan, waiting on you) → answered (muted, waiting on the
 // manager's pickup) → consumed (muted ✓, terminal), with the watchdog re-escalating an ignored `answered`
-// to amber "WAITING ON MGR". `cancelled` (question_cancel/dismiss) is a FOURTH terminal state reachable
+// to amber "Waiting on mgr". `cancelled` (question_cancel/dismiss) is a FOURTH terminal state reachable
 // only from pending — red, never confusable with the muted "resolved with an answer" states. `notice`
 // (card 59fa6403) is a FIFTH, self-terminal state reading "FYI" — nobody answered it, so it must never
-// read "ANSWERED" nor trigger the watchdog. One source of truth for every surface that renders a request's
-// state.
+// read "Answered" nor trigger the watchdog. One source of truth for every surface that renders a request's
+// state. The labels are sentence case HERE, at the source: the kit renders them as given.
 export function questionStateChip(q: Pick<Question, "state" | "answeredAt">, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): StateChipSpec {
-  if (q.state === "pending") return { tone: "cyan", label: "PENDING" };
-  if (q.state === "cancelled") return { tone: "red", label: "CANCELLED" };
-  if (q.state === "consumed") return { tone: "muted", label: "CONSUMED ✓" };
+  if (q.state === "pending") return { tone: "info", label: "Pending" };
+  if (q.state === "cancelled") return { tone: "danger", label: "Cancelled" };
+  if (q.state === "consumed") return { tone: "muted", label: "Consumed ✓" };
   if (q.state === "notice") return { tone: "muted", label: "FYI" };
   // answered
   return isDecisionWatchdog(q, nowMs, thresholdMs)
-    ? { tone: "amber", label: "WAITING ON MGR" }
-    : { tone: "muted", label: "ANSWERED" };
+    ? { tone: "busy", label: "Waiting on mgr" }
+    : { tone: "muted", label: "Answered" };
 }
 
 // ── Provenance vs routing (card 5b22b262) ───────────────────────────────────────────────────────
@@ -120,10 +120,10 @@ export function decisionAttentionText(q: Pick<Question, "sessionId" | "title"> &
 // of the four "actionable" tones (card 59fa6403): nothing here asks for the human's attention the way the
 // other four do, so it gets the same quiet tone questionStateChip already uses for a settled row.
 export const REQUEST_TYPE_TONE: Record<QuestionType, Tone> = {
-  decision: "cyan",
-  input: "phosphor",
-  permission: "red",
-  credential: "amber",
+  decision: "info",
+  input: "live",
+  permission: "danger",
+  credential: "busy",
   notice: "muted",
 };
 
@@ -330,8 +330,8 @@ export interface AttachmentStateSpec { tone: Tone; label: string; }
  *  preview it deliberately does not count, so `new` keeps meaning "you have not opened this through the
  *  real route yet" rather than "you have not glanced at a 232px thumbnail of it". */
 export function attachmentStateChip(a: Pick<QuestionAttachment, "available" | "openedAt">, nowMs: number): AttachmentStateSpec {
-  if (!a.available) return { tone: "red", label: "unavailable" };
-  if (!a.openedAt) return { tone: "phosphor", label: "new" };
+  if (!a.available) return { tone: "danger", label: "unavailable" };
+  if (!a.openedAt) return { tone: "live", label: "new" };
   const age = relativeAge(a.openedAt, nowMs);
   return { tone: "muted", label: age ? `opened ${age}` : "opened" };
 }

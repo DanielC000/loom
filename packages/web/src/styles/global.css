@@ -65,6 +65,9 @@
   --loom-card-border: transparent;
   --loom-card-shadow: none;
   --loom-pop-shadow: 0 16px 40px oklch(0 0 0 / 0.5);
+  /* Segmented control: the raised thumb under the chosen option. */
+  --loom-seg-on: oklch(0.32 0.008 260);
+  --loom-seg-shadow: none;
   /* The terminal well. It stays dark in BOTH themes (see lib/xtermTheme.ts). */
   --loom-term-bg: oklch(0.145 0.005 260);
   --loom-term-fg: oklch(0.92 0.005 260);
@@ -124,6 +127,8 @@
   --loom-card-border: oklch(0.92 0.004 260);
   --loom-card-shadow: 0 1px 2px oklch(0.9 0.005 260);
   --loom-pop-shadow: 0 16px 40px oklch(0.2 0.02 260 / 0.14);
+  --loom-seg-on: oklch(1 0 0);
+  --loom-seg-shadow: 0 1px 2px oklch(0.85 0.006 260), 0 0 0 1px oklch(0.92 0.004 260);
   --loom-term-bg: oklch(0.2 0.008 260);
   --loom-term-fg: oklch(0.93 0.004 260);
   --loom-diff-add: oklch(0.78 0.14 155);
@@ -165,9 +170,15 @@
   --loom-fs-h1: 22px;
   --loom-fs-kpi: 27.5px;
 
-  /* Shape */
-  --loom-radius: 4px;
-  --loom-radius-sm: 2px;
+  /* Shape (Graphite): one 8px base, a smaller step for tags, a larger one for panels and cards. */
+  --loom-radius: 8px;
+  --loom-radius-sm: 6px;
+  --loom-radius-lg: 12px;
+  --loom-radius-pill: 999px;
+
+  /* Motion: the one easing and duration for state changes (hover, press, focus). */
+  --loom-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --loom-dur-1: 140ms;
 
   /* Instrument Rail (sidebar) — collapsed gutter width + expanded (hover/pin) width. */
   --loom-rail-w: 60px;
@@ -281,7 +292,7 @@ body {
 }
 .loom-lane-head:hover .loom-lane-more,
 .loom-lane-more[aria-expanded="true"] { border-color: var(--loom-border-strong); color: var(--loom-text-dim); }
-.loom-lane-more:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: 1px; color: var(--loom-text); }
+.loom-lane-more:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; color: var(--loom-text); }
 /* Portalled to <body> and positioned inline (fixed, from the trigger's rect) by LaneMenu. */
 .loom-lane-menu {
   z-index: 60;
@@ -296,7 +307,7 @@ body {
 }
 .loom-lane-menu-item.is-quiet { color: var(--loom-text-dim); }
 .loom-lane-menu-item:hover { background: var(--loom-panel-2); }
-.loom-lane-menu-item:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-lane-menu-item:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-lane-menu-item[aria-disabled="true"] { color: var(--loom-text-muted); cursor: default; }
 .loom-lane-menu-item[aria-disabled="true"]:hover { background: transparent; }
 .loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-muted); font-size: 10px; }
@@ -308,7 +319,7 @@ body {
   font-family: var(--loom-font-head); font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
 }
 .loom-lane-rail:hover { background: var(--loom-panel-2); }
-.loom-lane-rail:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-lane-rail:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-lane-rail-label { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) {
   .loom-lane-grip { transition: none; }
@@ -461,10 +472,11 @@ body {
 
 /* ── Component-kit interaction states (see components/ui) ─────────────────────── */
 
-/* Button: primary fills on hover; danger tints; default brightens its border. */
+/* Button (Graphite): primary is a solid cobalt fill; default a filled control on a strong hairline;
+   ghost is bare until hovered; danger is a red outline that tints on hover. Every variant steps to a
+   darker fill on press. */
 /* Safe base so a RAW `loom-btn` (set color but no background) matches the Button component
-   instead of falling back to the UA's light button chrome — there is no `color-scheme: dark`,
-   so an unstyled <button> renders a light grey bevel that buries light text. Transparent
+   instead of falling back to the UA's button chrome, whose bevel buries the label. Transparent
    background + transparent border neutralizes both; the Button component and any caller that
    sets its own background/border/color inline still wins (inline > class). */
 .loom-btn {
@@ -472,13 +484,18 @@ body {
   border: 1px solid transparent;
   color: inherit;
   transition:
-    background 80ms linear,
-    border-color 80ms linear,
-    color 80ms linear;
+    background var(--loom-dur-1) var(--loom-ease),
+    border-color var(--loom-dur-1) var(--loom-ease),
+    color var(--loom-dur-1) var(--loom-ease);
 }
 .loom-btn:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+@media (prefers-reduced-motion: reduce) {
+  .loom-btn {
+    transition: none;
+  }
 }
 /* Variant REST chrome. These live here, not inline on the Button component, because inline
    declarations beat class rules — a variant that set its own background/border-color/color inline
@@ -487,32 +504,49 @@ body {
    They also apply to a RAW `loom-btn loom-btn-<variant>` element, which is why a raw caller that
    wants no border states `border: 1px solid transparent` for itself. */
 .loom-btn-default {
-  border-color: var(--loom-border-strong);
+  background: var(--loom-btn-bg);
+  border-color: var(--loom-line-strong);
   color: var(--loom-text);
 }
 .loom-btn-primary {
-  border-color: var(--loom-phosphor);
-  color: var(--loom-phosphor);
+  background: var(--loom-accent);
+  border-color: var(--loom-accent);
+  color: var(--loom-on-accent);
 }
 .loom-btn-danger {
-  border-color: var(--loom-red);
-  color: var(--loom-red);
+  border-color: var(--loom-danger-line);
+  color: var(--loom-danger);
 }
 .loom-btn-ghost {
   border-color: transparent;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-btn-default:not(:disabled):hover {
-  border-color: var(--loom-text-dim);
+  background: var(--loom-hover);
+  border-color: var(--loom-line-hover);
 }
 .loom-btn-primary:not(:disabled):hover {
-  background: var(--loom-phosphor-dim);
+  background: var(--loom-accent-hover);
+  border-color: var(--loom-accent-hover);
 }
 .loom-btn-danger:not(:disabled):hover {
-  background: color-mix(in oklab, var(--loom-danger) 12%, transparent);
+  background: var(--loom-danger-soft);
 }
 .loom-btn-ghost:not(:disabled):hover {
+  background: var(--loom-hover);
   color: var(--loom-text);
+}
+/* Press: one step darker than hover. Primary has no darker token of its own, so it dims its fill. */
+.loom-btn-default:not(:disabled):active,
+.loom-btn-ghost:not(:disabled):active {
+  background: var(--loom-pressed);
+}
+.loom-btn-primary:not(:disabled):active {
+  background: color-mix(in oklab, var(--loom-accent) 82%, black);
+  border-color: color-mix(in oklab, var(--loom-accent) 82%, black);
+}
+.loom-btn-danger:not(:disabled):active {
+  background: color-mix(in oklab, var(--loom-danger-soft) 80%, var(--loom-danger));
 }
 
 /* Caller-level MODIFIERS (not variants — they tune a variant's rest label/fill, they don't replace it).
@@ -531,25 +565,49 @@ body {
   color: var(--loom-text);
 }
 .loom-btn-accent {
-  color: var(--loom-cyan);
+  color: var(--loom-accent-fg);
 }
 .loom-btn-accent:not(:disabled):hover {
-  background: color-mix(in oklab, var(--loom-info) 12%, transparent);
-  color: var(--loom-cyan);
+  background: var(--loom-selected);
+  color: var(--loom-accent-fg);
 }
+/* A filled on-state is a SELECTION, so it is cobalt: the selected fill, the accent label. */
 .loom-btn-on {
-  background: var(--loom-phosphor-dim);
-  color: var(--loom-phosphor);
+  background: var(--loom-selected);
+  border-color: var(--loom-accent-edge);
+  color: var(--loom-accent-fg);
 }
 .loom-btn-on:not(:disabled):hover {
-  background: color-mix(in oklab, var(--loom-live) 28%, transparent);
-  color: var(--loom-phosphor);
+  background: var(--loom-ring-soft);
+  color: var(--loom-accent-fg);
 }
 
-/* Field: phosphor focus border, no default outline. */
+/* Field: chrome lives here, not inline on the kit Input/Select, for the same reason as .loom-btn's
+   (decision db040811): an inline border beat the :hover and :focus border rules below and left them
+   inert. A cobalt focus border with a soft halo, no default outline; the halo is a box-shadow, so it
+   is never clipped the way an offset outline can be, and it still shows on a raw .loom-field whose
+   caller sets its own border inline. */
+.loom-field {
+  background: var(--loom-field-bg);
+  color: var(--loom-text);
+  border: 1px solid var(--loom-line-strong);
+  border-radius: var(--loom-radius);
+  transition:
+    border-color var(--loom-dur-1) var(--loom-ease),
+    box-shadow var(--loom-dur-1) var(--loom-ease);
+}
+.loom-field:hover:not(:disabled):not(:focus) {
+  border-color: var(--loom-line-hover);
+}
 .loom-field:focus {
-  border-color: var(--loom-phosphor);
+  border-color: var(--loom-ring);
+  box-shadow: 0 0 0 1px var(--loom-ring), 0 0 0 4px var(--loom-ring-soft);
   outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .loom-field {
+    transition: none;
+  }
 }
 
 /* Toggle chip (board filters): outlined when off, filled when on. Hover lifts an off chip's
@@ -581,20 +639,22 @@ body {
 }
 
 /* Keyboard focus ring — shown only for keyboard nav (:focus-visible), so mouse clicks stay clean
-   while Tab users get a clear phosphor ring on every interactive control. */
+   while Tab users get a clear cobalt --loom-ring on every interactive control. Every focus ring in
+   this sheet uses that one token. A .loom-field draws its own ring (border plus halo, above), so it is
+   not listed here: an outline on top of the halo would double it. */
 .loom-toggle:focus-visible,
 .loom-btn:focus-visible,
 .loom-task-link:focus-visible,
-.loom-manifest-row:focus-visible,
-.loom-field:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+.loom-manifest-row:focus-visible {
+  outline: 2px solid var(--loom-ring);
   outline-offset: 2px;
 }
 
 /* Segmented option (components/ui `Segmented`) and the Companion mode toggle (pages/Companion.tsx
-   `ModeToggle`): the same phosphor ring, drawn INSET. Both sit flush inside a rounded `overflow: hidden`
-   track, which clips anything painted outside a segment's border box — so the positive offset above
-   would be invisible here. Same reason the rail items and Atlas tree nodes below use a negative offset.
+   `ModeToggle`): the same ring, drawn INSET. The mode toggle sits flush inside a rounded `overflow:
+   hidden` track, which clips anything painted outside a segment's border box, so the positive offset
+   above would be invisible there; the Segmented track no longer clips, but its 2px inner padding is too
+   tight for an outset ring to read, so it keeps the inset one. Same reason the rail items and Atlas tree nodes below use a negative offset.
 
    `.loom-modetoggle` is its own class rather than a second `.loom-segment` so that class keeps naming
    EXACTLY the kit primitive: `PAGE_SUB_TAB` (e2e/fixtures/daemon.ts) leans on `.loom-segment` to tell a
@@ -606,16 +666,55 @@ body {
    which is what catches that. */
 .loom-segment:focus-visible,
 .loom-modetoggle:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 
-/* Board card open target (pages/Board.tsx `Card`, card a6d7a102) — the same phosphor ring, INSET for
+/* Segmented (components/ui `Segmented`): a tinted track holding a raised thumb under the chosen
+   option. Chrome lives here rather than inline so the hover rule can win (decision db040811's
+   reason); the kit writes only `aria-checked`, which this keys on. */
+.loom-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--loom-surface-2);
+  border-radius: var(--loom-radius);
+  align-self: flex-start;
+}
+.loom-segment {
+  border: 0;
+  background: transparent;
+  color: var(--loom-text-2);
+  padding: 4px 12px;
+  border-radius: var(--loom-radius-sm);
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--loom-dur-1) var(--loom-ease),
+    color var(--loom-dur-1) var(--loom-ease);
+}
+.loom-segment:hover {
+  color: var(--loom-text);
+}
+.loom-segment[aria-checked="true"] {
+  background: var(--loom-seg-on);
+  color: var(--loom-text);
+  box-shadow: var(--loom-seg-shadow);
+}
+@media (prefers-reduced-motion: reduce) {
+  .loom-segment {
+    transition: none;
+  }
+}
+
+/* Board card open target (pages/Board.tsx `Card`, card a6d7a102) — the same ring, INSET for
    the same reason as the segments above: a lane's card list is `overflow-y: auto`, which computes the
    other axis to `auto` as well, so the ring on the first or last card in a lane would be clipped away
    at a positive offset. Drawn inside the border box, nothing can eat it. */
 .loom-board-open:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
   border-radius: 3px;
 }
@@ -632,26 +731,31 @@ body {
   background: var(--loom-panel-2);
 }
 
-/* NavTab: uppercase mono, phosphor underline when active. */
+/* NavTab: sentence-case sans; the active tab is semibold with a cobalt underline. */
 .loom-navtab {
-  font-family: var(--loom-font-mono);
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-body);
+  font-weight: 500;
   text-decoration: none;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   padding: 4px 0;
   border-bottom: 2px solid transparent;
   transition:
-    color 80ms linear,
-    border-color 80ms linear;
+    color var(--loom-dur-1) var(--loom-ease),
+    border-color var(--loom-dur-1) var(--loom-ease);
 }
 .loom-navtab:hover {
   color: var(--loom-text);
 }
 .loom-navtab.is-active {
   color: var(--loom-text);
-  border-bottom-color: var(--loom-phosphor);
+  font-weight: 600;
+  border-bottom-color: var(--loom-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .loom-navtab {
+    transition: none;
+  }
 }
 
 /* ── Instrument Rail (sidebar nav — Direction A) ──────────────────────────────────
@@ -1057,14 +1161,14 @@ body {
 .loom-rail-proj:focus-visible,
 .loom-rail-item:focus-visible,
 .loom-rail-statrow:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 
 /* Role picker cards (Profiles editor, components/RolePicker): a selectable capability "class" card.
    Hover brightens an unselected card's border; the selected card carries its phosphor ring inline. A
    locked (dev-layer) card gets a not-allowed cursor + a faint diagonal-hatch overlay so it reads as
-   present-but-unavailable. Focus-visible gives Tab users a phosphor ring on every reachable card. */
+   present-but-unavailable. Focus-visible gives Tab users a --loom-ring on every reachable card. */
 .loom-rolecard {
   transition:
     border-color 90ms linear,
@@ -1075,7 +1179,7 @@ body {
   border-color: var(--loom-text-dim);
 }
 .loom-rolecard:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: 2px;
 }
 .loom-rolecard.is-locked::after {
@@ -1452,11 +1556,11 @@ a.loom-atlas-node.is-active {
   border-left-color: var(--loom-phosphor);
   background: linear-gradient(90deg, var(--loom-phosphor-dim), transparent 70%);
 }
-/* Keyboard focus ring, matching the rail's inset phosphor ring. The tree is the app's primary
+/* Keyboard focus ring, matching the rail's inset ring. The tree is the app's primary
    navigation with the switch on, so every node has to be reachable and VISIBLY focused by Tab. */
 a.loom-atlas-node:focus-visible,
 button.loom-atlas-node:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 /* The no-project placeholder row (a <div>): there is nothing to select, so it stays the plain label
@@ -1590,7 +1694,7 @@ button.loom-atlas-node.is-branch.is-open {
   color: var(--loom-phosphor);
 }
 .loom-atlas-twistbtn:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -1px;
 }
 
@@ -2114,7 +2218,7 @@ button.loom-atlas-node.is-branch.is-open {
    also uses). Scoped here rather than added to the primitive: this card has no business
    changing chrome in the shell it is not building. */
 .loom-atlas-tabs .loom-navtab:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: 3px;
   border-radius: 2px;
 }
@@ -2202,7 +2306,7 @@ button.loom-atlas-node.is-branch.is-open {
 /* Inset, unlike the row's own 3px offset ring: the panel's 4px padding is all the room there is, so
    an outset ring would be clipped by the panel's border and read as a broken focus state. */
 .loom-atlas-tabmenu-item:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
   color: var(--loom-text);
 }
@@ -2308,7 +2412,7 @@ button.loom-atlas-node.is-branch.is-open {
   cursor: pointer;
 }
 .loom-mcp-bar:hover { background: color-mix(in oklab, var(--loom-panel-2), var(--loom-text) 3%); }
-.loom-mcp-bar:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-mcp-bar:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-mcp-l1 {
   display: flex;
   align-items: center;
@@ -2445,7 +2549,7 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 4px 8px;
 }
 .loom-mcp-search::placeholder { color: var(--loom-text-muted); }
-.loom-mcp-search:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: 1px; }
+.loom-mcp-search:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; }
 .loom-mcp-fr {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) 24px;
@@ -2464,7 +2568,7 @@ button.loom-atlas-node.is-branch.is-open {
   text-align: left;
 }
 .loom-mcp-fr:hover { background: var(--loom-panel); color: var(--loom-text); }
-.loom-mcp-fr:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -1px; }
+.loom-mcp-fr:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -1px; }
 .loom-mcp-fr[aria-pressed="true"] { background: var(--loom-panel); color: var(--loom-text); box-shadow: inset 2px 0 0 var(--loom-text); }
 .loom-mcp-nm { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .loom-mcp-nm > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2515,7 +2619,7 @@ button.loom-atlas-node.is-branch.is-open {
   cursor: pointer;
 }
 .loom-mcp-ent:hover, .loom-mcp-ent[aria-expanded="true"] { background: var(--loom-panel); }
-.loom-mcp-ent:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-mcp-ent:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-mcp-ent.error { box-shadow: inset 2px 0 0 var(--loom-red); }
 .loom-mcp-ent.error .loom-mcp-s { color: color-mix(in oklab, var(--loom-red) 55%, var(--loom-text)); }
 .loom-mcp-s {
@@ -2745,7 +2849,7 @@ button.loom-kpi:hover {
   background: var(--loom-panel-2);
 }
 button.loom-kpi:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 /* The open tile keeps its own light while its breakdown is showing, so the pop-over reads as
@@ -2937,7 +3041,7 @@ button.loom-kpi.is-open {
 /* Inset, like the board card's own ring (card a6d7a102): the bar is a full-width block, so a
    positive offset would put the ring under the panel edge above it. */
 .loom-banddisc-bar:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 .loom-banddisc-twist {
@@ -3108,7 +3212,7 @@ button.loom-kpi.is-open {
   color: var(--loom-text-dim);
 }
 .loom-orchchip:focus-visible {
-  outline: 2px solid var(--loom-cyan);
+  outline: 2px solid var(--loom-ring);
   outline-offset: 2px;
 }
 /* PAUSED is a state you must not be able to miss from any node — hence both the chip's own colour
@@ -3284,7 +3388,7 @@ button.loom-ovbrief-cell:hover {
   background: var(--loom-panel-2);
 }
 button.loom-ovbrief-cell:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 /* The open reading keeps its own light while its breakdown shows — the same affordance
@@ -3663,7 +3767,7 @@ button.loom-ovbrief-cell.is-open {
    first and last row, which is how a focus ring goes missing on exactly the two rows a keyboard
    reader reaches first. */
 .loom-wsessionbtn:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 .loom-wsession-twist {
@@ -3768,7 +3872,7 @@ button.loom-ovbrief-cell.is-open {
   background: var(--loom-panel-2);
 }
 .loom-projcard:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
 .loom-projcard-head {
@@ -4368,7 +4472,7 @@ button.loom-ovbrief-cell.is-open {
   border-color: var(--loom-border-strong);
 }
 .loom-atlas-plus:focus-visible {
-  outline: 2px solid var(--loom-phosphor);
+  outline: 2px solid var(--loom-ring);
   outline-offset: 1px;
 }
 

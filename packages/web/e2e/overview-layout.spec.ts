@@ -121,8 +121,9 @@ test.describe("project Overview — Attention list caps + collapses (unbounded-g
     await pinActiveProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/overview`);
 
-    // Each DECISION NEEDED item renders its kind label uppercase in its row — count visible rows by it.
-    const rows = page.locator("main").getByText("DECISION NEEDED", { exact: true });
+    // Each DECISION NEEDED item renders its kind label (sentence case, "Decision needed") in its row —
+    // count visible rows by it.
+    const rows = page.locator("main").getByText("Decision needed", { exact: true });
     const header = page.locator("main").getByText(/^Attention \(/);
     const statTile = page.locator("main").getByText("attention", { exact: true }).locator("..");
     const showMore = page.getByRole("button", { name: `Show ${total - ATTENTION_CAP} more` });
@@ -171,7 +172,7 @@ test.describe("project Overview — a notice renders as FYI, never an answerable
     // e2e daemon is shared and a sibling spec's row could otherwise satisfy a bare text match.
     const row = page.locator('[data-testid="attention-row"][data-kind="FYI"]');
     await expect(row).toBeVisible();
-    await expect(row.getByText("PENDING", { exact: true })).toHaveCount(0);
+    await expect(row.getByText("Pending", { exact: true })).toHaveCount(0);
     await expect(row.getByRole("button", { name: "Answer →" })).toHaveCount(0);
     await expect(row.getByRole("button", { name: "Open" })).toBeVisible();
   });

@@ -141,7 +141,7 @@ function ReleasedRow({ projectId, entry, open, onToggle, onReadopted }: {
             `flexShrink: 0` here clipped a long name clean off the row at 390px. */}
         <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text, wordBreak: "break-all", minWidth: 0 }}>{entry.name}</span>
         <Badge tone={reasonTone}>{entry.reason}</Badge>
-        {trackedLabel && <Badge tone="red">{trackedLabel}</Badge>}
+        {trackedLabel && <Badge tone="danger">{trackedLabel}</Badge>}
         <span style={{ flex: 1 }} />
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, flexShrink: 0 }}>
           {releasedAgeLabel(entry.firstSeenAt)}

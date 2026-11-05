@@ -39,9 +39,9 @@ export interface HarnessDrop {
 
 export const SEVERITY_META: Record<DropSeverity, { tone: Tone; tag: string }> = {
   // Reads ON, restricts nothing — the dangerous direction, so it gets the alert tone.
-  "fail-open": { tone: "red", tag: "not enforced" },
+  "fail-open": { tone: "danger", tag: "not enforced" },
   // The capability is simply absent: a real functionality gap, but failing safe.
-  "fail-closed": { tone: "amber", tag: "not applied" },
+  "fail-closed": { tone: "busy", tag: "not applied" },
   // Nothing is lost or widened — the setting just has no counterpart to act on.
   inert: { tone: "muted", tag: "no effect" },
 };

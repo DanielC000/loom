@@ -29,7 +29,7 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
 
     // (1) Mission Control: the DECISION NEEDED attention item renders + the Requests nav item badges it.
     await page.goto(`${loomDaemon.baseURL}/`);
-    const attnRow = page.locator("main").getByText("DECISION NEEDED").first();
+    const attnRow = page.locator("main").getByText("Decision needed", { exact: true }).first();
     await expect(attnRow).toBeVisible();
     await expect(page.locator("main").getByText(title)).toBeVisible();
     // The Inbox rail item (renamed from "Requests", card 59fa6403) shows a non-zero pending-requests
@@ -63,14 +63,14 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
 
     // OBSERVABLE state change: the state chip flips to ANSWERED and the recorded-answer readout appears
     // (the pending form unmounts). This is the durable, non-racy witness (vs. the transient success flash).
-    await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Answered", { exact: true })).toBeVisible();
     await expect(dialog.getByText(/waiting on manager pickup/)).toBeVisible();
 
     // Persistence via GET on the deep-link route: the SAME content renders at /question/:id, and the
     // recorded choice is read back from the daemon (proves the answer durably persisted).
     await page.goto(`${loomDaemon.baseURL}/question/${id}`);
     await expect(page.locator("main").getByText("Keep workers warm")).toBeVisible();
-    await expect(page.locator("main").getByText(/Answered/)).toBeVisible();
+    await expect(page.locator("main").getByText("Answered", { exact: true })).toBeVisible();
 
     // The attention item CLEARS: back on Mission Control, the answered decision no longer surfaces.
     await page.goto(`${loomDaemon.baseURL}/`);
@@ -98,7 +98,7 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     await expect(submit).toBeEnabled();
     await submit.click();
     // OBSERVABLE change: the pending form unmounts and the answered readout (with the note) persists.
-    await expect(page.locator("main").getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(page.locator("main").getByText("Answered", { exact: true })).toBeVisible();
     await expect(page.locator("main").getByText(/Open a PR from the release branch/)).toBeVisible();
   });
 
@@ -122,7 +122,7 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     await submit.click();
 
     // OBSERVABLE change: the pending form unmounts; the answered readout shows the note but NO chosen option.
-    await expect(page.locator("main").getByText("ANSWERED", { exact: true })).toBeVisible();
+    await expect(page.locator("main").getByText("Answered", { exact: true })).toBeVisible();
     await expect(page.locator("main").getByText(/None of these — hold off/)).toBeVisible();
     await expect(page.locator("main").getByText(/Chose:/)).toHaveCount(0);
   });
@@ -158,8 +158,8 @@ test.describe("decision STALE + owner snooze (card 889ae619)", () => {
     // the innermost one — the AttentionRow's own container, and nothing broader.
     const row = main.locator("div").filter({ hasText: title }).last();
     await expect(row).toBeVisible();
-    await expect(row.getByText("DECISION STALE")).toBeVisible();
-    await expect(row.getByText("DECISION NEEDED")).toHaveCount(0);
+    await expect(row.getByText("Decision stale", { exact: true })).toBeVisible();
+    await expect(row.getByText("Decision needed", { exact: true })).toHaveCount(0);
 
     // The Snooze select is present ONLY on the stale row — pick "1 day" (an OBSERVABLE onChange action,
     // not a submit-button flow: the select fires the mutation directly).
@@ -169,8 +169,8 @@ test.describe("decision STALE + owner snooze (card 889ae619)", () => {
 
     // OBSERVABLE change: the row drops from red STALE to ordinary cyan NEEDED, and the Snooze control
     // itself disappears (nothing left to suppress) — while the request is STILL pending and answerable.
-    await expect(row.getByText("DECISION NEEDED")).toBeVisible();
-    await expect(row.getByText("DECISION STALE")).toHaveCount(0);
+    await expect(row.getByText("Decision needed", { exact: true })).toBeVisible();
+    await expect(row.getByText("Decision stale", { exact: true })).toHaveCount(0);
     await expect(row.locator("select")).toHaveCount(0);
     await expect(row.getByRole("button", { name: "Answer →" })).toBeVisible();
 
@@ -197,7 +197,7 @@ test.describe("decision STALE + owner snooze (card 889ae619)", () => {
     await page.goto(`${loomDaemon.baseURL}/`);
     const row = page.locator("main").locator("div").filter({ hasText: title }).first();
     await expect(row).toBeVisible();
-    await expect(row.getByText("DECISION NEEDED")).toBeVisible();
+    await expect(row.getByText("Decision needed", { exact: true })).toBeVisible();
     await expect(row.locator("select")).toHaveCount(0);
   });
 });

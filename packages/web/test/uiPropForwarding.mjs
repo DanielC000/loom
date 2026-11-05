@@ -27,7 +27,7 @@ const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
 check("Dot forwards data-* / aria-* / id, and merges style rather than clobbering it", () => {
   const html = renderToStaticMarkup(
     React.createElement(Dot, {
-      tone: "phosphor",
+      tone: "live",
       "data-testid": "dot-el",
       "aria-label": "session status",
       id: "dot-1",
@@ -45,21 +45,21 @@ check("Dot forwards data-* / aria-* / id, and merges style rather than clobberin
 
 check("StatusPill forwards data-*/aria-* to its root span", () => {
   const html = renderToStaticMarkup(
-    React.createElement(StatusPill, { tone: "cyan", label: "IDLE", "data-testid": "pill-el", "aria-label": "idle" }),
+    React.createElement(StatusPill, { tone: "info", label: "Idle", "data-testid": "pill-el", "aria-label": "idle" }),
   );
   assert.match(html, /data-testid="pill-el"/);
   assert.match(html, /aria-label="idle"/);
-  assert.match(html, />IDLE</);
+  assert.match(html, />Idle</);
 });
 
 check("Badge forwards data-* and merges caller style with its own", () => {
   const html = renderToStaticMarkup(
-    React.createElement(Badge, { tone: "red", "data-testid": "badge-el", style: { marginTop: 2 } }, "RUNNING"),
+    React.createElement(Badge, { tone: "danger", "data-testid": "badge-el", style: { marginTop: 2 } }, "Running"),
   );
   assert.match(html, /data-testid="badge-el"/);
   assert.match(html, /margin-top:2px/);
-  assert.match(html, /text-transform:uppercase/); // base style preserved
-  assert.match(html, />RUNNING</);
+  assert.match(html, /background:var\(--loom-danger-soft\)/); // base style preserved
+  assert.match(html, />Running</);
 });
 
 check("Chip forwards data-*/aria-* to its root span", () => {
@@ -76,7 +76,7 @@ check("SectionLabel forwards data-* and merges caller style with its own", () =>
   );
   assert.match(html, /data-testid="section-el"/);
   assert.match(html, /margin:0/);
-  assert.match(html, /text-transform:uppercase/); // base style preserved despite caller style
+  assert.match(html, /font-weight:600/); // base style preserved despite caller style
 });
 
 check("PresetAccentDots forwards data-*/id but keeps its decorative aria-hidden pinned", () => {

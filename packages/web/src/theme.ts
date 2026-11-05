@@ -99,21 +99,53 @@ export const fs = {
 } as const;
 
 export const radius = {
-  sm: "var(--loom-radius-sm)",
-  base: "var(--loom-radius)",
+  sm: "var(--loom-radius-sm)", // 6 — tags, small controls
+  base: "var(--loom-radius)", // 8 — buttons, fields
+  lg: "var(--loom-radius-lg)", // 12 — panels, cards
+  pill: "var(--loom-radius-pill)", // capsules, chips
 } as const;
 
 // 4px base grid. space(2) -> "8px".
 export const space = (n: number): string => `${n * 4}px`;
 
-// Signal tones — the semantic status palette used by StatusPill / Dot / Badge / Meter.
-export type Tone = "phosphor" | "amber" | "cyan" | "red" | "muted";
+// Signal tones — the semantic status palette used by StatusPill / Dot / Badge / Chip / Meter.
+// Green `live` means live and nothing else; primary, focus and selection are `accent` (cobalt).
+export type Tone = "live" | "busy" | "info" | "danger" | "muted" | "accent";
+
+// The tone's signal colour: what a caller writes into `color:` or a border. `live` is the live fill
+// itself (the colour every pre-Graphite `phosphor` call site rendered); `accent` is the cobalt that
+// reads as text and as an edge.
 export const tone: Record<Tone, string> = {
-  phosphor: color.phosphor,
-  amber: color.amber,
-  cyan: color.cyan,
-  red: color.red,
+  live: color.live,
+  busy: color.busy,
+  info: color.info,
+  danger: color.danger,
   muted: color.textMuted,
+  accent: color.accentFg,
+};
+
+// The tone as TEXT laid on its own soft fill (a status capsule, a tag). Live uses its darker text
+// token there, because the live fill shade is too light to read as text on a light-theme soft fill.
+export const toneText: Record<Tone, string> = { ...tone, live: color.liveText };
+
+// The tone as a FILL: a status dot, a meter bar.
+export const toneFill: Record<Tone, string> = {
+  live: color.live,
+  busy: color.busy,
+  info: color.info,
+  danger: color.danger,
+  muted: color.textMuted,
+  accent: color.meterOk,
+};
+
+// The tone's tinted background, for a capsule or tag that carries the tone's text on top of it.
+export const toneSoft: Record<Tone, string> = {
+  live: color.liveSoft,
+  busy: color.busySoft,
+  info: color.infoSoft,
+  danger: color.dangerSoft,
+  muted: color.surface2,
+  accent: color.selected,
 };
 
 // Lifecycle-role → signal tone. The ONE place a board lane's role maps to a color, so every surface
@@ -121,14 +153,14 @@ export const tone: Record<Tone, string> = {
 // the Settings ColumnManager (role badge + row border) both read this map. (Mirrors the preset
 // ROLE_ACCENT palette in shared/presets.ts, which is its own — cosmetic, persisted — accent source.)
 export const roleTone: Record<ColumnRole, Tone> = {
-  intake: "cyan", // info / new arrivals
-  defaultLanding: "phosphor", // the catch-all landing
+  intake: "info", // info / new arrivals
+  defaultLanding: "live", // the catch-all landing
   workReady: "muted", // queued, not yet active
-  active: "amber", // in flight
-  review: "cyan", // under review
+  active: "busy", // in flight
+  review: "info", // under review
   parked: "muted", // waiting / parked
-  terminal: "phosphor", // done
-  mergeLanding: "amber", // where a merged card lands, pre-terminal
+  terminal: "live", // done
+  mergeLanding: "busy", // where a merged card lands, pre-terminal
 };
 
 // A board lane's signal tone, resolved from its lifecycle ROLE — the ONE resolver, so every surface that
@@ -144,13 +176,13 @@ export function columnTone(col: Pick<KanbanColumn, "role">): Tone | null {
 // Workspace all read this). null/plain sessions fall back to "muted" at the call site. Distinct from
 // the lane-oriented `roleTone` above (ColumnRole) — this keys on SessionRole.
 export const sessionRoleTone: Record<NonNullable<SessionRole>, Tone> = {
-  manager: "phosphor",
-  worker: "cyan",
-  platform: "amber",
+  manager: "live",
+  worker: "info",
+  platform: "busy",
   auditor: "muted",
-  setup: "cyan",
+  setup: "info",
   "workspace-auditor": "muted",
   run: "muted",
-  assistant: "cyan",
-  operator: "amber",
+  assistant: "info",
+  operator: "busy",
 };

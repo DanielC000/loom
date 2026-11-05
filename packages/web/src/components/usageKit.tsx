@@ -50,9 +50,9 @@ export function fmtRatio(r: number | null): string {
 // re-paying the whole prefix every turn) escalates amber then red; unmeasured stays muted.
 export function ratioTone(r: number | null): Tone {
   if (r == null) return "muted";
-  if (r >= 0.8) return "phosphor";
-  if (r >= 0.4) return "amber";
-  return "red";
+  if (r >= 0.8) return "live";
+  if (r >= 0.4) return "busy";
+  return "danger";
 }
 
 // Every billed token class on an interactive-session usage row summed (totals / per-day / per-project /
@@ -116,7 +116,7 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
-export function Stat({ label, value, tone: t = "phosphor", testId }: { label: string; value: string; tone?: Tone; testId?: string }) {
+export function Stat({ label, value, tone: t = "live", testId }: { label: string; value: string; tone?: Tone; testId?: string }) {
   return (
     <span data-testid={testId}
       style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: 4, padding: "4px 12px", minWidth: 72 }}>

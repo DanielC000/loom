@@ -90,7 +90,7 @@ export default function ProjectUsage() {
         <SortToggle value={sort} onChange={setSort} />
       </div>
 
-      <SectionHead title="Usage by task" tag={`est. consumption · ${spanMeta.window}`} tagTone="amber" />
+      <SectionHead title="Usage by task" tag={`est. consumption · ${spanMeta.window}`} tagTone="busy" />
 
       {usageQ.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading usage…</span></Panel>}
       {usageQ.isError && (
@@ -115,8 +115,8 @@ export default function ProjectUsage() {
           <>
             {/* The window's grand total — the figure every row below is a slice of. */}
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <Stat label="est. consumption" value={fmtUsd(part.total.costUsd)} tone="amber" testId="project-usage-total-cost" />
-              <Stat label="total tok" value={fmtTokens(taskTotalTokens(part.total))} tone="cyan" testId="project-usage-total-tokens" />
+              <Stat label="est. consumption" value={fmtUsd(part.total.costUsd)} tone="busy" testId="project-usage-total-cost" />
+              <Stat label="total tok" value={fmtTokens(taskTotalTokens(part.total))} tone="info" testId="project-usage-total-tokens" />
               <Stat label="cache hit" value={fmtRatio(part.total.cacheHitRatio)} tone={ratioTone(part.total.cacheHitRatio)} />
               <Stat label="tasks" value={String(usageQ.data?.byTask?.length ?? 0)} tone="muted" testId="project-usage-task-count" />
             </div>
@@ -226,7 +226,7 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
         subtitle={short} />
       {node.columnKey && <Chip value={node.columnKey} />}
       {kids > 0 && (
-        <Badge tone="cyan">
+        <Badge tone="info">
           {/* The number IS the claim this row makes: the figure to its right contains that many cards'
               usage as well as its own. */}
           +{node.descendantsWithUsage} rolled up
@@ -239,7 +239,7 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
           down disappears exactly where it is hardest to scan. */}
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
-        <Meter value={tok} max={peak} tone="cyan" width={90} />
+        <Meter value={tok} max={peak} tone="info" width={90} />
         <span data-testid={`project-usage-cost-${short}`}
           style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(node.rolled.costUsd)}</span>
       </span>
@@ -264,7 +264,7 @@ function RelationRows({ taskId, rolled }: { taskId: string; rolled: Map<string, 
     return <Note indent={28}>Loading related cards…</Note>;
   }
   if (q.isError) {
-    return <Note indent={28} tone="red">Couldn't load this card's related cards.</Note>;
+    return <Note indent={28} tone="danger">Couldn't load this card's related cards.</Note>;
   }
   if (rows.length === 0) {
     return <Note indent={28}>No related cards.</Note>;
@@ -327,9 +327,9 @@ function BucketRow({ label, hint, row, peak, testId }: {
   );
 }
 
-function Note({ children, indent = 0, tone: t }: { children: ReactNode; indent?: number; tone?: "red" }) {
+function Note({ children, indent = 0, tone: t }: { children: ReactNode; indent?: number; tone?: "danger" }) {
   return (
-    <div style={{ fontFamily: font.mono, fontSize: 11, color: t === "red" ? color.red : color.textMuted, padding: "4px 0", paddingLeft: indent }}>
+    <div style={{ fontFamily: font.mono, fontSize: 11, color: t === "danger" ? color.red : color.textMuted, padding: "4px 0", paddingLeft: indent }}>
       {children}
     </div>
   );

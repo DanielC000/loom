@@ -423,8 +423,8 @@ function RequestAttachments({ question }: { question: QuestionInboxItem }) {
     <Panel style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Attached · {attachments.length}</SectionLabel>
-        {chip.unopened > 0 && <Badge tone="phosphor">{chip.unopened} unopened</Badge>}
-        {chip.unavailable > 0 && <Badge tone="red">{chip.unavailable} unavailable</Badge>}
+        {chip.unopened > 0 && <Badge tone="accent">{chip.unopened} unopened</Badge>}
+        {chip.unavailable > 0 && <Badge tone="danger">{chip.unavailable} unavailable</Badge>}
       </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
         <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex", flexDirection: "column" }}>
@@ -462,7 +462,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
   const watchdog = isDecisionWatchdog(q, now);
   const typeTone = REQUEST_TYPE_TONE[q.type];
   const edge = q.state === "pending" ? tone[typeTone] : watchdog ? color.amber : "transparent";
-  const metaDot = q.state === "pending" ? typeTone : watchdog ? "amber" : "muted";
+  const metaDot = q.state === "pending" ? typeTone : watchdog ? "busy" : "muted";
   return (
     // `data-testid` + `data-question-id`: an e2e needs to scope an assertion to ONE row, and filtering a
     // bare `div` by its title text matches every ANCESTOR container too — which silently widens the scope
@@ -950,10 +950,10 @@ function DecisionControl({ q }: { q: QuestionInboxItem }) {
               <Panel key={i} selected={selected} onClick={() => setChoice(opt)}
                 style={{ display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer" }}>
                 <span aria-hidden style={{ width: 14, height: 14, borderRadius: 14, flexShrink: 0, marginTop: 2,
-                  border: `2px solid ${selected ? color.cyan : color.borderStrong}`, background: selected ? color.cyan : "transparent",
-                  boxShadow: selected ? `inset 0 0 0 2px ${color.panel}` : "none" }} />
+                  border: `2px solid ${selected ? color.accent : color.borderStrong}`, background: selected ? color.accent : "transparent",
+                  boxShadow: selected ? `inset 0 0 0 2px ${color.selected}` : "none" }} />
                 <span style={{ flex: 1, fontFamily: font.mono, fontSize: 13, color: color.text }}>{opt}</span>
-                {recommended && <Badge tone="phosphor">recommended</Badge>}
+                {recommended && <Badge tone="accent">recommended</Badge>}
               </Panel>
             );
           })}
@@ -1042,7 +1042,7 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
             return (
               <Panel key={s} selected={selected} onClick={() => { setScope(s); if (s === "standing" && isSsh && !expiry) setExpiry("24h"); }}
                 style={{ flex: 1, cursor: "pointer", display: "flex", flexDirection: "column", gap: 3 }}>
-                <span style={{ fontFamily: font.mono, fontSize: 13, color: selected ? color.phosphor : color.text }}>{s}</span>
+                <span style={{ fontFamily: font.mono, fontSize: 13, color: selected ? color.accentFg : color.text }}>{s}</span>
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
                   {s === "once" ? "this action only" : "keep authorizing this class"}
                 </span>

@@ -41,8 +41,8 @@ export function releaseReasonGloss(reason: string): string {
  * on this page is reserved for a refusal the reader has actually run into.
  */
 export function releaseReasonTone(reason: string): Tone {
-  if (reason === "modified") return "amber";
-  if (reason === "unverifiable-legacy") return "cyan";
+  if (reason === "modified") return "busy";
+  if (reason === "unverifiable-legacy") return "info";
   return "muted";
 }
 

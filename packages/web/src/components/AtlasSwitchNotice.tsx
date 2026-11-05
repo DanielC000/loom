@@ -20,7 +20,7 @@ export function AtlasSwitchNotice() {
         // coupling the two, and clears the rail gutter and the Atlas tree in both shells.
         position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 16, zIndex: 2000, maxWidth: 380,
         display: "flex", alignItems: "center", gap: 10,
-        background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${tone.cyan}`,
+        background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${tone.info}`,
         borderRadius: radius.base, padding: "9px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
         fontFamily: font.mono, fontSize: 12,
       }}>

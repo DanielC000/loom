@@ -311,18 +311,18 @@ export default function ProjectHome() {
   const briefReadings: BriefReading[] = [
     {
       key: "cards", label: "board", value: board.open, sub: `open · ${board.inReview} review · ${board.waiting} waiting`,
-      tone: board.open > 0 ? "cyan" : "muted",
+      tone: board.open > 0 ? "info" : "muted",
       title: `${plural(board.total, "card")} on the board, ${board.open} of them open`,
       popover: (
         <>
-          {board.lanes.map((l) => <DataRow key={l.key} label={l.label} value={l.count} tone={l.count > 0 ? "cyan" : "muted"} />)}
+          {board.lanes.map((l) => <DataRow key={l.key} label={l.label} value={l.count} tone={l.count > 0 ? "info" : "muted"} />)}
           <BandFoot>{plural(board.total, "card")} on the board, {board.open} of them open.</BandFoot>
         </>
       ),
     },
     {
       key: "fleet", label: "fleet", value: live.length, sub: `live · ${roster.spawnable.length} spawnable`,
-      tone: liveManagers.length > 0 ? "phosphor" : "muted",
+      tone: liveManagers.length > 0 ? "live" : "muted",
       title: `${liveManagers.length} live manager(s) and ${workers.filter(isLiveSession).length} live worker(s) in this project`,
       popover: <FleetList managers={managers} workers={workers} />,
     },
@@ -331,14 +331,14 @@ export default function ProjectHome() {
       // Highest band FIRST. Tested amber-before-red, `>= 95` was unreachable — anything at 95 is also
       // at 80 — so the figure could never go red, which is the one state this reading exists to
       // surface. The workspace node's `plan` tile orders it the same way.
-      tone: ctxPct >= 95 ? "red" : ctxPct >= 80 ? "amber" : "phosphor",
+      tone: ctxPct >= 95 ? "danger" : ctxPct >= 80 ? "busy" : "live",
       sub: worstSession ? worstSession.agentName : "no session reports context",
       title: worstSession ? `${worstSession.agentName} · ${plural(worstSession.ctxTurns ?? 0, "turn")}` : undefined,
       popover: <ContextList sessions={live} recycleAt={recycleAt} />,
     },
     {
       key: "gates", label: "gate lanes", value: `${lanes.running}·${lanes.queued}`, sub: `of cap ${lanes.cap}`,
-      tone: lanes.queued > 0 ? "amber" : lanes.running > 0 ? "phosphor" : "muted",
+      tone: lanes.queued > 0 ? "busy" : lanes.running > 0 ? "live" : "muted",
       title: `${lanes.running} running · ${lanes.queued} queued, daemon-wide (cap ${lanes.cap})`,
       popover: <GateLaneList lanes={lanes} />,
     },
@@ -379,7 +379,7 @@ export default function ProjectHome() {
       card: rosterCardLabel(s, taskTitles),
       branch: s.branch ?? null,
       context: ctx > 0
-        ? { ratio, pct: Math.round(ratio * 100), tone: ratio >= 0.95 ? "red" : ratio >= 0.8 ? "amber" : "phosphor" }
+        ? { ratio, pct: Math.round(ratio * 100), tone: ratio >= 0.95 ? "danger" : ratio >= 0.8 ? "busy" : "live" }
         : null,
       lastEvent: e ? { kind: e.kind, at: relativeTime(e.ts) } : null,
     };
@@ -422,7 +422,7 @@ export default function ProjectHome() {
   const headPills: NodeHeadPill[] = [
     {
       key: "working", text: `${working} working`,
-      tone: working > 0 ? "phosphor" : "muted",
+      tone: working > 0 ? "live" : "muted",
       title: `${plural(working, "session")} in ${project?.name ?? "this project"} taking a turn right now`,
     },
     // The branch is NOT assumed to be `main` — the mockup's own `main 57143a90` is that repo's
@@ -498,7 +498,7 @@ export default function ProjectHome() {
           <>
             <BriefLine readings={briefReadings} trailing={
               <BriefTrailing label="landed" value={merges.branches} testId="atlas-brief-merged"
-                tone={merges.branches > 0 ? "phosphor" : "muted"}
+                tone={merges.branches > 0 ? "live" : "muted"}
                 sub={merges.branches > 0 ? `today · last ${relativeTime(merges.lastEndedAt)}` : "today"}>
                 {/* The series IS the breakdown, so this reading is a readout and not a fifth button:
                     a pop-over would open the same 14 bars already drawn beside the figure. */}
@@ -676,7 +676,7 @@ function ContextList({ sessions, recycleAt }: { sessions: SessionListItem[]; rec
           <Link to={`/session/${s.id}`} className="loom-inlinelink" title={`Open ${s.agentName}'s session`}>{s.agentName}</Link>
         } ratio={ratio}
           value={`${Math.round(ratio * 100)}% · ${s.ctxTurns ?? 0}t`}
-          tone={ratio >= 0.95 ? "red" : ratio >= 0.8 ? "amber" : "phosphor"} />
+          tone={ratio >= 0.95 ? "danger" : ratio >= 0.8 ? "busy" : "live"} />
       ))}
       <BandFoot>
         Occupancy against each session's own model window.{" "}

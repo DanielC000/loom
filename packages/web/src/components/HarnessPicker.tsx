@@ -15,12 +15,12 @@ import {
 // set it; this editor + the loopback REST it drives are the whole grant path, which is exactly why the
 // field needed a control here at all.
 const HARNESS_OPTIONS: ReadonlyArray<{
-  value: Harness; label: string; tone: "phosphor" | "amber"; summary: string; implications: string[];
+  value: Harness; label: string; tone: "live" | "busy"; summary: string; implications: string[];
 }> = [
   {
     value: "claude",
     label: "Claude Code",
-    tone: "phosphor",
+    tone: "live",
     summary: "Loom's native harness. Every profile setting on this page applies.",
     implications: [
       "Spawns the claude binary with Loom's full spawn recipe",
@@ -30,7 +30,7 @@ const HARNESS_OPTIONS: ReadonlyArray<{
   {
     value: "codex",
     label: "Codex CLI",
-    tone: "amber",
+    tone: "busy",
     summary: "A different vendor CLI, with a coarser permission model and a narrower Loom integration.",
     implications: [
       "Spawns the codex binary on this host, not claude",

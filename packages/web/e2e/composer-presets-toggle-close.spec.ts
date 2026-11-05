@@ -108,7 +108,7 @@ test("the presets popover closes from its own trigger, and Escape / outside-clic
 
   // Park the pointer OFF the trigger before reading its open REST appearance: the click above left the
   // pointer sitting on it, so an immediate reading is its HOVER value presented as rest (measured
-  // pre-Graphite as the 0.28 hover fill where rest is 0.15). The dialog's top-left corner is the inert "Preset
+  // pre-Graphite as the 0.28 hover fill where rest was 0.15). The dialog's top-left corner is the inert "Preset
   // prompts" section label. ⛔ Never park at a viewport corner: that expands the collapsed nav rail,
   // which then intercepts pointer events and times out the next hover.
   const dialogBox = await dialog.boundingBox();
@@ -116,11 +116,11 @@ test("the presets popover closes from its own trigger, and Escape / outside-clic
   await page.mouse.move(dialogBox!.x + 4, dialogBox!.y + 4);
 
   // Consequence: `.loom-btn-on`'s own hover rule is reachable by a real pointer while the popover is up,
-  // which it provably was not before (global.css `.loom-btn-on:not(:disabled):hover` → 0.28 fill). The
-  // open REST appearance is unchanged: `--loom-phosphor-dim`. Both values are resolved from the live
-  // tokens (the hover is the same expression global.css's hover rule uses), never typed as literals.
-  const restFill = await cssColor(page, "--loom-phosphor-dim");
-  const hoverFill = await cssColor(page, "color-mix(in oklab, var(--loom-live) 28%, transparent)");
+  // which it provably was not before (global.css `.loom-btn-on:not(:disabled):hover`). An open state is
+  // a selection, so it is cobalt: `--loom-selected` at rest, the stronger `--loom-ring-soft` on hover.
+  // Both values are resolved from the live tokens global.css's rules name, never typed as literals.
+  const restFill = await cssColor(page, "--loom-selected");
+  const hoverFill = await cssColor(page, "--loom-ring-soft");
   expect(hoverFill, "the open trigger's hover fill differs from its rest fill").not.toBe(restFill);
   await expect(trigger).toHaveClass(/\bloom-btn-on\b/);
   await expect(trigger).toHaveCSS("background-color", restFill);

@@ -108,7 +108,7 @@ export default function Git() {
               )}
             </div>
             <div style={{ display: "flex", gap: 6, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}` }}>
-              <Input placeholder="new-branch-name" value={newBranch} onChange={(e) => setNewBranch(e.target.value)}
+              <Input mono placeholder="new-branch-name" value={newBranch} onChange={(e) => setNewBranch(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && newBranch.trim() && !busy) createBranch.mutate(newBranch.trim()); }}
                 style={{ flex: 1, minWidth: 0 }} />
               <Button variant="primary" disabled={!newBranch.trim() || busy} onClick={() => createBranch.mutate(newBranch.trim())}>+ Branch</Button>
@@ -243,7 +243,7 @@ function BranchList({ data, busy, onCheckout }: {
       {current && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: named.length || workers.length ? 12 : 0 }}>
           <button title="current branch" disabled style={{ ...branchButtonStyle(color.phosphor, true), cursor: "default" }}>
-            <Dot tone="phosphor" glow />{current}
+            <Dot tone="live" glow />{current}
           </button>
           <span style={{ fontFamily: font.mono, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>
             current

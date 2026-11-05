@@ -94,8 +94,8 @@ export function ReviewSurface({ workerId, embedded = false }: {
           about THIS REVIEW, not about which session you are looking at, so the pane keeps them. */}
       {embedded ? (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="cyan" />}
-          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="cyan" />}
+          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="info" />}
+          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="info" />}
         </div>
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -105,11 +105,11 @@ export function ReviewSurface({ workerId, embedded = false }: {
             worker w:{workerId.slice(0, 8)}{worker?.taskId ? ` · task ${worker.taskId.slice(0, 8)}` : ""}
           </span>
           <span style={{ flex: 1 }} />
-          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="cyan" />}
-          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="cyan" />}
+          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="info" />}
+          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="info" />}
           {ctx > 0 && (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "amber" : "phosphor"} width={60} />
+              <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "busy" : "accent"} width={60} />
               <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k ctx</span>
             </span>
           )}
@@ -126,9 +126,9 @@ export function ReviewSurface({ workerId, embedded = false }: {
             <SectionLabel style={{ margin: 0 }}>Summary</SectionLabel>
             <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted }}>auto-derived</span>
             <span style={{ flex: 1 }} />
-            {merged && <Badge tone="phosphor">already merged</Badge>}
-            {uncommitted && <Badge tone="amber">uncommitted</Badge>}
-            <Badge tone={analysis.highRisk ? "red" : analysis.mediumRisk ? "amber" : "phosphor"}>
+            {merged && <Badge tone="live">already merged</Badge>}
+            {uncommitted && <Badge tone="busy">uncommitted</Badge>}
+            <Badge tone={analysis.highRisk ? "danger" : analysis.mediumRisk ? "busy" : "live"}>
               {analysis.highRisk ? `${analysis.highRisk} high-risk` : analysis.mediumRisk ? `${analysis.mediumRisk} to watch` : "low risk"}
             </Badge>
           </div>

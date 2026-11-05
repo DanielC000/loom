@@ -37,9 +37,11 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     await expect(pill).toHaveText(/4\s*requests need you/);
 
     // Regression witness: NO per-request toast stacks. Pre-fix, four toasts rendered their kind label
-    // ("DECISION NEEDED" / "INPUT NEEDED" / "SECRET NEEDED" / "PERMISSION NEEDED") and their title text in
-    // the bottom-right overlay. Post-fix none render — the pill carries only a count, no title/kind label.
-    await expect(page.getByText(/NEEDED/)).toHaveCount(0);
+    // ("Decision needed" / "Input needed" / "Secret needed" / "Permission needed", sentence case since
+    // Graphite card 542f642f) and their title text in the bottom-right overlay. Post-fix none render — the
+    // pill carries only a count, no title/kind label. The pattern is the exact rendered label, anchored,
+    // so it cannot pass vacuously on a casing change: step (3) below proves the same label renders.
+    await expect(page.getByText(/^(Decision|Input|Secret|Permission) needed$/)).toHaveCount(0);
     for (const t of titles) await expect(page.getByText(t)).toHaveCount(0);
 
     // (2) The primary CTA is fully visible and sits clearly ABOVE the corner pill (no occlusion).
@@ -56,7 +58,7 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     await page.goto(`${loomDaemon.baseURL}/`);
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
     // The queue itself is present on Mission Control (the pill's job is done by the page).
-    await expect(page.locator("main").getByText("DECISION NEEDED").first()).toBeVisible();
+    await expect(page.locator("main").getByText(/^Decision needed$/).first()).toBeVisible();
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);

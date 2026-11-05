@@ -182,9 +182,9 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
             {analysis.totalInsertions > 0 && <span style={{ color: color.phosphor }}>+{analysis.totalInsertions}</span>}
             {analysis.totalDeletions > 0 && <span style={{ color: color.red }}>−{analysis.totalDeletions}</span>}
             <span style={{ flex: 1 }} />
-            {analysis.highRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.red }}><Dot tone="red" glow />{analysis.highRisk} high-risk</span>}
-            {analysis.highRisk === 0 && analysis.mediumRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.amber }}><Dot tone="amber" />{analysis.mediumRisk} to watch</span>}
-            {analysis.highRisk === 0 && analysis.mediumRisk === 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.phosphor }}><Dot tone="phosphor" />low risk</span>}
+            {analysis.highRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.red }}><Dot tone="danger" glow />{analysis.highRisk} high-risk</span>}
+            {analysis.highRisk === 0 && analysis.mediumRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.amber }}><Dot tone="busy" />{analysis.mediumRisk} to watch</span>}
+            {analysis.highRisk === 0 && analysis.mediumRisk === 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.phosphor }}><Dot tone="live" />low risk</span>}
           </div>
 
           {/* top risk files inline */}

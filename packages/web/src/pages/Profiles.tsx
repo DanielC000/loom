@@ -167,7 +167,7 @@ function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reac
     <Panel data-testid="delete-grant-reach-notice" role="alert"
       style={{ borderColor: color.amber, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Badge tone="amber">grant</Badge>
+        <Badge tone="busy">grant</Badge>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 12, color: color.text }}>
           Deleting {name} widened what agents can do
         </strong>
@@ -217,8 +217,8 @@ function StatusDots({ customized, updateAvailable }: { customized: boolean; upda
   if (!customized && !updateAvailable) return null;
   return (
     <span style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
-      {customized && <Dot tone="cyan" title="Customized — you edited this profile" />}
-      {updateAvailable && <Dot tone="amber" title="Update available — Loom shipped a newer version" />}
+      {customized && <Dot tone="info" title="Customized — you edited this profile" />}
+      {updateAvailable && <Dot tone="busy" title="Update available — Loom shipped a newer version" />}
     </span>
   );
 }
@@ -638,8 +638,8 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         <RoleBadge role={role || null} />
         <HarnessTag harness={harness} />
         {bundled && <Badge tone="muted">bundled</Badge>}
-        {customized && <Badge tone="cyan">customized</Badge>}
-        {updateAvailable && <Badge tone="amber">update available</Badge>}
+        {customized && <Badge tone="info">customized</Badge>}
+        {updateAvailable && <Badge tone="busy">update available</Badge>}
         <span style={{ flex: 1 }} />
         {confirmDel ? (
           <>
@@ -730,7 +730,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
                 <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontSize: 13 }}>{c.name}</span>
                   {c.builtin && <Badge tone="muted">builtin</Badge>}
-                  {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
+                  {c.requiresConnection && <Badge tone="info">needs connection</Badge>}
                   {/* Card cd9a78bc: provisioning FETCHES for this kind (pip / a GitHub release asset /
                       `npm install`), so an offline or proxied host is a real reason the MCP won't mount.
                       Muted deliberately — it is a property to know, not a warning to act on. The badge is
@@ -1014,7 +1014,7 @@ function ConflictResolver({
         <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: `1px solid ${color.border}` }}>
             <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>Resolve update</strong>
-            <Badge tone="cyan">{name}</Badge>
+            <Badge tone="info">{name}</Badge>
             <span style={{ color: color.textMuted, fontSize: 12 }}>
               {n} conflicting {n === 1 ? "field" : "fields"} — keep yours or take shipped
             </span>
@@ -1029,9 +1029,9 @@ function ConflictResolver({
                 <div key={c.field} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{fieldDisplayName(c.field)}</span>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <FieldSide label="Your version" tone="cyan" active={choice === "mine"} value={formatFieldValue(c.field, c.mine)}
+                    <FieldSide label="Your version" tone="info" active={choice === "mine"} value={formatFieldValue(c.field, c.mine)}
                       onPick={() => setChoices((m) => ({ ...m, [c.field]: "mine" }))} />
-                    <FieldSide label="Shipped version" tone="amber" active={choice === "shipped"} value={formatFieldValue(c.field, c.shipped)}
+                    <FieldSide label="Shipped version" tone="busy" active={choice === "shipped"} value={formatFieldValue(c.field, c.shipped)}
                       onPick={() => setChoices((m) => ({ ...m, [c.field]: "shipped" }))} />
                   </div>
                 </div>
@@ -1055,7 +1055,7 @@ function ConflictResolver({
 // One side of a conflict field — clickable to select. The active side gets a phosphor border; the other
 // reads dim, so the chosen resolution is obvious at a glance. Mirrors Skills.tsx HunkSide (value, not lines).
 function FieldSide({ label, tone: t, active, value, onPick }: { label: string; tone: Tone; active: boolean; value: string; onPick: () => void }) {
-  const accent = t === "cyan" ? color.cyan : color.amber;
+  const accent = t === "info" ? color.cyan : color.amber;
   return (
     <button onClick={onPick} title={`Keep this version (${label})`}
       style={{ textAlign: "left", cursor: "pointer", borderRadius: radius.sm, padding: 8,

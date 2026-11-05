@@ -1212,7 +1212,7 @@ function ConfigEditor({ project }: { project: Project }) {
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>
             <span style={fieldLabel}>Gate command</span>
-            <Input value={gateCommand} onChange={(e) => setGateCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no gate)" />
+            <Input mono value={gateCommand} onChange={(e) => setGateCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no gate)" />
             <Hint>build/test command run in a worker's worktree before merge · {effHint(resolved.orchestration.gateCommand || "none")}</Hint>
           </label>
         </div>
@@ -1221,7 +1221,7 @@ function ConfigEditor({ project }: { project: Project }) {
           <MergeGateCadencePanel projectId={project.id} draft={cadence} onChange={setCadence} />
           <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 8 }}>
             <span style={fieldLabel}>Ungated landing check command</span>
-            <Input value={ungatedLandingCheckCommand} onChange={(e) => setUngatedLandingCheckCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no check)" />
+            <Input mono value={ungatedLandingCheckCommand} onChange={(e) => setUngatedLandingCheckCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no check)" />
             <Hint>runs INSTEAD of the real gate, right before an interval-SKIPPED landing's squash — a red refuses the landing without counting as a gated pass or touching the interval counter · {effHint(resolved.orchestration.ungatedLandingCheckCommand || "none")}</Hint>
             {ungatedLandingCheckCommand.trim() && !gateCommand.trim() && (
               <Hint style={{ color: color.amber }}>no gate command is configured for this project — this check is nested inside the same gate-skip logic, so with no gate command there is no interval to skip and it will never run</Hint>
@@ -1242,7 +1242,7 @@ function ConfigEditor({ project }: { project: Project }) {
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>
             <span style={fieldLabel}>Deploy command</span>
-            <Input value={deployCommand} onChange={(e) => setDeployCommand(e.target.value)} placeholder="e.g. git push (blank = no deploy configured)" />
+            <Input mono value={deployCommand} onChange={(e) => setDeployCommand(e.target.value)} placeholder="e.g. git push (blank = no deploy configured)" />
             <Hint>run in this project's repo by the `deploy` manager tool · host-exec, human-set only · {effHint(resolved.orchestration.deployCommand || "none")}</Hint>
           </label>
         </div>
@@ -2296,10 +2296,10 @@ function scopeLabel(scope: string): string {
   return known ? known.label : (scope.split("/").pop() || scope);
 }
 
-function oauthStatus(c: { connected?: boolean; needsReauth?: boolean; tokenExpiresAt?: string | null }): { tone: "phosphor" | "red" | "cyan"; label: string } {
-  if (c.needsReauth) return { tone: "red", label: "Needs re-auth" };
-  if (c.connected) return { tone: "phosphor", label: c.tokenExpiresAt ? `Connected · expires ${new Date(c.tokenExpiresAt).toLocaleString()}` : "Connected" };
-  return { tone: "cyan", label: "Not connected" };
+function oauthStatus(c: { connected?: boolean; needsReauth?: boolean; tokenExpiresAt?: string | null }): { tone: "live" | "danger" | "info"; label: string } {
+  if (c.needsReauth) return { tone: "danger", label: "Needs re-auth" };
+  if (c.connected) return { tone: "live", label: c.tokenExpiresAt ? `Connected · expires ${new Date(c.tokenExpiresAt).toLocaleString()}` : "Connected" };
+  return { tone: "info", label: "Not connected" };
 }
 
 /** The ssh create mutation's cache key — the handle its on-success eviction finds it by. */
@@ -2417,16 +2417,16 @@ function ConnectionsPanel() {
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
                 </span>
-                <Badge tone={c.projectId ? "cyan" : "phosphor"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
-                {c.autoProvisioned && <Badge tone="cyan">Auto-provisioned</Badge>}
+                <Badge tone={c.projectId ? "info" : "live"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
+                {c.autoProvisioned && <Badge tone="info">Auto-provisioned</Badge>}
                 {/* Bound/unbound (api-key/bearer ALLOWLIST, matching the server's RAW_SECRET_AUTH_SCHEMES
                     in connections/store.ts): an oauth2 row shows its own connectedness instead, and an ssh
                     row's secret is never resolvable through this static-injection seam either — the
                     allowlist-binding badge only reads for the two schemes it can actually describe. */}
                 {(c.authScheme === "api-key" || c.authScheme === "bearer") && (
                   boundConnectionIds.has(c.id)
-                    ? <Badge tone="phosphor">Bound</Badge>
-                    : <Badge tone="amber">Unbound</Badge>
+                    ? <Badge tone="live">Bound</Badge>
+                    : <Badge tone="busy">Unbound</Badge>
                 )}
                 {status && <Badge tone={status.tone}>{status.label}</Badge>}
                 {c.authScheme === "oauth2" && c.scopes && c.scopes.length > 0 && (
@@ -2524,8 +2524,8 @@ function PendingBindingsPanel() {
               <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>→</span>
               <span style={{ fontFamily: font.mono, fontSize: 13, color: color.cyan }}>{b.agentName}</span>
               <Badge tone="muted">profile {b.profileName}</Badge>
-              <Badge tone="cyan">{b.projectName}</Badge>
-              {b.alreadyGranted && <Badge tone="phosphor">Granted</Badge>}
+              <Badge tone="info">{b.projectName}</Badge>
+              {b.alreadyGranted && <Badge tone="live">Granted</Badge>}
               <span style={{ flex: 1 }} />
               <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(b.requestedAt).toLocaleString()}</span>
               {!b.alreadyGranted && b.agentId && confirming !== b.questionId && (
@@ -2992,17 +2992,17 @@ const RECLAIM_DEFAULT_MIN_AGE_HOURS = 24; // mirrors the daemon's DEFAULT_NODE_M
 // force-stopped part-way and is never retried, so a real fraction of that tree may already be gone.
 // Rendering it as "0 bytes freed" would tell the owner nothing happened when something did.
 const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: string; freed: string; note: string }> = {
-  removed: { tone: "phosphor", label: "Removed", freed: "", note: "" },
+  removed: { tone: "live", label: "Removed", freed: "", note: "" },
   wedged: {
-    tone: "red", label: "Interrupted", freed: "Freed: unknown",
+    tone: "danger", label: "Interrupted", freed: "Freed: unknown",
     note: "the removal was force-stopped part-way and is never retried, so part of this tree may already be deleted. Scan again to see what is left.",
   },
   "left-on-disk": {
-    tone: "amber", label: "Not removed", freed: "Freed: nothing",
+    tone: "busy", label: "Not removed", freed: "Freed: nothing",
     note: "the removal failed cleanly — most likely a file handle was still held. Nothing was deleted.",
   },
   rejected: {
-    tone: "red", label: "Failed to start", freed: "Freed: nothing",
+    tone: "danger", label: "Failed to start", freed: "Freed: nothing",
     note: "the removal never started — nothing on disk was touched.",
   },
   missing: {
@@ -3010,7 +3010,7 @@ const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: st
     note: "node_modules was no longer there when the reclaim ran. Nothing was deleted.",
   },
   "no-longer-eligible": {
-    tone: "amber", label: "Skipped", freed: "Freed: nothing",
+    tone: "busy", label: "Skipped", freed: "Freed: nothing",
     note: "this worktree stopped being eligible between the scan and the reclaim, so it was never touched.",
   },
 };
@@ -3018,7 +3018,7 @@ const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: st
 // never as a quantity. "Unknown" is the honest reading, and it keeps the same rule as "wedged": we cannot
 // say nothing happened to that tree.
 const RECLAIM_OUTCOME_UNKNOWN = {
-  tone: "amber" as Tone, label: "Unknown outcome", freed: "Freed: unknown",
+  tone: "busy" as Tone, label: "Unknown outcome", freed: "Freed: unknown",
   note: "this version of the UI does not recognise the outcome the daemon reported for this worktree.",
 };
 const reclaimOutcome = (o: NodeModulesReclaimOutcome) => RECLAIM_OUTCOME[o] ?? RECLAIM_OUTCOME_UNKNOWN;
@@ -3161,7 +3161,7 @@ function NodeModulesReclaimPanel() {
                     {e.worktreePath}
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <Badge tone="cyan">{e.projectName}</Badge>
+                    <Badge tone="info">{e.projectName}</Badge>
                     <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>{idleLabel(e.ageHours)}</span>
                     <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
                       last active {new Date(e.lastActivityAt).toLocaleString()}
@@ -3239,7 +3239,7 @@ function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclai
   return (
     <div data-testid="reclaim-result" style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <StatusPill tone={clean ? "phosphor" : "amber"} label="last reclaim" />
+        <StatusPill tone={clean ? "live" : "busy"} label="last reclaim" />
         <span style={{ fontFamily: font.mono, fontSize: 13, color: clean ? color.text : color.amber, lineHeight: 1.5 }}>
           {reclaimHeadline(result)}
         </span>
@@ -3271,7 +3271,7 @@ function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclai
               style={{ display: "flex", flexDirection: "column", gap: 3, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <Badge tone={o.tone}>{o.label}</Badge>
-                <span style={{ fontFamily: font.mono, fontSize: 12, color: o.tone === "phosphor" ? color.text : tone[o.tone] }}>{freed}</span>
+                <span style={{ fontFamily: font.mono, fontSize: 12, color: o.tone === "live" ? color.text : tone[o.tone] }}>{freed}</span>
                 {r.projectName && <Badge tone="muted">{r.projectName}</Badge>}
               </div>
               <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>{r.worktreePath}</span>
@@ -3409,7 +3409,7 @@ function PollJobRow({ job, connName, target, toggling, deleting, onEdit, onToggl
         <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{connName}</span>
         <Chip label={job.method} value={job.path} />
         <span style={{ flex: 1 }} />
-        <Badge tone={job.enabled ? "phosphor" : "muted"}>{job.enabled ? "enabled" : "disabled"}</Badge>
+        <Badge tone={job.enabled ? "live" : "muted"}>{job.enabled ? "enabled" : "disabled"}</Badge>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
         <span>every {job.intervalMs / 1000}s</span>
@@ -3687,12 +3687,12 @@ function CapabilitiesPanel() {
                       builtin
                     </Badge>
                   )}
-                  {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
+                  {c.requiresConnection && <Badge tone="info">needs connection</Badge>}
                   {/* Amber, and present on the ROW rather than only inside the editor: a non-empty list
                       widens this capability's env isolation, so it has to be legible while scanning the
                       catalog, not just while editing the one row you already opened. */}
                   {editable && names.length > 0 && (
-                    <Badge tone="amber" data-testid={`capability-passenv-badge-${c.slug}`}>
+                    <Badge tone="busy" data-testid={`capability-passenv-badge-${c.slug}`}>
                       ambient env · {names.length}
                     </Badge>
                   )}

@@ -297,7 +297,7 @@ for (const shell of SHELLS) {
       });
 
       const stack = page.locator(TOAST_STACK);
-      const toast = stack.getByText("QUIET BOARD", { exact: true });
+      const toast = stack.getByText("Quiet board", { exact: true });
       await expect(toast).toBeVisible({ timeout: 30_000 });
       await expect(stack).toContainText("quiet: 7 deferred (manager)");
       // Bottom-right, i.e. genuinely in the fixed overlay rather than somewhere in page flow — the one

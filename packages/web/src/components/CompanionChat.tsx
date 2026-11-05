@@ -561,7 +561,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           "status") so a screen reader announces it rather than queueing it politely. */}
       {stuck && (
         <div
-          style={notice("red")}
+          style={notice("danger")}
           data-testid="companion-zero-reply-alert"
           data-session-id={sessionId}
           role="alert"
@@ -583,7 +583,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           now actively refused, vs. "no route configured at all"). */}
       {homeRouteRefused && (
         <div
-          style={notice("amber")}
+          style={notice("busy")}
           data-testid="companion-home-refused-alert"
           data-session-id={sessionId}
           role="alert"
@@ -598,7 +598,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
       )}
 
       {armed === false && (
-        <div style={notice("amber")} role="status">
+        <div style={notice("busy")} role="status">
           <span aria-hidden style={{ color: color.amber }}>▲</span>
           <span>
             This companion has no in-app route yet, so a message won't reach it — bind one under{" "}
@@ -624,7 +624,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
               zero-reply streak, say so definitely instead of guessing "may be offline" — same moment, same
               spot on screen, but the owner learns the real fact rather than a hedge. */}
           {replyTimedOut && (
-            <div style={{ ...notice(stuck ? "red" : "muted"), alignSelf: "center", marginTop: 12 }} role="status">
+            <div style={{ ...notice(stuck ? "danger" : "muted"), alignSelf: "center", marginTop: 12 }} role="status">
               {stuck
                 ? `No reply — ${name} has now gone ${stuck.turnsSinceLastReply} turns without answering anyone.`
                 : `No reply yet — ${name} may be offline or not connected.`}
@@ -676,22 +676,22 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
 // scrolls away. Truncates with an ellipsis rather than wrapping the strip.
 function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
   const pill =
-    conn === "connected" ? { tone: "phosphor" as const, label: "connected", glow: true } :
-    conn === "connecting" ? { tone: "amber" as const, label: "connecting", glow: false } :
-    conn === "revoked" ? { tone: "red" as const, label: "token revoked", glow: false } :
+    conn === "connected" ? { tone: "live" as const, label: "connected", glow: true } :
+    conn === "connecting" ? { tone: "busy" as const, label: "connecting", glow: false } :
+    conn === "revoked" ? { tone: "danger" as const, label: "token revoked", glow: false } :
     // Card a6d7bf36: the held credential came back REFUSED from an HTTP probe, not from a close reason —
     // so it is a credential claim (red, banner-bound) but deliberately NOT a NAMED one: a 401 to a probe
     // never says which of revoked/paused/rotated/deleted happened, and `revoked`'s own label would assert
     // the one observation the three-state probe exists to avoid fabricating.
-    conn === "token-refused" ? { tone: "red" as const, label: "token refused", glow: false } :
+    conn === "token-refused" ? { tone: "danger" as const, label: "token refused", glow: false } :
     // Card d56b12d8: terminal with NO credential presented at all — red and banner-bound like the two
     // above (the gateway lock is raised, so the paste field is on screen), but worded for an absence:
     // "refused"/"revoked" would both assert the daemon judged a token it was never shown.
-    conn === "no-token" ? { tone: "red" as const, label: "no gateway token", glow: false } :
+    conn === "no-token" ? { tone: "danger" as const, label: "no gateway token", glow: false } :
     // Card 04314fbc: terminal, but NOT a credential claim — amber (the same "attention, not alarm" tone
     // `connecting` uses) and wording that says this pane was refused, with no token to go re-paste.
-    conn === "refused" ? { tone: "amber" as const, label: "refused", glow: false } :
-    { tone: "red" as const, label: "reconnecting", glow: false };
+    conn === "refused" ? { tone: "busy" as const, label: "refused", glow: false } :
+    { tone: "danger" as const, label: "reconnecting", glow: false };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
       <Avatar label={initials(title)} />
@@ -977,12 +977,12 @@ function EmptyState({ connected, title }: { connected: boolean; title: string })
 // config gap you can go fix), `red` = a live FAULT (the companion is running but has stopped answering).
 // The red tone is deliberately reserved for the zero-reply alert — if everything glowed amber the one
 // notice that means "this is actually broken" would read as the same weight as "you haven't bound a route".
-function notice(t: "amber" | "muted" | "red"): CSSProperties {
-  const accent = t === "amber" ? color.amber : t === "red" ? color.red : color.border;
+function notice(t: "busy" | "muted" | "danger"): CSSProperties {
+  const accent = t === "busy" ? color.amber : t === "danger" ? color.red : color.border;
   return {
     display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
     border: `1px solid ${accent}`, borderRadius: radius.base,
-    background: t === "amber" ? wash(color.busy, 6) : t === "red" ? wash(color.danger, 7) : color.panel2,
+    background: t === "busy" ? wash(color.busy, 6) : t === "danger" ? wash(color.danger, 7) : color.panel2,
     fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, color: t === "muted" ? color.textMuted : color.textDim,
   };
 }
@@ -1104,7 +1104,7 @@ function HistoryRow({ active, primary, secondary, count, live, onClick }: {
       }}
     >
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        {live && <Dot tone="phosphor" glow />}
+        {live && <Dot tone="live" glow />}
         <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: active ? color.text : color.textDim }}>
           {primary}
         </span>
@@ -1143,7 +1143,7 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
         <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.data ? formatConversationTime(q.data.conversation.startedAt) : "Conversation"}
         </span>
-        <StatusPill tone="cyan" label="read-only" />
+        <StatusPill tone="info" label="read-only" />
       </div>
 
       <div style={{ flex: 1, minHeight: 0, maxHeight: SCROLL_MAX_HEIGHT, overflowY: "auto", display: "flex", flexDirection: "column", padding: "6px 14px 10px" }}>

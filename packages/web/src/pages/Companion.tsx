@@ -377,7 +377,7 @@ function CompanionSwitcher({ companions, alertingIds, selectedId, onSelect, onNe
               >
                 {/* Decorative — the dot's meaning is also spelled out in the button's title tooltip; keep
                     it out of the accessible name so that stays just the companion's name. */}
-                <Dot tone={stuck ? "red" : enabled ? "phosphor" : "muted"} />
+                <Dot tone={stuck ? "danger" : enabled ? "live" : "muted"} />
                 <span>{named || COMPANION_DEFAULT_NAME}</span>
                 {!named && <span style={{ color: color.textMuted, fontSize: 11 }}>{c.sessionId.slice(0, 4)}</span>}
               </button>
@@ -553,7 +553,7 @@ function CompanionCreate({ onCreate, pending, error, onCancel }: {
 
       {message && (
         isGuard ? (
-          <Callout tone="amber">{message}</Callout>
+          <Callout tone="busy">{message}</Callout>
         ) : (
           <span style={errStyle}>{message}</span>
         )
@@ -761,13 +761,13 @@ function CompanionIdentity({ companion, label }: { companion: CompanionRow; labe
     <>
       <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</strong>
       {companion.config
-        ? <Badge tone={companion.config.enabled ? "phosphor" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
+        ? <Badge tone={companion.config.enabled ? "live" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
         : companion.bindings.length > 0
-          ? <Badge tone="cyan">binding only</Badge>
+          ? <Badge tone="info">binding only</Badge>
           // Card ed49cef6: neither a config nor a binding — a live assistant session reachable by nothing.
-          : <Badge tone="amber">not provisioned</Badge>}
-      {companion.config?.envPinned && <Badge tone="amber">pinned by env</Badge>}
-      {companion.config && companion.bindings.length === 0 && <Badge tone="amber">not reachable — no binding</Badge>}
+          : <Badge tone="busy">not provisioned</Badge>}
+      {companion.config?.envPinned && <Badge tone="busy">pinned by env</Badge>}
+      {companion.config && companion.bindings.length === 0 && <Badge tone="busy">not reachable — no binding</Badge>}
     </>
   );
 }
@@ -945,7 +945,7 @@ function CompanionTerminal({ sessionId }: { sessionId: string }) {
         offerFork={false}
         lifecycle="none"
         maximizable
-        title={<StatusPill tone="cyan" label="read-only" />}
+        title={<StatusPill tone="info" label="read-only" />}
       />
     </>
   );
@@ -1030,7 +1030,7 @@ function ConfigSection({ companion, onChanged, createLabel = "Configure" }: {
       </div>
 
       {cfg?.envPinned && (
-        <Callout tone="amber" testId="companion-env-pinned-notice">
+        <Callout tone="busy" testId="companion-env-pinned-notice">
           <code>LOOM_COMPANION_*</code> env is set for this session — it will <strong>override</strong> these
           values on the next daemon restart. Edit the env (or unset it) to make a REST change stick.
         </Callout>
@@ -1051,10 +1051,10 @@ function ConfigSection({ companion, onChanged, createLabel = "Configure" }: {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <Chip label="name" value={cfg.name || "unnamed"} tone={cfg.name ? undefined : "muted"} />
             <Chip label="token" value={maskedToken(cfg)} />
-            <Chip label="channel" value={cfg.channel} tone="cyan" />
+            <Chip label="channel" value={cfg.channel} tone="info" />
             <Chip label="initial scope" value={cfg.chatScope} />
             <Chip label="initial chat" value={cfg.allowedChatId} />
-            <Chip label="heartbeat" value={cfg.heartbeatIntervalMinutes ? `${cfg.heartbeatIntervalMinutes}m` : "off"} tone={cfg.heartbeatIntervalMinutes ? "phosphor" : "muted"} />
+            <Chip label="heartbeat" value={cfg.heartbeatIntervalMinutes ? `${cfg.heartbeatIntervalMinutes}m` : "off"} tone={cfg.heartbeatIntervalMinutes ? "live" : "muted"} />
             <Chip label="home" value={cfg.home ? `${cfg.home.channel}:${cfg.home.chatId}`
               : `unset → ${cfg.effectiveHome.channel}:${cfg.effectiveHome.chatId}`} tone={cfg.home ? undefined : "muted"} />
           </div>
@@ -1131,8 +1131,8 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>
           {channelDisplayName(binding.channel)}
         </strong>
-        <StatusPill tone={binding.scope === "group" ? "amber" : inApp ? "phosphor" : "cyan"} label={inApp ? "default" : binding.scope} />
-        {binding.flaggedNonPrivate && <StatusPill tone="red" label="not private — outbound suppressed" glow />}
+        <StatusPill tone={binding.scope === "group" ? "busy" : inApp ? "live" : "info"} label={inApp ? "default" : binding.scope} />
+        {binding.flaggedNonPrivate && <StatusPill tone="danger" label="not private — outbound suppressed" glow />}
         {!inApp && <Chip label="chat" value={binding.chatId} />}
         <span style={{ flex: 1 }} />
         {confirm ? (
@@ -1203,7 +1203,7 @@ function ConnectTelegram({ companion, onChanged }: { companion: CompanionRow; on
     <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 12, border: `1px solid ${color.cyan}`, borderRadius: radius.base, background: color.panel2 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>Connect Telegram</strong>
-        <StatusPill tone="cyan" label="adds a channel" />
+        <StatusPill tone="info" label="adds a channel" />
       </div>
       <ol style={{ ...hint, margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
         <li>In Telegram, message <code style={{ color: color.text }}>@BotFather</code> and send <code style={{ color: color.text }}>/newbot</code>; follow the prompts to name it.</li>
@@ -1312,7 +1312,7 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {(senders.data ?? []).map((s) => (
           <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Chip label="id" value={s.senderId} tone="cyan" />
+            <Chip label="id" value={s.senderId} tone="info" />
             {s.label && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>{s.label}</span>}
             <span style={{ flex: 1 }} />
             <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate(s.id)}>Remove</Button>
@@ -1551,7 +1551,7 @@ function MemoryRow({ sessionId, memory, onDelete, deleting }: { sessionId: strin
     <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <code style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{memory.name}</code>
-        {memory.pinned && <span title="pinned — always in this companion's context"><Badge tone="amber">pinned</Badge></span>}
+        {memory.pinned && <span title="pinned — always in this companion's context"><Badge tone="busy">pinned</Badge></span>}
         {memory.description && <span style={{ ...hint, margin: 0 }}>{memory.description}</span>}
         <span style={{ flex: 1 }} />
         <Button onClick={() => setOpen((v) => !v)}>{open ? "Hide" : "Read"}</Button>
@@ -1632,7 +1632,7 @@ function ReminderRow({ reminder, onDelete, deleting }: { reminder: CompanionRemi
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: font.head, fontSize: 13, color: color.text }}>{reminderTitle(reminder)}</strong>
-        <Badge tone={reminder.enabled ? "phosphor" : "muted"}>{reminder.enabled ? "enabled" : "disabled"}</Badge>
+        <Badge tone={reminder.enabled ? "live" : "muted"}>{reminder.enabled ? "enabled" : "disabled"}</Badge>
         <span style={{ flex: 1 }} />
         {confirm ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1645,9 +1645,9 @@ function ReminderRow({ reminder, onDelete, deleting }: { reminder: CompanionRemi
         )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Chip label="schedule" value={humanCron(reminder.cron)} tone="cyan" />
+        <Chip label="schedule" value={humanCron(reminder.cron)} tone="info" />
         {nextFire
-          ? <Chip label="next fire" value={new Date(nextFire).toLocaleString()} tone="phosphor" />
+          ? <Chip label="next fire" value={new Date(nextFire).toLocaleString()} tone="live" />
           : <Chip label="next fire" value={disabled ? "paused" : "—"} tone="muted" />}
       </div>
       <ReadonlyBlock>{reminder.prompt}</ReadonlyBlock>
@@ -1732,7 +1732,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
           </div>
         ) : (
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <Badge tone="amber">restart to apply</Badge>
+            <Badge tone="busy">restart to apply</Badge>
             <Button onClick={() => setConfirmRestart(true)} data-testid="companion-restart-to-apply">
               Restart this companion to apply
             </Button>
@@ -1773,12 +1773,12 @@ function ShieldBolt() {
   );
 }
 // A grants/keeps disclosure row: a leading icon + rich text. `tone` tints the icon (red = a grant, amber = a keep).
-function DiscItem({ tone: t, children }: { tone: "red" | "amber"; children: ReactNode }) {
-  const c = t === "red" ? color.red : color.amber;
+function DiscItem({ tone: t, children }: { tone: "danger" | "busy"; children: ReactNode }) {
+  const c = t === "danger" ? color.red : color.amber;
   return (
     <li style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: 11.5, lineHeight: 1.55, color: color.textDim }}>
       <svg viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 2, width: 13, height: 13 }} aria-hidden>
-        {t === "red"
+        {t === "danger"
           ? <path d="M5 12h14M13 6l6 6-6 6" />
           : <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />}
       </svg>
@@ -1833,8 +1833,8 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
         <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0, flex: 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 13, color: color.text }}>Lead mode</span>
-            <Badge tone="red">owner only</Badge>
-            <StatusPill tone="red" glow label={leadMode ? "no guardrails · live" : "no guardrails"} />
+            <Badge tone="danger">owner only</Badge>
+            <StatusPill tone="danger" glow label={leadMode ? "no guardrails · live" : "no guardrails"} />
           </div>
           <p style={{ fontSize: 11.5, color: color.textDim, lineHeight: 1.55, margin: 0, maxWidth: 640 }}>
             One switch instead of per-project grants: full capability across{" "}
@@ -1890,7 +1890,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
           style={{ display: "flex", flexDirection: "column", gap: 14, padding: 14, border: leadRedBorder, borderRadius: radius.base, background: RED_WASH }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <StatusPill tone="red" glow label="Lead mode — fleet-wide" />
+            <StatusPill tone="danger" glow label="Lead mode — fleet-wide" />
             <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>Read this before you enable it</span>
           </div>
           <p style={{ fontSize: 12.5, color: color.text, lineHeight: 1.6, margin: 0 }}>
@@ -1903,17 +1903,17 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
             <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: `1px solid ${wash(color.danger, 35)}`, background: wash(color.danger, 4) }}>
               <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: color.red }}>What lead mode grants</span>
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-                <DiscItem tone="red"><strong style={{ color: color.text }}>Full act-scope on every lever</strong>, in every project — including any project you create later.</DiscItem>
-                <DiscItem tone="red"><strong style={{ color: color.text }}>Session control with no confirmation</strong> — message, stop, or resume <strong style={{ color: color.text }}>any</strong> session, of any role, in any project.</DiscItem>
-                <DiscItem tone="red">That reach <strong style={{ color: color.text }}>includes Loom's own infrastructure sessions</strong> — Platform Lead, Operator, Setup. Fleet-wide, no exclusions.</DiscItem>
+                <DiscItem tone="danger"><strong style={{ color: color.text }}>Full act-scope on every lever</strong>, in every project — including any project you create later.</DiscItem>
+                <DiscItem tone="danger"><strong style={{ color: color.text }}>Session control with no confirmation</strong> — message, stop, or resume <strong style={{ color: color.text }}>any</strong> session, of any role, in any project.</DiscItem>
+                <DiscItem tone="danger">That reach <strong style={{ color: color.text }}>includes Loom's own infrastructure sessions</strong> — Platform Lead, Operator, Setup. Fleet-wide, no exclusions.</DiscItem>
               </ul>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: `1px solid ${wash(color.busy, 35)}`, background: AMBER_WASH }}>
               <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: color.amber }}>What still asks you first</span>
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-                <DiscItem tone="amber"><strong style={{ color: color.text }}>Deploy &amp; irreversible decisions</strong> still require a fresh confirmation each time.</DiscItem>
-                <DiscItem tone="amber"><strong style={{ color: color.text }}>Spawning a session</strong> still asks every time — that step-up is untouched.</DiscItem>
-                <DiscItem tone="amber"><strong style={{ color: color.text }}>Turning it off reverts instantly</strong> — every per-project grant below is back in force at once.</DiscItem>
+                <DiscItem tone="busy"><strong style={{ color: color.text }}>Deploy &amp; irreversible decisions</strong> still require a fresh confirmation each time.</DiscItem>
+                <DiscItem tone="busy"><strong style={{ color: color.text }}>Spawning a session</strong> still asks every time — that step-up is untouched.</DiscItem>
+                <DiscItem tone="busy"><strong style={{ color: color.text }}>Turning it off reverts instantly</strong> — every per-project grant below is back in force at once.</DiscItem>
               </ul>
             </div>
           </div>
@@ -1951,7 +1951,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
           data-testid="companion-lead-mode-active"
           style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "10px 12px", border: leadRedBorder, borderRadius: radius.base, background: RED_WASH }}
         >
-          <StatusPill tone="red" glow label="Active · fleet-wide" />
+          <StatusPill tone="danger" glow label="Active · fleet-wide" />
           <span style={{ flex: 1, minWidth: 200, fontSize: 11.5, color: color.textDim, lineHeight: 1.5 }}>
             <strong style={{ color: color.text }}>{companionName}</strong> has full act-scope across every
             project, no guardrails. Your per-project grants are shadowed below and return the moment you switch this off.
@@ -2044,7 +2044,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
                   fontFamily: font.mono, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.08em", color: color.red,
                 }}
               >
-                <Dot tone="red" /> Superseded by lead mode
+                <Dot tone="danger" /> Superseded by lead mode
               </span>
             )}
             <div style={{
@@ -2062,7 +2062,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
                 border: `1px solid ${color.amber}`, borderRadius: radius.base, background: wash(color.busy, 6),
               }}
             >
-              <Badge tone="amber">restart to apply</Badge>
+              <Badge tone="busy">restart to apply</Badge>
               <span style={{ ...hint, margin: 0, flex: 1, minWidth: 180 }}>
                 Grant changes take effect when the companion restarts — its conversation is preserved.
               </span>
@@ -2093,7 +2093,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <Badge tone="amber">heads up</Badge>
+                <Badge tone="busy">heads up</Badge>
                 <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>
                   Risky capability combination
                 </strong>
@@ -2178,7 +2178,7 @@ function GrantsByProject({ rows, projects }: { rows: CompanionCapabilityGrant[];
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 11, color: color.textDim }}>Grants by project</strong>
         <span style={{ flex: 1 }} />
-        <StatusPill tone="phosphor" label={`${ordered.length} project${ordered.length === 1 ? "" : "s"}`} />
+        <StatusPill tone="live" label={`${ordered.length} project${ordered.length === 1 ? "" : "s"}`} />
       </div>
       <p style={{ ...hint, margin: 0 }}>
         Everything this companion holds, grouped by project — the cross-project view of the levers below. Edit
@@ -2191,14 +2191,14 @@ function GrantsByProject({ rows, projects }: { rows: CompanionCapabilityGrant[];
             data-testid={`companion-grants-project-${grp.projectId ?? "own"}`}
             style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}
           >
-            <Chip label="project" value={grp.name} tone="cyan" />
+            <Chip label="project" value={grp.name} tone="info" />
             <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
               {grp.caps.map((c) => (
                 <Chip
                   key={c.slug}
                   label={c.known ? leverName.get(c.slug) : c.slug}
                   value={c.mode}
-                  tone={!c.known ? "muted" : c.mode === "act" ? "amber" : "phosphor"}
+                  tone={!c.known ? "muted" : c.mode === "act" ? "busy" : "live"}
                 />
               ))}
             </span>
@@ -2250,9 +2250,9 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
   };
 
   const tierFlag =
-    meta.tier === "elevated" ? <StatusPill tone="red" label="elevated" glow />
-    : meta.tier === "act-capable" ? <Badge tone="amber">act-capable</Badge>
-    : <Badge tone="cyan">read-only</Badge>;
+    meta.tier === "elevated" ? <StatusPill tone="danger" label="elevated" glow />
+    : meta.tier === "act-capable" ? <Badge tone="busy">act-capable</Badge>
+    : <Badge tone="info">read-only</Badge>;
 
   return (
     <div data-testid={`companion-lever-${meta.slug}`} style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${meta.tier === "elevated" ? color.red : color.border}`, borderRadius: radius.base, background: color.panel2 }}>
@@ -2262,10 +2262,10 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
         {tierFlag}
         {/* Tier-X honest label: an elevated lever that ALSO confirms every single use (session-spawn) is
             NOT friction-free like session-steer — surface that difference so the owner grants it knowingly. */}
-        {meta.stepUpOnUse && <Badge tone="cyan">confirms each use</Badge>}
+        {meta.stepUpOnUse && <Badge tone="info">confirms each use</Badge>}
         <span style={{ flex: 1 }} />
         {grants.length > 0
-          ? <StatusPill tone="phosphor" label={`on · ${grants.length} project${grants.length === 1 ? "" : "s"}`} />
+          ? <StatusPill tone="live" label={`on · ${grants.length} project${grants.length === 1 ? "" : "s"}`} />
           : <span style={{ ...hint, margin: 0 }}>off</span>}
       </div>
       <p style={{ ...hint, margin: 0 }}>{meta.summary}</p>
@@ -2315,7 +2315,7 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
               data-testid={`companion-grant-confirm-${meta.slug}`}
               style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${color.red}`, borderRadius: radius.base, background: RED_WASH }}
             >
-              <StatusPill tone="red" label="Elevated grant" glow />
+              <StatusPill tone="danger" label="Elevated grant" glow />
               <span style={{ ...hint, margin: 0 }}>
                 This grants <strong style={{ color: color.text }}>{meta.name}</strong> — one of Loom's most
                 powerful levers. The companion will be able to {meta.elevatedAction} in{" "}
@@ -2355,7 +2355,7 @@ function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig,
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Chip label="project" value={projectName} tone="cyan" />
+        <Chip label="project" value={projectName} tone="info" />
         {meta.modes.length > 1 ? (
           <div role="group" aria-label="Grant mode" style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
             {meta.modes.map((m) => {
@@ -2382,7 +2382,7 @@ function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig,
             })}
           </div>
         ) : isAct ? (
-          <Badge tone="red">act</Badge>
+          <Badge tone="danger">act</Badge>
         ) : null}
         <span style={{ flex: 1 }} />
         <Button variant="danger" disabled={busy} onClick={onRemove}>Remove</Button>
@@ -2635,7 +2635,7 @@ function PairingCode({ code, expiresAt, onDismiss }: { code: string; expiresAt: 
   return (
     <Panel style={{ padding: 14, border: `1px solid ${color.amber}`, boxShadow: `inset 0 0 0 1px ${color.amber}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <StatusPill tone="amber" label="One-time pairing code" glow />
+        <StatusPill tone="busy" label="One-time pairing code" glow />
         <span style={{ flex: 1 }} />
         <Button variant="ghost" onClick={onDismiss}>Dismiss</Button>
       </div>
@@ -2697,7 +2697,7 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <StatusPill tone="red" label="Destructive" glow />
+            <StatusPill tone="danger" label="Destructive" glow />
             <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>
               Delete {label}?
             </strong>
@@ -2714,7 +2714,7 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
             </ul>
           </div>
           {envPinned && (
-            <Callout tone="amber">
+            <Callout tone="busy">
               <code>LOOM_COMPANION_*</code> env is set for this session — it will <strong>re-create</strong> this
               companion on the next daemon restart. Unset the env to delete it for good.
             </Callout>
@@ -2736,8 +2736,8 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
   );
 }
 
-function Callout({ tone, children, testId }: { tone: "amber"; children: ReactNode; testId?: string }) {
-  const c = tone === "amber" ? color.amber : color.cyan;
+function Callout({ tone, children, testId }: { tone: "busy"; children: ReactNode; testId?: string }) {
+  const c = tone === "busy" ? color.amber : color.cyan;
   return (
     <div data-testid={testId} style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: wash(color.busy, 6) }}>
       <span aria-hidden style={{ color: c }}>▲</span>

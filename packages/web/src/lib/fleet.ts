@@ -161,10 +161,10 @@ export function capArchived<T>(archived: readonly T[], cap = ARCHIVED_FOLD_CAP):
 // exited row that was parked when archived could still carry a future rateLimitedUntil and spuriously
 // paint the card red). Archived history surfaces in the buckets/header instead.
 export function fleetRollup(sessions: SessionListItem[]): { tone: Tone; label: string; glow?: boolean } {
-  if (sessions.some(isRateLimited)) return { tone: "red", label: "rate-limited" };
-  if (sessions.some(isBailed)) return { tone: "red", label: "auto-resume abandoned" };
-  if (sessions.some((s) => s.processState === "live" && s.busy)) return { tone: "amber", label: "busy", glow: true };
-  if (sessions.some((s) => s.role === "manager" && s.processState === "live")) return { tone: "phosphor", label: "idle" };
+  if (sessions.some(isRateLimited)) return { tone: "danger", label: "rate-limited" };
+  if (sessions.some(isBailed)) return { tone: "danger", label: "auto-resume abandoned" };
+  if (sessions.some((s) => s.processState === "live" && s.busy)) return { tone: "busy", label: "busy", glow: true };
+  if (sessions.some((s) => s.role === "manager" && s.processState === "live")) return { tone: "live", label: "idle" };
   return { tone: "muted", label: "no live manager" };
 }
 

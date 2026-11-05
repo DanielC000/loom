@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
-import { isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
+import { attentionKindLabel, isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
 import { harnessOf } from "../lib/harnessFields";
 import { DecisionStateChip } from "./decisions";
@@ -22,13 +22,13 @@ export { fleetRollup, workerBuckets };
 // project-filtered session set. Pure presentation off existing endpoints; no new backend.
 
 export function sessionStatus(s: SessionListItem): { tone: Tone; label: string; glow?: boolean } {
-  if (isRateLimited(s)) return { tone: "red", label: "rate-limited" };
+  if (isRateLimited(s)) return { tone: "danger", label: "rate-limited" };
   if (s.processState !== "live") return { tone: "muted", label: s.processState };
-  if (s.busy) return { tone: "amber", label: "busy", glow: true };
-  return { tone: "phosphor", label: "idle" };
+  if (s.busy) return { tone: "busy", label: "busy", glow: true };
+  return { tone: "live", label: "idle" };
 }
 
-export function Stat({ label, value, tone: t = "phosphor" }: { label: string; value: number; tone?: Tone }) {
+export function Stat({ label, value, tone: t = "live" }: { label: string; value: number; tone?: Tone }) {
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: 4, padding: "4px 12px", minWidth: 64 }}>
       <span style={{ fontFamily: font.mono, fontSize: 20, color: tone[t] }}>{value}</span>
@@ -45,9 +45,9 @@ export function Stat({ label, value, tone: t = "phosphor" }: { label: string; va
 
 // Utilization → tone, consistent with CONTEXT_WARN_RATIO styling: phosphor < 80% ≤ amber < 95% ≤ red.
 function usageTone(utilization: number): Tone {
-  if (utilization >= 95) return "red";
-  if (utilization >= 80) return "amber";
-  return "phosphor";
+  if (utilization >= 95) return "danger";
+  if (utilization >= 80) return "busy";
+  return "live";
 }
 
 // ms-from-now → "3d 4h" / "1h 42m" / "12m" / "now". "—" when there's no reset instant.
@@ -185,9 +185,9 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   // lets the `compact` band shape re-order the SAME children without a second copy of any of them —
   // and a fragment adds no DOM node, so the classic `head` below renders the element sequence it
   // always did, attributes and inline styles included.
-  const dot = <Dot tone={item.tone} glow={item.tone === "amber"} />;
+  const dot = <Dot tone={item.tone} glow={item.tone === "busy"} />;
   const kindLabel = (
-    <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[item.tone], textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }}>{item.kind}</span>
+    <span style={{ fontFamily: font.ui, fontSize: 12, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" }}>{attentionKindLabel(item.kind)}</span>
   );
   const textBase = { fontFamily: font.mono, fontSize: 12, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" } as const;
   /* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
@@ -373,7 +373,7 @@ export function ContextUsage({ ctxInputTokens, model, unmeasured = null }: {
   const hot = ctx > win * CONTEXT_WARN_RATIO;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={`${ctx.toLocaleString()} input tokens · ${Math.round((ctx / win) * 100)}% of the ${(win / 1000).toFixed(0)}k window`}>
-      <Meter value={ctx} max={win} tone={hot ? "amber" : "phosphor"} width={60} />
+      <Meter value={ctx} max={win} tone={hot ? "busy" : "accent"} width={60} />
       <span style={{ fontFamily: font.mono, fontSize: 11, color: hot ? color.amber : color.textMuted }}>{Math.round((ctx / win) * 100)}%</span>
       <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
     </span>
@@ -406,13 +406,13 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: 11, color: color.cyan,
             border: `1px solid ${color.cyan}`, borderRadius: radius.sm, padding: "1px 7px" }}>
-            <Dot tone="cyan" />{decision.count} decision{decision.count === 1 ? "" : "s"} · waiting on you
+            <Dot tone="info" />{decision.count} decision{decision.count === 1 ? "" : "s"} · waiting on you
           </span>
           <Button variant="primary" style={{ padding: "1px 8px", fontSize: 11 }} onClick={() => openRequest(decision.questionId)}>Answer →</Button>
         </span>
       )}
       {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} />}
-      {s.branch && <Chip label="branch" value={s.branch} tone="cyan" />}
+      {s.branch && <Chip label="branch" value={s.branch} tone="info" />}
       {/* A LIVE row hides both "no reading yet" AND a measured zero — neither is worth the width on a
           dense, fast-moving row (the Archive, where a session is final, treats them differently). */}
       {ctx > 0 && <ContextUsage ctxInputTokens={s.ctxInputTokens} model={s.model} />}
@@ -445,7 +445,7 @@ export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
       <span style={{ color: color.text }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
       <span style={{ color: color.textMuted }}>·</span>
       <span style={{ color: color.textMuted }}>peak</span>
-      <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "amber" : "phosphor"} width={70} />
+      <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "busy" : "accent"} width={70} />
       <span style={{ color: hot ? color.amber : color.textMuted }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
     </span>
   );
@@ -471,7 +471,7 @@ export function worstContext(sessions: SessionListItem[]): { ctx: number; window
   return { ctx, window, ratio };
 }
 
-const SEG_TONE = { busy: "amber", idle: "phosphor", rl: "red", offline: "muted" } as const;
+const SEG_TONE = { busy: "busy", idle: "live", rl: "danger", offline: "muted" } as const;
 
 // Stacked horizontal bar of worker states (flex-weighted by count). Degrades cleanly: 0 workers →
 // an empty track; 1 worker → a single full segment.
@@ -541,10 +541,10 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         <StatusPill tone={roll.tone} label={roll.label} glow={roll.glow} />
         <span style={{ flex: 1 }} />
-        {decision && <Chip label="decision" value={decision.count} tone="cyan" />}
+        {decision && <Chip label="decision" value={decision.count} tone="info" />}
         <Chip label="mgr" value={managers.length} />
         <Chip label="wkr" value={workers.length} />
-        {attention > 0 && <Chip label="attn" value={attention} tone="red" />}
+        {attention > 0 && <Chip label="attn" value={attention} tone="danger" />}
       </div>
 
       {/* worker-state composition bar + legend */}
@@ -560,7 +560,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       {/* worst-case context pressure */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.head, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted, width: 28 }}>ctx</span>
-        <Meter value={wc.ctx} max={wc.window || 1} tone={ctxHot ? "amber" : "phosphor"} width={110} />
+        <Meter value={wc.ctx} max={wc.window || 1} tone={ctxHot ? "busy" : "accent"} width={110} />
         <span style={{ fontFamily: font.mono, fontSize: 10, color: ctxHot ? color.amber : color.textMuted }}>
           {wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}
         </span>

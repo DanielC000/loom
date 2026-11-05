@@ -95,7 +95,7 @@ export function FleetControls({ variant }: { variant: "bar" | "pop" }) {
 
   return (
     <div className={`loom-fleetctl${variant === "pop" ? " is-pop" : ""}`} data-testid={`fleet-controls-${variant}`}>
-      <Badge tone={paused ? "red" : "phosphor"} data-testid="fleet-orch-pill">
+      <Badge tone={paused ? "danger" : "live"} data-testid="fleet-orch-pill">
         {paused ? "orchestration: paused" : "orchestration: running"}
       </Badge>
 
@@ -181,7 +181,7 @@ export function OrchestrationChip() {
           ? "Orchestration is PAUSED daemon-wide — no new worker is dispatched. Open the fleet controls."
           : "Orchestration is running. Open the fleet controls (usage hold, pause, kill all)."}
         onClick={() => setOpen((o) => !o)}>
-        <Dot tone={paused ? "red" : "phosphor"} />
+        <Dot tone={paused ? "danger" : "live"} />
         {paused ? "paused" : "running"}
       </button>
 

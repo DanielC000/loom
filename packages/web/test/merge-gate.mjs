@@ -38,7 +38,7 @@ const iso = (minutesAgo) => new Date(NOW - minutesAgo * 60_000).toISOString();
 check("cadence=every reads as the healthy phosphor state", () => {
   const r = readMergeGate(st({ cadence: "every" }));
   assert.equal(r.state, "every");
-  assert.equal(r.tone, "phosphor");
+  assert.equal(r.tone, "live");
   assert.equal(r.glow, false);
   assert.equal(r.badge, "Every merge");
   assert.match(r.sentence, /Every merge runs the gate command/);
@@ -47,7 +47,7 @@ check("cadence=every reads as the healthy phosphor state", () => {
 check("cadence=never is RED and counts the damage rather than just saying 'off'", () => {
   const r = readMergeGate(st({ cadence: "never", ungatedSinceLastPass: 17 }));
   assert.equal(r.state, "never");
-  assert.equal(r.tone, "red", "a standing hazard, not a neutral setting");
+  assert.equal(r.tone, "danger", "a standing hazard, not a neutral setting");
   assert.equal(r.badge, "Never gated");
   assert.match(r.sentence, /17 merges have landed unverified/, "the unverified count IS the readout");
 });
@@ -55,7 +55,7 @@ check("cadence=never is RED and counts the damage rather than just saying 'off'"
 check("cadence=interval mid-count is amber and says how many are left", () => {
   const r = readMergeGate(st({ cadence: "interval", interval: 5, ungatedSinceLastPass: 3 }));
   assert.equal(r.state, "counting");
-  assert.equal(r.tone, "amber");
+  assert.equal(r.tone, "busy");
   assert.equal(r.badge, "Every 6th merge", "N=5 ungated allowed ⇒ the 6th runs the gate");
   assert.match(r.sentence, /2 more merges land ungated/);
 });
@@ -71,7 +71,7 @@ check("the 'more merges' sentence is singular at exactly one left, and never neg
 check("nextLandingGated is CYAN (verification imminent, not a verdict)", () => {
   const r = readMergeGate(st({ cadence: "interval", interval: 5, ungatedSinceLastPass: 5, nextLandingGated: true }));
   assert.equal(r.state, "due");
-  assert.equal(r.tone, "cyan", "Loom's established non-verdict / info tone");
+  assert.equal(r.tone, "info", "Loom's established non-verdict / info tone");
   assert.equal(r.glow, false);
   assert.match(r.sentence, /A pass resets the counter to 0; a fail keeps every merge gated\./);
 });
@@ -80,7 +80,7 @@ check("an escalated failure OUTRANKS every cadence, and is the only glowing stat
   for (const cadence of ["every", "interval", "never"]) {
     const r = readMergeGate(st({ cadence, interval: cadence === "interval" ? 5 : null, gateOwed: true, lastFailure: failure(), ungatedSinceLastPass: 5 }));
     assert.equal(r.state, "failed", `${cadence} must still read as failed`);
-    assert.equal(r.tone, "red");
+    assert.equal(r.tone, "danger");
     assert.equal(r.glow, true, "the CRT glow is reserved for a real verdict");
     assert.match(r.sentence, /Every merge is gated until one passes\. 5 merges landed unverified behind it\./);
   }
@@ -284,13 +284,13 @@ check("every cadence write round-trips through cadenceOf", () => {
 check("a pass and a fail render as the verdict marks, in their own tones", () => {
   const p = verdictMark({ result: "pass", at: iso(60) }, NOW);
   assert.equal(p.kind, "pass");
-  assert.equal(p.tone, "phosphor");
+  assert.equal(p.tone, "live");
   assert.equal(p.glyph, "✓");
   assert.match(p.title, /^passed 1h 0m ago/);
 
   const f = verdictMark({ result: "fail", at: iso(14), branch: "loom/abc", fromSha: "1111111aaa", toSha: "2222222bbb" }, NOW);
   assert.equal(f.kind, "fail");
-  assert.equal(f.tone, "red");
+  assert.equal(f.tone, "danger");
   assert.equal(f.glyph, "✗");
   assert.match(f.title, /^failed 14m ago/);
   assert.match(f.title, /branch loom\/abc/, "the tooltip carries what landed");
@@ -301,7 +301,7 @@ check("a CLEARED entry is neutral — never a pass, never a fail", () => {
   const c = verdictMark({ result: "cleared", at: iso(30), reason: "cadence-changed" }, NOW);
   assert.equal(c.kind, "cleared");
   assert.equal(c.tone, "muted", "not red: nothing failed");
-  assert.notEqual(c.tone, "phosphor", "and not green: nothing was verified either");
+  assert.notEqual(c.tone, "live", "and not green: nothing was verified either");
   assert.notEqual(c.glyph, "✓");
   assert.notEqual(c.glyph, "✗");
   assert.equal(c.title, "owed gate cleared by a settings change 30m ago", "the manager's exact wording");
@@ -373,12 +373,12 @@ check("the weakening note states the real cost at each non-default cadence", () 
   assert.equal(weakeningNote("every", null), null, "the default cadence weakens nothing");
 
   const never = weakeningNote("never", null);
-  assert.equal(never.tone, "red");
+  assert.equal(never.tone, "danger");
   assert.match(never.text, /No merge will run the gate command/);
   assert.match(never.text, /No agent can make this change/, "the trust boundary is part of the warning");
 
   const interval = weakeningNote("interval", 5);
-  assert.equal(interval.tone, "amber");
+  assert.equal(interval.tone, "busy");
   assert.match(interval.text, /up to 5 merges reach the default branch/);
   assert.match(interval.text, /not which merge broke it/, "the bisect cost is stated, not implied");
 
@@ -461,7 +461,7 @@ check("the draft round-trips through a stored override", () => {
 
 check("the trailers-off note states every cost the card requires, and the reassurance", () => {
   const note = commitMessageNote("trailers", "off");
-  assert.equal(note.tone, "amber");
+  assert.equal(note.tone, "busy");
   assert.match(note.text, /crashes mid-landing/, "the crash-window gap");
   assert.match(note.text, /already shipped as not merged/, "the merged:null read-out");
   assert.match(note.text, /auto-confirming retained batch branches/, "the cleanup degradation");

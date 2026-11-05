@@ -91,7 +91,7 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
         <RoleChip label="tool_result" current={role} onPick={setRole} />
         <RoleChip label="system" current={role} onPick={setRole} />
         {active && (
-          <Badge tone={filtered.length ? "phosphor" : "muted"}>
+          <Badge tone={filtered.length ? "accent" : "muted"}>
             {filtered.length} / {turns?.length ?? 0}
           </Badge>
         )}

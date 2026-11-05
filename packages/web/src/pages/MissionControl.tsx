@@ -31,7 +31,7 @@ const ATTN_RANK: Record<string, number> = {
   "STUCK-BUSY": 5,
   "QUEUE DRAINED": 6,
 };
-const attnRank = (kind: string, tone: string) => ATTN_RANK[kind] ?? (tone === "red" ? 3.5 : 7);
+const attnRank = (kind: string, tone: string) => ATTN_RANK[kind] ?? (tone === "danger" ? 3.5 : 7);
 
 // Phase 3 — MISSION CONTROL: a god-eye view of every orchestration at once, so you don't have to
 // pick a single manager. Three regions: a global status strip, an ATTENTION QUEUE (shared with the
@@ -211,7 +211,7 @@ export default function MissionControl() {
 
       {/* Global status strip */}
       <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-        <Badge tone={globalPaused ? "red" : "phosphor"}>{globalPaused ? "orchestration: paused" : "orchestration: running"}</Badge>
+        <Badge tone={globalPaused ? "danger" : "live"}>{globalPaused ? "orchestration: paused" : "orchestration: running"}</Badge>
         {/* These counts derive from the LIVE session feed (api.allSessions excludes archived rows, and
             sessions auto-archive on exit), so they read ACTIVE orchestration only — labelled as such so
             the number reads as correct-scope, not broken. Finished runs stay reachable via Run Replay.
@@ -223,7 +223,7 @@ export default function MissionControl() {
           <Stat label="active projects" value={projectNames.length} />
           <Stat label="active managers" value={managers.length} />
           <Stat label="active workers" value={workers.length} />
-          <Stat label="attention" value={attention.length} tone={attention.length ? "amber" : "muted"} />
+          <Stat label="attention" value={attention.length} tone={attention.length ? "busy" : "muted"} />
         </div>
         <span style={{ flex: 1 }} />
         <ClearUsageHoldButton onCleared={refreshSessions} />

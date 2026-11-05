@@ -20,11 +20,11 @@ import { color, font, tone, type Tone } from "../theme";
 const IN_FLIGHT: ReadonlySet<RunStatus> = new Set<RunStatus>(["queued", "starting", "running"]);
 const statusTone: Record<RunStatus, Tone> = {
   queued: "muted",
-  starting: "amber",
-  running: "amber",
-  completed: "phosphor",
-  failed: "red",
-  timed_out: "red",
+  starting: "busy",
+  running: "busy",
+  completed: "live",
+  failed: "danger",
+  timed_out: "danger",
   cancelled: "muted",
 };
 const isInFlight = (s: RunStatus) => IN_FLIGHT.has(s);
@@ -148,14 +148,14 @@ function CapRejections({ events, agentName }: { events: RunEvent[]; agentName: (
           return (
             <Panel key={e.id} style={{ padding: "6px 10px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <StatusPill tone="red" label="429" />
+                <StatusPill tone="danger" label="429" />
                 <span style={{ fontSize: 12, color: color.text }}>{capLabel} cap</span>
                 <span style={{ flex: 1 }} />
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{ts(e.createdAt)}</span>
               </div>
               <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <Chip label="key" value={e.keyId ? e.keyId.slice(0, 8) : "—"} />
-                {d.agentId && <Chip label="agent" value={agentName(d.agentId)} tone="cyan" />}
+                {d.agentId && <Chip label="agent" value={agentName(d.agentId)} tone="info" />}
                 {d.observed != null && d.limit != null && <Chip label="observed" value={`${d.observed} / ${d.limit}`} />}
               </div>
             </Panel>
@@ -178,7 +178,7 @@ function RunRow({ run, selected, agentName, onSelect, onCancel, cancelling }:
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{run.id.slice(0, 8)}</span>
       </div>
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <Chip label="agent" value={agentName} tone="cyan" />
+        <Chip label="agent" value={agentName} tone="info" />
         <Chip label="key" value={run.keyId ? run.keyId.slice(0, 8) : "internal"} />
         <Chip label="created" value={ts(run.createdAt)} />
         {run.endedAt && <Chip label="ended" value={ts(run.endedAt)} />}
@@ -214,7 +214,7 @@ function RunDetail({ run, agentName, onCancel, cancelling }:
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Chip label="run" value={run.id} />
-        <Chip label="agent" value={agentName} tone="cyan" />
+        <Chip label="agent" value={agentName} tone="info" />
         <Chip label="key" value={run.keyId ? run.keyId : "internal"} />
         {run.sessionId && <Chip label="session" value={run.sessionId.slice(0, 8)} />}
         {run.idempotencyKey && <Chip label="idem" value={run.idempotencyKey} />}

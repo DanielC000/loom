@@ -153,7 +153,7 @@ export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProj
   const shortId = s.id.slice(0, 8);
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-      <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} style={{ flexShrink: 0 }} />
+      <StatusPill tone={s.busy ? "busy" : "live"} glow={s.busy} label={s.busy ? "busy" : "idle"} style={{ flexShrink: 0 }} />
       {/* Same rule as FleetRow — codex always, claude only in a mixed-harness view.
           @decision b8e52cfe — never badge claude in a single-harness view.
 
