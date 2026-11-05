@@ -48,8 +48,10 @@ const planted2 = "const x = db.prepare(`SELECT capabilities FROM profiles WHERE 
 check("(S) NEGATIVE CONTROL: a planted `SELECT capabilities FROM profiles` is flagged", dormantProfileColumnReaders("planted2.ts", planted2).length === 1);
 // positive control: the scanner must hit on the PRE-change tree (fixed sha, never HEAD) where toProfile DID read them.
 const repoRoot = path.join(here, "..", "..", "..");
-const pre = execFileSync("git", ["--no-pager", "show", "403b397f:packages/daemon/src/db.ts"], { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-check("(S) POSITIVE CONTROL: pre-change db.ts (sha 403b397f) is flagged for its toProfile + profile SQL", dormantProfileColumnReaders("db.ts", pre).length >= 2);
+let pre = null;
+try { pre = execFileSync("git", ["--no-pager", "show", "403b397f:packages/daemon/src/db.ts"], { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
+catch (e) { console.log(`SKIP  (S) POSITIVE CONTROL: sha 403b397f is not reachable in this checkout (shallow clone?) — not a claim either way (${String(e.message).split("\n")[0]})`); }
+if (pre !== null) check("(S) POSITIVE CONTROL: pre-change db.ts (sha 403b397f) is flagged for its toProfile + profile SQL", dormantProfileColumnReaders("db.ts", pre).length >= 2);
 check("(S) bogus-pattern control: a clean snippet returns 0", dormantProfileColumnReaders("clean.ts", "const a = 1; // connections\n").length === 0);
 
 // ----- (B) behaviour -----
