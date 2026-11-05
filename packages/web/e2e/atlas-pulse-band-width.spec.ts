@@ -4,7 +4,7 @@
 // This header covers only what each leg here asserts and how it can fail.
 //
 // @decision b4442d27 — the band's fifth track is Pulse on both nodes and its appetite is additive.
-// Never flatten it back toward 1fr, never remove its 300px floor, and never buy Pulse width by
+// Never flatten it back toward 1fr, never remove its 308px floor, and never buy Pulse width by
 // wrapping the band to a second row.
 //
 //   * The KIND's box is no longer what limits it — asserted as "within half a pixel of the text's own
@@ -22,8 +22,11 @@
 //   * The band is still ONE ROW — the alternative this card rejected. The row-count collector is
 //     shown able to return >1 at 1100px, where the band's own `auto-fit` fold genuinely wraps it;
 //     without that leg "one row" could never fail.
-//   * The 300px FLOOR binds at the narrow end. At 1280 Pulse's proportional share is ~291px, so a
-//     reading at or above 300 is the floor doing work rather than the weight.
+//   * The 308px FLOOR binds at the narrow end. At 1280 Pulse's proportional share is ~291px, so a
+//     reading at or above 308 is the floor doing work rather than the weight.
+//   * Every run measures the WIDEST 12h timestamp (card 6ba79d7c): the describe pins `locale` and a
+//     runtime-computed `timezoneId` (`widestTimestampTimezone`), and each row asserts the pin took.
+//     Unpinned, the chip reading tracked the wall clock — 22.11px at a one-digit hour, 14.92 at two.
 //   * SWITCH OFF renders no band at all, so none of this can have leaked into the classic Overview.
 //
 // FIXTURE IDENTITY (load-bearing): the Workspace Pulse feed is the CROSS-PROJECT god-eye stream, so a
@@ -55,7 +58,27 @@ const CHIP_MIN = 16;
  *  defect boundary, which is a literal zero. */
 const CHIP_MIN_1440 = 36;
 /** `.loom-atlas-band`'s own declared floor for the Pulse track. */
-const PULSE_TRACK_FLOOR = 300;
+const PULSE_TRACK_FLOOR = 308;
+
+/**
+ * The browser timezone that puts the seeded events' LOCAL hour on 11 — card 6ba79d7c.
+ *
+ * WHY: `EventRow` renders its never-shrinking timestamp with `toLocaleTimeString()`, and in en-US's
+ * 12h format an hour of 10, 11 or 12 is one glyph wider than 1–9 (+7.2031px at 12px mono). The chip
+ * pays that width 1:1, so unpinned this leg measured whatever the WALL CLOCK said: green for 18 hours
+ * a day, red at 14.92px for the other 6. Pinning it measures the WIDEST timestamp every run.
+ *
+ * Hour 11 rather than 10 or 12 because the seeds land seconds after this is computed: a rollover
+ * moves 11 to 12, which is still two digits. `Etc/GMT` names are fixed-offset (no DST) and their sign
+ * is INVERTED (`Etc/GMT-5` is UTC+5); offsets land in [-11, +12], all valid names.
+ */
+function widestTimestampTimezone(now = new Date()): string {
+  let offset = (11 - now.getUTCHours() + 24) % 24;
+  if (offset > 12) offset -= 24;
+  return offset === 0 ? "Etc/GMT" : `Etc/GMT${offset > 0 ? "-" : "+"}${Math.abs(offset)}`;
+}
+/** What `widestTimestampTimezone` must produce on screen — asserted, so a broken pin fails loudly. */
+const WIDE_TIMESTAMP = /^1[0-2]:\d\d:\d\d [AP]M$/;
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
 // navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
@@ -110,7 +133,7 @@ type BandReading = {
   /** One entry per row whose detail names THIS run's own worker. `chip` is null on the project node,
    *  which renders no project chip at all — see `assertPulseIsReadable`. Widths are CONTENT-box and
    *  fractional; `*Text` is the canvas metric of the same string in that element's own resolved font. */
-  own: { time: number; chip: number | null; chipText: number | null; kind: number; kindText: number }[];
+  own: { time: number; timeText: string; chip: number | null; chipText: number | null; kind: number; kindText: number }[];
   /** Total rows in the band, this run's and every sibling's — the population `own` was filtered from. */
   allRows: number;
 };
@@ -155,7 +178,7 @@ async function readBand(page: Page, detailNeedle: string, bandSelector: string):
       const kind = row.querySelector('[data-testid="activity-event-kind"]');
       const time = row.querySelector('[data-testid="activity-event-time"]');
       own.push({
-        time: contentW(time) ?? -1,
+        time: contentW(time) ?? -1, timeText: (time?.textContent ?? "").trim(),
         chip: contentW(chip), chipText: textW(chip),
         kind: contentW(kind) ?? -1, kindText: textW(kind) ?? -1,
       });
@@ -196,6 +219,9 @@ function assertPulseIsReadable(m: BandReading, at: string, expectChip: boolean, 
 
   for (const [i, r] of m.own.entries()) {
     const where = `${at} row ${i}`;
+    // FIXTURE CONTROL: the timezone pin really produced the widest 12h timestamp (card 6ba79d7c).
+    // Without it every width below is a reading of the wall clock, not of the layout.
+    expect.soft(r.timeText, `${where}: timestamp must be the two-digit-hour worst case`).toMatch(WIDE_TIMESTAMP);
     // INSTRUMENT CONTROL FIRST: the canvas metric must return the fixture kind's real natural width.
     // A broken font/metric read returns 0 and would make every "it fits" assertion below vacuous.
     expect.soft(r.kindText, `${where}: canvas natural width of "${SEEDED_KIND}" — the instrument itself`)
@@ -218,6 +244,8 @@ function assertPulseIsReadable(m: BandReading, at: string, expectChip: boolean, 
 }
 
 test.describe("Atlas dashboard band track budget (card b4442d27)", () => {
+  // The worst-case timestamp, not the wall clock's — see `widestTimestampTimezone`.
+  test.use({ locale: "en-US", timezoneId: widestTimestampTimezone() });
   test("switch ON: at 1280, 1440 and 1920 the Workspace Pulse band stops being what limits the event kind, keeps the project chip off its floor, and stays one band row", async ({ page, loomDaemon }) => {
     // Three viewports plus a fold control, each a full navigation.
     test.setTimeout(240_000);
@@ -256,11 +284,11 @@ test.describe("Atlas dashboard band track budget (card b4442d27)", () => {
       }
     }
 
-    // ── THE 300px FLOOR, at the width where it actually binds. Pulse's proportional share at 1280
-    //    is ~291px, so a reading at or above 300 is the floor, not the 1.9fr weight. At 1920 the
+    // ── THE 308px FLOOR, at the width where it actually binds. Pulse's proportional share at 1280
+    //    is ~291px, so a reading at or above 308 is the floor, not the 1.9fr weight. At 1920 the
     //    weight alone is far past it, which is why this is asserted at the narrow end only.
     const pulseAt = (width: number) => byWidth.get(width)?.panels.pulse ?? -1;
-    expect.soft(pulseAt(1280), "1280px: the Pulse track's declared 300px floor")
+    expect.soft(pulseAt(1280), "1280px: the Pulse track's declared 308px floor")
       .toBeGreaterThanOrEqual(PULSE_TRACK_FLOOR);
     // And the budget really is width-responsive above the floor, not a fixed column.
     expect.soft(pulseAt(1920), `1920px: Pulse vs its 1440px width (${pulseAt(1440)}) — the track still grows`)

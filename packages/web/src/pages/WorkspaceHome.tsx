@@ -308,7 +308,7 @@ export default function WorkspaceHome() {
   //
   // @decision b4442d27 — this panel's width is a BUDGETED track in `.loom-atlas-band`, not a bare
   // 1fr: its `EventRow` has an additive appetite no other band panel has. Never flatten that track
-  // and never drop its 300px floor.
+  // and never drop its 308px floor.
   const pulsePanel = (
     <BandPanel label="Pulse" testId="atlas-band-pulse">
       {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}

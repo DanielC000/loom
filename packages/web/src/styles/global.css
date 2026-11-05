@@ -2336,8 +2336,10 @@ button.loom-kpi.is-open {
    sat on its floor at EVERY desktop width, and 1440 was tighter than 420px phone width
    (354px, one column) ever was.
 
-   ⚠️ So the 300px FLOOR is load-bearing, not a round number: it is the measured "chip can
-   show anything at all" threshold plus margin, and it binds only below ~1300px viewport —
+   ⚠️ So the 308px FLOOR is load-bearing, not a round number: it is the measured "chip can
+   show anything at all" threshold plus margin, sized for the WIDEST 12h timestamp (an hour of
+   10–12 is one 7.2px glyph wider than 1–9; card 6ba79d7c raised it from 300 for exactly that
+   glyph), and it binds only below ~1300px viewport —
    above that the 1.9fr share is already larger and the floor is inert. Do not drop it to make
    a neighbouring column wider, and do not flatten this track back toward 1fr: at 1fr the band
    gives Pulse less room at 1440 than the phone layout gives it at 420.
@@ -2349,11 +2351,11 @@ button.loom-kpi.is-open {
    had before this budget. Lowering it to widen another column re-breaks that guard.
 
    @decision b4442d27 — the fifth track is Pulse on BOTH nodes and its budget is additive, not
-   proportional. Never return it to a bare 1fr and never remove the 300px floor. */
+   proportional. Never return it to a bare 1fr and never remove or lower the 308px floor. */
 .loom-atlas-band {
   display: grid;
   grid-template-columns:
-    minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(300px, 1.9fr);
+    minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(308px, 1.9fr);
   gap: 10px;
   align-items: stretch;
 }

@@ -601,7 +601,7 @@ export function BandPanel({ label, count, action, children, style, testId }: {
             the five tracks are 287 / 220 / 152 / 135 / 321 px, so three of the five are under
             225px and two are under 160px. Card 102bc915 recorded 283.9 / 244.7 / 195.8 / 195.8 /
             195.8 for the same five-track rule; that was BEFORE card b4442d27 re-weighted it to
-            `1.7 / 1.3 / 0.9 / 0.8 / minmax(300px, 1.9)fr`, which is where the current figures come
+            `1.7 / 1.3 / 0.9 / 0.8 / minmax(308px, 1.9)fr`, which is where the current figures come
             from — they are re-derivable from that template by arithmetic and were confirmed by
             measurement. Don't size anything to a remembered number from either set; re-measure at
             the width you care about. A label allowed to wrap inside the head pushes the row to two

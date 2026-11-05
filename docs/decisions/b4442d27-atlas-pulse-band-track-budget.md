@@ -41,6 +41,8 @@ grid-template-columns:
   minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(300px, 1.9fr);
 ```
 
+(As shipped by this card. The floor is now **308px** — raised, never removed, by card `6ba79d7c`; see "The floor is sized for the widest timestamp" at the end of this record. The table below is this card's own measurement and was taken at a one-digit hour.)
+
 Measured after, Workspace node (same fixture, same build):
 
 | viewport | Pulse col | Pulse body | kind box | chip CONTENT | Needs | Operators | Gates | Plan |
@@ -63,13 +65,13 @@ So the Needs track is sized to **at least its pre-fix width at 1600** — the wi
 
 ### The 300px floor is a measured threshold, not a round number
 
-The project chip shrinks 1000× harder than the kind, so it only leaves `min-content` once the kind is **already** fully satisfied. That makes the chip a direct read on *surplus*: it needs 72 (timestamp) + 24 (three gaps) + 144 (kind) + ~13 = **~255px of body**, i.e. ~281px of column, before it can show a single character. 300px is that threshold plus margin.
+The project chip shrinks 1000× harder than the kind, so it only leaves `min-content` once the kind is **already** fully satisfied. That makes the chip a direct read on *surplus*: it needs 72 (timestamp, at a one-digit hour — 79.2 at a two-digit one, see the end of this record) + 24 (three gaps) + 144 (kind) + ~13 = **~255px of body**, i.e. ~281px of column, before it can show a single character. 300px is that threshold plus margin.
 
 The floor binds only below ~1300px viewport — at 1440 the 1.9fr share is already 339px and the floor is inert. Its job is to stop the catastrophic narrow-desktop case (the 1180–1300px range just above the band's own `auto-fit` fold), not to set the column's width.
 
 ## Do not
 
-- **Do not return the fifth track to a bare `1fr`, and do not remove its `300px` floor.** At `1fr` the band gives Pulse less room at 1440 than the phone layout gives it at 420.
+- **Do not return the fifth track to a bare `1fr`, and do not remove or lower its floor (`308px` since card `6ba79d7c`).** At `1fr` the band gives Pulse less room at 1440 than the phone layout gives it at 420.
 - **Do not take the floor's width back for a neighbouring column.** The floor is the chip-off-its-floor threshold; shaving it re-opens the exact defect, silently, because an over-shrunk chip renders as a plausible-looking small box rather than as a visible break.
 - **Wrapping the band to a second row is no longer ruled out — see "The wrap ruling, amended" below.** It is still not what this card did, and it should not be attempted without the measurement that section asks for.
 - **Do not re-tune tracks 3 and 4 for one node's content.** They are *Gate lanes · Plan usage* on the Workspace node but *Fleet · Gate lanes* on the project node, from one shared declaration. Only tracks 1, 2 and 5 hold the same panel on both.
@@ -125,3 +127,15 @@ This record opens by saying the band "lays five panels across one line on **both
 **What the project node's own composition proves about the central measurement.** This record measured Pulse needing **479px for all four `EventRow` columns at natural width**, and budgeted it 321px at 1440 — the most the band had. The project node's Pulse is now a **full-width card at the content column's own width (1156px at 1440)**, so for the first time that row renders with no column short of its natural width at all. That is not a refutation of the budget; it is confirmation of its diagnosis. The band was over-subscribed, as the appetite census said, and the only way to pay Pulse in full was to stop making it share a line with four other panels.
 
 ⇒ A future card wrapping the Workspace band (the "wrap ruling, amended" section above) now has a THIRD comparison available that this record could not offer: the project node's full-width Pulse is a live rendering of the 479px-satisfied case, on the same fixture and the same `EventRow`. Look at it before deciding whether ~767px of wrapped column reads better or worse than 321px of budgeted one.
+
+## The floor is sized for the widest timestamp — raised 300 → 308px (card `6ba79d7c`, 2026-11-04)
+
+**The 1280 chip reading above (22.11px) was a reading of the wall clock, not only of the layout.** `EventRow`'s timestamp is `toLocaleTimeString()` and never shrinks. In en-US's 12h format an hour of 10, 11 or 12 renders one glyph wider than 1–9: **+7.2031px** at 12px JetBrains Mono. At 1280 the Pulse track sits on its floor, so the chip (flex-shrink 1000) pays that glyph 1:1 — content **22.1094 → 14.9219px**, under the spec's 16px `CHIP_MIN`. The leg went red for 6 hours of every 24 and green for the other 18; "recurs, then doesn't" was the clock.
+
+Attributed with a contrast case, not a guess: the same build, the same daemon fixture and the same 1280 viewport, changing only the browser `timezoneId` (America/New_York "5:40:05 PM" against Europe/Paris "11:40:12 PM"). Every other number in the width chain was identical — grid `237.266 / 181.453 / 125.609 / 111.656 / 300px`, band 996, Pulse body 274 with no scrollbar, row 274, fonts `loaded`, kind 143.89. The timestamp gained 7.2031px, and the chip lost 7.19.
+
+**The repair raises the floor, never removes it, and leaves the chip floor alone.** `minmax(300px, 1.9fr)` becomes `minmax(308px, 1.9fr)`: the measured glyph plus under a pixel of margin, so the worst-case chip should get the full 8px back (≈22.9px, derived from 14.92 + 8 and not separately measured; the spec asserts only ≥16). Grid at 1280 before → after: `237.266 / 181.453 / 125.609 / 111.656 / 300` → `234.375 / 179.234 / 124.078 / 110.297 / 308` (the four other tracks give 2.9 / 2.2 / 1.5 / 1.4px; each is `minmax(0, …)`, so none has a declared floor to cross). At 1440 the floor stays inert — `287.453 / 219.812 / 152.188 / 135.266 / 321.266`, unchanged. `CHIP_MIN` was **not** loosened: 14.92 was a real squeeze of the reader's project name, not threshold noise.
+
+**The spec now measures the worst case every run.** `atlas-pulse-band-width.spec.ts` pins `locale: "en-US"` plus a runtime-computed fixed-offset `timezoneId` that puts the seeded events' local hour on 11 (a rollover lands on 12, still two digits), and asserts each row's timestamp matches the two-digit-hour form so a broken pin fails loudly. Pin alone: RED at 14.9219 on every run, including under a config whose New York timezone passed unpinned. Pin + 308: GREEN. Revert only 308 → 300, with the pin kept: RED at 14.9219.
+
+⛔ **Do not "fix" a time-of-day flake in this spec by un-pinning the clock, and do not switch `EventRow` to a fixed 24h format to win the width back** — that changes the visible time on all six mounts and is an owner call, not a layout one. ⚠️ A locale with a longer time string than en-US's widest (e.g. a longer day-period marker) is not covered by this floor; the spec pins en-US deliberately and says so.
