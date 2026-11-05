@@ -20,13 +20,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-c53790a5-content-kept-tombstone-gate.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { useOwnLoomHome, mkdtempManaged } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 useOwnLoomHome("loom-mqc53790a5-");
@@ -40,11 +39,9 @@ const GIT_ID = "-c user.email=mqc53790a5@loom -c user.name=mqc53790a5";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-const freshSfx = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 function makeResolvableRepo(tag) {
-  const repo = path.join(os.tmpdir(), `loom-mqc53790a5-${tag}-${freshSfx()}`);
-  fs.mkdirSync(repo, { recursive: true });
+  const repo = mkdtempManaged(`loom-mqc53790a5-${tag}-`); // registered for guaranteed cleanup at creation
   fs.writeFileSync(path.join(repo, "README.md"), `# ${tag}\n`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
   execFileSync("git", ["config", "user.email", "mqc53790a5@loom"], { cwd: repo });
@@ -62,7 +59,10 @@ const sameTokenSet = (a, b) => a !== undefined && b !== undefined && a.length ==
 let bootCounter = 0;
 async function rebootSim() { bootCounter++; return await import(`${mergeQuarantineModuleHref}?bc53790a5=${bootCounter}`); }
 
-{
+// Undo steps for state the registry cannot sweep (the repoA->repoX junction, the orphan latch file in the
+// quarantine dir), run LIFO in `finally` so a throwing assertion still removes the junction.
+const undo = [];
+try {
   const repoA = makeResolvableRepo("a");
   const repoX = makeResolvableRepo("x");
   const tA = enterMergeQuarantine(repoA, "loom/c53790a5-a", "c53790a5: A's own entry");
@@ -84,6 +84,7 @@ async function rebootSim() { bootCounter++; return await import(`${mergeQuaranti
     repoPath: linkP, branch: "loom/c53790a5-p", reason: "foreign content-kept orphan",
     enteredAt: Date.now(), tokens: [tX, foreignToken],
   }));
+  undo.push(() => fs.rmSync(path.join(MERGE_QUARANTINE_DIR, orphanBasename), { force: true }));
 
   check("(precondition) A reads blocked after boot", rb1.stillBlockedEntryFor(repoA)?.tokens.includes(tA) === true);
   check("(precondition) X reads blocked after boot", rb1.stillBlockedEntryFor(repoX)?.tokens.includes(tX) === true);
@@ -92,12 +93,15 @@ async function rebootSim() { bootCounter++; return await import(`${mergeQuaranti
   check("(precondition) the clear reports a kept latch", !!clear.latchKept);
   check("(precondition) the clear names the orphan as CONTENT-kept at P", Array.isArray(clear.contentKeptRepoPaths) && clear.contentKeptRepoPaths.includes(linkP));
   check("(precondition) the clear reports NO referencing co-occupant (isolates the content-kept clause)", !(clear.stillBlockedCoOccupants?.length > 0));
+  check("(precondition) the clear reports NO referencingRepoPaths (anyReferencing is false)", !(clear.referencingRepoPaths?.length > 0));
+  check("(precondition) the clear reports NO unattributed kept latch (anyKeptUnattributed is false)", !clear.unattributed);
   check("(precondition) X reads fully unblocked right after the clear", rb1.stillBlockedEntryFor(repoX) === undefined);
   check("(precondition) A is untouched", rb1.stillBlockedEntryFor(repoA)?.tokens.includes(tA) === true);
   check("(precondition, by content) the orphan survives on disk holding tX", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, orphanBasename)) && (readTokensOnDisk(orphanBasename) ?? []).includes(tX));
 
   // P now resolves to X: a directory link (junction on Windows) inside A's tree pointing at X.
   fs.symlinkSync(repoX, linkP, "junction");
+  undo.push(() => fs.rmSync(linkP, { force: true, recursive: false })); // remove the LINK, never recurse into repoX
 
   const rb2 = await rebootSim();
   rb2.reenterMergeQuarantinesAtBoot([repoA, repoX]);
@@ -106,9 +110,8 @@ async function rebootSim() { bootCounter++; return await import(`${mergeQuaranti
   check("*** PINS the content-kept clause of clearMergeQuarantineByKey's tombstone gate *** after a reboot the surviving orphan's entry still holds tX (no durable tombstone was written for a content-kept clear)",
     booted.some((e) => e.tokens.includes(tX)));
   check("(post-reboot) X's repo reads blocked via the surviving orphan's content", rb2.stillBlockedEntryFor(repoX)?.tokens.includes(tX) === true);
-
-  try { fs.rmSync(linkP, { force: true, recursive: false }); } catch { /* junction removal best-effort */ }
-  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, orphanBasename), { force: true });
+} finally {
+  for (const fn of undo.reverse()) { try { fn(); } catch (e) { console.error(`[cleanup] ${e.message}`); } }
 }
 
 console.log(failures === 0 ? "\n✅ ALL CHECKS PASS" : `\n❌ ${failures} CHECK(S) FAILED.`);

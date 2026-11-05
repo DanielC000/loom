@@ -33,7 +33,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
-import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { useOwnLoomHome, mkdtempManaged } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
 
 const loomHome = useOwnLoomHome("loom-mqd2592cd5-");
@@ -54,8 +54,7 @@ const GIT_ID_D2592CD5 = "-c user.email=mqd2592cd5@loom -c user.name=mqd2592cd5";
 // a raise ARMS directly into `activeQuarantines` (hits `clearActiveEntryTokenAtKey`/`clearMergeQuarantineByKey`
 // on a clear) rather than staying pending-only.
 function makeResolvableRepo(tag) {
-  const repo = path.join(os.tmpdir(), `loom-mqd2592cd5-${tag}-${freshSfx()}`);
-  fs.mkdirSync(repo, { recursive: true });
+  const repo = mkdtempManaged(`loom-mqd2592cd5-${tag}-`); // registered for guaranteed cleanup at creation
   fs.writeFileSync(path.join(repo, "README.md"), `# ${tag}\n`);
   execFileSync("git", ["init", "-q"], { cwd: repo });
   execFileSync("git", ["config", "user.email", "mqd2592cd5@loom"], { cwd: repo });
@@ -756,7 +755,11 @@ async function rebootSim() {
 
   const sidecarPathM5 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
   const sidecarM5 = JSON.parse(fs.readFileSync(sidecarPathM5, "utf8"));
-  check("*** KILLS MUTANT 3 (clearMergeQuarantineByKey content-kept term), FINAL — never overridden by any backstop at this identity-wide route *** the sidecar never durably tombstones t1 while a foreign orphan was content-kept", sidecarM5[t1] === undefined);
+  // Gated by `anyReferencing` ALONE (measured: green with the `keptContentRepoPaths.size === 0` term dropped,
+  // red with `!anyReferencing` dropped). The foreign repo is a plain resolvable repo, so the kept orphan is
+  // classed REFERENCING here, not content-kept. The content-kept term's real pin is
+  // merge-quarantine-c53790a5-content-kept-tombstone-gate.mjs.
+  check("*** KILLS MUTANT (clearMergeQuarantineByKey `!anyReferencing` term), FINAL — never overridden by any backstop at this identity-wide route *** the sidecar never durably tombstones t1 while a foreign orphan was kept (referencing); NOT the content-kept pin, see merge-quarantine-c53790a5-content-kept-tombstone-gate.mjs", sidecarM5[t1] === undefined);
 
   fs.rmSync(path.join(MERGE_QUARANTINE_DIR, orphanBasenameM5), { force: true });
 }
