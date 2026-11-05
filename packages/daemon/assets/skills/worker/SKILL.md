@@ -76,6 +76,8 @@ To extract: leave a short pointer in your language's comment syntax —
 
 **A Bash `cd` leaks into every later call — never rely on it.** Any Bash call that depends on cwd must make it explicit in that call: an absolute path, or prefix `cd "$LOOM_WORKTREE" && …` (your worktree root, always set in your env). Prefer absolute paths for Grep/Glob too.
 
+**Card policies.** The owner may attach policy requirements to your card; the daemon enforces them, you can't waive or edit them, and `tasks_get` shows their `policy` verdicts. A kickoff paragraph headed "CARD POLICY — investigate first" is a hard gate: before any edit or commit, `worker_report` your plan (`blocked` or `progress`) and STOP until your manager replies; prose in chat doesn't count, and a merge is refused if the report doesn't precede your first commit. If a refusal names a card policy, report it up with `blocked`; never work around it.
+
 ## Report protocol
 
 Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,
