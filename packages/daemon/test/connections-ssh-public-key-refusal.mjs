@@ -74,7 +74,11 @@ const kdfKey = opensshArmor(Buffer.concat([MAGIC, sshStr("aes256-ctr"), sshStr(K
 const dekKey = `-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: ${DEK_MARKER},00112233445566778899AABBCCDDEEFF\n\n${Buffer.alloc(48, 7).toString("base64")}\n-----END RSA PRIVATE KEY-----`;
 const pubTypeKey = `ssh-${PUBTYPE_MARKER} ${Buffer.concat([sshStr(`ssh-${PUBTYPE_MARKER}`), sshStr("x")]).toString("base64")}`;
 const GENERIC = "invalid private key: could not read this private key";
+// Card 13c6a9e2: a keyCount=0 OpenSSH envelope makes ssh2.parseKey return `undefined` (not an Error) -> was a TypeError / REST 500.
+const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+const keyCountZeroKey = opensshArmor(Buffer.concat([MAGIC, sshStr("none"), sshStr("none"), sshStr(""), u32(0), pad]));
 const OTHER_ROWS = [
+  ["ssh2 keyCount=0 envelope (parseKey -> undefined)", keyCountZeroKey, GENERIC, null],
   ["ssh2 cipher-name echo (:484)", cipherKey, GENERIC, CIPHER_MARKER],
   ["ssh2 kdf-name echo (:493)", kdfKey, GENERIC, KDF_MARKER],
   ["ssh2 PEM DEK-Info cipher echo (:831)", dekKey, GENERIC, DEK_MARKER],
@@ -134,8 +138,40 @@ try {
 
   check("no refused submission wrote a row", db.listConnections().length === countAfterControl);
 
+  // Card 13c6a9e2 (control): the keyCount=0 fixture really does make ssh2 return a non-Error, non-object value.
+  const rawKc0 = sshUtils.parseKey(keyCountZeroKey);
+  check("(positive control) ssh2.parseKey(keyCount=0 envelope) is neither an Error nor an object", !(rawKc0 instanceof Error) && (rawKc0 === undefined || typeof rawKc0 !== "object"));
+
+  // Item 2: selfVerifyKeyMaterial returns FIXED reasons; library error text is never forwarded.
+  const { selfVerifyKeyMaterial, SSH2_FIXED_PARSE_ERRORS } = await import("../dist/connections/sshKey.js");
+  const SIGN_LEAK = "LEAKSIGNOPENSSLTEXT", VERIFY_LEAK = "LEAKVERIFYOPENSSLTEXT";
+  const signErr = selfVerifyKeyMaterial({ verify: () => true }, { sign: () => new Error(SIGN_LEAK) });
+  const verifyErr = selfVerifyKeyMaterial({ verify: () => new Error(VERIFY_LEAK) }, { sign: () => Buffer.from("sig") });
+  const mismatch = selfVerifyKeyMaterial({ verify: () => false }, { sign: () => Buffer.from("sig") });
+  check("selfVerify: sign Error -> non-empty fixed reason", typeof signErr === "string" && signErr.length > 0);
+  check("selfVerify: sign Error text is NOT forwarded", !signErr.includes(SIGN_LEAK));
+  check("selfVerify: verify Error -> non-empty fixed reason", typeof verifyErr === "string" && verifyErr.length > 0);
+  check("selfVerify: verify Error text is NOT forwarded", !verifyErr.includes(VERIFY_LEAK));
+  check("selfVerify: mismatch reason still returned", typeof mismatch === "string" && mismatch.length > 0);
+  check("selfVerify: matching keys -> null", selfVerifyKeyMaterial({ verify: () => true }, { sign: () => Buffer.from("sig") }) === null);
+
+  // Item 3: the allowlist must survive an ssh2 bump. Chosen over a bare version pin because it keeps passing across a
+  // no-change bump and fails only when a message we forward is actually reworded or removed. Scope: literal PRESENCE
+  // in keyParser.js (not that it is still emitted on the same path); the one message ssh2 builds by concatenation is
+  // checked as its two literal halves.
+  const nodeRequire = (await import("node:module")).createRequire(import.meta.url);
+  const keyParserSrc = fs.readFileSync(nodeRequire.resolve("ssh2/lib/protocol/keyParser.js"), "utf8");
+  const literalPresent = (src, s) => src.includes(`'${s}'`) || src.includes(`"${s}"`);
+  const COMPOSED = new Map([["Malformed OpenSSH private key. Bad passphrase?", ["Malformed OpenSSH private key", ". Bad passphrase?"]]]);
+  check("allowlist guard: the allowlist is non-empty (not vacuous)", SSH2_FIXED_PARSE_ERRORS.size >= 10);
+  check("allowlist guard: (negative control) a bogus entry is reported absent", !literalPresent(keyParserSrc, "No such ssh2 message zzz"));
+  for (const entry of SSH2_FIXED_PARSE_ERRORS) {
+    const parts = COMPOSED.get(entry) ?? [entry];
+    check(`allowlist guard: ssh2 keyParser.js still carries literal(s) for "${entry}"`, parts.every((p) => literalPresent(keyParserSrc, p)));
+  }
+
   // Positive control (marker mechanism): each planted marker really IS in the submitted text.
-  for (const [label, key, , marker] of OTHER_ROWS.slice(0, 4)) check(`(positive control) marker is in the submitted text (raw or base64-decoded): ${label}`, key.includes(marker) || Buffer.from(key.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""), "base64").includes(marker));
+  for (const [label, key, , marker] of OTHER_ROWS.slice(1, 5)) check(`(positive control) marker is in the submitted text (raw or base64-decoded): ${label}`, key.includes(marker) || Buffer.from(key.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""), "base64").includes(marker));
   // Every allowlisted message still passes through: encrypted key with no / a wrong passphrase.
   const encKp = genKey("ed25519", { passphrase: "pp-for-allowlist-control", cipher: "aes256-ctr" });
   check("allowlist: encrypted key, no passphrase -> ssh2's fixed 'no passphrase given' text still forwarded", /no passphrase given/.test(stripSshKeyPassphrase(encKp.private, undefined).error ?? ""));

@@ -40,7 +40,7 @@ function sshUint32(n: number): Buffer {
  * ssh2@1.17.0's `lib/protocol/keyParser.js`, line numbers below) are forwarded; ANY other message — including
  * a wording a future ssh2 adds — collapses to one generic fallback. Re-audit the list on an ssh2 bump.
  */
-const SSH2_FIXED_PARSE_ERRORS: ReadonlySet<string> = new Set([
+export const SSH2_FIXED_PARSE_ERRORS: ReadonlySet<string> = new Set([
   "Malformed OpenSSH private key", // :475 etc.
   "Malformed OpenSSH private key. Bad passphrase?", // :887-889 (errMsg + ". Bad passphrase?")
   "Encrypted private OpenSSH key detected, but no passphrase given", // :495
@@ -127,6 +127,9 @@ export function stripSshKeyPassphrase(privateKey: unknown, passphrase: unknown):
   // A private-key armor anywhere wins (a valid private key with a public block appended is still a private key).
   if (!PEM_PRIVATE_KEY_ARMOR_RE.test(privateKey) && PEM_PUBLIC_KEY_ARMOR_RE.test(privateKey)) return { ok: false, error: PUBLIC_KEY_REFUSAL };
   const parsed = sshUtils.parseKey(privateKey, passphrase || undefined);
+  // A keyCount=0 OpenSSH envelope makes ssh2 return `undefined` (not an Error), so a non-object result is the
+  // same generic parse failure rather than a TypeError on the next line.
+  if (!parsed || typeof parsed !== "object") return { ok: false, error: `invalid private key: ${GENERIC_PARSE_ERROR}` };
   if (parsed instanceof Error) {
     // ssh2's own message distinguishes "encrypted, no passphrase given" from "bad passphrase" from
     // "unsupported key format" — but a handful of its messages interpolate raw submission bytes (see
@@ -178,17 +181,18 @@ function finishStrip(parsed: ParsedKey, candidatePem: string): StripPassphraseRe
  * record's "self-verify" section for why a `getPublicSSH()`-bytes compare alone is not enough. Returns
  * an error string on any failure, or null when the two keys are proven to be the same key.
  */
-function selfVerifyKeyMaterial(original: ParsedKey, candidate: ParsedKey): string | null {
+export function selfVerifyKeyMaterial(original: ParsedKey, candidate: ParsedKey): string | null {
   const nonce = randomBytes(32);
+  // Reasons are FIXED text: the library/OpenSSL error message is never forwarded (it reaches a REST 400).
   const signature = candidate.sign(nonce);
   if (signature instanceof Error) {
-    return `failed to self-verify this key (sign failed: ${signature.message})`;
+    return "failed to self-verify this key (sign step failed)";
   }
   // @types/ssh2 types verify() as always returning `boolean`, but the real runtime (ssh2's own
   // keyParser.js BaseKey.verify) can return an Error — cast to the true runtime contract before narrowing.
   const verified = original.verify(nonce, signature) as boolean | Error;
   if (verified instanceof Error) {
-    return `failed to self-verify this key (verify failed: ${verified.message})`;
+    return "failed to self-verify this key (verify step failed)";
   }
   if (verified !== true) {
     return "failed to self-verify this key (signature did not verify against the original key)";
