@@ -10352,7 +10352,7 @@ export class SessionService {
         // own kickoff text (which typically carries the task description — the richest match source of any
         // spawn path); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so this
         // worker's FIRST resume compares against what this fresh spawn just showed it.
-        workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt);
+        workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt, { taskTitle });
         // Card e1864a31: stamped from the pinned POOL, not workerProjectMemoryFramed.
         this.stampProjectMemoryDigest(worker.id, this.db.listPinnedProjectMemory(project.id));
         // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the

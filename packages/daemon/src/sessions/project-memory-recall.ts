@@ -173,10 +173,47 @@ function versionStamp(m: ProjectMemoryEntry): string {
 /** `annotations` (card e6d270b3) — one live-resolved line per linked Request id, appended AFTER the note's
  *  own body so a stale decided/pending claim in `text` is immediately followed by the current truth. `[]`
  *  (a note that links nothing, or no `annotate` callback supplied) ⇒ byte-identical to before this card. */
-function noteBlock(m: ProjectMemoryEntry, annotations: string[] = []): string {
+function noteBlock(m: ProjectMemoryEntry, annotations: string[] = [], full = false): string {
   const title = sanitizeTitle(m.title) || m.key;
-  const lines = [`### ${title} (${m.key}) [${versionStamp(m)}]`, m.text.trim(), ...annotations];
+  const body = full || isNeverDrop(m) ? m.text.trim() : leadOrWhole(m.text.trim(), m.key);
+  const lines = [`### ${title} (${m.key}) [${versionStamp(m)}]`, body, ...annotations];
   return lines.join("\n");
+}
+
+/** Card 7c74acd8 (B) — a non-floor note whose text is longer than this renders as its LEAD plus a
+ *  `memory_read` pointer instead of in full. Measured on a 730-note export of this project's store
+ *  (2026-11-05): unpinned notes have p25 2518 / median 3140 / p90 3877 chars (cap ~4000), so 643 of 721
+ *  exceed 2000 and 698 exceed 1500, while the 8 floor notes sit at ~1900. 1500 leaves a note that is
+ *  already short (a one-fact note) whole and truncates essentially every long-form note. */
+export const DIGEST_NOTE_TRUNCATE_OVER_CHARS = 1500;
+// @decision 7c74acd8 — never truncate a never-drop note or one the kickoff cited by key; never edit stored notes.
+/** The lead is whole paragraphs from the start until it reaches this many chars (so a one-line
+ *  provenance paragraph is followed by the note's first rule/section, not left alone)... */
+export const DIGEST_NOTE_LEAD_TARGET_CHARS = 500;
+/** ...and is hard-cut at this many chars (on a line boundary when one exists past half the cap). */
+export const DIGEST_NOTE_LEAD_MAX_CHARS = 900;
+
+/** The lead of `text` (see the constants above), or `text` itself when it is not over the threshold or
+ *  the lead would not actually be shorter. A truncated lead ends with a pointer naming the key and the
+ *  omitted size, so the reader can tell a cut note from a complete one and knows how to get the rest. */
+export function leadOrWhole(text: string, key: string): string {
+  if (text.length <= DIGEST_NOTE_TRUNCATE_OVER_CHARS) return text;
+  let lead = "";
+  for (const para of text.split(/\r?\n[ \t]*\r?\n/)) {
+    lead = lead ? `${lead}\n\n${para}` : para;
+    if (lead.length >= DIGEST_NOTE_LEAD_TARGET_CHARS) break;
+  }
+  if (lead.length > DIGEST_NOTE_LEAD_MAX_CHARS) {
+    let end = DIGEST_NOTE_LEAD_MAX_CHARS;
+    const last = lead.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1; // never split a surrogate pair at the hard cut
+    const cut = lead.slice(0, end);
+    const nl = cut.lastIndexOf("\n");
+    lead = (nl > DIGEST_NOTE_LEAD_MAX_CHARS / 2 ? cut.slice(0, nl) : cut).trimEnd();
+  }
+  if (lead.length >= text.length) return text;
+  if ((lead.match(/```/g) ?? []).length % 2 === 1) lead += "\n```"; // never leave a code fence open
+  return `${lead}\n[… ${text.length - lead.length} more chars omitted — \`memory_read\` ${key} for the full note]`;
 }
 
 function isNeverDrop(m: ProjectMemoryEntry): boolean {
@@ -266,7 +303,7 @@ function packCitedRestPrefix(
   const blocks: string[] = [];
   const includedIds: string[] = [];
   for (const m of citedRest.slice(0, CITED_REST_RESERVE_MAX_COUNT)) {
-    const block = noteBlock(m, annotate(m));
+    const block = noteBlock(m, annotate(m), true); // a note the kickoff cited by key always renders in full
     const candidate = [...blocks, block].join(SECTION_SEP);
     if (estimateTokens(candidate) > capTokens) break;
     blocks.push(block);
@@ -326,12 +363,14 @@ function packRelatedPrefix(
   related: ProjectMemoryEntry[],
   capTokens: number,
   annotate: (m: ProjectMemoryEntry) => string[],
+  kickoffText = "",
+  forceFull = false,
 ): { section: string | null; includedIds: string[]; droppedFrom: number } {
   const blocks: string[] = [];
   let section: string | null = null;
   const includedIds: string[] = [];
   for (const [i, m] of related.entries()) {
-    const block = noteBlock(m, annotate(m));
+    const block = noteBlock(m, annotate(m), forceFull || isKeyCitedInText(kickoffText, m.key));
     const candidate = ["## Related project memory (matched your kickoff)", ...blocks, block].join(SECTION_SEP);
     if (estimateTokens(candidate) > capTokens) {
       return { section, includedIds, droppedFrom: i };
@@ -447,6 +486,10 @@ export function composeProjectMemoryDigest(
    *  match anything, so neither the warning nor the reorder ever fires) so every pre-existing call site,
    *  incl. every hermetic fixture test with no notion of "kickoff text," stays byte-identical. */
   kickoffText = "",
+  /** Card 7c74acd8 — `truncateLongNotes: false` renders every note in full (the pre-card sizing). Production
+   *  never passes it; budget-arithmetic tests that size fixtures by raw note bytes do, so they keep testing
+   *  the packer, not the lead-truncation. */
+  renderOpts: { truncateLongNotes?: boolean } = {},
 ): {
   digest: string | null;
   includedIds: string[];
@@ -462,6 +505,7 @@ export function composeProjectMemoryDigest(
     return { digest: null, includedIds: [], droppedFloorKeys: [], droppedRestKeys: [], droppedRelatedKeys: [] };
   }
   const includedIds: string[] = [];
+  const forceFull = renderOpts.truncateLongNotes === false;
 
   const floorSorted = sortPinnedByRecency(pinned.filter(isNeverDrop));
   const restSorted = sortPinnedByRecency(pinned.filter((m) => !isNeverDrop(m)));
@@ -472,7 +516,7 @@ export function composeProjectMemoryDigest(
   // legitimate case, see retrieveProjectMemoryForKickoff) or one smaller than the reserve reduces restCap
   // by ZERO extra, never walling off space nothing occupies.
   const reserveTokens = Math.floor(budgetTokens * RELATED_RESERVE_FRACTION);
-  const relatedProbe = packRelatedPrefix(related, reserveTokens, annotate);
+  const relatedProbe = packRelatedPrefix(related, reserveTokens, annotate, kickoffText, forceFull);
   const relatedNeed = relatedProbe.section ? estimateTokens(relatedProbe.section) : 0;
 
   let pinnedSection: string | null = null;
@@ -513,7 +557,7 @@ export function composeProjectMemoryDigest(
     // in this loop; captured here rather than re-calling `noteBlock`/`annotate` a second time.
     const floorBlocks: string[] = [];
     for (const m of pinnedOrdered) {
-      const block = noteBlock(m, annotate(m));
+      const block = noteBlock(m, annotate(m), forceFull || isKeyCitedInText(kickoffText, m.key));
       if (isNeverDrop(m)) floorBlocks.push(block);
       const candidate = ["## Pinned project memory (always included)", ...blocks, block].join(SECTION_SEP);
       const cap = isNeverDrop(m) ? budgetTokens : restCap;
@@ -595,7 +639,7 @@ export function composeProjectMemoryDigest(
   let droppedRelatedKeys: string[] = [];
   {
     const remaining = budgetTokens - usedTokens - (pinnedSection ? estimateTokens(SECTION_SEP) : 0);
-    const finalPack = packRelatedPrefix(related, remaining, annotate);
+    const finalPack = packRelatedPrefix(related, remaining, annotate, kickoffText, forceFull);
     relatedSection = finalPack.section;
     includedIds.push(...finalPack.includedIds);
     const droppedRelatedEntries = related.slice(finalPack.droppedFrom);
@@ -758,7 +802,85 @@ export function partitionPinnedForKickoff(
  * full inclusion, so its daemon log stays a routine console.warn, matching pinned-REST, not the
  * NEVER_DROP_TAG alarm.
  */
-export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kickoffText: string): string | null {
+/** Card 7c74acd8 (C) — common English words that carry no topic. The RELATED tier ORs its query tokens, so
+ *  every one of these ("the", "not", "and") matched nearly every note and, because the tokenizer keeps only
+ *  the FIRST 32 tokens, also spent the query's whole 32-token cap on filler. */
+const RECALL_STOPWORDS = new Set((
+  "the and for not but are was were with that this these those from into onto than then them they their " +
+  "there here have has had its our out all any can could should would will shall may might must does did " +
+  "you your yours who whom what when where which while about after before over under again also just only " +
+  "very more most some such each both other own same too per via etc how why use used using get got let " +
+  "one two see make made need needs now yet nor off task card"
+).split(/\s+/));
+
+/** Where a recall query's text came from — logged (no content) so a reader can tell the narrow path from
+ *  the fallback. `title+task-section`: spawn-supplied task title plus the kickoff's TASK section;
+ *  `task-section`: no title but a TASK section was found; `title+kickoff`: title plus the whole kickoff
+ *  (no TASK section found); `kickoff`: the whole kickoff text, today's behaviour. */
+export type RecallQuerySource = "title+task-section" | "task-section" | "title+kickoff" | "kickoff";
+
+/** The kickoff's task-specific section: from a line starting `TASK:` (optionally a markdown heading) to the
+ *  first following line that opens a standing-constraints block. `null` when there is no `TASK:` line. A
+ *  manager's kickoff typically ends with a verbatim standing-constraints block that names gates, guards,
+ *  pushes and lanes on EVERY task; it describes the fleet's rules, not this task's subject. */
+export function extractTaskSection(kickoffText: string): string | null {
+  const start = /^[ \t]*(?:#{1,6}[ \t]+)?\**TASK\**[ \t]*:/im.exec(kickoffText);
+  if (!start) return null;
+  const rest = kickoffText.slice(start.index);
+  // The stop is the real standing-constraints marker — a line starting `STANDING…`, or `CONSTRAINT(S)` followed
+  // by `:` / `(verbatim)` — never any line that merely begins with the word ("- constraint-free layout").
+  const stop = /\r?\n[ \t#>*⛔⚠️️-]*(?:STANDING\b|CONSTRAINTS?[ \t]*(?::|\(verbatim\)))/i.exec(rest.slice(1));
+  const section = stop ? rest.slice(0, stop.index + 1) : rest;
+  // A section with fewer than TASK_SECTION_MIN_CONTENT_TOKENS content words (a bare `TASK:` header whose body
+  // is the constraints block) carries no topic: fall back to the whole kickoff (null) rather than query on it.
+  return countContentTokens(section) >= TASK_SECTION_MIN_CONTENT_TOKENS ? section : null;
+}
+
+/** 3: a real task line ("fix X in Y") has at least three topic words; one or two is a label or header stub.
+ *  Low enough that a terse one-line task still narrows, high enough that `TASK:` alone cannot. */
+const TASK_SECTION_MIN_CONTENT_TOKENS = 3;
+function countContentTokens(s: string): number {
+  const seen = new Set<string>();
+  for (const t of s.match(/[\p{L}\p{N}_]+/gu) ?? []) {
+    const w = t.toLowerCase();
+    if (w.length >= 3 && !RECALL_STOPWORDS.has(w)) seen.add(w);
+  }
+  return seen.size;
+}
+
+/** Card 7c74acd8 (C) — builds the text the RELATED tier's FTS query is made from. Pure. Up to
+ *  {@link RECALL_QUERY_MAX_TOKENS} distinct content words (stopwords dropped BEFORE the cap), task title
+ *  first, then the TASK section (or, failing that, the whole kickoff). The result is passed to
+ *  `db.searchProjectMemory` unchanged; it only decides what text that tokenizer sees, so the shared
+ *  tokenizer (also used by near-duplicate detection) is untouched. Fail-safe: no title and no TASK
+ *  section ⇒ the whole kickoff, filtered the same way. All-stopword/empty ⇒ `""` ⇒ no related tier. */
+export const RECALL_QUERY_MAX_TOKENS = 32;
+// @decision 7c74acd8 — never put the stopword filter in the shared tokenizer (near-duplicate coverage uses it).
+export function buildRecallQuery(kickoffText: string, taskTitle?: string | null): { query: string; source: RecallQuerySource } {
+  const title = taskTitle?.trim() ?? "";
+  const section = extractTaskSection(kickoffText);
+  const body = section ?? kickoffText;
+  const source: RecallQuerySource = title
+    ? (section ? "title+task-section" : "title+kickoff")
+    : (section ? "task-section" : "kickoff");
+  const seen = new Set<string>();
+  for (const t of `${title}\n${body}`.match(/[\p{L}\p{N}_]+/gu) ?? []) {
+    const w = t.toLowerCase();
+    if (w.length < 3 || RECALL_STOPWORDS.has(w) || seen.has(w)) continue;
+    seen.add(w);
+    if (seen.size >= RECALL_QUERY_MAX_TOKENS) break;
+  }
+  return { query: [...seen].join(" "), source };
+}
+
+export function retrieveProjectMemoryForKickoff(
+  db: Db,
+  projectId: string,
+  kickoffText: string,
+  /** The bound card's title for a tasked spawn; `null`/absent (taskless, review, resume, recycle) ⇒ the
+   *  query is built from the kickoff alone. */
+  opts: { taskTitle?: string | null } = {},
+): string | null {
   const project = db.getProject(projectId);
   if (!project) return null;
   const memoryConfig = resolveConfig(project.config).memory;
@@ -769,7 +891,10 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   // existing note with no triggerGlob is untouched by this partition (always lands in `pinned`), so this
   // is additive over the pre-this-card behavior.
   const { forDigest: pinned } = partitionPinnedForKickoff(allPinned, kickoffText);
-  const relatedRaw = kickoffText.trim() ? db.searchProjectMemory(projectId, kickoffText, memoryConfig.topK) : [];
+  const recallQuery = kickoffText.trim() ? buildRecallQuery(kickoffText, opts.taskTitle) : null;
+  const relatedRaw = recallQuery ? db.searchProjectMemory(projectId, recallQuery.query, memoryConfig.topK) : [];
+  // Which source built the query — a label only, never any text from the kickoff or the notes.
+  if (recallQuery) console.log(`[project-memory] project ${projectId}: related-tier query source=${recallQuery.source} matched=${relatedRaw.length}`);
   // A trigger-gated note whose predicate just fired is already included via `pinned` above — exclude it
   // here so a note that ALSO happens to FTS-match its own kickoff text is never injected twice. A
   // gated-OUT note that FTS-matches is exactly the intended "competes on relevance instead" path and

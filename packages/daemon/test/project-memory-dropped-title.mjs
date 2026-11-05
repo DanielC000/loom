@@ -23,8 +23,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const { composeProjectMemoryDigest, estimateTokens, NEVER_DROP_TAG } =
+const { composeProjectMemoryDigest: composeReal, estimateTokens, NEVER_DROP_TAG } =
   await import("../dist/sessions/project-memory-recall.js");
+// Card 7c74acd8: this test sizes fixtures by raw note bytes, so it pins the pre-truncation (full-note) rendering.
+const composeProjectMemoryDigest = (p, r, b, a, k) => composeReal(p, r, b, a, k, { truncateLongNotes: false });
 
 const mkEntry = (key, textBytes, title, overrides = {}) => ({
   id: `id-${key}`,
