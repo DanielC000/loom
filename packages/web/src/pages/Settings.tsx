@@ -43,6 +43,7 @@ import { useAllAgentLabels, useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import { CardPoliciesEditor } from "../components/cardPolicies";
+import { TasklessGuardedPathsEditor } from "../components/tasklessGuardedPaths";
 import {
   CodexDefaultConfirm, HarnessDrainBanner, fleetScopeAvailable, FLEET_SCOPE_DISABLED_REASON,
   rolesAffected, switchesToCodex, type DefaultValue, type ScopeValue,
@@ -1189,6 +1190,12 @@ function ConfigEditor({ project }: { project: Project }) {
         <SectionLabel>Card policies</SectionLabel>
         {/* Its OWN save too (orchestration.cardPolicies through the config PATCH) — the form below never models it. */}
         <CardPoliciesEditor project={project} />
+      </Panel>
+
+      <Panel data-testid="taskless-guarded-paths-panel">
+        <SectionLabel>Taskless guarded paths</SectionLabel>
+        {/* Its OWN save (orchestration.tasklessGuardedPaths through the config PATCH), like card policies above. */}
+        <TasklessGuardedPathsEditor project={project} />
       </Panel>
 
       <Panel>
