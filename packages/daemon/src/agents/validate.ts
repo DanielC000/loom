@@ -1,4 +1,5 @@
 import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
+import { capabilityGrantBindingError, agentCapabilitiesCodexProfileError, type CapabilityGrantBindingDbStore } from "../profiles/validate.js";
 
 /**
  * Shared validator + PATCH normalizer for an agent-preset edit — the body of the human REST
@@ -167,4 +168,30 @@ export function agentCredentialGrantCrossProjectError(
     }
   }
   return null;
+}
+
+/** The narrow db surface {@link agentCredentialGrantWriteError} reads. */
+export interface AgentCredentialGrantWriteDbStore extends CapabilityGrantBindingDbStore {
+  getProfile(id: string): { harness?: string | null } | undefined;
+}
+
+/**
+ * The ONE write-time refusal block for an agent-level credential grant, shared by both agent grant routes.
+ * Only meaningful when the patch carries `connections` and/or `capabilities` (callers gate on that).
+ *
+ * @decision b1df40f2 — never fork this per route: the whole-list and add-one paths must refuse identically.
+ */
+export function agentCredentialGrantWriteError(
+  db: AgentCredentialGrantWriteDbStore,
+  existing: { projectId: string; profileId: string | null; capabilities?: readonly { slug: string; connectionId?: string }[] | null },
+  patch: AgentPatch,
+  getConnectionProjectId: (id: string) => string | null | undefined,
+): string | null {
+  const scopeErr = agentCredentialGrantCrossProjectError(patch, existing.projectId, getConnectionProjectId);
+  if (scopeErr) return scopeErr;
+  const bindingError = capabilityGrantBindingError(patch.capabilities ?? [], db);
+  if (bindingError) return bindingError;
+  const effectiveProfileId = "profileId" in patch ? patch.profileId : existing.profileId;
+  const effectiveProfile = effectiveProfileId != null ? db.getProfile(effectiveProfileId) : undefined;
+  return agentCapabilitiesCodexProfileError(patch.capabilities ?? existing.capabilities, effectiveProfile?.harness);
 }

@@ -92,11 +92,11 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
 import { releasedSkillsAt, releasedSkillDiffSummary, releasedSkillDiffFile, reAdoptReleasedSkill } from "../skills/inject.js";
 import { permissionWideningField } from "../skills/permissionWidening.js";
-import { validateProfile, capabilityGrantBindingError, agentCapabilitiesCodexProfileError, boundAgentCapabilitiesCodexFlipError } from "../profiles/validate.js";
+import { validateProfile, agentCapabilitiesCodexProfileError, boundAgentCapabilitiesCodexFlipError } from "../profiles/validate.js";
 import { codexProviderBindingError } from "../profiles/codex-provider.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
-import { validateAgentPatch, agentCredentialGrantCrossProjectError } from "../agents/validate.js";
+import { validateAgentPatch, agentCredentialGrantWriteError } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
@@ -5927,18 +5927,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!v.ok) return reply.code(v.kind === "notFound" ? 404 : 400).send({ error: v.error });
     // Card caca806c: write-time refusal for a credential grant this agent's own project can't reach
     // (mirrors connections/store.ts's isConnectionUsableByProject), plus the oauth2-can't-statically-
-    // inject guard (capabilityGrantBindingError, same function the profile write path already uses).
+    // inject guard (capabilityGrantBindingError, same function the profile write path already uses; both
+    // now live behind agentCredentialGrantWriteError).
     if ("connections" in v.patch || "capabilities" in v.patch) {
-      const scopeErr = agentCredentialGrantCrossProjectError(v.patch, existing.projectId, (id) => getConnectionMetadata(deps.db, id)?.projectId);
-      if (scopeErr) return reply.code(400).send({ error: scopeErr });
-      const bindingError = capabilityGrantBindingError(v.patch.capabilities ?? [], deps.db);
-      if (bindingError) return reply.code(400).send({ error: bindingError });
-      // Card afe1bc90 R4: an agent bound (post-patch) to a codex-harness profile cannot carry stdio
-      // capabilities — codex mounts nothing for them, so the grant would silently do nothing.
-      const effectiveProfileId = "profileId" in v.patch ? v.patch.profileId : existing.profileId;
-      const effectiveProfile = effectiveProfileId != null ? deps.db.getProfile(effectiveProfileId) : null;
-      const codexErr = agentCapabilitiesCodexProfileError(v.patch.capabilities ?? existing.capabilities, effectiveProfile?.harness);
-      if (codexErr) return reply.code(400).send({ error: codexErr });
+      // Shared with the add-one route below (decision b1df40f2): scope + oauth2-binding + codex checks.
+      const grantErr = agentCredentialGrantWriteError(deps.db, existing, v.patch, (id) => getConnectionMetadata(deps.db, id)?.projectId);
+      if (grantErr) return reply.code(400).send({ error: grantErr });
     } else if ("profileId" in v.patch && v.patch.profileId != null) {
       // Rebinding onto a codex profile while the agent already carries capabilities (R4, rebind leg).
       const codexErr = agentCapabilitiesCodexProfileError(existing.capabilities, deps.db.getProfile(v.patch.profileId)?.harness);
@@ -5974,6 +5968,31 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       ...(connectionsFreshSpawnNote ? { connectionsFreshSpawnNote } : {}),
     };
     return rebindReach ? { ...withWarning, rebindReach } : withWarning;
+  });
+
+  // Atomically ADD ONE connection id to an agent's grant list (decision b1df40f2). HUMAN-only loopback REST,
+  // INTENTIONALLY NO MCP path (same trust posture as POST /api/agents/:id above). Exists because the whole-list
+  // route replaces `connections`, so a read-then-write client can silently revoke a grant landed in between.
+  app.post("/api/agents/:id/connections", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const existing = deps.db.getAgent(id);
+    if (!existing) return reply.code(404).send({ error: "agent not found" });
+    const connectionId = (req.body as { connectionId?: unknown } | null)?.connectionId;
+    if (typeof connectionId !== "string" || connectionId === "") return reply.code(400).send({ error: "connectionId must be a non-empty string" });
+    // Asymmetry with the whole-list route (which tolerates unknown ids): the ONE new id must exist.
+    if (!getConnectionMetadata(deps.db, connectionId)) return reply.code(404).send({ error: "connection not found" });
+    // Same validator as the whole-list route, fed the post-add list (nothing here may bypass it).
+    const grantErr = agentCredentialGrantWriteError(deps.db, existing, { connections: [...(existing.connections ?? []), connectionId] }, (cid) => getConnectionMetadata(deps.db, cid)?.projectId);
+    if (grantErr) return reply.code(400).send({ error: grantErr });
+    // No await between the checks above and this synchronous read-modify-write transaction.
+    const res = deps.db.addAgentConnection(id, connectionId);
+    if (!res) return reply.code(404).send({ error: "agent not found" });
+    deps.db.markBindingsAppliedForAgent(id, [connectionId]);
+    return {
+      ...deps.db.getAgent(id),
+      added: res.added,
+      ...(res.added ? { connectionsFreshSpawnNote: "This grant reaches only a session spawned FRESH after this save — a session that is merely resumed or recycled keeps whatever connections it already had." } : {}),
+    };
   });
 
   // --- Agent Runs R1: project-scoped API keys (HUMAN-only, loopback REST — a TRUST-BOUNDARY surface

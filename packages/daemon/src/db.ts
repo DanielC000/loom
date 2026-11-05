@@ -6488,6 +6488,25 @@ export class Db {
     this.db.prepare(`UPDATE agents SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
   }
   /**
+   * Atomically ADD ONE connection id to an agent's `connections` grant list (human-only REST add-one).
+   * ONE SQL statement: there is no read-then-write gap for another writer to land in, so a concurrent
+   * whole-list `updateAgent` is never silently reverted by this call. Idempotent: an id already present
+   * writes nothing (`added:false`). A corrupt/non-array column reads as `[]` (same as `toAgent`).
+   * Returns undefined when the agent does not exist.
+   *
+   * @decision b1df40f2 — never split this into a JS read of the list followed by a write of the list.
+   */
+  addAgentConnection(agentId: string, connectionId: string): { added: boolean; connections: string[] } | undefined {
+    const isArray = "json_valid(connections) AND json_type(connections) = 'array'";
+    const res = this.db.prepare(
+      `UPDATE agents SET connections = CASE WHEN ${isArray} THEN json_insert(connections, '$[#]', ?) ELSE json_array(?) END
+       WHERE id = ? AND NOT (CASE WHEN ${isArray} THEN EXISTS (SELECT 1 FROM json_each(connections) WHERE value = ?) ELSE 0 END)`,
+    ).run(connectionId, connectionId, agentId, connectionId);
+    const agent = this.getAgent(agentId);
+    if (!agent) return undefined;
+    return { added: res.changes > 0, connections: agent.connections ?? [] };
+  }
+  /**
    * PERMANENTLY delete an agent and CASCADE its sessions (+ each session's pending wakes + decision-inbox
    * questions + the session-keyed orchestration_events), the agent's schedules, and the runs that
    * referenced it (+ the run-keyed run_events for those runs) — in ONE transaction, so no orphan rows

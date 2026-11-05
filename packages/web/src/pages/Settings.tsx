@@ -2478,7 +2478,7 @@ function ConnectionsPanel() {
 // credential Request was answered (the secret was stored + a Connection auto-provisioned, but the binding
 // was DELIBERATELY never applied). Card afe1bc90: the grant targets the REQUESTING AGENT only (never the
 // whole profile — least privilege). "Review & grant" opens an inline confirm; only its explicit Grant button
-// writes, through the human-only agent REST (POST /api/agents/:id). HUMAN-only read (GET /api/pending-bindings).
+// writes, through the human-only atomic add-one REST (POST /api/agents/:id/connections). HUMAN-only read (GET /api/pending-bindings).
 // Binding stays the deliberate owner-only trust decision — the whole point of Direction B.
 function PendingBindingsPanel() {
   const qc = useQueryClient();
@@ -2487,17 +2487,13 @@ function PendingBindingsPanel() {
     queryFn: () => api.pendingBindings(),
   });
   const rows = data ?? [];
-  const allAgentsForGrant = useAllAgents();
   const [confirming, setConfirming] = useState<string | null>(null); // questionId whose inline confirm is open
   const grant = useMutation({
     meta: { inlineError: true },
-    // Refetch-then-write: the write replaces the agent's whole connections list, so build it from the agent's
-    // CURRENT row (a fresh GET), never the cached list — a grant added elsewhere since the page loaded must survive.
-    mutationFn: async ({ agentId, connectionId }: { agentId: string; connectionId: string }) => {
-      const fresh = await api.allAgents();
-      const current = fresh.find((a) => a.id === agentId)?.connections ?? [];
-      return api.updateAgent(agentId, { connections: current.includes(connectionId) ? current : [...current, connectionId] });
-    },
+    // Server-side atomic add-one: the daemon appends this one id to the agent's CURRENT list in a single
+    // statement, so a grant landed elsewhere (another tab, the agent editor) is never overwritten.
+    mutationFn: ({ agentId, connectionId }: { agentId: string; connectionId: string }) =>
+      api.addAgentConnection(agentId, connectionId),
     onSuccess: () => {
       setConfirming(null);
       qc.invalidateQueries({ queryKey: ["pendingBindings"] });
@@ -2553,7 +2549,7 @@ function PendingBindingsPanel() {
                   <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber }}>
                     Grant {b.connectionName} to agent {b.agentName} only? It reaches only a session spawned fresh afterward.
                   </span>
-                  <Button variant="primary" disabled={grant.isPending || !allAgentsForGrant.isSuccess}
+                  <Button variant="primary" disabled={grant.isPending}
                     onClick={() => grant.mutate({ agentId: b.agentId!, connectionId: b.connectionId })}>Grant</Button>
                   <Button variant="ghost" disabled={grant.isPending} onClick={() => setConfirming(null)}>Cancel</Button>
                   {grant.isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(grant.error as Error)}</span>}

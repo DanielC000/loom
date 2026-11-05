@@ -95,20 +95,25 @@ test("pending binding surfaces in Settings, then Review & grant commits only on 
   await expect(confirm).toBeHidden();
   expect(await agentConnections()).not.toContain(connectionId);
 
-  // M4 (refetch-then-write): the page's cached agent list is now STALE — another grant lands on the same
-  // agent (agent REST) AFTER the page loaded. The panel's write replaces the whole list, so it must be built
-  // from the agent's CURRENT row or this second grant would be silently erased.
+  // Card b1df40f2: the page's cached agent list is now STALE — another grant lands on the same agent
+  // (agent REST) AFTER the page loaded. The panel grants through the server-side atomic add-one
+  // (POST /api/agents/:id/connections), which appends to the agent's CURRENT list, so this second grant
+  // must survive. The page must NOT fall back to the whole-list write (asserted below on the request).
   const otherConn = await apiPost<{ id: string }>(base, "/api/connections", { name: `E2E Other ${ts}`, host: "other.example.com", authScheme: "bearer", secret: `tok_${ts}` });
   await apiPost(base, `/api/agents/${agentId}`, { connections: [otherConn.id] });
   expect(await agentConnections()).toEqual([otherConn.id]);
 
   // The deliberate Grant is what commits it — to the agent, not the profile.
   await page.getByRole("button", { name: "Review & grant" }).click();
+  const grantRequest = page.waitForRequest((r) => r.method() === "POST" && new RegExp(`/api/agents/${agentId}(/connections)?$`).test(new URL(r.url()).pathname));
   await page.getByTestId(`pending-binding-confirm-${questionId}`).getByRole("button", { name: "Grant", exact: true }).click();
+  const sent = await grantRequest;
+  expect(new URL(sent.url()).pathname, "the grant goes through the atomic add-one route, not the whole-list write").toBe(`/api/agents/${agentId}/connections`);
+  expect(sent.postDataJSON()).toEqual({ connectionId });
 
   // Observable after-state: the AGENT's allowlist now contains the connection (REST read-back) …
   await expect.poll(agentConnections).toContain(connectionId);
-  expect(await agentConnections(), "the grant added elsewhere after page load survives (refetch-then-write)").toContain(otherConn.id);
+  expect(await agentConnections(), "the grant added elsewhere after page load survives the add-one (no whole-list overwrite)").toContain(otherConn.id);
   // … and the row left the queue. (That the profile named in the ask gained nothing is asserted against the RAW
   // column in daemon/test/pending-bindings.mjs — the profile REST body has no grant key, so it cannot show it.)
   await expect.poll(async () => (await apiGet<{ questionId: string }[]>(base, "/api/pending-bindings")).some((b) => b.questionId === questionId)).toBe(false);

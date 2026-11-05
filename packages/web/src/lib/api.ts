@@ -634,6 +634,10 @@ export const api = {
   // surfaces its server-side `{error}` text verbatim via `post`'s own throw.
   updateAgent: (id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean; connections?: string[]; capabilities?: CapabilityGrant[] }) =>
     post<Agent>(`/api/agents/${id}`, patch),
+  // Atomic server-side ADD-ONE of a connection grant (human REST; same refusals as updateAgent). Never
+  // replaces the list, so a grant landed concurrently elsewhere is not lost.
+  addAgentConnection: (id: string, connectionId: string) =>
+    post<Agent & { added: boolean }>(`/api/agents/${id}/connections`, { connectionId }),
   tasks: (projectId: string) => get<Task[]>(`/api/projects/${projectId}/tasks`),
   // Memory — the read-only per-project project_memory list (pinned first, then most-recently-updated).
   // Full entries incl. the note `text`, so client-side search (title+key+content) + the note-detail
