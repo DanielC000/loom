@@ -30,6 +30,10 @@ This couples the web parser to `extractText`'s marker format. `test/mcp-activity
 - Do not poll every 5s unconditionally: the idle backoff exists because every poll is the whole transcript.
 - Do not count non-Loom tools (Read, Bash, other MCP servers). Only `mcp__loom-*` routers.
 
+## Marker format pin
+
+The daemon side of the marker contract is pinned by `packages/daemon/test/transcript-mcp-marker-format.mjs` (card `afea18a1`): it renders a real-shaped JSONL through `parseTranscriptFile` and asserts the exact `[tool] {tag} mcp__loom-…(…)` and `-> tool result {tag} (error): …` lines against copies of `CALL_LINE` / `RESULT_HEAD`.
+
 ## Codex sessions
 
 A codex-harness transcript (`pty/codex-adapter.ts`) does not render calls with these markers, so it parses to zero calls. The strip says plainly that codex sessions don't show their Loom calls here yet, rather than claiming the session made none.
