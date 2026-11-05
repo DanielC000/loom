@@ -106,6 +106,14 @@ check("fork spawn argv does NOT lead with resume (fork forces a fresh spawn, per
 check("[negative control] hasUpdateCheckOverride returns false against argv genuinely missing the override", !hasUpdateCheckOverride(["-a", "never", "-s", "workspace-write"]));
 check("[negative control] hasUpdateCheckOverride returns false against the two tokens present but NOT adjacent", !hasUpdateCheckOverride(["-c", "some_other_key=true", "check_for_update_on_startup=false"]));
 
+// --- card 7d2c05fb: the plugin-sync suppression, on all three spawn shapes. ---------------------------------
+const { CODEX_PLUGIN_SYNC_OVERRIDE_ARGS } = await import("../dist/pty/codex-host.js");
+check("CODEX_PLUGIN_SYNC_OVERRIDE_ARGS is the expected [\"-c\", \"features.plugins=false\"] pair", CODEX_PLUGIN_SYNC_OVERRIDE_ARGS.length === 2 && CODEX_PLUGIN_SYNC_OVERRIDE_ARGS[0] === "-c" && CODEX_PLUGIN_SYNC_OVERRIDE_ARGS[1] === "features.plugins=false");
+check("fresh spawn argv carries the plugin-sync override as an ADJACENT -c pair", hasAdjacentCArg(freshArgv, "features.plugins=false"));
+check("resume spawn argv carries the plugin-sync override", hasAdjacentCArg(resumeArgv, "features.plugins=false"));
+check("fork spawn argv carries the plugin-sync override", hasAdjacentCArg(forkArgv, "features.plugins=false"));
+check("[negative control] hasAdjacentCArg returns false for the plugin override against argv missing it", !hasAdjacentCArg(["-c", "check_for_update_on_startup=false"], "features.plugins=false"));
+
 // --- card 702f2197: the codex MCP auto-approve overrides — the exact lever that bypasses `-a never`'s
 // blanket deny for a worker_report call (see docs/decisions/702f2197-codex-mcp-server-approve-mode-
 // bypasses-a-never-blanket-deny.md). Pins that createCodexPty's real production call site actually PASSES

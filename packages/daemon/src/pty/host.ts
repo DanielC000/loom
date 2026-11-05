@@ -54,7 +54,7 @@ import { resolveGitDirsSync } from "../git/repo-lock.js";
  */
 export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness "claude" for codescape access`;
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine, removeStaleCodexDoctrineArtifact } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, buildCodexProviderArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, buildCodexProviderArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, CODEX_PLUGIN_SYNC_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn, resolveTranscriptFile as resolveCodexRolloutFile } from "./codex-transcript.js";
 import { restoreArchivedCodexRollout } from "./codex-rollout-archive.js";
 
@@ -7459,7 +7459,7 @@ export class PtyHost {
     // @decision d7657543 — no writable-roots lever (`--add-dir`) fixes a codex worktree's `git commit`
     // denial on Windows — the sandbox's DENY ACE on `.git` wins over any inherited ALLOW. Do not reach for
     // `-s danger-full-access`/`--dangerously-bypass-approvals-and-sandbox` to route around it; report up.
-    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs, ...buildCodexModelArgs(opts.model), ...codexProviderArgs];
+    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...CODEX_PLUGIN_SYNC_OVERRIDE_ARGS, ...mcpArgs, ...buildCodexModelArgs(opts.model), ...codexProviderArgs];
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
     // Card e92cd4a3: on Windows an npm-global codex is a `.cmd` shim that node-pty would hand to cmd.exe

@@ -220,6 +220,17 @@ export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>, opts?
 export const CODEX_UPDATE_CHECK_OVERRIDE_ARGS: readonly string[] = ["-c", "check_for_update_on_startup=false"];
 
 /**
+ * Card `7d2c05fb`: per-invocation override turning off codex's `plugins` feature, whose startup sync runs
+ * `git ls-remote https://github.com/openai/plugins.git HEAD` and clones into `CODEX_HOME/.tmp/plugins-clone-*`
+ * in every session — unannounced outbound traffic and disk writes. `plugins` is a real feature flag
+ * (`codex features list`: stable, default true). MEASURED (codex-cli 0.153.4, Windows, n=1 per arm, `codex exec`
+ * against a loopback stub provider, temp CODEX_HOME): without the flag a `git ls-remote`/`git-remote-https`/
+ * `fetch` child and a `.tmp/plugins-clone-*` dir appeared; with `-c features.plugins=false` neither did.
+ * Loom's codex code uses no codex plugin. Record: docs/decisions/7d2c05fb-codex-plugin-sync-disabled.md.
+ */
+export const CODEX_PLUGIN_SYNC_OVERRIDE_ARGS: readonly string[] = ["-c", "features.plugins=false"];
+
+/**
  * Card `b987f086`: companion to {@link mcpServersToCodexArgs} — WHICH entries of the SAME `mcpServers` map
  * that function silently (bar the `console.warn` above, into a shared multi-tenant log nobody polls —
  * project memory `shipping-a-detector-is-not-someone-reading-it` measures passive notice at 0-acted-on)
