@@ -5,6 +5,7 @@ import { validateDenyGlobs } from "./deny-globs.js";
 import { validateRepoRegistry } from "./repos.js";
 import { checkVaultRepoTripleContainment } from "./vault-path.js";
 import { validateProjectConfigOverride } from "../mcp/platform.js";
+import { resolveWrittenCardPolicyIds } from "../orchestration/card-policy.js";
 
 /** Raw, unvalidated create-time fields shared by every human-only REST "bind a project" route. */
 export interface ProjectCreateInputRaw {
@@ -76,6 +77,10 @@ export async function validateProjectCreateInput(
   }
   const configCheck = validateProjectConfigOverride(raw.config);
   if (!configCheck.ok) return { ok: false, status: 400, error: `invalid config: ${configCheck.error}` };
+  // A new project has no cards, so a card-policy `cardIds` entry cannot resolve and is refused (a prefix stored
+  // unresolved would later capture unrelated cards via startsWith). Both human POST routes share this point.
+  const idsResolved = resolveWrittenCardPolicyIds(configCheck.value, []);
+  if (!idsResolved.ok) return { ok: false, status: 400, error: `invalid config: ${idsResolved.error}` };
   const tripleCheck = await checkVaultRepoTripleContainment(
     { repoPath: ctx.repoPath, vaultPath: ctx.vaultPath, repos },
     { pairingIsIntentional: ctx.pairingIsIntentional },
@@ -86,5 +91,5 @@ export async function validateProjectCreateInput(
     ...repos.map((r) => ({ repoKey: r.key, repoPath: r.path })),
   ]);
   if (!pinCheck.ok) return { ok: false, status: 409, error: pinCheck.error };
-  return { ok: true, value: { referenceRepos, noGateByDesign, denyGlobs, repos, repoGateWarning, config: configCheck.value } };
+  return { ok: true, value: { referenceRepos, noGateByDesign, denyGlobs, repos, repoGateWarning, config: idsResolved.value } };
 }

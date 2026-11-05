@@ -51,6 +51,10 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   // omitted from the board LIST route above). Read-only, same class as the board/tasks reads; the
   // writer on this SAME path (POST /api/tasks/:id) deliberately stays Tier 0.
   { method: "GET", pattern: "/api/tasks/:id" },
+  // Card-policy reads (card 61d32daf) — the drawer's per-card verdict and the board badge's counts. Read-only, same
+  // class as the board/task reads above; the waiver WRITERS (POST/DELETE /api/tasks/:id/policy-waivers) stay Tier 0.
+  { method: "GET", pattern: "/api/tasks/:id/policy" },
+  { method: "GET", pattern: "/api/projects/:id/card-policy-status" },
   { method: "GET", pattern: "/api/projects/:id/agents" },
   // Memory = the per-project project_memory read (backs the /memory explorer page). Read-only, human-only,
   // project-scoped — same posture as the sibling board/tasks/vault project reads above.

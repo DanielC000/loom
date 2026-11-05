@@ -232,6 +232,15 @@ export const MEMORY_CONFIG_MAX = {
   duplicateReportIntervalHours: 720,
 } as const;
 
+/**
+ * The Conventional Commits types Loom recognizes — the ONE code-level list (card 3a833d94; moved here from the
+ * daemon's `tasks/title-guard.ts` by card 61d32daf so the web card-policy editor reads it too). The daemon
+ * re-exports it from title-guard; never hand-copy it.
+ */
+export const CONVENTIONAL_TYPES = [
+  "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
+] as const;
+
 /** Card 78a9ae1c: closed vocabulary of card-policy requirement kinds. Schema + selector only; enforcement is a later card. */
 export const POLICY_REQUIREMENT_KINDS = ["code-review-report", "approved-request", "investigate-checkpoint"] as const;
 export type PolicyRequirementKind = (typeof POLICY_REQUIREMENT_KINDS)[number];

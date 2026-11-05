@@ -822,8 +822,10 @@ export type TaskWithRequests = TaskWithMerged & TaskRelationView & { requests: T
  * Card 9623e943 — the READ-ONLY card-policy verdict for `tasks_get` (agents may read, never write). Present ONLY
  * when a stored policy matches the card (a project with no policies returns a byte-identical response). Evaluated
  * for the spawn phase with the shared DB-only evidence readers; merge-phase requirements show as `deferred`.
+ * Exported (card 61d32daf) so the board's human REST reads (`GET /api/tasks/:id/policy`, the project-wide
+ * `card-policy-status`) render the SAME view rather than a second evaluation.
  */
-async function taskPolicyView(db: Db, projectId: string, task: Pick<Task, "id" | "title">): Promise<ReturnType<typeof policyView> | undefined> {
+export async function taskPolicyView(db: Db, projectId: string, task: Pick<Task, "id" | "title">): Promise<ReturnType<typeof policyView> | undefined> {
   const raw = (db.getProject(projectId)?.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
   const never = (): never => { throw new Error("merge-phase evidence is not read by tasks_get"); };
   const ev = await evaluateCardPolicies({ rawPolicies: raw, task, phase: "spawn", evidence: { ...dbPolicyEvidence(db, projectId), codeReview: never, checkpoint: never }, stickyPolicyIds: raw === undefined || (Array.isArray(raw) && raw.length === 0) ? undefined : new Set(db.listCardPolicyMatches(task.id, projectId)) });

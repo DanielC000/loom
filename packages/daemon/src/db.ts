@@ -9328,6 +9328,10 @@ export class Db {
     return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY column_key, position")
       .all(projectId).map((r) => toTask(r, ids.get((r as Row).id as string)));
   }
+  /** Card 61d32daf: just (id, title) of every card on a project — the board's policy status read needs no other column, and a full `listTasks` row mapping dominated its cost. */
+  listTaskIdTitles(projectId: string): { id: string; title: string }[] {
+    return this.db.prepare("SELECT id, title FROM tasks WHERE project_id = ?").all(projectId) as { id: string; title: string }[];
+  }
   /** Card c8f855e1: one COUNT for the spawn-time stale-prompt banner — never a full board read. */
   countTasks(projectId: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?").get(projectId) as { c: number }).c;
@@ -11288,6 +11292,17 @@ export class Db {
   /** Card 9623e943: policy ids that have EVER matched this card within `projectId` (sticky; see card_policy_matches_v2). */
   listCardPolicyMatches(taskId: string, projectId: string): string[] {
     return (this.db.prepare("SELECT policy_id FROM card_policy_matches_v2 WHERE task_id = ? AND project_id = ?").all(taskId, projectId) as Row[]).map((r) => r.policy_id as string);
+  }
+  /** Card 61d32daf: every sticky match of one project in ONE query (the board status read), keyed by task id. */
+  listCardPolicyMatchesForProject(projectId: string): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    for (const r of this.db.prepare("SELECT task_id, policy_id FROM card_policy_matches_v2 WHERE project_id = ?").all(projectId) as Row[]) {
+      const k = r.task_id as string;
+      let s = out.get(k);
+      if (!s) { s = new Set(); out.set(k, s); }
+      s.add(r.policy_id as string);
+    }
+    return out;
   }
   /** Card 9623e943: add (never remove) sticky policy matches for a card under `projectId`. Idempotent. */
   recordCardPolicyMatches(taskId: string, projectId: string, policyIds: readonly string[]): void {

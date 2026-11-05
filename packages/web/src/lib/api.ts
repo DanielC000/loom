@@ -1,4 +1,5 @@
-import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, OrchestrationEventKind, Wake, SkillSummary, SkillPermissionVector, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, CapabilityGrant, ConnectionMetadata, ConnectionAuthScheme, SshCommandRule, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning, ProfileGrantReach } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, OrchestrationEventKind, Wake, SkillSummary, SkillPermissionVector, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, CapabilityGrant, ConnectionMetadata, ConnectionAuthScheme, SshCommandRule, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning, ProfileGrantReach, PolicyRequirementKind } from "@loom/shared";
+import type { CardPolicyVerdict, CardPolicyCardStatus } from "./cardPolicies";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -835,6 +836,22 @@ export const api = {
   // PERMANENTLY delete a task card (drawer Delete button). HUMAN/loopback REST only — no MCP path. Uses
   // delErr so the server's live-session guard 400 ({ error }) surfaces verbatim to the user.
   deleteTask: (id: string) => delErr<{ ok: boolean }>(`/api/tasks/${id}`),
+  // --- Card policies (card 61d32daf). Both reads render the daemon's ONE evaluation (the tasks_get `policy` view);
+  // the policies themselves are WRITTEN through updateProjectConfig (orchestration.cardPolicies). A daemon without
+  // the status route answers 404, which getOrNull reads as "no badges", not an error.
+  taskPolicy: (id: string) => get<{ policy: CardPolicyVerdict[] }>(`/api/tasks/${id}/policy`),
+  cardPolicyStatus: (projectId: string) =>
+    getOrNull<{ tasks: Record<string, CardPolicyCardStatus> }>(`/api/projects/${projectId}/card-policy-status`),
+  // Waive / un-waive ONE requirement of one policy on one card. HUMAN-only loopback REST (there is no MCP path);
+  // a waiver needs a reason (1..500 chars) and both write an audit event. The 400 reasons surface verbatim.
+  waiveCardPolicy: (taskId: string, body: { policyId: string; requirement: PolicyRequirementKind; reason: string }) =>
+    postErr<{ ok: boolean }>(`/api/tasks/${taskId}/policy-waivers`, body),
+  revokeCardPolicyWaiver: async (taskId: string, body: { policyId: string; requirement: PolicyRequirementKind }) => {
+    const url = `/api/tasks/${taskId}/policy-waivers`;
+    const r = await guardedFetch(url, { method: "DELETE", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error(await errorMessageFrom(url, r));
+    return r.json() as Promise<{ ok: boolean; removed: boolean }>;
+  },
   transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
 
   // --- Agent Runs (R4b Runs UI; HUMAN/loopback REST, project-scoped, no auth — mirrors the other

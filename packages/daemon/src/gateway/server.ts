@@ -17,7 +17,7 @@ import { buildServedStatus, currentWebBundle } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
-import { policyIdIsConfigured } from "../orchestration/card-policy.js";
+import { dbPolicyEvidence, evaluateProjectCardPolicyStatus, policyIdIsConfigured, projectStoresCardPolicies, resolveWrittenCardPolicyIds } from "../orchestration/card-policy.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
@@ -30,7 +30,7 @@ import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESS
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
-import { toBoardTasks, resolveMergedInfo, computeDeferralReleasePatch } from "../mcp/tasks.js";
+import { toBoardTasks, resolveMergedInfo, computeDeferralReleasePatch, taskPolicyView } from "../mcp/tasks.js";
 import { boardRollup, buildRelationView, planTaskStructure, applyTaskPlan, resolveDeferralInput, hasStructureInput, type TaskStructureInput, type StructurePlan } from "../tasks/relations.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
@@ -5673,11 +5673,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const priorSessionEnvKeys = new Set(Object.keys((existing.config.sessionEnv ?? {}) as Record<string, unknown>));
     const v = validateProjectConfigOverride(wrapped ? body.config : req.body, { priorSessionEnvKeys });
     if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
+    // Card 61d32daf: a written card-policy list has every `match.cardIds` entry resolved to the full id of a card on
+    // THIS project before it is stored; an unknown or ambiguous entry refuses the whole PATCH.
+    const idsResolved = resolveWrittenCardPolicyIds(v.value, deps.db.listTasks(id), existing.config);
+    if (!idsResolved.ok) return reply.code(400).send({ error: `invalid config: ${idsResolved.error}` });
+    const written = idsResolved.value;
     const replace = wrapped && body.replace === true;
     const unset = wrapped && Array.isArray(body.unset) ? body.unset.filter((p): p is string => typeof p === "string" && p.length > 0) : [];
     // @decision b5faa194 — a colliding write+unset of the same path is REFUSED, not resolved either way
     // (silent data loss under merge-then-unset); check BEFORE the merge/unset run at all.
-    const collisions = findConfigPatchUnsetCollisions(v.value, unset);
+    const collisions = findConfigPatchUnsetCollisions(written, unset);
     if (collisions.length > 0) {
       return reply.code(400).send({ error: `config PATCH writes and unsets the same path(s): ${collisions.join(", ")} — the merge-then-unset order would silently discard the write; drop the colliding unset entr${collisions.length === 1 ? "y" : "ies"} or remove the write` });
     }
@@ -5688,7 +5693,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // @decision 1069c8e1 — no additiveOnlyRotationGuard here: this human REST PATCH is the documented
     // escape hatch for shrinking rotationMarkers / lowering rotationLiveCommitmentsFloor (Settings.tsx);
     // the agent-only guard would silently disable that release valve.
-    let merged = replace ? v.value : mergeConfigOverride(existing.config, v.value);
+    let merged = replace ? written : mergeConfigOverride(existing.config, written);
     for (const p of unset) merged = unsetConfigPath(merged, p);
     // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/renames
     // a column re-keys the affected cards to the landing lane instead of ORPHANING them on a non-existent
@@ -6549,6 +6554,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const removed = deps.db.deleteCardPolicyWaiver(task.id, task.projectId, p.policyId, p.requirement);
     if (removed) deps.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "revoke", policyId: p.policyId, requirement: p.requirement } });
     return { ok: true, removed };
+  });
+  // Card 61d32daf: the board's card-policy READS. Both render `taskPolicyView`, the SAME evaluation tasks_get exposes
+  // (spawn phase; a merge-phase requirement reads `deferred`), never a second implementation.
+  app.get("/api/tasks/:id/policy", async (req, reply) => {
+    const task = deps.db.getTask((req.params as { id: string }).id);
+    if (!task) return reply.code(404).send({ error: "task not found" });
+    return { policy: (await taskPolicyView(deps.db, task.projectId, task)) ?? [] };
+  });
+  // One entry per card a policy applies to, with its count of blocking (unmet or unreadable) requirements, so the
+  // board badge needs one read instead of one per card. Answers before any per-card read when no policy is set.
+  app.get("/api/projects/:id/card-policy-status", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!projectStoresCardPolicies(p)) return { tasks: {} };
+    // Batched (the board polls this): config parsed once, sticky matches in one query, the shared evaluator only for
+    // cards a policy can match. Each card's verdict equals taskPolicyView's (spawn phase, DB-only evidence).
+    const never = (): never => { throw new Error("merge-phase evidence is not read by tasks_get"); };
+    const tasks = await evaluateProjectCardPolicyStatus({
+      project: p, tasks: deps.db.listTaskIdTitles(p.id), stickyByTask: deps.db.listCardPolicyMatchesForProject(p.id),
+      evidence: { ...dbPolicyEvidence(deps.db, p.id), codeReview: never, checkpoint: never },
+    });
+    return { tasks };
   });
 
   app.post("/api/agents/:id/sessions", async (req, reply) => {

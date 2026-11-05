@@ -5,7 +5,7 @@
 // card f324e8fa) cannot import this predicate back FROM `mcp/tasks.ts` without a cycle. Living here lets
 // every caller — the write boundary, `sessions/service.ts`'s pre-gate merge check, and
 // `git/worktrees.ts`'s squash-subject check — share the ONE pattern instead of each re-deriving it.
-import { CONVENTIONAL_SCOPE_GROUP_SOURCE } from "@loom/shared";
+import { CONVENTIONAL_SCOPE_GROUP_SOURCE, CONVENTIONAL_TYPES } from "@loom/shared";
 
 /**
  * @decision 267fd215 — an HTML-entity title shipped as a PERMANENT mainline subject once (commit
@@ -63,17 +63,14 @@ export function checkTitleHtmlEntities(title: string, allow: boolean | undefined
 }
 
 /**
- * Card 3a833d94 — the SINGLE source of truth for the Conventional Commits types Loom recognizes. Was a
- * hand-copied local const in `git/worktrees.ts` (the ONLY prior code-level copy, used to build its own
- * `toConventionalSubject` coercion regex); moved here and re-exported so `git/worktrees.ts` reads it
- * back rather than the two ever drifting into independent lists. `CLAUDE.md`'s Conventional Commits
- * section documents the SAME list in prose — this array is the code mirror of that prose, not a second
- * independent policy, and there is deliberately no third copy anywhere (this file's own scope check below
- * reuses it too).
+ * Card 3a833d94 — the SINGLE source of truth for the Conventional Commits types Loom recognizes. The array
+ * itself now lives in `@loom/shared` (card 61d32daf, so the web Settings card-policy editor reads the same
+ * list instead of a hand-copied third one); re-exported here so `git/worktrees.ts`, `mcp/platform.ts` and
+ * this file's own scope check keep importing it from the same place. `CLAUDE.md`'s Conventional Commits
+ * section documents the SAME list in prose — the shared array is the code mirror of that prose, not a
+ * second independent policy.
  */
-export const CONVENTIONAL_TYPES = [
-  "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
-] as const;
+export { CONVENTIONAL_TYPES };
 
 /**
  * Shape of a title that READS as a Conventional Commits subject — a leading lowercase-and-hyphens word,

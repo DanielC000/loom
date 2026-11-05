@@ -42,6 +42,7 @@ import { useThemePref, type ThemePref } from "../lib/themePref";
 import { useAllAgentLabels, useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
+import { CardPoliciesEditor } from "../components/cardPolicies";
 import {
   CodexDefaultConfirm, HarnessDrainBanner, fleetScopeAvailable, FLEET_SCOPE_DISABLED_REASON,
   rolesAffected, switchesToCodex, type DefaultValue, type ScopeValue,
@@ -1182,6 +1183,12 @@ function ConfigEditor({ project }: { project: Project }) {
         <SectionLabel>Board Columns</SectionLabel>
         {/* Its OWN atomic save (the columns endpoint) — independent of the project-config Save below. */}
         <ColumnManager project={project} />
+      </Panel>
+
+      <Panel data-testid="card-policies-panel">
+        <SectionLabel>Card policies</SectionLabel>
+        {/* Its OWN save too (orchestration.cardPolicies through the config PATCH) — the form below never models it. */}
+        <CardPoliciesEditor project={project} />
       </Panel>
 
       <Panel>

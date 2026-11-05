@@ -38,6 +38,10 @@ import { usePreviewOnly, PREVIEW_REQUEST_HELD_TITLE } from "../lib/previewOnly";
 // Ship state is only DISCOVERABLE from git while this project writes the reserved trailer paragraph
 // (card bd828fb3) — the drawer says so rather than letting a null read as "did not ship".
 import { commitTrailersOff, SHIP_STATE_TRAILERS_OFF } from "../lib/mergeGate";
+// Card policies (card 61d32daf): the unmet badge on a card and the drawer's Policy block. This one component is
+// also the board embedded in Overview, so both surfaces get them.
+import { CardPolicyBadge, CardPolicyBlock, useCardPolicyStatus } from "../components/cardPolicies";
+import type { CardPolicyCardStatus } from "../lib/cardPolicies";
 
 const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
 // Everything the detail drawer can write, in ONE place — the drawer's `onSave` prop, the mutation that
@@ -62,6 +66,7 @@ type TaskEditPatch = {
 // window, so the lane's unrendered cards are never fetched at all; the instant a filter IS active the
 // client must drop the param and fetch the whole set, or a search can only ever see the newest page.
 const DONE_LANE_PAGE = 50;
+const NO_POLICY_STATUS: Record<string, CardPolicyCardStatus> = {};
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
@@ -135,6 +140,9 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   const project = (projects.data ?? []).find((p) => p.id === projectId) ?? null;
   const repos = project?.repos ?? [];
   const multiRepo = repos.length > 0;
+  // Per-card unmet counts for the policy badge. No request at all on a project that stores no policy.
+  const policyStatus = useCardPolicyStatus(projectId, project);
+  const policyByTask = policyStatus.data?.tasks ?? NO_POLICY_STATUS;
   const workerByTask = new Map<string, SessionListItem>();
   for (const s of sessions.data ?? []) if (s.taskId) workerByTask.set(s.taskId, s);
 
@@ -406,6 +414,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
             priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
             shown={shownTasks.length + unfetchedDone} total={allTasks.length + unfetchedDone}
             active={filterActive} onClear={clearFilters} />
+          {/* A failed policy-status read must not look like "nothing is blocking": say so, quietly (404 stays null = no badges). */}
+          {policyStatus.isError && (
+            <div data-testid="card-policy-status-unavailable" title="The unmet-requirement badges could not be loaded; open a card to see its policy."
+              style={{ marginTop: 10, color: color.textMuted, fontFamily: font.mono, fontSize: fs.xs }}>
+              card policy status unavailable
+            </div>
+          )}
           {laneError && (
             <div role="alert" data-testid="lane-reorder-error"
               style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.amber, fontFamily: font.mono, fontSize: fs.mono }}>
@@ -432,7 +447,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                   <Column key={`${projectId}:${col.key}`} col={col}
                     tasks={shownTasks.filter((t) => t.columnKey === col.key)
                       .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
-                    filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
+                    filterActive={filterActive} workers={workerByTask} policyByTask={policyByTask} onOpen={setOpenTaskId}
                     multiRepo={multiRepo} repos={repos} primaryRepoPath={project?.repoPath ?? ""}
                     titleById={titleById}
                     // The server's TRUE lane length on a windowed response, else undefined. It is what
@@ -577,9 +592,10 @@ function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
   );
 }
 
-function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount, laneTotal, onRevealMore, revealPending,
+function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount, laneTotal, onRevealMore, revealPending,
   index, laneCount, collapsed, onCollapse, onMoveLane, reordering, laneDragging, dropEdge }:
-  { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void; multiRepo: boolean;
+  { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>;
+    policyByTask: Record<string, CardPolicyCardStatus>; onOpen: (id: string) => void; multiRepo: boolean;
     repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number;
     /** Card a483cbec — the server's TRUE lane length when THIS lane came back windowed, else undefined. */
     laneTotal?: number; onRevealMore?: () => void; revealPending?: boolean;
@@ -701,7 +717,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
           onMove={onMoveLane} onCollapse={() => onCollapse(true)} />
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {visible.map((task) => <Card key={task.id} task={task} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
+        {visible.map((task) => <Card key={task.id} task={task} worker={workers.get(task.id)} policy={policyByTask[task.id]} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
         {/* The reveal for the done-lane page. Sits INSIDE the lane's own scroll region (so it trails the
             last rendered card rather than pinning to the lane footer) and is full-width so it reads as
             the continuation of the list it extends, not as a card. One-way: revealing more is not a
@@ -946,8 +962,8 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
 const cardStateTag: React.CSSProperties = { flexShrink: 0, fontFamily: font.ui, fontSize: fs.xs, fontWeight: 600,
   borderRadius: radius.pill, padding: "1px 7px", lineHeight: "16px" };
 
-function Card({ task, worker, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
-  { task: BoardTask; worker?: SessionListItem; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
+function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
+  { task: BoardTask; worker?: SessionListItem; policy?: CardPolicyCardStatus; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, data: { type: "card" } satisfies BoardDragData });
   const st = worker ? workerStatus(worker) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
@@ -1030,6 +1046,9 @@ function Card({ task, worker, multiRepo, repos, primaryRepoPath, titleById, isDo
                 deferred
               </span>
             )}
+            {/* Card policies (card 61d32daf): only when a requirement would block the card today, so a card
+                no policy touches, or one whose requirements are all met or waived, keeps its height. */}
+            <CardPolicyBadge status={policy} />
             {/* `break-word` (not `anywhere`): normal titles wrap at WORD boundaries, and only a genuinely
                 long unbroken token breaks mid-word. `anywhere` makes the title's min-content width one
                 character, so at a crushed lane width the flex row collapses it to one letter per row. */}
@@ -1476,6 +1495,9 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
         {hasTaskContextLinks(links) && (
           <TaskLinksBlock links={links} columns={columns} titleById={titleById} onOpenTask={requestOpen} />
         )}
+        {/* Card policies (card 61d32daf): same register as the links block, and the same two rules — nothing
+            renders when no policy applies, and a failed read says so rather than reading as "no policy". */}
+        <CardPolicyBlock taskId={task.id} projectId={task.projectId} />
         {/* Dossier body: LEFT = task editing, RIGHT = connected-requests rail. When the rail is collapsed
             the left column expands to full width (single-column); flexWrap lets the two stack on a narrow
             panel. flex:1 so the body fills the panel down to its min-height. */}

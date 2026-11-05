@@ -141,12 +141,13 @@ anything else — and joined the two.
 | 37 | `updateProjectColumns` | rename / add / remove / reorder board lanes | `components/ColumnManager.tsx`, `pages/Projects.tsx` | board bar → `pop-columns` | ✅ |
 | 38 | `updateTask` | move / edit / hold / defer / re-prioritise a card | `pages/Board.tsx` | board drag-drop + the **card DIALOG** (centred modal, the board never reflows) — ROUND 4 | ✅ |
 | 39 | `deleteTask` | delete a card | `pages/Board.tsx` | card dialog footer, two-step inline confirm — ROUND 4 | ✅ |
+| 39a | `waiveCardPolicy` / `revokeCardPolicyWaiver` (+ reads `taskPolicy`, `cardPolicyStatus`) | waive / un-waive one card-policy requirement on a card (mandatory reason); the board card's "N unmet" badge and the dialog's Policy block read the verdict. Added after the round-4 mockups (card 61d32daf); the policies themselves are authored through row 40 | `components/cardPolicies.tsx`, rendered by `pages/Board.tsx` and `pages/Settings.tsx` | project › Board and project › Settings mount the SAME `Board`/`Settings` components (`pages/ProjectHome.tsx`), so badge, Policy block and the Settings "Card policies" editor appear there unchanged; no Atlas-specific surface built | ⚠️ **NOT IN MOCKUPS** (inherited, not designed) |
 
 #### Review & merge
 
 | # | `api.*` | What it writes | Today (code-derived) | Atlas home (round 4) | Covered |
 |---|---|---|---|---|---|
-| 40 | `updateProjectConfig` | set merge-gate cadence + project config | `components/mergeGate.tsx`, `pages/Settings.tsx` | **Settings** (project) · merge-gate strip | ✅ |
+| 40 | `updateProjectConfig` | set merge-gate cadence + project config (incl. the card-policy list, `components/cardPolicies.tsx`, card 61d32daf) | `components/mergeGate.tsx`, `components/cardPolicies.tsx`, `pages/Settings.tsx` | **Settings** (project) · merge-gate strip | ✅ |
 | 41 | `gateNextMerge` | force the gate on the next landing | `components/mergeGate.tsx` | merge-gate strip · **Gates** tab | ✅ |
 | 42 | `mergeWorker` | review / approve / merge a worker branch | `components/reviewQueue.tsx`, `pages/ReviewPanel.tsx` | **Needs you** merge card · worker node → Diff tab | ✅ |
 

@@ -167,6 +167,7 @@ try {
   const EXPECTED_TIER_1 = new Set([
     "GET /api/projects", "GET /api/sessions", "GET /api/sessions/:id/transcript", "GET /api/sessions/:id/diff",
     "GET /api/projects/:id/board", "GET /api/projects/:id/tasks", "GET /api/tasks/:id", "GET /api/projects/:id/agents",
+    "GET /api/tasks/:id/policy", "GET /api/projects/:id/card-policy-status",
     "GET /api/agents/:id/sessions", "GET /api/sessions/:id/queue", "GET /api/sessions/:id/wakes",
     "GET /api/audit/session/:id", "GET /api/audit/wave/:managerId", "GET /api/audit/diff",
     "GET /api/gates/active", "GET /api/gates/history",

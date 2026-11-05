@@ -6,6 +6,7 @@
 import { parseCardPolicies, PERMISSION_ANSWERS, type CardPolicy, type PolicyRequirement, type PolicyRequirementKind } from "@loom/shared";
 import { cardPolicyMatches } from "../tasks/title-guard.js";
 import { isSshApprovalAction, isPermissionLapsed } from "../mcp/questionTool.js";
+import { resolveIdPrefix } from "../id-prefix.js";
 
 export type PolicyPhase = "spawn" | "merge";
 /** Requirement kinds enforced at each phase; the other phase's kinds report `deferred` (visible, not blocking). */
@@ -84,6 +85,65 @@ export function policyIdIsConfigured(project: { config?: unknown }, policyId: st
   return parsed.ok && parsed.policies.some((p) => p.id === policyId);
 }
 
+/**
+ * Card 61d32daf — resolve every `match.cardIds` entry of a policy list being WRITTEN to the full id of one existing
+ * task (an exact id, or an unambiguous 8+-char prefix, via the shared `resolveIdPrefix`), refusing an unknown or
+ * ambiguous entry. `tasks` is the writing project's own board, so a card on another project never resolves. Run by
+ * the human config PATCH before it stores the list, so a stored entry always names one real card and a card created
+ * later with the same prefix is never captured by the matcher's `startsWith`. Duplicate resolutions collapse to one.
+ */
+export function resolveCardPolicyCardIds(
+  policies: readonly CardPolicy[],
+  tasks: readonly { id: string }[],
+  storedCardIds?: ReadonlyMap<string, ReadonlySet<string>>,
+): { ok: true; policies: CardPolicy[] } | { ok: false; error: string } {
+  const out: CardPolicy[] = [];
+  for (const p of policies) {
+    if (!p.match.cardIds) { out.push(p); continue; }
+    const full: string[] = [];
+    for (const ref of p.match.cardIds) {
+      const r = resolveIdPrefix([...tasks], ref);
+      // An EXACT full id already stored for this same policy stays valid after its card is deleted, so one dead entry
+      // never blocks every later whole-list save. A new, prefix or other policy's entry still has to resolve.
+      if (r.kind === "none" && storedCardIds?.get(p.id)?.has(ref)) { if (!full.includes(ref)) full.push(ref); continue; }
+      if (r.kind === "ambiguous") return { ok: false, error: `card policy '${p.id}': card id '${ref}' is ambiguous (matches ${r.ids.join(", ")}); use more characters or the full id` };
+      if (r.kind === "none") return { ok: false, error: `card policy '${p.id}': card id '${ref}' matches no card on this project` };
+      if (!full.includes(r.record.id)) full.push(r.record.id);
+    }
+    out.push({ ...p, match: { ...p.match, cardIds: full } });
+  }
+  return { ok: true, policies: out };
+}
+
+/**
+ * Card 61d32daf — {@link resolveCardPolicyCardIds} applied to the list a config PATCH is WRITING (`override` is the
+ * validated incoming override, never the stored one). Returns the override to store, with full card ids. An override
+ * that writes no list passes through untouched, as does one the shared parser rejects (the validator refused it already).
+ */
+export function resolveWrittenCardPolicyIds<T extends { orchestration?: object }>(
+  override: T,
+  tasks: readonly { id: string }[],
+  storedConfig?: { orchestration?: object },
+): { ok: true; value: T } | { ok: false; error: string } {
+  const storedRaw = (storedConfig?.orchestration as { cardPolicies?: unknown } | undefined)?.cardPolicies;
+  const written = (override.orchestration as { cardPolicies?: unknown } | undefined)?.cardPolicies;
+  if (written === undefined) return { ok: true, value: override };
+  const parsed = parseCardPolicies(written);
+  if (!parsed.ok) return { ok: true, value: override };
+  const stored = new Map<string, Set<string>>();
+  const prior = storedRaw === undefined ? undefined : parseCardPolicies(storedRaw);
+  if (prior?.ok) for (const p of prior.policies) if (p.match.cardIds) stored.set(p.id, new Set(p.match.cardIds));
+  const r = resolveCardPolicyCardIds(parsed.policies, tasks, stored);
+  if (!r.ok) return r;
+  return { ok: true, value: { ...override, orchestration: { ...override.orchestration, cardPolicies: r.policies } } };
+}
+
+/** True when the project STORES a policy list (absent or empty = false; an unparseable value = true, since it fails closed on every card). */
+export function projectStoresCardPolicies(project: { config?: unknown }): boolean {
+  const raw = (project.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
+  return raw !== undefined && !(Array.isArray(raw) && raw.length === 0);
+}
+
 function nameOf(p: CardPolicy): string {
   return p.name ?? p.id;
 }
@@ -132,6 +192,44 @@ export async function evaluateCardPolicies(input: {
     }
   }
   return { verdicts, blocking: verdicts.filter((v) => v.status === "unmet" || v.status === "unreadable") };
+}
+
+/**
+ * Card 61d32daf — the board's project-wide status read, with every per-request input hoisted: the stored list is
+ * read and parsed ONCE, the sticky matches arrive pre-fetched (`stickyByTask`, one project-keyed query), and the shared
+ * {@link evaluateCardPolicies} runs ONLY for a card some policy can match (live selector, or a sticky row naming a
+ * configured policy). Every evaluated card gets exactly the verdict `taskPolicyView` gives it (same evaluator, same
+ * spawn-phase evidence). An unparseable list yields the same `config` verdict on every card, so it is evaluated once.
+ * Returns `{}` for a project that stores no list.
+ */
+export async function evaluateProjectCardPolicyStatus(input: {
+  project: { config?: unknown };
+  tasks: readonly { id: string; title: string }[];
+  stickyByTask: ReadonlyMap<string, ReadonlySet<string>>;
+  evidence: PolicyEvidence;
+}): Promise<Record<string, { blocking: number; total: number }>> {
+  const { project, tasks, stickyByTask, evidence } = input;
+  const out: Record<string, { blocking: number; total: number }> = {};
+  if (!projectStoresCardPolicies(project)) return out;
+  const raw = (project.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
+  const parsed = parseCardPolicies(raw);
+  const record = (id: string, ev: PolicyEvaluation): void => {
+    if (ev.verdicts.length > 0) out[id] = { blocking: ev.blocking.length, total: ev.verdicts.length };
+  };
+  if (!parsed.ok) {
+    if (tasks.length === 0) return out;
+    const ev = await evaluateCardPolicies({ rawPolicies: raw, task: tasks[0]!, phase: "spawn", evidence });
+    for (const t of tasks) record(t.id, ev);
+    return out;
+  }
+  const configured = new Set(parsed.policies.map((p) => p.id));
+  for (const t of tasks) {
+    const sticky = stickyByTask.get(t.id);
+    const stickyHit = sticky !== undefined && [...sticky].some((id) => configured.has(id));
+    if (!stickyHit && !parsed.policies.some((p) => cardPolicyMatches(p, t))) continue;
+    record(t.id, await evaluateCardPolicies({ rawPolicies: raw, task: t, phase: "spawn", evidence, stickyPolicyIds: sticky }));
+  }
+  return out;
 }
 
 const WAIVER_REMEDY = "Or the owner can record a waiver for this requirement (human-only; agents cannot waive).";
