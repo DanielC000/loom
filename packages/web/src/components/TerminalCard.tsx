@@ -17,7 +17,7 @@ import { SessionQueue } from "./SessionQueue";
 import { SessionWakes } from "./SessionWakes";
 import { SessionTaskCard } from "./SessionTaskCard";
 import { Panel, Button, SectionLabel, StatusPill } from "./ui";
-import { font, color } from "../theme";
+import { font, color, radius } from "../theme";
 
 // ── <TerminalCard> — the ONE base every live-session terminal card is built on ────────────────────
 //
@@ -395,10 +395,13 @@ export function TerminalCard({
       hrefFor={(key) => atlasNode.hrefFor(key as TerminalTab)}
     />
   ) : (
-    <div style={{ marginBottom: 6, display: "flex", gap: 6, flexShrink: 0 }}>
+    // Graphite tabs: the same underline grammar as the kit's NavTab (`.loom-navtab`), as real buttons
+    // because these switch a pane in place rather than navigate. aria-pressed carries the on state.
+    <div className="loom-cardtabs" style={{ marginBottom: 6, display: "flex", gap: 18, flexShrink: 0 }}>
       {tabDefs.map((t) => (
-        <Button key={t.key} variant={activeTab === t.key ? "primary" : "default"}
-          onClick={() => setTab(t.key)}>{t.label}</Button>
+        <button key={t.key} type="button" aria-pressed={activeTab === t.key}
+          className={`loom-navtab loom-cardtab${activeTab === t.key ? " is-active" : ""}`}
+          onClick={() => setTab(t.key)}>{t.label}</button>
       ))}
     </div>
   );
@@ -485,7 +488,10 @@ export function TerminalCard({
           rescale; this guarantees the terminal can NEVER paint over the composer below. xterm scrolls
           via its own .xterm-viewport. */}
       {(!tabs || activeTab === "terminal") && (
-        <div ref={paneWrapRef} style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
+        // The terminal well (Graphite): rounded and on the terminal's own dark ground in both themes. Radius
+        // and background only, never padding, so the HUG budget measures exactly what it did before.
+        <div ref={paneWrapRef} style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden",
+          borderRadius: radius.base, background: color.termBg }}>
           {terminalPane(heightBudget)}
         </div>
       )}
@@ -540,7 +546,7 @@ export function TerminalCard({
 
   if (maximizable && maximized) {
     const overlay: CSSProperties = {
-      position: "fixed", inset: 0, background: "rgba(0,0,0,0.66)", display: "flex",
+      position: "fixed", inset: 0, background: color.scrim, display: "flex",
       alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16,
     };
     return (

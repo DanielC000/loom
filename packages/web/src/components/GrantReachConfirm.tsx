@@ -25,7 +25,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
 
   return (
     <Panel data-testid="grant-reach-confirm" role="alertdialog" aria-label="Confirm capability grant"
-      style={{ borderColor: color.amber, display: "flex", flexDirection: "column", gap: 10 }}>
+      style={{ boxShadow: `inset 0 0 0 1px ${color.busy}`, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Badge tone="busy">grant</Badge>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 12, color: color.text }}>

@@ -9,7 +9,7 @@ import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import { SessionNode } from "../components/SessionNode";
 import { TerminalTile } from "../components/TerminalTile";
 import { Panel, Button, SectionLabel, StatusPill } from "../components/ui";
-import { color, font } from "../theme";
+import { color, font, fs } from "../theme";
 
 // Deep-linkable SINGLE-session view (/session/:id) — the destination a non-merge attention alert
 // (STUCK-BUSY / CRASH-LOOPED / MANAGER ASLEEP / QUEUE DRAINED / CONTEXT OVERFLOW) opens
@@ -53,7 +53,7 @@ export default function SessionView() {
   const header = (label: string) => atlasOn ? null : (
     <div data-testid="session-view-header" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
       <Button onClick={() => navigate(-1)}>← back</Button>
-      <span style={{ fontFamily: font.head, fontSize: 14, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{label}</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.lg, fontWeight: 600, letterSpacing: "-0.01em", color: color.text }}>{label}</span>
       {session && (
         <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
           {session.projectName} · {session.agentName}{session.role ? ` · ${session.role}` : ""} · {session.id.slice(0, 8)}

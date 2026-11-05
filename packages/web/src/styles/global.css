@@ -757,6 +757,27 @@ body {
     transition: none;
   }
 }
+/* The session card's pane tabs (components/TerminalCard.tsx): `.loom-navtab` on a <button>, so the UA
+   button chrome is reset and the underline slot is kept. A hairline under the row seats the tabs. */
+.loom-cardtabs {
+  border-bottom: 1px solid var(--loom-line);
+}
+button.loom-cardtab {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 4px 0 6px;
+  cursor: pointer;
+}
+button.loom-cardtab.is-active {
+  border-bottom-color: var(--loom-accent);
+}
+button.loom-cardtab:focus-visible {
+  outline: 2px solid var(--loom-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 
 /* ── Instrument Rail (sidebar nav — Direction A) ──────────────────────────────────
    A 60px icon-only rail that expands to full labels on hover / keyboard focus / pin, floating OVER
@@ -1411,7 +1432,7 @@ body {
   top: 0;
   bottom: 0;
   width: 38%;
-  background: linear-gradient(90deg, transparent, var(--loom-amber), transparent);
+  background: linear-gradient(90deg, transparent, var(--loom-busy), transparent);
   animation: loom-merge-sweep 1.5s ease-in-out infinite;
 }
 @keyframes loom-merge-sweep {
@@ -1461,8 +1482,8 @@ body {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  background: var(--loom-panel-2);
-  border-right: 1px solid var(--loom-border);
+  /* Graphite: the rail is its own tonal step (rail-bg), separated from the content by tone, not a line. */
+  background: var(--loom-rail-bg);
 }
 .loom-atlas-treehead {
   display: flex;
@@ -1472,7 +1493,6 @@ body {
   height: 52px;
   flex: none;
   padding: 0 16px;
-  border-bottom: 1px solid var(--loom-border);
 }
 .loom-atlas-treebody {
   flex: 1;
@@ -1483,10 +1503,9 @@ body {
 
 /* ── Atlas tree nodes (card 8cbb2ac2 — P1-1) ──────────────────────────────────────────
    One row per nav destination (components/AtlasTree.tsx), in the round-4 mockup's tree
-   language: a reserved twist column, a 14px icon, an ellipsising label, and a 2px left
-   edge that lights phosphor on the active node. The active fill is the SAME gradient the
-   Instrument Rail's own active item uses, so both shells read as one product and no new
-   colour value enters the system. */
+   language: a reserved twist column, a 14px icon and an ellipsising label. The active node
+   takes Graphite's selection fill with an accent icon; the 2px left border slot stays
+   reserved (transparent) so the open project branch can light it without a shift. */
 .loom-atlas-nodes {
   list-style: none;
   margin: 0;
@@ -1519,11 +1538,12 @@ body {
   gap: 7px;
   min-height: 28px;
   padding: 0 10px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   text-decoration: none;
-  font-family: var(--loom-font-mono);
-  font-size: 12.5px;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-body);
   border-left: 2px solid transparent;
+  border-radius: var(--loom-radius);
   transition:
     color 80ms linear,
     background 80ms linear;
@@ -1549,12 +1569,17 @@ button.loom-atlas-node {
 a.loom-atlas-node:hover,
 button.loom-atlas-node:hover {
   color: var(--loom-text);
-  background: var(--loom-panel);
+  background: var(--loom-hover);
 }
+/* Graphite selection: a cobalt-tinted fill (`--loom-selected`) with the icon in the accent. No edge
+   bar: the fill alone says "you are here", and green stays reserved for "live". */
 a.loom-atlas-node.is-active {
   color: var(--loom-text);
-  border-left-color: var(--loom-phosphor);
-  background: linear-gradient(90deg, var(--loom-phosphor-dim), transparent 70%);
+  font-weight: 500;
+  background: var(--loom-selected);
+}
+a.loom-atlas-node.is-active .loom-atlas-ico {
+  color: var(--loom-accent-fg);
 }
 /* Keyboard focus ring, matching the rail's inset ring. The tree is the app's primary
    navigation with the switch on, so every node has to be reachable and VISIBLY focused by Tab. */
@@ -1570,12 +1595,12 @@ div.loom-atlas-node.is-branch {
   cursor: default;
 }
 /* The OPEN project row says which branch you are INSIDE, not where you are — so it takes the
-   phosphor edge and the brighter text but NOT the active destination's gradient fill. Two rows
+   accent edge and the brighter text but NOT the active destination's selection fill. Two rows
    wearing an identical "you are here" treatment would leave neither reading as it. Closed rows keep
    the dim rest colour every other row has, so the tier reads as one list with one selection. */
 button.loom-atlas-node.is-branch.is-open {
   color: var(--loom-text);
-  border-left-color: var(--loom-phosphor);
+  border-left-color: var(--loom-accent);
 }
 /* Reserved, blank on a destination row — see the note in AtlasTree.tsx. The width is the point: it
    keeps every label on one text origin so the phase-2 branch nodes can land without rows shifting. */
@@ -1596,7 +1621,7 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-atlas-node.is-branch.is-open .loom-atlas-twist {
   transform: rotate(90deg);
-  color: var(--loom-phosphor);
+  color: var(--loom-accent-fg);
 }
 /* Live-session marker on a project row: the same count + phosphor dot the rail chip's dropdown rows
    carry, so both shells say "work is running here" in one language. */
@@ -1612,8 +1637,7 @@ button.loom-atlas-node.is-branch.is-open {
   width: 7px;
   height: 7px;
   border-radius: 7px;
-  background: var(--loom-phosphor);
-  box-shadow: 0 0 6px var(--loom-phosphor);
+  background: var(--loom-live);
 }
 .loom-atlas-ico {
   flex: 0 0 14px;
@@ -1638,7 +1662,7 @@ button.loom-atlas-node.is-branch.is-open {
 /* ── The project BRANCH row (card 0d0c6cee) ───────────────────────────────────────────
    The twist is its own button now, because expansion is not selection — so it sits
    OUTSIDE the selector, as a sibling in the row. Which makes the ROW, not the button,
-   the thing that starts at the rail's left edge: the phosphor "you are inside this
+   the thing that starts at the rail's left edge: the accent "you are inside this
    branch" edge moves onto the row, and the selector gives up its own left border so the
    pair still reads as one row rather than as a control with a gutter in front of it.
    A branch label lands on the SAME text origin as a destination label's, which is what
@@ -1652,10 +1676,10 @@ button.loom-atlas-node.is-branch.is-open {
   border-left: 2px solid transparent;
 }
 .loom-atlas-noderow.is-branchrow.is-open {
-  border-left-color: var(--loom-phosphor);
+  border-left-color: var(--loom-accent);
 }
 .loom-atlas-noderow.is-branchrow:hover {
-  background: var(--loom-panel);
+  background: var(--loom-hover);
 }
 .loom-atlas-noderow.is-branchrow > button.loom-atlas-node.is-branch {
   padding-left: 7px;
@@ -1691,7 +1715,7 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-atlas-twistbtn.is-expanded {
   transform: rotate(90deg);
-  color: var(--loom-phosphor);
+  color: var(--loom-accent-fg);
 }
 .loom-atlas-twistbtn:focus-visible {
   outline: 2px solid var(--loom-ring);
@@ -1735,12 +1759,10 @@ button.loom-atlas-node.is-branch.is-open {
   background: var(--loom-text-muted);
 }
 .loom-atlas-entdot.is-live {
-  background: var(--loom-phosphor);
-  box-shadow: 0 0 6px var(--loom-phosphor);
+  background: var(--loom-live);
 }
 .loom-atlas-entdot.is-busy {
-  background: var(--loom-amber);
-  box-shadow: 0 0 6px var(--loom-amber);
+  background: var(--loom-busy);
 }
 /* (The card tier's own dot and its `+N more` row went with the Board tree row — card
    ec1aa18e; a session dot is the only entity dot left.) */
@@ -1783,10 +1805,11 @@ button.loom-atlas-node.is-branch.is-open {
   min-width: 0;
   overflow: hidden;
 }
+/* Graphite: the topbar sits on the page tone; one hairline under the crumbs and one under the head. */
 .loom-atlas-topbar {
   flex: none;
-  background: var(--loom-panel-2);
-  border-bottom: 1px solid var(--loom-border);
+  background: var(--loom-bg);
+  border-bottom: 1px solid var(--loom-line);
 }
 .loom-atlas-crumbs {
   display: flex;
@@ -1794,13 +1817,15 @@ button.loom-atlas-node.is-branch.is-open {
   gap: 8px;
   min-height: 34px;
   padding: 4px 16px;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
 }
 .loom-atlas-nodehead {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px 12px;
+  padding: 12px 16px 12px;
   /* A session node fills the extras slot with its state + lifecycle cluster (card 525c8ad9), which on
      a phone needs a second row rather than squeezing the heading to nothing. */
   flex-wrap: wrap;
@@ -1851,14 +1876,17 @@ button.loom-atlas-node.is-branch.is-open {
   max-width: 100%;
   overflow: hidden;
   white-space: nowrap;
-  border: 1px solid var(--loom-border-strong);
+  /* Graphite status capsule: a tonal fill, no outline. The 1px border slot stays (transparent) so the
+     pill keeps its measured box. */
+  border: 1px solid transparent;
   border-radius: 999px;
-  background: var(--loom-panel);
+  background: var(--loom-surface-2);
   padding: 2px 10px;
-  font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 /* The pill's reading rides its OWN element, which is what makes the ellipsis fire: this span is a
    flex ITEM of the pill above, so it is blockified, and a block container is the only kind of box
@@ -1876,24 +1904,20 @@ button.loom-atlas-node.is-branch.is-open {
   white-space: nowrap;
 }
 .loom-atlas-headpill.is-phosphor {
-  border-color: color-mix(in oklab, var(--loom-live) 40%, transparent);
-  background: color-mix(in oklab, var(--loom-live) 7%, transparent);
-  color: var(--loom-phosphor);
+  background: var(--loom-live-soft);
+  color: var(--loom-live-text);
 }
 .loom-atlas-headpill.is-amber {
-  border-color: color-mix(in oklab, var(--loom-busy) 40%, transparent);
-  background: color-mix(in oklab, var(--loom-busy) 7%, transparent);
-  color: var(--loom-amber);
+  background: var(--loom-busy-soft);
+  color: var(--loom-busy);
 }
 .loom-atlas-headpill.is-cyan {
-  border-color: color-mix(in oklab, var(--loom-info) 35%, transparent);
-  background: color-mix(in oklab, var(--loom-info) 6%, transparent);
-  color: var(--loom-cyan);
+  background: var(--loom-info-soft);
+  color: var(--loom-info);
 }
 .loom-atlas-headpill.is-red {
-  border-color: color-mix(in oklab, var(--loom-danger) 40%, transparent);
-  background: color-mix(in oklab, var(--loom-danger) 7%, transparent);
-  color: var(--loom-red);
+  background: var(--loom-danger-soft);
+  color: var(--loom-danger);
 }
 .loom-atlas-content {
   flex: 1;
@@ -2275,10 +2299,9 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 4px;
   display: flex;
   flex-direction: column;
-  background: var(--loom-panel);
-  border: 1px solid var(--loom-border-strong);
-  border-top: 2px solid var(--loom-phosphor);
-  border-radius: var(--loom-radius);
+  background: var(--loom-surface);
+  border: 1px solid var(--loom-line);
+  border-radius: var(--loom-radius-lg);
   box-shadow: var(--loom-pop-shadow);
 }
 .loom-atlas-tabmenu-item {
@@ -2342,9 +2365,11 @@ button.loom-atlas-node.is-branch.is-open {
   height: min(58vh, 640px);
   min-height: 240px;
   overflow: hidden;
-  border: 1px solid var(--loom-border);
-  border-radius: var(--loom-radius);
-  background: var(--loom-panel);
+  /* Graphite terminal well: the terminal's own dark ground in BOTH themes (--loom-term-bg), radius 12,
+     no outline. The 1px border slot is kept transparent so the box measures as before. */
+  border: 1px solid transparent;
+  border-radius: var(--loom-radius-lg);
+  background: var(--loom-term-bg);
   padding: 6px;
   box-sizing: border-box;
 }
@@ -2832,10 +2857,13 @@ button.loom-atlas-node.is-branch.is-open {
   width: 100%;
   min-width: 0;
   text-align: left;
+  /* Graphite tile: a surface step on the page, radius 12, no outline (a light-theme ring + shadow comes
+     from --loom-panel-shadow). The 1px border slot stays, transparent, so the open state can light it. */
   padding: 11px 14px 12px;
-  background: var(--loom-panel);
-  border: 1px solid var(--loom-border);
-  border-radius: var(--loom-radius);
+  background: var(--loom-surface);
+  border: 1px solid transparent;
+  border-radius: var(--loom-radius-lg);
+  box-shadow: var(--loom-panel-shadow);
   transition:
     border-color 80ms linear,
     background 80ms linear;
@@ -2845,8 +2873,7 @@ button.loom-kpi {
   font: inherit;
 }
 button.loom-kpi:hover {
-  border-color: var(--loom-border-strong);
-  background: var(--loom-panel-2);
+  background: var(--loom-hover);
 }
 button.loom-kpi:focus-visible {
   outline: 2px solid var(--loom-ring);
@@ -2855,20 +2882,22 @@ button.loom-kpi:focus-visible {
 /* The open tile keeps its own light while its breakdown is showing, so the pop-over reads as
    hanging off THIS number and not as a floating panel that arrived from nowhere. */
 button.loom-kpi.is-open {
-  border-color: var(--loom-phosphor);
-  background: var(--loom-panel-2);
+  border-color: var(--loom-accent-edge);
+  background: var(--loom-selected);
 }
 .loom-kpi-label {
   font-family: var(--loom-font-head);
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-2);
 }
 .loom-kpi-value {
-  font-family: var(--loom-font-mono);
+  font-family: var(--loom-font-ui);
   font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
 }
@@ -2885,7 +2914,7 @@ button.loom-kpi.is-open {
   height: 3px;
   margin-top: 4px;
   border-radius: var(--loom-radius-sm);
-  background: var(--loom-border);
+  background: var(--loom-track);
   overflow: hidden;
 }
 .loom-kpi-fill {
@@ -2904,10 +2933,9 @@ button.loom-kpi.is-open {
   top: calc(100% + 6px);
   z-index: 60;
   width: min(380px, 86vw);
-  background: var(--loom-panel);
-  border: 1px solid var(--loom-border-strong);
-  border-top: 2px solid var(--loom-phosphor);
-  border-radius: var(--loom-radius);
+  background: var(--loom-surface);
+  border: 1px solid var(--loom-line);
+  border-radius: var(--loom-radius-lg);
   box-shadow: var(--loom-pop-shadow);
 }
 .loom-orch-pop {
@@ -3344,9 +3372,10 @@ button.loom-kpi.is-open {
   display: flex;
   align-items: stretch;
   flex-wrap: nowrap;
-  background: var(--loom-panel);
-  border: 1px solid var(--loom-border);
-  border-radius: var(--loom-radius);
+  background: var(--loom-surface);
+  border: 1px solid transparent;
+  border-radius: var(--loom-radius-lg);
+  box-shadow: var(--loom-panel-shadow);
 }
 /* The divider lives on the CHILD, not on the cell, because a cell with a pop-over is wrapped in
    its own positioned slot — so `:first-child` has to resolve against whichever of the two it is. */
@@ -3385,7 +3414,7 @@ button.loom-ovbrief-cell {
   cursor: pointer;
 }
 button.loom-ovbrief-cell:hover {
-  background: var(--loom-panel-2);
+  background: var(--loom-hover);
 }
 button.loom-ovbrief-cell:focus-visible {
   outline: 2px solid var(--loom-ring);
@@ -3395,8 +3424,8 @@ button.loom-ovbrief-cell:focus-visible {
    `button.loom-kpi.is-open` gives a tile, drawn as an inset edge because these cells share one
    border rather than each carrying their own. */
 button.loom-ovbrief-cell.is-open {
-  background: var(--loom-panel-2);
-  box-shadow: inset 0 2px 0 var(--loom-phosphor);
+  background: var(--loom-selected);
+  box-shadow: inset 0 2px 0 var(--loom-accent);
 }
 .loom-ovbrief-l {
   font-family: var(--loom-font-head);

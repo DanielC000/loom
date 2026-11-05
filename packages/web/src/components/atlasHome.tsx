@@ -13,7 +13,7 @@ import { Button, Panel, SectionLabel } from "./ui";
 import { useAtlasNodeHeadSlot } from "../lib/atlasNodeHead";
 import { useDismissable } from "../lib/useDismissable";
 import type { BoardLane } from "../lib/atlasHome";
-import { color, columnTone, font, radius, tone, type Tone } from "../theme";
+import { color, columnTone, font, radius, tone, toneFill, type Tone } from "../theme";
 
 // ── Node tabs ──────────────────────────────────────────────────────────────────────────────────
 // Real addresses, not local state: a tab is a `?tab=` on the node's own path, so it is linkable,
@@ -358,7 +358,7 @@ function KpiTile({ item, open, align, onToggle, onClose }: {
       {item.fill !== undefined && (
         <span className="loom-kpi-track" aria-hidden>
           <span className="loom-kpi-fill"
-            style={{ width: `${Math.max(0, Math.min(1, item.fill)) * 100}%`, background: tone[t] }} />
+            style={{ width: `${Math.max(0, Math.min(1, item.fill)) * 100}%`, background: toneFill[t] }} />
         </span>
       )}
     </>
@@ -705,7 +705,7 @@ export function MeterRow({ label, ratio, value, tone: t = "live" }: {
       <span className="loom-meterrow-l">{label}</span>
       <span className="loom-meterrow-track" aria-hidden>
         <span style={{ display: "block", height: "100%", borderRadius: radius.sm,
-          width: `${Math.max(0, Math.min(1, ratio)) * 100}%`, background: tone[t] }} />
+          width: `${Math.max(0, Math.min(1, ratio)) * 100}%`, background: toneFill[t] }} />
       </span>
       <span className="loom-meterrow-v" style={{ color: tone[t] }}>{value}</span>
     </div>

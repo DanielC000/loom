@@ -67,6 +67,7 @@ export const color = {
   meterOk: "var(--loom-meter-ok)",
   scrim: "var(--loom-scrim)",
   termBg: "var(--loom-term-bg)",
+  cardBorder: "var(--loom-card-border)",
   termFg: "var(--loom-term-fg)",
 } as const;
 
@@ -112,11 +113,11 @@ export const space = (n: number): string => `${n * 4}px`;
 // Green `live` means live and nothing else; primary, focus and selection are `accent` (cobalt).
 export type Tone = "live" | "busy" | "info" | "danger" | "muted" | "accent";
 
-// The tone's signal colour: what a caller writes into `color:` or a border. `live` is the live fill
-// itself (the colour every pre-Graphite `phosphor` call site rendered); `accent` is the cobalt that
-// reads as text and as an edge.
+// The tone's signal colour: what a caller writes into `color:` or a border. `live` is the live TEXT
+// shade (the fill shade is too light to read as text on the light theme's white); a dot or a meter bar
+// reads `toneFill` instead. `accent` is the cobalt that reads as text and as an edge.
 export const tone: Record<Tone, string> = {
-  live: color.live,
+  live: color.liveText,
   busy: color.busy,
   info: color.info,
   danger: color.danger,
@@ -124,9 +125,9 @@ export const tone: Record<Tone, string> = {
   accent: color.accentFg,
 };
 
-// The tone as TEXT laid on its own soft fill (a status capsule, a tag). Live uses its darker text
-// token there, because the live fill shade is too light to read as text on a light-theme soft fill.
-export const toneText: Record<Tone, string> = { ...tone, live: color.liveText };
+// The tone as TEXT laid on its own soft fill (a status capsule, a tag). Today it equals `tone`, which
+// already reads live as its text shade; it stays a separate map so a capsule can diverge later.
+export const toneText: Record<Tone, string> = { ...tone };
 
 // The tone as a FILL: a status dot, a meter bar.
 export const toneFill: Record<Tone, string> = {
@@ -154,12 +155,12 @@ export const toneSoft: Record<Tone, string> = {
 // ROLE_ACCENT palette in shared/presets.ts, which is its own — cosmetic, persisted — accent source.)
 export const roleTone: Record<ColumnRole, Tone> = {
   intake: "info", // info / new arrivals
-  defaultLanding: "live", // the catch-all landing
+  defaultLanding: "accent", // the catch-all landing (green means live only)
   workReady: "muted", // queued, not yet active
   active: "busy", // in flight
   review: "info", // under review
   parked: "muted", // waiting / parked
-  terminal: "live", // done
+  terminal: "muted", // done: quiet, never green (green means live only)
   mergeLanding: "busy", // where a merged card lands, pre-terminal
 };
 
@@ -176,7 +177,7 @@ export function columnTone(col: Pick<KanbanColumn, "role">): Tone | null {
 // Workspace all read this). null/plain sessions fall back to "muted" at the call site. Distinct from
 // the lane-oriented `roleTone` above (ColumnRole) — this keys on SessionRole.
 export const sessionRoleTone: Record<NonNullable<SessionRole>, Tone> = {
-  manager: "live",
+  manager: "accent",
   worker: "info",
   platform: "busy",
   auditor: "muted",

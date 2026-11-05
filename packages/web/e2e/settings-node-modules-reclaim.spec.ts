@@ -276,6 +276,6 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
     await expect(page.getByText(/Cleared 1 of 2 · freed 100 MB · 1 failed to start/)).toBeVisible();
 
     // The run is not clean: the summary pill wears the amber "attention" tone, never the phosphor clean one.
-    await expect(page.getByText("last reclaim", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-amber"));
+    await expect(page.getByText("last reclaim", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-busy"));
   });
 });

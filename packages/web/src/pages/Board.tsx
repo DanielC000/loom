@@ -15,7 +15,7 @@ import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } fro
 import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
-import { color, columnTone, font, fs, radius, shadow, tone, toneSoft, toneText, type Tone } from "../theme";
+import { color, columnTone, font, fs, radius, shadow, tone, toneFill, toneSoft, toneText, type Tone } from "../theme";
 // Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
 // structurally and defaults every one of them, so a response without them renders exactly as before.
 import { boardHierarchy, hasBoardHierarchy, hasTaskContextLinks, resolveParentInput, taskLinks, type TaskLinks, type TaskRef } from "../lib/taskHierarchy";
@@ -547,6 +547,17 @@ function labelColorFor(accent: string | null, theme: ResolvedTheme): string {
   return accent;
 }
 
+// The lane's identity mark (Graphite): an 8px dot in the lane's resolved accent, beside a name set in
+// plain text colour. It replaces the old 3px top bar. A dot is decorative (the name carries the meaning),
+// so it takes the raw accent with no contrast floor; an un-accented lane gets the quiet text-3 grey. A
+// done lane shows a check mark instead: done is quiet, and green means live only.
+function LaneDot({ accent, done = false }: { accent: string | null; done?: boolean }) {
+  if (done) return <span aria-hidden data-testid="lane-dot" style={{ width: 10, flexShrink: 0, color: accent ?? color.text3,
+    fontSize: fs.sm, lineHeight: 1, textAlign: "center" }}>✓</span>;
+  return <span aria-hidden data-testid="lane-dot" style={{ width: 8, height: 8, borderRadius: radius.pill, flexShrink: 0,
+    background: accent ?? color.text3 }} />;
+}
+
 // The lifted lane's DragOverlay preview — the lane's own header, so the thing under the pointer is
 // recognisably the lane being moved.
 function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
@@ -555,11 +566,11 @@ function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
   const accent = columnAccent(col);
   return (
     <div data-testid="lane-drag-preview"
-      style={{ width: 220, background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4,
+      style={{ width: 220, background: color.laneBg, border: `1px solid ${color.lineStrong}`, borderRadius: radius.lg,
         boxShadow: shadow.pop, transform: "rotate(-1deg)", cursor: "grabbing" }}>
-      <div aria-hidden style={{ height: 3, background: accent ?? "transparent", borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
-      <SectionLabel style={{ color: labelColorFor(accent, theme), margin: 0, padding: "10px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+      <SectionLabel style={{ color: labelColorFor(accent, theme), margin: 0, padding: "12px 14px", display: "flex", alignItems: "center", gap: 8 }}>
         <span aria-hidden style={{ color: color.textDim }}>⠿</span>
+        <LaneDot accent={accent} />
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
       </SectionLabel>
     </div>
@@ -614,7 +625,6 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
   const accent = columnAccent(col);
   const theme = useResolvedTheme();
   const labelColor = labelColorFor(accent, theme); // resolved accent if it clears AA on this theme's panel, else textDim
-  const cardAccent = accent ?? color.border; // un-accented lane → a neutral hairline left-border
   // SOFT WIP limit (advisory, never blocks). Shown as "N / limit" WHENEVER a limit is set (so an
   // approaching "2 / 3" is visible, not just a breach) — neutral under, amber AT-or-over. The count is
   // the column's TRUE card load (`laneTotal` when the lane came back windowed, else `cardCount`,
@@ -628,18 +638,24 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
   // two ORDER/VIEW controls (card 67c43038): drag by the header to reorder, and the ⋯ lane menu. Column
   // CRUD (add/rename/delete/role/accent/WIP) still lives ONLY in Settings › Board Columns (ColumnManager).
   //
-  // The insertion edge for a lane drag: an inset phosphor bar on the side the dragged lane will land.
-  const dropShadow = dropEdge === "before" ? `inset 3px 0 0 ${color.phosphor}` : dropEdge === "after" ? `inset -3px 0 0 ${color.phosphor}` : undefined;
+  // The insertion edge for a lane drag: an inset cobalt bar on the side the dragged lane will land.
+  const dropShadow = dropEdge === "before" ? `inset 3px 0 0 ${color.accent}` : dropEdge === "after" ? `inset -3px 0 0 ${color.accent}` : undefined;
+  // Graphite: a lane is a tinted WELL (lane-bg, radius 12, no border). The 1px border slot stays reserved
+  // (transparent at rest) so the dashed "this lane is being dragged" outline costs no layout shift. A card
+  // dragged over the lane tints it with the selection fill.
+  const laneChrome: React.CSSProperties = {
+    background: cardOver ? color.selected : color.laneBg, borderRadius: radius.lg,
+    border: `1px ${laneDragging ? "dashed" : "solid"} ${laneDragging ? color.lineStrong : "transparent"}`,
+    display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh", boxShadow: dropShadow,
+    opacity: laneDragging ? 0.35 : 1, transition: "background-color 120ms ease",
+  };
 
   // Collapsed: a slim rail with the label + count, still a drop target for cards. The whole rail is the
   // expand control; reorder needs the lane expanded (its menu lives in the full header).
   if (collapsed) {
     return (
       <div ref={setNodeRef} data-testid={`lane-${col.key}`} data-lane-key={col.key} data-collapsed=""
-        style={{ background: cardOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
-          display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh", boxShadow: dropShadow,
-          opacity: laneDragging ? 0.35 : 1 }}>
-        <div aria-hidden style={{ height: 3, background: accent ?? "transparent", flexShrink: 0, borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
+        style={laneChrome}>
         <button type="button" className="loom-lane-rail" data-lane-expand={col.key} data-testid={`lane-expand-${col.key}`}
           aria-expanded={false} aria-label={`Expand the ${col.label} lane (${laneLength} card${laneLength === 1 ? "" : "s"})`}
           title={`Expand ${col.label}`} onClick={() => onCollapse(false)} style={{ color: labelColor }}>
@@ -654,22 +670,19 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
   // droppable ref stays on this outer wrapper, so a drop lands anywhere over the column (incl. when
   // scrolled — dnd-kit measures this wrapper's rect, and its auto-scroll drives the inner list).
   return (
-    <div ref={setNodeRef} className="loom-grid" data-testid={`lane-${col.key}`} data-lane-key={col.key}
-      style={{ background: cardOver ? color.phosphorDim : color.panel, border: `1px ${laneDragging ? "dashed" : "solid"} ${laneDragging ? color.borderStrong : color.border}`, borderRadius: 4,
-        display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh", boxShadow: dropShadow,
-        opacity: laneDragging ? 0.35 : 1 }}>
-      {/* Restrained per-column header accent: a thin top bar in the lane's resolved color. The 3px height
-          is ALWAYS reserved (transparent when un-accented) so accented and un-accented lanes share one
-          label baseline. Top corners rounded to nest inside the wrapper's radius. */}
-      <div aria-hidden style={{ height: 3, background: accent ?? "transparent", flexShrink: 0,
-        borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
-      <SectionLabel className="loom-lane-head" style={{ color: labelColor, margin: 0, padding: "12px 8px 8px 12px", display: "flex", alignItems: "center", gap: 6 }}>
-        {/* The drag handle: grip + label. Pointer-only by design: the keyboard path is the ⋯ menu below
-            (a dnd-kit keyboard drag would nudge the lane 25px per keypress, which is no way to reorder). */}
+    // `.loom-grid` stays on the lane: it is inert in Graphite (--loom-grid-line is transparent) but it is
+    // the hook every board spec locates a lane by, so it is part of the lane's contract, not decoration.
+    <div ref={setNodeRef} className="loom-grid" data-testid={`lane-${col.key}`} data-lane-key={col.key} style={laneChrome}>
+      {/* The lane head (Graphite): the accent dot plus the lane name in plain text colour, sentence case
+          as the owner typed it. The accent rides the dot only, so every lane name reads at full contrast. */}
+      <SectionLabel className="loom-lane-head" style={{ color: color.text, fontSize: fs.sm, margin: 0, padding: "12px 8px 8px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+        {/* The drag handle: grip + dot + label. Pointer-only by design: the keyboard path is the ⋯ menu
+            below (a dnd-kit keyboard drag would nudge the lane 25px per keypress, which is no way to reorder). */}
         <span ref={laneDrag.setNodeRef} {...laneDrag.listeners} data-testid={`lane-handle-${col.key}`}
           className="loom-lane-handle" title="Drag to reorder this lane"
-          style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0, touchAction: "none" }}>
+          style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, touchAction: "none" }}>
           <span aria-hidden className="loom-lane-grip">⠿</span>
+          <LaneDot accent={accent} done={doneLane} />
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
         </span>
         {hasWipLimit ? (
@@ -677,17 +690,18 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
             title={atOrOverWip
               ? `At or over the soft WIP limit of ${col.wipLimit} (advisory — does not block; counts the column's true load)`
               : `Soft WIP limit of ${col.wipLimit} (advisory; counts the column's true load)`}
-            style={{ marginLeft: "auto", flexShrink: 0, color: atOrOverWip ? color.amber : color.textDim, fontWeight: atOrOverWip ? 700 : undefined }}>
+            style={{ marginLeft: "auto", flexShrink: 0, fontFamily: font.mono, fontWeight: atOrOverWip ? 600 : 400,
+              color: atOrOverWip ? color.busy : color.text3 }}>
             {wipCount} / {col.wipLimit}
           </span>
         ) : (
-          <span style={{ marginLeft: "auto", flexShrink: 0, color: "inherit" }}>({laneLength})</span>
+          <span style={{ marginLeft: "auto", flexShrink: 0, fontFamily: font.mono, fontWeight: 400, color: color.text3 }}>({laneLength})</span>
         )}
         <LaneMenu col={col} index={index} count={laneCount} disabled={reordering}
           onMove={onMoveLane} onCollapse={() => onCollapse(true)} />
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {visible.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
+        {visible.map((task) => <Card key={task.id} task={task} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
         {/* The reveal for the done-lane page. Sits INSIDE the lane's own scroll region (so it trails the
             last rendered card rather than pinning to the lane footer) and is full-width so it reads as
             the continuation of the list it extends, not as a card. One-way: revealing more is not a
@@ -707,7 +721,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
               ? `Showing ${step} more card${step === 1 ? "" : "s"} in ${col.label}`
               : `Show ${step} more card${step === 1 ? "" : "s"} in ${col.label}`}
             title={serverWindowed ? `${hidden} older card${hidden === 1 ? "" : "s"} not loaded yet` : undefined}
-            style={{ width: "100%", marginTop: 2, color: color.textDim, border: `1px dashed ${color.border}` }}>
+            style={{ width: "100%", marginTop: 2, color: color.text2, border: `1px dashed ${color.lineStrong}` }}>
             {serverWindowed && revealPending ? `Showing ${step} more…` : `Show ${step} more`}
           </Button>
         )}
@@ -719,8 +733,8 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
             empty column reads as intentional rather than a broken blank — and lights up when dragged over. */}
         {laneLength === 0 && !filterActive && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 72, textAlign: "center",
-            color: cardOver ? color.phosphor : color.textMuted, fontFamily: font.mono, fontSize: 11,
-            border: `1px dashed ${cardOver ? color.phosphor : color.border}`, borderRadius: 4,
+            color: cardOver ? color.accentFg : color.text3, fontFamily: font.ui, fontSize: fs.sm,
+            border: `1px dashed ${cardOver ? color.accentEdge : color.lineStrong}`, borderRadius: radius.base,
             transition: "color 120ms ease, border-color 120ms ease" }}>
             {cardOver ? "drop to move here" : "no cards yet"}
           </div>
@@ -734,8 +748,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
 // Tiny uppercase group label (font.head) preceding a row of toggle chips. aria-hidden — each
 // toggle carries its own descriptive aria-label, so the visual label would only be redundant noise
 // to a screen reader.
-const groupLabel = { fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-  letterSpacing: "0.1em", color: color.textMuted } as const;
+const groupLabel = { fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: color.text2 } as const;
 
 // A multi-select toggle chip. Off: outlined + dim. On: filled with its signal tone (the established
 // PriorityChip "pop" look). `muted` fills with the lighter text-dim grey instead of the near-invisible
@@ -743,15 +756,17 @@ const groupLabel = { fontFamily: font.head, fontSize: 10, fontWeight: 700, textT
 // (.loom-toggle in global.css) come for free; aria-pressed exposes the on/off state.
 function ToggleChip({ label, ariaLabel, t, active, onToggle }:
   { label: string; ariaLabel: string; t: Tone; active: boolean; onToggle: () => void }) {
-  const fill = t === "muted" ? color.textDim : tone[t];
+  // Graphite capsule: outlined at rest; on, it takes the tone's soft fill, text and edge. A muted tone has
+  // no edge of its own, so its "on" state borrows the strong line to stay distinguishable from rest.
+  const edge = t === "muted" ? color.lineStrong : tone[t];
   return (
     <button type="button" aria-pressed={active} aria-label={ariaLabel} title={ariaLabel} onClick={onToggle}
       className={`loom-toggle${active ? " is-active" : ""}`}
       style={{
-        fontFamily: font.head, fontSize: 10, fontWeight: active ? 700 : 500, letterSpacing: "0.06em",
-        textTransform: "uppercase", padding: "3px 8px", borderRadius: 3, lineHeight: "14px",
-        color: active ? color.bg : color.textDim, background: active ? fill : "transparent",
-        border: `1px solid ${active ? fill : color.border}`,
+        fontFamily: font.ui, fontSize: fs.sm, fontWeight: active ? 600 : 500,
+        padding: "3px 10px", borderRadius: radius.pill, lineHeight: "16px",
+        color: active ? toneText[t] : color.text2, background: active ? toneSoft[t] : "transparent",
+        border: `1px solid ${active ? edge : color.line}`,
       }}>
       {label}
     </button>
@@ -764,8 +779,8 @@ function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilte
     colFilter: Set<string>; onToggleCol: (k: string) => void;
     shown: number; total: number; active: boolean; onClear: () => void }) {
   return (
-    <div style={{ marginTop: 10, background: color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
-      padding: "8px 10px", display: "flex", flexDirection: "column", gap: 8 }}>
+    <div style={{ marginTop: 10, background: color.surface, borderRadius: radius.lg, boxShadow: shadow.panel,
+      padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
       {/* Row 1: search + live result count + clear-all */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div style={{ position: "relative", display: "flex", alignItems: "center", flex: "1 1 240px", maxWidth: 460 }}>
@@ -781,7 +796,7 @@ function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilte
           )}
         </div>
         <span aria-live="polite" style={{ fontFamily: font.mono, fontSize: 11, whiteSpace: "nowrap",
-          color: active ? color.phosphor : color.textMuted }}>
+          color: active ? color.accentFg : color.text3 }}>
           {shown} of {total} shown
         </span>
         {active && <Button variant="ghost" onClick={onClear} style={{ marginLeft: "auto" }}>Clear filters</Button>}
@@ -908,17 +923,17 @@ function MergePill({ merge }: { merge: MergeDisplay }) {
 // The bottom-edge hairline itself. RUNNING → an amber segment sweeping left↔right (the CSS keyframes
 // degrade to a static amber bar under prefers-reduced-motion); QUEUED → a static muted bar (no sweep — a
 // queued op hasn't reached the gate, so animating it would read as active work it isn't doing); settled →
-// a solid full-width fill — phosphor (merged, with a faint CRT glow), cyan (cancelled — no verdict
+// a solid full-width fill from the tone fills — live green (merged), info (cancelled — no verdict
 // reached, deliberately NOT the same amber a real rejection gets), amber (rejected — a solid bar, distinct
 // from the RUNNING sweep's animated one), or red (failed). aria-hidden — the worker-row pill already names
 // the state in text.
 function MergeTrack({ merge }: { merge: MergeDisplay }) {
   const fillStyle: React.CSSProperties =
-    merge.state === "merged" ? { background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }
-    : merge.state === "cancelled" ? { background: color.cyan }
-    : merge.state === "rejected" ? { background: color.amber }
-    : merge.state === "queued" ? { background: color.textMuted }
-    : { background: color.red };
+    merge.state === "merged" ? { background: toneFill.live }
+    : merge.state === "cancelled" ? { background: toneFill.info }
+    : merge.state === "rejected" ? { background: toneFill.busy }
+    : merge.state === "queued" ? { background: toneFill.muted }
+    : { background: toneFill.danger };
   return (
     <div className="loom-merge-track" aria-hidden>
       {merge.state === "running" ? <span className="loom-merge-sweep" /> : <span className="loom-merge-fill" style={fillStyle} />}
@@ -926,8 +941,13 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
   );
 }
 
-function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
-  { task: BoardTask; accent: string; worker?: SessionListItem; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
+// The held/deferred STATE tag on a card: a small tonal capsule (soft fill + tone text), Graphite's
+// status shape, rather than the old solid uppercase block.
+const cardStateTag: React.CSSProperties = { flexShrink: 0, fontFamily: font.ui, fontSize: fs.xs, fontWeight: 600,
+  borderRadius: radius.pill, padding: "1px 7px", lineHeight: "16px" };
+
+function Card({ task, worker, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
+  { task: BoardTask; worker?: SessionListItem; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, data: { type: "card" } satisfies BoardDragData });
   const st = worker ? workerStatus(worker) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
@@ -942,11 +962,13 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
         // position:relative anchors the merge-gate hairline (MergeTrack), which is absolutely positioned
         // flush at the card's bottom edge so it adds no height.
         position: "relative",
-        // Held reads as braked WHEREVER the card sits — its amber left-border overrides the column's
-        // own role accent, so a held card never blends into an ordinary lane.
-        border: `1px solid ${task.held ? color.amber : color.border}`,
-        borderLeft: `3px solid ${task.held ? color.amber : accent}`, borderRadius: 4,
-        padding: "6px 8px", marginBottom: 6, background: color.panel2,
+        // Graphite: a card is a tonal step above its lane well (card-bg), with a hairline and a short
+        // shadow in light only (the card-border/card-shadow tokens are transparent/none in dark). The
+        // lane's identity rides its head dot, not a per-card edge. Held reads as braked WHEREVER the card
+        // sits: a busy-tone edge plus a 3px busy left rule, so a held card never blends into a lane.
+        border: `1px solid ${task.held ? color.busy : color.cardBorder}`,
+        borderLeft: task.held ? `3px solid ${color.busy}` : `1px solid ${color.cardBorder}`, borderRadius: radius.base,
+        boxShadow: shadow.card, padding: "8px 10px", marginBottom: 8, background: color.cardBg,
         opacity: isDragging ? 0.5 : 1,
         transform: transform ? `translate(${transform.x}px, ${transform.y}px)` : undefined,
         fontFamily: font.mono, fontSize: 12, color: color.text,
@@ -975,8 +997,7 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
             <PriorityChip priority={prio(task)} />
             {task.held && (
               <span title="Held — won't be worked or nagged (the owner's brake)"
-                style={{ flexShrink: 0, fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
-                  textTransform: "uppercase", color: color.bg, background: color.amber, borderRadius: 3, padding: "1px 4px" }}>
+                style={{ ...cardStateTag, color: toneText.busy, background: toneSoft.busy }}>
                 held
               </span>
             )}
@@ -1005,8 +1026,7 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
               <span title={hier.blockedByFirst
                 ? `Deferred until "${hier.blockedByFirst.title}"${hier.blockedByOpen > 1 ? ` (and ${hier.blockedByOpen - 1} more)` : ""} — a manager's own sequencing marker, won't nag (not the owner's brake)`
                 : "Deferred — a manager's own sequencing marker, won't nag (not the owner's brake)"}
-                style={{ flexShrink: 0, fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
-                  textTransform: "uppercase", color: color.bg, background: color.cyan, borderRadius: 3, padding: "1px 4px" }}>
+                style={{ ...cardStateTag, color: toneText.info, background: toneSoft.info }}>
                 deferred
               </span>
             )}
@@ -1017,7 +1037,8 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleBy
                 meta row below renders the PARENT's title as card text, so a card's title is no longer
                 unique text on the board and `getByText(title)` resolves the card PLUS every child of it.
                 This gives specs the card's OWN title to filter on. */}
-            <span data-testid="card-title" style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word" }}>{task.title}</span>
+            <span data-testid="card-title" style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word",
+              fontFamily: font.ui, fontSize: fs.body, fontWeight: 500, lineHeight: 1.4 }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
             {/* Ship-state (card 1eebc46a) — a compact "landed" marker naming the sha; the REPO it landed on
                 (which may differ from the target-repo badge above, though it normally agrees) is in the
@@ -1107,7 +1128,7 @@ function TaskDrawerPlaceholder({ onClose, children }: { onClose: () => void; chi
         // the whole panel, a bright frame the design never specified and that appears on the keyboard
         // path alone. Nothing a user can reach loses a ring here.
         style={{ outline: "none", width: "min(820px, 92vw)", maxWidth: "100%", minHeight: "min(820px, 85vh)", maxHeight: "88vh",
-          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+          background: color.surface, border: `1px solid ${color.line}`, boxShadow: shadow.pop, borderRadius: radius.lg,
           padding: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
           gap: 10, boxSizing: "border-box" }}>
         {children}
@@ -1398,8 +1419,8 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           // padding that's an exact fit). On a short viewport the 85vh floor collapses below the 88vh cap
           // and the panel itself scrolls (overflowY) instead of overflowing. Sibling to the width cap.
           minHeight: "min(820px, 85vh)", maxHeight: "88vh", overflowY: "auto",
-          background: color.panel, border: `1px solid ${color.borderStrong}`,
-          borderRadius: radius.base, padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
+          background: color.surface, border: `1px solid ${color.line}`, boxShadow: shadow.pop,
+          borderRadius: radius.lg, padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
         {/* Dossier header: TASK · id · priority · lane · close. The priority chip reflects the LIVE
             edited priority (updates as you pick below); the lane chip is tinted by the column's role. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -1410,9 +1431,9 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           {column && (
             <Select value={column.key} aria-label="Move to lane" title="Move to lane" data-testid="task-move-lane"
               disabled={moving} onChange={(e) => { if (e.target.value !== column.key) onMoveLane(e.target.value); }}
-              style={{ width: "auto", padding: "2px 6px", fontSize: 11, fontFamily: font.head, fontWeight: 700,
-                letterSpacing: "0.06em", textTransform: "uppercase", color: labelColorFor(columnAccent(column), theme),
-                borderLeft: `3px solid ${columnAccent(column) ?? color.border}` }}>
+              style={{ width: "auto", padding: "2px 6px", fontSize: fs.sm, fontFamily: font.ui, fontWeight: 600,
+                color: labelColorFor(columnAccent(column), theme),
+                borderLeft: `3px solid ${columnAccent(column) ?? color.lineStrong}` }}>
               {columns.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
             </Select>
           )}
@@ -1423,9 +1444,9 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
         {/* Unsaved-edit guard: an exit request while dirty arms this confirm instead of discarding. The
             wording names WHICH exit is pending, so "Discard" never looks like it might keep the card open. */}
         {pendingNav && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: 4,
-            background: color.panel2, border: `1px solid ${color.amber}` }}>
-            <span style={{ flex: 1, color: color.amber, fontSize: 12, fontFamily: font.mono }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: radius.base,
+            background: color.busySoft }}>
+            <span style={{ flex: 1, color: toneText.busy, fontSize: fs.sm, fontFamily: font.ui }}>
               {pendingNav.to ? "Discard unsaved changes and open that card?" : "Discard unsaved changes?"}
             </span>
             <Button variant="danger" onClick={() => { const to = pendingNav.to; if (to) onOpenTask(to); else onClose(); }}>
@@ -2111,21 +2132,21 @@ function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCre
   );
 }
 
-// First-load placeholder for the board — a few lane shells matching the real column chrome (border,
-// radius, the 3px top-bar reserve) so the layout doesn't pop in from a blank page. The faint pulse
-// (.loom-skeleton) is dropped under prefers-reduced-motion. Reuses .loom-board-grid so it's responsive too.
+// First-load placeholder for the board — a few lane shells matching the real column chrome (the lane
+// well, its radius, a head line and card-sized blocks) so the layout doesn't pop in from a blank page. The
+// faint pulse (.loom-skeleton) is dropped under prefers-reduced-motion. Reuses .loom-board-grid so it's
+// responsive too.
 function BoardSkeleton() {
   return (
     <div className="loom-board-grid loom-skeleton" style={{ marginTop: 10 }} aria-hidden>
       {Array.from({ length: 4 }).map((_, i) => (
-        <div key={i} style={{ background: color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
+        <div key={i} style={{ background: color.laneBg, border: "1px solid transparent", borderRadius: radius.lg,
           minHeight: 200, maxHeight: "75vh", display: "flex", flexDirection: "column" }}>
-          <div style={{ height: 3 }} />
-          <div style={{ height: 11, width: "44%", margin: "12px 12px 12px", background: color.border, borderRadius: 3 }} />
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "0 12px 12px" }}>
+          <div style={{ height: 11, width: "44%", margin: "14px 12px 12px", background: color.track, borderRadius: radius.sm }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "0 12px 12px" }}>
             {Array.from({ length: 3 }).map((_, j) => (
-              <div key={j} style={{ height: 34, background: color.panel2, border: `1px solid ${color.border}`,
-                borderLeft: `3px solid ${color.border}`, borderRadius: 4 }} />
+              <div key={j} style={{ height: 40, background: color.cardBg, border: `1px solid ${color.cardBorder}`,
+                borderRadius: radius.base }} />
             ))}
           </div>
         </div>

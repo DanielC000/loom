@@ -165,7 +165,7 @@ export default function Profiles() {
 function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reach: ProfileGrantReach; onDismiss: () => void }) {
   return (
     <Panel data-testid="delete-grant-reach-notice" role="alert"
-      style={{ borderColor: color.amber, display: "flex", flexDirection: "column", gap: 10 }}>
+      style={{ boxShadow: `inset 0 0 0 1px ${color.busy}`, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Badge tone="busy">grant</Badge>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 12, color: color.text }}>

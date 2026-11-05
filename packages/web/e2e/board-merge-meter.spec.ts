@@ -34,9 +34,9 @@ function cardByTitle(page: Page, title: string) {
 // Asserting the fill's computed color is the strongest observable that the card actually switched
 // terminal state, not merely that some bar is present. The expected colours are resolved from the live
 // tokens inside the test (`cssColor`), never typed as literals:
-//   --loom-amber        the running sweep gradient AND the rejected fill
-//   --loom-phosphor     the merged fill
-//   --loom-red          the failed fill
+//   --loom-busy         the running sweep gradient AND the rejected fill
+//   --loom-live         the merged fill (the live FILL shade, not the live text shade)
+//   --loom-danger       the failed fill
 //   --loom-text-muted   the queued fill (card 53ad9ed3)
 
 // `state` is the raw op state; `outcome` (only meaningful once `state !== "running"`) is what actually
@@ -87,9 +87,9 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
 
   // ── RUNNING: the oscilloscope sweep is present (settled fill is NOT), the pill reads "merging", the
   //    branch chip yields to the merge pill (compactness), and the sweep is drawn with the amber token. ──
-  const AMBER = await cssColor(page, "--loom-amber");
-  const PHOSPHOR = await cssColor(page, "--loom-phosphor");
-  const RED = await cssColor(page, "--loom-red");
+  const AMBER = await cssColor(page, "--loom-busy");
+  const PHOSPHOR = await cssColor(page, "--loom-live");
+  const RED = await cssColor(page, "--loom-danger");
   const MUTED = await cssColor(page, "--loom-text-muted");
   const sweep = card.locator(".loom-merge-sweep");
   await expect(sweep).toBeVisible();

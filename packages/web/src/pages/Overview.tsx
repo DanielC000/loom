@@ -519,7 +519,7 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
         <SessionActions s={s} {...actions} />
       </div>
       {open && (
-        <div style={{ marginLeft: 10, marginTop: 6, paddingLeft: 10, borderLeft: `1px solid ${color.phosphor}` }}>
+        <div style={{ marginLeft: 10, marginTop: 6, paddingLeft: 10, borderLeft: `1px solid ${color.accent}` }}>
           <SessionCockpit session={s} />
         </div>
       )}

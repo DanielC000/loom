@@ -24,7 +24,7 @@ import { Button, Dot, Panel, SectionLabel, Segmented, StatusPill } from "./ui";
 import { useDismissable } from "../lib/useDismissable";
 import type { BoardLane } from "../lib/atlasHome";
 import type { RosterRow, RosterScope } from "../lib/atlasProjectOverview";
-import { color, columnTone, font, tone, type Tone } from "../theme";
+import { color, columnTone, font, tone, toneFill, type Tone } from "../theme";
 
 // ── The briefing line ──────────────────────────────────────────────────────────────────────────
 //
@@ -285,7 +285,7 @@ export function RosterTable({ rows, cellFor }: {
               {c.context ? (
                 <>
                   <span className="loom-ovroster-track" aria-hidden>
-                    <span style={{ width: `${Math.max(0, Math.min(1, c.context.ratio)) * 100}%`, background: tone[c.context.tone] }} />
+                    <span style={{ width: `${Math.max(0, Math.min(1, c.context.ratio)) * 100}%`, background: toneFill[c.context.tone] }} />
                   </span>
                   <span className="loom-ovroster-pct" style={{ color: tone[c.context.tone] }}>{c.context.pct}%</span>
                 </>

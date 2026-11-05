@@ -334,8 +334,8 @@ test.describe("Gates page (card a1c86452)", () => {
     }));
 
     await page.goto(`${loomDaemon.baseURL}/gates`);
-    const AMBER = await cssColor(page, "--loom-amber");
-    const RED = await cssColor(page, "--loom-red");
+    const AMBER = await cssColor(page, "--loom-busy");
+    const RED = await cssColor(page, "--loom-danger");
     expect(RED, "the two tones are distinguishable").not.toBe(AMBER);
     const activeSection = page.locator("section").filter({ hasText: "Lane occupancy" }).first();
     // FIXTURE IDENTITY: this payload is on screen, not the real (empty) registry or a sibling spec's rows.

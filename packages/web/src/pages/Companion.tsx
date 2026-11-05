@@ -2633,7 +2633,7 @@ function PairingCode({ code, expiresAt, onDismiss }: { code: string; expiresAt: 
   const [copied, setCopied] = useState(false);
   const copy = () => navigator.clipboard?.writeText(code).then(() => setCopied(true)).catch(() => {});
   return (
-    <Panel style={{ padding: 14, border: `1px solid ${color.amber}`, boxShadow: `inset 0 0 0 1px ${color.amber}` }}>
+    <Panel style={{ padding: 14, background: color.busySoft, boxShadow: `inset 0 0 0 1px ${color.busy}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <StatusPill tone="busy" label="One-time pairing code" glow />
         <span style={{ flex: 1 }} />

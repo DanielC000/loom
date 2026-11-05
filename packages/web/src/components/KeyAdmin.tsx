@@ -162,7 +162,7 @@ function OneTimeSecret({ name, plaintext, onDismiss }: { name: string; plaintext
   const [copied, setCopied] = useState(false);
   const copy = () => { navigator.clipboard?.writeText(plaintext).then(() => setCopied(true)).catch(() => {}); };
   return (
-    <Panel style={{ padding: 14, border: `1px solid ${color.amber}`, boxShadow: `inset 0 0 0 1px ${color.amber}` }}>
+    <Panel style={{ padding: 14, background: color.busySoft, boxShadow: `inset 0 0 0 1px ${color.busy}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <StatusPill tone="busy" label="New secret · store it now" glow />
         <span style={{ flex: 1 }} />

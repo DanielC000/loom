@@ -281,14 +281,14 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       const rowChrome = (name: string) =>
         tree.locator("div.loom-atlas-noderow.is-branchrow").filter({ hasText: new RegExp(escapeRe(name)) })
           .evaluate((el) => getComputedStyle(el).borderLeftColor);
-      // The selected branch carries the phosphor "you are inside this" edge, at the RAIL's own left
-      // edge — which is the whole reason `is-open` is mirrored onto the row now that the twist has
-      // been hoisted out of the button that used to draw it.
-      expect(await rowChrome(alpha.name), "the selected branch row has no phosphor left edge")
-        .toBe(await cssColor(page, "--loom-phosphor"));
+      // The selected branch carries the accent "you are inside this" edge (Graphite: cobalt, since green
+      // means live only), at the RAIL's own left edge — which is the whole reason `is-open` is mirrored
+      // onto the row now that the twist has been hoisted out of the button that used to draw it.
+      expect(await rowChrome(alpha.name), "the selected branch row has no accent left edge")
+        .toBe(await cssColor(page, "--loom-accent"));
       // Positive control in the same breath: an unselected row reads transparent, so the above is
       // not simply "every branch row has a coloured border".
-      expect(await rowChrome(bravo.name), "an unselected branch row also carries the phosphor edge")
+      expect(await rowChrome(bravo.name), "an unselected branch row also carries the accent edge")
         .toBe("rgba(0, 0, 0, 0)");
       // One text origin for the whole tier: a branch label and a workspace-tier destination label
       // start at the same x, so rows do not step in and out as branches open and close.

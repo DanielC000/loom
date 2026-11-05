@@ -10,7 +10,7 @@ import { DecisionStateChip } from "./decisions";
 import { HarnessTag } from "./HarnessPicker";
 import { useOpenRequest } from "./requests";
 import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
-import { color, font, radius, tone, type Tone } from "../theme";
+import { color, font, radius, tone, toneFill, type Tone } from "../theme";
 
 // The pure roll-up math lives in lib/fleet.ts (JSX-free, so the hermetic node test can import it); the
 // widgets re-export it so existing consumers (Overview) keep importing from the components/fleet barrel.
@@ -481,7 +481,7 @@ function CompBar({ buckets }: { buckets: ReturnType<typeof workerBuckets> }) {
   return (
     <div style={{ display: "flex", height: 8, width: "100%", borderRadius: radius.sm, overflow: "hidden", background: color.border }}>
       {segs.map(([key, n]) => (
-        <div key={key} title={`${key} ${n}`} style={{ flexGrow: n, flexBasis: 0, background: tone[SEG_TONE[key]] }} />
+        <div key={key} title={`${key} ${n}`} style={{ flexGrow: n, flexBasis: 0, background: toneFill[SEG_TONE[key]] }} />
       ))}
     </div>
   );

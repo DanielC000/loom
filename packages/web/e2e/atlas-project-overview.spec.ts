@@ -434,7 +434,7 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     // reading is a real `worstContext` derivation and not "whichever session came back first".
     const figure = page.getByTestId("atlas-brief-context").locator(".loom-ovbrief-n");
     await expect(figure).toHaveText(`${RED_PCT}%`);
-    const TONE_RED = await cssColor(page, "--loom-red");
+    const TONE_RED = await cssColor(page, "--loom-danger");
     await expect(figure).toHaveCSS("color", TONE_RED);
 
     // …and the SAME expression, rendered a second way: the roster row's own track fill.

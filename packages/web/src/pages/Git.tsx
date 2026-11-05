@@ -74,8 +74,8 @@ export default function Git() {
       {projectId && (
         <>
           {feedback && (
-            <Panel style={{ marginTop: 12, borderColor: feedback.ok ? color.phosphor : color.red }}>
-              <span style={{ fontFamily: font.mono, fontSize: 12, color: feedback.ok ? color.phosphor : color.red }}>
+            <Panel style={{ marginTop: 12, background: feedback.ok ? color.liveSoft : color.dangerSoft }}>
+              <span style={{ fontFamily: font.mono, fontSize: 12, color: feedback.ok ? color.liveText : color.danger }}>
                 {feedback.ok ? "✓ " : "✗ "}{feedback.text}
               </span>
               {feedback.warning && (
