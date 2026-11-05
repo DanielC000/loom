@@ -276,7 +276,7 @@ export function AgentEditor(
           onClick={() => onSavePrompt(prompt)}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setPrompt(seed)}>Reset</Button>
-          : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+          : <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
         {conflict && (
           <span data-testid="agent-prompt-conflict" style={{ color: color.amber, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
             This prompt changed elsewhere since you opened it — Save replaces it with your version, Reset takes theirs.

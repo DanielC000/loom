@@ -180,7 +180,9 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await dialog.getByTestId(`agent-prompt-${freshId}`).fill("rewritten first turn");
     await expect(save).toBeEnabled();
     await save.click();
-    await expect(dialog.getByText("saved", { exact: true })).toBeVisible();
+    // Scoped to the PROMPT's own indicator: the grants block renders a second "saved" span
+    // (`agent-grants-saved-*`) in the same dialog, so a bare text match is ambiguous (card b8861829).
+    await expect(dialog.getByTestId(`agent-prompt-saved-${freshId}`)).toHaveText("saved");
     await page.getByTestId("atlas-agent-editor-close").click();
     await freshCard.getByTestId(`atlas-agent-edit-${freshId}`).click();
     await expect(dialog.getByTestId(`agent-prompt-${freshId}`)).toHaveValue("rewritten first turn");

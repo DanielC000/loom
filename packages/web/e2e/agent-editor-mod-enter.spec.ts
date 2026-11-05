@@ -167,6 +167,9 @@ for (const surface of SURFACES) {
         // editor is wired to the seeded agent and not to a sibling worker's identically-rendered app.
         const field = page.getByTestId(`agent-prompt-${seeded.agent.id}`);
         const save = page.getByTestId(`agent-save-${seeded.agent.id}`);
+        // The PROMPT's own "saved" indicator. A bare `editor.getByText("saved")` also matches the
+        // grants block's `agent-grants-saved-*` span inside the same editor (card b8861829).
+        const promptSaved = editor.getByTestId(`agent-prompt-saved-${seeded.agent.id}`);
         await expect(field).toHaveValue(seeded.sentinel);
         await expect(save).toBeDisabled();
         // The shortcut is DISCOVERABLE. A keyboard save nobody can find has not really shipped, and
@@ -195,7 +198,7 @@ for (const surface of SURFACES) {
         expect(afterEnter.replace(/\n/g, ""), "the bare Enter changed more than a line break")
           .toBe(typo.replace(/\n/g, ""));
         await expect(save).toBeEnabled();
-        await expect(editor.getByText("saved", { exact: true })).toHaveCount(0);
+        await expect(promptSaved).toHaveCount(0);
         expect(await stamp(), "a bare Enter remounted the editor").toBe(STAMP);
 
         // ── (b) ⌘+Enter SAVES ──────────────────────────────────────────────────────────────────────
@@ -205,7 +208,7 @@ for (const surface of SURFACES) {
         await field.press("Meta+Enter");
         // The dirty gate clears only once the invalidated agents query comes back with the new text,
         // so this chip is a read of persisted state, not of the local textarea.
-        await expect(editor.getByText("saved", { exact: true })).toBeVisible();
+        await expect(promptSaved).toBeVisible();
         await expect.poll(() => readPrompt(loomDaemon.baseURL, seeded.project.id, seeded.agent.id),
           { message: "⌘+Enter never reached the daemon" }).toBe(viaMeta);
         // The draft survived the save, in the SAME element.
@@ -220,7 +223,7 @@ for (const surface of SURFACES) {
         await field.fill(viaCtrl);
         await expect(save).toBeEnabled();
         await field.press("Control+Enter");
-        await expect(editor.getByText("saved", { exact: true })).toBeVisible();
+        await expect(promptSaved).toBeVisible();
         await expect.poll(() => readPrompt(loomDaemon.baseURL, seeded.project.id, seeded.agent.id),
           { message: "Ctrl+Enter never reached the daemon" }).toBe(viaCtrl);
         await expect(field).toHaveValue(viaCtrl);
@@ -241,7 +244,7 @@ for (const surface of SURFACES) {
         const viaFinal = `${seeded.sentinel}\n${uniq("MODENTER-SAVED-LAST")}`;
         await field.fill(viaFinal);
         await field.press("Control+Enter");
-        await expect(editor.getByText("saved", { exact: true })).toBeVisible();
+        await expect(promptSaved).toBeVisible();
         await expect.poll(() => readPrompt(loomDaemon.baseURL, seeded.project.id, seeded.agent.id)).toBe(viaFinal);
         expect(saves.length, "an inert ⌘+Enter on a clean editor still wrote to the agent").toBe(3);
 
