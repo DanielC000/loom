@@ -3690,42 +3690,33 @@ export class OrchestrationMcpRouter {
       "worker_report_get",
       {
         description:
-          "Read one worker_report your worker already FILED, straight from durable event storage — " +
-          "WITHOUT the worker needing to be alive, and without going through rendered transcript text at " +
-          "all. A worker_report's full body is recorded verbatim in an orchestration event " +
-          "the INSTANT the worker calls worker_report — this reads that record directly, so it is unaffected " +
-          "by anything that can degrade a transcript rendering (an oversized tool-call argument, a rotated " +
+          "Read one worker_report your worker already FILED, straight from durable event storage: the " +
+          "worker need not be alive, and no rendered transcript text is involved. The full body is " +
+          "recorded verbatim the INSTANT the worker calls worker_report, so this is unaffected by " +
+          "anything that degrades a transcript rendering (an oversized tool-call argument, a rotated " +
           "engine session id, a spilled/truncated page). THIS is the documented recovery path for a " +
-          "`staleReport` (worker_list/worker_status) — prefer it over `worker_transcript(lastN:2)`, which " +
-          "additionally depends on the worker's CURRENT engine transcript file still holding the turn " +
-          "(broken across an engine session id rotation) and on transcript rendering never " +
-          "having dropped anything. ALSO reaches a report your worker FILED but that Loom's own pending-" +
-          "direction guard then REFUSED — that refusal still records the report's full " +
-          "`summary`/`status`/`prUrl`/`needs`/`noChanges`/`awaiting` on its own `worker_report_rejected` " +
-          "event, so it is recoverable here exactly like an accepted one; such a result carries `rejected: " +
-          "true` plus `reason`/`queued`/`msgIds`/`repeat` (the refusal's own detail) so you can tell it apart " +
-          "from a genuine accepted report — a refused report was NEVER acted on by the worker, so treat its " +
-          "content as what the worker WOULD have reported, not as work already landed. Returns the MOST " +
-          "RECENT worker_report OR worker_report_rejected event for `workerSessionId` by default — " +
+          "`staleReport` (worker_list/worker_status); prefer it over `worker_transcript(lastN:2)`, " +
+          "which also depends on the CURRENT engine transcript file still holding the turn. ALSO " +
+          "reaches a report your worker FILED but Loom's pending-direction guard REFUSED: the refusal " +
+          "records the full `summary`/`status`/`prUrl`/`needs`/`noChanges`/`awaiting` on its " +
+          "`worker_report_rejected` event; such a result carries `rejected:true` plus " +
+          "`reason`/`queued`/`msgIds`/`repeat`. A refused report was NEVER acted on, so treat it as " +
+          "what the worker WOULD have reported, not as work landed. Returns the MOST RECENT " +
+          "worker_report OR worker_report_rejected event for `workerSessionId` by default: " +
           "{eventId, ts, taskId, status, summary, prUrl, needs, noChanges, awaiting, warning, " +
-          "managerTurnSeqAtReport} (any field the report didn't set is simply absent, never null/empty) — " +
-          "or pass `eventId` (the full id, or an unambiguous 8-char id-prefix) to read a SPECIFIC earlier " +
-          "report (accepted or refused) instead of the latest one. `error` (a string) means nothing to " +
-          "read — 'not your worker' (a session row exists for `workerSessionId` but belongs to a " +
-          "different manager's lineage — scoped the same way every other per-worker tool is: your own " +
-          "lineage only), 'no such worker session ...' (no session row exists for that id at all — " +
-          "carries a did-you-mean when the id matches a taskId/opId already known in YOUR OWN scope), " +
-          "'no worker_report recorded for this worker', an ambiguous-prefix message naming the matching " +
-          "ids, or 'no worker_report event matching id …' — never a partial/best-effort result. Also carries " +
-          "`subagentAttribution` ({agentId, agentType}) when this tool's own correlation POSITIVELY " +
-          "CONFIRMED this report was filed by a sub-agent call rather than the worker's own top-level turn " +
-          "— advisory only (never refused), absent means either a genuine main-turn call or an honest " +
-          "correlation failure (never conflate the two). OVERSIZE: `summary` has " +
-          "NO fixed truncation — spill, don't widen (the same defect this tool exists to fix, not " +
-          "reintroduced here): it is bounded to the same SPILL_INLINE_BUDGET_CHARS inline cap every other " +
-          "spillable surface on this MCP uses, and a summary above it is written verbatim (plain UTF-8) to " +
-          "YOUR OWN scratch dir instead, with `summary` replaced by {summaryFile, summaryChars, note}; a " +
-          "summary at or under the cap is always inline, byte-identical to what was filed.",
+          "managerTurnSeqAtReport} (unset fields are absent, never null/empty); pass `eventId` (full " +
+          "id or unambiguous 8-char prefix) to read a SPECIFIC earlier report (accepted or refused). " +
+          "`error` (a string) means nothing to read, never a partial result: 'not your worker' (the " +
+          "session belongs to a different manager's lineage), 'no such worker session ...' (with a " +
+          "did-you-mean when the id matches a taskId/opId in YOUR scope), 'no worker_report recorded " +
+          "for this worker', an ambiguous-prefix message naming the matching ids, or 'no worker_report " +
+          "event matching id …'. Also carries `subagentAttribution` ({agentId, agentType}) when " +
+          "correlation POSITIVELY CONFIRMED the report was filed by a sub-agent call rather than the " +
+          "worker's own top-level turn (advisory; absent means a genuine main-turn call OR a " +
+          "correlation failure, never to be conflated). OVERSIZE: `summary` is never truncated; above " +
+          "the SPILL_INLINE_BUDGET_CHARS inline cap (same as every spillable surface here) it is " +
+          "written verbatim (UTF-8) to YOUR OWN scratch dir and replaced by {summaryFile, " +
+          "summaryChars, note}; at or under the cap it is inline, byte-identical to what was filed.",
         inputSchema: strictShape({ workerSessionId: z.string(), eventId: z.string().optional() }),
       },
       async ({ workerSessionId, eventId }) => {
@@ -4061,7 +4052,7 @@ export class OrchestrationMcpRouter {
         "pending `wake_me` wakes and bars it from EVERY automatic resume (a due wake, crash recovery, a " +
         "daemon restart's boot-resume) until a human resumes it manually from the app — only that manual " +
         "resume lifts the bar, and only for the epoch it starts; a later worker_stop/kill/auto-retire " +
-        "re-arms it. Pass EITHER workerSessionId (a real, already-spawned worker) OR opId (a `cap-queued` placeholder row from worker_list — an intent that was recorded but never actually spawned because the concurrency cap was full) — exactly one is required. `workerSessionId` must be the FULL session id — unlike `opId` below, it does NOT accept a prefix. An id matching no session anywhere in your scope errors \"no such worker session '<id>'\" with a did-you-mean hint (your own worker ids / taskIds / in-flight op ids); \"not your worker\" is reserved for a session that exists but belongs to a different manager's lineage. opId accepts the FULL id OR an unambiguous 8-char id-prefix (the short id Loom displays everywhere else — gate_status, gate_cancel, tasks_get, worker_spawn's own taskId all accept the same form). An AMBIGUOUS prefix (matches more than one of your own queued entries) returns `{error: \"ambiguous opId prefix '...' — it matches ...\"}`, naming the candidates — never a silent pick. The opId path withdraws the queued intent instead of stopping a pty (there's no pty yet): it returns `{cancelled:true}` if a matching queued entry was found and removed, or `{cancelled:false, reason}` if not — that's a normal outcome, not an error, so check the flag rather than assuming success. `reason` is `\"already-fired\"` (already auto-fired once a slot freed), `\"reaped\"` (already TTL-reaped), or `\"not-found\"` (the opId is simply wrong, or has aged out of this registry's own bounded memory of why an entry is gone) — only the distinction the registry can actually tell apart, never a guess. A queued entry otherwise auto-fires on its own once a concurrency slot frees, for as long as THIS daemon process keeps running (no re-call needed to make that happen) — cancel it BEFORE that happens if you no longer want it. ⚠️ It does NOT survive a daemon restart of any kind (a crash, a dev-watch reload, or a deliberate restart (via `daemon_restart` where your surface has it, or a human relaunch otherwise)) — the queue is in-memory only, so a restart discards it silently and there is nothing left here to cancel. The workerSessionId path returns `{stopped:true}` ONLY when a live pty actually existed and was told to stop — NEVER unconditionally (a worker_spawn that failed during process creation used to leave a phantom `live` row with no engine, and this tool used to report `{stopped:true}` for it without having stopped anything, a false success a manager could not route around). `{stopped:false, reason:\"no live pty for this session\"}` means there was nothing running to stop — the call still reconciles a stale `live` DB row to `exited` as a side effect, releasing the per-task one-live-worker mutex, so a re-spawn on that task is admitted right after. The workerSessionId path's result may ALSO carry `kickoffConfirmPendingWarning` (string) — ADVISORY ONLY, never a refusal: present exactly when this worker's turn-1 kickoff's own size earned an EXTENDED plausible-confirm window (an ordinary-sized kickoff never triggers this, even in its first minute) and that window was still open at the moment you stopped it — a real engine confirmation can still land after this call (watch for a subsequent [loom:redelivery-confirmed] notice naming this worker as already-stopped). Only ever present for a worker that genuinely started a live pty in this process — a never-started or already-exited worker always reads this as absent.",
+        "re-arms it. Pass EITHER workerSessionId (a real, already-spawned worker) OR opId (a `cap-queued` placeholder row from worker_list — an intent that was recorded but never actually spawned because the concurrency cap was full) — exactly one is required. `workerSessionId` must be the FULL session id — unlike `opId` below, it does NOT accept a prefix. An unknown id errors \"no such worker session '<id>'\" with a did-you-mean hint; \"not your worker\" means the session belongs to a different manager's lineage. opId accepts the FULL id OR an unambiguous 8-char prefix; an AMBIGUOUS prefix returns `{error: \"ambiguous opId prefix '...' — it matches ...\"}` naming the candidates, never a silent pick. The opId path withdraws the queued intent (no pty yet): `{cancelled:true}` if a matching queued entry was removed, else `{cancelled:false, reason}` (a normal outcome, not an error; check the flag): `\"already-fired\"` (auto-fired once a slot freed), `\"reaped\"` (TTL-reaped), or `\"not-found\"` (wrong opId, or aged out of the registry's bounded memory). A queued entry auto-fires once a concurrency slot frees, for as long as THIS daemon process runs; cancel it BEFORE that if you no longer want it. ⚠️ The queue is in-memory only: any daemon restart discards it silently, so there is nothing left to cancel. The workerSessionId path returns `{stopped:true}` ONLY when a live pty actually existed and was told to stop. `{stopped:false, reason:\"no live pty for this session\"}` means nothing was running; the call still reconciles a stale `live` DB row to `exited`, releasing the per-task one-live-worker mutex so a re-spawn on that task is admitted right after. That path's result may ALSO carry `kickoffConfirmPendingWarning` (string): ADVISORY ONLY, never a refusal, present exactly when this worker's turn-1 kickoff was large enough to earn an EXTENDED plausible-confirm window and it was still open when you stopped it, so a real engine confirmation can still land after this call (a later [loom:redelivery-confirmed] notice names the worker as already-stopped). Absent for a never-started or already-exited worker.",
         inputSchema: strictShape({ workerSessionId: z.string().optional(), opId: z.string().optional(), mode: z.enum(["graceful", "hard"]).optional() }),
       },
       async ({ workerSessionId, opId, mode }) => {
@@ -4166,67 +4157,40 @@ export class OrchestrationMcpRouter {
       "worker_flush",
       {
         description:
-          "The SUBMIT-ONLY affordance for a stranded worker composer — press Enter on " +
-          "this worker's OWN composer, WRITING NOTHING NEW. Reach for this when a worker looks stuck and " +
-          "you suspect it's holding an already-written turn that just never got confirmed (a paste landed " +
-          "but the Enter never registered) — the daemon-driven analogue of what a human does at the raw " +
-          "terminal in exactly that situation, which has recovered a session that sat apparently dead for " +
-          "~29 minutes with nothing more than pressing Enter. This is your THIRD option alongside " +
-          "`worker_message` (which APPENDS — compounding an already-oversized buffer if the worker is " +
-          "already holding a large unconfirmed payload) and `worker_stop` + respawn (which DISCARDS " +
-          "whatever the worker had accumulated): neither of those is a submit, and until this tool existed " +
-          "there was no way to just submit what's already there. " +
-          "GENUINELY NON-WRITING: this never appends so much as an empty string or a newline to the " +
-          "composer — it only reasserts the paste boundary (zero body bytes) and sends the Enter keystroke " +
-          "itself, so the composer's own byte count is unchanged by this call, unlike worker_message. " +
-          "NO-OP ON A CLEAN COMPOSER: if the worker's composer looks genuinely empty (nothing outstanding, " +
-          "no possibly-stranded residue), this is a documented no-op — `{ok:false, reason:\"composer-empty\"}` " +
-          "— never a stray bare Enter that could start an empty turn. " +
-          "NOT APPLICABLE TO A CODEX-HARNESS WORKER: this affordance is a bracketed-paste " +
-          "reassert + Enter mechanism claude uses; codex never uses bracketed paste and has no equivalent " +
-          "stranded-composer state, so a LIVE codex worker reports `{ok:false, reason:\"not-applicable-codex\"}` " +
-          "— never the dead-session `\"session-dead\"` a genuinely gone worker gets, which this used to " +
-          "falsely report for every codex worker regardless of liveness (fixed; see that card's decision " +
-          "record). Check `worker_list`/`worker_status` for a codex worker's own liveness/busy state instead. " +
-          "⚠️ A REMEDY TO TRY, NOT A GUARANTEED RECOVERY: the Enter can succeed, OR it can fail to confirm " +
-          "exactly as it did the first time — `confirmed` reports which, honestly, after a bounded wait; a " +
-          "`confirmed:false` result means this attempt didn't land, not that nothing can be done (you still " +
-          "have worker_message/worker_stop as escalations). This tool alone does NOT prove a worker is " +
-          "recoverable in general — respawning is a SEPARATE, more destructive escalation with its own " +
-          "tradeoffs (see worker_stop's own docs), not something this tool's success or failure should be " +
-          "read as evidence for or against. " +
-          "`recovered` distinguishes the TWO shapes `confirmed:false` can mean: " +
-          "`recovered:true` means THIS call's own retry ladder gave up waiting for a confirming hook and " +
-          "cleared busy for you, re-queuing whatever was stranded for delivery on the worker's next natural " +
-          "drain — the state is UNSTUCK, don't keep calling worker_flush on it. `recovered:false` (or " +
-          "absent) alongside `confirmed:false` means it's still genuinely unresolved — either a real turn " +
-          "may still land the hook shortly, or it's still stuck and another `worker_flush` (or an " +
-          "escalation) is worth trying. " +
-          "Also returns `resumability` (\"dead\"|\"resumable\"|\"unknown\") as a SECOND, independent " +
-          "discriminator alongside the flush outcome — a \"dead\" worker's process/transcript is already " +
-          "confirmed gone, which makes a submit-only retry moot regardless of what `ok`/`confirmed` say; " +
-          "read the two together, not `confirmed` alone, before deciding what to do next. " +
-          "`lastFlushAttribution` (always present, `null` when nothing has ever resolved) " +
-          "is what makes \"did this flush actually work?\" answerable for the first time: before this, a " +
-          "flush's own effect and Loom's own unrelated late redelivery retry were BYTE-IDENTICAL from the " +
-          "outside, so a confirmation arriving after this call already returned `confirmed:false` (the " +
-          "common case, per the incident that carded this) had no way to be attributed to anything. Once " +
-          "non-null it is `{gen, attributable, reason, resolvedAt}`: `attributable:true` " +
-          "(`reason:\"confirmed-while-flush-marker-live\"`) means this flush's own targeted generation is " +
-          "the one that went on to confirm — the best signal available (it does NOT rule out a concurrent " +
-          "natural retry for the SAME generation having raced in; two Enter keystrokes for one generation " +
-          "produce exactly one hook either way, so that specific ambiguity is structurally irreducible from " +
-          "outside the pty — see it as \"a flush was the last action taken for this generation and it went " +
-          "on to confirm\", not as physical keystroke proof). `attributable:false` " +
-          "(`reason:\"marker-superseded-before-confirm\"`) is a DIFFERENT, definitive verdict: a flush WAS " +
-          "issued but its targeted generation was superseded (a fresh message, a heal, a redirect, a stop) " +
-          "before it ever confirmed — this is NOT the same as \"unknown\", it is \"this specific attempt " +
-          "never got the chance.\" `null` genuinely means no resolution has happened yet (or worker_flush " +
-          "was never called) — never conflate it with the `false` verdict above. STICKY (never cleared, " +
-          "only overwritten by a later resolution): re-calling worker_flush later on an already-recovered " +
-          "worker is a safe, cheap way to read the latest verdict — the call itself no-ops " +
-          "(`{ok:false,reason:\"composer-empty\"}`) on a clean composer, but `lastFlushAttribution` is " +
-          "still populated from whatever resolved most recently.",
+          "The SUBMIT-ONLY affordance for a stranded worker composer: press Enter on this worker's OWN " +
+          "composer, WRITING NOTHING NEW. Reach for it when a worker looks stuck holding an already-" +
+          "written turn that never got confirmed (a paste landed but the Enter never registered). It is " +
+          "your THIRD option beside `worker_message` (APPENDS, compounding an already-oversized buffer) " +
+          "and `worker_stop` + respawn (DISCARDS what the worker accumulated). " +
+          "GENUINELY NON-WRITING: it only reasserts the paste boundary (zero body bytes) and sends the " +
+          "Enter keystroke, so the composer's byte count is unchanged. " +
+          "NO-OP ON A CLEAN COMPOSER: a genuinely empty composer returns `{ok:false, " +
+          "reason:\"composer-empty\"}`, never a stray bare Enter that could start an empty turn. " +
+          "NOT APPLICABLE TO A CODEX-HARNESS WORKER (no bracketed paste, no stranded-composer state): a " +
+          "LIVE codex worker reports `{ok:false, reason:\"not-applicable-codex\"}`, distinct from the " +
+          "`\"session-dead\"` a genuinely gone worker gets; check `worker_list`/`worker_status` for a " +
+          "codex worker's liveness instead. " +
+          "⚠️ A REMEDY TO TRY, NOT A GUARANTEED RECOVERY: `confirmed` reports honestly, after a bounded " +
+          "wait, whether the Enter landed; `confirmed:false` means this attempt didn't land, not that " +
+          "nothing can be done (worker_message/worker_stop remain escalations), and it is no evidence " +
+          "for or against respawning. " +
+          "`recovered` splits `confirmed:false`: `recovered:true` = this call's retry ladder gave up " +
+          "waiting for a confirming hook and cleared busy, re-queuing what was stranded for the " +
+          "worker's next natural drain: UNSTUCK, don't keep calling worker_flush. `recovered:false`/" +
+          "absent = still unresolved (a real turn may still land the hook, or it's stuck and another " +
+          "`worker_flush` or an escalation is worth trying). " +
+          "`resumability` (\"dead\"|\"resumable\"|\"unknown\") is a SECOND, independent discriminator: a " +
+          "\"dead\" worker makes a submit-only retry moot whatever `ok`/`confirmed` say; read both. " +
+          "`lastFlushAttribution` (always present; `null` = no resolution yet or never called) answers " +
+          "\"did this flush work?\": once non-null it is `{gen, attributable, reason, resolvedAt}`. " +
+          "`attributable:true` (`reason:\"confirmed-while-flush-marker-live\"`) = this flush's targeted " +
+          "generation went on to confirm: the best signal available, not physical keystroke proof (it " +
+          "can't rule out a concurrent natural retry for the SAME generation). `attributable:false` " +
+          "(`reason:\"marker-superseded-before-confirm\"`) = a definitive verdict, not \"unknown\": the " +
+          "targeted generation was superseded (a fresh message, heal, redirect, stop) before it " +
+          "confirmed. STICKY (only overwritten by a later resolution), so re-calling worker_flush on an " +
+          "already-recovered worker is a cheap way to read the latest verdict (the call itself no-ops " +
+          "with `composer-empty` on a clean composer).",
         inputSchema: strictShape({ workerSessionId: z.string() }),
       },
       async ({ workerSessionId }) => {
@@ -4247,7 +4211,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_message",
       {
-        description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT a queued message from a DIFFERENT sender is delivered ALONE as its own turn — one-per-turn ACROSS senders, so two different senders' distinct directives are never mashed together — but CONSECUTIVE messages from the SAME sender (e.g. you send two messages to the same worker while it's still busy on the first) now coalesce into ONE turn, in send order, visibly separated — bounded so one sender's own burst can't grow unbounded, and a message that fails to confirm delivery is excluded from coalescing rather than compounding that failure into a bigger write. The legacy full-COALESCE-into-one-turn behavior (every sender mixed together, FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). `delivered` NEVER changes meaning (true = HANDED OFF as a turn now); on `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting). A `\"held\"` result is a SUCCESS, not a failure — it ALSO carries `queued:true`, `landsAt:\"next-turn-boundary\"`, `position` (1-based queue position), `busyForMs` (how long the worker has been mid-turn, when known), and `msgId` (to correlate with a later durable record), so you can read the outcome as the honest queue-and-will-land it is instead of inferring that from a bare `false`. ⚠️ CODEX-SPECIFIC: if this worker's codex session is wedged before it ever finished booting (never reached model-loaded — see `worker_status`'s `codexBootStuck` field), `held` does NOT mean it will land: the text is still durably queued (`queued:true`), but there is no next turn running to end, so it carries an `advisory` explaining that honestly instead of the ordinary `landsAt:\"next-turn-boundary\"` framing — read it before assuming this message will simply arrive soon, and consider `worker_stop`/`worker_recycle` if the session doesn't recover. ⚠️ `delivered:true` is NOT proof the worker ever saw it: it only means the text was handed to the engine as a turn attempt. `deliveryState` (always present, `\"handed-off\"|\"queued\"|\"dropped\"`, one-to-one with the actual outcome) spells that out explicitly instead of leaving it to be inferred from `delivered`/`reason`/`queued` — on `delivered:true` it reads `\"handed-off\"`, a REMINDER that the engine's own confirmation is asynchronous and can still GIVE UP after this call already returned (this happened in production — a `delivered:true` message never reached the worker's transcript and it sat idle for 26 minutes with no signal anything was wrong). To find out what actually happened, poll `worker_list`/`worker_status` and check this `msgId` against `directive`/`staleDirective` (delivered but unacknowledged after several of the worker's own turns) or `parkedDirective` (Loom stopped auto-retrying it — see its own `state` for what that does and doesn't prove; a resend of the SAME content is automatically recognized and joined to the original even if you don't pass `resendOf` — but that auto-join is NOT unconditional: (a) it matches on the exact FRAMED text, which embeds YOUR OWN session id, so it breaks if you've been recycled since the original send; (b) the join window closes the instant Loom itself confirms the original landed — resend AFTER that and it becomes a genuine second turn instead of joining. A reworded resend is always treated as new either way). `resendOf` is an OPTIONAL explicit disambiguator — the exact `msgId`/`rootMsgId` of an earlier directive this message re-sends — for when you know it; it does not change whether (a)/(b) apply, only removes the guesswork of which chain you mean. The result MAY ALSO carry a `contextWarning` string when the TARGET worker's own LIVE context occupancy is already at or above this project's configured warn floor — e.g. \"worker at 64%: recycle it before sending a large round\". If the worker is already CONTEXT-EXHAUSTED (see `worker_status`'s `contextExhaustedAt`), `contextWarning` says so explicitly instead of a percentage, unconditionally (even with the warn floor disabled). ADVISORY ONLY: it never blocks or alters the send. ABSENT — never a false negative — when the worker is not exhausted AND its context has never been measured (a codex worker, or a claude worker that hasn't completed a turn yet; null is NEVER read as 0), when the project has the warn floor disabled (ratio 0), or when `deliveryState` is \"dropped\" (the worker is gone — recycle advice about a session that no longer exists would be noise). Read it before sending a large or heavy round; `worker_recycle` keeps the worktree/branch/task if you decide to act on it. `workerSessionId` must be the FULL session id (no prefix support). An id matching no session anywhere in your scope errors \"no such worker session '<id>'\" with a did-you-mean hint (your own worker ids / taskIds / in-flight op ids); \"not your worker\" is reserved for a session that exists but belongs to a different manager's lineage.",
+        description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT a queued message from a DIFFERENT sender is delivered ALONE as its own turn (one-per-turn ACROSS senders), but CONSECUTIVE messages from the SAME sender coalesce into ONE turn, in send order (bounded; a message that failed to confirm delivery is excluded from coalescing). The legacy full-coalesce (all senders mixed) applies only when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). `delivered` NEVER changes meaning (true = HANDED OFF as a turn now); on `delivered:false`, `reason` is \"held\" (queued, will land) or \"session-dead\" (the worker is gone: DROPPED, not queued; re-dispatch or recycle instead of waiting). \"held\" is a SUCCESS and also carries `queued:true`, `landsAt:\"next-turn-boundary\"`, `position` (1-based), `busyForMs` (when known) and `msgId` (to correlate with a later durable record). ⚠️ CODEX-SPECIFIC: if a codex session is wedged before it finished booting (see `worker_status`'s `codexBootStuck`), `held` does NOT mean it will land: the text is durably queued but no turn is running to end, so the result carries an `advisory` instead of the ordinary `landsAt`; consider `worker_stop`/`worker_recycle` if it doesn't recover. ⚠️ `delivered:true` is NOT proof the worker ever saw it: it only means the text was handed to the engine as a turn attempt, and the engine's confirmation is asynchronous and can still GIVE UP afterwards. `deliveryState` (always present: `\"handed-off\"|\"queued\"|\"dropped\"`, one-to-one with the outcome) says so explicitly. To find out what actually happened, poll `worker_list`/`worker_status` and check this `msgId` against `directive`/`staleDirective` (delivered but unacknowledged after several of the worker's turns) or `parkedDirective` (Loom stopped auto-retrying; see its `state`). A resend of the SAME content is automatically joined to the original even without `resendOf`, but NOT unconditionally: (a) it matches the exact FRAMED text, which embeds YOUR OWN session id, so if you've been recycled since the original send it breaks; (b) the join window closes the instant Loom itself confirms the original landed, after which a resend is a genuine second turn. A reworded resend is always new. `resendOf` is an OPTIONAL explicit disambiguator (the `msgId`/`rootMsgId` of the earlier directive being re-sent); it doesn't change whether (a)/(b) apply. The result MAY carry a `contextWarning` string when the TARGET worker's live context is at or above this project's warn floor (e.g. \"worker at 64%: recycle it before sending a large round\"), or says so explicitly when the worker is CONTEXT-EXHAUSTED (see `worker_status`'s `contextExhaustedAt`, even with the floor disabled). ADVISORY ONLY: never blocks or alters the send. ABSENT when the worker's context was never measured (codex, or no completed turn yet; null is NEVER read as 0), the warn floor is disabled (ratio 0), or `deliveryState` is \"dropped\". `worker_recycle` keeps the worktree/branch/task if you act on it. `workerSessionId` must be the FULL session id (no prefix support). An unknown id errors \"no such worker session '<id>'\" with a did-you-mean hint; \"not your worker\" means the session belongs to a different manager's lineage.",
         inputSchema: strictShape({ workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional(), resendOf: z.string().optional() }),
       },
       async ({ workerSessionId, text, message, resendOf }) => {
@@ -4276,62 +4240,46 @@ export class OrchestrationMcpRouter {
           "(which ENDS the session outright) — this one interrupts the worker's CURRENT turn and REPLACES " +
           "its entire pending direction with this ONE instruction, delivered as its next turn, while the " +
           "session stays alive for you to resume it once you've decided what's next. Before you use it: " +
-          "VERIFY WHAT THE WORKER IS ACTUALLY BUILDING before you hold/stop it — check its real state " +
-          "(e.g. its working tree via `git status`, not just a busy flag or your own tool-call log), since " +
-          "a control-plane signal alone can misread what's actually in flight, and an unnecessary hold can " +
-          "abandon or clobber correct in-progress work. CONTRAST with worker_message, " +
-          "which is ADDITIVE and NON-interrupting (it queues behind the current turn, delivered ALONE as its " +
-          "own turn by default — coalesced with other pending messages into one turn only if the human has " +
-          "turned on the legacy daemon-global `coalesceAgentMessages` setting); prefer worker_message for " +
-          "ordinary, non-urgent direction and reach for this tool only when you truly need to interrupt now. " +
-          "CAUTION: the interrupt may land MID-EDIT, leaving the worker's working tree partly changed — so " +
-          "phrase `text` so the worker FIRST reconciles/inspects its working tree (e.g. `git status`, finish " +
-          "or revert the half-done edit) BEFORE acting on the new direction. Any messages that were queued for " +
-          "the worker are discarded (superseded by this one) — but 'queued' means Loom's own internal pending " +
-          "FIFO, NOT the worker's terminal composer. This tool cancels the in-flight turn (a single Esc) and " +
-          "replaces the QUEUE; it does not read back or forcibly clear whatever text is already sitting in the " +
-          "composer. If the worker is wedged because a PASTE got stranded there (unconfirmed, non-zero " +
-          "`composerDirtyLen`) rather than because a message was queued, `discarded:0` here just means the " +
-          "queue was already empty — it is not evidence the composer is now clean, and this redirect's own text " +
-          "can land ON TOP of whatever is already stranded instead of replacing it. For a stuck COMPOSER, use " +
-          "`worker_flush` first (a disambiguator and a real remedy — it presses Enter on the existing composer, " +
-          "writing nothing new), and if it doesn't confirm after repeated tries, escalate to `worker_recycle` " +
-          "(keeps the worktree/branch/task) rather than this tool. Returns {delivered} — true if it went out as a " +
-          "turn immediately (worker was idle), false if queued to land right after the interrupt clears. " +
-          "UNLIKE worker_message, a `delivered:false` here does NOT mean a plain FIFO hold: it carries " +
-          "`interrupting:true` and `landsAt:\"after-interrupt\"` (not `worker_message`'s `\"next-turn-boundary\"`) " +
-          "— the worker was busy, its current turn is being cut short with an Esc right now, and this redirect " +
-          "lands the instant that settles. Also carries `position`, `busyForMs`, and `msgId` like worker_message. " +
-          "An idle worker (delivered:true) had nothing to interrupt — no Esc fires. " +
-          "⚠️ Like worker_message, `delivered:true` is NOT proof the worker ever saw it — only that the " +
-          "text was handed to the engine as a turn attempt; the engine's own confirmation is asynchronous " +
-          "and can still GIVE UP after this call already returned (see worker_message's own docs for the " +
-          "`deliveryState` field and the production incident behind this caveat). worker_list/worker_status's " +
-          "`directive`/`staleDirective`/`parkedDirective` projection tracks a redirect on EITHER path " +
-          "— a HELD redirect (delivered:false here) the same way it tracks a held worker_message, AND " +
-          "an IMMEDIATELY-delivered redirect (delivered:true here, the worker was idle) the same way an " +
-          "immediate worker_message is tracked: both carry a real correlatable msgId, so if THIS hand-off " +
-          "silently gives up later (the same async-confirmation risk described above), it still resolves to " +
-          "`parkedDirective`/`staleDirective` exactly like a held one would — no residual blind spot on either " +
-          "path. Whichever kind (message or redirect) was sent most recently is the ONE directive the " +
-          "projection tracks — a redirect always supersedes an outstanding queued message (this tool flushes " +
-          "it), and a later worker_message likewise supersedes an outstanding (even parked) redirect. " +
-          "`text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if " +
-          "both, text wins). The result MAY ALSO carry a `contextWarning` string when the " +
-          "TARGET worker's own LIVE context occupancy is already at or above this project's configured " +
-          "warn floor — e.g. \"worker at 64%: recycle it before sending a large round\". If the worker is " +
-          "already CONTEXT-EXHAUSTED (see `worker_status`'s `contextExhaustedAt`), " +
-          "`contextWarning` says so explicitly instead of a percentage, unconditionally (even with the " +
-          "warn floor disabled). ADVISORY ONLY: it never blocks or alters the redirect. ABSENT — never a " +
-          "false negative — when the worker is not exhausted AND its context has never been measured (a " +
-          "codex worker, or a claude worker that hasn't completed a turn yet; null is NEVER read as 0), " +
-          "when the project has the warn floor disabled (ratio 0), or when `deliveryState` is \"dropped\" " +
-          "(the worker is gone — recycle advice about a session that no longer exists would be noise). " +
-          "Read it before relaying a heavy round; `worker_recycle` keeps the worktree/branch/task if you " +
-          "decide to act on it. `workerSessionId` must be the FULL session id (no prefix support). An id " +
-          "matching no session anywhere in your scope errors \"no such worker session '<id>'\" with a " +
-          "did-you-mean hint (your own worker ids / taskIds / in-flight op ids); \"not your worker\" is " +
-          "reserved for a session that exists but belongs to a different manager's lineage.",
+          "VERIFY WHAT THE WORKER IS ACTUALLY BUILDING before you hold/stop it. Check its real state " +
+          "(e.g. its working tree via `git status`, not just a busy flag or your own tool-call log); an " +
+          "unnecessary hold can abandon or clobber correct in-progress work. CONTRAST with " +
+          "worker_message, which is ADDITIVE and NON-interrupting (queues behind the current turn); " +
+          "prefer it for ordinary, non-urgent direction and reach for this tool only when you truly need " +
+          "to interrupt now. CAUTION: the interrupt may land MID-EDIT, leaving the working tree partly " +
+          "changed, so phrase `text` so the worker FIRST reconciles/inspects its working tree (e.g. " +
+          "`git status`, finish or revert the half-done edit) BEFORE acting on the new direction. " +
+          "Messages already queued for the worker are discarded (superseded), but 'queued' means Loom's " +
+          "own pending FIFO, NOT the worker's terminal composer: this tool cancels the in-flight turn " +
+          "(a single Esc) and replaces the QUEUE; it does not clear text already sitting in the " +
+          "composer. If the worker is wedged by a stranded PASTE (unconfirmed, non-zero " +
+          "`composerDirtyLen`), `discarded:0` only means the queue was empty, not that the composer is " +
+          "clean, and this redirect's text can land ON TOP of the stranded text. For a stuck COMPOSER " +
+          "use `worker_flush` first, and if it doesn't confirm after repeated tries escalate to " +
+          "`worker_recycle` (keeps the worktree/branch/task) rather than this tool. " +
+          "Returns {delivered}: true if it went out as a turn immediately (worker was idle, no Esc " +
+          "fired), false if queued to land right after the interrupt clears. UNLIKE worker_message, " +
+          "`delivered:false` here is NOT a plain FIFO hold: it carries `interrupting:true` and " +
+          "`landsAt:\"after-interrupt\"` (not `\"next-turn-boundary\"`): the worker's current turn is being " +
+          "cut short with an Esc right now and the redirect lands the instant that settles. Also " +
+          "carries `position`, `busyForMs` and `msgId` like worker_message. " +
+          "⚠️ Like worker_message, `delivered:true` is NOT proof the worker ever saw it (the engine's " +
+          "confirmation is asynchronous and can still GIVE UP; see worker_message for `deliveryState`). " +
+          "worker_list/worker_status's `directive`/`staleDirective`/`parkedDirective` projection tracks a " +
+          "redirect on EITHER path (held or immediate; both carry a correlatable msgId). Whichever of " +
+          "message or redirect was sent most recently is the ONE directive tracked: a redirect always " +
+          "supersedes an outstanding queued message, and a later worker_message supersedes an " +
+          "outstanding (even parked) redirect. " +
+          "`text` is the canonical param; `message` is accepted as an ALIAS (if both, text wins). The " +
+          "result MAY carry a `contextWarning` string when the TARGET worker's live context is at or " +
+          "above this project's warn floor (e.g. \"worker at 64%: recycle it before sending a large " +
+          "round\"), or says so explicitly when the worker is CONTEXT-EXHAUSTED (see `worker_status`'s " +
+          "`contextExhaustedAt`, even with the floor disabled). ADVISORY ONLY: never blocks or alters " +
+          "the redirect. ABSENT when the worker's context was never measured (codex, or no completed " +
+          "turn yet; null is NEVER read as 0), the warn floor is disabled (ratio 0), or `deliveryState` " +
+          "is \"dropped\". `worker_recycle` keeps the worktree/branch/task if you act on it. " +
+          "`workerSessionId` must be the FULL session id (no prefix support). An unknown id errors " +
+          "\"no such worker session '<id>'\" with a did-you-mean hint; \"not your worker\" means the " +
+          "session belongs to a different manager's lineage.",
         inputSchema: strictShape({ workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() }),
       },
       async ({ workerSessionId, text, message }) => {
@@ -4658,49 +4606,39 @@ export class OrchestrationMcpRouter {
       "requests_list",
       {
         description:
-          "List Requests (decision/input/permission/credential asks) for YOUR OWN project, board-wide — " +
-          "the non-consuming complement to question_pull (which only returns ANSWERED requests and " +
-          "CONSUMES them). Use this to survey pending/answered/consumed requests, including ones asked " +
-          "with no taskId or asked by a predecessor manager on this project. NON-CONSUMING — reading NEVER " +
-          "drains or flips state; calling it twice returns the same records. Returns {items, total, " +
-          "returned, offset, hasMore}: `items` per row is {id, projectId, loomSessionId, filedBySessionId, " +
-          "agentId, taskId, type, title, state, createdAt, answeredAt, consumedAt} plus an answer summary by " +
-          "type — chosenOption/note for decision|input, approved/note/scope/expiresAt/lapsed/fulfillment for " +
-          "permission (see question_pull's own doc for `fulfillment: {state, detail}` — an approval is an " +
-          "authorization, not evidence the human-only write it authorizes actually happened; \"unknown\"/" +
-          "\"unwritable\"/\"not_yet_done\"/\"fulfilled\", recomputed fresh on every read), ack ONLY for credential " +
-          "(NEVER the secret — a pending row's answer fields read null rather than a misleading false-ish " +
-          "value). `loomSessionId` is the CURRENT routing target — it MUTATES on a manager/Lead recycle, so " +
-          "it does NOT identify who originally filed the request; `filedBySessionId` is the immutable filer " +
-          "(set once at ask time, null on a row that predates this field — that history is unrecoverable). " +
-          "`stale` is true only for a still-'pending' row whose CURRENT routing target " +
-          "isn't live right now — a SOFT flag, never an auto-cancel: a moot-LOOKING ask can still be one " +
-          "the human wants to answer, so amend it (question_amend) or cancel it (question_cancel) yourself " +
-          "rather than trusting this alone; always false for answered/consumed/cancelled/notice. `total` is " +
-          "the FULL matching count and `hasMore` tells you whether `items` was truncated. Filters (all optional, AND'd): state " +
-          "(pending|answered|consumed|cancelled|notice — \"cancelled\" is a moot/superseded ask you or a " +
-          "human withdrew via question_cancel/dismiss, never an answer; \"notice\" is a self-terminal FYI " +
-          "that was never answered either), type (decision|input|permission|" +
-          "credential|notice), includeConsumed (false by default — folds already-consumed AND already-cancelled " +
-          "requests in alongside the rest, PLUS every notice regardless of age; without it, a notice older " +
-          "than the Inbox's own visibility window drops out of the default view too, same as the web UI — " +
-          "an explicit state:\"consumed\"/\"cancelled\"/\"notice\" always shows those regardless of this " +
-          "flag), mine (false by default — " +
-          "when true, narrows to ONLY requests filed by YOUR OWN agent lineage, the same ownership scope " +
-          "question_pull consumes from, so a fresh successor session on the same agent still sees them — " +
-          "a notice is never returned by question_pull, but `mine:true` still lists it here since this " +
-          "read is non-consuming). " +
-          "`mine:true` is the dedup read for a scheduled/autonomous agent: before filing a new " +
-          "question_ask, call this to check whether you (or a predecessor session on your agent) already " +
-          "filed an equivalent request that's still pending or answered-but-unpulled, instead of re-filing " +
-          `a duplicate every cycle. Newest-first (createdAt DESC). Bounded to ${DEFAULT_REQUESTS_LIST_CAP} ` +
-          "rows by default (see `hasMore`) — pass an explicit limit/offset to page past it. " +
-          "`fields:[...]` (same contract as `tasks_list`'s own `fields`) projects each " +
-          "returned item down to ONLY the given top-level key names, e.g. fields:[\"id\",\"type\",\"title\"," +
-          "\"state\"] for a quick triage scan — an un-asked-for field is genuinely ABSENT from every item, " +
-          "not merely a smaller preview, and an unmatched/unknown field name is silently ignored rather " +
-          "than erroring. `id` is NOT auto-added — include it yourself if you need to correlate items back " +
-          "to requests.",
+          "List Requests (decision/input/permission/credential asks) for YOUR OWN project, board-wide: " +
+          "the non-consuming complement to question_pull (which returns only ANSWERED requests and " +
+          "CONSUMES them). Survey pending/answered/consumed requests, including ones asked with no " +
+          "taskId or by a predecessor manager. NON-CONSUMING: reading never drains or flips state. " +
+          "Returns {items, total, returned, offset, hasMore}: each item is {id, projectId, " +
+          "loomSessionId, filedBySessionId, agentId, taskId, type, title, state, createdAt, answeredAt, " +
+          "consumedAt} plus an answer summary by type: chosenOption/note for decision|input; " +
+          "approved/note/scope/expiresAt/lapsed/fulfillment for permission (see question_pull for " +
+          "`fulfillment: {state, detail}`; an approval is an authorization, not evidence the human-only " +
+          "write happened; recomputed on every read); ack ONLY for credential (NEVER the secret; a " +
+          "pending row's answer fields read null). `loomSessionId` is the CURRENT routing target and " +
+          "MUTATES on a manager/Lead recycle, so it does NOT identify the original filer; " +
+          "`filedBySessionId` is the immutable filer (null on a row predating the field). `stale` is " +
+          "true only for a still-'pending' row whose CURRENT routing target isn't live: a SOFT flag, " +
+          "never an auto-cancel (amend it with question_amend or cancel it with question_cancel " +
+          "yourself); always false for answered/consumed/cancelled/notice. `total` is the FULL " +
+          "matching count; `hasMore` says whether `items` was truncated. Filters (all optional, " +
+          "AND'd): state (pending|answered|consumed|cancelled|notice; \"cancelled\" = withdrawn via " +
+          "question_cancel/dismiss, never an answer; \"notice\" = a self-terminal FYI never answered), " +
+          "type (decision|input|permission|credential|notice), includeConsumed (default false; folds " +
+          "in already-consumed AND cancelled requests plus every notice regardless of age; without it " +
+          "a notice older than the Inbox's visibility window drops out too; an explicit " +
+          "state:\"consumed\"/\"cancelled\"/\"notice\" always shows those), mine (default false; true " +
+          "narrows to requests filed by YOUR OWN agent lineage, the scope question_pull consumes from, " +
+          "so a successor session still sees them; it lists notices too, which question_pull never " +
+          "returns). `mine:true` is the dedup read for a scheduled/autonomous agent: before a new " +
+          "question_ask, check whether you or a predecessor already filed an equivalent request that's " +
+          "pending or answered-but-unpulled. " +
+          `Newest-first (createdAt DESC). Bounded to ${DEFAULT_REQUESTS_LIST_CAP} rows by default (see ` +
+          "`hasMore`); pass an explicit limit/offset to page past it. `fields:[...]` (same contract as " +
+          "`tasks_list`'s) projects each item to ONLY the given top-level keys, e.g. " +
+          "fields:[\"id\",\"type\",\"title\",\"state\"]; others are genuinely ABSENT, unknown names are " +
+          "silently ignored, `id` is NOT auto-added.",
         inputSchema: strictShape({
           state: z.enum(QUESTION_STATES).optional(),
           type: z.enum(QUESTION_TYPES).optional(),
@@ -4824,72 +4762,47 @@ export class OrchestrationMcpRouter {
         description:
           "STEP 1 of the merge gate: review a worker's branch diff. For a HELD (batch- or solo-retained) branch the result also carries `lateRange` {assembledTip, liveTip, filesChanged, insertions, deletions, files, commitSubjects, commits[{sha, subject, emptyOnMain}], note} — the NON-MERGE commits added after a merge landed the branch (assembledTip..liveTip) that main does not reach, and the diffstat of those commits cherry-picked onto current main; this is exactly what `worker_merge_confirm` lands instead of the fork-point diff (`emptyOnMain` = the commit changes nothing on current main and is skipped). If a commit does not apply cleanly onto main, a merge in the range carries content of its own or merges a branch that is not on main, or the range cannot be determined, a HELD BRANCH `warning` says so. This call ALSO records the tip it reviewed (its contract is stated once, in `worker_merge_confirm`'s description)." +
           "The result also carries `mergeGate` " +
-          "({cadence, interval, ungatedSinceLastPass, nextLandingGated, gateOwed} — READ-ONLY; see " +
-          "`my_context`) so you can see whether confirming this branch will run the gate or land ungated. " +
-          "By DEFAULT returns a bounded DIFFSTAT — " +
-          "the list of changed files with per-file +/- and the insertion/deletion totals — so it will NOT " +
-          "overflow the display on a large change (where the full patch is biggest/riskiest). A renamed " +
-          "file's entry carries `renameFrom` (the real pre-rename path) instead of the old `{old => new}` " +
-          "inline display text. Pass " +
-          "fullDiff:true to ALSO get the full unified patch for line-level review (the full patch is " +
-          "unbounded and may itself overflow on a very large change — review the diffstat first, then pull " +
-          "the patch). Pass `files` (an array of exact/substring path matches — RELIABLE for nested paths, " +
-          "e.g. 'service.ts' matches 'src/sessions/service.ts') and/or `pathGlob` " +
-          "(a glob like 'src/mcp/*.ts'; a bare pattern with no '/', e.g. '*service.ts', is " +
-          "auto-matched anywhere as if written '**/*service.ts' — but a pattern that DOES contain '/' " +
-          "scopes to that literal directory and won't match elsewhere) to scope BOTH the diffstat and the " +
-          "patch to matching file(s) — pull one file's hunk at a time on a large multi-file change instead " +
-          "of the whole patch. A pathGlob matching 0 of the actually-changed files returns a `hint` " +
-          "explaining the miss (with the list of changed files) instead of a silent, empty-looking result. " +
-          "Omit both for the full unfiltered diff. If the (possibly filtered) patch is still too " +
-          "large to inline safely, it's written to a scratch file instead — UTF-8, real line breaks, " +
-          "Read-pageable with offset/limit — and the response carries patchFile/patchChars + a note in " +
-          "place of the inline patch. No merge happens; you must review before confirming (there is no " +
-          "worker-side merge). STALE-BASE BACKSTOP: if this branch's history is " +
-          "missing commits current main carries, the result ALSO carries `behindMain:<count>` plus a " +
-          "'STALE BASE' clause folded into `warning` — confirmWorkerMerge's own union-merge will attempt to " +
-          "forward it automatically before the gate runs, but this is a heads-up to review the diff with " +
-          "that in mind; a stale-based rebuild can silently overwrite or conflict with a change that landed " +
-          "on main after the branch was cut. Fires independent of whether this worker's spawn already " +
-          "surfaced a `staleBase` (it may have been spawned before that fix, or fallen behind mid-session). " +
-          "Absent when the branch is caught up. PROSPECTIVE COMMIT SUBJECT: when this worker " +
-          "has a task, the result ALSO carries `commitSubject` — the EXACT, byte-for-byte subject that will " +
-          "be committed if you confirm (this is your only chance to see it before it's permanent — " +
-          "confirmWorkerMerge derives and commits it, it never re-shows it for approval). If the card's raw " +
-          "title was NOT already Conventional-Commits form, the result also carries `rawTitle` (the " +
-          "original) and `coerced:true` — a factual flag that a type was inferred (bracket-mapped or " +
-          "defaulted to `chore:`), not a judgment that the title is wrong. Retitle the card now (before " +
-          "confirming) if `commitSubject` doesn't actually describe what shipped. Absent entirely for a " +
-          "taskless worker (no card to preview a title from) — a taskless worker instead gets " +
-          "`tasklessSubjectPreview`, the subject the eventual squash will actually " +
-          "derive from THIS branch's own tip commit (never a fabricated placeholder, and never the branch " +
-          "name — that's only the merge's own last-resort fallback for an unreadable branch). NECESSARY " +
-          "but NOT SUFFICIENT on its own: this preview being populated does NOT mean the eventual QUEUED " +
-          "merge will announce its landed subject anywhere else — see `worker_merge_confirm`'s own " +
-          "description for where the landed subject is actually surfaced once this merge is confirmed. " +
-          "BATCH-BOUND PREVIEW: `commitSubject`/`tasklessSubjectPreview` above preview ONLY " +
-          "the SOLO squash path (worker_merge_confirm) — a `merge_batch` landing never rewrites or coerces " +
-          "anything, it commits each candidate branch's OWN commit subjects verbatim. The result ALSO " +
-          "carries `ownTipSubject` (the branch's tip commit subject, UNCOERCED — byte-for-byte what a batch " +
-          "would actually commit for this branch) and `ownTipSubjectConventional` (a plain " +
-          "toConventionalSubject(ownTipSubject) === ownTipSubject fact, mirroring `coerced`'s own framing) — " +
-          "computed for EVERY worker regardless of task, so you can title-check what a batch would land " +
-          "before routing this worker into `merge_batch` instead of a solo confirm. Absent only when the " +
-          "branch has no readable commit at all. NON-TIP COMMITS: `ownTipSubject` above " +
-          "covers only the branch's LAST commit — for a branch with MORE THAN ONE commit, `merge_batch` " +
-          "lands every earlier commit verbatim too, and those are invisible to the tip fields alone. The " +
-          "result ALSO carries `ownNonTipCommitSubjects` — every OTHER commit's own subject on this " +
-          "branch (`<mergeBase>..<branch>`, oldest-first, excluding the tip), bounded (a `true` " +
-          "`ownNonTipCommitSubjectsTruncated` means older entries were dropped, never silently) — plus " +
-          "`ownNonTipCommitSubjectsConventional`, whether EVERY subject actually returned is Conventional-" +
-          "Commits form (when truncated, this verdict covers only the visible entries, not the dropped " +
-          "tail). Absent entirely for the common single-commit branch, where `ownTipSubject` alone is " +
-          "already the complete check — no need to look further. `workerSessionId` must be the FULL " +
-          "session id (no prefix support) and resolves against your OWN lineage even for an " +
-          "EXITED/archived worker (the common already-done-and-awaiting-review case) — an id matching no " +
-          "session anywhere in your scope errors \"no such worker session '<id>'\" with a did-you-mean " +
-          "hint (your own worker ids / taskIds / in-flight op ids); \"not your worker\" is reserved for a " +
-          "session that exists but belongs to a different manager's lineage.",
+          "({cadence, interval, ungatedSinceLastPass, nextLandingGated, gateOwed}, READ-ONLY; see " +
+          "`my_context`) so you can see whether confirming will run the gate or land ungated. " +
+          "By DEFAULT returns a bounded DIFFSTAT (changed files with per-file +/- and totals), so it " +
+          "won't overflow on a large change; a renamed file's entry carries `renameFrom` (the real " +
+          "pre-rename path). Pass fullDiff:true to ALSO get the full unified patch (unbounded; review " +
+          "the diffstat first). Pass `files` (exact/substring path matches, reliable for nested paths: " +
+          "'service.ts' matches 'src/sessions/service.ts') and/or `pathGlob` (e.g. 'src/mcp/*.ts'; a " +
+          "bare pattern with no '/' such as '*service.ts' matches anywhere, as '**/*service.ts'; one " +
+          "containing '/' scopes to that literal directory) to scope BOTH diffstat and patch to " +
+          "matching file(s): pull one file's hunk at a time on a large change. A pathGlob matching 0 of " +
+          "the changed files returns a `hint` listing them. Omit both for the full diff. A patch still " +
+          "too large to inline is written to a scratch file (UTF-8, Read-pageable with offset/limit) " +
+          "and the response carries patchFile/patchChars + a note instead. No merge happens; you must " +
+          "review before confirming (there is no worker-side merge). STALE-BASE BACKSTOP: if the " +
+          "branch is missing commits current main carries, the result carries `behindMain:<count>` and " +
+          "a 'STALE BASE' clause in `warning`: confirm's union-merge will try to forward it before the " +
+          "gate, but review with that in mind (a stale-based rebuild can silently overwrite or " +
+          "conflict with a later change on main). Absent when caught up. PROSPECTIVE COMMIT SUBJECT: " +
+          "for a worker with a task the result carries `commitSubject`, the EXACT subject that will be " +
+          "committed if you confirm (your only chance to see it; confirm never re-shows it). If the " +
+          "card's raw title was not already Conventional-Commits form it also carries `rawTitle` and " +
+          "`coerced:true` (a type was inferred, bracket-mapped or defaulted to `chore:`; not a verdict " +
+          "that the title is wrong). Retitle the card BEFORE confirming if `commitSubject` doesn't " +
+          "describe what shipped. A taskless worker instead gets `tasklessSubjectPreview`, derived from " +
+          "this branch's own tip commit. NECESSARY but NOT SUFFICIENT: it does not mean a QUEUED merge " +
+          "announces the landed subject elsewhere (see `worker_merge_confirm`). BATCH-BOUND PREVIEW: " +
+          "`commitSubject`/`tasklessSubjectPreview` preview ONLY the SOLO squash path; `merge_batch` " +
+          "never rewrites or coerces, it commits each branch's OWN commit subjects verbatim. For EVERY " +
+          "worker the result also carries `ownTipSubject` (the tip subject, UNCOERCED, exactly what a " +
+          "batch would commit) and `ownTipSubjectConventional` (whether it is already Conventional-" +
+          "Commits form), so you can title-check before routing into `merge_batch`; absent only when " +
+          "the branch has no readable commit. NON-TIP COMMITS: for a branch with MORE THAN ONE commit, " +
+          "`merge_batch` lands every earlier commit verbatim too, so the result carries " +
+          "`ownNonTipCommitSubjects` (every OTHER commit subject, `<mergeBase>..<branch>`, oldest-" +
+          "first, bounded; `ownNonTipCommitSubjectsTruncated:true` = older entries dropped) plus " +
+          "`ownNonTipCommitSubjectsConventional` (whether every RETURNED subject is Conventional; when " +
+          "truncated it covers only the visible entries). Absent for a single-commit branch. " +
+          "`workerSessionId` must be the FULL session id (no prefix support) and resolves against your " +
+          "OWN lineage even for an EXITED/archived worker (the common done-awaiting-review case). An " +
+          "unknown id errors \"no such worker session '<id>'\" with a did-you-mean hint; \"not your " +
+          "worker\" means the session belongs to a different manager's lineage.",
         inputSchema: strictShape({ workerSessionId: z.string(), fullDiff: z.boolean().optional(), files: z.array(z.string()).optional(), pathGlob: z.string().optional() }),
       },
       async ({ workerSessionId, fullDiff, files, pathGlob }) => {
@@ -5157,93 +5070,52 @@ export class OrchestrationMcpRouter {
       "project_checkout_branch",
       {
         description:
-          "Switch YOUR OWN project's canonical repo to an EXISTING local branch — e.g. to build something " +
-          "on its own branch and compare before switching back — then re-point this (project, repoKey)'s " +
-          "mainline watermark to the resulting {branch, sha}, so a subsequent worker_merge_confirm/" +
-          "merge_batch lands against the NEW branch instead of refusing with branchDiverted. Does NOT " +
-          "touch any remote. `repoKey` (optional — null/omitted/\"primary\" for the project's primary " +
-          "repo, else a key from your own project's repo registry) targets one registered repo; an " +
-          "unknown key is rejected with {error}. " +
-          "Pass `create:true` to make a BRAND NEW branch instead of switching to an existing one — it is " +
-          "created at the CURRENT trusted tip (never a caller-chosen start point, never plain HEAD if that " +
-          "has drifted unverified past it), switched to, and its own trust record is stamped immediately, " +
-          "so you never need a human to \"adopt\" a fresh branch before using it. Refuses a name that " +
-          "already exists, an invalid git branch name, or one starting with Loom's own reserved \"loom/\" " +
-          "worker-branch prefix. Returns {ok:true, noop:false, created:true, branch, sha, repoKey, " +
-          "previousBranch} on success — `create` and `branch` targeting an EXISTING branch never mix. " +
-          "WITHOUT `create`: calling this on the branch ALREADY checked out is a TRUE no-op ONLY when this " +
-          "project's mainline watermark already agrees with it too — {ok:true, noop:true, branch, sha, " +
-          "repoKey, previousBranch}, no checkout, no re-point. If the watermark DISAGREES (a prior call " +
-          "already moved the real checkout, then failed on a later check), this re-validates every refusal " +
-          "below in-lock and, once they all pass, RE-POINTS the watermark to the current checkout — " +
-          "{ok:true, noop:false, ...}, same as an ordinary switch, just with no new `git checkout` spawned. " +
-          "Every refusal below still applies first either way, since a same-branch call is exactly the " +
-          "laundering shape they close. An EXISTING branch with no trusted baseline on record is refused " +
-          "outright (create it with `create:true`, or ask the owner to check out the branch THEMSELVES " +
-          "first and only then call the human-only reset route below — it reads whatever is CURRENTLY " +
-          "checked out, so checkout must come BEFORE the reset call, never after). " +
-          "A branch name must be a PLAIN branch name — no leading \"-\" (could be parsed as a git option), " +
-          "no \"@{\" (revision/reflog shorthand, e.g. \"@{-1}\" for the previous branch), no \"..\", no " +
-          "\"refs/\" prefix, and no character outside a conservative charset (letters, digits, \".\", \"_\", " +
-          "\"-\", and \"/\" between segments); rejected before any git read or write, for both `create` and " +
-          "non-`create`. Existence/collision checks never resolve the name via git (a case-insensitive " +
-          "filesystem, e.g. Windows/NTFS, can silently resolve a request through a DIFFERENTLY-cased ref); " +
-          "they compare against the real, case-sensitive branch listing instead. ANY path-PREFIX of the " +
-          "requested name that case-folds to a path-prefix of an EXISTING branch's name, while differing " +
-          "from it in exact case, is refused and names the real existing branch — this covers a full-name " +
-          "collision (\"FEAT\" vs an existing \"feat\"), the candidate's own leaf colliding with an " +
-          "existing branch's directory segment (\"FEAT/x\" vs an existing \"feat/y\"), and the reverse. " +
-          "`create:true` ALSO refuses a name that case-insensitively starts with a configured remote's " +
-          "FULL name followed by \"/\" (e.g. \"origin/main\" or \"Origin/main\" against remote \"origin\"; " +
-          "\"a/b/c\" against a multi-segment remote named \"a/b\") — it would shadow that remote's own " +
-          "tracking-ref namespace; switching to such a branch if it already exists is unaffected. A " +
-          "remote-tracking shadow on the SWITCH path (no local ref, but `refs/remotes/<remote>/<branch>` " +
-          "exists for some configured remote) is matched EXACTLY per remote, never by a loose \"ends with " +
-          "/<branch>\" suffix — a differently-named branch under the same remote (e.g. " +
-          "`refs/remotes/origin/hotfix/zzz` when switching to \"zzz\") is NOT a shadow and refuses " +
-          "ordinarily, with no alert filed. " +
-          "HARD REFUSALS, no override, scoped to your WHOLE project (coarser than this one repoKey — " +
-          "over-refusal is intentional): (1) an unresolved mainline alert already exists for this repo — " +
-          "you cannot silently clear the owner's alarm as a side effect of this call; ask the owner to " +
-          "review and use the human-only reset route first. (2) WITHOUT `create`, the branch does not " +
-          "exist as a LOCAL ref at all — refused directly here, NEVER deferred to the underlying checkout " +
-          "(a same-named remote-tracking ref existing when no local one does is itself a HARD refusal with " +
-          "a HIGH-severity event filed — that exact shape is what git's own checkout DWIM used to silently " +
-          "launder before this tool closed it). (3) the SWITCH TARGET's own LIVE TIP does not EXACTLY " +
-          "match its own trust record's sha — ANY other tip is refused, including a " +
-          "descendant commit that carries what LOOKS like a Loom merge trailer (that text is unauthenticated " +
-          "and can be forged — e.g. `branch -f`/`branch -D`+recreate, a forged `update-ref -m` message, or " +
-          "a plain commit on the branch while it's parked, each onto a tip carrying a planted trailer), a " +
-          "rewind/divergence, or a non-ancestor move — checked on " +
-          "the TARGET branch regardless of what's currently checked out (so tampering a branch while it's " +
-          "away, then switching back to it later, is still caught), refused with a HIGH-severity event " +
-          "filed and the same human-only reset route named. Only an EXACT match adopts; no other " +
-          "git-derived fact is consulted. The trust record this compares against is written by EXACTLY " +
-          "three things, each keyed on Loom's own durable record: a real Loom landing on that branch, " +
-          "this tool's own checkout/create success, and the human-only reset route's own `adopt` — never " +
-          "a raw git-derived classification. Inherent residual: a landing's own stamp transitively " +
-          "includes whatever the mainline tripwire admitted on the checked-out branch at that moment, " +
-          "since that content was already live on mainline — not a gap this check itself can close. " +
-          "(4) any worker branch " +
-          "in this project not yet PROVEN merged that is either LIVE or whose worktree still exists on " +
-          "disk (an EXITED worker whose worktree was already removed is excluded — the merge-time " +
-          "fork-point backstop is the net for that case, not this tool) — landing it after a " +
-          "switch would squash its history into whichever branch ends up checked out; land it " +
-          "(worker_merge_confirm), or ask the owner to remove its worktree/branch by hand — worker_stop " +
-          "retains it; no manager tool deletes a worktree (returns `unmergedWorkers`). (5) any live/queued gate of ANY kind " +
-          "(merge/batch, deploy, or a worker's own run_gate self-check) on this project's repo(s) — check " +
-          "gate_queue and retry once clear (returns `liveGateOps`). (6) a worktree currently being CUT (a " +
-          "worker_spawn or batch assembly in flight). (7) the canonical repo has tracked changes " +
-          "(untracked files do not block). Without `create`, Loom's own reserved/operational home is " +
-          "refused by the underlying checkout itself; an invalid name is refused by this tool's own " +
-          "pre-git validation above, never by git. " +
-          "On success, returns {ok:true, noop, created?, branch, sha, repoKey, previousBranch} — no field " +
-          "reports on other live workers: an unmerged one is now a hard refusal (4) above, not a " +
-          "success-time notice. On refusal, returns {error, refused:true, liveGateOps?, unmergedWorkers?} " +
-          "for any of the seven hard refusals above (dirty tree included — it refuses the same way), or " +
-          "just {error} for an invalid name (rejected by this tool's own validation, before any git call), " +
-          "Loom's reserved/operational home, or an ordinary create-path failure (an already-existing name, " +
-          "or no established watermark yet to branch from).",
+          "Switch YOUR OWN project's canonical repo to an EXISTING local branch, then re-point this " +
+          "(project, repoKey)'s mainline watermark to the resulting {branch, sha}, so a later " +
+          "worker_merge_confirm/merge_batch lands against the NEW branch instead of refusing with " +
+          "branchDiverted. Touches no remote. `repoKey` (optional; null/omitted/\"primary\" = the primary " +
+          "repo, else a key from your project's repo registry; an unknown key is rejected with {error}). " +
+          "`create:true` makes a BRAND NEW branch instead: created at the CURRENT trusted tip (never a " +
+          "caller-chosen start point), switched to, and trust-stamped immediately (no human adopt needed). " +
+          "Refuses an existing name, an invalid branch name, or the reserved \"loom/\" worker-branch " +
+          "prefix; `create` never mixes with switching to an existing branch. " +
+          "WITHOUT `create`: calling this on the branch ALREADY checked out is a TRUE no-op " +
+          "({ok:true, noop:true}) only when the watermark already agrees; if it disagrees, every refusal " +
+          "below re-validates in-lock and, once clear, the watermark is RE-POINTED ({ok:true, " +
+          "noop:false}) with no new git checkout. An EXISTING branch with no trusted baseline on record is " +
+          "refused outright: create it with `create:true`, or ask the owner to check it out THEMSELVES " +
+          "first and only then call the human-only reset route (it reads whatever is CURRENTLY checked " +
+          "out, so checkout must come BEFORE the reset call, never after). " +
+          "Branch names must be PLAIN: no leading \"-\", no \"@{\", no \"..\", no \"refs/\" prefix, only " +
+          "letters, digits, \".\", \"_\", \"-\", and \"/\" between segments; rejected before any git call, for " +
+          "both modes. Existence/collision checks use the real case-sensitive branch listing, never git " +
+          "resolution: any path-prefix of the name that differs only in case from an EXISTING branch's " +
+          "prefix (\"FEAT\" vs \"feat\", \"FEAT/x\" vs \"feat/y\", or the reverse) is refused, naming the real " +
+          "branch. `create:true` also refuses a name starting (case-insensitively) with a configured " +
+          "remote's full name + \"/\" (it would shadow that remote's tracking-ref namespace). On the SWITCH " +
+          "path a remote-tracking shadow (no local ref, but `refs/remotes/<remote>/<branch>` exists) is " +
+          "matched EXACTLY per remote, never by loose suffix. " +
+          "HARD REFUSALS (no override; scoped to your WHOLE project, over-refusal intentional): (1) an " +
+          "unresolved mainline alert exists for this repo; ask the owner to review and use the human-only " +
+          "reset route first. (2) WITHOUT `create`, the branch is not a LOCAL ref (refused here, never " +
+          "deferred to checkout; a same-named remote-tracking ref with no local one is a HARD refusal " +
+          "with a HIGH-severity event filed). (3) the SWITCH TARGET's live tip does not EXACTLY match its " +
+          "trust record's sha: any other tip is refused with a HIGH event and the reset route named, " +
+          "including a descendant carrying a (forgeable) Loom merge trailer, a rewind/divergence or a " +
+          "non-ancestor move; checked on the TARGET regardless of what's checked out. The trust record is " +
+          "written only by a real Loom landing, this tool's own checkout/create success, and the reset " +
+          "route's `adopt`. (4) any worker branch in this project not yet PROVEN merged that is LIVE or " +
+          "whose worktree still exists on disk (an EXITED worker whose worktree is gone is excluded): " +
+          "land it (worker_merge_confirm) or ask the owner to remove its worktree/branch by hand " +
+          "(worker_stop retains it; no manager tool deletes a worktree); returns `unmergedWorkers`. " +
+          "(5) any live/queued gate of ANY kind (merge/batch, deploy, a worker's run_gate) on this " +
+          "project's repo(s): check gate_queue and retry; returns `liveGateOps`. (6) a worktree currently " +
+          "being CUT (worker_spawn or batch assembly in flight). (7) tracked changes in the canonical " +
+          "repo (untracked files don't block). " +
+          "Returns {ok:true, noop, created?, branch, sha, repoKey, previousBranch} on success; on any of " +
+          "the seven refusals {error, refused:true, liveGateOps?, unmergedWorkers?}; just {error} for an " +
+          "invalid name, Loom's reserved/operational home (refused by the underlying checkout), or an " +
+          "ordinary create failure (existing name, or no established watermark to branch from).",
         inputSchema: strictShape({ branch: z.string(), repoKey: z.string().nullable().optional(), create: z.boolean().optional() }),
       },
       async ({ branch, repoKey, create }) => ok(await sessions.checkoutProjectBranch(managerSessionId, { branch, repoKey, create })),
@@ -5257,45 +5129,31 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Deliberately re-stamp a worker session's recorded cut-base (fork-point) sha to the canonical " +
-          "repo's CURRENT mainline target tip — one of three remedies for a merge-time forkPointDiverged " +
-          "refusal (the other two: switch the canonical checkout back, or re-dispatch on a fresh worker " +
-          "cut from current mainline) for a worker whose branch was cut before the canonical checkout " +
-          "moved to a different lineage. Recycling or rebasing the worker alone can NEVER clear that " +
-          "refusal (its recorded cut base is carried forward unchanged either way); this tool clears it " +
-          "deliberately, but ONLY after verifying TWO things against the branch's CURRENT state: (A) the " +
-          "current mainline target tip is an ancestor of the worker branch's tip (the branch genuinely " +
-          "contains it), and (B) every commit the branch carries beyond that tip has exactly one parent — " +
-          "ANY merge commit in that range refuses outright, including a legitimate union-forward merge of " +
-          "the mainline, because a merge commit is the only way the OLD, departed lineage could ever have " +
-          "entered the branch in the first place. The remedy when refused on (B) is to rebase/cherry-pick " +
-          "the branch linearly onto the current target (no merges) and retry — never to inspect what the " +
-          "merge brought in. Neither check inspects CONTENT: a worker could hand-author fresh " +
-          "single-parent commits that happen to redo a departed diff by hand, which this tool cannot tell " +
-          "apart from a genuine rebase's own replayed commits — the ordinary merge gate and review of the " +
-          "branch's real diff are what cover that, not this tool. Check B is also POINT-IN-TIME: it is " +
-          "never re-run at merge time, so a merge commit added to the branch AFTER a successful restamp " +
-          "lands through the ordinary squash uncaught, same as it always would have. " +
+          "repo's CURRENT mainline target tip: one of three remedies for a merge-time forkPointDiverged " +
+          "refusal (the others: switch the canonical checkout back, or re-dispatch a fresh worker cut " +
+          "from current mainline). Recycling or rebasing the worker alone can NEVER clear that refusal " +
+          "(the recorded cut base is carried forward unchanged). Re-stamps ONLY after verifying against " +
+          "the branch's CURRENT state: (A) the current mainline target tip is an ancestor of the worker " +
+          "branch's tip, and (B) every commit beyond that tip has exactly one parent: ANY merge commit " +
+          "in that range refuses outright, even a legitimate union-forward merge of the mainline (a " +
+          "merge commit is the only way the OLD lineage could have entered the branch). If refused on " +
+          "(B), rebase/cherry-pick the branch linearly onto the current target and retry. Neither check " +
+          "inspects CONTENT (the merge gate and review of the real diff cover that), and (B) is " +
+          "POINT-IN-TIME: never re-run at merge time. " +
           "`workerSessionId` must name a session in YOUR OWN project with a branch and a task not already " +
-          "proven merged, AND must be the NEWEST session row at that worktree path/branch — a merge only " +
-          "ever reads the newest row's own recorded cut base, so restamping a superseded row from an " +
-          "older recycle/respawn is refused (naming the newer session's id), not silently accepted as a " +
-          "no-op success. Pass `dryRun:true` to run every check and report the same shape with no write " +
-          "and no audit event — use it to probe before committing. " +
-          "HARD REFUSALS (no override): any live/queued gate op of ANY kind on this project's repo(s) — " +
-          "hygiene, avoiding a race against an in-flight worker_merge_confirm's own pre-lock read, not a " +
-          "correctness requirement — wait for gate_queue to show it clear and retry (returns `liveGateOps`); " +
-          "check (A) failing (returns `notAncestor:true`); check (B) failing on a merge commit (returns " +
-          "`mergeCommitSha`); or the branch carrying more commits beyond the target than a fixed, " +
-          "non-configurable scan bound (returns `tooManyCommits:true` + `branchExtraCount`) — refused " +
-          "rather than scanned unboundedly, since real worker branches are small. " +
-          "A same-state call (the recorded cut base already equals the current target tip, re-verified) " +
-          "is a TRUE no-op — {ok:true, noop:true, ...}, no write, no audit event, same as calling this " +
-          "with nothing to change. " +
-          "On success, re-stamps the session's cut base and files a durable audit event naming the old " +
-          "and new sha, the branch, and you as the acting manager — never silent. Returns {ok:true, noop, " +
-          "dryRun?, branch, oldCutBaseSha, newCutBaseSha, branchExtraCount, repoKey} on success, or " +
-          "{error, refused?, liveGateOps?, notAncestor?, mergeCommitSha?, tooManyCommits?, " +
-          "branchExtraCount?} on refusal.",
+          "proven merged, and must be the NEWEST session row at that worktree path/branch (a superseded " +
+          "row from an older recycle/respawn is refused, naming the newer session's id). `dryRun:true` " +
+          "runs every check and reports the same shape with no write and no audit event. " +
+          "HARD REFUSALS (no override): any live/queued gate op of ANY kind on this project's repo(s) " +
+          "(wait for gate_queue to show it clear and retry; returns `liveGateOps`); check (A) failing " +
+          "(`notAncestor:true`); check (B) failing on a merge commit (`mergeCommitSha`); or more commits " +
+          "beyond the target than a fixed, non-configurable scan bound (`tooManyCommits:true` + " +
+          "`branchExtraCount`). A same-state call (cut base already equals the current target tip) is a " +
+          "TRUE no-op ({ok:true, noop:true}), no write, no audit event. " +
+          "On success, re-stamps the cut base and files a durable audit event naming the old and new " +
+          "sha, the branch and you as acting manager. Returns {ok:true, noop, dryRun?, branch, " +
+          "oldCutBaseSha, newCutBaseSha, branchExtraCount, repoKey}, or {error, refused?, liveGateOps?, " +
+          "notAncestor?, mergeCommitSha?, tooManyCommits?, branchExtraCount?} on refusal.",
         inputSchema: strictShape({ workerSessionId: z.string(), dryRun: z.boolean().optional() }),
       },
       async ({ workerSessionId, dryRun }) => ok(await sessions.restampWorkerCutBase(managerSessionId, { workerSessionId, dryRun })),
@@ -5520,54 +5378,40 @@ export class OrchestrationMcpRouter {
       "events_search",
       {
         description:
-          "A BOUNDED, newest-first page of orchestration_events for YOUR OWN project ONLY — the general " +
-          "sibling of `gate_history` (which only ever returns settled GATE runs), for forensics that " +
-          "aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/" +
-          "merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally " +
-          "narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an " +
-          "EXPLICIT error (never a silent `[]`) naming which value(s) were bad, since a caller reaching for " +
-          "this tool is usually investigating precisely BECAUSE they don't know what happened — a wrongly-" +
-          "empty result would misread as \"this never occurred\" rather than \"you asked a question this " +
-          "tool cannot answer\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". PROJECT-SCOPED " +
-          "SERVER-SIDE, NOT BY ARGUMENT: there is no `projectId` parameter — the project is always the " +
-          "CALLER's own, resolved from this session, exactly like `gate_queue`/`gate_history`. `sessionId` " +
-          "(input filter — the DAEMON's own Loom-namespaced session id, e.g. `loomSessionId` from " +
-          "`my_context`, or the bare `id` `list_all_sessions` returns, never the engine's own id) matches " +
-          "an event where that session is EITHER the manager or the worker. `taskId` matches the event's " +
-          "linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, " +
-          "projectId, projectName, agentName, branch} — `detail` is the raw kind-specific payload (already-" +
-          "durable operational metadata, not a dump of session transcript content). limit/offset paginate " +
-          "(default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE +
-          "); the result is ALWAYS the {events, total, returned, offset, nextOffset, limit} envelope (never " +
-          "a bare array) since this read is inherently a forensics page, not a small enumerable set — page " +
-          "deterministically via offset:nextOffset until it is null, same contract as `gate_history`. " +
-          "SPILL: when the `events` array itself is too large to inline safely, it is " +
-          "proactively rendered as NDJSON (one event per line, real line breaks, UTF-8) and written to your " +
-          "own scratch dir — `events` is then ABSENT and replaced by `eventsFile`/`eventsChars`/" +
-          "`eventsCount`/`note` alongside the same total/returned/offset/nextOffset/limit fields; page the " +
-          "file with Read (offset/limit are LINE-based) or grep it, same as tasks_list's own `rowsFile` " +
-          "spill — never the host engine's own opaque single-line spill, which `Read`/`Grep` can't page. " +
-          "`limit` echoes the EFFECTIVE, already-clamped limit actually applied (never the raw request) — " +
-          "if it differs from the `limit` you passed (or from " + DEFAULT_EVENTS_SEARCH_CAP + " when you " +
-          "omitted one), your request was clamped and `returned` rows are NOT the whole matching set even " +
-          "though `total` may say otherwise; page via `offset`/`nextOffset` to see the rest. " +
-          "⚠️ For a `cross_project_message` event, project-scoping prefers the WORKER/target session over " +
-          "the sending manager's own (by design, when the target session resolves) — so a manager can be " +
-          "structurally unable to see its own outbound peer messages here; they scope to the RECIPIENT " +
-          "project instead. Never read a `0`/missing result on this class as \"never happened\" — check " +
-          "the recipient project's own read. ⚠️ `session_message_delivered` events carry no project " +
-          "attribution at all (no resolvable session, no linked task) and are structurally invisible to " +
-          "EVERY project-scoped read, this one included — a `0`/missing result on that kind specifically " +
-          "is likewise never proof it didn't happen. `fields:[...]` (same " +
-          "contract as `tasks_list`'s own `fields`) projects each returned event down to ONLY the given " +
-          "top-level key names, e.g. fields:[\"ts\",\"kind\",\"taskId\"] for a lightweight timeline scan — " +
-          "an un-asked-for field is genuinely ABSENT from every event, not merely a smaller preview, and " +
-          "an unmatched/unknown field name is silently ignored rather than erroring. `id` is NOT auto-added. " +
-          "`countsOnly:true` (same contract as `tasks_list`'s own `countsOnly`) SHORT-" +
-          "CIRCUITS before any row fetch, JOIN-enrichment, or spill and returns {total, byKind} instead of " +
-          "{events,...} — `byKind` breaks down the (already `kind`-filtered, if you passed one) matching " +
-          "set by event kind. `limit`/`offset`/`fields` are ignored when `countsOnly` is set — this is the " +
-          "WHOLE matching set, not one page of it.",
+          "A BOUNDED, newest-first page of orchestration_events for YOUR OWN project ONLY: the general " +
+          "sibling of `gate_history` (settled GATE runs only), for forensics beyond gate-run kinds (e.g. " +
+          "kill_switch/recycle_begin/merge_rejected/platform_escalate). `kind` optionally narrows to " +
+          "specific event kinds (omitted = every kind). An UNRECOGNIZED kind is an EXPLICIT error naming " +
+          "the bad value(s), never a silent `[]` (which would misread as \"never occurred\"). Valid kind " +
+          "values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". PROJECT-SCOPED SERVER-SIDE, NOT BY ARGUMENT: " +
+          "no `projectId` parameter; the project is always the CALLER's own. `sessionId` (the DAEMON's " +
+          "Loom-namespaced session id, e.g. `loomSessionId` from `my_context` or the `id` from " +
+          "`list_all_sessions`, never the engine's own id) matches an event where that session is " +
+          "EITHER the manager or the worker. `taskId` matches the event's linked task. Each event " +
+          "returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, projectId, projectName, " +
+          "agentName, branch}; `detail` is the raw kind-specific payload (operational metadata, not " +
+          "transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP +
+          ", clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, " +
+          "returned, offset, nextOffset, limit} envelope; page via offset:nextOffset until null. " +
+          "`limit` echoes the EFFECTIVE, clamped limit: if it differs from what you passed, `returned` " +
+          "is NOT the whole matching set even though `total` may say otherwise. " +
+          "SPILL: an `events` array too large to inline is written as NDJSON (one event per line, " +
+          "UTF-8) to your scratch dir; `events` is then ABSENT, replaced by `eventsFile`/`eventsChars`/" +
+          "`eventsCount`/`note` beside the same total/returned/offset/nextOffset/limit; page it with " +
+          "Read (offset/limit are LINE-based) or grep, like tasks_list's `rowsFile`. " +
+          "⚠️ For a `cross_project_message` event, project-scoping prefers the WORKER/target session " +
+          "over the sender's, so a manager can be structurally unable to see its own outbound peer " +
+          "messages here (they scope to the RECIPIENT project); never read a `0`/missing result on " +
+          "this class as \"never happened\": check the recipient project's read. ⚠️ " +
+          "`session_message_delivered` events carry no project attribution (no resolvable session, no " +
+          "linked task) and are invisible to EVERY project-scoped read, this one included; a " +
+          "`0`/missing result on that kind is likewise no proof it didn't happen. `fields:[...]` (same " +
+          "contract as `tasks_list`'s) projects each event to ONLY the given top-level keys, e.g. " +
+          "fields:[\"ts\",\"kind\",\"taskId\"]; others are genuinely ABSENT, unknown names are silently " +
+          "ignored, `id` is NOT auto-added. `countsOnly:true` (same contract as `tasks_list`'s) " +
+          "short-circuits before any row fetch or spill and returns {total, byKind} for the WHOLE " +
+          "matching set (already `kind`-filtered if you passed one); `limit`/`offset`/`fields` are " +
+          "ignored.",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           sessionId: z.string().optional(),
@@ -5735,90 +5579,60 @@ export class OrchestrationMcpRouter {
       "resume_doc_check",
       {
         description:
-          "Check YOUR OWN resume doc's rotation integrity against this project's " +
-          "configured protected-marker set (orchestration.rotationMarkers) and, if configured, its " +
-          "LIVE-COMMITMENTS-style numbered-section floor (orchestration.rotationLiveCommitmentsHeading/" +
-          "rotationLiveCommitmentsFloor). Resolves and reads your ACTIVE resume doc ITSELF — there is NO " +
-          "path argument for it, so you can never MIS-AIM this call at the wrong file (the optional " +
-          "`archivePath` below IS a path argument, for a DIFFERENT file — see its own note); that guarantee " +
-          "is about the ARGUMENT, not that the resolved doc is definitionally right for this seat — if " +
-          "your resume doc lives under a non-default filename, redirect the resolution ITSELF via " +
-          "project_update's config.orchestration.resumeDocFilename (a project-level config key, not a " +
-          "per-call argument) and every future call here follows it automatically. Call with no arguments " +
-          "any time (lint-mode: markers + floor only, no rotation implied). ⚠️ `configured:false` means " +
-          "this seat has NOT set up any protection yet — an unconfigured seat's `ok:true` is VACUOUS " +
-          "(nothing was actually checked), never mistake it for 'checked and passed.' Add markers with " +
-          "project_update's orchestration.rotationMarkers — an array of `{token: string, caseSensitive?: " +
-          "boolean, note?: string}` objects, NOT bare strings (additive-only from this session — you can " +
-          "add a marker but not remove one; ask a human/Lead to remove one). " +
-          "The LIVE-COMMITMENTS section is normally located by matching " +
-          "`rotationLiveCommitmentsHeading` against the first heading line that CONTAINS it — a heading " +
-          "elsewhere that merely CITES that text (and happens to appear earlier) can silently win over " +
-          "the real section. Set `orchestration.rotationLiveCommitmentsMarker` (e.g. an HTML comment like " +
-          "`<!-- loom:live-commitments -->`, placed on its own line above the section heading or inline " +
-          "on it) to anchor on that explicit token instead — once set, there is NO fallback to " +
-          "heading-text search if the marker is missing from a given text. If the marker's literal text " +
-          "occurs more than once, the response carries `liveCommitments.markerAmbiguous`/" +
-          "`markerOccurrences` plus a top-level `markerAmbiguityWarning` — never a silent first-match. " +
-          "⚠️ HONEST LIMIT: every check here is an " +
-          "exact-substring grep — it proves literal text survived, not that no meaning was lost to " +
-          "rewording. A green is a candidate set ('nothing was blatantly deleted'), never a verdict that " +
-          "no meaning was lost — still read the real diff for a rewrite that changed words but kept (or " +
-          "lost) the idea. At an actual ROTATION: pass `archivePath` to also verify the archive file this " +
-          "rotation is producing exists and is non-empty — it must resolve INSIDE this project's " +
-          "vaultPath (refused otherwise), mirroring where the rotation doctrine already puts an archive " +
-          "(a `<name>.archive/<date>.md` sibling of the active doc). Pass `preEditBytes` (a byte count " +
-          "YOU measured before editing) to verify the doc actually shrank — this is CUT-scoped, not " +
-          "rotation-scoped (a rotation is a replacement, not a cut; omit this for an ordinary rotation). " +
-          "Pass `rulesPath` to also union-check markers against a NON-ROTATING rules " +
-          "file (e.g. an Orchestrator Rules.md) — a marker is satisfied if present in the ACTIVE doc OR " +
-          "the rules file, mirroring the rotation-gate.mjs script's own --rules semantics; this " +
-          "is a union, NEVER a replacement — a marker present in NEITHER still fails. `rulesPath` NOW " +
-          "ALSO unions the LIVE-COMMITMENTS-style floor itself: the numbered section is " +
-          "counted wherever its heading is actually found — the active doc first (so nothing changes " +
-          "while it stays there), the rules file only when the active doc has no such heading at all — " +
-          "so this section can move OUT of the rotating doc into a rules file without ever going blind. " +
-          "`liveCommitments.source` (\"active\"|\"rules\"|null) names which file the count actually came " +
-          "from; null only alongside a hard failure (the heading was in NEITHER file). Like `archivePath`, " +
-          "`rulesPath` must resolve INSIDE this project's vaultPath (refused otherwise) — omit it and " +
-          "behavior is byte-identical to a call with no rules file at all. ⚠️ If `rulesPath` IS supplied " +
-          "but cannot be read (e.g. a wrong base — vault-ROOT-relative instead of this project's own " +
-          "vaultPath), the union degrades to active-only for BOTH markers and the commitments floor — " +
-          "the overall `ok` is UNAFFECTED only when the active doc alone already satisfies everything " +
-          "(the common case while the LIVE COMMITMENTS section still lives there). It is NOT unaffected " +
-          "once that section has moved: with no readable rules file to fall back to, the floor check (and " +
-          "so the overall `ok`) genuinely FAILS — this is the same 'nothing durable protects it' outcome " +
-          "as the section being missing outright, by design. Always check the returned `rulesCheck` field " +
-          "when you pass this argument: `rulesCheck.ok:false` names the exact resolved " +
-          "path that could not be read, so a red `ok` is diagnosable as 'rulesPath unreadable', not 'the " +
-          "section is actually gone.' ⚠️ If the LIVE COMMITMENTS heading is found in BOTH the active doc " +
-          "AND the rules file (the active doc's count wins by precedence, never the rules file's), the " +
-          "response carries a loud top-level `ambiguityWarning` — this shape is the expected transient " +
-          "residue of a doc mid-migration into the rules file (a leftover heading where only a plain " +
-          "prose pointer should remain) and should be resolved, not left standing. " +
-          "Pass `rulesPaths` (an array) instead of/alongside `rulesPath` to union-check " +
-          "against MULTIPLE non-rotating rules files at once (e.g. a seat with more than one doctrine " +
-          "file) — `rulesPath` alone is UNCHANGED and byte-identical to before this card; passing " +
-          "`rulesPaths` (even a single-entry array) switches to an EXTENDED response shape that names " +
-          "WHICH file satisfied each marker/the commitments floor by its own resolved path instead of the " +
-          "generic \"rules\" label: `markerSources` values become that path, `liveCommitments.source` can " +
-          "be that path too, and on ambiguity (the heading found in more than one place) the response " +
-          "carries `liveCommitments.otherSources` (an array of every OTHER place it was found) instead of " +
-          "the single-file `otherCount`/`otherDiagnostic` pair. Each entry of `rulesPaths` is independently " +
-          "vault-contained exactly like `rulesPath` (refused if any resolves outside this project's " +
-          "vaultPath) and independently reported in the response's `rulesChecks` array (mirrors " +
-          "`rulesCheck` per-file) — a file that does not exist or cannot be read is a REAL entry there " +
-          "with `ok:false`, never silently dropped from the union. " +
-          "A marker being FOUND is NOT evidence its content survived — a marker satisfied " +
-          "by a line that merely NAMES it (a marker list, a doctrine note warning 'keep this so the " +
-          "marker resolves') reads identical to one satisfied by real content in `markerSources`/`ok` " +
-          "alone. The response also carries `markerHits` (per FOUND marker: every line in its winning " +
-          "source containing the token, each with a match-centered excerpt — NEVER head-anchored, since " +
-          "a real doc can have matches past any fixed head window — and `sharedLineMarkers`, naming any " +
-          "OTHER configured marker also on that exact line) and a top-level `markersNeedingReview` (marker " +
-          "tokens whose hits carry `multipleHits` or a non-empty `sharedLineMarkers` — 'inspect these', " +
-          "never a verdict, never folded into `ok`). Read the excerpts yourself to tell a meta-mention " +
-          "from real content; this module still cannot classify that automatically.",
+          "Check YOUR OWN resume doc's rotation integrity against this project's configured " +
+          "protected-marker set (orchestration.rotationMarkers) and, if configured, its LIVE-COMMITMENTS-" +
+          "style numbered-section floor (orchestration.rotationLiveCommitmentsHeading/" +
+          "rotationLiveCommitmentsFloor). Reads your ACTIVE resume doc ITSELF: there is NO path argument " +
+          "for it, so it can't be mis-aimed (the resolved doc follows project_update's " +
+          "config.orchestration.resumeDocFilename if yours has a non-default name). No arguments = " +
+          "lint-mode (markers + floor only). ⚠️ `configured:false` = this seat has set up NO protection: " +
+          "its `ok:true` is VACUOUS (nothing was checked). Add markers with project_update's " +
+          "orchestration.rotationMarkers, an array of `{token: string, caseSensitive?: boolean, note?: " +
+          "string}` objects, NOT bare strings (additive-only from this session; ask a human/Lead to " +
+          "remove one). " +
+          "The LIVE-COMMITMENTS section is normally found by the first heading line CONTAINING " +
+          "`rotationLiveCommitmentsHeading`, so an earlier heading that merely CITES that text can win. " +
+          "Set `orchestration.rotationLiveCommitmentsMarker` (e.g. `<!-- loom:live-commitments -->` on " +
+          "its own line above the heading or inline on it) to anchor on that token instead; once set " +
+          "there is NO fallback to heading search. A marker occurring more than once yields " +
+          "`liveCommitments.markerAmbiguous`/`markerOccurrences` plus a top-level " +
+          "`markerAmbiguityWarning`, never a silent first-match. " +
+          "⚠️ HONEST LIMIT: every check is an exact-substring grep: it proves literal text survived, not " +
+          "that no meaning was lost to rewording. A green is a candidate set, never a verdict; still read " +
+          "the real diff. At an actual ROTATION pass `archivePath` to verify the archive file exists and " +
+          "is non-empty (must resolve INSIDE this project's vaultPath, else refused; conventionally a " +
+          "`<name>.archive/<date>.md` sibling of the active doc). Pass `preEditBytes` (a byte count YOU " +
+          "measured before editing) to verify the doc shrank: CUT-scoped, omit it for an ordinary " +
+          "rotation (a replacement). " +
+          "`rulesPath` also union-checks markers against a NON-ROTATING rules file (e.g. an Orchestrator " +
+          "Rules.md): a marker is satisfied if present in the ACTIVE doc OR the rules file (a union, " +
+          "NEVER a replacement; a marker in NEITHER still fails). It also unions the LIVE-COMMITMENTS " +
+          "floor: the numbered section is counted in the active doc first, the rules file only when the " +
+          "active doc has no such heading at all. `liveCommitments.source` (\"active\"|\"rules\"|null) names " +
+          "which file the count came from (null only with a hard failure: heading in NEITHER file). Like " +
+          "`archivePath`, `rulesPath` must resolve INSIDE this project's vaultPath (refused otherwise). " +
+          "⚠️ If `rulesPath` is supplied but unreadable (e.g. vault-ROOT-relative instead of this " +
+          "project's vaultPath), the union degrades to active-only: `ok` is unaffected only while the " +
+          "active doc alone satisfies everything; once the LIVE COMMITMENTS section has moved, the floor " +
+          "(and `ok`) genuinely FAILS, by design. Always check `rulesCheck` when you pass this: " +
+          "`rulesCheck.ok:false` names the exact resolved path that could not be read, so a red `ok` is " +
+          "diagnosable as 'rulesPath unreadable', not 'the section is gone'. ⚠️ If the LIVE COMMITMENTS " +
+          "heading is found in BOTH the active doc and the rules file (the active doc's count wins), the " +
+          "response carries a top-level `ambiguityWarning`: expected transient residue of a doc " +
+          "mid-migration; resolve it. " +
+          "`rulesPaths` (an array; even one entry) unions against MULTIPLE rules files and switches to an " +
+          "EXTENDED response shape: `markerSources` values and `liveCommitments.source` become the " +
+          "resolved path instead of \"rules\", ambiguity yields `liveCommitments.otherSources` (every OTHER " +
+          "place found) instead of `otherCount`/`otherDiagnostic`, and each entry is independently " +
+          "vault-contained and reported in `rulesChecks` (a missing/unreadable file is a REAL entry with " +
+          "`ok:false`, never dropped from the union). " +
+          "A marker being FOUND is NOT evidence its content survived: a line that merely NAMES it reads " +
+          "identical in `markerSources`/`ok`. The response also carries `markerHits` (per FOUND marker: " +
+          "every line in its winning source containing the token, each with a match-centered excerpt, " +
+          "and `sharedLineMarkers` naming any OTHER configured marker on that line) and a top-level " +
+          "`markersNeedingReview` (tokens whose hits carry `multipleHits` or a non-empty " +
+          "`sharedLineMarkers`): 'inspect these', never a verdict, never folded into `ok`. Read the " +
+          "excerpts yourself to tell a meta-mention from real content.",
         inputSchema: strictShape({
           archivePath: z.string().optional(),
           rulesPath: z.string().optional(),
@@ -6679,55 +6493,43 @@ export class OrchestrationMcpRouter {
       "platform_escalate",
       {
         description:
-          "Escalate a discovered Loom bug or friction UP to the Platform Lead — or notify it of a status/" +
-          "completion it asked to hear about. This is the " +
-          "ONE durable channel for anything the Lead needs to know; don't invent an ad hoc 'I'll ping you' — " +
-          "that reaches no one reliably. Files a DURABLE, structured task on your own reserved platform " +
-          "home board (the Lead's inbox — it survives whether or not a Lead session is live), capturing your " +
-          "origin project + this manager session, the title, the detail/evidence, and a severity. The target " +
-          "is the Platform board, fixed server-side (you cannot pick a project) — for a LINKED peer " +
-          "project's manager instead, use peer_message. Returns the created Platform task id plus a " +
-          "`deliveryStatus` (delivered-live | queued | boarded | suppressed-duplicate | dropped): `boarded` " +
-          "means no Lead session was live but the board task is durably filed (the normal, safe case) — a " +
-          "live Lead is nudged immediately (even one that's currently parked waiting on exactly this). " +
-          "`suppressed-duplicate` is DIFFERENT from `boarded`: a Lead IS live, but its live nudge was " +
-          "deliberately withheld because it already saw this same content (today: a completion report " +
-          "naming a deploy SHA the Lead was already told about) — the board task is still filed either way, " +
-          "so nothing is lost, but don't read `suppressed-duplicate` as \"nobody is watching\" the way you " +
-          "would `boarded`; it means someone IS watching and chose not to take a live turn on this one. " +
-          "Only `dropped` warrants concern. DEDUPED: re-escalating the SAME title with an unchanged-or-lower severity while your " +
-          "prior escalation is still UNRESOLVED (pending, unclaimed on the board — OR already being worked, " +
-          "moved off the landing lane but not yet resolved) reuses that task instead of filing a duplicate " +
-          "— the response carries `deduped: true` and no fresh Lead nudge is sent; check escalation_status " +
-          "instead of re-escalating on a timer. A HIGHER severity than what's on file for that still-open " +
-          "title is NOT deduped — it reuses the same task (no duplicate card) but files a fresh event and a " +
-          "fresh Lead nudge, since the severity change is genuinely new information. SCOPE: this dedup is " +
-          "PER-ORIGIN-PROJECT, against THIS PROJECT's own prior escalations by title only — a different " +
-          "project escalating the SAME underlying finding is not deduped against yours and will land as " +
-          "its own card (both are legitimate signals the Lead can triage independently), and it has no " +
-          "visibility into a card filed by hand (tasks_create) or via peer_message for the SAME underlying " +
-          "finding either, so a peer describing one incident in their own words can still land as a second, " +
-          "unlinked card (see tasks_create's own cross-channel duplicate check). Use it for " +
-          "platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
-          "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +
-          "project's task board (use tasks_create there). `detail` is the canonical param; `body` is " +
-          "accepted as an ALIAS for it — pass either one (if both, detail wins).\n" +
-          "⚠️ SAME TITLE IS NOT A CONTRACT for landing on a specific existing thread — it is only a " +
-          "best-effort heuristic (title + severity + still-open-per-the-board-column), and it silently " +
-          "stops matching the instant that card's column reaches the Lead's terminal lane (i.e. the Lead " +
-          "closed it) — a same-title follow-up at that point files a brand-new, unlinked card instead of " +
-          "appending, with nothing in the response telling you that happened differently than you intended. " +
-          "Pass `followUpOn:<taskId>` (the Platform task id THIS escalation returned, full id or an " +
-          "unambiguous 8-char prefix) instead whenever you specifically mean 'append this to that thread' " +
-          "— it appends UNCONDITIONALLY (even to a card the Lead has already closed) and always files a " +
-          "durable board task; unless the completion-SHA de-dup suppresses it, it also nudges a live Lead — " +
-          "read `deliveryStatus` (it's the honest signal, never assume a live nudge happened). Rejected with " +
-          "{error} if the id doesn't resolve to one of YOUR OWN project's " +
-          "previously filed escalations. Check the response's `outcome` (\"created\" | \"appended\") to know " +
-          "for certain which happened either way — don't infer it from the title you sent. When `followUpOn` " +
-          "was honored, the response also carries `followedUp:true`, and `targetWasTerminal:true` if the " +
-          "card you appended to had already been moved to the Lead's terminal column — i.e. you just " +
-          "reopened a thread the Lead had considered closed, worth knowing.",
+          "Escalate a discovered Loom bug or friction UP to the Platform Lead, or notify it of a status/" +
+          "completion it asked to hear about. This is the ONE durable channel for anything the Lead " +
+          "needs to know; an ad hoc 'I'll ping you' reaches no one reliably. Files a DURABLE, structured " +
+          "task on your own reserved platform home board (the Lead's inbox; it survives whether or not " +
+          "a Lead session is live), capturing your origin project + this manager session, the title, " +
+          "the detail/evidence and a severity. The target is the Platform board, fixed server-side " +
+          "(you cannot pick a project); for a LINKED peer project's manager use peer_message. Returns " +
+          "the created Platform task id plus a `deliveryStatus` (delivered-live | queued | boarded | " +
+          "suppressed-duplicate | dropped): `boarded` = no Lead session was live but the task is " +
+          "durably filed (the normal, safe case); a live Lead is nudged immediately. " +
+          "`suppressed-duplicate` is DIFFERENT: a Lead IS live but its nudge was withheld because it " +
+          "already saw this content (today: a completion report naming a deploy SHA it was already " +
+          "told about); the task is still filed and someone IS watching. Only `dropped` warrants " +
+          "concern. DEDUPED: re-escalating the SAME title with an unchanged-or-lower severity while " +
+          "your prior escalation is still UNRESOLVED (pending, or being worked but not resolved) reuses " +
+          "that task: the response carries `deduped: true` and no fresh nudge is sent; check " +
+          "escalation_status instead of re-escalating on a timer. A HIGHER severity on a still-open " +
+          "title reuses the same task but files a fresh event and a fresh Lead nudge. SCOPE: dedup is " +
+          "PER-ORIGIN-PROJECT, by title only against THIS project's prior escalations; another " +
+          "project escalating the same finding lands as its own card, and a card filed by hand " +
+          "(tasks_create) or via peer_message for the same finding is invisible to it (see " +
+          "tasks_create's cross-channel duplicate check). Use it for platform-level problems (a Loom " +
+          "bug, a confusing tool/skill, friction that slowed your workers) or a completion/status " +
+          "update the Lead is waiting on, NOT for your own project's board (use tasks_create). " +
+          "`detail` is the canonical param; `body` is accepted as an ALIAS (if both, detail wins).\n" +
+          "⚠️ SAME TITLE IS NOT A CONTRACT for landing on a specific existing thread: it is a " +
+          "best-effort heuristic (title + severity + still-open) that silently stops matching once " +
+          "the Lead closes the card, and a same-title follow-up then files a brand-new, unlinked card " +
+          "with nothing in the response saying so. Pass `followUpOn:<taskId>` (the Platform task id " +
+          "THIS escalation returned, full id or unambiguous 8-char prefix) whenever you mean 'append " +
+          "to that thread': it appends UNCONDITIONALLY (even to a card the Lead closed), always files a " +
+          "durable board task, and (unless the completion-SHA dedup suppresses it) nudges a live Lead; " +
+          "read `deliveryStatus`, never assume a nudge happened. Rejected with {error} if the id isn't " +
+          "one of YOUR OWN project's previously filed escalations. Check the response's `outcome` " +
+          "(\"created\" | \"appended\") rather than inferring it from the title. When `followUpOn` was " +
+          "honored the response also carries `followedUp:true`, and `targetWasTerminal:true` if you " +
+          "just reopened a card the Lead had closed.",
         inputSchema: strictShape({
           title: z.string(),
           detail: z.string().optional(),
@@ -6840,45 +6642,33 @@ export class OrchestrationMcpRouter {
         "peer_message_status",
         {
           description:
-            "Check whether a PRIOR peer_message you sent actually landed — the sender-side delivery read " +
-            "peer_message's own `[loom:redelivery-parked]` notice points you to, closing the dead end where " +
-            "you're told delivery may have failed and, in the same breath, told no check exists. Pass the " +
-            "`msgId` a PRIOR peer_message call returned to you (the FULL id, or an unambiguous 8-char " +
-            "id-prefix — the SAME resolution as `tasks_get`/`agent_get`/`worker_relink`, and exactly what " +
-            "the parked notice itself hands you, since it only ever slices a msgId to 8 chars; never a value " +
-            "you invent — see below for what an unrecognized one returns). Returns `{msgId, found, state, " +
-            "at, sentAt}` (`msgId` is always the FULL resolved id, even when you passed a prefix): " +
-            "`found:false` means this isn't one of YOUR OWN peer_message sends — a typo, an ambiguous " +
-            "prefix, or the send BOARDED (a boarded send has no redelivery chain to track, since it's " +
-            "already a durable task on the target's own board — check the target project's board instead). " +
-            "`found:true` gives `state` — `\"pending\"` (still queued, still being redelivered internally, " +
-            "or CARRIED across a recycle at the recipient and awaiting the successor's own resolution — " +
-            "not resolved either way yet), `\"delivered\"` (handed off as a turn — either your original " +
-            "send or, if the recipient manager recycled while it was still held, the carried copy that " +
-            "landed on its successor — NOT proof the recipient acted on it, only that Loom got it there), " +
-            "`\"parked\"` (Loom exhausted its own redelivery budget with no confirmed hand-off — NOT proof " +
-            "it was never received, the engine can confirm a write minutes late under load; treat as " +
-            "genuinely uncertain, not as failed), or `\"confirmed-after-park\"` (a late confirming hook " +
-            "proved the original DID land after all, correcting an earlier `parked` reading — do NOT " +
-            "resend once you see this, the original already arrived and a resend would create a real " +
-            "duplicate turn). `at` is the timestamp of whichever state produced this reading, or null " +
-            "while still `\"pending\"`. `sentAt` is when the ORIGINAL msgId you passed was actually sent " +
-            "(unaffected by any later recycle-carry hop) — diff it against now to tell \"pending for 3 " +
-            "seconds\" from \"pending for 16 minutes\" without holding your own send stamp. " +
-            "A STILL-`\"pending\"`/`\"parked\"` READ AFTER A WHILE: neither state is proof of non-delivery " +
-            "— do NOT resend (a real duplicate turn if it already landed) and prefer NOT to restate the " +
-            "owed content in your next message either, since a restatement delivers the SAME material " +
-            "twice if the read turns out wrong, which is exactly the duplicate you're trying to avoid. " +
-            "When you have a live channel back to the recipient and something is already owed, fold ONE " +
-            "line into that message asking directly — e.g. \"<msgId> still reads pending — did it reach " +
-            "you? If not, say so and I'll restate\" — the recipient is the only party who actually knows. " +
-            "Restate outright only when you won't be around to hear the answer (going silent, recycling, " +
-            "nothing else owed) — there, an unanswered question is worse than a duplicate paragraph. " +
-            "Resolvable across YOUR OWN recycle lineage too — if you recycled since sending, you can still " +
-            "check a msgId your predecessor's peer_message call returned. This returns ONLY a " +
-            "delivered/undelivered/consumed bit for YOUR OWN message — " +
-            "never the peer's transcript, internals, or any other user-visible surface into that project " +
-            "(the peer stays a PRIVATE product). Non-mutating; safe to re-call any time.",
+            "Check whether a PRIOR peer_message you sent actually landed: the sender-side delivery read " +
+            "peer_message's `[loom:redelivery-parked]` notice points you to. Pass the `msgId` a PRIOR " +
+            "peer_message call returned (the FULL id or an unambiguous 8-char prefix, the same " +
+            "resolution as `tasks_get`/`agent_get`/`worker_relink`; never a value you invent). Returns " +
+            "`{msgId, found, state, at, sentAt}` (`msgId` is always the FULL resolved id). " +
+            "`found:false` = not one of YOUR OWN peer_message sends: a typo, an ambiguous prefix, or " +
+            "the send BOARDED (a boarded send has no redelivery chain; check the target project's " +
+            "board). `found:true` gives `state`: `\"pending\"` (still queued/being redelivered, or " +
+            "CARRIED across a recipient recycle awaiting the successor; unresolved), `\"delivered\"` " +
+            "(handed off as a turn, your original or the carried copy on the recipient's successor; NOT " +
+            "proof the recipient acted on it), `\"parked\"` (Loom exhausted its redelivery budget with no " +
+            "confirmed hand-off; NOT proof it was never received, the engine can confirm minutes late; " +
+            "treat as uncertain, not failed), or `\"confirmed-after-park\"` (a late hook proved the " +
+            "original DID land: do NOT resend, it would be a real duplicate turn). `at` is when the " +
+            "state producing this reading occurred (null while `\"pending\"`). `sentAt` is when the " +
+            "ORIGINAL msgId was sent (unaffected by recycle-carry hops); diff it against now to tell " +
+            "\"pending for 3 seconds\" from \"pending for 16 minutes\". " +
+            "A STILL-`\"pending\"`/`\"parked\"` READ AFTER A WHILE is no proof of non-delivery: do NOT " +
+            "resend, and prefer NOT to restate the owed content in your next message either (it " +
+            "delivers the same material twice if the read is wrong). With a live channel back to the " +
+            "recipient and something already owed, fold ONE line asking directly, e.g. \"<msgId> still " +
+            "reads pending — did it reach you? If not, say so and I'll restate\"; the recipient is the " +
+            "only party who knows. Restate outright only when you won't be around to hear the answer " +
+            "(going silent, recycling, nothing else owed). Resolvable across YOUR OWN recycle lineage " +
+            "too. Returns ONLY a delivery bit for YOUR OWN message, never the peer's transcript, " +
+            "internals or any other surface into that project (the peer stays a PRIVATE product). " +
+            "Non-mutating; safe to re-call any time.",
           inputSchema: strictShape({ msgId: z.string() }),
         },
         async ({ msgId }) => ok(peerMessageStatusByMsgId(db, managerSessionId, msgId)),
