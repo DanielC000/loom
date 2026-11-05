@@ -723,8 +723,11 @@ async function rebootSim() {
 // `!anyReferencing && !anyKeptUnattributed && keptContentRepoPaths.size===0` term from
 // `clearMergeQuarantineByKey`'s own `tombstoneDurablyIfConfirmed` gate. A content-kept FOREIGN orphan
 // (named in this entry's own `orphanLatchFiles`, but itself naming a wholly DIFFERENT repoPath) survives
-// this entry's full lift — `keptContentRepoPaths.size>0`. The durable tombstone must still be WITHHELD;
-// the mutant would persist it anyway.
+// this entry's full lift — `keptContentRepoPaths.size>0`. The durable tombstone must still be WITHHELD
+// AT THIS GATE; the mutant would persist it anyway.
+//
+// @decision d2592cd5 (fix round, card 3d4467cf) — calls `clearMergeQuarantineByRecordedPath` (identity-
+// wide `true`, like Scenario J): production's only `false` caller overrides this withhold right after (G1).
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 {
   const m5 = makeResolvableRepo("m5-repo");
@@ -746,13 +749,14 @@ async function rebootSim() {
     enteredAt: Date.now(), tokens: [randomUUID()],
   }));
 
-  rbM5.clearMergeQuarantineByToken(m5, t1);
+  const clearResultM5 = rbM5.clearMergeQuarantineByRecordedPath(m5);
+  check("(m5 precondition) the identity-wide clear reports the content-kept orphan", !!clearResultM5.latchKept);
   check("(m5 precondition) m5 reads fully unblocked right after the clear", rbM5.stillBlockedEntryFor(m5) === undefined);
   check("(m5 precondition, by content) the foreign orphan survives on disk (content-kept, never swept)", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, orphanBasenameM5)));
 
   const sidecarPathM5 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
   const sidecarM5 = JSON.parse(fs.readFileSync(sidecarPathM5, "utf8"));
-  check("*** KILLS MUTANT 3 (clearMergeQuarantineByKey content-kept term) *** the sidecar never durably tombstones t1 while a foreign orphan was content-kept", sidecarM5[t1] === undefined);
+  check("*** KILLS MUTANT 3 (clearMergeQuarantineByKey content-kept term), FINAL — never overridden by any backstop at this identity-wide route *** the sidecar never durably tombstones t1 while a foreign orphan was content-kept", sidecarM5[t1] === undefined);
 
   fs.rmSync(path.join(MERGE_QUARANTINE_DIR, orphanBasenameM5), { force: true });
 }
@@ -906,6 +910,579 @@ async function rebootSim() {
   rb.reenterMergeQuarantinesAtBoot([l]);
   const listedAfterBootL = rb.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(l));
   check("*** THE FIX (identityHasAnyPhysicalRecordOnDisk readdir-failure fail-closed) *** some boot-time record for l still carries t1 — the untracked stray was never tombstoned away despite the readdir fault", listedAfterBootL.some((e) => e.tokens.includes(t1)));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO M7 (BLOCKING fix round, Code Review of card 3d4467cf) — the SAME shape as Scenario M4, but
+// driven through the PUBLIC dispatcher `clearMergeQuarantineByToken(w, s)` instead of calling
+// `clearMergeQuarantineByKey` directly. `clearActiveEntryTokenAtKey`'s own full-lift SECOND call
+// (`remaining.length===0` branch, after the delegated `clearMergeQuarantineByKey` call returns) used to
+// re-decide the durable tombstone from a BARE disk re-scan, with no knowledge of the delegated call's
+// own `anyWriteFailed` — P's own failed reduce-write stayed invisible to that scan (P still reads
+// "tracked"), so this SECOND call durably tombstoned s anyway. Threading `result.anyWriteFailed` into
+// this gate (see `clearActiveEntryTokenAtKey`'s own doc) closes it.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const w = makeResolvableRepo("m7-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-m7-s";
+  const v = "tok-d2592cd5-m7-v";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-m7 — W", enteredAt: Date.now(), tokens: [s], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`), JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  const pSourceFile = `pending-d2592cd5-m7-twin-${freshSfx()}.json`;
+  const pEntry = { repoPath: w, branch: "p-branch", reason: "d2592cd5-m7 — P (tied via armedKeys)", enteredAt: Date.now(), tokens: [s, v], armedKeys: [Kw] };
+  pushPendingQuarantineTestOnly(pEntry, pSourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), JSON.stringify({ repoPath: w, branch: pEntry.branch, reason: pEntry.reason, tokens: pEntry.tokens, enteredAt: pEntry.enteredAt }, null, 2) + "\n");
+
+  const injectM7 = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, pSourceFile));
+  try { clearMergeQuarantineByToken(w, s); } finally { injectM7.restore(); }
+  check("(m7 precondition) P's own twin rename was forced to fail at least once", injectM7.hits() >= 1);
+  check("(m7 precondition, by content) P's own sourceFile is untouched (still holds s,v — rename never landed)", sameTokenSet(readTokensOnDisk(pSourceFile), [s, v]));
+  check("(m7 precondition) w still reads blocked, by v alone — P's own IN-MEMORY entry already narrowed off s regardless of the write failure", stillBlockedEntryFor(w)?.tokens.includes(v) === true && !stillBlockedEntryFor(w)?.tokens.includes(s));
+
+  const sidecarPathM7 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarM7 = JSON.parse(fs.readFileSync(sidecarPathM7, "utf8"));
+  check("*** THE BLOCKING FIX, BY CONTENT — RED ON PRE-FIX CODE *** the sidecar never durably tombstones s via the dispatcher's own full-lift backstop — P's own reduce-write failed", sidecarM7[s] === undefined);
+
+  const rb = await rebootSim();
+  rb.reenterMergeQuarantinesAtBoot([w]);
+  const listedAfterBootM7 = rb.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(w));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT *** some boot-time record for w still carries s — P's own stale copy was never falsely tombstoned away", listedAfterBootM7.some((e) => e.tokens.includes(s)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO M8 (BLOCKING fix round, Code Review of card 3d4467cf — "do the same audit at the PENDING-site
+// backstop") — the IDENTICAL cross-target blind spot, at `clearTokenFromPendingIndices`'s own REMOVE
+// (full-lift) branch, for TWO INDEPENDENT pending wrappers sharing one identity (this card's own root-
+// cause shape): R (the real raise, tok ALONE — full lift) and Q (a manually-planted second on-disk
+// record for the SAME identity, tok+other — a reduce). Both are matched by `collectPendingIndices` into
+// ONE `clearTokenFromPendingIndices([idxR, idxQ], tok)` call. Q's own narrowing write is forced to fail.
+// R's remove-branch tombstone decision used to be decided INLINE, scanning disk with Q's own sourceFile
+// excluded as "tracked" regardless of Q's write outcome — wrongly tombstoning tok even though Q's own
+// on-disk copy still genuinely holds it. Deferring R's decision past the whole batch, ANDed against
+// `reduceWriteFailedForIdentity`, closes it.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const identityPathM8 = path.join(os.tmpdir(), `loom-mqd2592cd5-m8-never-exists-${freshSfx()}`);
+  const tok = enterMergeQuarantine(identityPathM8, "loom/d2592cd5-m8-1", "d2592cd5-m8: raise 1 (tok)");
+  const other = "tok-d2592cd5-m8-other";
+
+  const qSourceFile = `pending-d2592cd5-m8-twin-${freshSfx()}.json`;
+  const qEntry = { repoPath: identityPathM8, branch: "q-branch", reason: "d2592cd5-m8 — Q (independent on-disk twin)", enteredAt: Date.now(), tokens: [tok, other] };
+  pushPendingQuarantineTestOnly(qEntry, qSourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, qSourceFile), JSON.stringify({ repoPath: identityPathM8, branch: qEntry.branch, reason: qEntry.reason, tokens: qEntry.tokens, enteredAt: qEntry.enteredAt }, null, 2) + "\n");
+
+  const injectM8 = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, qSourceFile));
+  try { clearMergeQuarantineByToken(identityPathM8, tok); } finally { injectM8.restore(); }
+  check("(m8 precondition) Q's own narrowing rename was forced to fail at least once", injectM8.hits() >= 1);
+  check("(m8 precondition, by content) Q's own sourceFile is untouched (still holds tok,other — rename never landed)", sameTokenSet(readTokensOnDisk(qSourceFile), [tok, other]));
+  check("(m8 precondition) identityPathM8 still reads blocked, by other alone — Q's own IN-MEMORY entry already narrowed off tok regardless of the write failure", stillBlockedEntryFor(identityPathM8)?.tokens.includes(other) === true && !stillBlockedEntryFor(identityPathM8)?.tokens.includes(tok));
+
+  const sidecarPathM8 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarM8 = JSON.parse(fs.readFileSync(sidecarPathM8, "utf8"));
+  check("*** THE BLOCKING FIX (PENDING-site audit), BY CONTENT — RED ON PRE-FIX CODE *** the sidecar never durably tombstones tok via R's own deferred remove decision — Q's own reduce-write failed", sidecarM8[tok] === undefined);
+
+  const rb = await rebootSim();
+  rb.reenterMergeQuarantinesAtBoot([identityPathM8]);
+  const listedAfterBootM8 = rb.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(identityPathM8));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT *** some boot-time record for identityPathM8 still carries tok — Q's own stale copy was never falsely tombstoned away", listedAfterBootM8.some((e) => e.tokens.includes(tok)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, qSourceFile), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO P2 (2nd Code Review of card 3d4467cf, BLOCKING) — M7's own fix (threading the delegate's
+// `anyWriteFailed` into the full-lift backstop) only covers a TIED twin (shares armedKeys with W, so
+// `clearMergeQuarantineByKey`'s own pendingPlan ties it and folds its failure into `result.anyWriteFailed`).
+// A NON-TWIN pending P sharing the SAME identity — no armedKeys, a wholly separate object, reduced
+// EARLIER in this same `clearMergeQuarantineByToken` call's own pre-pass — is invisible to the delegate
+// call entirely (P is not in its pendingPlan), so `result.anyWriteFailed` stays false and the backstop's
+// bare disk re-scan excludes P's basename as "tracked" (still a live pending entry) regardless of P's
+// own write having failed. Closed by ANDing the CALL-SCOPED `writeFailedIdentitiesThisCall` into the
+// backstop too — see `clearActiveEntryTokenAtKey`'s own doc.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const w = makeResolvableRepo("p2-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-p2-s";
+  const v = "tok-d2592cd5-p2-v";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-p2 — W", enteredAt: Date.now(), tokens: [s], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`), JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  // P: a wholly separate, NON-TWIN pending record for the SAME identity — no armedKeys, never unioned
+  // with W in any way (the 535fd69d shape: an unrelated, independently-raised record).
+  const pSourceFile = `pending-d2592cd5-p2-nontwin-${freshSfx()}.json`;
+  const pEntry = { repoPath: w, branch: "p-branch", reason: "d2592cd5-p2 — P (non-twin, same identity)", enteredAt: Date.now(), tokens: [s, v] };
+  pushPendingQuarantineTestOnly(pEntry, pSourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), JSON.stringify({ repoPath: w, branch: pEntry.branch, reason: pEntry.reason, tokens: pEntry.tokens, enteredAt: pEntry.enteredAt }, null, 2) + "\n");
+
+  const injectP2 = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, pSourceFile));
+  try { clearMergeQuarantineByToken(w, s); } finally { injectP2.restore(); }
+  check("(p2 precondition) P's own narrowing rename was forced to fail at least once", injectP2.hits() >= 1);
+  check("(p2 precondition, by content) P's own sourceFile is untouched (still holds s,v — rename never landed)", sameTokenSet(readTokensOnDisk(pSourceFile), [s, v]));
+  check("(p2 precondition) w still reads blocked, by v alone — P's own IN-MEMORY entry already narrowed off s regardless of the write failure", stillBlockedEntryFor(w)?.tokens.includes(v) === true && !stillBlockedEntryFor(w)?.tokens.includes(s));
+
+  const sidecarPathP2 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP2 = JSON.parse(fs.readFileSync(sidecarPathP2, "utf8"));
+  check("*** THE BLOCKING FIX, BY CONTENT — RED ON PRE-FIX CODE *** the sidecar never durably tombstones s via the dispatcher's own full-lift backstop — a NON-TWIN sibling P's own reduce-write (from this SAME call's pre-pass) failed", sidecarP2[s] === undefined);
+
+  const rbP2 = await rebootSim();
+  rbP2.reenterMergeQuarantinesAtBoot([w]);
+  const listedAfterBootP2 = rbP2.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(w));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT *** some boot-time record for w still carries s — P's own stale copy was never falsely tombstoned away", listedAfterBootP2.some((e) => e.tokens.includes(s)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO P1a (2nd Code Review of card 3d4467cf, MAJOR, pre-existing) — clearTokenFromPendingIndices's
+// own REDUCE branch used to decide its durable tombstone INLINE, at the moment each target is visited —
+// unlike the "remove" branch, which card 3d4467cf's first fix round already deferred. Two independent
+// pending REDUCE targets Q1 [tok,a] and Q2 [tok,b] sharing one identity, in ONE clearMergeQuarantineByToken
+// call: whichever one's own narrowing write fails, the SUCCEEDING sibling's own inline decision scans disk
+// with the FAILED sibling's basename excluded as "tracked" (a live pending entry, regardless of its own
+// write outcome) and wrongly durably tombstones tok anyway. RED in BOTH iteration orders — deferring
+// EVERY reduce target's decision to a pass that runs after the whole batch, ANDed against the SAME
+// call-scoped `writeFailedIdentitiesThisCall` the remove branch already uses, closes both. Q1 pushed
+// first (lower index) -> processed SECOND in descending order; Q2 pushed second (higher index) ->
+// processed FIRST. This scenario faults Q1 (the one processed SECOND, after Q2 already succeeded).
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const identityP1a = path.join(os.tmpdir(), `loom-mqd2592cd5-p1a-never-exists-${freshSfx()}`);
+  const tok = "tok-d2592cd5-p1a-tok";
+  const a = "tok-d2592cd5-p1a-a";
+  const b = "tok-d2592cd5-p1a-b";
+
+  const q1SourceFile = `pending-d2592cd5-p1a-q1-${freshSfx()}.json`;
+  const q1Entry = { repoPath: identityP1a, branch: "q1-branch", reason: "d2592cd5-p1a — Q1", enteredAt: Date.now(), tokens: [tok, a] };
+  pushPendingQuarantineTestOnly(q1Entry, q1SourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, q1SourceFile), JSON.stringify({ repoPath: identityP1a, branch: q1Entry.branch, reason: q1Entry.reason, tokens: q1Entry.tokens, enteredAt: q1Entry.enteredAt }, null, 2) + "\n");
+
+  const q2SourceFile = `pending-d2592cd5-p1a-q2-${freshSfx()}.json`;
+  const q2Entry = { repoPath: identityP1a, branch: "q2-branch", reason: "d2592cd5-p1a — Q2", enteredAt: Date.now(), tokens: [tok, b] };
+  pushPendingQuarantineTestOnly(q2Entry, q2SourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, q2SourceFile), JSON.stringify({ repoPath: identityP1a, branch: q2Entry.branch, reason: q2Entry.reason, tokens: q2Entry.tokens, enteredAt: q2Entry.enteredAt }, null, 2) + "\n");
+
+  const injectP1a = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, q1SourceFile));
+  try { clearMergeQuarantineByToken(identityP1a, tok); } finally { injectP1a.restore(); }
+  check("(p1a precondition) Q1's own narrowing rename was forced to fail at least once", injectP1a.hits() >= 1);
+  check("(p1a precondition, by content) Q1's own sourceFile is untouched (still holds tok,a — rename never landed)", sameTokenSet(readTokensOnDisk(q1SourceFile), [tok, a]));
+
+  const sidecarPathP1a = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP1a = JSON.parse(fs.readFileSync(sidecarPathP1a, "utf8"));
+  check("*** THE MAJOR FIX (pre-existing), BY CONTENT — RED ON PRE-FIX CODE *** the sidecar never durably tombstones tok via Q2's own succeeding, inline reduce decision — its SIBLING Q1's own reduce-write (in the SAME batch) failed", sidecarP1a[tok] === undefined);
+
+  const rbP1a = await rebootSim();
+  rbP1a.reenterMergeQuarantinesAtBoot([identityP1a]);
+  const listedAfterBootP1a = rbP1a.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(identityP1a));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p1a) *** some boot-time record for identityP1a still carries tok", listedAfterBootP1a.some((e) => e.tokens.includes(tok)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, q1SourceFile), { force: true });
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, q2SourceFile), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO P1b — the SAME shape as P1a, with the OPPOSITE fault: Q2 (processed FIRST) fails this time;
+// Q1 (processed SECOND) succeeds. Proves P1a's fix is order-independent, not an artifact of which
+// sibling happens to fail.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const identityP1b = path.join(os.tmpdir(), `loom-mqd2592cd5-p1b-never-exists-${freshSfx()}`);
+  const tok = "tok-d2592cd5-p1b-tok";
+  const a = "tok-d2592cd5-p1b-a";
+  const b = "tok-d2592cd5-p1b-b";
+
+  const q1SourceFile = `pending-d2592cd5-p1b-q1-${freshSfx()}.json`;
+  const q1Entry = { repoPath: identityP1b, branch: "q1-branch", reason: "d2592cd5-p1b — Q1", enteredAt: Date.now(), tokens: [tok, a] };
+  pushPendingQuarantineTestOnly(q1Entry, q1SourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, q1SourceFile), JSON.stringify({ repoPath: identityP1b, branch: q1Entry.branch, reason: q1Entry.reason, tokens: q1Entry.tokens, enteredAt: q1Entry.enteredAt }, null, 2) + "\n");
+
+  const q2SourceFile = `pending-d2592cd5-p1b-q2-${freshSfx()}.json`;
+  const q2Entry = { repoPath: identityP1b, branch: "q2-branch", reason: "d2592cd5-p1b — Q2", enteredAt: Date.now(), tokens: [tok, b] };
+  pushPendingQuarantineTestOnly(q2Entry, q2SourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, q2SourceFile), JSON.stringify({ repoPath: identityP1b, branch: q2Entry.branch, reason: q2Entry.reason, tokens: q2Entry.tokens, enteredAt: q2Entry.enteredAt }, null, 2) + "\n");
+
+  const injectP1b = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, q2SourceFile));
+  try { clearMergeQuarantineByToken(identityP1b, tok); } finally { injectP1b.restore(); }
+  check("(p1b precondition) Q2's own narrowing rename was forced to fail at least once", injectP1b.hits() >= 1);
+  check("(p1b precondition, by content) Q2's own sourceFile is untouched (still holds tok,b — rename never landed)", sameTokenSet(readTokensOnDisk(q2SourceFile), [tok, b]));
+
+  const sidecarPathP1b = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP1b = JSON.parse(fs.readFileSync(sidecarPathP1b, "utf8"));
+  check("*** THE MAJOR FIX (pre-existing), BY CONTENT — RED ON PRE-FIX CODE, OPPOSITE ORDER *** the sidecar never durably tombstones tok via Q1's own succeeding, inline reduce decision — its SIBLING Q2's own reduce-write (in the SAME batch) failed", sidecarP1b[tok] === undefined);
+
+  const rbP1b = await rebootSim();
+  rbP1b.reenterMergeQuarantinesAtBoot([identityP1b]);
+  const listedAfterBootP1b = rbP1b.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(identityP1b));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p1b) *** some boot-time record for identityP1b still carries tok", listedAfterBootP1b.some((e) => e.tokens.includes(tok)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, q1SourceFile), { force: true });
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, q2SourceFile), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO M8B (2nd Code Review of card 3d4467cf, Minor (a)) — M8 above only exercises the
+// Q-processed-before-R order (Q pushed AFTER R, so Q has the HIGHER index and is processed FIRST in
+// descending order — its own failure is already recorded by the time R's deferred decision runs). This
+// mirror, with Q at the LOWER index (pushed before R, so Q is processed SECOND, AFTER R), additionally
+// proves R's own decision is genuinely deferred past the WHOLE batch — not merely order-sensitive. Both
+// R and Q are constructed directly (never via enterMergeQuarantine) so each can hold a self-chosen token
+// regardless of push order.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const identityPathM8b = path.join(os.tmpdir(), `loom-mqd2592cd5-m8b-never-exists-${freshSfx()}`);
+  const tok = "tok-d2592cd5-m8b-tok";
+  const other = "tok-d2592cd5-m8b-other";
+
+  // Q pushed FIRST (lower index) -> processed SECOND, AFTER R.
+  const qSourceFileM8b = `pending-d2592cd5-m8b-q-${freshSfx()}.json`;
+  const qEntryM8b = { repoPath: identityPathM8b, branch: "q-branch", reason: "d2592cd5-m8b — Q (reduce, lower index)", enteredAt: Date.now(), tokens: [tok, other] };
+  pushPendingQuarantineTestOnly(qEntryM8b, qSourceFileM8b);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, qSourceFileM8b), JSON.stringify({ repoPath: identityPathM8b, branch: qEntryM8b.branch, reason: qEntryM8b.reason, tokens: qEntryM8b.tokens, enteredAt: qEntryM8b.enteredAt }, null, 2) + "\n");
+
+  // R pushed SECOND (higher index) -> processed FIRST, the real full-lift (remove) target.
+  const rSourceFileM8b = `pending-d2592cd5-m8b-r-${freshSfx()}.json`;
+  const rEntryM8b = { repoPath: identityPathM8b, branch: "r-branch", reason: "d2592cd5-m8b — R (remove, higher index)", enteredAt: Date.now(), tokens: [tok] };
+  pushPendingQuarantineTestOnly(rEntryM8b, rSourceFileM8b);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, rSourceFileM8b), JSON.stringify({ repoPath: identityPathM8b, branch: rEntryM8b.branch, reason: rEntryM8b.reason, tokens: rEntryM8b.tokens, enteredAt: rEntryM8b.enteredAt }, null, 2) + "\n");
+
+  const injectM8b = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, qSourceFileM8b));
+  try { clearMergeQuarantineByToken(identityPathM8b, tok); } finally { injectM8b.restore(); }
+  check("(m8b precondition) Q's own narrowing rename was forced to fail at least once", injectM8b.hits() >= 1);
+  check("(m8b precondition, by content) Q's own sourceFile is untouched (still holds tok,other — rename never landed)", sameTokenSet(readTokensOnDisk(qSourceFileM8b), [tok, other]));
+
+  const sidecarPathM8b = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarM8b = JSON.parse(fs.readFileSync(sidecarPathM8b, "utf8"));
+  check("*** THE FIX, ORDER-INDEPENDENT (Minor a) *** the sidecar never durably tombstones tok via R's own deferred remove decision — Q's own reduce-write (processed AFTER R this time) failed", sidecarM8b[tok] === undefined);
+
+  const rb = await rebootSim();
+  rb.reenterMergeQuarantinesAtBoot([identityPathM8b]);
+  const listedAfterBootM8b = rb.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(identityPathM8b));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (m8b) *** some boot-time record for identityPathM8b still carries tok", listedAfterBootM8b.some((e) => e.tokens.includes(tok)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, qSourceFileM8b), { force: true });
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, rSourceFileM8b), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO M4-AWF (2nd Code Review of card 3d4467cf, Minor (b)) — pins `clearMergeQuarantineByKey`'s own
+// `anyWriteFailed` field on its CLEAN return path (no `latchKept` at all) — mutant Md2 (clearing
+// `anyWriteFailed` on that return branch alone) survived the full corpus. SAME construction as Scenario
+// M4 (a structurally-tied pending twin's own reduce-write fails during a full lift): that write failure
+// never sets `anyReferencing`/`anyKeptUnattributed`/`keptContentRepoPaths`, so this result reaches the
+// clean-return branch with `anyWriteFailed:true`.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const w = makeResolvableRepo("m4awf-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-m4awf-s";
+  const v = "tok-d2592cd5-m4awf-v";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-m4awf — W", enteredAt: Date.now(), tokens: [s], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`), JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  const pSourceFile = `pending-d2592cd5-m4awf-twin-${freshSfx()}.json`;
+  const pEntry = { repoPath: w, branch: "p-branch", reason: "d2592cd5-m4awf — P (tied via armedKeys)", enteredAt: Date.now(), tokens: [s, v], armedKeys: [Kw] };
+  pushPendingQuarantineTestOnly(pEntry, pSourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), JSON.stringify({ repoPath: w, branch: pEntry.branch, reason: pEntry.reason, tokens: pEntry.tokens, enteredAt: pEntry.enteredAt }, null, 2) + "\n");
+
+  const injectM4awf = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, pSourceFile));
+  let resultM4awf;
+  try { resultM4awf = clearMergeQuarantineByKey(Kw, w, undefined, true); } finally { injectM4awf.restore(); }
+  check("(m4awf precondition) P's own twin rename was forced to fail at least once", injectM4awf.hits() >= 1);
+  check("*** PINS THE CLEAN-RETURN SHAPE (Minor b) *** this result carries no latchKept at all (the clean-return branch, never the kept/referencing branch)", resultM4awf.latchKept === undefined);
+  check("*** KILLS MUTANT Md2 (clearMergeQuarantineByKey's own CLEAN-return anyWriteFailed) *** anyWriteFailed is true on the clean-return path", resultM4awf.anyWriteFailed === true);
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), { force: true });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO P3 (3rd Code Review of card 3d4467cf, BLOCKING finding 1) — the SAME P2 shape, but P's own
+// narrowing write is faulted at `fs.openSync` (before any tmp is ever created) rather than at the rename
+// (which leaves a real stranded tmp on disk). P2 above passed only incidentally, via the delegate's own
+// disk-based orphan/tmp-residue classification happening to notice the stranded tmp — never via the
+// write-failure-awareness this card's fix actually provides. With NOTHING stranded, that incidental cover
+// is gone: `clearMergeQuarantineByKey`'s own internal durable-tombstone decision (never seeing
+// `writeFailedIdentitiesThisCall` at all, pre-fix) wrongly tombstones `s` anyway.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+function injectOpenFaultForTmpOf(sourceFile) {
+  const prefix = `${path.join(MERGE_QUARANTINE_DIR, sourceFile)}.tmp-`;
+  const realOpen = fs.openSync;
+  let hits = 0;
+  fs.openSync = (p, ...rest) => {
+    if (typeof p === "string" && p.startsWith(prefix)) {
+      hits++;
+      throw Object.assign(new Error("EMFILE: simulated open failure"), { code: "EMFILE" });
+    }
+    return realOpen(p, ...rest);
+  };
+  return { restore: () => { fs.openSync = realOpen; }, hits: () => hits };
+}
+{
+  const w = makeResolvableRepo("p3-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-p3-s";
+  const v = "tok-d2592cd5-p3-v";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-p3 — W", enteredAt: Date.now(), tokens: [s], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`), JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  const pSourceFile = `pending-d2592cd5-p3-nontwin-${freshSfx()}.json`;
+  const pEntry = { repoPath: w, branch: "p-branch", reason: "d2592cd5-p3 — P (non-twin, same identity)", enteredAt: Date.now(), tokens: [s, v] };
+  pushPendingQuarantineTestOnly(pEntry, pSourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), JSON.stringify({ repoPath: w, branch: pEntry.branch, reason: pEntry.reason, tokens: pEntry.tokens, enteredAt: pEntry.enteredAt }, null, 2) + "\n");
+
+  const injectP3 = injectOpenFaultForTmpOf(pSourceFile);
+  try { clearMergeQuarantineByToken(w, s); } finally { injectP3.restore(); }
+  check("(p3 precondition) P's own tmp open was forced to fail at least once", injectP3.hits() >= 1);
+  check("(p3 precondition, by content) P's own sourceFile is untouched (still holds s,v)", sameTokenSet(readTokensOnDisk(pSourceFile), [s, v]));
+  check("(p3 precondition) nothing stranded — no tmp residue for P's own sourceFile exists on disk", fs.readdirSync(MERGE_QUARANTINE_DIR).every((f) => !f.startsWith(`${pSourceFile}.tmp-`)));
+  check("(p3 precondition) w still reads blocked, by v alone", stillBlockedEntryFor(w)?.tokens.includes(v) === true && !stillBlockedEntryFor(w)?.tokens.includes(s));
+
+  const sidecarPathP3 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP3 = JSON.parse(fs.readFileSync(sidecarPathP3, "utf8"));
+  check("*** THE FIX, BY CONTENT — RED ON PRE-FIX CODE (dbaa253d) *** the sidecar never durably tombstones s via the delegate's own internal decision — P's own write failed with NOTHING stranded", sidecarP3[s] === undefined);
+
+  const rbP3 = await rebootSim();
+  rbP3.reenterMergeQuarantinesAtBoot([w]);
+  const listedAfterBootP3 = rbP3.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(w));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p3) *** some boot-time record for w still carries s", listedAfterBootP3.some((e) => e.tokens.includes(s)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO P4 (3rd Code Review of card 3d4467cf, BLOCKING finding 2) — REVERSE cross-phase order: a
+// non-twin pending P (holding ONLY `s`) is fully removed in the PRE-PASS (succeeds cleanly, decided
+// EARLY) — but the active entry W (holding [s,v], a REDUCE) fails its OWN write LATER, in the active
+// loop. Pre-fix, P's own pre-pass decision was decided AND WRITTEN before W's later failure could ever
+// be known; post-fix, both decisions are deferred to the end of the whole public call, so W's later
+// failure correctly withholds P's earlier-queued job too.
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const w = makeResolvableRepo("p4-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-p4-s";
+  const v = "tok-d2592cd5-p4-v";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-p4 — W (reduce, fails LATER)", enteredAt: Date.now(), tokens: [s, v], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  const wFinalP4 = path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`);
+  fs.writeFileSync(wFinalP4, JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  const pSourceFile = `pending-d2592cd5-p4-nontwin-${freshSfx()}.json`;
+  const pEntry = { repoPath: w, branch: "p-branch", reason: "d2592cd5-p4 — P (non-twin, full-lift, succeeds EARLY)", enteredAt: Date.now(), tokens: [s] };
+  pushPendingQuarantineTestOnly(pEntry, pSourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), JSON.stringify({ repoPath: w, branch: pEntry.branch, reason: pEntry.reason, tokens: pEntry.tokens, enteredAt: pEntry.enteredAt }, null, 2) + "\n");
+
+  const injectP4 = injectRenameFaultAt(wFinalP4);
+  try { clearMergeQuarantineByToken(w, s); } finally { injectP4.restore(); }
+  check("(p4 precondition) W's own final rename was forced to fail at least once", injectP4.hits() >= 1);
+  check("(p4 precondition) P's own sourceFile was removed (pre-pass full lift succeeded cleanly)", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile)));
+  check("(p4 precondition, by content) W's own final is untouched (still holds s,v — rename never landed)", sameTokenSet(readTokensOnDisk(path.basename(wFinalP4)), [s, v]));
+  check("(p4 precondition) w still reads blocked, by v alone — in-memory already narrowed", stillBlockedEntryFor(w)?.tokens.includes(v) === true && !stillBlockedEntryFor(w)?.tokens.includes(s));
+
+  const sidecarPathP4 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP4 = JSON.parse(fs.readFileSync(sidecarPathP4, "utf8"));
+  check("*** THE FIX, BY CONTENT — RED ON PRE-FIX CODE (dbaa253d) *** the sidecar never durably tombstones s via P's own EARLY pre-pass decision — W's own LATER active-reduce write failed, for the SAME identity, in a LATER phase of this SAME call", sidecarP4[s] === undefined);
+
+  const rbP4 = await rebootSim();
+  rbP4.reenterMergeQuarantinesAtBoot([w]);
+  const listedAfterBootP4 = rbP4.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(w));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p4, reverse order) *** some boot-time record for w still carries s", listedAfterBootP4.some((e) => e.tokens.includes(s)));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SCENARIO P5 (3rd Code Review of card 3d4467cf, test 3c — post-arm second-pass failure) — W (active,
+// full lift, succeeds cleanly) is decided EARLY, in the active loop. A SECOND pending record Y, for the
+// SAME identity, is injected mid-call (as a side effect of W's own final file being unlinked — the exact
+// moment the active loop processes W) and did NOT exist (so never held `s`) at call start — Y is
+// therefore invisible to the pre-pass and to `identitiesPendingBeforeCall`, and is picked up ONLY by the
+// POST-ARM second pending pass, which runs LAST. Y's own narrowing write fails THERE. Pre-fix, W's early
+// decision was already durably written long before the post-arm pass even ran; post-fix, both are
+// deferred to the end, so the post-arm failure correctly withholds W's earlier-queued job too.
+// ═════════════════════════════════════════════════════════════════════════════
+function injectOnFirstUnlink(targetPath, sideEffect) {
+  const real = fs.unlinkSync;
+  let fired = false;
+  fs.unlinkSync = (p) => {
+    if (!fired && p === targetPath) {
+      fired = true;
+      sideEffect();
+    }
+    return real(p);
+  };
+  return { restore: () => { fs.unlinkSync = real; }, fired: () => fired };
+}
+{
+  const w = makeResolvableRepo("p5-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-p5-s";
+  const x = "tok-d2592cd5-p5-x";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-p5 — W (full lift, succeeds EARLY)", enteredAt: Date.now(), tokens: [s], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  const wFinalP5 = path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`);
+  fs.writeFileSync(wFinalP5, JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  const ySourceFile = `pending-d2592cd5-p5-y-${freshSfx()}.json`;
+  const injectY = injectOnFirstUnlink(wFinalP5, () => {
+    const yEntry = { repoPath: w, branch: "y-branch", reason: "d2592cd5-p5 — Y (armed mid-call, post-arm reduce target)", enteredAt: Date.now(), tokens: [s, x] };
+    pushPendingQuarantineTestOnly(yEntry, ySourceFile);
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, ySourceFile), JSON.stringify({ repoPath: w, branch: yEntry.branch, reason: yEntry.reason, tokens: yEntry.tokens, enteredAt: yEntry.enteredAt }, null, 2) + "\n");
+  });
+  const injectYFault = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, ySourceFile));
+  try { clearMergeQuarantineByToken(w, s); } finally { injectY.restore(); injectYFault.restore(); }
+  check("(p5 precondition) Y was injected mid-call, as a side effect of W's own final unlink", injectY.fired());
+  check("(p5 precondition) Y's own narrowing write was forced to fail at least once", injectYFault.hits() >= 1);
+  check("(p5 precondition, by content) Y's own sourceFile is untouched (still holds s,x — rename never landed)", sameTokenSet(readTokensOnDisk(ySourceFile), [s, x]));
+
+  const sidecarPathP5 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP5 = JSON.parse(fs.readFileSync(sidecarPathP5, "utf8"));
+  check("*** THE FIX, BY CONTENT — RED ON PRE-FIX CODE (dbaa253d) *** the sidecar never durably tombstones s via W's own EARLY full-lift decision — Y's own LATER post-arm reduce write failed, for the SAME identity, in the LAST phase of this SAME call", sidecarP5[s] === undefined);
+
+  const rbP5 = await rebootSim();
+  rbP5.reenterMergeQuarantinesAtBoot([w]);
+  const listedAfterBootP5 = rbP5.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(w));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p5, post-arm failure) *** some boot-time record for w still carries s", listedAfterBootP5.some((e) => e.tokens.includes(s)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, ySourceFile), { force: true });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SCENARIO P6 (3rd Code Review of card 3d4467cf, test 3d — CR's Minor #3) — the OPPOSITE direction from
+// P4: a non-twin pending P (holding [s,y], a REDUCE) fails its OWN write EARLY, in the pre-pass. The
+// active entry W (holding [s,z], ALSO a reduce — never a full lift) succeeds cleanly LATER, in the active
+// loop, hitting `clearActiveEntryTokenAtKey`'s own reduce-branch backstop. Pre-fix, that backstop decided
+// and wrote immediately, unaware of P's earlier pre-pass failure for the SAME identity; post-fix, it is
+// deferred and withheld by the call-scoped set.
+// ═════════════════════════════════════════════════════════════════════════════
+{
+  const w = makeResolvableRepo("p6-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-p6-s";
+  const y = "tok-d2592cd5-p6-y";
+  const z = "tok-d2592cd5-p6-z";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-p6 — W (reduce, succeeds LATER)", enteredAt: Date.now(), tokens: [s, z], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`), JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  const pSourceFile = `pending-d2592cd5-p6-nontwin-${freshSfx()}.json`;
+  const pEntry = { repoPath: w, branch: "p-branch", reason: "d2592cd5-p6 — P (non-twin, reduce, fails EARLY)", enteredAt: Date.now(), tokens: [s, y] };
+  pushPendingQuarantineTestOnly(pEntry, pSourceFile);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), JSON.stringify({ repoPath: w, branch: pEntry.branch, reason: pEntry.reason, tokens: pEntry.tokens, enteredAt: pEntry.enteredAt }, null, 2) + "\n");
+
+  const injectP6 = injectRenameFaultAt(path.join(MERGE_QUARANTINE_DIR, pSourceFile));
+  try { clearMergeQuarantineByToken(w, s); } finally { injectP6.restore(); }
+  check("(p6 precondition) P's own narrowing rename was forced to fail at least once", injectP6.hits() >= 1);
+  check("(p6 precondition, by content) P's own sourceFile is untouched (still holds s,y — rename never landed)", sameTokenSet(readTokensOnDisk(pSourceFile), [s, y]));
+  check("(p6 precondition) w still reads blocked, by z alone — W's own in-memory write succeeded cleanly", stillBlockedEntryFor(w)?.tokens.includes(z) === true && !stillBlockedEntryFor(w)?.tokens.includes(s));
+
+  const sidecarPathP6 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP6 = JSON.parse(fs.readFileSync(sidecarPathP6, "utf8"));
+  // NOTE: this direction (failure chronologically BEFORE the decision) was already correctly handled on
+  // dbaa253d — the pre-pass unconditionally runs to completion, and folds its own failure into the
+  // SHARED `writeFailedIdentitiesThisCall` set, before the active loop's own backstop ever reads it. This
+  // scenario is therefore a COVERAGE PIN for the ~:5722 decision point (mirrors M8B/M4-AWF above, not a
+  // live dbaa253d bug) — verified mutant-provable, not RED-on-dbaa253d: see Mutant (iii) in the record.
+  check("*** THE FIX, BY CONTENT *** the sidecar never durably tombstones s via W's own LATER, successful active-reduce decision — P's own EARLIER pre-pass write failed, for the SAME identity", sidecarP6[s] === undefined);
+
+  const rbP6 = await rebootSim();
+  rbP6.reenterMergeQuarantinesAtBoot([w]);
+  const listedAfterBootP6 = rbP6.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(w));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p6, pre-pass withholds active-reduce) *** some boot-time record for w still carries s", listedAfterBootP6.some((e) => e.tokens.includes(s)));
+
+  fs.rmSync(path.join(MERGE_QUARANTINE_DIR, pSourceFile), { force: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO P7 (4th Code Review of card 3d4467cf, CRITICAL, reproduced via a scratch probe) — W is ACTIVE,
+// holding [s] alone, undergoing a FULL LIFT. A non-twin pending P, SAME identity, also holds [s] alone —
+// its own job is pushed in the PRE-PASS, with push-time `nonFailureOk:true` (W's own final was still
+// "tracked" — a live activeQuarantines entry — at that moment, so the push-time disk scan excluded it).
+// W's own full-lift happens LATER, in the active loop: its own final unlink fails (EPERM). Pre-fix,
+// `deleteMergeQuarantineLatchByKey` swallowed this failure entirely — neither `anyWriteFailed` nor
+// `writeFailedIdentitiesThisCall` ever learned of it — so P's own stale push-time verdict sailed through
+// unchallenged at decide time, and `s` got durably tombstoned even though W's own final still physically
+// held it. After a reboot, boot deleted W's kept final as "covered by the tombstone", and the quarantine
+// failed open. Fixed by BOTH Lead rulings together: (1) the unlink failure now surfaces into `writeFailed`/
+// `anyWriteFailed`; (2) `decideDeferredTombstones` ALSO re-derives the physical-holder scan fresh, at
+// decide time, for every job.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const w = makeResolvableRepo("p7-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-p7-s";
+  const wEntry = { repoPath: w, branch: "w-branch", reason: "d2592cd5-p7 — W (full lift, fails LATE via unlink)", enteredAt: Date.now(), tokens: [s], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, wEntry);
+  const wFinalP7 = path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`);
+  fs.writeFileSync(wFinalP7, JSON.stringify({ repoPath: w, branch: wEntry.branch, reason: wEntry.reason, tokens: wEntry.tokens, enteredAt: wEntry.enteredAt }, null, 2) + "\n");
+
+  const pSourceFileP7 = `pending-d2592cd5-p7-nontwin-${freshSfx()}.json`;
+  const pEntryP7 = { repoPath: w, branch: "p-branch", reason: "d2592cd5-p7 — P (non-twin, full-lift, succeeds EARLY)", enteredAt: Date.now(), tokens: [s] };
+  pushPendingQuarantineTestOnly(pEntryP7, pSourceFileP7);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFileP7), JSON.stringify({ repoPath: w, branch: pEntryP7.branch, reason: pEntryP7.reason, tokens: pEntryP7.tokens, enteredAt: pEntryP7.enteredAt }, null, 2) + "\n");
+
+  const injectP7 = injectUnlinkFaultAt(wFinalP7);
+  try { clearMergeQuarantineByToken(w, s); } finally { injectP7.restore(); }
+  check("(p7 precondition) W's own final unlink was forced to fail exactly once", injectP7.hits() === 1);
+  check("(p7 precondition) P's own sourceFile was removed (pre-pass full lift succeeded cleanly)", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, pSourceFileP7)));
+  check("(p7 precondition, by content) W's own final is untouched — still holds s, unlink never landed", sameTokenSet(readTokensOnDisk(path.basename(wFinalP7)), [s]));
+  check("(p7 precondition) w reads fully unblocked IN-PROCESS — both W's in-memory arm and P were removed from live tracking regardless of the unlink's own outcome (the card's own original 'in-process unblocked, reboot re-blocks' symptom)", stillBlockedEntryFor(w) === undefined);
+
+  const sidecarPathP7 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP7 = fs.existsSync(sidecarPathP7) ? JSON.parse(fs.readFileSync(sidecarPathP7, "utf8")) : {};
+  check("*** THE FIX, BY CONTENT — RED ON PRE-FIX CODE *** the sidecar never durably tombstones s via P's own early, now-stale push-time verdict — W's own final unlink failed LATER, in the active loop", sidecarP7[s] === undefined);
+
+  const rbP7 = await rebootSim();
+  rbP7.reenterMergeQuarantinesAtBoot([w]);
+  const listedAfterBootP7 = rbP7.listActiveMergeQuarantines().filter((e) => directPathIdentity(e.repoPath) === directPathIdentity(w));
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p7) *** some boot-time record for w still carries s", listedAfterBootP7.some((e) => e.tokens.includes(s)));
+  check("*** NEVER FAIL-OPEN (p7) *** w still reads blocked by s after the reboot", rbP7.stillBlockedEntryFor(w)?.tokens.includes(s) === true);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// SCENARIO P8 (card 3d4467cf round 4, `removeWriteFailed` in clearTokenFromPendingIndices's "remove" branch)
+// — the KEY-DRIFT shape (entryStillOwnsKey's third branch): pending P holds [s] alone and names Kw in its
+// armedKeys, but a DIFFERENT object Q (same identity, tokens a SUBSET of P's) occupies Kw in
+// activeQuarantines. P's plan is therefore "remove" with ownedArmedKeys=[Kw]; the remove branch unlinks
+// Kw's final, and that unlink FAILS (EPERM) — the final still physically holds s. The call must NEVER
+// durably tombstone s. NOTE (documented in the decision record): THREE independent masks withhold this exact
+// shape — `removeWriteFailed`, `decideDeferredTombstones`'s decide-time physical re-scan (ruling 2), and the
+// remove branch's push-time `nonFailureOk` — so a mutant must turn ALL THREE off to flip it.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const w = makeResolvableRepo("p8-w");
+  const Kw = canonicalRepoLockKey(w);
+  const s = "tok-d2592cd5-p8-s";
+  const qEntry = { repoPath: w, branch: "q-branch", reason: "d2592cd5-p8 — Q (drifted occupant of Kw)", enteredAt: Date.now(), tokens: [s], resolvedKey: Kw, armedKeys: [Kw] };
+  setActiveQuarantineTestOnly(Kw, qEntry);
+  const kwFinalP8 = path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(Kw)}.json`);
+  fs.writeFileSync(kwFinalP8, JSON.stringify({ repoPath: w, branch: qEntry.branch, reason: qEntry.reason, tokens: qEntry.tokens, enteredAt: qEntry.enteredAt }, null, 2) + "\n");
+
+  const pSourceFileP8 = `pending-d2592cd5-p8-${freshSfx()}.json`;
+  const pEntryP8 = { repoPath: w, branch: "p-branch", reason: "d2592cd5-p8 — P (pending, names Kw, a DIFFERENT object holds it)", enteredAt: Date.now(), tokens: [s], armedKeys: [Kw] };
+  pushPendingQuarantineTestOnly(pEntryP8, pSourceFileP8);
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, pSourceFileP8), JSON.stringify({ repoPath: w, branch: pEntryP8.branch, reason: pEntryP8.reason, tokens: pEntryP8.tokens, enteredAt: pEntryP8.enteredAt }, null, 2) + "\n");
+
+  const idxP8 = mod.findPendingIndexByIdentityTestOnly(w);
+  check("(p8 precondition) P is a pending entry and Q (a different object) occupies Kw", idxP8 !== -1 && listActiveMergeQuarantines().some((e) => e === qEntry || (directPathIdentity(e.repoPath) === directPathIdentity(w) && e.branch === "q-branch")));
+
+  const injectP8 = injectUnlinkFaultAt(kwFinalP8);
+  try { mod.clearTokenFromPendingIndicesTestOnly([idxP8], s); } finally { injectP8.restore(); }
+  check("(p8 precondition) Kw's final unlink was forced to fail exactly once (the remove branch reached deleteMergeQuarantineLatchByKey)", injectP8.hits() === 1);
+  check("(p8 precondition, by content) Kw's final is untouched — still holds s, the unlink never landed", sameTokenSet(readTokensOnDisk(path.basename(kwFinalP8)), [s]));
+
+  const sidecarPathP8 = path.join(loomHome, "merge-quarantine-cleared-tokens.dat");
+  const sidecarP8 = fs.existsSync(sidecarPathP8) ? JSON.parse(fs.readFileSync(sidecarPathP8, "utf8")) : {};
+  check("*** THE FIX, BY CONTENT *** the sidecar never durably tombstones s — Kw's final unlink failed inside the remove branch", sidecarP8[s] === undefined);
+
+  const rbP8 = await rebootSim();
+  rbP8.reenterMergeQuarantinesAtBoot([w]);
+  check("*** NEVER FAIL-OPEN, ACROSS A REAL REBOOT (p8) *** w still reads blocked by s after the reboot", rbP8.stillBlockedEntryFor(w)?.tokens.includes(s) === true);
 }
 
 console.log(failures === 0

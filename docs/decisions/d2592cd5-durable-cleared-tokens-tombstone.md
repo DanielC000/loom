@@ -162,6 +162,13 @@ genuine, untracked AE danger. Deriving the exclude set fresh from live state, ra
 written-basenames set through each clear path, avoids a missed accumulation silently reopening this same
 regression later.
 
+**Clarified (2nd/3rd fix rounds):** "never mistaken for the genuine AE danger" is true of THIS SCAN alone
+— it correctly does not treat a tracked-but-write-failed sibling as untracked AE content. It does NOT mean
+the write failure is thereby safe to ignore: this scan structurally EXCLUDES that sibling, so it can never
+itself DETECT the failure either. Read this paragraph as "the scan doesn't misfire on it," never as "the
+scan covers it" — coverage for that case is the separate `writeFailedIdentitiesThisCall` mechanism (2nd/3rd
+fix rounds, below).
+
 ### A SEPARATE, real regression found and fixed in the same round: a mid-process boot-rescan wiped `clearedTokens`
 
 `loadClearedTokensTombstoneFileAtBoot` (the boot-time seed, §C above) used to unconditionally
@@ -277,10 +284,16 @@ and the unreadable-file `return true`→`continue` fail-closed branch in both
 `identityHasAnyPhysicalRecordHoldingToken` and `identityHasAnyPhysicalRecordOnDisk`.
 
 ### The two full-lift branches (`clearTokenFromPendingIndices`'s remove branch; `clearActiveEntryTokenAtKey`'s
-unconditional second call) deliberately do NOT durably tombstone
+unconditional second call) deliberately do NOT durably tombstone — SUPERSEDED by card `3d4467cf` below
 
-Both sites call only `tombstoneIfNotSurviving` (in-memory), never `tombstoneDurablyIfConfirmed`. This is
-a DELIBERATE choice for this round, not an oversight needing a matching fix:
+**Superseded.** Card `3d4467cf` (see the Follow-up section below) found a real fail-to-remember gap this
+reasoning missed and added the durable call at both sites after all — kept here for the history of why it
+was *originally* believed unnecessary, not as current guidance. The reasoning below was wrong about the
+cost (no new failure-tracking turned out to be needed — see the superseding section for why), not about
+the shape of the two sites themselves.
+
+Both sites call only `tombstoneIfNotSurviving` (in-memory), never `tombstoneDurablyIfConfirmed`. This WAS
+treated as a DELIBERATE choice for this round, not an oversight needing a matching fix:
 
 - Adding it would require NEW write/sweep-failure tracking these branches don't currently have —
   `clearTokenFromPendingIndices`'s remove branch discards `deleteMergeQuarantineLatchByKey`'s own
@@ -340,6 +353,74 @@ mutant on `identityHasAnyPhysicalRecordHoldingToken` turned exactly Scenario K's
 two new scenarios don't overlap with any pre-existing one. Dist restored byte-identically after each
 mutant (`tsconfig.tsbuildinfo` deleted before rebuild, `cmp` confirmed against a pre-mutant backup).
 
+## Follow-up (card `3d4467cf`) — the two full-lift branches now DO durably tombstone
+
+Supersedes "The two full-lift branches … deliberately do NOT durably tombstone" above: both of those
+sites (`clearTokenFromPendingIndices`'s remove branch; `clearActiveEntryTokenAtKey`'s unconditional second
+call) now ALSO call `tombstoneDurablyIfConfirmed`, gated the same way as the three original sites —
+`!identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity))`.
+
+### The bug this closes
+
+A full lift deletes the entry's own tracked record and never called `tombstoneDurablyIfConfirmed`. If an
+untracked AE-shaped stray sibling for this identity still physically holds the token, a reboot correctly
+keeps over-blocking on it (accepted, as before) — but when NEITHER a failed delete NOR a stray survives,
+the token was never durably remembered as cleared at all, leaving a reboot's boot-time union free to
+re-arm a later, unrelated stray for the same identity (migrated under a stale key, or an AE sibling raised
+after this clear) and silently resurrect the already-cleared token. Repro (`merge-quarantine-3d4467cf-
+full-lift-stray-reblock.mjs`, Scenarios A-G2): full-lift a token for an identity with a genuine untracked
+AE stray holding it — the gate correctly WITHHOLDS the durable tombstone; with nothing contending it, the
+gate durably tombstones it, closing the gap. This revised Scenario A's own original form (which the test
+file's own header used to call out explicitly): a genuine untracked stray still physically holding the
+lifted token MUST stay fail-closed BOTH BEFORE AND AFTER this fix — that is the required, never-fail-open
+safety property, not a bug this fix removes. This fix's actual value is narrower — the ORDINARY case (see
+Scenario B) now gets durably recorded instead of permanently leaving a sidecar gap, and (at
+`clearActiveEntryTokenAtKey`'s own backstop specifically) an UNRELATED kept/referenced co-occupant no
+longer permanently blocks this token's own, otherwise-safe durable confirmation (see Scenario G1).
+
+### Why no new write/sweep-failure tracking is needed at the full-lift record's OWN basename — true, but
+INCOMPLETE; see "Follow-up (fix round, Code Review)" below for the gap this section missed
+
+At a full-lift site the record's own basename is no longer tracked anywhere in live state the moment the
+lift runs (it is being DELETED, not reduced), so `identityHasAnyPhysicalRecordHoldingToken`'s fresh, post-
+splice/post-delegation disk re-verification sees exactly the right thing either way FOR THAT ONE
+BASENAME, without the caller tracking its own delete's outcome at all: a failed delete leaves the record
+still physically on disk, so the scan sees it and withholds; a successful delete with no untracked AE
+stray leaves nothing for the scan to find, so it durably tombstones. This part of the reasoning stands.
+
+What it missed: the SAME call can ALSO touch a DIFFERENT basename — `clearActiveEntryTokenAtKey`'s
+delegated `clearMergeQuarantineByKey` call can itself REDUCE a TIED PENDING TWIN sharing this identity
+(never just delete the full-lift record itself), and `clearTokenFromPendingIndices`'s own batch can
+likewise process a "reduce" target alongside a "remove" target for the SAME identity in one call. Either
+sibling's own narrowing write can fail — and its basename stays `trackedBasenamesForIdentity`-excluded
+from the disk scan REGARDLESS of that write's outcome (the exclusion means "a known, tracked,
+legitimately-surviving sibling", not "a sibling whose write definitely succeeded"), so a bare disk scan
+alone cannot see it. See "Follow-up (fix round, Code Review)" below for the fix: threading the sibling's
+own write-failure signal explicitly into the gate, rather than relying on the scan alone.
+
+### Mutant M5 re-aim (`merge-quarantine-d2592cd5-reboot-between-clears.mjs`) — see "Follow-up (fix round,
+Code Review)" below for a SECOND re-aim of this same scenario, correcting this section's own premise
+
+The pre-existing Scenario M5 (a content-kept FOREIGN orphan surviving `clearMergeQuarantineByKey`'s own
+full lift, proving the `!anyReferencing && !anyKeptUnattributed && keptContentRepoPaths.size===0` term) was
+re-aimed to call `clearMergeQuarantineByKey` directly, with `identityWideHumanClear:false`, rather than
+through `clearMergeQuarantineByToken`, the public dispatcher it used before this card. Calling through
+the dispatcher would let this card's own new backstop gate (`clearMergeQuarantineByToken`'s own full-lift
+branch) independently durably-tombstone M5's own token on its own, unrelated disk re-verification — that
+token has no AE stray of its own, only the foreign orphan the scenario is about does — masking the mutant
+this scenario exists to kill. **Superseded by the fix-round Code Review below: `false` turned out to be
+the WRONG isolation — see that section's own M5 re-aim for why, and for the scenario's current shape.**
+
+### Verification
+
+New scenarios A-G2 in `packages/daemon/test/merge-quarantine-3d4467cf-full-lift-stray-reblock.mjs`.
+Negative-controlled with an EXPLICIT pre-fix ref (`node packages/daemon/scripts/negative-control.mjs
+--file packages/daemon/src/git/merge-quarantine.ts --test packages/daemon/test/merge-quarantine-3d4467cf-
+full-lift-stray-reblock.mjs --ref f44f6b51`, confirmed `f44f6b51` carries the tests but not the fix): RED
+against that pre-fix tip, GREEN restored, working tree confirmed byte-identical. Full corpus — all 124
+`merge-quarantine-*.mjs` files (including the M5 re-aim) — green. `pnpm --filter @loom/daemon guards`
+(35/35) and the lesson-299 ungated-landing list (9/9) both green.
+
 ## Do not
 
 - Do not move the tombstone sidecar back inside `MERGE_QUARANTINE_DIR` — a test or production sweep that
@@ -368,6 +449,473 @@ mutant (`tsconfig.tsbuildinfo` deleted before rebuild, `cmp` confirmed against a
   this is the exact CRITICAL regression the fix round closed (Scenarios P1/P2). It must serialize ONLY
   `durablyTombstonedTokens`, and that map must only ever be grown by `tombstoneDurablyIfConfirmed`'s own
   per-call token+identity set or the boot-load's additive union, never by copying `clearedTokens`.
-- Do not add a `tombstoneDurablyIfConfirmed` call to either of the two full-lift branches named above
-  without first adding the write/sweep-failure tracking they currently lack — see "The two full-lift
-  branches" section for why leaving them in-memory-only is safe as-is, not a gap to close reflexively.
+- Neither full-lift branch (`clearTokenFromPendingIndices`'s remove branch; `clearActiveEntryTokenAtKey`'s
+  unconditional second call) calls `tombstoneDurablyIfConfirmed` directly any more, on the token path — do
+  not reintroduce a direct call at either site. Since the 3rd fix round, both PUSH a `DeferredTombstoneJob`
+  onto the shared, call-scoped array instead; `clearMergeQuarantineByToken` decides and writes every job
+  exactly once, via `decideDeferredTombstones`, after every phase of the whole public call (including
+  every delegate) has settled. **No durable tombstone may ever be written mid-call, by any site or
+  delegate, on the token path — push a job; the verdict is decided at end-of-call.** See "Follow-up (3rd
+  fix round)" and "Follow-up (4th fix round)" below.
+- Do not let a backstop that re-decides a delegated clear's own durable tombstone AND in that delegate's
+  own `anyReferencing`/`latchKept`/`contentKeptRepoPaths` signals — those are the foreign-co-occupant
+  withhold this backstop deliberately overrides by design (Scenario G1/G2). AND in `anyWriteFailed` ONLY.
+  Still true as of the 4th fix round — unchanged by any round's own refactor of WHERE/WHEN the decision
+  actually runs.
+- Do not decide ANY site's own durable-tombstone verdict mid-call, or trust its own push-time verdict as
+  final — a tied sibling for the SAME identity, in the SAME batch or a LATER phase of the SAME public
+  call, can fail its own write either before or after any one site's own decision point, and its basename
+  reads "tracked" (excluded from the disk scan) regardless of that outcome. (History: round 1 deferred
+  only the "remove" target's decision, ANDed against a batch-local set; the 2nd fix round made that set
+  CALL-SCOPED (`writeFailedIdentitiesThisCall`) and deferred "reduce" too; the 3rd fix round found the set
+  alone still wasn't enough — a decision WRITTEN immediately, before a later phase's own failure could
+  ever be known, is still wrong — and moved every site to PUSH a job instead, decided+written exactly
+  once, at the very end, via `decideDeferredTombstones`.)
+- Do not trust a job's own push-time `nonFailureOk` (nor the write-failed set alone) as the FINAL word,
+  even after the 3rd round's defer-the-write fix — see "Follow-up (4th fix round)" below:
+  `decideDeferredTombstones` ALSO re-derives `identityHasAnyPhysicalRecordHoldingToken` fresh, at decide
+  time, because a delete/unlink failure that never gets folded into the write-failed set at all (the
+  round-4 reproduced gap) can leave a push-time scan looking clean while the record it was pushed for
+  still physically holds the token right now.
+- Do not assume a non-ENOENT unlink failure inside `deleteMergeQuarantineLatchByKey` is safe to log and
+  drop — the file still physically holds the token. Fold it into the caller's own `anyWriteFailed`/
+  `writeFailedIdentitiesThisCall`, same as every other write-failure branch in this module.
+
+## Follow-up (fix round, Code Review of card `3d4467cf`)
+
+A Code Review of card `3d4467cf`'s own tip found one BLOCKING defect in the two full-lift branches added
+there, confirmed the manager's ruling that this fix must override ONLY the foreign-co-occupant withhold
+(never the write-failure withhold), and made several follow-on corrections to this record and its tests.
+
+### BLOCKING: the bare disk scan under-blocks when a TIED SIBLING's own reduce-write fails
+
+`clearActiveEntryTokenAtKey`'s own full-lift SECOND call (after its delegated `clearMergeQuarantineByKey`
+call returns) re-decided its durable tombstone from `identityHasAnyPhysicalRecordHoldingToken` ALONE, with
+no knowledge of the delegated call's own `anyWriteFailed`. That delegated call can itself REDUCE a tied
+pending twin sharing the same identity (card `64119847`'s own precondition shape) while fully lifting the
+main entry — and if the twin's own narrowing write fails, its basename still excludes it from the disk
+scan (`trackedBasenamesForIdentity` tracks it as a known, legitimately-surviving sibling, not as "its
+write definitely succeeded") — so the backstop wrongly durably tombstoned the token anyway.
+
+Repro (`merge-quarantine-d2592cd5-reboot-between-clears.mjs`, Scenario M7, driven through the PUBLIC
+`clearMergeQuarantineByToken` — M4's own direct `clearMergeQuarantineByKey` call never reaches this
+backstop at all): W armed `[s]` at `Kw`; a tied pending twin P `[s,v]`, `armedKeys:[Kw]`; a rename fault on
+P's own narrowing write. On the pre-fix tip, `s` gets durably tombstoned and a reboot resurrects W with
+only `v` outstanding. Fixed by having `clearMergeQuarantineByKey` return a new required `anyWriteFailed`
+field on every return path, and ANDing `!result.anyWriteFailed` into the backstop's own gate —
+**never** ANDing in `result.latchKept`/`referencingRepoPaths`/`contentKeptRepoPaths`, which the backstop
+deliberately overrides by design (the manager's ruling: option (b) overrides ONLY the G1/G2
+foreign-co-occupant withhold, never the write-failure withhold).
+
+### The SAME blind spot, audited and found at the PENDING-site backstop too
+
+The reviewer's own finding was scoped to the active-entry backstop; the Lead's own fix-round instructions
+asked for the identical audit at `clearTokenFromPendingIndices`'s own "remove" (full-lift) branch. It has
+the SAME gap, reached a DIFFERENT way: `collectPendingIndices` can match SEVERAL independent pending
+wrappers for one identity into ONE `clearTokenFromPendingIndices([idx...], token)` call (this card's own
+root-cause shape — see "The bug" above). If one of them is a "remove" target (R, holding only `token`)
+and another is a "reduce" target (Q, holding `token` plus another), R's own tombstone decision used to be
+made INLINE, at the moment R is processed in the batch's loop — scanning disk with Q's own sourceFile
+EXCLUDED as "tracked", regardless of whether Q's own narrowing write (dropping `token`) later succeeds or
+fails. A failed Q write leaves Q's on-disk copy genuinely still holding `token`, yet R's decision never
+sees it either way, because the exclusion is unconditional on Q simply being a known, live, tracked
+pending entry for the identity — not on Q's write actually having succeeded.
+
+Repro: Scenario M8, the same shape (R + Q, same identity, Q's own rename faulted), driven through the
+PUBLIC `clearMergeQuarantineByToken`. Fixed by deferring every "remove" target's own tombstone decision
+to a pass that runs AFTER the whole batch (every reduce AND remove in it) has already executed its own
+write/delete, ANDed against a new `reduceWriteFailedForIdentity` set populated as each "reduce" target's
+own write actually resolves during the batch's main loop. The actual mutation/delete/splice ordering is
+untouched — only the FINAL tombstone decision for a "remove" target is deferred; nothing else in the
+batch's existing, already-audited "REPLACED (not spliced)" dynamic re-resolution logic changes.
+
+### `anyReferencing`/`anyKeptUnattributed` do NOT need the same treatment — by design, not by omission
+
+**CORRECTED by the 2nd Code Review (see "Follow-up (2nd fix round...)" below) — the "by definition" claim
+in this section's own title and body is FALSIFIED:** a 2nd Code Review's own P2 repro showed
+`clearMergeQuarantineByKey`'s delegate CAN return `referencingRepoPaths` naming the SAME identity being
+cleared (not only a foreign one), via a mechanism this section never accounted for. The RULING survives —
+`anyReferencing`/`anyKeptUnattributed`/`keptContentRepoPaths` must still NEVER be ANDed into any backstop
+— but the REASON stated below ("structurally cannot see it either way") is not reliable as a general
+argument; the real guard against a same-identity write failure is the separate, call-scoped
+`writeFailedIdentitiesThisCall` set (2nd fix round), never an assumption that this disk scan's own
+`referencingRepoPaths` output is foreign-only.
+
+The Lead's own fix-round instructions asked whether these two signals (and `keptContentRepoPaths`) need
+the same AND-in treatment as `anyWriteFailed`. They do not, and reproducing why requires `clearMergeQuarantineByKey`'s
+own disk-scan helper, `identityHasAnyPhysicalRecordHoldingToken(identity, ...)`: it matches files by
+CONTENT IDENTITY (`directPathIdentity(repoPath) === identity`), never by basename pattern alone. A foreign
+co-occupant (the G1/G2 shape) carries a DIFFERENT repoPath/identity than the identity being cleared, by
+definition — so this identity-scoped scan structurally cannot see it either way, write-failure or not.
+`anyReferencing`/`anyKeptUnattributed`/`keptContentRepoPaths` are ABOUT that foreign co-occupant, not
+about this identity's own write; ANDing them into the backstop would reintroduce exactly the regression
+Scenario G1 exists to prevent (an unrelated kept/referenced co-occupant permanently blocking this token's
+own, otherwise-safe durable confirmation) with no corresponding safety benefit, since the write-failure
+case they'd be guarding against is already covered by `anyWriteFailed` alone.
+
+### M5 re-aimed a second time — `identityWideHumanClear:false` was itself the wrong isolation
+
+The prior "Mutant M5 re-aim" section above re-aimed M5 to call `clearMergeQuarantineByKey` directly with
+`identityWideHumanClear:false` to dodge `clearMergeQuarantineByToken`'s own full-lift backstop. That
+premise no longer holds: grepping every call site, `false` is reachable in PRODUCTION from exactly one
+caller — `clearActiveEntryTokenAtKey`'s own full-lift backstop call — which (by the BLOCKING fix above)
+unconditionally re-decides this exact withhold right after, on purpose (G1/G2). A standalone `false` call
+no longer represents any real caller's own final word on the token. M5 now calls
+`clearMergeQuarantineByRecordedPath(m5)` instead — the SAME identity-wide `true` route Scenario J already
+uses, which no backstop ever re-decides afterward.
+
+**A separate finding, surfaced while re-verifying this scenario, not fixed by this re-aim:** M5's own
+orphan fixture (a readable, well-formed latch record for a resolvable `foreignRepoM5`) is NOT genuinely
+"content-kept" (`keptContentRepoPaths`) in practice — `sweepOrphanLatchFilesUnioned`'s own arm-then-
+classify logic (card `9f387d7e`/`25d0d45b`) successfully arms any readable, well-formed orphan record in
+memory and classifies it as a live, referencing co-occupant instead, REGARDLESS of `identityWideHumanClear`
+or whether the orphan's own repoPath happens to resolve. Verified directly (mutation-tested): nullifying
+ONLY the `keptContentRepoPaths.size===0` clause of the gate, leaving `!anyReferencing &&
+!anyKeptUnattributed` intact, does NOT turn M5 red — `anyReferencing` alone already withholds. Nullifying
+the WHOLE combined term (the mutant as actually documented above and in the Round-2 mutant list) DOES
+turn M5 red (and only M5), so M5's own "KILLS MUTANT 3" claim is correct for the term as documented — but
+its label (and comment) overclaim exclusivity to the content-kept clause specifically, which M5 has
+evidently never isolated on its own. Constructing a genuine `keptContentRepoPaths`-only repro (one where
+`armForeignOrphanContentInMemoryIfUnenforced` returns `"already-enforced"` yet `classifyKeptRepoPath`
+still reports non-live — a deliberate canonical-key collision) is a real, separate gap in this corpus's
+own mutant coverage, left as a residual for a future card rather than solved here.
+
+### Verification (fix round)
+
+New scenarios M7, M8 in `packages/daemon/test/merge-quarantine-d2592cd5-reboot-between-clears.mjs`.
+Negative-controlled (`node packages/daemon/scripts/negative-control.mjs --file
+packages/daemon/src/git/merge-quarantine.ts --test packages/daemon/test/merge-quarantine-d2592cd5-
+reboot-between-clears.mjs --ref a8164cf2`): exactly M7's and M8's own four new assertions (the sidecar-
+content check and the post-reboot resurrection check, for each) went RED against `a8164cf2` (the branch
+tip carrying card `3d4467cf`'s own fix but not this round's), GREEN restored, working tree confirmed
+byte-identical. M5's re-aim re-verified mutation-tested against the WHOLE documented term (see above).
+Full `merge-quarantine-*.mjs` corpus, `guards`, and the lesson-299 ungated-landing list: see the worker's
+own report on this fix round for the exact sweep and counts.
+
+## Follow-up (2nd fix round, Code Review of card `3d4467cf`)
+
+A 2nd Code Review of the fix round above found the `anyWriteFailed`-ANDing fix still under-blocks two
+further ways, both within the SAME public `clearMergeQuarantineByToken` call.
+
+### BLOCKING (P2): a NON-TWIN pending sibling's own earlier write failure is invisible to the full-lift
+backstop
+
+M7's own fix threads `result.anyWriteFailed` into `clearActiveEntryTokenAtKey`'s full-lift backstop —
+but `result` comes from `clearMergeQuarantineByKey`'s own delegate call, which only ties a pending entry
+via `pendingPlan` (shared `armedKeys`, a shared orphan-file reference, or a proven token subset — see
+`clearMergeQuarantineByKey`'s own tie predicate). A wholly separate pending record P sharing the SAME
+identity as the active entry W, but with none of those ties (no `armedKeys`, a different object — the
+`535fd69d` shape), is invisible to that delegate's own `pendingPlan` entirely. If P was already reduced,
+and its own narrowing write failed, EARLIER in this same `clearMergeQuarantineByToken` call's own
+pre-pass (`clearTokenFromPendingIndices`'s `nonTwinPendingIndices` pass), the full-lift backstop's own
+bare disk re-scan excludes P's basename as "tracked" (P is still a live pending entry) regardless of its
+write having failed — so `s` gets durably tombstoned anyway.
+
+Repro (`merge-quarantine-d2592cd5-reboot-between-clears.mjs`, Scenario P2, through the PUBLIC
+`clearMergeQuarantineByToken`): W active `[s]` at `Kw`; a NON-twin pending P `[s,v]` (no `armedKeys`),
+same identity as W; a rename fault on P's own narrowing write. The pre-pass reduces P (its write fails,
+withheld correctly FOR P's own decision); the active loop then full-lifts W, and the backstop — seeing no
+failure of its OWN (`result.anyWriteFailed:false`, since P was never in its `pendingPlan`) — wrongly
+tombstones `s`.
+
+### MAJOR, pre-existing (P1): two REDUCE targets in one batch, decided inline, miss each other's failure
+
+The first fix round deferred a "remove" target's own decision past the whole batch, ANDed against
+`reduceWriteFailedForIdentity` — but left a "reduce" target's own decision INLINE, at
+`clearTokenFromPendingIndices`'s own reduce branch. Two independent pending REDUCE targets Q1 `[tok,a]`
+and Q2 `[tok,b]` sharing one identity, in ONE `clearTokenFromPendingIndices` batch: whichever one's own
+write fails, the OTHER (succeeding) sibling's own inline decision scans disk with the failed sibling's
+basename excluded as "tracked" — regardless of its write outcome — and wrongly durably tombstones `tok`
+anyway. Reproduced in BOTH iteration orders (Scenarios P1a, P1b) — this was never an artifact of which
+sibling happens to fail or be visited first.
+
+### Minor findings
+
+(a) The "remove"-deferred fix (first round) was only ever exercised with the reduce target (Q) processed
+BEFORE the remove target (R) in the batch — a mutant that reverted R's own decision back to INLINE, while
+still ANDing the per-batch failure set at that earlier point, would still have passed. Scenario M8B (Q at
+the LOWER index, processed AFTER R) closes this coverage gap; it does not reproduce a live bug on this
+round's own predecessor code (R's decision was already correctly deferred there), only on the described
+hypothetical mutant.
+
+(b) `clearMergeQuarantineByKey`'s own `anyWriteFailed` field, on its CLEAN return path (no `latchKept` at
+all), was never directly pinned — a mutant clearing it ONLY on that return branch survived the corpus.
+Pinned by Scenario M4-AWF, reusing M4's own construction (a tied twin's reduce-write fails during a full
+lift, which never sets `anyReferencing`/`anyKeptUnattributed`/`keptContentRepoPaths`, so the result
+reaches the clean-return branch with `anyWriteFailed:true`).
+
+### The fix: ONE call-scoped `writeFailedIdentitiesThisCall` set, shared across every phase
+
+**SUPERSEDED IN PART by "Follow-up (3rd fix round)" below** — the bullet list immediately below describes
+this round's own fix as written THEN; the 3rd Code Review found it still writes durably MID-CALL at two
+more sites (the `clearMergeQuarantineByKey` delegate's own internal decision, never threaded this set at
+all; and every site here deciding+WRITING immediately rather than deferring the WRITE itself past the
+whole call) — see that section for the current, correct shape. Kept here for the history of what this
+round actually changed, not as current guidance for where/when the write happens.
+
+`clearMergeQuarantineByToken` now creates ONE `Set<string>` (identities, matching
+`tombstoneDurablyIfConfirmed`'s own namespace) and threads it through every phase it runs: both
+`clearTokenFromPendingIndices` invocations (the pre-pass and the post-arm pass) and the active loop's own
+`clearActiveEntryTokenAtKey` calls. Every durable-tombstone decision in the whole call ANDs in "this
+identity is not in the set", on top of its own pre-existing checks:
+
+- `clearTokenFromPendingIndices`'s reduce branch no longer decides inline — EVERY target (reduce AND
+  remove) is now pushed onto ONE `deferredTombstoneJobs` list and decided in a single pass AFTER the
+  whole batch has settled, closing P1 regardless of order.
+- `clearActiveEntryTokenAtKey`'s full-lift backstop and its own reduce branch both fold their own write
+  failure into the shared set (`if (<writeFailed>) writeFailedIdentitiesThisCall.add(identity)`) and AND
+  the set into their own `tombstoneDurablyIfConfirmed` call, closing P2 — a same-identity failure from an
+  EARLIER phase of this same call now withholds a LATER phase's decision too, even when the two phases
+  never directly tie the two records together at all.
+- The backstops still override ONLY the foreign-co-occupant withhold (`anyReferencing`/`latchKept`/
+  `contentKeptRepoPaths` — G1/G2, unchanged) — never write-failure, per the manager's original ruling.
+
+`identityHasAnyPhysicalRecordHoldingToken`'s own doc comment (previously claiming a tracked-but-stale
+sibling "is exactly what the tombstone exists to cover for") is corrected: that disk scan structurally
+EXCLUDES a tracked sibling by design, so it alone can never see a same-identity write failure — every
+caller now ANDs `writeFailedIdentitiesThisCall` separately, never relying on the scan for this case.
+
+### Verification (2nd fix round)
+
+New scenarios P2, P1a, P1b, M8B, M4-AWF in
+`packages/daemon/test/merge-quarantine-d2592cd5-reboot-between-clears.mjs`. Negative-controlled (`node
+packages/daemon/scripts/negative-control.mjs --file packages/daemon/src/git/merge-quarantine.ts --test
+packages/daemon/test/merge-quarantine-d2592cd5-reboot-between-clears.mjs --ref e40e3c1f`): P2's and P1a's/
+P1b's own assertions (the sidecar-content check and the post-reboot resurrection check, for each) went RED
+against `e40e3c1f` (the branch tip carrying this card's 1st fix round but not this one), GREEN restored,
+working tree confirmed byte-identical. M8B and M4-AWF stayed green against `e40e3c1f` (as expected — see
+"Minor findings" above; they pin mutant-only gaps, not a live `e40e3c1f` bug).
+
+Three API-keeping mutants, each independently reverted after:
+1. Every `writeFailedIdentitiesThisCall.add(identity)` call replaced with a no-op — turned Scenario B,
+   M1, M7, M8, P2, P1a, P1b, and M8B all RED (the set being populated at all is load-bearing broadly).
+2. The full-lift backstop's own `!writeFailedIdentitiesThisCall.has(identity) &&` term dropped (keeping
+   `result.anyWriteFailed`'s own `.add()` call intact) — turned exactly M7 and P2 RED.
+3. The deferred-decision pass's own `!writeFailedIdentitiesThisCall.has(job.identity) &&` term dropped —
+   turned Scenario B, M1, M7, M8, P2, P1a, P1b, and M8B all RED (this decision point is load-bearing for
+   every target in the module, not just P1's own two-reduce-target shape).
+
+Full `merge-quarantine-*.mjs` corpus (124 files, by name, one lane), `pnpm --filter @loom/daemon guards`,
+and the lesson-299 ungated-landing list: see the worker's own report on this round for the exact sweep and
+counts.
+
+## Follow-up (3rd fix round, Code Review `fc10277f` of the 2nd fix round)
+
+A 3rd Code Review found the 2nd round's own fix still writes a durable tombstone MID-CALL at two more
+places, both reproduced across a real reboot before any fix was written.
+
+### BLOCKING 1: the `clearMergeQuarantineByKey` delegate's own internal decision never saw the shared set
+
+The delegate's own `tombstoneDurablyIfConfirmed` call (reached via `clearActiveEntryTokenAtKey`'s
+full-lift branch) decided and WROTE immediately, gated only on its OWN local `anyWriteFailed` — it never
+received `writeFailedIdentitiesThisCall` at all, so a failure recorded by ANY OTHER phase of the same
+public call (including a non-twin pending sibling's own pre-pass failure, invisible to the delegate's
+`pendingPlan` entirely) could never withhold it. The 2nd round's own P2 scenario passed only
+INCIDENTALLY — `injectRenameFaultAt` leaves a real stranded `.json.tmp-*` file that the delegate's own
+unrelated orphan/co-occupant scan happens to notice (setting `anyReferencing`, which already withholds
+independently of this gap). Scenario P3 closes the gap genuinely: the SAME shape, faulted at
+`fs.openSync` instead of `fs.renameSync`, so NOTHING is ever stranded on disk — P3 is RED on `dbaa253d`,
+where P2 is GREEN only by accident.
+
+### BLOCKING 2: reverse cross-phase order — an earlier phase's decision was written before a later
+phase's failure could ever be known
+
+Every site's own fix (2nd round) deferred its DECISION past its own batch/call, then WROTE immediately
+at that point. When phase N's decision is written before phase N+1 even runs, phase N+1's own later
+failure (same identity) can never retroactively un-write it. Scenario P4 (pre-pass decides EARLY,
+succeeds; active-reduce fails LATER) and Scenario P5 (active full-lift decides EARLY, succeeds; a
+pending record armed MID-CALL and caught only by the POST-ARM pass fails LAST) are both RED on
+`dbaa253d` for exactly this reason.
+
+### The structural fix (Lead ruling): no durable tombstone is written mid-call, by any phase or delegate
+
+`clearMergeQuarantineByToken` creates ONE call-scoped `deferredTombstoneJobs: DeferredTombstoneJob[]`
+array (type defined just above `tombstoneDurablyIfConfirmed`), shared with `writeFailedIdentitiesThisCall`
+across every phase AND threaded into the `clearMergeQuarantineByKey` delegate. Every site that used to
+decide-and-write (`clearTokenFromPendingIndices`'s remove AND reduce branches, `clearActiveEntryTokenAtKey`'s
+full-lift backstop AND its own reduce branch, and `clearMergeQuarantineByKey`'s own internal decision when
+called with the two new optional trailing params) instead computes `nonFailureOk` — its own foreign-
+co-occupant/disk-scan verdict, PLUS any write failure the site itself already knows about (its own local
+`anyWriteFailed`/`writeFailed`), exactly as before — and PUSHES `{identity, tokens, repoPath, nonFailureOk}`
+onto the shared array, never calling `tombstoneDurablyIfConfirmed` itself. ONLY after every phase of the
+public call has run (pre-pass, active loop, post-arm pass — in that order, unchanged) does
+`clearMergeQuarantineByToken` walk the array ONCE and decide+write each job:
+`tombstoneDurablyIfConfirmed(job.nonFailureOk && !writeFailedIdentitiesThisCall.has(job.identity), ...)`.
+A crash before this final pass only OVER-blocks (fail-closed; no worse than the pre-existing, already-
+accepted posture) — nothing is ever written early enough to be wrong.
+
+`clearMergeQuarantineByKey`'s own two new trailing params (`deferredWriteFailedIdentitiesThisCall?:
+Set<string>`, `deferredTombstoneSink?: DeferredTombstoneJob[]`) are BOTH optional and used ONLY by the
+token path; every OTHER caller (the three identity-wide human-clear routes: `clearMergeQuarantineByRecordedPath`'s
+four call sites, `tryClearMergeQuarantineByOwnIdentity`'s matched loop, `clearMergeQuarantine`'s own
+direct call) omits both and keeps the pre-existing decide-and-write-immediately behavior byte-identical —
+this round touches NOTHING about `identityWideHumanClear:true` callers.
+
+`clearTokenFromPendingIndicesTestOnly` (the one seam that bypasses the public dispatcher entirely) now
+decides+writes its own jobs immediately, right after calling the now-deferred `clearTokenFromPendingIndices`
+— mirroring what the real dispatcher would do for a call with exactly one phase, so this seam's own
+external behavior is unchanged.
+
+### Item 4 (investigate-first): `tryClearMergeQuarantineByOwnIdentity`'s matched loop — NOT CONSTRUCTED by any existing fixture; the union mechanism leaves it open, not closed
+
+The Lead's own fix-round instructions asked whether `tryClearMergeQuarantineByOwnIdentity`'s `matched`
+loop (several `clearMergeQuarantineByKey(m.key, m.repoPath, L, true)` delegate calls, one per matched
+active entry sharing one identity, each deciding durably with only its own local `anyWriteFailed`, no
+shared set threaded between iterations) has the same class of gap — two matches for the same identity
+overlapping tokens, where a later match's own write failure should withhold an earlier match's already-
+decided tombstone.
+
+**RETRACTED (round 4): "provably unreachable" was WRONG — premise (2) below is FALSE.**
+`unionQuarantineEntries` (merge-quarantine.ts ~:1647) unconditionally unions BOTH sides' `.tokens` into
+the returned object, regardless of whether the two sides share an identity. `armQuarantineKey`
+(~:1709-1711) only re-points EVERY in-memory reference to the losing side (`replaceEntryEverywhere`) when
+that side shares the WINNING side's identity — on a genuine key COLLISION between two DIFFERENT
+identities, the losing side's own pre-union object can survive, still referenced by a pending wrapper
+nothing re-points, while the exact same token value it carries is now ALSO present in the winning side's
+own, differently-identified `armed` object. That is exactly the "two matched entries share a literal
+token" shape premise (2) claimed could never happen.
+
+1. `activeMatchesAndLiftedKeysFor` (the source of `matched`) dedupes by OBJECT REFERENCE
+   (`seen.has(entry)`) — still true, and still correct on its own terms: two array entries for one
+   identity are two genuinely distinct `MergeQuarantineEntry` objects.
+2. ~~A token is minted once, into exactly ONE entry object's own `.tokens` array.~~ **FALSE** — see above;
+   a key-collision union can duplicate a token value across two DIFFERENT identities' own objects.
+3. `test/merge-quarantine-c93e9e7a-cross-entry-liftedkeys.mjs`'s own `"recorded-path-threading-pin"`
+   scenario constructs a two-matched-active-entries-one-identity shape with DISJOINT tokens — that remains
+   true of THAT fixture, but no longer supports "disjoint is the only producible shape" now that (2) is
+   retracted.
+
+**Conclusion: NOT CONSTRUCTED, not PROVABLY UNREACHABLE.** No existing fixture in this corpus builds the
+shared-token shape through the union mechanism above, so this round found no reproducible fail-open to
+fix here — but the mechanism itself leaves the door open, and a future fixture (or a future production
+sequence) could walk through it. The human-route cross-phase shape (this `matched` loop, and the
+union-collision mechanism above) is tracked on a separate card per the Lead's own round-4 ruling, not
+fixed here.
+
+### Verification (3rd fix round)
+
+New scenarios P3, P4, P5, P6 in `packages/daemon/test/merge-quarantine-d2592cd5-reboot-between-clears.mjs`.
+P3/P4/P5 are negative-controlled (`node packages/daemon/scripts/negative-control.mjs --file
+packages/daemon/src/git/merge-quarantine.ts --test packages/daemon/test/merge-quarantine-d2592cd5-
+reboot-between-clears.mjs --ref dbaa253d`): their own six assertions (two each) went RED against
+`dbaa253d` (the branch tip carrying the 2nd fix round but not this one), GREEN restored, working tree
+confirmed byte-identical via the script's own CLEAN check. P6 is a COVERAGE PIN, not RED on `dbaa253d`
+(mirrors M8B/M4-AWF above) — see the next paragraph for its own mutant proof.
+
+Three API-keeping mutants, each gated behind a temporary `process.env.LOOM_MUTANT_*` check, run, then
+reverted (`git diff` confirmed byte-identical to pre-mutant):
+1. `LOOM_MUTANT_DECIDE_IMMEDIATELY` — decide+write every phase's own jobs right after that phase, instead
+   of once at the very end. Turned P4 and P5 RED (4 checks); P3 and P6 stayed green (their own gap is
+   closed by mutant 2/the set-check alone, not by timing-within-this-mutant's-scope).
+2. `LOOM_MUTANT_DELEGATE_WRITES_DIRECTLY` — `clearMergeQuarantineByKey` writes directly even when given
+   the deferred sink. Turned P3 and P5 RED (4 checks).
+3. `LOOM_MUTANT_IGNORE_WRITE_FAILED_SET` — the final decide pass ignores `writeFailedIdentitiesThisCall`
+   entirely. Turned Scenario B, M1, M7, M8, P1a, P1b, M8B, P3, P4, P5, AND P6 all RED (24 checks) —
+   confirming the final pass's own set-check is load-bearing for every scenario in the file, including
+   P6's own coverage-pin shape.
+
+Full `merge-quarantine-*.mjs` corpus (124 files, by name, one lane, sequential): 124/124 exit 0.
+`pnpm --filter @loom/daemon guards`: 35/35 passed. The lesson-299 ungated-landing list (9 files, run
+directly by name): all 9 passed.
+
+## Follow-up (4th fix round, Code Review `b23c7ad9` of the 3rd fix round)
+
+A 4th Code Review found the 3rd round's own structural fix still has a reproduced CRITICAL fail-open
+across a reboot: `deleteMergeQuarantineLatchByKey`'s own non-ENOENT unlink failure for `final` was
+swallowed outside `provenCoverage` — never surfaced into `anyWriteFailed`, never folded into
+`writeFailedIdentitiesThisCall`, and never re-checked at decide time. A sibling job for the SAME identity,
+pushed EARLIER (while `final` was still a live, "tracked" in-memory record, so the push-time disk scan
+correctly excluded it), sailed through decide-time unchallenged: its stale `nonFailureOk:true` durably
+tombstoned the token even though `final` still physically held it. After a reboot, boot deleted the
+kept-but-un-unlinked `final` as "covered by the tombstone," and the quarantine failed open — the card's
+own original stranding symptom, reopened by a different mechanism.
+
+### The Lead's binding ruling
+
+A token still physically held by a record whose write FAILED anywhere in a public clear call must NEVER
+be durably tombstoned by ANY decision in that same call. Two independent, redundant fixes, BOTH required:
+
+1. **A failed unlink IS a write failure.** `deleteMergeQuarantineLatchByKey` now returns `writeFailed?:
+   true` whenever its own `fs.unlinkSync(final)` fails with a non-ENOENT code outside `provenCoverage`
+   (the `provenCoverage` branch already logged but never surfaced it either — now it does, implicitly, by
+   feeding the same new field). Every caller folds it into its own `anyWriteFailed`
+   (`clearMergeQuarantineByKey`'s two call sites) or directly into `writeFailedIdentitiesThisCall`
+   (`clearTokenFromPendingIndices`'s own "remove" branch, which has no `anyWriteFailed` local of its own).
+2. **The decide-time verdict is RE-DERIVED, not trusted.** `decideDeferredTombstones` (the new,
+   extracted, single decision point — see "Structural" below) re-runs
+   `identityHasAnyPhysicalRecordHoldingToken(job.identity, job.tokens, trackedBasenamesForIdentity(job.identity))`
+   fresh, for every job, at the very end of the whole public call — never trusting `job.nonFailureOk` (a
+   push-time snapshot) alone. This is strictly fail-closed on top of the two push-time conditions: ANDing
+   a third, freshly-re-read check can only ever turn a `true` into a `false`.
+
+### Structural
+
+- `clearMergeQuarantineByKey`'s two independently-optional trailing params
+  (`deferredWriteFailedIdentitiesThisCall?`, `deferredTombstoneSink?`) are collapsed into ONE optional
+  `deferred?: { writeFailed: Set<string>; sink: DeferredTombstoneJob[] }`, discriminated via TypeScript
+  overloads on `identityWideHumanClear`: the `false` overload (the token path's one real caller,
+  `clearActiveEntryTokenAtKey`) REQUIRES `deferred` at compile time; the `true` overload (every
+  identity-wide human-clear route) takes none. A token-path call site that forgets `deferred` can no
+  longer compile — this was previously enforceable only by convention.
+- `decideDeferredTombstones(jobs, writeFailedIdentitiesThisCall)` is the ONE place every deferred decision
+  is made, used by both `clearMergeQuarantineByToken`'s own end-of-call loop and
+  `clearTokenFromPendingIndicesTestOnly` (which used to hand-copy the same loop).
+
+### The empirical finding: both rulings are independently redundant for THIS reproduced shape
+
+Verified by temporarily neutering each fix in isolation and re-running the full scenario corpus (reverted
+after each check; `git diff` confirmed byte-identical):
+
+- Ruling 1 alone disabled (the unlink-failure fold reverted, ruling 2 intact): Scenario P7 (below) still
+  passes — `decideDeferredTombstones`'s own fresh disk re-scan independently catches it, since a full lift
+  always deletes its own basename from live tracking regardless of whether the physical unlink succeeded.
+- Ruling 2 alone disabled (the decide-time re-derivation reverted to a no-op, ruling 1 intact): P7 still
+  passes — the unlink failure still reaches the PRE-EXISTING, round-2/3 `writeFailedIdentitiesThisCall`
+  set via ruling 1's fold, and EVERY job already ANDs against that set at decide time.
+- BOTH rulings disabled together: exactly P7's own three "THE FIX"/"NEVER FAIL-OPEN" assertions go RED
+  (171 → 168 PASS), and nothing else regresses — a clean, surgical proof that P7 depends on "ruling 1 OR
+  ruling 2," never on one specifically. The Lead's own "do ALL" instruction was correct caution, not
+  redundant busywork: either fix alone closes this exact reproduced shape, which is why no single-mutant
+  test can cleanly attribute the fix to one ruling over the other — only the combined mutant discriminates.
+- The pre-existing round-3 mutant (`decideDeferredTombstones` ignoring `writeFailedIdentitiesThisCall`
+  entirely) still turns the SAME 24 checks RED across the SAME scenario families (B, M1, M7, M8, P1a,
+  P1b, M8B, P3, P4, P5, P6) as documented above — unaffected by the refactor, and P7 is NOT among them
+  (consistent with the previous bullet: P7 does not depend on the set alone).
+
+### Verification (4th fix round)
+
+New Scenario P7 in `packages/daemon/test/merge-quarantine-d2592cd5-reboot-between-clears.mjs`, modelled
+directly on the reviewer's own scratch probe (not committed): W active, holding `[s]` alone, full lift; a
+non-twin pending P, same identity, also holding `[s]` alone, its own job pushed in the pre-pass; W's own
+final unlink faulted (EPERM). Negative-controlled (`node packages/daemon/scripts/negative-control.mjs
+--file packages/daemon/src/git/merge-quarantine.ts --test packages/daemon/test/merge-quarantine-d2592cd5-
+reboot-between-clears.mjs --ref fef745b0`): P7's own assertions RED against `fef745b0` (the branch tip
+carrying the 3rd fix round but not this one), GREEN restored, working tree confirmed byte-identical.
+
+Full `merge-quarantine-d2592cd5-reboot-between-clears.mjs` (171/171) and
+`merge-quarantine-3d4467cf-full-lift-stray-reblock.mjs` (55/55) both green after the fix.
+
+### What this round did NOT fix — named explicitly, not silently dropped
+
+- **Two OTHER sites with the same class of swallow, found while auditing "the other delete/sweep sites in
+  the token path" per the Lead's own instruction, neither fixed in this round:**
+  `sweepTmpResidueForHashIfUnreferenced`'s own same-hash loop (merge-quarantine.ts ~:6568-6572) silently
+  discards a non-ENOENT unlink failure for a tmp residue that was never already `keptUnreadableLatchFiles`-
+  marked — strictly WORSE than the fixed site (it doesn't even set `anyUnattributed`, let alone a
+  write-failure signal). `orphanLatchFileSweepDecision`'s own bare `unlinkLatchFile(filename)` call (its
+  "safe to delete" branch) similarly never surfaces an unlink failure. Both are structurally the same
+  pattern this round closed at `deleteMergeQuarantineLatchByKey`, but neither is exercised by this round's
+  own reproduced CRITICAL (which is specific to a full-lift's own `final`), and fixing them correctly
+  needs its own investigation of each function's own surrounding invariants — flagged for a follow-up
+  card, not fixed here.
+- **`clearTokenFromPendingIndices`'s own "remove" branch fix (`removeWriteFailed`, ruling 1's second
+  required site) is pinned by scenario P8 (reboot-between-clears test) — a triple-masked, so triple-redundant, pin.** Its own `plan.ownedArmedKeys` loop
+  (where the fix lives) is only ever non-empty for a pending entry whose `armedKeys` are STILL "owned" per
+  `entryStillOwnsKey` — which, for a purely pending-only entry, requires either the exact same object also
+  being live in `activeQuarantines` (a genuine dual-tracked twin — which is structurally EXCLUDED from
+  ever reaching `clearTokenFromPendingIndices` at all, since `clearMergeQuarantineByToken`'s own
+  `activeMatches`-based filter routes it to `clearActiveEntryTokenAtKey`/`clearMergeQuarantineByKey`
+  instead) or the established "key-drift" shape (a DIFFERENT, subset-token object currently occupying
+  that key under the same identity). P8 builds the latter (pending P names Kw; a different subset-token Q occupies it) and forces an EPERM unlink on Kw's final. THREE independent masks withhold the durable tombstone there: `removeWriteFailed`, `decideDeferredTombstones`'s decide-time rescan, and the remove branch's push-time `nonFailureOk` (computed after the in-memory delete, so it already sees the surviving final). Only ALL THREE off flips P8 (two assertions); with `removeWriteFailed` alone back on and the other two still off, P8 stays green. So P8 pins the observable never-tombstone contract, NOT `removeWriteFailed` in isolation. The remove branch also folds an unattributed `kept` from its own sourceFile sweep into `removeWriteFailed`.
+  (RED/GREEN evidence: the mutant table in the round-4 report; not restated here); the fix also did not regress the existing
+  171+55 passing checks.

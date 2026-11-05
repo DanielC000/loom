@@ -796,6 +796,24 @@ export function resetClearedTokensTestOnly(): void {
 }
 
 /**
+ * A single durable-tombstone decision `clearMergeQuarantineByToken` has deferred rather than written
+ * immediately. `nonFailureOk` is that site's own already-computed foreign-co-occupant/disk-scan verdict
+ * (any LOCAL write-failure the site itself already knows about is folded in here too — see each push
+ * site's own comment); it is never re-derived at push time. The final decision, made once after every
+ * phase of the public call has settled (see {@link decideDeferredTombstones}), additionally ANDs in
+ * `!writeFailedIdentitiesThisCall.has(identity)` AND a FRESH re-derivation of the same physical-holder
+ * scan each push site already ran.
+ *
+ * @decision d2592cd5 (3rd fix round, card 3d4467cf) — see `clearMergeQuarantineByToken`'s own doc for why
+ * a write failure discovered in ANY phase of one call must withhold EVERY job sharing its identity.
+ *
+ * @decision d2592cd5 (round 4, card 3d4467cf) — `nonFailureOk` is PUSH-TIME only; {@link
+ * decideDeferredTombstones} ALSO re-derives the physical-holder check fresh at DECIDE time — a delete/
+ * unlink failure that never reaches `writeFailedIdentitiesThisCall` can otherwise slip through unseen.
+ */
+type DeferredTombstoneJob = { identity: string; tokens: string[]; repoPath: string | string[]; nonFailureOk: boolean };
+
+/**
  * The DURABLE twin of {@link tombstoneIfNotSurviving} — call ONLY when the caller's own clearing WRITE
  * for `tokens` under `clearingIdentity` has ITSELF been durably confirmed to succeed. Never gate this on
  * the generic "nothing survives in memory" check `tombstoneIfNotSurviving` already runs unconditionally
@@ -837,6 +855,29 @@ function tombstoneDurablyIfConfirmed(durablyConfirmed: boolean, tokens: string[]
     }
   }
   persistClearedTokensTombstoneFile();
+}
+
+/**
+ * THE single place every deferred durable-tombstone decision in {@link clearMergeQuarantineByToken} (and
+ * its {@link clearTokenFromPendingIndicesTestOnly} seam) is actually made — called ONCE, after every
+ * phase of the public call has fully settled, never per-phase and never mid-call.
+ *
+ * @decision d2592cd5 (round 4, card 3d4467cf, Code Review `b23c7ad9`) — re-derives the SAME physical-
+ * holder scan fresh, never trusting `job.nonFailureOk` (a push-time snapshot) alone — a delete/unlink
+ * failure that never reaches `writeFailedIdentitiesThisCall` can otherwise slip a sibling job through.
+ *
+ * This is STRICTLY fail-closed on top of the two push-time conditions — ANDing a third, freshly-re-read
+ * check can only ever turn a `true` into a `false`, never the reverse. Never AND in anything the foreign-
+ * co-occupant backstop deliberately overrides (`anyReferencing`/`latchKept`/`contentKeptRepoPaths`,
+ * G1/G2) — this helper re-derives ONLY the identity-scoped physical check every push site already ran.
+ */
+function decideDeferredTombstones(jobs: readonly DeferredTombstoneJob[], writeFailedIdentitiesThisCall: ReadonlySet<string>): void {
+  for (const job of jobs) {
+    const stillOk = job.nonFailureOk
+      && !writeFailedIdentitiesThisCall.has(job.identity)
+      && !identityHasAnyPhysicalRecordHoldingToken(job.identity, job.tokens, trackedBasenamesForIdentity(job.identity));
+    tombstoneDurablyIfConfirmed(stillOk, job.tokens, job.repoPath);
+  }
 }
 
 /**
@@ -892,6 +933,10 @@ function identityHasAnyPhysicalRecordOnDisk(identity: string): boolean {
  * @decision d2592cd5 (Follow-up, three-original-sites round) — derive this fresh from live state rather
  * than hand-threading a written-basenames set through each clear path — a missed accumulation there
  * would silently reopen the exact over-blocking regression this helper exists to avoid.
+ *
+ * @decision d2592cd5 (round 4, card 3d4467cf) — called a SECOND time per job, fresh, by {@link
+ * decideDeferredTombstones} (once per push-time site, once more at the final decide pass). The two calls
+ * can legitimately disagree — a basename tracked at push time can be gone by decide time — on purpose.
  */
 function trackedBasenamesForIdentity(identity: string): Set<string> {
   const basenames = new Set<string>();
@@ -911,16 +956,16 @@ function trackedBasenamesForIdentity(identity: string): Set<string> {
 /**
  * The TOKEN-AWARE twin of {@link identityHasAnyPhysicalRecordOnDisk} — safe to use at a PARTIAL (reduce)
  * clear, where a KNOWN, ALREADY-TRACKED sibling for the same identity (this entry's own written finals,
- * plus every basename in its own `orphanLatchFiles` — including one whose rewrite just FAILED and so
- * still, acknowledgedly, holds the stale token) is expected to keep physically surviving; the bare
+ * plus every basename in its own `orphanLatchFiles`) is expected to keep physically surviving; the bare
  * identity-only check would wrongly treat any such already-accounted-for survivor as a reason to skip the
- * durable tombstone, defeating this card's own core mechanism (a tracked-but-stale sibling is exactly what
- * the tombstone exists to cover for at the NEXT boot). `excludeBasenames` names every basename this call's
- * own tracking already accounts for; only an identity-matching file OUTSIDE that set, still physically
- * carrying one of `tokens` right now, is the genuine AE danger (a wholly separate, untracked sibling).
- * Fail-closed: a readdir/read/parse failure returns `true` (treat as "still there"). Called at the three
- * PARTIAL (reduce) clear sites: `clearTokenFromPendingIndices`'s reduce branch, `clearActiveEntryTokenAtKey`'s
- * reduce branch, and `clearMergeQuarantineByKey`'s one deferred call.
+ * durable tombstone, defeating this card's own core mechanism. `excludeBasenames` names every basename
+ * this call's own tracking already accounts for; only an identity-matching file OUTSIDE that set, still
+ * physically carrying one of `tokens` right now, is the genuine AE danger (a wholly separate, untracked
+ * sibling) THIS SCAN alone can see. Fail-closed: a readdir/read/parse failure returns `true`.
+ *
+ * @decision d2592cd5 (fix round, card 3d4467cf, 2nd fix round) — CORRECTED: a tracked sibling "whose
+ * rewrite just FAILED" is NOT "exactly what the tombstone exists to cover for" — this scan structurally
+ * CANNOT see that case; every caller additionally ANDs in the call-scoped `writeFailedIdentitiesThisCall`.
  *
  * @decision d2592cd5 (Follow-up, three-original-sites round) — pass every basename this call's own
  * write/orphan tracking already accounts for as `excludeBasenames`: a known, tracked-but-stale sibling
@@ -3174,7 +3219,7 @@ export function reconcileClearedEntryIfPlaceholderTestOnly(entry: MergeQuarantin
  */
 // @decision 1fea8b15 — `clearIdentity` is REQUIRED, never optional: every current caller already passes
 // a real `directPathIdentity(...)` value, and the content-check protection above depends on it structurally.
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string, liftedKeys: ReadonlySet<string>, identityWideHumanClear: boolean): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; unattributed?: true } {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string, liftedKeys: ReadonlySet<string>, identityWideHumanClear: boolean): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; unattributed?: true; writeFailed?: true } {
   const final = quarantinePathForKey(key);
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — every key THIS clear is itself touching, never
   // `key` alone — the caller computes it (via `ownedKeysIncluding`/`keysToLift`) and must pass it
@@ -3270,6 +3315,10 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   // ONE shape this function's own return had no way to represent at all (card 702b4241's own basename-
   // only unreadable mark, with no foreign identity attached), silently losing the keep at every caller.
   let unattributedKept = false;
+  // @decision d2592cd5 (round 4, card 3d4467cf) — a non-ENOENT unlink failure here IS a write failure:
+  // `final` still physically holds whatever tokens this clear meant to remove. Surfaced so every caller
+  // can fold it into its own `anyWriteFailed`/`writeFailedIdentitiesThisCall` — see the decision record.
+  let ownFinalWriteFailed = false;
   if (finalProtectOk) {
     let unlinkConfirmed = true;
     try {
@@ -3277,6 +3326,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") unlinkConfirmed = false;
     }
+    if (!unlinkConfirmed) ownFinalWriteFailed = true;
     if (provenCoverage) {
       if (unlinkConfirmed) {
         keptUnreadableLatchFiles.delete(finalBasename);
@@ -3284,6 +3334,9 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] ${finalBasename} could not be CONFIRMED removed (an EPERM/EBUSY-shaped unlink failure) even though its content was just proven fully covered by this clear — the mark stays set, fail-closed, until a later successful read or delete resolves it.`);
       }
+    } else if (!unlinkConfirmed) {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] ${finalBasename}'s own unlink could not be CONFIRMED (an EPERM/EBUSY-shaped failure) — it may still physically hold tokens this clear meant to remove; the caller must withhold any durable tombstone for this clear until that is resolved.`);
     }
     // @decision 8db913e2 (round 4, CR3 BLOCKER 1) — NEVER tombstone here: `finalProtectOk` true also
     // covers "copied aside, still enforced". The caller's own top-level clear tombstones once, at its own
@@ -3350,6 +3403,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     relocated: persistedRelocated,
     contentKept,
     ...(unattributedKept ? { unattributed: true as const } : {}),
+    ...(ownFinalWriteFailed ? { writeFailed: true as const } : {}),
   };
 }
 
@@ -5270,7 +5324,14 @@ function logPartialClearStillBlocked(token: string, entry: MergeQuarantineEntry,
  * @decision 1922be3a (round 3) — generalized from a single `findIndex` to every matching index, applying
  * this same per-entry logic to each, in descending order. See the decision record.
  */
-function clearTokenFromPendingIndices(indices: number[], token: string): void {
+// @decision d2592cd5 (fix round, card 3d4467cf, 2nd fix round) — `writeFailedIdentitiesThisCall` is ONE
+// set `clearMergeQuarantineByToken` shares across every phase of a single public call; see that
+// function's own doc for why a per-invocation-local set cannot see a cross-phase write failure.
+//
+// @decision d2592cd5 (3rd fix round, card 3d4467cf) — `deferredTombstoneJobs` is likewise shared: this
+// function only PUSHES jobs now, never decides-and-writes at its own end — a later phase's own failure,
+// for the same identity, could otherwise never un-write an earlier phase's already-durable tombstone.
+function clearTokenFromPendingIndices(indices: number[], token: string, writeFailedIdentitiesThisCall: Set<string>, deferredTombstoneJobs: DeferredTombstoneJob[]): void {
   // @decision 9c681680 — plan keyed by WRAPPER OBJECT, never by index: a protect call reached from this
   // same loop's own "remove" branch can splice an UNRELATED entry out of this array mid-loop, shifting a
   // not-yet-processed index onto a DIFFERENT wrapper (mirrors 07e3ad30's own fix for the identical hazard).
@@ -5292,6 +5353,10 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
   // only for log-ordering parity, never relied on for correctness — every write below resolves its own
   // current index (or avoids needing one) fresh, right before use.
   const targets = [...indices].sort((a, b) => b - a).map((idx) => pendingUnresolvedQuarantines[idx] as PendingUnresolvedQuarantine);
+
+  // @decision d2592cd5 (fix round, 2nd/3rd fix rounds, card 3d4467cf) — every target's decision is
+  // deferred past this whole batch (P1, both orders) AND, since the 3rd round, past the whole public
+  // call — pushed into the shared `deferredTombstoneJobs` parameter, never decided here.
 
   for (const pending of targets) {
     const identity = directPathIdentity(pending.entry.repoPath);
@@ -5350,11 +5415,16 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // index's own removal in THIS SAME descending loop may have already mutated. A repeated
       // `deleteMergeQuarantineLatchByKey` on a key an earlier twin already deleted is intentional and
       // idempotent (its own `fs.unlinkSync` tolerates ENOENT; nothing else re-runs destructively).
+      // @decision d2592cd5 (round 4, card 3d4467cf) — tracks whether ANY owned key's own delete failed to
+      // durably unlink its final: that final still physically holds `token`, so this "remove" target's
+      // own deferred decision below must withhold, same as the reduce branch's own `writeFailed` local.
+      let removeWriteFailed = false;
       for (const k of plan.ownedArmedKeys) {
         activeQuarantines.delete(k);
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
         // @decision 656fdf39 (CR d1e02886 round 3) — `false`: a token-scoped clear is never identity-wide.
-        const { relocated } = deleteMergeQuarantineLatchByKey(k, undefined, live.entry, identity, L, false);
+        const { relocated, writeFailed: deleteWriteFailed } = deleteMergeQuarantineLatchByKey(k, undefined, live.entry, identity, L, false);
+        if (deleteWriteFailed) removeWriteFailed = true;
         // @decision 182c01cc (round 2, item 4) — clearMergeQuarantineByToken has no human route to report
         // a relocation through; LOG it (disclosure-safe: repoPath + pending id, never content) rather than
         // silently discarding it, same as clearActiveEntryTokenAtKey's own full-lift call below.
@@ -5368,12 +5438,12 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
       // @decision 0d3b64c6 (round 2, S1) — `live.entry.repoPath` (RAW), never the already-normalized
       // `identity` local — see tombstoneIfNotSurviving's own doc for why a pre-normalized value drops
       // the literal namespace's own attribution.
-      //
-      // @decision d2592cd5 (fix round, Follow-up) — this full-lift branch deliberately does NOT call
-      // `tombstoneDurablyIfConfirmed` — see the decision record's "the two full-lift branches" section
-      // for why leaving this in-memory-only is safe (never fail-open) rather than a gap to close here.
       tombstoneIfNotSurviving([token], live.entry.repoPath);
-      sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile);
+      // @decision d2592cd5 — a `kept` with NO referencer (failed unlink) still holds `token`: a write
+      // failure, like the sibling loop's `anyKeptUnattributed`; a kept WITH referencers is another
+      // owner's record, covered by the decide-time scan.
+      const ownSourceSweep = sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile);
+      if (ownSourceSweep.kept && ownSourceSweep.referencingRepoPaths.length === 0) removeWriteFailed = true;
       // @decision 8db913e2 (Follow-up f2cc5f18) — `live.entry.tokens` captured via the `live` binding
       // resolved above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
       //
@@ -5392,6 +5462,14 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] a token-clear's own full lift also kept ${orphanNamed.length} orphan file reference(s) alive${orphanSweepResult.anyUnattributed ? " (plus at least one more, unattributed)" : ""} (no human route reaches this path — logging only)${orphanNamed.length > 0 ? `: ${orphanNamed.map((rp) => `'${rp}'`).join(", ")}` : ""}.`);
       }
+      // @decision d2592cd5 (3rd fix round, card 3d4467cf) — DEFERRED past the whole public call now, not
+      // just this batch — `nonFailureOk` is computed NOW; see `DeferredTombstoneJob`'s own doc.
+      //
+      // @decision d2592cd5 (round 4, card 3d4467cf) — `removeWriteFailed` folds in too: the "no separate
+      // write/sweep-failure tracking is needed at this site" claim this comment used to make (superseded
+      // by this round) missed a FAILED delete of this entry's own basename; see `decideDeferredTombstones`.
+      if (removeWriteFailed) writeFailedIdentitiesThisCall.add(identity);
+      deferredTombstoneJobs.push({ identity, tokens: [token], repoPath: live.entry.repoPath, nonFailureOk: !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)) });
       continue;
     }
     const remaining = live.entry.tokens.filter((t) => t !== token);
@@ -5471,15 +5549,15 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
     // @decision 55939b88 — log once here (never in a write branch above) via the shared formatter, using
     // `live.entry`'s final post-write state, not the pre-write `remaining` local. See the decision record.
     logPartialClearStillBlocked(token, live.entry, writeFailed);
-    // @decision d2592cd5 — durable echo ONLY when the narrowing write above actually succeeded for every
-    // target it touched (`writeFailed` is false); never on the generic in-memory tombstone call above,
-    // which also fires on a failed write by design.
-    //
-    // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
-    // UNTRACKED on-disk sibling for this identity still carries `token` — see
-    // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
-    tombstoneDurablyIfConfirmed(!writeFailed && !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)), [token], live.entry.repoPath);
+    // @decision d2592cd5 (fix round, 2nd/3rd fix rounds, card 3d4467cf) — the write-failure signal is
+    // folded into the CALL-SCOPED set first, for every OTHER deferred job (this call's, and every later
+    // phase's) to AND against at the public dispatcher's own end — `nonFailureOk` here never includes it.
+    if (writeFailed) writeFailedIdentitiesThisCall.add(identity);
+    deferredTombstoneJobs.push({ identity, tokens: [token], repoPath: live.entry.repoPath, nonFailureOk: !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)) });
   }
+  // @decision d2592cd5 (3rd fix round, card 3d4467cf) — nothing decided/written here any more; every job
+  // above is already pushed into the caller's shared `deferredTombstoneJobs` array (this function's own
+  // parameter IS that array) — the public dispatcher decides+writes every job once, after all phases run.
 }
 
 /** TEST-ONLY: calls the private {@link clearTokenFromPendingIndices} directly, bypassing
@@ -5492,7 +5570,12 @@ function clearTokenFromPendingIndices(indices: number[], token: string): void {
  *  by `index.ts` — the `TestOnly` suffix is load-bearing: `no-src-testonly-import-guard.mjs` matches
  *  `/TestOnly$/` specifically to catch a future import of this exact kind of seam into production code. */
 export function clearTokenFromPendingIndicesTestOnly(indices: number[], token: string): void {
-  clearTokenFromPendingIndices(indices, token);
+  // @decision d2592cd5 (2nd/3rd fix rounds, card 3d4467cf) — fresh, call-local state (no cross-phase
+  // sibling to share with); decide+write every job right here, as the dispatcher would for one phase.
+  const writeFailedIdentitiesThisCall = new Set<string>();
+  const deferredTombstoneJobs: DeferredTombstoneJob[] = [];
+  clearTokenFromPendingIndices(indices, token, writeFailedIdentitiesThisCall, deferredTombstoneJobs);
+  decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
 }
 
 /** TEST-ONLY: the CURRENT `pendingUnresolvedQuarantines` index whose entry shares `repoPath`'s own
@@ -5525,7 +5608,9 @@ export function findPendingIndexByIdentityTestOnly(repoPath: string): number {
  * all when reached via the identity scan) — same rule as every other degraded-identity-aware write site
  * in this module.
  */
-function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, token: string): void {
+// @decision d2592cd5 (2nd/3rd fix rounds, card 3d4467cf) — `writeFailedIdentitiesThisCall` and
+// `deferredTombstoneJobs` are shared across every phase (P2, and the delegate-visibility gap below).
+function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, token: string, writeFailedIdentitiesThisCall: Set<string>, deferredTombstoneJobs: DeferredTombstoneJob[]): void {
   const remaining = entry.tokens.filter((t) => t !== token);
   if (remaining.length === 0) {
     // @decision 883e29bc — clear via the key/entry ALREADY matched (c0be9bf9's rule), never by
@@ -5535,7 +5620,11 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     // @decision 8db913e2 (Follow-up d6efbc9b) — the delegated call's own touchedFinalBasenames-gated
     // tombstone can leave a RELEASED token un-tombstoned; tombstone it unconditionally here too.
     // @decision 656fdf39 (CR d19f0490 round 4, nit 2) — `false` explicit: a token-scoped clear is never identity-wide.
-    const result = clearMergeQuarantineByKey(key, entry.repoPath, undefined, false);
+    //
+    // @decision d2592cd5 (3rd fix round, card 3d4467cf) — thread the shared set/array into the delegate
+    // too: its own internal durable-tombstone call used to decide+write immediately, invisible to a
+    // failure from any OTHER phase and able to fire BEFORE this function's own backstop below even runs.
+    const result = clearMergeQuarantineByKey(key, entry.repoPath, undefined, false, { writeFailed: writeFailedIdentitiesThisCall, sink: deferredTombstoneJobs });
     // @decision 182c01cc (round 2, item 4) — same disclosure-safe logging as clearTokenFromPendingIndices
     // above; clearMergeQuarantineByToken has no human route to report a relocation through otherwise.
     const { kept, relocated } = splitCoOccupants(result?.stillBlockedCoOccupants, result?.referencingRepoPaths);
@@ -5555,10 +5644,25 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       // eslint-disable-next-line no-console
       console.warn(`[merge-quarantine] a token-clear's own full lift at key ${key} also kept ${result.contentKeptRepoPaths.length} orphan file reference(s) alive, content-parsed as belonging to (no human route reaches this path — logging only): ${result.contentKeptRepoPaths.map((rp) => `'${rp}'`).join(", ")}`);
     }
-    // @decision d2592cd5 (fix round, Follow-up) — this unconditional, in-memory-only call is deliberately
-    // NOT paired with a `tombstoneDurablyIfConfirmed` of its own — see the decision record's "the two
-    // full-lift branches" section for why that's safe (never fail-open), not a gap left open here.
     tombstoneIfNotSurviving([token], entry.repoPath);
+    // @decision d2592cd5 (Follow-up, card 3d4467cf) — durable echo for `token` ALONE, gated by a fresh
+    // post-delegation disk re-verification; see the decision record's "card 3d4467cf" section for why
+    // this is independent of the call above (supersedes "the two full-lift branches").
+    //
+    // @decision d2592cd5 (fix round, card 3d4467cf) — AND in `result.anyWriteFailed` too: a tied pending
+    // twin's own failed reduce-write is invisible to the disk scan below (its basename reads "tracked").
+    // Never AND in `latchKept`/`referencingRepoPaths`/`contentKeptRepoPaths` — G1/G2 overrides those.
+    //
+    // @decision d2592cd5 (2nd fix round) — ALSO AND against the CALL-SCOPED `writeFailedIdentitiesThisCall`:
+    // a NON-TWIN pending sibling sharing this identity, reduced earlier in this SAME call's own pre-pass,
+    // can fail its write and still read "tracked" here (P2).
+    //
+    // @decision d2592cd5 (3rd fix round, card 3d4467cf) — DEFERRED, not written here: push a job instead
+    // (`nonFailureOk` computed NOW, same scan as before) — the public dispatcher decides+writes it, once,
+    // after every phase (including this one's own delegate call above) has settled.
+    const identity = directPathIdentity(entry.repoPath);
+    if (result.anyWriteFailed) writeFailedIdentitiesThisCall.add(identity);
+    deferredTombstoneJobs.push({ identity, tokens: [token], repoPath: entry.repoPath, nonFailureOk: !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)) });
     return;
   }
   // @decision 6be6c9ff — derive via {@link liveArmedKeys}, before `updated` so it can be stamped onto it
@@ -5684,8 +5788,16 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
   // UNTRACKED on-disk sibling for this identity still carries `token` — see
   // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
+  //
+  // @decision d2592cd5 (2nd fix round) — fold THIS write failure into the CALL-SCOPED
+  // `writeFailedIdentitiesThisCall` too — same reasoning as the backstop above.
+  //
+  // @decision d2592cd5 (3rd fix round, card 3d4467cf) — DEFERRED, not written here: push a job instead,
+  // same reasoning as the full-lift backstop above — a pre-pass failure for this same identity must be
+  // able to withhold THIS decision too, even though it is discovered only AFTER the pre-pass already ran.
   const identity = directPathIdentity(entry.repoPath);
-  tombstoneDurablyIfConfirmed(!writeFailed && !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)), [token], entry.repoPath);
+  if (writeFailed) writeFailedIdentitiesThisCall.add(identity);
+  deferredTombstoneJobs.push({ identity, tokens: [token], repoPath: entry.repoPath, nonFailureOk: !identityHasAnyPhysicalRecordHoldingToken(identity, [token], trackedBasenamesForIdentity(identity)) });
 }
 
 /**
@@ -5731,12 +5843,20 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   // mere pending presence: the relocate-foreign-occupant path can fold `token` into an already-pending
   // record mid-call, which a presence-only exclusion strands forever — never widen back to bare presence.
   const identitiesPendingBeforeCall = new Set(pendingUnresolvedQuarantines.filter((p) => p.entry.tokens.includes(token)).map((p) => directPathIdentity(p.entry.repoPath)));
+  // @decision d2592cd5 (fix round, card 3d4467cf, 2nd fix round) — ONE call-scoped write-failed-identity
+  // set, shared across every phase below: a failure discovered in one phase must withhold every OTHER
+  // phase's own durable-tombstone decision for that identity in this SAME call (P1/P2).
+  const writeFailedIdentitiesThisCall = new Set<string>();
+  // @decision d2592cd5 (3rd fix round, card 3d4467cf) — ONE call-scoped deferred-job list, shared across
+  // every phase/delegate: NO durable tombstone is written mid-call any more — see the end-of-call loop
+  // below and `DeferredTombstoneJob`'s own doc for the two reproduced gaps this closes.
+  const deferredTombstoneJobs: DeferredTombstoneJob[] = [];
   const activeMatches = new Set<MergeQuarantineEntry>();
   for (const [, entry] of activeQuarantines) {
     if (entry.tokens.includes(token)) activeMatches.add(entry);
   }
   const nonTwinPendingIndices = collectPendingIndices((p) => p.entry.tokens.includes(token) && !activeMatches.has(p.entry));
-  clearTokenFromPendingIndices(nonTwinPendingIndices, token);
+  clearTokenFromPendingIndices(nonTwinPendingIndices, token, writeFailedIdentitiesThisCall, deferredTombstoneJobs);
   const seen = new Set<MergeQuarantineEntry>();
   // @decision 1dd00dca — relies on Map visiting entries inserted mid-iteration (the orphan arm inside
   // clearActiveEntryTokenAtKey); never iterate a snapshot, or a resolvable foreign T strands on the dead
@@ -5747,7 +5867,7 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
     // entry armed under several keys can hit a NON-matching key first in Map iteration order — marking it
     // seen there would permanently hide the SAME entry's later, genuinely matching key.
     seen.add(entry);
-    clearActiveEntryTokenAtKey(k, entry, token);
+    clearActiveEntryTokenAtKey(k, entry, token, writeFailedIdentitiesThisCall, deferredTombstoneJobs);
   }
   // @decision 028837ad — a FRESH, independent second pending pass: `nonTwinPendingIndices` above is a
   // snapshot taken before the active loop, blind to a foreign identity armed PENDING mid-call. Never
@@ -5757,7 +5877,11 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
     if (entry.tokens.includes(token)) activeMatchesAfterLoop.add(entry);
   }
   const postArmPendingIndices = collectPendingIndices((p) => p.entry.tokens.includes(token) && !activeMatchesAfterLoop.has(p.entry) && !identitiesPendingBeforeCall.has(directPathIdentity(p.entry.repoPath)));
-  clearTokenFromPendingIndices(postArmPendingIndices, token);
+  clearTokenFromPendingIndices(postArmPendingIndices, token, writeFailedIdentitiesThisCall, deferredTombstoneJobs);
+  // @decision d2592cd5 (3rd fix round, card 3d4467cf) — decide and write every deferred job exactly ONCE,
+  // now that every phase of this public call (including every delegate) has fully settled — a crash
+  // before this point only OVER-blocks (fail-closed; never worse than the pre-fix behavior).
+  decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
 }
 
 /**
@@ -6842,7 +6966,20 @@ export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | un
 // @decision 656fdf39 (CR d1e02886 round 3/4) — `identityWideHumanClear` gates the re-ingest below:
 // `true` ONLY from the three identity-wide human clear routes, NEVER a token-scoped clear. REQUIRED
 // (round 4) — mirrors `deleteMergeQuarantineLatchByKey`'s own required param.
-export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: boolean): { wasQuarantined: boolean; liftedRepoPaths: string[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unattributed?: true; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+type ClearByKeyResult = { wasQuarantined: boolean; liftedRepoPaths: string[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unattributed?: true; stillBlockedCoOccupants: BlockedCoOccupant[]; anyWriteFailed: boolean };
+type DeferredClearContext = { writeFailed: Set<string>; sink: DeferredTombstoneJob[] };
+/**
+ * @decision d2592cd5 (3rd fix round, card 3d4467cf) — `deferred`, used only by the token path: when given,
+ * this function PUSHES a job instead of deciding+writing immediately. Every `identityWideHumanClear:true`
+ * caller omits it, keeping this function's pre-existing decide-and-write-immediately behavior unchanged.
+ *
+ * @decision d2592cd5 (round 4, card 3d4467cf) — collapsed from two independently-optional trailing params
+ * into ONE object, discriminated via the overloads below: `false` (the token path's one real caller) now
+ * REQUIRES `deferred` at COMPILE time — a call site that forgets it can no longer compile.
+ */
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: false, deferred: DeferredClearContext): ClearByKeyResult;
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: true): ClearByKeyResult;
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: boolean, deferred?: DeferredClearContext): ClearByKeyResult {
   let entry = activeQuarantines.get(key);
   // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest BEFORE anything below reads `entry.tokens`, so
   // a stale boot placeholder's own synthetic token never feeds a coverage decision in its place; see
@@ -6881,8 +7018,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
   // FOREIGN occupant (d2582692's shape) this clear ends up PROTECTING, not destroying.
   const candidateTokens: string[] = [...(entry?.tokens ?? [])];
-  // @decision d2592cd5 — set true at either of this function's own two write-failure branches below; the
-  // durable tombstone call at this function's own end is gated on this staying false.
+  // @decision d2592cd5 (round 4, card 3d4467cf) — set true at any of this function's own now-FOUR
+  // write-failure branches below (the reduce branch's two armed-key/pending-divert writes, plus a
+  // failed unlink folded in from either `deleteMergeQuarantineLatchByKey` call). See `tombstoneDurablyIfConfirmed`'s own doc for how this feeds a decision, on either route.
   let anyWriteFailed = false;
 
   // Lift EVERY key this entry is armed under (its own tracked set), never reference equality — a union or
@@ -7002,6 +7140,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     // unreadable mark, or any other claimant-less protect failure) into this function's own return —
     // previously lost entirely, so a kept file reported as a bare, unqualified success.
     if (r.unattributed) anyKeptUnattributed = true;
+    // @decision d2592cd5 (round 4, card 3d4467cf) — a failed unlink of `final` itself IS a write failure
+    // too: fold it into `anyWriteFailed`, same as the reduce branch's own two write-failure branches below.
+    if (r.writeFailed) anyWriteFailed = true;
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   // @decision 656fdf39 (CR 66fad7ed round 2) — paired with each pushed entry's OWN (already-reconciled)
@@ -7032,7 +7173,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       const writtenBasenames = new Set<string>([p.sourceFile]);
       // @decision 2dd97aaa (Follow-up 58957b1e) — pass the FULL `entry!.tokens` as `droppedTokens`, same
       // strict-superset reasoning (and same value) as this branch's own `writePendingDivertFile` call
-      // below — this write runs BEFORE the function's one deferred tombstone call (line ~4472).
+      // below — this write runs BEFORE this function's own tombstone decision, near its end.
       //
       // @decision 1fc3a561 — iterates `liveKeysBeforeRepoint`; the next line's live
       // `activeQuarantines.get(k) !== updated` re-check is the ownership gate, stricter than a one-time
@@ -7130,6 +7271,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       for (const cc of r.contentKept) { keptContentRepoPaths.set(cc.repoPath, cc.sourceFile); if (cc.blockedBy) keptContentBlockedBy.set(cc.repoPath, cc.blockedBy); }
       // @decision 702b4241 (round 2) — same fold as the active loop above.
       if (r.unattributed) anyKeptUnattributed = true;
+      // @decision d2592cd5 (round 4, card 3d4467cf) — same fold as the active loop above.
+      if (r.writeFailed) anyWriteFailed = true;
     }
     sourceFilesToSweep.push({ sourceFile: p.sourceFile, tokens: p.entry.tokens });
     // @decision 07e3ad30 — resolve `p`'s own CURRENT index fresh, right now, never a precomputed one —
@@ -7233,11 +7376,24 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
   // UNTRACKED on-disk sibling for this identity still carries any of `candidateTokens` — see
   // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
-  tombstoneDurablyIfConfirmed(!anyWriteFailed && !anyReferencing && !anyKeptUnattributed && keptContentRepoPaths.size === 0 && !identityHasAnyPhysicalRecordHoldingToken(identity, candidateTokens, trackedBasenamesForIdentity(identity)), candidateTokens, identityRepoPath);
+  //
+  // @decision d2592cd5 (3rd fix round, card 3d4467cf) — on the token path (`deferred` given), push a job
+  // (folding `anyWriteFailed` into the shared set too) instead of writing here — see
+  // `DeferredTombstoneJob`'s own doc. Every other caller keeps deciding and writing immediately.
+  const nonFailureOk = !anyWriteFailed && !anyReferencing && !anyKeptUnattributed && keptContentRepoPaths.size === 0 && !identityHasAnyPhysicalRecordHoldingToken(identity, candidateTokens, trackedBasenamesForIdentity(identity));
+  if (deferred) {
+    if (anyWriteFailed) deferred.writeFailed.add(identity);
+    deferred.sink.push({ identity, tokens: candidateTokens, repoPath: identityRepoPath, nonFailureOk });
+  } else {
+    tombstoneDurablyIfConfirmed(nonFailureOk, candidateTokens, identityRepoPath);
+  }
+  // @decision d2592cd5 (fix round, card 3d4467cf) — `anyWriteFailed` surfaced on EVERY return path for a
+  // caller's own backstop to AND in; never `anyReferencing`/`anyKeptUnattributed` (G1 overrides those).
   if (anyReferencing || anyKeptUnattributed || relocatedCoOccupants.size > 0 || keptContentRepoPaths.size > 0) {
     return {
       wasQuarantined: anythingProcessed,
       liftedRepoPaths,
+      anyWriteFailed,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       // @decision 182c01cc — latchKept/referencingRepoPaths name ONLY the kept subset; a relocation never
       // sets either (round 2, finding 2).
@@ -7275,6 +7431,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   return {
     wasQuarantined: anythingProcessed,
     liftedRepoPaths,
+    anyWriteFailed,
     ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
     stillBlockedCoOccupants: [],
   };
