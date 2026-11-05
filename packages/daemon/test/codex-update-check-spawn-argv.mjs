@@ -8,6 +8,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // regression guard. THIS file is: it asserts the argv shape directly, on every run, on any host, whether
 // or not codex has a pending update right now — the gap the card's own DoD-3 names ("the real-spawn tests
 // alone would read green on a broken fix" once the pending update is gone).
+// It also pins the plugin-sync suppression (`CODEX_PLUGIN_SYNC_OVERRIDE_ARGS`, `-c features.plugins=false`)
+// that sits beside the update-check pin in the same argv.
 //
 // SHAPE: mirrors pty-codex-spawn-env.mjs exactly (same fixture substitution technique, same
 // LOOM_CODEX_BIN .cmd-wrapper trick) — drives the REAL (unsubclassed) `PtyHost.createCodexPty()` against a
@@ -142,6 +144,6 @@ for (const [role, serverId] of [
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createCodexPty's real spawn argv carries \"-c check_for_update_on_startup=false\" on a fresh spawn, a resume spawn, and a fork spawn alike (the three shapes buildCodexResumeArgs distinguishes), proven against a real OS child process substituted for codex via LOOM_CODEX_BIN, so this regresses loudly even when no codex update happens to be pending on the host running this test. Card 702f2197: the SAME real-spawn argv capture also pins that createCodexPty's production call site actually wires CODEX_AUTO_APPROVE_MCP_SERVER_IDS into mcpServersToCodexArgs — both loom-tasks and loom-orchestration carry the default_tools_approval_mode=approve override as an adjacent -c pair, so a future refactor that silently drops that argument (leaving every OTHER test green) regresses loudly here instead."
+  ? "\n✅ ALL PASS — createCodexPty's real spawn argv carries \"-c check_for_update_on_startup=false\" and \"-c features.plugins=false\" (plugin-sync pin) on a fresh spawn, a resume spawn, and a fork spawn alike (the three shapes buildCodexResumeArgs distinguishes), proven against a real OS child process substituted for codex via LOOM_CODEX_BIN, so this regresses loudly even when no codex update happens to be pending on the host running this test. Card 702f2197: the SAME real-spawn argv capture also pins that createCodexPty's production call site actually wires CODEX_AUTO_APPROVE_MCP_SERVER_IDS into mcpServersToCodexArgs — both loom-tasks and loom-orchestration carry the default_tools_approval_mode=approve override as an adjacent -c pair, so a future refactor that silently drops that argument (leaving every OTHER test green) regresses loudly here instead."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

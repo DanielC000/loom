@@ -46,7 +46,7 @@ const codexBin = resolveExecutable(process.env.LOOM_CODEX_BIN || "codex");
 // real space, strips other CSI/OSC sequences) before matching — see codex-doctrine.ts#normalizeCodexScreenText
 // for the general (not hardcoded-to-one-variant) normalization and codex-host-decisions.mjs for its own
 // unit coverage against a real captured specimen.
-const { isTrustDialogPrompt, trustDialogAnswer, MCP_TOKEN_ENV_VAR: CODEX_MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
+const { isTrustDialogPrompt, trustDialogAnswer, MCP_TOKEN_ENV_VAR: CODEX_MCP_TOKEN_ENV_VAR, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, CODEX_PLUGIN_SYNC_OVERRIDE_ARGS } = await import("../dist/pty/codex-host.js");
 
 // --- Graceful skip: this test needs a REAL, authenticated codex install; no fixture can stand in for a
 // real MCP client's wire behavior. ------------------------------------------------------------------
@@ -123,7 +123,9 @@ const runStartedAt = Date.now();
 const p = pty.spawn(
   codexBin,
   [
-    "-a", "never", "-s", "workspace-write", "--no-alt-screen", "-c", "check_for_update_on_startup=false",
+    "-a", "never", "-s", "workspace-write", "--no-alt-screen",
+    // Derived from the production constants (update-check + plugin-sync pins) so this hand-built argv can't drift.
+    ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...CODEX_PLUGIN_SYNC_OVERRIDE_ARGS,
     "-c", `mcp_servers.loom_reach_probe.url="${url}"`,
     // Card 280b1e44: codex's config loader REJECTS a literal `bearer_token` value — only the pointer to an
     // env var it reads at runtime (see CODEX_MCP_TOKEN_ENV_VAR's own doc, codex-host.ts).

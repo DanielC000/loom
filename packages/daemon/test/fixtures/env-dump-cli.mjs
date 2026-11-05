@@ -17,13 +17,21 @@ if (!outputFile) {
   process.exit(1);
 }
 
-fs.writeFileSync(outputFile, JSON.stringify(process.env));
+// Atomic write (temp file in the same dir, then rename): readers wait only for the file to EXIST and then
+// JSON.parse it, so a plain writeFileSync could be observed empty/partial ("Unexpected end of JSON input").
+function writeAtomic(file, text) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
+}
+
+writeAtomic(outputFile, JSON.stringify(process.env));
 
 // Card 4084fadb: additive argv dump, gated on an opt-in env var so this stays byte-identical for every
 // existing consumer (pty-codex-spawn-env.mjs never sets it) — lets a sibling test pin the exact argv a
 // harness spawn passed this fixture, not just its env.
 const argvOutputFile = process.env.FIXTURE_ARGV_OUTPUT_FILE;
-if (argvOutputFile) fs.writeFileSync(argvOutputFile, JSON.stringify(process.argv.slice(2)));
+if (argvOutputFile) writeAtomic(argvOutputFile, JSON.stringify(process.argv.slice(2)));
 
 process.stdout.write("FIXTURE_ENV_DUMPED\n");
 
