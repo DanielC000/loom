@@ -5751,7 +5751,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
     const v = validateColumnLayout(req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid column layout: ${v.error}` });
-    const result = deps.sessions.updateBoardColumns(id, v.value.columns);
+    const result = deps.sessions.updateBoardColumns(id, v.value.columns, v.value.baseKeys);
+    if (!result.ok && result.drift) {
+      // 409: the editor's staged layout was based on a key set the board no longer has. Nothing was written;
+      // the body carries the CURRENT layout so the client can re-apply its staged edits instead of dropping them.
+      return reply.code(409).send({ error: result.error, code: "columns_drifted", ...result.drift });
+    }
     if (!result.ok) return reply.code(400).send({ error: result.error });
     return { ok: true, columns: result.columns, warnings: result.warnings };
   });

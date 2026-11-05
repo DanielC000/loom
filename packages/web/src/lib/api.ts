@@ -55,6 +55,20 @@ export type ProfileFieldResolution = "mine" | "shipped";
 // round-tripping that actually carries the unmodelled ones.
 export interface DesiredColumn extends KanbanColumn { prevKey?: string; }
 
+// Thrown by updateProjectColumns on the server's 409 `columns_drifted`: the board's key set changed since the
+// editor loaded it (an agent added/removed/re-keyed a column). Nothing was written. `columns` is the board as
+// it stands NOW; `added`/`removed` are the keys that differ from the editor's `baseKeys`.
+export class ColumnsDriftedError extends Error {
+  readonly columns: KanbanColumn[];
+  readonly added: string[];
+  readonly removed: string[];
+  constructor(message: string, columns: KanbanColumn[], added: string[], removed: string[]) {
+    super(message);
+    this.name = "ColumnsDriftedError";
+    this.columns = columns; this.added = added; this.removed = removed;
+  }
+}
+
 // MIRRORS the daemon's own TranscriptTurn (packages/daemon/src/pty/adapter.ts) — a hand-copy across the
 // package boundary, not an import, so this union must be updated by hand whenever that one changes
 // (card 100c523f added "system" for a harness whose native turns include a system/instruction role that
@@ -781,8 +795,27 @@ export const api = {
   // ONE transaction, and HARD-rejects a guard violation (no/duplicate required role, <1-column floor,
   // bad rename) with a 400 whose `{ error }` body surfaces verbatim via putErr. `warnings` are soft
   // (e.g. dropping a non-required role lane) — shown but non-blocking.
-  updateProjectColumns: (id: string, columns: DesiredColumn[]) =>
-    putErr<{ ok: boolean; columns: KanbanColumn[]; warnings: string[] }>(`/api/projects/${id}/columns`, { columns }),
+  //
+  // `baseKeys` (card d5946e05) is OPTIONAL: the column keys the staged layout was based on. When given, the
+  // server refuses (409, nothing written) if the board's key set has since drifted, and this rejects with a
+  // `ColumnsDriftedError` carrying the CURRENT layout so the editor can re-apply its staged edits. Omit it for a
+  // deliberate wholesale replace (preset apply).
+  updateProjectColumns: async (id: string, columns: DesiredColumn[], baseKeys?: string[]) => {
+    const url = `/api/projects/${id}/columns`;
+    const r = await guardedFetch(url, {
+      method: "PUT", headers: { "content-type": "application/json", ...authHeaders() },
+      body: JSON.stringify(baseKeys === undefined ? { columns } : { columns, baseKeys }),
+    });
+    if (!r.ok) {
+      let j: { error?: string; code?: string; columns?: KanbanColumn[]; added?: string[]; removed?: string[] } | null = null;
+      try { j = await r.json(); } catch { /* non-JSON body */ }
+      if (r.status === 409 && j?.code === "columns_drifted" && Array.isArray(j.columns)) {
+        throw new ColumnsDriftedError(j.error ?? "the board's columns changed", j.columns, j.added ?? [], j.removed ?? []);
+      }
+      throw new Error(j?.error ?? `${url} -> ${r.status}`);
+    }
+    return r.json() as Promise<{ ok: boolean; columns: KanbanColumn[]; warnings: string[] }>;
+  },
   // Reorder-only twin (card 67c43038), for the board's lane drag + Move left/right. Sends just the keys in
   // their new order; the server 409s unless they are exactly the CURRENT key set, so a reorder from a stale
   // poll can never drop a column created since (which the whole-array PUT above would).

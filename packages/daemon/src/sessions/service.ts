@@ -14901,11 +14901,30 @@ export class SessionService {
    * warnings on success, or {error} on a hard reject / unknown project.
    */
   updateBoardColumns(
-    projectId: string, desired: DesiredColumn[],
-  ): { ok: true; columns: KanbanColumn[]; warnings: string[] } | { ok: false; error: string } {
+    projectId: string, desired: DesiredColumn[], baseKeys?: readonly string[],
+  ): { ok: true; columns: KanbanColumn[]; warnings: string[] }
+    | { ok: false; error: string; drift?: { columns: KanbanColumn[]; added: string[]; removed: string[] } } {
     const project = this.db.getProject(projectId);
     if (!project) return { ok: false, error: "project not found" };
     const current = resolveConfig(project.config).kanbanColumns;
+    // @decision d5946e05 — the drift check lives HERE, in the same synchronous read-check-write as the
+    // plan, so nothing can interleave. Key-SET only: an absent `baseKeys` is the legacy blind replace.
+    if (baseKeys) {
+      const base = new Set(baseKeys);
+      const currentKeys = new Set(current.map((c) => c.key));
+      const added = current.filter((c) => !base.has(c.key)).map((c) => c.key);
+      const removed = [...base].filter((k) => !currentKeys.has(k));
+      if (added.length || removed.length) {
+        return {
+          ok: false,
+          error: `the board's columns changed since this editor loaded it (${[
+            ...added.map((k) => `added '${current.find((c) => c.key === k)?.label ?? k}'`),
+            ...removed.map((k) => `removed '${k}'`),
+          ].join(", ")}); nothing was saved`,
+          drift: { columns: current, added, removed },
+        };
+      }
+    }
     const plan = planColumnLayout(current, desired);
     if (!plan.ok || !plan.columns || !plan.rekeys || !plan.defaultLandingKey) {
       return { ok: false, error: plan.error ?? "invalid column layout" };

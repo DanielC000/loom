@@ -1282,11 +1282,14 @@ const desiredColumn = z.object({
   wipLimit: z.number().int().nonnegative().optional(),
   excludeFromIdleWatchdog: z.boolean().optional(),
 }).strict();
-const columnLayoutSchema = z.object({ columns: z.array(desiredColumn).min(1) }).strict();
+// `baseKeys` (optional) = the column keys the client's staged layout was based on; present ⇒ the service
+// refuses the save when the board's key set has drifted since (see SessionService.updateBoardColumns).
+// Absent ⇒ today's blind whole-array replace. An explicit `[]` is PRESENT (it drifts against any real board).
+const columnLayoutSchema = z.object({ columns: z.array(desiredColumn).min(1), baseKeys: z.array(z.string().min(1)).optional() }).strict();
 
 export function validateColumnLayout(
   raw: unknown,
-): { ok: true; value: { columns: z.infer<typeof desiredColumn>[] } } | { ok: false; error: string } {
+): { ok: true; value: { columns: z.infer<typeof desiredColumn>[]; baseKeys?: string[] } } | { ok: false; error: string } {
   const r = columnLayoutSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
   return { ok: true, value: r.data };

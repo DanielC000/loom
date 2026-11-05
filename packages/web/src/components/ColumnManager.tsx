@@ -12,8 +12,9 @@ import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import { resolveConfig, COLUMN_PRESETS, presetById, presetToDesired, ACCENT_PALETTE, DEFAULT_COLUMN_PRESET_ID, type ColumnRole, type KanbanColumn, type Project } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, ColumnsDriftedError } from "../lib/api";
 import { carriedColumnFields, toDesired, type CarriedColumnFields } from "../lib/columnDesired";
+import { mergeDriftedColumns } from "../lib/columnDrift";
 import { Button, Input, Select, Badge, PresetAccentDots } from "./ui";
 import { color, font, radius, tone, roleTone, type Tone } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
@@ -56,7 +57,16 @@ interface Row {
   carried?: CarriedColumnFields;
   keyOpen: boolean;
   keyTouched: boolean;
+  // Set by lib/columnDrift.ts when a refused (409) Save revealed that this column was removed elsewhere while
+  // the human was editing it: the row is kept as a staged NEW column, and Save would re-create it.
+  removedElsewhere?: boolean;
 }
+
+// A staged row seeded from a stored server column (mount, post-Save reseed, and a drift merge's added lanes).
+const rowFromColumn = (c: KanbanColumn): Row => ({
+  uid: nextUid(), key: c.key, label: c.label, role: c.role, accentColor: c.accentColor, wipLimit: c.wipLimit,
+  carried: carriedColumnFields(c), originalKey: c.key, keyOpen: false, keyTouched: true,
+});
 
 let UID = 0;
 const nextUid = () => `row-${UID++}`;
@@ -102,12 +112,29 @@ export function ColumnManager({ project }: { project: Project }) {
   const qc = useQueryClient();
   // Edit the EFFECTIVE columns (override or inherited default) — saving materializes the full array as
   // the project's override. Seeded once on mount (keyed by project id upstream → a switch remounts).
-  const seedRows = useMemo<Row[]>(() => resolveConfig(project.config).kanbanColumns.map((c) => ({
-    uid: nextUid(), key: c.key, label: c.label, role: c.role, accentColor: c.accentColor, wipLimit: c.wipLimit,
-    carried: carriedColumnFields(c), originalKey: c.key, keyOpen: false, keyTouched: true,
-  })), [project.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const seedRows = useMemo<Row[]>(() => resolveConfig(project.config).kanbanColumns.map(rowFromColumn),
+    [project.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const [rows, setRows] = useState<Row[]>(seedRows);
   const baseline = useRef(JSON.stringify(toDesired(seedRows)));
+  // The column keys the staged rows are based on (the last server layout seeded/adopted). Sent with every
+  // Save so the daemon can refuse one built on a board that has since gained/lost a column (card d5946e05).
+  const baseKeys = useRef(seedRows.map((r) => r.key));
+  // Set when the last Save/Reset came back 409 columns_drifted: what changed under the editor. Cleared by the
+  // next successful apply. The staged edits are NEVER dropped — see lib/columnDrift.ts.
+  const [drift, setDrift] = useState<{ added: string[]; removed: string[] } | null>(null);
+  // A drifted 409 → re-base the staged rows on the board as it stands now (no write happened).
+  const onDrift = (err: unknown): boolean => {
+    if (!(err instanceof ColumnsDriftedError)) return false;
+    const m = mergeDriftedColumns(rows, err.columns, baseKeys.current, rowFromColumn);
+    setRows(m.rows);
+    baseKeys.current = m.baseKeys;
+    baseline.current = JSON.stringify(toDesired(err.columns.map(rowFromColumn)));
+    setDrift({ added: m.added, removed: m.removed });
+    setResetConfirming(false);
+    qc.invalidateQueries({ queryKey: ["projects"] });
+    qc.invalidateQueries({ queryKey: ["board", project.id] });
+    return true;
+  };
   // Soft warnings from the LAST successful apply (a manual Save or a Reset-to-preset), surfaced inline.
   const [warnings, setWarnings] = useState<string[]>([]);
   // Preset chosen in the Reset-to-preset control (defaults to today's board).
@@ -117,12 +144,11 @@ export function ColumnManager({ project }: { project: Project }) {
   // Re-seed the staged rows from the server's canonical, just-stored columns — clearing dirty and
   // re-baselining the originalKeys so a subsequent rename diffs against the new persisted keys.
   const reseedFrom = (cols: KanbanColumn[]) => {
-    const fresh: Row[] = cols.map((c) => ({
-      uid: nextUid(), key: c.key, label: c.label, role: c.role, accentColor: c.accentColor, wipLimit: c.wipLimit,
-      carried: carriedColumnFields(c), originalKey: c.key, keyOpen: false, keyTouched: true,
-    }));
+    const fresh: Row[] = cols.map(rowFromColumn);
     setRows(fresh);
     baseline.current = JSON.stringify(toDesired(fresh));
+    baseKeys.current = fresh.map((r) => r.key);
+    setDrift(null);
     qc.invalidateQueries({ queryKey: ["projects"] });
     qc.invalidateQueries({ queryKey: ["board", project.id] });
   };
@@ -140,23 +166,27 @@ export function ColumnManager({ project }: { project: Project }) {
   const cardsOf = (r: Row) => (r.originalKey ? counts.get(r.originalKey) ?? 0 : 0);
   const landingLabel = rows.find((r) => r.role === "defaultLanding")?.label ?? "Default landing";
 
+  // A drifted key → the best label we still hold for it (a removed lane's label lives on its flagged row).
+  const labelOf = (k: string) => rows.find((r) => r.key === k)?.label ?? k;
   const desired = toDesired(rows);
   const dirty = JSON.stringify(desired) !== baseline.current;
   const error = validate(rows);
 
   const save = useMutation({
-    mutationFn: () => api.updateProjectColumns(project.id, desired),
+    mutationFn: () => api.updateProjectColumns(project.id, desired, baseKeys.current),
     meta: { inlineError: true }, // surfaced inline below (no blocking window.alert)
     onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); },
+    onError: onDrift, // a drifted 409 re-bases the staged rows (below); any other error shows inline
   });
 
   // Reset-to-preset: apply a chosen preset to the CURRENT board through the SAME atomic columns API
   // (no new endpoint). The server diffs preset-vs-current — re-keys/removes/adds, and cards in dropped
   // columns fall back to the preset's defaultLanding — then returns its soft warnings (surfaced below).
   const applyPreset = useMutation({
-    mutationFn: () => api.updateProjectColumns(project.id, presetToDesired(presetById(resetPresetId))),
+    mutationFn: () => api.updateProjectColumns(project.id, presetToDesired(presetById(resetPresetId)), baseKeys.current),
     meta: { inlineError: true },
     onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); setResetConfirming(false); },
+    onError: onDrift,
   });
 
   const patchRow = (uid: string, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.uid === uid ? { ...r, ...p } : r)));
@@ -212,6 +242,18 @@ export function ColumnManager({ project }: { project: Project }) {
         <Button onClick={addRow} style={{ borderStyle: "dashed" }}>+ Add column</Button>
       </div>
 
+      {/* The board changed under the editor (an agent added/removed/re-keyed a lane): the Save was REFUSED and
+          nothing was written. Staged edits are kept; the human reviews and presses Save again (card d5946e05). */}
+      {drift ? (
+        <div role="status" data-testid="column-drift-notice"
+          style={{ color: color.amber, fontSize: 12, fontFamily: font.mono, lineHeight: 1.5, border: `1px solid ${color.amber}`, borderRadius: radius.base, padding: "6px 9px" }}>
+          The board changed while you were editing — nothing was saved, and your edits are kept.
+          {drift.added.length ? ` Added elsewhere: ${drift.added.map(labelOf).join(", ")} (now listed below).` : ""}
+          {drift.removed.length ? ` Removed elsewhere: ${drift.removed.map(labelOf).join(", ")} (flagged below).` : ""}
+          {" "}Review, then Save again.
+        </div>
+      ) : null}
+
       {/* Soft warnings the server returned on the last successful apply (a Save or a Reset-to-preset),
           e.g. a dropped non-required role. */}
       {warnings.length ? (
@@ -233,7 +275,7 @@ export function ColumnManager({ project }: { project: Project }) {
             ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
-        {save.isError && (
+        {save.isError && !(save.error instanceof ColumnsDriftedError) && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
             {errorText(save.error)}
           </span>
@@ -264,7 +306,7 @@ export function ColumnManager({ project }: { project: Project }) {
           ) : (
             <Button onClick={() => setResetConfirming(true)} disabled={applyPreset.isPending}>Reset board</Button>
           )}
-          {applyPreset.isError && (
+          {applyPreset.isError && !(applyPreset.error instanceof ColumnsDriftedError) && (
             <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(applyPreset.error)}</span>
           )}
         </div>
@@ -372,6 +414,15 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
             title="Delete this column">✕</Button>
         )}
       </div>
+
+      {/* Kept through a refused (drifted) Save: this lane no longer exists on the board. Saving would create it
+          again as an empty lane — the human's call, so it is stated on the row itself; ✕ drops it instead. */}
+      {row.removedElsewhere && (
+        <div data-testid="column-removed-elsewhere"
+          style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.5 }}>
+          Removed elsewhere — Save will re-create this lane (empty; its cards were already moved). Press ✕ to leave it deleted.
+        </div>
+      )}
 
       {/* Delete-with-cards confirm: what happens to the lane's cards on save. */}
       {confirming && cards > 0 && (
