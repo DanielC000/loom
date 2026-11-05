@@ -126,9 +126,10 @@ import type {
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
+import { matchingCardPolicyIds } from "./tasks/title-guard.js";
 import type { MergeGateOutcomeEntry } from "@loom/shared";
 import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
-import { unionConnections, unionCapabilities, SSH_APPROVAL_ACTION_PREFIX } from "@loom/shared";
+import { unionConnections, unionCapabilities, SSH_APPROVAL_ACTION_PREFIX, parseCardPolicies } from "@loom/shared";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig, isProjectMemoryExpired, projectedAttachmentKind } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
@@ -1516,6 +1517,26 @@ CREATE TABLE IF NOT EXISTS task_relations (
 );
 CREATE INDEX IF NOT EXISTS idx_task_relations_to ON task_relations(to_task_id, type);
 CREATE INDEX IF NOT EXISTS idx_task_relations_project ON task_relations(project_id, type);
+-- Card-policy waivers (card 9623e943): one row per (card, policy, requirement kind). Written ONLY by the
+-- human-only REST route; no MCP tool reads-and-writes it. CREATE TABLE only (no migrated column).
+CREATE TABLE IF NOT EXISTS card_policy_waivers (
+  task_id TEXT NOT NULL,
+  policy_id TEXT NOT NULL,
+  requirement_kind TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  waived_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, policy_id, requirement_kind)
+);
+-- Sticky card-policy matches (card 9623e943): a policy that has EVER matched a card keeps applying even after the
+-- card is retitled out of its selector. Loom-owned: written only by the Db's own title chokepoints and the policy
+-- evaluator; nothing an agent can call removes a row. CREATE TABLE only (no migrated column, no extra index).
+CREATE TABLE IF NOT EXISTS card_policy_matches (
+  task_id TEXT NOT NULL,
+  policy_id TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, policy_id)
+);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
 -- worker_session_id, ts, kind are all ORIGINAL columns on this table (present since its very first
 -- CREATE TABLE, unlike a later ALTER-added column) — so, like idx_orch_events_mgr above, these two are
@@ -9279,6 +9300,8 @@ export class Db {
       // @decision e7dabf95 — STRIP (never reject) title/body here: many callers (e.g.
       // appendEscalationDetail) are non-retryable and return void; a reject would throw into them.
     ).run({ ...t, title: stripEscapeAndControlChars(t.title).text, body: stripEscapeAndControlChars(t.body).text, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, parentId: t.parentId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []), deferredUntilEvent: serializeDeferredUntilEvent(t.deferredUntilEvent) }); // defaults when an (untyped) caller omits them
+    // Card 9623e943: record the created title's sticky card-policy matches (a later retitle cannot drop them).
+    this.recordTitlePolicyMatches(t.id, t.projectId, stripEscapeAndControlChars(t.title).text);
     // Card 3df86c87: the deferredUntilTaskId alias is stored as flagged blocks edges, not the frozen column.
     const created = t.deferredUntilTaskId == null ? [] : Array.isArray(t.deferredUntilTaskId) ? t.deferredUntilTaskId : [t.deferredUntilTaskId];
     if (created.length > 0) this.setDeferralEdges(t.id, t.projectId, created);
@@ -9313,6 +9336,8 @@ export class Db {
     // @decision e7dabf95 — STRIP (never reject), same posture as insertTask above.
     if (patch.title !== undefined) next.title = stripEscapeAndControlChars(next.title).text;
     if (patch.body !== undefined) next.body = stripEscapeAndControlChars(next.body).text;
+    // Card 9623e943: a title write can only ADD sticky card-policy matches — the OLD title's are recorded BEFORE the new title applies.
+    if (patch.title !== undefined && next.title !== t.title) this.recordTitlePolicyMatches(id, t.projectId, t.title);
     this.db.prepare(
       "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, held_request_id=@heldRequestId, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, parent_id=@parentId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, deferred_until_event=@deferredUntilEvent, version=@version WHERE id=@id",
     ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, heldRequestId: next.heldRequestId ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null,
@@ -11174,6 +11199,54 @@ export class Db {
       `SELECT 1 FROM questions WHERE session_id = ? AND state = 'pending' LIMIT 1`,
     ).get(sessionId);
     return row !== undefined;
+  }
+  /** Card 9623e943: a waiver for exactly one (card, policy, requirement kind); upserts the reason/author. */
+  upsertCardPolicyWaiver(w: { taskId: string; policyId: string; requirementKind: string; reason: string; waivedBy: string; createdAt: string }): void {
+    this.db.prepare(
+      `INSERT INTO card_policy_waivers (task_id, policy_id, requirement_kind, reason, waived_by, created_at)
+       VALUES (@taskId, @policyId, @requirementKind, @reason, @waivedBy, @createdAt)
+       ON CONFLICT(task_id, policy_id, requirement_kind) DO UPDATE SET reason = excluded.reason, waived_by = excluded.waived_by, created_at = excluded.created_at`,
+    ).run(w);
+  }
+  /** Card 9623e943: policy ids that have EVER matched this card (sticky; see the card_policy_matches table). */
+  listCardPolicyMatches(taskId: string): string[] {
+    return (this.db.prepare("SELECT policy_id FROM card_policy_matches WHERE task_id = ?").all(taskId) as Row[]).map((r) => r.policy_id as string);
+  }
+  /** Card 9623e943: add (never remove) sticky policy matches for a card. Idempotent. */
+  recordCardPolicyMatches(taskId: string, policyIds: readonly string[]): void {
+    if (policyIds.length === 0) return;
+    const ins = this.db.prepare("INSERT OR IGNORE INTO card_policy_matches (task_id, policy_id, recorded_at) VALUES (?, ?, ?)");
+    const now = new Date().toISOString();
+    for (const id of new Set(policyIds)) ins.run(taskId, id, now);
+  }
+  /**
+   * Card 9623e943: record which of the project's stored card policies match `title` for this card. Called by every
+   * title chokepoint BEFORE a title is replaced (the OLD title's matches are added), and on create. Reads the RAW
+   * stored override like the evaluator; an absent/unreadable list records nothing (a title write must not throw).
+   */
+  private recordTitlePolicyMatches(taskId: string, projectId: string, title: string): void {
+    const raw = (this.getProject(projectId)?.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
+    if (raw === undefined) return;
+    const parsed = parseCardPolicies(raw);
+    if (!parsed.ok) return;
+    this.recordCardPolicyMatches(taskId, matchingCardPolicyIds(parsed.policies, { id: taskId, title }));
+  }
+  /** Card 9623e943: returns true when a waiver row existed and was removed. */
+  deleteCardPolicyWaiver(taskId: string, policyId: string, requirementKind: string): boolean {
+    return this.db.prepare("DELETE FROM card_policy_waivers WHERE task_id = ? AND policy_id = ? AND requirement_kind = ?").run(taskId, policyId, requirementKind).changes > 0;
+  }
+  listCardPolicyWaivers(taskId: string): { taskId: string; policyId: string; requirementKind: string; reason: string; waivedBy: string; createdAt: string }[] {
+    return (this.db.prepare("SELECT task_id, policy_id, requirement_kind, reason, waived_by, created_at FROM card_policy_waivers WHERE task_id = ?").all(taskId) as Row[]).map((r) => ({
+      taskId: r.task_id as string, policyId: r.policy_id as string, requirementKind: r.requirement_kind as string,
+      reason: r.reason as string, waivedBy: r.waived_by as string, createdAt: r.created_at as string,
+    }));
+  }
+  /**
+   * Card 9623e943: the ONE reader of `sessions.review_of_task_id` besides the usage sampler (docs/decisions/
+   * 9623e943-*.md amends aaacafe4). Read-only; used solely by the card-policy code-review evidence reader.
+   */
+  listReviewSessionsOfTask(projectId: string, taskId: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE project_id = ? AND review_of_task_id = ? ORDER BY created_at").all(projectId, taskId) as Row[]).map(toSession);
   }
   /**
    * Every request (any state) connected to ONE task via `task_id`, chronological (created_at) — the

@@ -31,7 +31,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, firstBranchCommitTime, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, fastForwardCanonicalMain, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -97,6 +97,7 @@ import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuatio
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView, type OwnerCheck } from "../orchestration/pending-ops.js";
+import { evaluateCardPolicies, dbPolicyEvidence, describePolicyRefusal, hasActiveInvestigateCheckpoint, policyView, INVESTIGATE_CHECKPOINT_KICKOFF_PARAGRAPH, type PolicyEvidence, type PolicyEvaluation, type PolicyPhase, type RequirementVerdict } from "../orchestration/card-policy.js";
 import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn, type CapQueueCancelResult } from "../orchestration/cap-queue.js";
 import { readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
@@ -1050,6 +1051,8 @@ type ConfirmMergeResult = {
   reducedGateOnlyFileFailed?: boolean;
   /** Card bbccf470: refused BEFORE any gate/union/squash because the branch tip moved after the manager's last worker_merge review (classified `"reviewed-tip-moved"`, never cached — a re-review changes the answer). */
   reviewedTipMoved?: boolean;
+  /** Card 9623e943: refused by a card policy (before any gate/git work); classified `"policy-refused"` (never cached, no op minted by the tracked path). */
+  policyRefusal?: { policyId: string; requirement: string };
   /** Card 7e5b23e7: set on a union-merge (pre-gate) rejection caused by `mergeMainIntoWorktree` raising —
    *  or hitting an already-raised — canonical-repo quarantine (an unconfirmed-kill after a timeout on one
    *  of its own mutating merge calls). Distinct from an ordinary `union_conflict`/`union_merge_failed`:
@@ -10081,6 +10084,7 @@ export class SessionService {
     const taskRef = (opts.taskId ?? "").trim();
     let taskId: string | null = null;
     let taskTitle: string | null = null; // captured for the shipped-card advisory check below (tasked spawns only)
+    let policyKickoffNote = ""; // card 9623e943: card-policy verdict + investigate paragraph appended to the kickoff (tasked, non-revive spawns only)
     if (taskRef) {
       if (/\s/.test(taskRef)) throw new Error(`worker_spawn taskId '${opts.taskId}' is not a valid task id`);
       const exactTask = this.db.getTask(taskRef);
@@ -10102,6 +10106,20 @@ export class SessionService {
       // lane this used to key off). A one-line sibling of the terminal rail, BEFORE any worktree/pty side effect.
       if (task.held === true) {
         throw new Error(`worker_spawn taskId '${taskId}' is HELD (owner brake) — release the hold before dispatching a worker`);
+      }
+      // CARD POLICIES (card 9623e943): spawn-phase requirements, evaluated live, BEFORE any claim/worktree side
+      // effect. Tasked spawns only (this block). A worker_revive onto a follow-up card is a tasked spawn like any
+      // other: the FOLLOW-UP card's policy applies in full (and a checkpoint card gets the checkpoint paragraph).
+      // Recycle and boot-reconcile recover the SAME admitted card and never reach spawnWorker at all. A review
+      // spawn is taskless by convention.
+      {
+        const ev = await this.evaluateTaskPolicies(project, task, "spawn");
+        const blocked = ev.blocking[0];
+        if (blocked) throw new Error(describePolicyRefusal(blocked, { phase: "spawn", taskId }));
+        if (ev.verdicts.length > 0) {
+          const lines = policyView(ev).map((p) => `- ${p.policy} (${p.policyId}): ${p.requirement} — ${p.status}`);
+          policyKickoffNote = `\n\nCARD POLICY (read-only; set by the owner):\n${lines.join("\n")}${hasActiveInvestigateCheckpoint(ev) ? `\n${INVESTIGATE_CHECKPOINT_KICKOFF_PARAGRAPH}` : ""}`;
+        }
       }
       // DATA-LOSS guard (structural): refuse a SECOND live worker on a task already held by a live one. The
       // worktree path is DETERMINISTIC per task and createWorktree REUSES an existing dir, recutting a 0-ahead
@@ -10428,7 +10446,7 @@ export class SessionService {
               // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
               // session row above — the same resolution, so the prompt can never disagree with the worktree.
               // A revive drops the agent base brief: the forked conversation already carries it (card dc13bcf1).
-              composeWorkerStartupPrompt(internal?.revive ? undefined : workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut, projectWorkDir(project.id)),
+              composeWorkerStartupPrompt(internal?.revive ? undefined : workerAgent.startupPrompt, opts.kickoffPrompt + policyKickoffNote, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut, projectWorkDir(project.id)),
               codescapeStatus.text,
             ),
             workerProjectMemoryFramed,
@@ -16292,6 +16310,7 @@ export class SessionService {
         worktreePath,
         branch,
         reviewBaseSha: old.reviewBaseSha ?? null, // SAME worktree ⇒ SAME fork point — carried forward like repoKey
+        reviewOfTaskId: old.reviewOfTaskId ?? null, // SAME review target ⇒ carried forward with reviewBaseSha (card 9623e943: a recycled reviewer's `done` report must still count as that card's review)
         cutBaseSha: old.cutBaseSha ?? null, // SAME worktree ⇒ SAME cut base — carried forward like reviewBaseSha
         repoKey: old.repoKey ?? null, // SAME worktree, SAME repo — carried forward like browserTesting/skills
         gen: newGen,
@@ -19725,6 +19744,13 @@ export class SessionService {
     const worktreePath = worker.worktreePath ?? worker.cwd;
     const taskId = worker.taskId ?? null;
     const branch = worker.branch;
+    // CARD-POLICY BACKSTOP (card 9623e943): the SAME shared check confirmWorkerMergeTracked runs before attach,
+    // repeated here so no caller path (batch fallback, a direct call, evidence that changed in between) reaches
+    // a gate or git work past an unmet policy. Never cached (`policy-refused`).
+    {
+      const refusal = await this.mergePolicyRefusal(workerSessionId);
+      if (refusal) return { merged: false, reason: refusal.text, notified: false, opId: thisOpId, gateRan: false, policyRefusal: { policyId: refusal.policyId, requirement: refusal.requirement } };
+    }
     // RESOLVE-LIVE: read the gate command AND its per-project timeout fresh here, so a human PATCH to
     // either takes effect with no daemon restart. Also threads the daemon-global platform override so
     // `orchestration.maxConcurrentGates` (host-load guard, card 301d8c01) resolves correctly below —
@@ -22264,6 +22290,12 @@ export class SessionService {
       const rt = await this.reviewedTipVerdict(branch, repoPath, worker.repoKey ?? null, squashTip ?? null, project.id);
       if (rt.state === "moved" && !(await findLandedSquashCommit(repoPath, branch, expectedMainlineRef ?? "HEAD", { timeoutMs: this.gitOpMs, goneBranchLedger, workerTipLedger }))) return refuseReviewedTipMoved(rt, "pre-squash");
     }
+    // CARD-POLICY PRE-SQUASH RE-CHECK (card 9623e943): the merge-phase evidence is re-read against the tip the squash is PINNED to (`squashTip`), so a commit or
+    // union-merge advance after the top-of-op read cannot ride through on a review of an older tip. Never cached (`policy-refused`).
+    if (squashTip) {
+      const polRefusal = await this.mergePolicyRefusal(workerSessionId, { pinnedTip: squashTip });
+      if (polRefusal) return { merged: false, reason: polRefusal.text, notified: false, opId: thisOpId, gateRan, policyRefusal: { policyId: polRefusal.policyId, requirement: polRefusal.requirement }, ...gatePassRefusalExtras() };
+    }
     const mainlineCheckedTip = await this.checkMainlineMove({ projectId: project.id, repoKey: worker.repoKey ?? "primary", repoPath, managerSessionId, workerSessionId, taskId }); // card 4fa36502: fail-open tripwire, before the squash trusts main's tip
     // @decision 24c22912 (round 2, item 3) — CLOSE THE NO-GATECOMMAND ASYMMETRY: `expectAlreadyLanded`
     //  above is derived only inside `if (gate)`, leaving a GATELESS project unprotected. Derived fresh
@@ -23320,6 +23352,17 @@ export class SessionService {
       if (rt.state === "moved") reviewMoved.set(cand.workerSessionId, rt.text);
       else if (rt.tip) verifiedTip.set(cand.workerSessionId, rt.tip);
     }
+    // CARD-POLICY DROP (card 9623e943): a candidate whose card policy is unmet is excluded from assembly EXACTLY like a held / review-moved one — it stays in
+    // `chosen` (so the f944d4e4 dedupe key below is derived over the same candidate set with or without the policy), is never stranded-checked, never counts toward K
+    // or the `< 2` check, is NEVER solo-fallback-confirmed, and is reported `started:false` with the refusal text. Batchmates are unaffected. The verdict comes from
+    // the ONE shared `mergePolicyRefusal` (the same function the solo confirm calls before attach and again as its backstop).
+    const policyBlocked = new Map<string, string>();
+    for (const cand of resolved) {
+      if (retainedOutstanding.has(cand.workerSessionId)) continue;
+      const pinned = verifiedTip.get(cand.workerSessionId); // the tip the batch will cherry-pick: judged here exactly as the solo pre-squash re-check judges its pin
+      const pr = await this.mergePolicyRefusal(cand.workerSessionId, pinned ? { pinnedTip: pinned } : undefined);
+      if (pr) policyBlocked.set(cand.workerSessionId, pr.text);
+    }
 
     // STRANDED-WORK BACKSTOP (mirrors confirmWorkerMerge's own pre-gate check): a worker whose real commits
     // sit on some OTHER self-created branch would squash NOTHING into the batch — pull it out to the
@@ -23342,7 +23385,7 @@ export class SessionService {
     const advisoryBatchGit = (this.batchFfGitFactory ?? canonicalGit)(finalRepoPath, this.gitOpMs ?? 15_000);
     try { advisoryBatchTip = (await advisoryBatchGit.raw(["rev-parse", "HEAD"])).trim(); } catch { /* advisory only */ }
     for (const r of resolved) {
-      if (retainedOutstanding.has(r.workerSessionId) || reviewMoved.has(r.workerSessionId)) { candidates.push(r); continue; } // held / review-moved: no stranded check, no fallback
+      if (retainedOutstanding.has(r.workerSessionId) || reviewMoved.has(r.workerSessionId) || policyBlocked.has(r.workerSessionId)) { candidates.push(r); continue; } // held / review-moved / policy-blocked: no stranded check, no fallback
       const worker = this.db.getSession(r.workerSessionId)!;
       const worktreePath = worker.worktreePath ?? worker.cwd;
       const spawnConflict = this.spawnMintConflict(r.taskId, worktreePath, r.workerSessionId);
@@ -23366,14 +23409,14 @@ export class SessionService {
       candidates.push(r);
     }
 
-    const batchable = candidates.filter((c) => !retainedOutstanding.has(c.workerSessionId) && !reviewMoved.has(c.workerSessionId));
+    const batchable = candidates.filter((c) => !retainedOutstanding.has(c.workerSessionId) && !reviewMoved.has(c.workerSessionId) && !policyBlocked.has(c.workerSessionId));
     // Held candidates are excluded from `batchable`, so they count toward neither K nor the `liveChosen.length < 2` check below (a
     // [held, X] pair must not cut a batch worktree for one real candidate) — but they STAY in `chosen`, so the dedupe key over the
     // original set, and with it the cached retained verdict a degraded caller's same-ids re-call recovers, is unchanged. They are
     // never assembled: `liveChosen` (chosen minus held) is what every batch member list below is built from.
     const K = computeBatchSize(batchable.length, Math.max(1, orchestration.maxConcurrentWorkers));
     const liveChosen = batchable.slice(0, K);
-    const chosen = candidates.filter((c) => retainedOutstanding.has(c.workerSessionId) || reviewMoved.has(c.workerSessionId) || liveChosen.includes(c));
+    const chosen = candidates.filter((c) => retainedOutstanding.has(c.workerSessionId) || reviewMoved.has(c.workerSessionId) || policyBlocked.has(c.workerSessionId) || liveChosen.includes(c));
     const overflow = batchable.slice(K);
     // Card 19256231: `batchOpId`, when given, is threaded onto every fallback confirm this call spawns
     // (via confirmWorkerMergeTracked's own `opts.fallbackOfBatchOpId`) so each one's gate_queue row is
@@ -23416,6 +23459,9 @@ export class SessionService {
         // Card bbccf470: a review-moved candidate is skipped EXACTLY like a held one — never solo-confirmed from ANY caller path (the `< 2`, gate-off and no-gate returns included).
         const movedText = reviewMoved.get(f.workerSessionId);
         if (movedText) { out.push({ workerSessionId: f.workerSessionId, reason: movedText + tail, started: false }); unit?.release(); continue; }
+        // Card 9623e943: a policy-blocked candidate is skipped EXACTLY like a review-moved one — never solo-confirmed from ANY caller path.
+        const policyText = policyBlocked.get(f.workerSessionId);
+        if (policyText) { out.push({ workerSessionId: f.workerSessionId, reason: policyText + tail, started: false }); unit?.release(); continue; }
         if (noStart) { out.push({ workerSessionId: f.workerSessionId, reason: f.reason + tail, started: false }); unit?.release(); continue; }
         const owner = this.resolveLineageOwnerForWorker(managerSessionId, f.workerSessionId);
         if (!owner) {
@@ -23454,6 +23500,9 @@ export class SessionService {
         if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: heldReason(held) + tail, started: false });
       }
       for (const [id, text] of reviewMoved) {
+        if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: text + tail, started: false });
+      }
+      for (const [id, text] of policyBlocked) {
         if (!out.some((o) => o.workerSessionId === id)) out.push({ workerSessionId: id, reason: text + tail, started: false });
       }
       return out;
@@ -23536,7 +23585,7 @@ export class SessionService {
     const finishRefusedStillAtCachedTip = new Set<string>();
     for (const f of cachedFinishRefused) {
       const cand = chosen.find((c) => c.workerSessionId === f.workerSessionId);
-      if (!cand || reviewMoved.has(cand.workerSessionId)) continue;
+      if (!cand || reviewMoved.has(cand.workerSessionId) || policyBlocked.has(cand.workerSessionId)) continue;
       if (!f.assembledTip) continue; // unresolvable at mint time — fail toward a fresh run
       try {
         const liveTip = await resolveBranchTip(finalRepoPath, cand.branch, { timeoutMs: this.gitOpMs });
@@ -26162,6 +26211,113 @@ export class SessionService {
     return { ...v, gatedIdentity: undefined, gatedMain: undefined };
   }
 
+  /**
+   * Card 9623e943 — the ONE card-policy evidence builder shared by the spawn, solo-merge and batch sites
+   * (never a second implementation). `worker` is set only for the merge phase.
+   * @decision 9623e943 — Session.reviewOfTaskId has exactly one extra read-only reader here (aaacafe4 amended).
+   */
+  private buildCardPolicyEvidence(project: Project, task: Task, worker?: Session, pinnedTip?: string): PolicyEvidence {
+    const shortSha = (s: string): string => s.slice(0, 8);
+    const branchTip = async (): Promise<string> => {
+      if (pinnedTip) return pinnedTip; // the pre-squash re-check judges the tip the squash is PINNED to, not a fresh branch read
+      if (!worker?.branch) throw new Error("worker branch unknown");
+      const repo = resolveRepoByKey(project, worker.repoKey ?? null);
+      const tip = await this.confirmMergeBranchTipReader(repo.path, worker.branch, { timeoutMs: this.gitOpMs });
+      if (!tip) throw new Error("branch tip unreadable");
+      return tip;
+    };
+    return {
+      ...dbPolicyEvidence(this.db, project.id),
+      codeReview: async (taskId) => {
+        const tip = await branchTip();
+        const reviews = this.db.listReviewSessionsOfTask(project.id, taskId).filter((r) => this.db.listEventsForWorkerKinds(r.id, ["worker_report"]).some((e) => (e.detail as { status?: string } | undefined)?.status === "done"));
+        if (reviews.some((r) => normalizeReviewBaseSha(r.reviewBaseSha) === tip)) return { met: true };
+        if (pinnedTip && worker?.branch) {
+          // The pre-squash re-check: the pinned tip may legitimately sit past the reviewed one ONLY by Loom's own union-merge of main — the SAME
+          // chain walk the reviewed-tip check uses. Any worker commit in between breaks the chain and the review no longer counts.
+          const repo = resolveRepoByKey(project, worker.repoKey ?? null);
+          const owed = await this.resolveOwedRange(worker.branch, repo.path, worker.repoKey ?? null, project.id);
+          for (const r of reviews) {
+            const base = normalizeReviewBaseSha(r.reviewBaseSha);
+            if (!base) continue;
+            const chain = await verifyReviewedTipChain(repo.path, base, tip, { timeoutMs: this.gitOpMs }, this.extraUnionBasesForOwedBase(owed.kind === "range" ? owed.base : undefined));
+            if (chain.ok) return { met: true };
+          }
+        }
+        const last = reviews.map((r) => normalizeReviewBaseSha(r.reviewBaseSha)).filter((s): s is string => s !== null).pop();
+        return { met: false, detail: last ? `review at ${shortSha(last)}, branch tip is now ${shortSha(tip)}` : `no completed review of this card (branch tip ${shortSha(tip)})` };
+      },
+      checkpoint: async () => {
+        if (!worker?.branch || !worker.cutBaseSha) throw new Error("worker cut base unknown");
+        const repo = resolveRepoByKey(project, worker.repoKey ?? null);
+        const first = await firstBranchCommitTime(repo.path, worker.branch, worker.cutBaseSha, { timeoutMs: this.gitOpMs });
+        if (!first.ok) throw new Error("first commit time unreadable");
+        if (first.epochSec === null) return { met: true, detail: "branch has no commits yet" };
+        const cutoffMs = (first.epochSec + 1) * 1000; // committer time has 1s resolution: a same-second report is tolerated
+        const seen = new Set<string>();
+        let cur: Session | undefined = worker;
+        for (let hops = 0; cur && !seen.has(cur.id) && hops < 50; hops++) {
+          seen.add(cur.id);
+          const early = this.db.listEventsForWorkerKinds(cur.id, ["worker_report"]).some((e) => {
+            const st = (e.detail as { status?: string } | undefined)?.status;
+            return (st === "blocked" || st === "progress") && Date.parse(e.ts) < cutoffMs;
+          });
+          if (early) return { met: true };
+          cur = cur.recycledFrom ? this.db.getSession(cur.recycledFrom) : undefined;
+        }
+        return { met: false, detail: "no blocked/progress worker_report precedes the first commit on this branch" };
+      },
+    };
+  }
+
+  /** Card 9623e943: evaluate this task's card policies for a phase (RAW stored override; see card-policy.ts). */
+  private async evaluateTaskPolicies(project: Project, task: Task, phase: PolicyPhase, worker?: Session, pinnedTip?: string): Promise<PolicyEvaluation> {
+    const raw = (project.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
+    const ev = await evaluateCardPolicies({ rawPolicies: raw, task: { id: task.id, title: task.title }, phase, evidence: this.buildCardPolicyEvidence(project, task, worker, pinnedTip), stickyPolicyIds: Array.isArray(raw) && raw.length === 0 || raw === undefined ? undefined : new Set(this.db.listCardPolicyMatches(task.id)) });
+    // Sticky: every policy that matched this card now (by live title or by record) stays recorded, so no later retitle can drop it.
+    this.db.recordCardPolicyMatches(task.id, ev.verdicts.map((v) => v.policyId).filter((id) => id !== "(config)"));
+    return ev;
+  }
+
+  /**
+   * Card 9623e943 — the ONE merge-phase policy check, called by confirmWorkerMergeTracked (before attach),
+   * confirmWorkerMerge (backstop) and mergeBatchTracked (per candidate). Returns the refusal or `null`.
+   * A taskless worker is never refused. A worker whose OWN branch is PROVEN already landed (the same
+   * `findLandedSquashCommit` proof the ALREADY_MERGED path uses, with the ledger facts) is not refused either — an
+   * idempotent re-confirm. The card's sticky `mergedSha` and its terminal COLUMN exempt nothing: a card that landed once
+   * and was moved back out of done gets a NEW worker, whose branch has not landed, and that worker is held to the policy.
+   * `pinnedTip` (the pre-squash re-check) judges the tip the squash is pinned to instead of a fresh branch read.
+   */
+  async mergePolicyRefusal(workerSessionId: string, opts?: { pinnedTip?: string }): Promise<{ text: string; policyId: string; requirement: string } | null> {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker?.taskId) return null;
+    const project = this.db.getProject(worker.projectId);
+    const task = this.db.getTask(worker.taskId);
+    if (!project || !task) return null;
+    const ev = await this.evaluateTaskPolicies(project, task, "merge", worker, opts?.pinnedTip);
+    const v: RequirementVerdict | undefined = ev.blocking[0];
+    if (v && (await this.workerBranchProvenLanded(worker, project))) return null;
+    return v ? { text: describePolicyRefusal(v, { phase: "merge", taskId: task.id }), policyId: v.policyId, requirement: v.kind } : null;
+  }
+
+  /** True only when THIS worker's own branch is proven landed on its repo's mainline (trailer proof or the worker-tip ledger). Fails closed (false) on any doubt. */
+  private async workerBranchProvenLanded(worker: Session, project: Project): Promise<boolean> {
+    if (!worker.branch) return false;
+    try {
+      const repo = resolveRepoByKey(project, worker.repoKey ?? null);
+      const wm = this.resolveMainlineWatermarkRef(project.id, worker.repoKey);
+      if (wm.state !== "ok") return false;
+      const sha = await findLandedSquashCommit(repo.path, worker.branch, wm.ref ?? "HEAD", {
+        timeoutMs: this.gitOpMs,
+        goneBranchLedger: this.db.getGoneBranchLedgerFacts(project.id, worker.repoKey ?? "primary"),
+        workerTipLedger: this.db.getWorkerTipLedgerFacts(project.id, worker.repoKey ?? "primary"),
+      });
+      return !!sha;
+    } catch {
+      return false;
+    }
+  }
+
   async confirmWorkerMergeTracked(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
     opts?: {
@@ -26224,6 +26380,14 @@ export class SessionService {
     // has already settled.
     const lineageOp = lineageResolvedPendingOp(this.db, "merge", (k) => this.pendingOps.peek(k), workerSessionId);
     const key = lineageOp && lineageOp.view.state === "running" ? lineageOp.key : `merge:${workerSessionId}`;
+    // CARD-POLICY PRECHECK (card 9623e943): the shared `mergePolicyRefusal`, evaluated only when this call would MINT a
+    // new op. A call that would ATTACH to an already-RUNNING op under `key` is never refused here (that op was admitted
+    // under the policy then in force; refusing would return merged:false for work already in flight). The refusal
+    // happens before any supersede/attach, so it mints NO op and is never cached.
+    if (this.pendingOps.peek(key)?.state !== "running") {
+      const refusal = await this.mergePolicyRefusal(workerSessionId);
+      if (refusal) return { settled: true, ok: true, value: { merged: false, reason: refusal.text, notified: false, opId: randomUUID(), gateRan: false, policyRefusal: { policyId: refusal.policyId, requirement: refusal.requirement } } };
+    }
     // @decision 164f7915 — do not decide the supersede HERE (Round 3): the two awaits below (resolveGitRef /
     // readMainlineHead) leave a window for `parentSessionId` to change before the real mint. The decision
     // now lives immediately before `pendingOps.attach()`, after those awaits.
@@ -26641,7 +26805,7 @@ export class SessionService {
         // @decision c395b4fb — `preSquashResidueUnclearable` classifies distinctly too, same reasoning:
         // a human clearing the pre-existing residue by hand must see a fresh re-confirm, never a stale
         // cached refusal from before it was cleared.
-        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.canonicalTrustRefusal ? "canonical-trust-refusal" : outcome.value.headMovedUnverified ? "head-moved-unverified" : outcome.value.squashLandedUnread ? "squash-landed-unread" : outcome.value.preSquashResidueUnclearable ? "pre-squash-residue-unclearable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : (outcome.value.landedTipUnverifiable || outcome.value.heldRangeUnverifiable) ? "landed-tip-unverifiable" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.policyRefusal ? "policy-refused" : outcome.value.canonicalRepoShallow ? "canonical-repo-shallow" : outcome.value.strandedVerificationRefused ? "stranded-verification-refused" : outcome.value.branchDiverted ? "branch-diverted" : outcome.value.forkPointDiverged ? "fork-point-diverged" : outcome.value.forkPointUnverified ? "fork-point-unverified" : outcome.value.unverified ? "ff-unverified" : outcome.value.gateOwedRefusal ? "gate-owed" : outcome.value.reviewedTipMoved ? "reviewed-tip-moved" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.landedContentDiverged ? "landed-content-diverged" : outcome.value.branchTipUnresolvable ? "branch-tip-unresolvable" : outcome.value.canonicalTrustRefusal ? "canonical-trust-refusal" : outcome.value.headMovedUnverified ? "head-moved-unverified" : outcome.value.squashLandedUnread ? "squash-landed-unread" : outcome.value.preSquashResidueUnclearable ? "pre-squash-residue-unclearable" : outcome.value.gateWorktreeDirty ? "worktree-dirty" : outcome.value.gateTipMoved || outcome.value.gateRoundTripFail ? "gate-tip-moved" : outcome.value.squashRefused ? "squash-refused" : outcome.value.quarantined ? "quarantined" : outcome.value.indexLockPresent ? "canonical-index-lock-present" : outcome.value.unionMergeTransient ? "union-merge-transient" : outcome.value.ungatedLandingCheckFailed ? "ungated-landing-check-failed" : outcome.value.soloMergeTransient ? "solo-merge-transient" : outcome.value.reducedGateOnlyFileFailed ? "reduced-gate-only-file-failed" : outcome.value.worktreeGoneLandingUnconfirmed ? "worktree-gone-landing-unconfirmed" : outcome.value.worktreeMissingAtAdmission ? "worktree-missing-at-admission" : (outcome.value.landedTipUnverifiable || outcome.value.heldRangeUnverifiable) ? "landed-tip-unverifiable" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

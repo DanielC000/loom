@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, QuestionAttachmentKind, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, byRecentlyDone, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
+import { POLICY_REQUIREMENT_KINDS, resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, byRecentlyDone, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir } from "../paths.js";
@@ -17,6 +17,7 @@ import { buildServedStatus, currentWebBundle } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
+import { policyIdIsConfigured } from "../orchestration/card-policy.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
@@ -6510,6 +6511,39 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (live > 0) return reply.code(400).send({ error: `cannot delete a task with a live session bound to it — stop the worker first (${live} still live)` });
     deps.db.deleteTask(id);
     return { ok: true };
+  });
+
+  // --- Card-policy waivers (card 9623e943): HUMAN-only REST, deliberately NOT an MCP tool. One waiver is per
+  // (card, policy, requirement kind); POST records/updates it (a mandatory reason), DELETE revokes it. Each
+  // writes an audit `card_policy_waived` orchestration event.
+  // @decision 9623e943 — no agent surface (MCP tool) may waive or revoke a card-policy requirement.
+  const parsePolicyWaiverBody = (b: { policyId?: unknown; requirement?: unknown; reason?: unknown }, needReason: boolean): { policyId: string; requirement: string; reason: string } | string => {
+    if (typeof b.policyId !== "string" || !/^[A-Za-z0-9._-]+$/.test(b.policyId) || b.policyId.length > 64) return "policyId is required ([A-Za-z0-9._-]+, max 64 chars)";
+    if (typeof b.requirement !== "string" || !(POLICY_REQUIREMENT_KINDS as readonly string[]).includes(b.requirement)) return `requirement must be one of ${POLICY_REQUIREMENT_KINDS.join(", ")}`;
+    const reason = typeof b.reason === "string" ? b.reason.trim() : "";
+    if (needReason && (reason === "" || reason.length > 500)) return "reason is required (1..500 chars)";
+    return { policyId: b.policyId, requirement: b.requirement, reason };
+  };
+  app.post("/api/tasks/:id/policy-waivers", async (req, reply) => {
+    const task = deps.db.getTask((req.params as { id: string }).id);
+    if (!task) return reply.code(404).send({ error: "task not found" });
+    const p = parsePolicyWaiverBody((req.body ?? {}) as Record<string, unknown>, true);
+    if (typeof p === "string") return reply.code(400).send({ error: p });
+    const waiverProject = deps.db.getProject(task.projectId);
+    if (!waiverProject || !policyIdIsConfigured(waiverProject, p.policyId)) return reply.code(400).send({ error: `policyId '${p.policyId}' matches no configured card policy on this project` });
+    const now = new Date().toISOString();
+    deps.db.upsertCardPolicyWaiver({ taskId: task.id, policyId: p.policyId, requirementKind: p.requirement, reason: p.reason, waivedBy: "human", createdAt: now });
+    deps.db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "waive", policyId: p.policyId, requirement: p.requirement, reason: p.reason } });
+    return { ok: true };
+  });
+  app.delete("/api/tasks/:id/policy-waivers", async (req, reply) => {
+    const task = deps.db.getTask((req.params as { id: string }).id);
+    if (!task) return reply.code(404).send({ error: "task not found" });
+    const p = parsePolicyWaiverBody((req.body ?? {}) as Record<string, unknown>, false);
+    if (typeof p === "string") return reply.code(400).send({ error: p });
+    const removed = deps.db.deleteCardPolicyWaiver(task.id, p.policyId, p.requirement);
+    if (removed) deps.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "revoke", policyId: p.policyId, requirement: p.requirement } });
+    return { ok: true, removed };
   });
 
   app.post("/api/agents/:id/sessions", async (req, reply) => {

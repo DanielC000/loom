@@ -2716,6 +2716,26 @@ export async function countCommitsBehind(repoPath: string, branch: string, base 
   }
 }
 
+/**
+ * Card 9623e943: committer time (epoch SECONDS) of the FIRST commit on `branch`'s own first-parent line beyond
+ * `cutBaseSha` (the worker's own first commit — commits of main that a merge-forward brought in are not on the
+ * first-parent chain and never count), or `null` when it carries none. Read-only, bounded, via the canonical git helper. Any failure is reported as
+ * `{ ok: false }` — the card-policy investigate-checkpoint evidence treats that as UNREADABLE (fail closed),
+ * never as "no commits".
+ */
+export async function firstBranchCommitTime(repoPath: string, branch: string, cutBaseSha: string, deps: BoundedGitDeps = {}): Promise<{ ok: true; epochSec: number | null } | { ok: false }> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const raw = await withTimeout(git.raw(["log", "--first-parent", "--reverse", "--format=%ct", "--end-of-options", `${cutBaseSha}..refs/heads/${branch}`]), timeoutMs, "git log --first-parent --reverse (first branch commit time)");
+    const first = raw.split("\n").map((l) => l.trim()).find((l) => l !== "");
+    if (first === undefined) return { ok: true, epochSec: null };
+    const n = Number(first);
+    return Number.isInteger(n) && n > 0 ? { ok: true, epochSec: n } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
 /** Does `git status --porcelain -z` represent REAL worker work, or only daemon-injected `.claude/` noise
  *  (skill injection, Claude's own `settings.local.json` writes)? ⛔ Two noise classes are dropped — any
  *  untracked `.claude/` path, and the injected `.claude/skills/` subtree at ANY status — everything else
@@ -6227,6 +6247,10 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // A comment-only edit near any of the substitution's anchor text could make an oldStr occurrence count
   // mismatch (buildMutant throws) or silently substitute the wrong text.
   "packages/daemon/test/skills-dead-claim-reclaim-shared-cwd.mjs",
+  // Card 9623e943: card-policy-source-pins.mjs reads real src/**/*.ts (sessions/service.ts, mcp/tasks.ts, gateway/server.ts,
+  // mcp/platform.ts) and compiled dist/mcp/*.js TEXT (comment-stripped, but anchored on exact code shapes a comment-only
+  // diff near them can still shift) and pattern-matches it, so it belongs on the changed-compiled-.ts trigger.
+  "packages/daemon/test/card-policy-source-pins.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its

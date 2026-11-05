@@ -12,6 +12,7 @@ import { findSuspectedDuplicate, type DuplicateMatch } from "./duplicateDetectio
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
 import { stripEscapeAndControlChars } from "../security/control-chars.js";
+import { evaluateCardPolicies, dbPolicyEvidence, policyView } from "../orchestration/card-policy.js";
 import {
   planTaskStructure, applyTaskPlan, hasStructureInput, buildRelationView, boardRollup, openBlockersByTask,
   type TaskStructureInput, type StructurePlan,
@@ -815,7 +816,19 @@ export interface TaskRequestsSummary {
 }
 
 /** A task extended with its connected-requests summary + git-derived merged state — what getProjectTask/tasks_get returns. */
-export type TaskWithRequests = TaskWithMerged & TaskRelationView & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary; heldRequestState: HeldRequestState | null };
+export type TaskWithRequests = TaskWithMerged & TaskRelationView & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary; heldRequestState: HeldRequestState | null; policy?: ReturnType<typeof policyView> };
+
+/**
+ * Card 9623e943 — the READ-ONLY card-policy verdict for `tasks_get` (agents may read, never write). Present ONLY
+ * when a stored policy matches the card (a project with no policies returns a byte-identical response). Evaluated
+ * for the spawn phase with the shared DB-only evidence readers; merge-phase requirements show as `deferred`.
+ */
+async function taskPolicyView(db: Db, projectId: string, task: Pick<Task, "id" | "title">): Promise<ReturnType<typeof policyView> | undefined> {
+  const raw = (db.getProject(projectId)?.config as { orchestration?: { cardPolicies?: unknown } } | undefined)?.orchestration?.cardPolicies;
+  const never = (): never => { throw new Error("merge-phase evidence is not read by tasks_get"); };
+  const ev = await evaluateCardPolicies({ rawPolicies: raw, task, phase: "spawn", evidence: { ...dbPolicyEvidence(db, projectId), codeReview: never, checkpoint: never }, stickyPolicyIds: raw === undefined || (Array.isArray(raw) && raw.length === 0) ? undefined : new Set(db.listCardPolicyMatches(task.id)) });
+  return ev.verdicts.length > 0 ? policyView(ev) : undefined;
+}
 
 /**
  * The live-resolved state of a task's {@link Task.heldRequestId} link (card 0ad1ca68) — `null` when the
@@ -995,6 +1008,7 @@ export async function getProjectTask(
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
     incomingDeferredItems: summarizeIncomingDeferredItems(db, projectId, found.id),
     heldRequestState: resolveHeldRequestState(db, found),
+    ...await (async () => { const policy = await taskPolicyView(db, projectId, found); return policy ? { policy } : {}; })(),
   };
 }
 

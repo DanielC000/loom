@@ -1002,6 +1002,7 @@ const TEST_TIMEOUT_MS = 120_000;
 // splits did not stop the kills); the no-blanket-raise principle above stands. The nine 300s entries below
 // carrying "card a9119abf" are sized off in-suite max pass + tail, NOT off a solo-times-N factor.
 const TEST_TIMEOUT_OVERRIDES = {
+  "card-policy-enforcement": 260_000, // card 9623e943: ~15 scenario groups through the real SessionService with real git on a temp repo (spawn, solo merge, recycle lineage, landed re-confirm, pinned-tip re-check). Measured solo, foreground, single lane: 74.3s then 103.3s after the sticky-match scenarios (n=1 each, 2026-11-05, one host) — past the ~60s new-file-timing guidance and 86% of the 120s blanket ceiling. 260k gives ~2.5x the slower measured solo run.
   "merge-confirm-verdict-cache-union-merge-refusal": 150_000, // card 3573d2fb: no prior override, measured
     // right up against the 120s blanket ceiling under a loaded full-gate run (killed by SIGTERM). Measured
     // solo, foreground, single lane: 69.3s (n=1, 2026-11-03, one host) — 57.8% of the 120s default. 150k

@@ -2305,7 +2305,12 @@ export type OrchestrationEventKind =
   // deliberately NOT added to EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/
   // REPORT_RESOLVED_EVENT_KINDS: this is a forensic record of a destructive human action, not a
   // worker/manager lifecycle signal any of those four track.
-  | "merge_quarantine_broad_union_cleared";
+  | "merge_quarantine_broad_union_cleared"
+  // Card-policy waiver audit trail: written ONLY by the human-only REST waiver route (POST/DELETE
+  // /api/tasks/:id/policy-waivers); `detail` = {action:"waive"|"revoke", policyId, requirement, reason}.
+  // Audit-only, same bucket as `codex_auto_commit`: not a lifecycle signal.
+  // @decision 9623e943 — waivers are human-REST-only; no agent surface may write or revoke one.
+  | "card_policy_waived";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -2371,6 +2376,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   landing_trailer_displaced: true,
   worker_cut_base_restamped: true,
   merge_quarantine_broad_union_cleared: true,
+  card_policy_waived: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

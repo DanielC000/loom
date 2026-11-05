@@ -18,8 +18,10 @@ falls back to it only when `session.taskId` is unset: `session.taskId ?? session
   A review spawn defaulting `taskId` this way would collide with the mutex the worker BEING REVIEWED
   already holds (the live-holder check would refuse the review spawn outright), or — if it somehow got
   past that — would wrongly re-attribute board ownership of a card to its reviewer instead of its author.
-- Do not read `reviewOfTaskId` from any card/mutex/lane logic. It exists for exactly one reader: the
-  usage sampler's `sampleTaskId()`. It is deliberately excluded from `SESSION_ROW_FIELDS` (`worker_status`,
+- Do not read `reviewOfTaskId` from any card/mutex/lane logic. It has exactly two readers: the
+  usage sampler's `sampleTaskId()`, and (amended by card 9623e943, see
+  `9623e943-card-policy-enforcement.md`) the read-only code-review evidence predicate for card
+  policies (`Db.listReviewSessionsOfTask`). Any third reader needs its own amendment. It is deliberately excluded from `SESSION_ROW_FIELDS` (`worker_status`,
   `mcp/orchestration.ts`) and `SESSION_LIST_FIELDS` (`fleetView` full:true, `mcp/sessionView.ts`), same
   posture as `cutBaseSha`/`forcedPlain` — purely internal machinery, never a field an agent-facing view
   should carry.
@@ -29,8 +31,20 @@ falls back to it only when `session.taskId` is unset: `session.taskId ?? session
   to this card — see the card's own investigation checkpoint). Those historical samples stay
   `unattributed` permanently; only samples recorded by a review worker spawned AFTER this ships get the
   correct `byTask` attribution.
-- Do not add an index on `review_of_task_id` — nothing queries `sessions` by this column; it is read only
-  once, at usage-sample-write time, off the already-in-hand session row.
+- Do not add an index on `review_of_task_id`, and above all never a SCHEMA index on it: it is a migration-added
+  column, and a SCHEMA index on a migration-added column crashes boot on an upgraded database. Since card 9623e943,
+  `Db.listReviewSessionsOfTask` does query `sessions` by this column (`WHERE project_id = ? AND review_of_task_id = ?`),
+  so each call is a scan of the project's sessions rows, with no index to help. That is accepted deliberately: it runs
+  only for a card whose stored policy requires `code-review-report`, once per merge-phase evaluation (and once more at
+  the pre-squash re-check), never on a hot path, and the sessions table is small. Revisit only with a measured cost,
+  and then add the index through the migration function, never the SCHEMA block.
+
+## Amendment (card 9623e943): carried across a reviewer's recycle
+
+`recycleWorker` now carries `reviewOfTaskId` forward to the successor row, exactly as it already carried
+`reviewBaseSha` (same worktree, same review target). Before this a recycled reviewer's successor had a null
+`reviewOfTaskId`, so its `done` report was invisible to the card-policy code-review evidence (and its usage
+fell back to `unattributed`). The field stays usage/policy-evidence only. The Do-not list above is amended in the same card: the reader count (two) and the full-scan note on the index bullet.
 
 ## Test methodology (moved here from `review-of-task-id-migration.mjs`'s own header)
 

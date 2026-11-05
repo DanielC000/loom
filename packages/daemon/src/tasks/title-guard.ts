@@ -118,6 +118,17 @@ export function cardPolicyMatches(
 }
 
 /**
+ * Card 9623e943: the ids of every policy in `policies` whose selector matches `task` (the same predicate as
+ * {@link cardPolicyMatches}). Pure; used by the Db to record sticky matches before a title is rewritten.
+ */
+export function matchingCardPolicyIds(
+  policies: readonly { id: string; match: { types?: readonly string[]; scopes?: readonly string[]; cardIds?: readonly string[] } }[],
+  task: { id: string; title: string },
+): string[] {
+  return policies.filter((p) => cardPolicyMatches(p, task)).map((p) => p.id);
+}
+
+/**
  * @decision 3a833d94 — mirrors {@link checkTitleHtmlEntities}'s escape-hatch convention (same argument
  * as card 267fd215, applied to a second escape route): a `type(scope):`-shaped-but-invalid prefix
  * already LOOKS conventional, so the merge-time coercion net leaves it untouched rather than fixing it.
