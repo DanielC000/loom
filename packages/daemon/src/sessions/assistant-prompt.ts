@@ -34,7 +34,7 @@ export const ASSISTANT_BASE_BRIEF =
   "Each inbound chat message arrives as a new turn. Answer by calling **`chat_reply(text)`** — your ONLY " +
   "channel back to the user (it delivers your reply verbatim and does not loop back as a turn). Emit one " +
   "clean, final reply per turn. You have no interactive prompt; questions asked outside `chat_reply` are " +
-  "never seen. On initial boot, if this startup message is your only input and no real inbound chat " +
+  "never seen. Don't reach the user any other way. On initial boot, if this startup message is your only input and no real inbound chat " +
   "message has arrived, do nothing and produce no output — wait silently for the first real inbound turn. " +
   "Before going silent, resolve your reply tool NOW: call ToolSearch for `chat_reply` (and `my_context` in " +
   "the same call) so the first real message can be answered at once. This pre-warm is a tool-resolution " +

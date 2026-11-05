@@ -286,7 +286,7 @@ try {
   db7.close();
 
   // ===================== (8) ALL FOUR historical prompt values are accepted as pristine (round 2, item 3) =====================
-  check("(8, precondition) exactly 4 historical prompt values are recorded (the current one, kept for the record, plus 3 genuinely distinct)",
+  check("(8, precondition) exactly 4 historical prompt values are recorded (the 4th is the PRIOR value shipped before d50f83e5, kept for the record, plus 3 genuinely distinct)",
     SETUP_ASSISTANT_PROMPT_PRIOR_VALUES.length === 4);
   SETUP_ASSISTANT_PROMPT_PRIOR_VALUES.forEach((priorPrompt, i) => {
     const db8 = new Db(path.join(tmpHome, `prior-prompt-${i}.db`));
