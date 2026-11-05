@@ -326,7 +326,10 @@ try {
     fs.mkdirSync(d, { recursive: true }); // D remounts, still no own .git
 
     const clearResult1 = clearMergeQuarantine(r);
-    check("(twoclear, first clear) R's final is gone, D's tmp SURVIVES", fs.existsSync(strandedDTmp) && clearResult1.liftedRepoPaths.includes(r));
+    // 97516691: R is NOT reported lifted here — D is armed at R's key, so assertRepoNotQuarantined(r) refuses;
+    // `liftedRepoPaths.includes(r)` used to pin the untrue claim. Lifted <=> assert passes.
+    check("(twoclear, first clear) R's final is gone, D's tmp SURVIVES", fs.existsSync(strandedDTmp) && !clearResult1.liftedRepoPaths.includes(r));
+    check("(twoclear, first clear) R is still refused (D armed at R's key) — agrees with liftedRepoPaths omitting R", assertRepoNotQuarantined(r).ok === false);
     check("(twoclear, first clear) D is armed and reports as a genuine blocked co-occupant",
       clearResult1.stillBlockedCoOccupants?.some((c) => c.repoPath === d) && assertRepoNotQuarantined(d).ok === false);
 

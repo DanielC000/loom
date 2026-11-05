@@ -3424,18 +3424,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!(e instanceof UnknownRepoKeyError)) throw e;
       return reply.code(400).send({ error: `unknown repoKey: ${e.repoKey}` });
     }
-    const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, latchKept, referencingRepoPaths, contentKeptRepoPaths, contentKeptBlockedBy, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
+    const { wasQuarantined, reason, liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths, provenanceUnknown, latchKept, referencingRepoPaths, contentKeptRepoPaths, contentKeptBlockedBy, stillBlockedCoOccupants } = clearMergeQuarantineReporting(repo.path);
     // @decision 1872935d — name every OTHER identity this clear swept up beyond repo.path itself (the
     // sibling-key-contributor shape 6de79dc0 accepted releasing, but never disclosed on this success
     // path) — post-hoc, since the clear already ran by the time this is computed.
-    const alsoReleased = alsoReleasedRepoPaths(liftedRepoPaths, [repo.path]);
+    // @decision 97516691 — over the RELEASED set (tokens discarded), not `liftedRepoPaths` (admitted now).
+    const alsoReleased = alsoReleasedRepoPaths(releasedRepoPaths, [repo.path]);
     const alsoReleasedWarning = alsoReleasedWarningFor(alsoReleased);
     return {
       ok: true, wasQuarantined, repoPath: repo.path, ...(reason ? { reason } : {}),
       // @decision 4b6c8d24 — name every identity this clear actually lifted, unconditionally (same
       // field-consistency rule `stillBlockedCoOccupants` already follows below), plus a provenance
       // notice when the lifted union was marked — see the decision record.
-      liftedRepoPaths, ...(provenanceUnknown ? { provenanceUnknown } : {}),
+      liftedRepoPaths, releasedStillBlockedRepoPaths, ...(provenanceUnknown ? { provenanceUnknown } : {}),
       // @decision 1872935d — absent when nothing else was swept up; present (with its own post-hoc
       // warning text) whenever this clear also released a separately-outstanding, unrelated identity.
       ...(alsoReleased.length > 0 ? { alsoReleasedRepoPaths: alsoReleased, alsoReleasedWarning } : {}),
@@ -3480,14 +3481,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card abccee85: match by the entry's own STORED repoPath first (never a fresh canonicalRepoLockKey
       // recompute of the given string) — immune to the same key-drift class of bug round 3 already fixed
       // for the `{id}` form below. See clearMergeQuarantineByRecordedPath's own doc for why.
-      const { wasQuarantined, reason, liftedRepoPaths, provenanceUnknown, stillQuarantined, latchKept, referencingRepoPaths, contentKeptRepoPaths, contentKeptBlockedBy, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
+      const { wasQuarantined, reason, liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths, provenanceUnknown, stillQuarantined, latchKept, referencingRepoPaths, contentKeptRepoPaths, contentKeptBlockedBy, stillBlockedCoOccupants } = clearMergeQuarantineByRecordedPath(body.repoPath as string);
       // @decision 1872935d — same disclosure as `/clear` above, addressed against the given repoPath.
-      const alsoReleased = alsoReleasedRepoPaths(liftedRepoPaths, [body.repoPath as string]);
+      const alsoReleased = alsoReleasedRepoPaths(releasedRepoPaths ?? liftedRepoPaths, [body.repoPath as string]);
       const alsoReleasedWarning = alsoReleasedWarningFor(alsoReleased);
       return {
         ok: true, wasQuarantined, repoPath: body.repoPath, ...(reason ? { reason } : {}),
         // @decision 4b6c8d24 — same disclosure as `/clear` above.
-        liftedRepoPaths, ...(provenanceUnknown ? { provenanceUnknown } : {}),
+        liftedRepoPaths, releasedStillBlockedRepoPaths: releasedStillBlockedRepoPaths ?? [], ...(provenanceUnknown ? { provenanceUnknown } : {}),
         // @decision 1872935d — same shape as `/clear` above: absent when empty.
         ...(alsoReleased.length > 0 ? { alsoReleasedRepoPaths: alsoReleased, alsoReleasedWarning } : {}),
         // @decision 182c01cc (round 2) — see the matching note on `/clear` above: unconditional, never
@@ -3508,10 +3509,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // @decision 1872935d (CR round 2, MINOR) — addressed against the function's own `addressedRepoPaths`
     // (the id's own resolved key), never `result.liftedRepoPaths` against itself — that made the field
     // permanently dead (every lifted entry trivially matched itself). See the decision record.
-    const alsoReleased = alsoReleasedRepoPaths(result.liftedRepoPaths, result.addressedRepoPaths ?? []);
+    const alsoReleased = alsoReleasedRepoPaths(result.releasedRepoPaths ?? result.liftedRepoPaths, result.addressedRepoPaths ?? []);
     const alsoReleasedWarning = alsoReleasedWarningFor(alsoReleased);
     return {
       ok: true, wasQuarantined: result.wasQuarantined, id: body.id, liftedRepoPaths: result.liftedRepoPaths,
+      releasedStillBlockedRepoPaths: result.releasedStillBlockedRepoPaths ?? [],
       // @decision 1872935d — same shape as `/clear` above: absent when empty.
       ...(alsoReleased.length > 0 ? { alsoReleasedRepoPaths: alsoReleased, alsoReleasedWarning } : {}),
       // @decision 182c01cc (round 2) — same reason as the two routes above: unconditional.

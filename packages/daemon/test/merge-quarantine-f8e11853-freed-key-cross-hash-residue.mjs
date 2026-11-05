@@ -152,7 +152,8 @@ try {
     const xTmpAtRsHash = plantTmpResidue(keyR, x, "loom/x-branch", "X's own stray tmp, mismatched onto R's own hash", [xToken], "80001-cafef001");
 
     const clearResult = mod.clearMergeQuarantine(y);
-    check("(main) Y genuinely lifted", clearResult.liftedRepoPaths?.includes(y));
+    // 97516691: X is armed at Y's key, so assertRepoNotQuarantined(y) refuses and Y is NOT reported lifted (was: lifted).
+    check("(main) Y NOT reported lifted — X armed at Y's key still refuses Y (lifted <=> assert passes)", !clearResult.liftedRepoPaths?.includes(y) && mod.assertRepoNotQuarantined(y).ok === false);
     check("(main) X's own residue at R's hash SURVIVES Y's clear (never unlinked)", fs.existsSync(xTmpAtRsHash));
 
     // Snapshot BEFORE any further in-process verdict query -- see snapshotDir's own doc above.
@@ -207,7 +208,8 @@ try {
     const rLatchBytesBefore = fs.readFileSync(rLatchPath);
 
     const clearResult = mod.clearMergeQuarantine(y);
-    check("(rocc) Y genuinely lifted", clearResult.liftedRepoPaths?.includes(y));
+    // 97516691: same as (main) — X armed at Y's key refuses Y, so Y is NOT reported lifted (was: lifted).
+    check("(rocc) Y NOT reported lifted — X armed at Y's key still refuses Y (lifted <=> assert passes)", !clearResult.liftedRepoPaths?.includes(y) && mod.assertRepoNotQuarantined(y).ok === false);
     check("(rocc) Y's clear never lifts, addresses, or names R at all", !clearResult.liftedRepoPaths?.includes(r) && !clearResult.stillBlockedCoOccupants?.some((c) => c.repoPath === r) && !clearResult.contentKeptRepoPaths?.includes(r));
 
     const inProcessX = mod.stillBlockedEntryFor(x);

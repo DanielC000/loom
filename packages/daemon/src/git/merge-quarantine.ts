@@ -6966,7 +6966,10 @@ export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | un
 // @decision 656fdf39 (CR d1e02886 round 3/4) — `identityWideHumanClear` gates the re-ingest below:
 // `true` ONLY from the three identity-wide human clear routes, NEVER a token-scoped clear. REQUIRED
 // (round 4) — mirrors `deleteMergeQuarantineLatchByKey`'s own required param.
-type ClearByKeyResult = { wasQuarantined: boolean; liftedRepoPaths: string[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unattributed?: true; stillBlockedCoOccupants: BlockedCoOccupant[]; anyWriteFailed: boolean };
+/** A candidate this clear RELEASED (discarded its own tokens) that a DIFFERENT identity's entry still blocks —
+ *  `blockedByRepoPath` is that blocking entry's recorded repoPath only (no tokens, no secrets). Card 97516691. */
+export type ReleasedStillBlockedEntry = { repoPath: string; blockedByRepoPath: string };
+type ClearByKeyResult = { wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unattributed?: true; stillBlockedCoOccupants: BlockedCoOccupant[]; anyWriteFailed: boolean };
 type DeferredClearContext = { writeFailed: Set<string>; sink: DeferredTombstoneJob[] };
 /**
  * @decision d2592cd5 (3rd fix round, card 3d4467cf) — `deferred`, used only by the token path: when given,
@@ -6989,7 +6992,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     if (reconciled !== entry) { replaceEntryEverywhere(activeQuarantines, entry, reconciled); entry = reconciled; }
   }
   // @decision 4b6c8d24 (round 2) — CANDIDATES only, never a final answer — re-resolved after every
-  // mutation below (see resolveGenuinelyLiftedRepoPaths's own doc). `entry.contributorRepoPaths` are
+  // mutation below (see resolveReleasedAndLiftedRepoPaths's own doc). `entry.contributorRepoPaths` are
   // runtime-folded identities (82032b5c) — recorded facts, not guesses, so they belong here too.
   //
   // @decision 4b6c8d24 (round 3, R2) — a candidate only counts as lifted if blocked BEFORE this call;
@@ -7360,8 +7363,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     // live contributors do.
     for (const c of entry.reducedContributorRepoPaths ?? []) excludeRepoPaths.add(c);
   }
-  const liftedRepoPaths = resolveGenuinelyLiftedRepoPaths(candidateIdentities, excludeRepoPaths);
-  const provenanceUnknownLifted = anyLiftedCandidateProvenanceUnknown(liftedRepoPaths, provenanceByCandidate);
+  const { released: releasedRepoPaths, lifted: liftedRepoPaths, releasedStillBlocked: releasedStillBlockedRepoPaths } = resolveReleasedAndLiftedRepoPaths(candidateIdentities, excludeRepoPaths);
+  const provenanceUnknownLifted = anyLiftedCandidateProvenanceUnknown(releasedRepoPaths, provenanceByCandidate);
   // @decision 4b6c8d24 (round 2, nit) — `wasQuarantined` is a REAL boolean, never a lying `true` literal:
   // this clear may have been called with nothing at all tied to `identityRepoPath` (`entry` absent, no
   // pending twin ever matched) — see the decision record.
@@ -7392,7 +7395,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   if (anyReferencing || anyKeptUnattributed || relocatedCoOccupants.size > 0 || keptContentRepoPaths.size > 0) {
     return {
       wasQuarantined: anythingProcessed,
-      liftedRepoPaths,
+      liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       anyWriteFailed,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       // @decision 182c01cc — latchKept/referencingRepoPaths name ONLY the kept subset; a relocation never
@@ -7430,7 +7433,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // lifted; see the decision record for the two-path asymmetry this closes.
   return {
     wasQuarantined: anythingProcessed,
-    liftedRepoPaths,
+    liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
     anyWriteFailed,
     ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
     stillBlockedCoOccupants: [],
@@ -7553,13 +7556,22 @@ export function resolveQuarantineForTestOnly(repoPath: string): boolean {
  * @decision 4b6c8d24 (round 2) — re-resolve via {@link ownIdentityEntryFor}, a PURE identity scan; never
  * `resolveQuarantineFor`/`activeMergeQuarantineFor` here — querying either can itself mutate state.
  */
-function resolveGenuinelyLiftedRepoPaths(candidates: ReadonlySet<string>, excludeRepoPaths: ReadonlySet<string>): string[] {
+function resolveReleasedAndLiftedRepoPaths(candidates: ReadonlySet<string>, excludeRepoPaths: ReadonlySet<string>): { released: string[]; lifted: string[]; releasedStillBlocked: ReleasedStillBlockedEntry[] } {
+  const released: string[] = [];
   const lifted: string[] = [];
+  const releasedStillBlocked: ReleasedStillBlockedEntry[] = [];
   for (const candidate of candidates) {
     if (excludeRepoPaths.has(candidate)) continue;
-    if (!ownIdentityEntryFor(candidate)) lifted.push(candidate);
+    // RELEASED = this clear discarded the candidate's own tokens (the pre-97516691 meaning of "lifted").
+    if (ownIdentityEntryFor(candidate)) continue;
+    released.push(candidate);
+    // @decision 97516691 — lifted = released AND `!stillBlockedEntryFor` (pure mirror of the assert); a
+    // released-but-still-blocked candidate goes to `releasedStillBlocked`, never silently dropped.
+    const blocker = stillBlockedEntryFor(candidate);
+    if (blocker) releasedStillBlocked.push({ repoPath: candidate, blockedByRepoPath: blocker.repoPath });
+    else lifted.push(candidate);
   }
-  return lifted;
+  return { released, lifted, releasedStillBlocked };
 }
 
 /**
@@ -7576,8 +7588,9 @@ function markProvenanceCandidate(map: Map<string, boolean>, repoPath: string, fl
  * `lifted` list, keyed by that candidate's own pre-clear `provenanceUnknown` flag — never for a
  * protected-but-still-blocked occupant's own mark. See the decision record.
  */
-function anyLiftedCandidateProvenanceUnknown(lifted: readonly string[], provenanceByCandidate: ReadonlyMap<string, boolean>): boolean {
-  return lifted.some((rp) => provenanceByCandidate.get(directPathIdentity(rp)) === true);
+function anyLiftedCandidateProvenanceUnknown(released: readonly string[], provenanceByCandidate: ReadonlyMap<string, boolean>): boolean {
+  // 97516691: called over the RELEASED set (tokens discarded), not the admitted subset.
+  return released.some((rp) => provenanceByCandidate.get(directPathIdentity(rp)) === true);
 }
 
 /**
@@ -7611,7 +7624,7 @@ function anyLiftedCandidateProvenanceUnknown(lifted: readonly string[], provenan
  * `referencingRepoPaths` when a shared latch survives); the resolvable branch's own result, when routed
  * through the shared helper (card 3b1944b6), can now ALSO carry `stillQuarantined` — never otherwise.
  */
-export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
   if (!isRepoPathCurrentlyResolvable(repoPath)) {
     return clearMergeQuarantineByRecordedPath(repoPath);
   }
@@ -8039,7 +8052,7 @@ function tryClearMergeQuarantineByOwnIdentity(
   repoPath: string,
   pendingSweep: "broad" | "none" | "unreduced",
   matchedOverride?: Array<{ key: string; repoPath: string; mustRun?: true }>,
-): { matched: true; result: { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } } | { matched: false } {
+): { matched: true; result: { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } } | { matched: false } {
   // @decision 4b6c8d24 (round 2) — CANDIDATES only (never a final answer): a delegated call's own
   // `liftedRepoPaths` is already correctly re-resolved, but is re-verified again here too, since this
   // function's own later pending sweep can still mutate state after a given delegated call returns.
@@ -8138,7 +8151,9 @@ function tryClearMergeQuarantineByOwnIdentity(
       // @decision 4b6c8d24 (round 2) — the delegated call's own `liftedRepoPaths` are candidates here
       // too (re-verified below, never trusted blindly) — `provenanceUnknown` was already gated on THOSE
       // exact identities by the delegated call itself, so propagate it onto each of them directly.
-      for (const rp of result?.liftedRepoPaths ?? []) {
+      // 97516691: candidates are the delegated RELEASED set (a superset of its admitted `liftedRepoPaths`), so
+      // a released-but-still-blocked identity is re-partitioned below instead of vanishing here.
+      for (const rp of result?.releasedRepoPaths ?? result?.liftedRepoPaths ?? []) {
         candidateIdentities.add(rp);
         if (result?.provenanceUnknown) markProvenanceCandidate(provenanceByCandidate, rp, true);
       }
@@ -8286,11 +8301,11 @@ function tryClearMergeQuarantineByOwnIdentity(
   // doc + each caller's own doc) — this helper never guesses on their behalf.
   if (!wasQuarantined) return { matched: false };
   // @decision 4b6c8d24 (round 2) — ONE final re-resolve, after every mutation above, never a
-  // pre-computed guess — see resolveGenuinelyLiftedRepoPaths's own doc. `excludeRepoPaths` is every
+  // pre-computed guess — see resolveReleasedAndLiftedRepoPaths's own doc. `excludeRepoPaths` is every
   // repoPath this clear already knows is still blocked — the explicit never-in-both guard.
   const excludeRepoPaths = new Set<string>([...keptReferencingRepoPaths.keys(), ...relocatedCoOccupants.keys(), ...keptContentRepoPaths]);
-  const liftedRepoPaths = resolveGenuinelyLiftedRepoPaths(candidateIdentities, excludeRepoPaths);
-  const provenanceUnknownLifted = anyLiftedCandidateProvenanceUnknown(liftedRepoPaths, provenanceByCandidate);
+  const { released: releasedRepoPaths, lifted: liftedRepoPaths, releasedStillBlocked: releasedStillBlockedRepoPaths } = resolveReleasedAndLiftedRepoPaths(candidateIdentities, excludeRepoPaths);
+  const provenanceUnknownLifted = anyLiftedCandidateProvenanceUnknown(releasedRepoPaths, provenanceByCandidate);
   const relocated = [...relocatedCoOccupants.values()];
   // @decision 2a169469 (round 2) — `stillBlockedEntryFor` (the ONE shared PURE helper) — never a bare
   // `ownIdentityEntryFor` call (false-positive on a RESOLVABLE contributor, round 2) nor
@@ -8308,12 +8323,17 @@ function tryClearMergeQuarantineByOwnIdentity(
     const anyKept = keptReferencingRepoPaths.size > 0 || anyKeptUnattributed || keptContentRepoPaths.size > 0;
     // @decision 2a169469 — never report `repoPath` as both lifted AND still quarantined; filter it back
     // out of `liftedRepoPaths` (which never sees the ancestor tier `stillBlockedEntryFor` just matched on).
+    // (97516691: now redundant — `resolveReleasedAndLiftedRepoPaths` re-resolves via `stillBlockedEntryFor` itself; kept as a backstop.)
     const queriedIdentity = directPathIdentity(repoPath);
     const liftedExcludingQueried = liftedRepoPaths.filter((rp) => directPathIdentity(rp) !== queriedIdentity);
+    // The queried identity is already reported by `stillQuarantined`/`reason`, so it is left out of the
+    // released sets here too (it is also the "addressed" identity the REST disclosure excludes).
+    const releasedExcludingQueried = releasedRepoPaths.filter((rp) => directPathIdentity(rp) !== queriedIdentity);
+    const releasedStillBlockedExcludingQueried = releasedStillBlockedRepoPaths.filter((e) => directPathIdentity(e.repoPath) !== queriedIdentity);
     return { matched: true, result: {
       wasQuarantined: true, stillQuarantined: true,
       reason: composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), combinedRelocated),
-      liftedRepoPaths: liftedExcludingQueried,
+      liftedRepoPaths: liftedExcludingQueried, releasedRepoPaths: releasedExcludingQueried, releasedStillBlockedRepoPaths: releasedStillBlockedExcludingQueried,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       stillBlockedCoOccupants: [...combinedRelocated, ...[...keptReferencingRepoPaths.values()].filter((co) => !relocatedSet.has(co.repoPath))],
       ...(anyKept ? { latchKept: true as const } : {}),
@@ -8341,7 +8361,7 @@ function tryClearMergeQuarantineByOwnIdentity(
     });
     return { matched: true, result: {
       wasQuarantined: true, latchKept: true, referencingRepoPaths: refs,
-      liftedRepoPaths,
+      liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep names no live entry, so it never
       // joins `stillBlockedCoOccupants` above — only this field, alongside whatever TRUE referencer fired
@@ -8357,7 +8377,7 @@ function tryClearMergeQuarantineByOwnIdentity(
   if (anyKeptUnattributed) {
     return { matched: true, result: {
       wasQuarantined: true, latchKept: true, referencingRepoPaths: [],
-      liftedRepoPaths,
+      liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
@@ -8370,7 +8390,7 @@ function tryClearMergeQuarantineByOwnIdentity(
   if (relocated.length > 0) {
     return { matched: true, result: {
       wasQuarantined: true, stillBlockedCoOccupants: relocated,
-      liftedRepoPaths,
+      liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — a content-only keep can ALSO
       // coexist with a pure relocation; compose its own clause on, never silently drop it.
@@ -8387,7 +8407,7 @@ function tryClearMergeQuarantineByOwnIdentity(
   if (keptContentRepoPaths.size > 0) {
     return { matched: true, result: {
       wasQuarantined: true, latchKept: true, contentKeptRepoPaths: [...keptContentRepoPaths], stillBlockedCoOccupants: [],
-      liftedRepoPaths,
+      liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
       reason: contentKeptOnlyReasonFor([...keptContentRepoPaths], keptContentBlockedBy),
@@ -8395,7 +8415,7 @@ function tryClearMergeQuarantineByOwnIdentity(
   }
   return { matched: true, result: {
     wasQuarantined: true, stillBlockedCoOccupants: [],
-    liftedRepoPaths,
+    liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
     ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
   } };
 }
@@ -8419,7 +8439,7 @@ function tryClearMergeQuarantineByOwnIdentity(
  * through to a fresh-key ancestor clear — that fall-through belongs ONLY to {@link clearMergeQuarantine}'s
  * resolvable branch (see that function's own doc for why the two legitimately diverge).
  */
-export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
   // @decision 3be11be4 (Round 2, item 3) — check this card's own guard on every one of repoPath's own
   // matched entries BEFORE preClearForeignKeyStamp ever runs — see clearMergeQuarantine's own matching
   // comment and the decision record for why a refusal must never let that stamp happen.
@@ -8501,7 +8521,7 @@ export function computeBroadUnionVictimSet(entry: MergeQuarantineEntry): string[
 }
 
 type BroadUnionRealResult = {
-  wasQuarantined: boolean; liftedRepoPaths: string[]; stillBlockedCoOccupants: BlockedCoOccupant[];
+  wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[];
   provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[];
   contentKeptRepoPaths?: string[]; unattributed?: true;
 };
@@ -8519,6 +8539,8 @@ function composeBroadUnionClearResult(result: BroadUnionRealResult, confirmedSet
   return {
     ok: true as const, dryRun: false as const,
     wasQuarantined: result.wasQuarantined, liftedRepoPaths: result.liftedRepoPaths,
+    // 97516691: same release-vs-admission disclosure as the three other clear routes.
+    releasedStillBlockedRepoPaths: result.releasedStillBlockedRepoPaths ?? [],
     stillBlockedCoOccupants: result.stillBlockedCoOccupants,
     ...(result.provenanceUnknown ? { provenanceUnknown: true as const } : {}),
     ...(result.latchKept ? { latchKept: true as const, referencingRepoPaths: result.referencingRepoPaths } : {}),
@@ -9082,7 +9104,7 @@ export function alsoReleasedWarningFor(alsoReleased: string[]): string | undefin
  * `referencingRepoPaths`; re-resolving `repoPath` afterward finds nothing (a diverted entry never
  * blocks via the degraded-key tier), so without this the caller sees a plain, uninformative success.
  */
-export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths: string[]; releasedStillBlockedRepoPaths: ReleasedStillBlockedEntry[];provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
   // @decision 2a169469 (round 2) — `after` uses the shared PURE helper; `before` DELIBERATELY KEEPS the
   // real, mutating `resolveQuarantineFor` — see the decision record's "before stays impure" section: its
   // lazy GRADUATION side effect is, here, load-bearing for the real clear that follows (confirmed via a
@@ -9098,7 +9120,14 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
   // @decision 4b6c8d24 — forward the shared helper's own disclosure unconditionally, same field-
   // consistency rule `stillBlocked` above already follows — see the decision record.
   const liftedRepoPaths = clearResult?.liftedRepoPaths ?? [];
-  const provenanceUnknownFields = clearResult?.provenanceUnknown ? { provenanceUnknown: true as const } : {};
+  // 97516691: the RELEASED set (tokens discarded) and which of those a different entry still blocks; a
+  // result that carries neither (a refusal / reduce) released nothing beyond what it lifted.
+  const releasedRepoPaths = clearResult?.releasedRepoPaths ?? liftedRepoPaths;
+  const releasedStillBlockedRepoPaths = clearResult?.releasedStillBlockedRepoPaths ?? [];
+  const provenanceUnknownFields = {
+    ...(clearResult?.provenanceUnknown ? { provenanceUnknown: true as const } : {}),
+    releasedRepoPaths, releasedStillBlockedRepoPaths,
+  };
   if (after) {
     // @decision 3b1944b6 (Round 8, finding 2) — forward a preClear REFUSAL's own reason verbatim.
     // `stillQuarantined` alone double-composed the relocated clause (q4.mjs) — `refusedBeforeClear`
@@ -9185,7 +9214,7 @@ const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
  * names only an identity actually freed, never one still blocked by its own independent (d4b25feb) record
  * — `stillQuarantined`/`reason` name that case instead of a silently-false success.
  */
-export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; addressedRepoPaths?: string[]; stillQuarantined?: true; refusedBeforeClear?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
+export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; addressedRepoPaths?: string[]; stillQuarantined?: true; refusedBeforeClear?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
   if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
     return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list)` };
   }
@@ -9290,12 +9319,16 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     if (after) {
       return {
         ok: true, wasQuarantined: true, liftedRepoPaths: [], stillQuarantined: true,
+        // 97516691: the id's own entry was released but is still blocked — disclosed, never dropped.
+        releasedRepoPaths: [activeMatch.entry.repoPath],
+        releasedStillBlockedRepoPaths: [{ repoPath: activeMatch.entry.repoPath, blockedByRepoPath: after.repoPath }],
         reason: composeReasonWithRelocated(stillQuarantinedReason(after, activeMatch.entry.repoPath), activeRelocated),
         stillBlockedCoOccupants: activeStillBlocked, ...activeLatchKeptFields,
       };
     }
     return {
       ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath],
+      releasedRepoPaths: [activeMatch.entry.repoPath], releasedStillBlockedRepoPaths: [],
       // @decision 1872935d (CR round 2, MINOR) — the identity the id itself resolves to (activeMatch's
       // own key), never `liftedRepoPaths` itself — passing a field against itself made the disclosure dead.
       addressedRepoPaths: [activeMatch.entry.repoPath],
@@ -9474,12 +9507,15 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // EACH one; a repoPath still quarantined elsewhere is left OUT, never assumed fully freed.
     const matchedRepoPaths = [...new Set(matchedPending.map((p) => p.entry.repoPath))];
     const liftedRepoPaths: string[] = [];
+    const releasedStillBlockedRepoPaths: ReleasedStillBlockedEntry[] = [];
     const stillBlockedReasons: string[] = [];
     // @decision 2a169469 (round 2) — `stillBlockedEntryFor`, same helper the active-match branch uses.
     for (const repoPath of matchedRepoPaths) {
       const after = stillBlockedEntryFor(repoPath);
-      if (after) stillBlockedReasons.push(stillQuarantinedReason(after, repoPath));
-      else liftedRepoPaths.push(repoPath);
+      if (after) {
+        stillBlockedReasons.push(stillQuarantinedReason(after, repoPath));
+        releasedStillBlockedRepoPaths.push({ repoPath, blockedByRepoPath: after.repoPath });
+      } else liftedRepoPaths.push(repoPath);
     }
     // @decision 1872935d (CR round 2, MINOR) — `matchedRepoPaths[0]` as the one reference identity "the
     // id resolves to" (never the full set — that would be self-referential, the dead-field bug this
@@ -9491,6 +9527,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     const [firstMatchedRepoPath] = matchedRepoPaths;
     return {
       ok: true, wasQuarantined: true, liftedRepoPaths,
+      releasedRepoPaths: matchedRepoPaths, releasedStillBlockedRepoPaths,
       ...(firstMatchedRepoPath !== undefined ? { addressedRepoPaths: [firstMatchedRepoPath] } : {}),
       stillBlockedCoOccupants: [...keptCoOccupants.values()],
       ...(stillBlockedReasons.length > 0 ? { stillQuarantined: true, reason: stillBlockedReasons.join(" ") } : {}),
@@ -9540,7 +9577,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // @decision 182c01cc (round 2/4) — this raw fallback's own sweeps never relocate anything, but a kept
   // one is real (round 4 fix).
   return {
-    ok: true, wasQuarantined: false, liftedRepoPaths: [], stillBlockedCoOccupants: [...keptCoOccupants.values()],
+    ok: true, wasQuarantined: false, liftedRepoPaths: [], releasedRepoPaths: [], releasedStillBlockedRepoPaths: [], stillBlockedCoOccupants: [...keptCoOccupants.values()],
     ...(keptRepoPaths.size > 0 || anyKeptUnattributed || ownContentKept.size > 0 ? { latchKept: true as const } : {}),
     ...(keptRepoPaths.size > 0 || anyKeptUnattributed ? { referencingRepoPaths: [...keptRepoPaths] } : {}),
     ...(ownContentKept.size > 0 ? { contentKeptRepoPaths: [...ownContentKept.keys()] } : {}),
