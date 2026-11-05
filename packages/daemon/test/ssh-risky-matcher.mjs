@@ -22,7 +22,7 @@ requireHermeticEnv();
 const { evaluateSshCommandPolicy } = await import("../dist/connections/sshPolicy.js");
 const { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } = await import("@loom/shared");
 
-const rw = { readOnly: false, commandAllowlist: [], riskyCommandPatterns: [...DEFAULT_SSH_RISKY_COMMAND_PATTERNS] };
+const rw = { id: "risky-matcher-conn", readOnly: false, commandAllowlist: [], riskyCommandPatterns: [...DEFAULT_SSH_RISKY_COMMAND_PATTERNS] };
 const ro = { ...rw, readOnly: true };
 const verdict = (conn, cmd) => evaluateSshCommandPolicy(conn, cmd);
 const isHeld = async (cmd, conn = rw) => { const v = await verdict(conn, cmd); return v.allowed === true && v.requiresApproval === true; };

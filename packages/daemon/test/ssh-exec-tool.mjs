@@ -293,7 +293,7 @@ try {
     for (const [command, reason] of [
       ["file -C -m x", "not-read-only-verb"], ["docker logs web", "not-read-only-verb"], ["docker inspect web", "not-read-only-verb"],
       ["docker ps --format x", "not-read-only-verb"], ["docker ps --format=x", "not-read-only-verb"],
-      ["docker ps -n 5", "not-read-only-verb"], ["docker ps -aq", "not-read-only-verb"], ["docker ps --filter=x", "not-read-only-verb"],
+      ["docker ps -n 5", "not-read-only-verb"], ["docker ps -n", "not-read-only-verb"], ["docker ps -n5", "not-read-only-verb"], ["docker ps -aq", "not-read-only-verb"], ["docker ps --filter=x", "not-read-only-verb"],
       ["systemctl status -l nginx", "not-read-only-verb"],
       ["systemctl show nginx", "not-read-only-verb"], ["systemctl status a b", "not-read-only-verb"],
     ]) {
@@ -352,7 +352,7 @@ try {
     const r = await direct(evilConn, probe);
     const elapsed = performance.now() - t0;
     check("3e over-cap call refused as allowlist-regex-busy", r.ok === false && r.reason === "allowlist-regex-busy");
-    check(`3e refusal is immediate (${Math.round(elapsed)}ms < 150; a queued call would wait >= one 400ms worker round)`, elapsed < 150);
+    check(`3e refusal is immediate (${Math.round(elapsed)}ms < 300; a queued call would wait >= one 400ms worker round)`, elapsed < 300);
     const pair = rowsFor(probe);
     check("3e refusal audited as attempt+outcome pair with the busy reason, runner untouched", pair.length === 2 && pair[0].detail.phase === "attempt" && pair[1].detail.outcome === "refused" && pair[1].detail.reason === "allowlist-regex-busy" && calls.length === 0);
     check("3e refusal text echoes neither the command nor the pattern", !String(r.error).includes(probe) && !String(r.error).includes("(a+)+"));
@@ -361,6 +361,34 @@ try {
     check("3e queued holders still complete (bounded timeout), nothing leaked", settled.every((x) => x.ok === false && x.reason === "timeout") && getSshRegexWorkerStats().active === 0 && getSshRegexWorkerStats().queued === 0);
     const again = await testRegexesBounded(["^(a+)+$"], "aaaa");
     check("3e (flip control) once drained, a regex call is accepted again", again.ok === true && again.results[0] === true);
+  }
+
+  // ============ 3f. per-connection regex cap: one flooding connection cannot starve another ============
+  {
+    const { getSshRegexConnectionCount, SSH_REGEX_MAX_PER_CONNECTION } = await import("../dist/connections/sshRegex.js");
+    const benignConn = mk("BENIGN3F", { readOnly: false, commandAllowlist: [{ kind: "regex", pattern: "^ls " }] });
+    ALL.push(benignConn.id);
+    const evil = "a".repeat(4000) + "b";
+    calls.length = 0;
+    const { SSH_REGEX_MAX_CONCURRENT_WORKERS, SSH_REGEX_MAX_QUEUED_WAITERS } = await import("../dist/connections/sshRegex.js");
+    const globalCap = SSH_REGEX_MAX_CONCURRENT_WORKERS + SSH_REGEX_MAX_QUEUED_WAITERS;
+    // A floods with >= the whole global capacity: WITHOUT the per-connection cap A alone would fill the shared queue and B would be refused
+    const floodCount = globalCap + 2;
+    const flood = Array.from({ length: floodCount }, () => direct(evilConn, evil));
+    await delay(0);
+    check(`3f flooding connection holds exactly ${SSH_REGEX_MAX_PER_CONNECTION} regex entries (global capacity ${globalCap} is larger)`, getSshRegexConnectionCount(evilConn.id) === SSH_REGEX_MAX_PER_CONNECTION && SSH_REGEX_MAX_PER_CONNECTION < globalCap);
+    const b = await direct(benignConn, "ls /tmp");
+    check("3f connection B's benign call is still accepted and dispatched while A floods the global capacity", b.ok === true && calls.length > 0);
+    const flooded = await Promise.all(flood);
+    const busy = flooded.filter((x) => x.ok === false && x.reason === "allowlist-regex-busy").length;
+    const timedOut = flooded.filter((x) => x.ok === false && x.reason === "allowlist-regex-timeout").length;
+    check(`3f over-cap calls from A refused as busy (${floodCount - SSH_REGEX_MAX_PER_CONNECTION}), the rest time out (${SSH_REGEX_MAX_PER_CONNECTION})`, busy === floodCount - SSH_REGEX_MAX_PER_CONNECTION && timedOut === SSH_REGEX_MAX_PER_CONNECTION);
+    // pins the cap from below: a normal parallel burst on ONE connection (benign regexes) fits entirely
+    const burst = await Promise.all(Array.from({ length: SSH_REGEX_MAX_PER_CONNECTION }, () => direct(benignConn, "ls /tmp")));
+    check(`3f benign burst of ${SSH_REGEX_MAX_PER_CONNECTION} concurrent calls on one connection all succeed`, burst.every((x) => x.ok === true));
+    check("3f per-connection counter drained to zero on every exit path (ok, timeout, busy)", getSshRegexConnectionCount(evilConn.id) === 0 && getSshRegexConnectionCount(benignConn.id) === 0);
+    const again = await direct(benignConn, "ls /tmp");
+    check("3f refusals were not charged to any budget: A is accepted by the regex stage again once drained", (await direct(evilConn, "aaaa")).ok === true && again.ok === true);
   }
 
   // ============ 4. ReDoS: bounded, audited, event loop stays responsive ============

@@ -125,7 +125,7 @@ function riskyWordMatch(rule: SshCommandRule, words: string[], trimmed: string):
  * check names the refusal. Never throws.
  */
 export async function evaluateSshCommandPolicy(
-  conn: Pick<ConnectionMetadata, "readOnly" | "commandAllowlist" | "riskyCommandPatterns">,
+  conn: Pick<ConnectionMetadata, "readOnly" | "commandAllowlist" | "riskyCommandPatterns" | "id">,
   command: unknown,
 ): Promise<SshPolicyVerdict> {
   const refuse = (reason: SshRefusalReason): SshPolicyVerdict => ({ allowed: false, reason });
@@ -150,7 +150,7 @@ export async function evaluateSshCommandPolicy(
   }
   let regexResults: Array<boolean | null> = [];
   if (regexPatterns.length > 0) {
-    const res = await testRegexesBounded(regexPatterns, trimmed);
+    const res = await testRegexesBounded(regexPatterns, trimmed, undefined, conn.id);
     if (!res.ok) return refuse(res.reason === "busy" ? "allowlist-regex-busy" : "allowlist-regex-timeout");
     regexResults = res.results;
   }

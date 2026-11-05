@@ -65,18 +65,47 @@ export function getSshRegexWorkerStats(): { active: number; peak: number; queued
   return { active: activeWorkers, peak: peakWorkers, queued: waiters.length };
 }
 
+/**
+ * Most queued+active regex entries ONE connection may hold at once. The global queue cap bounds latency;
+ * this bounds availability, so one connection with a ReDoS-prone owner regex cannot fill the shared queue
+ * and starve every other connection. An over-cap call is refused as "busy", never queued.
+ * @decision ede5177a — per-connection cap; refusals are not charged to the connection's command budget.
+ */
+export const SSH_REGEX_MAX_PER_CONNECTION = 5;
+const perConnection = new Map<string, number>();
+
 export async function testRegexesBounded(
   patterns: string[],
   command: string,
   budgetMs: number = SSH_REGEX_BUDGET_MS,
+  connectionKey?: string,
 ): Promise<BoundedRegexResult> {
   if (patterns.length === 0) return { ok: true, results: [] };
-  if (!(await acquireSlot())) return { ok: false, reason: "busy" };
-  try {
-    return await runRegexWorker(patterns, command, budgetMs);
-  } finally {
-    releaseSlot();
+  if (connectionKey !== undefined) {
+    const held = perConnection.get(connectionKey) ?? 0;
+    if (held >= SSH_REGEX_MAX_PER_CONNECTION) return { ok: false, reason: "busy" };
+    perConnection.set(connectionKey, held + 1);
   }
+  try {
+    if (!(await acquireSlot())) return { ok: false, reason: "busy" };
+    try {
+      return await runRegexWorker(patterns, command, budgetMs);
+    } finally {
+      releaseSlot();
+    }
+  } finally {
+    // exactly one decrement per increment, on every exit (ok, timeout, error, busy-after-increment)
+    if (connectionKey !== undefined) {
+      const left = (perConnection.get(connectionKey) ?? 1) - 1;
+      if (left <= 0) perConnection.delete(connectionKey);
+      else perConnection.set(connectionKey, left);
+    }
+  }
+}
+
+/** Observability for tests: number of queued+active regex entries the given connection currently holds. */
+export function getSshRegexConnectionCount(connectionKey: string): number {
+  return perConnection.get(connectionKey) ?? 0;
 }
 
 function runRegexWorker(patterns: string[], command: string, budgetMs: number): Promise<BoundedRegexResult> {
