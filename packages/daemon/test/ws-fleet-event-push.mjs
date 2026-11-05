@@ -54,6 +54,16 @@ function makeInbox() {
 }
 
 const db = new Db(path.join(TMP, "loom.db"));
+// A real project + session for "mgr-1": appendEvent stamps detail.projectId onto a DURABLE_AUDIT_EVENT_KINDS row
+// by looking the session up, so §1's durable row can only be deep-equal if the push projects the STAMPED row.
+const seedNow = new Date().toISOString();
+db.insertProject({ id: "p1", name: "Proj", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: seedNow, archivedAt: null, reserved: false });
+db.insertAgent({ id: "a1", projectId: "p1", name: "Agent", startupPrompt: "x", position: 0, profileId: null });
+db.insertSession({
+  id: "mgr-1", projectId: "p1", agentId: "a1", engineSessionId: null, title: null, cwd: TMP,
+  processState: "live", resumability: "unknown", busy: false, createdAt: seedNow, lastActivity: seedNow,
+  lastError: null, role: "worker", parentSessionId: null,
+});
 const fleetHub = new FleetHub();
 const app = await buildServer({
   db, pty: {}, sessions: { peekPendingMerge: () => undefined, gatePhaseForOpId: () => null }, mcp: {}, orchMcp: {}, platformMcp: {}, auditMcp: {}, userAuditMcp: {},
@@ -85,6 +95,15 @@ try {
   const f1b = await inbox.next();
   check("(1) optional fields normalise exactly as REST does (workerSessionId/taskId null, detail absent)", JSON.stringify(f1b?.event) === JSON.stringify(db.listEvents("mgr-1").find((e) => e.id === bare.id)));
 
+  // A DURABLE_AUDIT_EVENT_KINDS kind: appendEvent stamps detail.projectId on the way in, so the pushed row must
+  // carry it too — a projection from the unstamped evt.detail would drop it and fail the deep-equal below.
+  const durable = ev("worker_gate", { detail: { passed: true } });
+  db.appendEvent(durable);
+  const f1d = await inbox.next();
+  const durableRest = db.listEvents("mgr-1").find((e) => e.id === durable.id);
+  check("(1) control: the durable row really was stamped with projectId (else this row proves nothing)", durableRest?.detail?.projectId === "p1");
+  check("(1) a DURABLE kind's frame is deep-equal to its stamped REST row (projectId included)", JSON.stringify(f1d?.event) === JSON.stringify(durableRest));
+
   // --- (2) rollback pushes nothing --------------------------------------------------------------------
   const rolled = ev("merge_request");
   let threw = false;
@@ -98,17 +117,19 @@ try {
 
   // --- (3) committed transaction: each event once, in order, after commit ------------------------------
   const a = ev("merge_request"), b = ev("idle_report");
-  let framesBeforeCommit = 0;
+  let socketsAttachedDuringTx = 0;
   db.runInTransaction(() => {
     db.appendEvent(a);
     db.appendEvent(b);
-    framesBeforeCommit = fleetHub.size; // nothing observable yet: notify is only reachable after commit
+    socketsAttachedDuringTx = fleetHub.size;
   });
   const sentinel3 = ev("idle_report");
   db.appendEvent(sentinel3);
   const ids3 = [(await inbox.next())?.event?.id, (await inbox.next())?.event?.id, (await inbox.next())?.event?.id];
   check("(3) transaction events pushed once each, in order, followed directly by the sentinel (no duplicates)", JSON.stringify(ids3) === JSON.stringify([a.id, b.id, sentinel3.id]));
-  check("(3) control: a socket was attached while the transaction ran", framesBeforeCommit === 1);
+  // Precondition only (NOT a proof of "only after commit" — the receive is async; §2's rollback case is what
+  // catches dispatch-before-commit): a socket was attached, so the observer was live while the tx ran.
+  check("(3) precondition: a socket was attached while the transaction ran", socketsAttachedDuringTx === 1);
 
   // --- (4) the alert-webhook slot is undisturbed; sinks are fault-isolated -----------------------------
   const listenerSeen = [];

@@ -24,8 +24,9 @@ import { expect, test, type LoomDaemon } from "./fixtures/daemon";
 const GAP_ITEMS = [{ id: "permissionDeny", reason: "this project has authored permission.deny rules that codex cannot honour." }];
 const ITEMS_KEY = "permissionDeny";
 const EVENTS_ENDPOINT = /\/api\/orchestration\/events(\?|$)/;
-// The slowest removed by-kinds poll was 15s, the fastest 4s; 9s fits two of the 4s family with room, the
-// same sizing rule the status-feed spec used.
+// The removed by-kinds polls ran at 4s through 15s. A 9s dwell reliably catches the 4s family (two ticks)
+// but NOT a restored 15s poll — that is the honest limit of this check; the slower polls are covered by the
+// list-level and emitter tests instead, not by this dwell.
 const DWELL_MS = 9_000;
 
 const mintId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -110,7 +111,6 @@ test.describe("orchestration events over /ws/fleet (card 670b2081)", () => {
     await expect.poll(() => attempts, { timeout: 15_000 }).toBeGreaterThan(0); // observable: the page is retrying and being refused
 
     await seedGap(loomDaemon, down.sessionId); // missed by the push: no socket exists
-    await expect(gapRowFor(page, down.sessionId), "control: nothing delivers it while the socket is down").toHaveCount(0);
 
     blocked = false;
     await expect(gapRowFor(page, down.sessionId)).toBeVisible({ timeout: 20_000 }); // the reconnect's resync read

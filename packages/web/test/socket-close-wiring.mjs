@@ -164,7 +164,9 @@ check("(4) the companion's two terminal branches land in DIFFERENT conn states",
 
 check("(5) the fleet provider's seed retries are STOPPABLE loops, not bare setTimeouts", () => {
   const loops = fleet.match(/createRetryLoop\(\)/g) ?? [];
-  assert.equal(loops.length, 2, `expected one retry loop per seed (2), saw ${loops.length}`);
+  assert.equal(loops.length, 3, `expected one retry loop per seed + one for the event resync (3), saw ${loops.length}`);
+  assert.ok(/stopSeedRetries = [\s\S]{0,300}?eventResyncRetry\.stop\(\)/.test(fleet), "the event resync's loop must be stopped by stopSeedRetries too");
+  assert.ok(/eventResyncRetry\.disarm\(\)/.test(fleet), "the event resync's pending retry must be disarmed on (re)open/close");
   // The pre-fix arming form, in both of its spellings.
   assert.ok(!/setTimeout\(\s*seed\b/.test(fleet), "seed must not be re-armed by a bare setTimeout");
   assert.ok(!/setTimeout\(\s*\(\)\s*=>\s*seedStatus/.test(fleet), "seedStatus must not be re-armed by a bare setTimeout");

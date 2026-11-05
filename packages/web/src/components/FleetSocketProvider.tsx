@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { OrchestrationEvent, ServerFleetMessage, SessionListItem } from "@loom/shared";
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
-import { applyOrchEvent, invalidateOrchEventQueries } from "../lib/orchEvents";
+import { applyOrchEvent, invalidateOrchEventQueries, resyncOrchEvents } from "../lib/orchEvents";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { createReconnectBackoff, createRefusalEpisode, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
 import { WEB_BUNDLE_QUERY_KEY } from "../lib/newBuild";
@@ -85,7 +85,8 @@ export function FleetSocketProvider() {
     // the terminal-close branch below stops both for good — see the decision note on that branch.
     const seedRetry = createRetryLoop();
     const statusSeedRetry = createRetryLoop();
-    const stopSeedRetries = () => { seedRetry.stop(); statusSeedRetry.stop(); };
+    const eventResyncRetry = createRetryLoop();
+    const stopSeedRetries = () => { seedRetry.stop(); statusSeedRetry.stop(); eventResyncRetry.stop(); };
     // Card a6d7bf36 — the ONE held-credential probe this run of failures is allowed. A remote page whose
     // gateway token has died never gets a 1008 here either (the upgrade 401s, so there is no socket to
     // close and the browser reports a bare 1006), so this socket's own reconnect would otherwise retry a
@@ -152,15 +153,19 @@ export function FleetSocketProvider() {
       eventsResyncing = true;
       bufferedEvents = [];
       const gen = ++eventResyncGen;
-      invalidateOrchEventQueries(qc)
-        .catch((err) => log("event resync failed", err))
-        .finally(() => {
-          if (disposed || gen !== eventResyncGen) return;
+      // A failed resync (a RateLimitedError, or an outage past react-query's own retries) leaves lists in
+      // error state with pre-outage data, so it retries on the same stoppable ladder as the seeds.
+      resyncOrchEvents(qc, {
+        retry: eventResyncRetry,
+        isCurrent: () => !disposed && gen === eventResyncGen,
+        onSettled: () => {
           const pending = bufferedEvents;
           bufferedEvents = [];
           eventsResyncing = false;
           for (const e of pending) applyOrchEvent(qc, e);
-        });
+        },
+        again: resyncEvents,
+      });
     };
 
     // Re-seeds the cache from a fresh REST fetch, buffering any deltas that arrive mid-fetch and replaying
@@ -246,6 +251,7 @@ export function FleetSocketProvider() {
         // concurrent seed under the fresh one below. The loop still has to work on a LATER failure.
         seedRetry.disarm();
         statusSeedRetry.disarm();
+        eventResyncRetry.disarm();
         log("connected");
         seed();
         seedStatus(reconnecting);
@@ -358,6 +364,7 @@ export function FleetSocketProvider() {
             // the reconnect re-seeds through these same loops once it opens.
             seedRetry.disarm();
             statusSeedRetry.disarm();
+            eventResyncRetry.disarm();
             // Card 97dd97e5 — the token-LESS arm must run before the probe is ever asked: with no
             // credential held there is nothing for `refusalEpisode.check` to learn (a token-less probe
             // settles as `"none"`), and asking anyway just re-arms this ladder forever at the 10s cap.
