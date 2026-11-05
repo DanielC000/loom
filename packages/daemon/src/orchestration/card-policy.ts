@@ -60,7 +60,7 @@ export const INVESTIGATE_CHECKPOINT_KICKOFF_PARAGRAPH =
  * @decision 9623e943 — the affirmative predicate is permission-only on purpose; never widen it to free text.
  */
 export function dbPolicyEvidence(
-  db: { listQuestionsForTask(projectId: string, taskId: string): { type: string; state: string; chosenOption: string | null; decidedExpiresAt?: string | null; answeredVia?: "human" | null; permissionAction?: string | null }[]; listCardPolicyWaivers(taskId: string): { policyId: string; requirementKind: string }[] },
+  db: { listQuestionsForTask(projectId: string, taskId: string): { type: string; state: string; chosenOption: string | null; decidedExpiresAt?: string | null; answeredVia?: "human" | null; permissionAction?: string | null }[]; listCardPolicyWaivers(taskId: string, projectId: string): { policyId: string; requirementKind: string }[] },
   projectId: string,
   nowMs: () => number = Date.now,
 ): Pick<PolicyEvidence, "authorizedPermissionRequest" | "waived"> {
@@ -70,7 +70,7 @@ export function dbPolicyEvidence(
       const hit = db.listQuestionsForTask(projectId, taskId).some((q) => q.type === "permission" && (q.state === "answered" || q.state === "consumed") && q.chosenOption === PERMISSION_ANSWERS[0] && q.answeredVia === "human" && !isSshApprovalAction(q.permissionAction) && !lapsed(q));
       return { met: hit, detail: hit ? "" : "no answered permission Request with an affirmative answer is linked to this card" };
     },
-    waived: (taskId, policyId, kind) => db.listCardPolicyWaivers(taskId).some((w) => w.policyId === policyId && w.requirementKind === kind),
+    waived: (taskId, policyId, kind) => db.listCardPolicyWaivers(taskId, projectId).some((w) => w.policyId === policyId && w.requirementKind === kind),
   };
 }
 

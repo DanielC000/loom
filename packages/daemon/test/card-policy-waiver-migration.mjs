@@ -33,6 +33,7 @@ const dbFile = path.join(tmpHome, "legacy.db");
   raw.exec("DROP TABLE card_policy_waivers");
   check("(setup) the reference schema also HAS card_policy_matches (sticky matches) before we drop it", !!raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='card_policy_matches'").get());
   raw.exec("DROP TABLE card_policy_matches");
+  raw.exec("DROP TABLE card_policy_waivers_v2"); // card 0b165937: the project-scoped waiver successor is likewise absent
   raw.exec("DROP TABLE card_policy_matches_v2"); // card f330faee: the project-scoped successor is also absent in a pre-card file
   check("(precondition) the legacy file has NO card_policy_waivers table", !raw.prepare("SELECT 1 FROM sqlite_master WHERE name='card_policy_waivers'").get());
   check("(precondition) the legacy file still holds the real rows", raw.prepare("SELECT count(*) AS c FROM tasks").get().c === 1 && raw.prepare("SELECT count(*) AS c FROM projects").get().c === 1);
@@ -72,16 +73,16 @@ if (!db) { console.log(`\n${failures} check(s) FAILED.`); await finishAndExit(1)
   check("(7) recording is idempotent and add-only", db.listCardPolicyMatches("legacy-t", "legacy-p").sort().join() === "p1,p9");
 }
 
-db.upsertCardPolicyWaiver({ taskId: "legacy-t", policyId: "p1", requirementKind: "approved-request", reason: "r", waivedBy: "human", createdAt: now });
-db.upsertCardPolicyWaiver({ taskId: "legacy-t", policyId: "p1", requirementKind: "approved-request", reason: "r2", waivedBy: "human", createdAt: now });
-check("(4) upsert on the migrated DB is idempotent per (card, policy, kind) and updates the reason", db.listCardPolicyWaivers("legacy-t").length === 1 && db.listCardPolicyWaivers("legacy-t")[0].reason === "r2");
-check("(4) delete reports whether a row existed", db.deleteCardPolicyWaiver("legacy-t", "p1", "approved-request") === true && db.deleteCardPolicyWaiver("legacy-t", "p1", "approved-request") === false);
-db.upsertCardPolicyWaiver({ taskId: "legacy-t", policyId: "p2", requirementKind: "code-review-report", reason: "keep", waivedBy: "human", createdAt: now });
+db.upsertCardPolicyWaiver({ taskId: "legacy-t", projectId: "legacy-p", policyId: "p1", requirementKind: "approved-request", reason: "r", waivedBy: "human", createdAt: now });
+db.upsertCardPolicyWaiver({ taskId: "legacy-t", projectId: "legacy-p", policyId: "p1", requirementKind: "approved-request", reason: "r2", waivedBy: "human", createdAt: now });
+check("(4) upsert on the migrated DB is idempotent per (card, project, policy, kind) and updates the reason", db.listCardPolicyWaivers("legacy-t", "legacy-p").length === 1 && db.listCardPolicyWaivers("legacy-t", "legacy-p")[0].reason === "r2");
+check("(4) delete reports whether a row existed", db.deleteCardPolicyWaiver("legacy-t", "legacy-p", "p1", "approved-request") === true && db.deleteCardPolicyWaiver("legacy-t", "legacy-p", "p1", "approved-request") === false);
+db.upsertCardPolicyWaiver({ taskId: "legacy-t", projectId: "legacy-p", policyId: "p2", requirementKind: "code-review-report", reason: "keep", waivedBy: "human", createdAt: now });
 db.close();
 
 let db2, threw2 = null;
 try { db2 = new Db(dbFile); } catch (e) { threw2 = e; }
-check("(5) a SECOND open is idempotent (no throw) and keeps the waiver data AND the sticky matches", threw2 === null && db2?.listCardPolicyWaivers("legacy-t").length === 1 && db2?.listCardPolicyMatches("legacy-t", "legacy-p").length === 2);
+check("(5) a SECOND open is idempotent (no throw) and keeps the waiver data AND the sticky matches", threw2 === null && db2?.listCardPolicyWaivers("legacy-t", "legacy-p").length === 1 && db2?.listCardPolicyMatches("legacy-t", "legacy-p").length === 2);
 db2?.close();
 
 console.log(failures === 0 ? "\n✅ ALL PASS — card_policy_waivers migrates onto a pre-card database" : `\n${failures} check(s) FAILED.`);

@@ -6537,7 +6537,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const waiverProject = deps.db.getProject(task.projectId);
     if (!waiverProject || !policyIdIsConfigured(waiverProject, p.policyId)) return reply.code(400).send({ error: `policyId '${p.policyId}' matches no configured card policy on this project` });
     const now = new Date().toISOString();
-    deps.db.upsertCardPolicyWaiver({ taskId: task.id, policyId: p.policyId, requirementKind: p.requirement, reason: p.reason, waivedBy: "human", createdAt: now });
+    deps.db.upsertCardPolicyWaiver({ taskId: task.id, projectId: task.projectId, policyId: p.policyId, requirementKind: p.requirement, reason: p.reason, waivedBy: "human", createdAt: now });
     deps.db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "waive", policyId: p.policyId, requirement: p.requirement, reason: p.reason } });
     return { ok: true };
   });
@@ -6546,7 +6546,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!task) return reply.code(404).send({ error: "task not found" });
     const p = parsePolicyWaiverBody((req.body ?? {}) as Record<string, unknown>, false);
     if (typeof p === "string") return reply.code(400).send({ error: p });
-    const removed = deps.db.deleteCardPolicyWaiver(task.id, p.policyId, p.requirement);
+    const removed = deps.db.deleteCardPolicyWaiver(task.id, task.projectId, p.policyId, p.requirement);
     if (removed) deps.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "revoke", policyId: p.policyId, requirement: p.requirement } });
     return { ok: true, removed };
   });

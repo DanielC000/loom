@@ -73,10 +73,10 @@ const REQ_APPROVED = { kind: "approved-request" }, REQ_REVIEW = { kind: "code-re
   const tCons = e.addTask("cons"); e.fileRequest({ taskId: tCons, state: "consumed" });
   check("(S3) consumed permission + authorize: spawn succeeds", !!(await spawn(tCons))?.id);
   const tWv = e.addTask("wv");
-  e.db.upsertCardPolicyWaiver({ taskId: tWv, policyId: "p1", requirementKind: "approved-request", reason: "owner said ok", waivedBy: "human", createdAt: e.now });
+  e.db.upsertCardPolicyWaiver({ taskId: tWv, projectId: e.projId, policyId: "p1", requirementKind: "approved-request", reason: "owner said ok", waivedBy: "human", createdAt: e.now });
   check("(S4) waived (card, policy, approved-request): spawn succeeds with no Request", !!(await spawn(tWv))?.id);
   const tWvOther = e.addTask("wvother");
-  e.db.upsertCardPolicyWaiver({ taskId: tWvOther, policyId: "p1", requirementKind: "code-review-report", reason: "wrong kind", waivedBy: "human", createdAt: e.now });
+  e.db.upsertCardPolicyWaiver({ taskId: tWvOther, projectId: e.projId, policyId: "p1", requirementKind: "code-review-report", reason: "wrong kind", waivedBy: "human", createdAt: e.now });
   await refuseCase("a waiver for a DIFFERENT requirement kind does not waive approved-request", tWvOther);
 
   // a permission grant whose DECIDED expiry has lapsed does not count; a live one does
@@ -127,7 +127,7 @@ const REQ_APPROVED = { kind: "approved-request" }, REQ_REVIEW = { kind: "code-re
   check("(S10) CONTROL: a card that NEVER matched is not made sticky by retitling", !!(await spawn(tFixOrig))?.id);
   const tRtWaive = e.addTask("stickywaive");
   e.db.updateTask(tRtWaive, { title: "no prefix" });
-  e.db.upsertCardPolicyWaiver({ taskId: tRtWaive, policyId: "p1", requirementKind: "approved-request", reason: "owner ok", waivedBy: "human", createdAt: e.now });
+  e.db.upsertCardPolicyWaiver({ taskId: tRtWaive, projectId: e.projId, policyId: "p1", requirementKind: "approved-request", reason: "owner ok", waivedBy: "human", createdAt: e.now });
   check("(S10) the human waiver still clears a sticky-matched card", !!(await spawn(tRtWaive))?.id);
   const tRtGone = e.addTask("stickygone");
   e.db.updateTask(tRtGone, { title: "no prefix either" });
@@ -162,7 +162,7 @@ const REQ_APPROVED = { kind: "approved-request" }, REQ_REVIEW = { kind: "code-re
   check("(S8) investigate-checkpoint card: the fixed investigate paragraph is appended to the kickoff", ckPrompt.includes("report your plan with worker_report") && ckPrompt.includes("KICK_OFF"));
   check("(S8) the paragraph comes AFTER the manager's kickoff text", ckPrompt.indexOf("KICK_OFF") < ckPrompt.indexOf("report your plan with worker_report"));
   const tCkW = e.addTask("ckw");
-  e.db.upsertCardPolicyWaiver({ taskId: tCkW, policyId: "p1", requirementKind: "investigate-checkpoint", reason: "r", waivedBy: "human", createdAt: e.now });
+  e.db.upsertCardPolicyWaiver({ taskId: tCkW, projectId: e.projId, policyId: "p1", requirementKind: "investigate-checkpoint", reason: "r", waivedBy: "human", createdAt: e.now });
   const wCkW = await spawn(tCkW);
   check("(S8) a waived investigate-checkpoint adds no paragraph", !(e.optsFor(wCkW.id)?.startupPrompt ?? "").includes("report your plan with worker_report"));
   check("(S8) merge-phase requirements never block a SPAWN (investigate-checkpoint is merge-enforced)", !!wCk?.id);
@@ -259,12 +259,12 @@ const REQ_APPROVED = { kind: "approved-request" }, REQ_REVIEW = { kind: "code-re
   // (M5) waived ⇒ lands (per requirement)
   e.setPolicies([policy({ require: [REQ_REVIEW, REQ_CHECK] })]);
   const w5 = await e.makeWorker("m5");
-  e.db.upsertCardPolicyWaiver({ taskId: w5.taskId, policyId: "p1", requirementKind: "code-review-report", reason: "owner ok", waivedBy: "human", createdAt: e.now });
+  e.db.upsertCardPolicyWaiver({ taskId: w5.taskId, projectId: e.projId, policyId: "p1", requirementKind: "code-review-report", reason: "owner ok", waivedBy: "human", createdAt: e.now });
   const r5 = val(await confirm(w5));
   check("(M5) waiving only code-review leaves investigate-checkpoint blocking", r5?.merged === false && r5.policyRefusal?.requirement === "investigate-checkpoint");
-  e.db.upsertCardPolicyWaiver({ taskId: w5.taskId, policyId: "p1", requirementKind: "investigate-checkpoint", reason: "owner ok", waivedBy: "human", createdAt: e.now });
+  e.db.upsertCardPolicyWaiver({ taskId: w5.taskId, projectId: e.projId, policyId: "p1", requirementKind: "investigate-checkpoint", reason: "owner ok", waivedBy: "human", createdAt: e.now });
   check("(M5) waiving both lets it land", val(await confirm(w5))?.merged === true && e.landed("m5.txt"));
-  e.db.deleteCardPolicyWaiver(w5.taskId, "p1", "code-review-report");
+  e.db.deleteCardPolicyWaiver(w5.taskId, e.projId, "p1", "code-review-report");
 
   // (M6) the BACKSTOP in confirmWorkerMerge refuses on its own (a caller that bypasses the tracked wrapper)
   e.setPolicies([policy({ require: [REQ_REVIEW] })]);

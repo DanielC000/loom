@@ -1528,6 +1528,20 @@ CREATE TABLE IF NOT EXISTS card_policy_waivers (
   created_at TEXT NOT NULL,
   PRIMARY KEY (task_id, policy_id, requirement_kind)
 );
+-- Project-scoped waivers (card 0b165937): policy ids are per-project config, so a human waiver only means
+-- something against the project whose policy it named. The (task_id, policy_id, requirement_kind) table above is
+-- LEGACY: no longer written or read after migrateCardPolicyWaiversV2 backfills this one (kept for downgrade).
+-- CREATE TABLE only (no migrated column, no extra index).
+CREATE TABLE IF NOT EXISTS card_policy_waivers_v2 (
+  task_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  policy_id TEXT NOT NULL,
+  requirement_kind TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  waived_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, project_id, policy_id, requirement_kind)
+);
 -- Sticky card-policy matches (card 9623e943): a policy that has EVER matched a card keeps applying even after the
 -- card is retitled out of its selector. Loom-owned: written only by the Db's own title chokepoints and the policy
 -- evaluator; nothing an agent can call removes a row. CREATE TABLE only (no migrated column, no extra index).
@@ -1774,6 +1788,8 @@ const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
 const DEFERRAL_EDGES_BACKFILL_MARKER = "task_deferral_edges_backfill_done";
 /** app_meta one-shot marker for the legacy `card_policy_matches` → `card_policy_matches_v2` backfill (card f330faee). */
 const CARD_POLICY_MATCHES_V2_BACKFILL_MARKER = "card_policy_matches_v2_backfill_done";
+/** app_meta one-shot marker for the legacy `card_policy_waivers` → `card_policy_waivers_v2` backfill (card 0b165937). */
+const CARD_POLICY_WAIVERS_V2_BACKFILL_MARKER = "card_policy_waivers_v2_backfill_done";
 /** app_meta one-shot marker for the profile→agent credential-grant fan-out (card afe1bc90). */
 export const CREDENTIAL_GRANT_FANOUT_MARKER = "profile_credential_grants_fanout_done";
 /** app_meta key holding the fan-out's durable JSON summary ({@link CredentialGrantFanoutSummary}) the notice card reads. */
@@ -3161,6 +3177,26 @@ export class Db {
     this.migratePurgeLegacyAlertWebhookHistory();
     this.migrateUsageSamples();
     this.migrateCardPolicyMatchesV2();
+    this.migrateCardPolicyWaiversV2();
+  }
+
+  /**
+   * Card 0b165937: backfill the project-scoped waiver table from the legacy (task_id, policy_id, kind) one,
+   * attributing each legacy row to the card's CURRENT project. ONE-SHOT, same shape as migrateCardPolicyMatchesV2:
+   * `app_meta` marker checked FIRST, stamped LAST in the SAME transaction as the copy, so a completed run is never
+   * repeated (a re-run would re-attribute a relocated card's waivers to its new project). The legacy table is left
+   * untouched for downgrade and is read only here. Named residual: a card relocated BEFORE this fix has its
+   * source-project waivers attributed to its current project (the old table recorded none).
+   */
+  private migrateCardPolicyWaiversV2(): void {
+    if (this.getMeta(CARD_POLICY_WAIVERS_V2_BACKFILL_MARKER)) return;
+    this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT OR IGNORE INTO card_policy_waivers_v2 (task_id, project_id, policy_id, requirement_kind, reason, waived_by, created_at)
+         SELECT w.task_id, t.project_id, w.policy_id, w.requirement_kind, w.reason, w.waived_by, w.created_at FROM card_policy_waivers w JOIN tasks t ON t.id = w.task_id`,
+      ).run();
+      this.setMeta(CARD_POLICY_WAIVERS_V2_BACKFILL_MARKER, new Date().toISOString());
+    })();
   }
 
   /**
@@ -11242,11 +11278,11 @@ export class Db {
     return row !== undefined;
   }
   /** Card 9623e943: a waiver for exactly one (card, policy, requirement kind); upserts the reason/author. */
-  upsertCardPolicyWaiver(w: { taskId: string; policyId: string; requirementKind: string; reason: string; waivedBy: string; createdAt: string }): void {
+  upsertCardPolicyWaiver(w: { taskId: string; projectId: string; policyId: string; requirementKind: string; reason: string; waivedBy: string; createdAt: string }): void {
     this.db.prepare(
-      `INSERT INTO card_policy_waivers (task_id, policy_id, requirement_kind, reason, waived_by, created_at)
-       VALUES (@taskId, @policyId, @requirementKind, @reason, @waivedBy, @createdAt)
-       ON CONFLICT(task_id, policy_id, requirement_kind) DO UPDATE SET reason = excluded.reason, waived_by = excluded.waived_by, created_at = excluded.created_at`,
+      `INSERT INTO card_policy_waivers_v2 (task_id, project_id, policy_id, requirement_kind, reason, waived_by, created_at)
+       VALUES (@taskId, @projectId, @policyId, @requirementKind, @reason, @waivedBy, @createdAt)
+       ON CONFLICT(task_id, project_id, policy_id, requirement_kind) DO UPDATE SET reason = excluded.reason, waived_by = excluded.waived_by, created_at = excluded.created_at`,
     ).run(w);
   }
   /** Card 9623e943: policy ids that have EVER matched this card within `projectId` (sticky; see card_policy_matches_v2). */
@@ -11273,12 +11309,13 @@ export class Db {
     this.recordCardPolicyMatches(taskId, projectId, matchingCardPolicyIds(parsed.policies, { id: taskId, title }));
   }
   /** Card 9623e943: returns true when a waiver row existed and was removed. */
-  deleteCardPolicyWaiver(taskId: string, policyId: string, requirementKind: string): boolean {
-    return this.db.prepare("DELETE FROM card_policy_waivers WHERE task_id = ? AND policy_id = ? AND requirement_kind = ?").run(taskId, policyId, requirementKind).changes > 0;
+  deleteCardPolicyWaiver(taskId: string, projectId: string, policyId: string, requirementKind: string): boolean {
+    return this.db.prepare("DELETE FROM card_policy_waivers_v2 WHERE task_id = ? AND project_id = ? AND policy_id = ? AND requirement_kind = ?").run(taskId, projectId, policyId, requirementKind).changes > 0;
   }
-  listCardPolicyWaivers(taskId: string): { taskId: string; policyId: string; requirementKind: string; reason: string; waivedBy: string; createdAt: string }[] {
-    return (this.db.prepare("SELECT task_id, policy_id, requirement_kind, reason, waived_by, created_at FROM card_policy_waivers WHERE task_id = ?").all(taskId) as Row[]).map((r) => ({
-      taskId: r.task_id as string, policyId: r.policy_id as string, requirementKind: r.requirement_kind as string,
+  /** Waivers granted for `taskId` against `projectId`'s policies only (card 0b165937). */
+  listCardPolicyWaivers(taskId: string, projectId: string): { taskId: string; projectId: string; policyId: string; requirementKind: string; reason: string; waivedBy: string; createdAt: string }[] {
+    return (this.db.prepare("SELECT task_id, project_id, policy_id, requirement_kind, reason, waived_by, created_at FROM card_policy_waivers_v2 WHERE task_id = ? AND project_id = ?").all(taskId, projectId) as Row[]).map((r) => ({
+      taskId: r.task_id as string, projectId: r.project_id as string, policyId: r.policy_id as string, requirementKind: r.requirement_kind as string,
       reason: r.reason as string, waivedBy: r.waived_by as string, createdAt: r.created_at as string,
     }));
   }
