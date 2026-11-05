@@ -15,13 +15,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // The full set of forbidden keys, each with a BACKSTOP (not-carried) value and a SET (carried) value.
 const ROWS = {
-  connections: { backstop: [], set: ["connX"] },
-  capabilities: { backstop: [], set: [{ slug: "some-capability" }] },
   vaultWrite: { backstop: false, set: true },
   harness: { backstop: "claude", set: "codex" },
   browserTesting: { backstop: false, set: true },
   documentConversion: { backstop: false, set: true },
   allowDelta: { backstop: [], set: ["Bash(*)"] },
+  codexProvider: { backstop: null, set: { id: "some-provider", baseUrl: "https://api.example.com/v1", connectionId: "connX" } },
 };
 
 check("(setup) the table above covers every AGENT_FORBIDDEN_PROFILE_KEYS member, no more, no fewer",
@@ -59,9 +58,9 @@ for (const key of AGENT_FORBIDDEN_PROFILE_KEYS) {
 
 // (D) multiple carried keys are ALL named in one refusal (not just the first).
 {
-  const existing = { ...backstopProfile(), connections: ["c1"], vaultWrite: true };
+  const existing = { ...backstopProfile(), codexProvider: ROWS.codexProvider.set, vaultWrite: true };
   const err = roleChangeCapabilityCarryoverError("worker", "manager", existing);
-  check("(multi) both carried keys are named in the SAME refusal", err?.includes("connections") && err?.includes("vaultWrite"));
+  check("(multi) both carried keys are named in the SAME refusal", err?.includes("codexProvider") && err?.includes("vaultWrite"));
 }
 
 console.log(failures === 0
