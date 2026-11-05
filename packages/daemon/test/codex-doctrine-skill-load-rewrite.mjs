@@ -78,7 +78,8 @@ check("(setup) collected all 10 seeded doctrine-skill prompts (2 setup home + 2 
 
 // --- (A) CLAUDE half: pre-change sha256 of each seeded prompt (captured on unmodified main before this card) --
 const PRE_CHANGE_SHA256 = {
-  "Platform/Platform": "88e3d64e5b8f15885f78b73eaa429634c5870848417f0cad843d25faf8b01970",
+  // Re-pinned for commit 2b739ec8 (intentional tightening of SETUP_ASSISTANT_PROMPT; the prior text is kept in SETUP_ASSISTANT_PROMPT_PRIOR_VALUES).
+  "Platform/Platform": "f91a19d6dfe71ce8cd700eef5cc87b2618d4e7cd0b3d7daf590b81ef8f98db09",
   "Platform/Workspace Auditor": "b90846cb7e157db458fa5da5b63ded7b26eb558301a5cab686a14301a839ffe3",
   "Loom Platform/Platform Lead": "30473c61a1b7f116effa4d434409ea7ba0e445feaa0f7e0bcfe1a7403791649a",
   "Loom Platform/Platform Auditor": "e51c083b17ece2ba5fdf80736e7e4a841f404ab189b13cc0824e1111d8bd04cf",

@@ -5,9 +5,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Proves:
 //   (1) the claim is PRESENT in SessionService's own claimedWorktreePaths set while createWorktree is
-//       still in flight — i.e. it is taken SYNCHRONOUSLY, before the first await, exactly like
-//       inFlightSpawnTaskIds (worker-spawn-toctou-race.mjs proves that one the same way: firing the
-//       async call and inspecting state before awaiting it, relying on the synchronous-prefix guarantee).
+//       still in flight. It is observed by polling while the spawn promise is still pending (the
+//       card-policy evaluation awaits BEFORE the claim, so it is no longer in the synchronous prefix);
+//       the check-then-add on inFlightSpawnTaskIds/claimedWorktreePaths stays atomic (no await between).
 //   (2) once createWorktree THROWS (a real failure, not a happy path), the claim is released — the Set
 //       is EMPTY afterward — so the unit that minted the claim (reclaimWedgedWorktreePathForSpawn's own
 //       returned `release()`) never leaks it, even on a failure path spawnWorker's outer `finally` reaches
@@ -80,11 +80,20 @@ try {
   // ===================== (1) the claim is PRESENT while createWorktree is still in flight =====================
   const expectedPath = resolveWorktreePath("pBad", taskBad);
   const p = svc.spawnWorker("mgrBad", { taskId: taskBad, agentId: "agentDevBad", kickoffPrompt: "GO" });
-  // No await yet: the synchronous prefix (cap checks, resolveRepo, reclaimWedgedWorktreePathForSpawn)
-  // has already run by the time this next line executes, and `await createWorktree(...)` is the FIRST
-  // await spawnWorker's try block hits — so the claim must already be in the Set right here.
+  // The claim is no longer taken in the synchronous prefix: the card-policy evaluation (97ae10f3) is an
+  // `await` that runs BEFORE the claim. The check-then-add itself stays atomic (no await between them),
+  // so poll until the claim shows up, and require that the spawn promise is still PENDING at that
+  // moment (i.e. createWorktree really is in flight). The loop ends when the promise settles, so a spawn
+  // that never claims fails (1) instead of hanging.
+  let settled = false;
+  p.then(() => { settled = true; }, () => { settled = true; });
+  let claimSeenWhilePending = false;
+  while (!settled) {
+    if (svc.claimedWorktreePaths.has(normForCompare(expectedPath))) { claimSeenWhilePending = true; break; }
+    await new Promise((r) => setImmediate(r));
+  }
   check("(1) the claim is present in claimedWorktreePaths while createWorktree is still in flight",
-    svc.claimedWorktreePaths.has(normForCompare(expectedPath)));
+    claimSeenWhilePending && !settled);
 
   // ===================== (2) createWorktree THROWS (notARepo has no HEAD to rev-parse) → the claim releases =====================
   let threw = null;

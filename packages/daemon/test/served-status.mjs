@@ -72,6 +72,7 @@ import {
   isTransientGitTimeout,
   withGitTimeoutRetry,
   GIT_TIMEOUT_RETRY_MIN_ATTEMPTS,
+  GIT_TIMEOUT_RETRY_DEADLINE_MS,
 } from "./_deploy-staleness-fault.mjs";
 requireHermeticEnv();
 installDeployStalenessFaultHook();
@@ -137,7 +138,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // classified retry test/deploy-staleness.mjs's own real-tree-adjacent calls already use — a GENUINE
 // "not a source checkout" (reasonKind:"not-applicable") is never retried and still throws exactly as
 // before; see (4-setup-fault-proof) below for the deterministic injected-fault proof of both halves.
-const realBuildProbe = withGitTimeoutRetry(computeDeployStaleness, {}, undefined, (attempt, result) => {
+// A bare 3-attempt retry (no deadline) was exhausted under full-gate load (the git calls each time out at the
+// product's 1s bound while the whole suite runs), so the probe now also gets the shared wall-clock deadline
+// test/deploy-staleness.mjs uses: it keeps retrying a TRANSIENT timeout until the deadline passes. A timeout
+// that persists for the whole deadline still returns available:false, so the check below FAILS and the
+// implausible-distBuiltAt throw fires — an environment failure never reads as a pass.
+const realBuildProbe = withGitTimeoutRetry(computeDeployStaleness, {}, performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, (attempt, result) => {
   console.log(`RETRY (${attempt}) (4-setup) real-tree probe hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
 });
 check("(4-setup) real-tree probe: this checkout's own daemon dist is a real source checkout" + reasonSuffix(realBuildProbe), realBuildProbe.available === true);
@@ -190,6 +196,20 @@ if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
   const exhaustedResult = withGitTimeoutRetry(computeDeployStaleness, {}, undefined, () => { exhaustedRetries++; });
   check(`(4-setup-fault-proof) NEGATIVE CONTROL: a fault that never clears still fails loud after exactly GIT_TIMEOUT_RETRY_MIN_ATTEMPTS (${GIT_TIMEOUT_RETRY_MIN_ATTEMPTS}) real attempts, never silently succeeding` + reasonSuffix(exhaustedResult),
     exhaustedResult.available === false && exhaustedRetries === GIT_TIMEOUT_RETRY_MIN_ATTEMPTS - 1 && globalThis.__dsLogFault.fired === GIT_TIMEOUT_RETRY_MIN_ATTEMPTS);
+  globalThis.__dsLogFault = { armed: false, fired: 0, maxFires: 0, delayMs: 0 };
+
+  // DEADLINE PROOF (the real-tree probe's configuration): a burst LONGER than the bare minimum attempts
+  // (5 injected timeouts > 3) is absorbed when a wall-clock deadline is supplied...
+  globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 5, delayMs: FAULT_DELAY_MS };
+  let burstRetries = 0;
+  const burstResult = withGitTimeoutRetry(computeDeployStaleness, {}, performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, () => { burstRetries++; });
+  check("(4-setup-fault-proof) DEADLINE: a burst of 5 consecutive injected timeouts (> the 3-attempt minimum) is absorbed once a wall-clock deadline is supplied" + reasonSuffix(burstResult),
+    burstResult.available === true && burstRetries >= 5 && globalThis.__dsLogFault.fired === 5);
+  // ...and a timeout that never clears still fails loud once the deadline passes (never a silent pass).
+  globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 999, delayMs: FAULT_DELAY_MS };
+  const deadlineExhausted = withGitTimeoutRetry(computeDeployStaleness, {}, performance.now() + 300, () => {});
+  check("(4-setup-fault-proof) DEADLINE NEGATIVE CONTROL: a persistent timeout still returns available:false after the deadline (loud, never a pass), having made at least the minimum attempts" + reasonSuffix(deadlineExhausted),
+    isTransientGitTimeout(deadlineExhausted) && globalThis.__dsLogFault.fired >= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS);
   globalThis.__dsLogFault = { armed: false, fired: 0, maxFires: 0, delayMs: 0 };
 
   // NEGATIVE CONTROL 2: a genuine "not a source checkout" must never be classified as a transient

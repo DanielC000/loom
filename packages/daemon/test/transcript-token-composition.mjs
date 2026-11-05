@@ -35,6 +35,10 @@ const lines = [
 const raw = lines.join("\n") + "\n{torn";
 const file = path.join(projDir, "s1.jsonl");
 fs.writeFileSync(file, raw);
+// A just-written file's mtime can be a few ms AHEAD of Date.now() (measured on Windows), which lands it
+// outside the report's `mtime <= now` window edge. Pin the mtime explicitly inside the window instead.
+const inWindow = new Date(Date.now() - 3_600_000);
+fs.utimesSync(file, inWindow, inWindow);
 
 const s = mod.analyzeSession(raw);
 // EXPECTED: calls=4, denominator = 100 + 120 + 60120 + 60130 = 120470
