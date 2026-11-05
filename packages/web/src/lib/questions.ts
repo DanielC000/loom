@@ -1,5 +1,5 @@
 import type { Question, QuestionAttachment, QuestionAttachmentKind, QuestionType } from "@loom/shared";
-import { SSH_APPROVAL_ACTION_PREFIX, SSH_DENY_COOLDOWN_MS } from "@loom/shared";
+import { PERMISSION_ANSWERS, SSH_APPROVAL_ACTION_PREFIX, SSH_DENY_COOLDOWN_MS, isPermissionLapsed } from "@loom/shared";
 import type { Tone } from "../theme";
 
 // Pure (JSX-free) helpers for the manager→human DECISION INBOX web surfaces (card 8701bdbb, child B):
@@ -12,6 +12,16 @@ import type { Tone } from "../theme";
 // follow-up card; until it lands, this age heuristic drives the amber state off `answeredAt`. Kept as a
 // single named constant so the eventual server signal has one clean place to override it.
 export const DECISION_WATCHDOG_MS = 30 * 60_000; // 30 min
+
+// A daemon-filed ssh_exec hold: a permission Request whose action carries the reserved prefix. Same test the
+// daemon's own `isSshApprovalQuestion` makes. `type`/`permissionAction` are optional so a caller holding only
+// the lifecycle fields (a bare state chip) still type-checks; without them a row is never an ssh hold.
+export function isSshHold(q: Partial<Pick<Question, "type" | "permissionAction">>): boolean {
+  return q.type === "permission" && typeof q.permissionAction === "string" && q.permissionAction.startsWith(SSH_APPROVAL_ACTION_PREFIX);
+}
+
+/** The fields the watchdog and the lifecycle chip read. */
+export type WatchdogInput = Pick<Question, "state" | "answeredAt"> & Partial<Pick<Question, "type" | "permissionAction">>;
 
 // A relative "4m ago" / "2h ago" / "3d ago" / "now" label from an ISO instant. `nowMs` is injected so the
 // formatter stays pure/testable (no ambient clock). Returns "" for a null/unparseable instant.
@@ -33,8 +43,10 @@ export function relativeAge(iso: string | null | undefined, nowMs: number): stri
 // "Nudge mgr". Card 59fa6403 round 2: a `notice` is its OWN terminal state (never "answered" — see
 // QuestionState's own doc) precisely so this check (and every other `state === "answered"` reader)
 // excludes it BY CONSTRUCTION, with no separate `type` check needed here at all.
-export function isDecisionWatchdog(q: Pick<Question, "state" | "answeredAt">, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): boolean {
-  if (q.state !== "answered" || !q.answeredAt) return false;
+// An answered ssh_exec hold (card 97ca3b74) is never watchdog either: the DAEMON consumes it on the agent's
+// next identical call (connections/sshApproval.ts), no manager ever pulls it, so "not picked up" is false.
+export function isDecisionWatchdog(q: WatchdogInput, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): boolean {
+  if (q.state !== "answered" || !q.answeredAt || isSshHold(q)) return false;
   const t = Date.parse(q.answeredAt);
   return Number.isFinite(t) && nowMs - t >= thresholdMs;
 }
@@ -55,7 +67,7 @@ export interface StateChipSpec { tone: Tone; label: string; }
 // (card 59fa6403) is a FIFTH, self-terminal state reading "FYI" — nobody answered it, so it must never
 // read "Answered" nor trigger the watchdog. One source of truth for every surface that renders a request's
 // state. The labels are sentence case HERE, at the source: the kit renders them as given.
-export function questionStateChip(q: Pick<Question, "state" | "answeredAt">, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): StateChipSpec {
+export function questionStateChip(q: WatchdogInput, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): StateChipSpec {
   if (q.state === "pending") return { tone: "info", label: "Pending" };
   if (q.state === "cancelled") return { tone: "danger", label: "Cancelled" };
   if (q.state === "consumed") return { tone: "muted", label: "Consumed ✓" };
@@ -210,15 +222,20 @@ export function requestHint(q: Pick<Question, "type" | "options" | "recommendati
 // cancelled decision/input would misleadingly fall through to "—" (indistinguishable from "answered with
 // no note") instead of naming what actually happened. A "notice" is never cancellable (never pending) so
 // the cancelled branch above never actually reaches it — its own case below is what always applies.
-export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note" | "state" | "cancelledReason">): string {
+// A permission grant names what the human actually granted (`decidedScope` + `decidedExpiresAt`, card
+// 97ca3b74), never a blanket "this action": a standing grant reads "standing · expires …". A row answered
+// before those fields existed (scope null) names no scope rather than guessing one.
+export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note" | "state" | "cancelledReason">
+  & Partial<Pick<Question, "decidedScope" | "decidedExpiresAt">>): string {
   if (q.state === "cancelled") return q.cancelledReason ? `cancelled · ${q.cancelledReason}` : "cancelled";
   switch (q.type) {
     case "credential":
       return "provided · encrypted, not shown";
-    case "permission":
-      return q.chosenOption === "authorize"
-        ? `authorized${q.note ? ` · ${q.note}` : " · this action"}`
-        : `denied${q.note ? ` · ${q.note}` : ""}`;
+    case "permission": {
+      if (q.chosenOption !== "authorize") return `denied${q.note ? ` · ${q.note}` : ""}`;
+      const scope = permissionGrantText(q.decidedScope ?? null, q.decidedExpiresAt ?? null);
+      return `authorized${scope ? ` · ${scope}` : ""}${q.note ? ` · ${q.note}` : ""}`;
+    }
     case "input":
       return q.note ? `“${q.note}”` : "—";
     case "notice":
@@ -228,23 +245,47 @@ export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note
   }
 }
 
+/** "standing · expires 2026-11-05 14:00 UTC" / "standing · no expiry" / "this action only", or "" for a
+ *  row with no recorded scope. UTC so the text is the same on every host; an unparseable expiry says so. */
+export function permissionGrantText(scope: Question["decidedScope"], expiresAt: string | null): string {
+  if (scope === "once") return "this action only";
+  if (scope !== "standing") return "";
+  if (expiresAt === null) return "standing · no expiry";
+  const t = Date.parse(expiresAt);
+  if (!Number.isFinite(t)) return "standing · expiry unreadable";
+  return `standing · expires ${new Date(t).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
 // The owner's "take it back" action on an ANSWERED ssh_exec hold (card a56270da), or null when there is
-// nothing to clear. Mirrors what still governs on the daemon (connections/sshApproval.ts): only an answered
-// row the human REST route wrote counts; a deny governs for SSH_DENY_COOLDOWN_MS after the answer; a grant
-// governs until it lapses. A pending, consumed, cancelled or lapsed row, and every non-ssh row, gets null.
+// nothing to clear. Mirrors `resolveSshApproval` (connections/sshApproval.ts) branch for branch (card
+// 97ca3b74): only an answered row the human REST route wrote counts; anything but "authorize" is a deny,
+// which governs until answeredAt + SSH_DENY_COOLDOWN_MS (exclusive); a standing grant with no expiry is not
+// honoured; any other grant governs until the SHARED `isPermissionLapsed` says it lapsed (unparseable =
+// lapsed, the expiry instant itself still holds). A pending, consumed, cancelled or lapsed row, and every
+// non-ssh row, gets null.
 export type SshClearAction = "clear-denial" | "revoke";
 export function sshClearAction(
-  q: Pick<Question, "type" | "state" | "permissionAction" | "chosenOption" | "answeredAt" | "answeredVia" | "decidedExpiresAt">,
+  q: Pick<Question, "type" | "state" | "permissionAction" | "chosenOption" | "answeredAt" | "answeredVia" | "decidedScope" | "decidedExpiresAt">,
   nowMs: number,
 ): SshClearAction | null {
-  if (q.type !== "permission" || q.state !== "answered" || q.answeredVia !== "human") return null;
-  if (!(q.permissionAction ?? "").startsWith(SSH_APPROVAL_ACTION_PREFIX)) return null;
-  if (q.chosenOption === "authorize") {
-    const expires = q.decidedExpiresAt ? Date.parse(q.decidedExpiresAt) : NaN;
-    return Number.isFinite(expires) && nowMs >= expires ? null : "revoke";
+  if (!isSshHold(q) || q.state !== "answered" || q.answeredVia !== "human") return null;
+  if (q.chosenOption !== PERMISSION_ANSWERS[0]) {
+    const until = Date.parse(q.answeredAt ?? "") + SSH_DENY_COOLDOWN_MS;
+    return Number.isNaN(until) || nowMs >= until ? null : "clear-denial";
   }
-  const answered = Date.parse(q.answeredAt ?? "");
-  return Number.isFinite(answered) && nowMs < answered + SSH_DENY_COOLDOWN_MS ? "clear-denial" : null;
+  if (q.decidedScope === "standing" && q.decidedExpiresAt === null) return null;
+  return isPermissionLapsed(q.decidedExpiresAt, nowMs) ? null : "revoke";
+}
+
+/** The second-line status of an answered ssh hold: "in effect" while the daemon still applies the answer to
+ *  identical calls (exactly when `sshClearAction` offers something to take back), else "no longer in
+ *  effect". `null` for every row that is not an answered ssh hold. */
+export function sshHoldStatus(
+  q: Parameters<typeof sshClearAction>[0],
+  nowMs: number,
+): "in effect" | "no longer in effect" | null {
+  if (!isSshHold(q) || q.state !== "answered") return null;
+  return sshClearAction(q, nowMs) ? "in effect" : "no longer in effect";
 }
 
 // ── Request ATTACHMENTS (epic 7d1d66ab, Direction B "Manifest" — the owner's pick on request 0bbf7d1b) ──

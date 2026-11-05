@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, SSH_APPROVAL_ACTION_PREFIX, resolveConfig, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
+import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, SSH_APPROVAL_ACTION_PREFIX, isPermissionLapsed, resolveConfig, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
 import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db, StoredQuestionAttachment } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
@@ -395,14 +395,9 @@ export function isSshApprovalAction(action: string | null | undefined): boolean 
   return typeof action === "string" && action.startsWith(SSH_APPROVAL_ACTION_PREFIX);
 }
 
-/** A decided grant's expiry has passed. The ONE lapse predicate: `permissionGrant` (advisory display) and the
- *  `ssh_exec` hold's redemption (`connections/sshApproval.ts`, which ENFORCES it) both call this, so the two
- *  can never disagree. `null` (no expiry) never lapses; an unparseable value fails closed as lapsed. */
-export function isPermissionLapsed(decidedExpiresAt: string | null, nowMs: number = Date.now()): boolean {
-  if (decidedExpiresAt === null) return false;
-  const t = new Date(decidedExpiresAt).getTime();
-  return Number.isNaN(t) || t < nowMs;
-}
+/** The ONE lapse predicate lives in `@loom/shared` so the Requests UI's Revoke offer reads the same rule the
+ *  `ssh_exec` hold's redemption (`connections/sshApproval.ts`) enforces; re-exported here for its callers. */
+export { isPermissionLapsed };
 
 /** A profile field's live value counts as "set" — the generic presence check `computeFulfillment` below
  *  falls back to when the asker didn't declare an `expectedValue`: null/undefined is never present, an

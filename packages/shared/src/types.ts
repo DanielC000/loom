@@ -4136,6 +4136,15 @@ export const SSH_APPROVAL_ACTION_PREFIX = "ssh_exec connection=";
 /** A denied ssh hold keeps refusing identical calls for this long after the owner's answer (or until the owner
  *  clears it). Shared so the Requests UI offers "Clear denial" only while the deny still governs. */
 export const SSH_DENY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/** A decided grant's expiry has passed. The ONE lapse predicate: the daemon's advisory `lapsed` display, the
+ *  `ssh_exec` hold's redemption (which ENFORCES it) and the Requests UI's Revoke offer all call this, so none
+ *  of them can disagree. `null` (no expiry) never lapses; an unparseable value fails closed as lapsed; at
+ *  exactly the expiry instant the grant still holds (`t < now`). */
+export function isPermissionLapsed(decidedExpiresAt: string | null, nowMs: number = Date.now()): boolean {
+  if (decidedExpiresAt === null) return false;
+  const t = new Date(decidedExpiresAt).getTime();
+  return Number.isNaN(t) || t < nowMs;
+}
 export type PermissionAnswer = (typeof PERMISSION_ANSWERS)[number];
 
 /**

@@ -16,7 +16,7 @@ import {
   isDecisionWatchdog, isUnread, relativeAge,
   REQUEST_TYPE_TONE, REQUEST_TYPE_ORDER,
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
-  requestProvenanceText, sshClearAction, type SshClearAction,
+  requestProvenanceText, sshClearAction, sshHoldStatus, isSshHold, type SshClearAction,
   ATTACHMENT_CHIP_GLYPH, ATTACHMENT_GLYPH, attachmentCountChip, attachmentDetail, attachmentOpenRefusal,
   attachmentPreviewMode, attachmentStateChip, isViewerKind,
 } from "../lib/questions";
@@ -142,6 +142,10 @@ function DismissButton({ q }: { q: QuestionInboxItem }) {
 // lapses. Offered only where `sshClearAction` says the answer still governs. A two-step INLINE confirm, not
 // window.confirm: the strip says what happens next in the row it applies to, and the safe choice ("Keep")
 // takes focus. After the clear lands the row leaves the inbox (it is now history, "cleared by owner").
+// The group/readout label for an answered ssh hold (card 97ca3b74): Loom applies the answer itself on the
+// agent's next identical call, so there is no manager pickup to wait for.
+const SSH_HOLD_ANSWERED_LABEL = "Answered · Loom applies it, no pickup needed";
+
 const SSH_CLEAR_COPY: Record<SshClearAction, { trigger: string; title: string; confirm: string; pending: string }> = {
   "clear-denial": {
     trigger: "Clear denial",
@@ -523,7 +527,18 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
   const edge = q.state === "pending" ? tone[typeTone] : watchdog ? color.amber : "transparent";
   const metaDot = q.state === "pending" ? typeTone : watchdog ? "busy" : "muted";
   const clearAction = sshClearAction(q, now);
+  const holdStatus = sshHoldStatus(q, now);
   const [confirmingClear, setConfirmingClear] = useState(false);
+  // Keep/Escape closes the confirm strip, which unmounts the focused button; hand focus back to the
+  // trigger (re-enabled on the same render) instead of letting it fall to <body>.
+  const clearTrigger = useRef<HTMLButtonElement>(null);
+  const refocusTrigger = useRef(false);
+  useEffect(() => {
+    if (confirmingClear || !refocusTrigger.current) return;
+    refocusTrigger.current = false;
+    clearTrigger.current?.focus();
+  }, [confirmingClear]);
+  const cancelClear = () => { refocusTrigger.current = true; setConfirmingClear(false); };
   return (
     // `data-testid` + `data-question-id`: an e2e needs to scope an assertion to ONE row, and filtering a
     // bare `div` by its title text matches every ANCESTOR container too — which silently widens the scope
@@ -557,7 +572,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
             : clearAction
               ? (
                 <div style={{ display: "flex", gap: 6 }}>
-                  <Button variant="ghost" disabled={confirmingClear} title={SSH_CLEAR_COPY[clearAction].title}
+                  <Button ref={clearTrigger} variant="ghost" disabled={confirmingClear} title={SSH_CLEAR_COPY[clearAction].title}
                     aria-expanded={confirmingClear} data-testid="ssh-clear"
                     onClick={() => setConfirmingClear(true)}>
                     {SSH_CLEAR_COPY[clearAction].trigger}
@@ -577,9 +592,10 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
         <span style={{ fontFamily: font.mono, fontSize: 11, color: watchdog ? color.amber : color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.state === "notice" ? "" : watchdog ? "answered, not picked up — " : "answered: "}
           {requestOutcome(q)}
+          {holdStatus && <span data-testid="ssh-hold-status"> · {holdStatus}</span>}
         </span>
       )}
-      {clearAction && confirmingClear && <SshClearConfirm q={q} action={clearAction} onCancel={() => setConfirmingClear(false)} />}
+      {clearAction && confirmingClear && <SshClearConfirm q={q} action={clearAction} onCancel={cancelClear} />}
     </Panel>
   );
 }
@@ -643,8 +659,12 @@ export function RequestsInbox() {
   // it, so it must never inflate the header count or sit under the "waiting on manager pickup" label,
   // which would be a false claim for a self-terminal row. Checked BEFORE the generic "answered" bucket.
   const notices = filtered.filter((q) => q.state === "notice");
-  const answered = filtered.filter((q) => q.state !== "pending" && q.state !== "notice");
-  const waitingCount = pending.length + answered.length;
+  // An answered ssh_exec hold (card 97ca3b74) is enforced by the DAEMON on the agent's next identical call;
+  // no manager picks it up, so it gets its own group instead of the "waiting on manager pickup" one.
+  const answeredAll = filtered.filter((q) => q.state !== "pending" && q.state !== "notice");
+  const sshHolds = answeredAll.filter((q) => isSshHold(q));
+  const answered = answeredAll.filter((q) => !isSshHold(q));
+  const waitingCount = pending.length + answeredAll.length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -693,6 +713,12 @@ export function RequestsInbox() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <SectionLabel style={{ margin: "4px 0 0", color: color.textMuted }}>Answered · waiting on manager pickup</SectionLabel>
           {answered.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={openRequest} />)}
+        </div>
+      )}
+      {sshHolds.length > 0 && (
+        <div data-testid="ssh-holds-group" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <SectionLabel style={{ margin: "4px 0 0", color: color.textMuted }}>{SSH_HOLD_ANSWERED_LABEL}</SectionLabel>
+          {sshHolds.map((q) => <RequestRow key={q.id} q={q} now={now} onOpen={openRequest} />)}
         </div>
       )}
       {notices.length > 0 && (
@@ -952,7 +978,9 @@ function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
   }
   return (
     <Panel style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <SectionLabel style={{ margin: 0 }}>{q.state === "consumed" ? "Answered · the manager pulled it" : "Answered · waiting on manager pickup"}</SectionLabel>
+      <SectionLabel style={{ margin: 0 }}>{isSshHold(q)
+        ? (q.state === "consumed" ? "Answered · no longer in effect" : SSH_HOLD_ANSWERED_LABEL)
+        : q.state === "consumed" ? "Answered · the manager pulled it" : "Answered · waiting on manager pickup"}</SectionLabel>
       {q.type === "credential" ? (
         <div style={{ fontFamily: font.mono, fontSize: 13, color: color.textDim }}>provided · encrypted, not shown</div>
       ) : q.type === "permission" ? (

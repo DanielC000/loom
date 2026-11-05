@@ -12,7 +12,7 @@ import { questionStateChip } from "../lib/questions";
 // (muted ✓ · terminal) → notice (muted · "FYI", card 59fa6403), with the watchdog re-escalating an
 // ignored `answered` to amber "Waiting on mgr". The kit's status capsule, tone-driven via the single
 // questionStateChip source of truth.
-export function DecisionStateChip({ q, now }: { q: Pick<QuestionInboxItem, "state" | "answeredAt">; now: number }) {
+export function DecisionStateChip({ q, now }: { q: Pick<QuestionInboxItem, "state" | "answeredAt"> & Partial<Pick<QuestionInboxItem, "type" | "permissionAction">>; now: number }) {
   const spec = questionStateChip(q, now);
   return <StatusPill tone={spec.tone} label={spec.label} style={{ flexShrink: 0 }} />;
 }

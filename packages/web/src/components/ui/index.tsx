@@ -14,6 +14,7 @@ import type {
   InputHTMLAttributes,
   KeyboardEvent,
   ReactNode,
+  Ref,
   SelectHTMLAttributes,
 } from "react";
 import { NavLink } from "react-router-dom";
@@ -81,7 +82,9 @@ type ButtonVariant = "default" | "primary" | "danger" | "ghost";
 
 export function Button({
   variant = "default", style, className, ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant; ref?: Ref<HTMLButtonElement> }) {
+  // React 19 passes `ref` as a plain prop, so it rides `rest` onto the <button> (a caller that must return
+  // focus to a trigger needs it).
   return (
     <button
       {...rest}

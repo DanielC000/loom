@@ -117,6 +117,13 @@ test("Clear denial ends a deny's cooldown: the next identical ssh_exec files a f
     await expect(confirm.getByRole("button", { name: "Keep" })).toBeFocused();
     await confirm.getByRole("button", { name: "Keep" }).click();
     await expect(confirm).toHaveCount(0);
+    // (card 97ca3b74) backing out hands focus back to the trigger, not to <body> — for Keep AND Escape.
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    await expect(r.getByTestId("ssh-clear-confirm").getByRole("button", { name: "Keep" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(r.getByTestId("ssh-clear-confirm")).toHaveCount(0);
+    await expect(trigger).toBeFocused();
     expect(await questionState(loomDaemon.baseURL, id)).toBe("answered");
     expect(await w.sshExec("reboot")).toMatchObject({ reason: "ssh-approval-denied" });
 
@@ -194,5 +201,65 @@ test("CONTROL: no Clear/Revoke on a pending ssh hold or on an answered non-ssh p
     await expect(r).toBeVisible();
     await expect(r.getByTestId("ssh-clear")).toHaveCount(0);
     await expect(r.getByRole("button", { name: /Clear denial|Revoke/ })).toHaveCount(0);
+  }
+});
+
+// (card 97ca3b74) An answered ssh hold is consumed by the DAEMON on the agent's next identical call; no
+// manager ever pulls it. So it must never sit under "waiting on manager pickup", never go amber "not picked
+// up", and never offer "Nudge mgr" (which would tell the filing worker to question_pull) — inside the deny's
+// 24h cooldown AND after it, when Clear denial is gone and the row used to fall back to the watchdog.
+// The pickup watchdog is a CLIENT-side age check, so the browser clock is moved forward (the daemon's real
+// human-stamped answer stays exactly as written); a second, seeded row carries an answeredAt days in the past.
+test("an answered ssh hold never shows the pickup/amber state or Nudge mgr, inside or after the deny cooldown", async ({ page, loomDaemon }) => {
+  const server = await startRefusingSshServer();
+  const w = await seedSshWorker(loomDaemon, server);
+  const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "SshHoldStaleMgr" });
+  const seededOld = await loomDaemon.seedQuestion({
+    sessionId: mgr.sessionId, projectId: mgr.projectId, title: uniq("old-ssh-deny"), type: "permission",
+    body: "A session asks to run `reboot`.", permissionAction: 'ssh_exec connection=conn-e2e target=loom@10.0.0.9:22 pin=0123456789ab command="reboot"',
+    state: "answered", chosenOption: "deny", answeredAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+  });
+  // CONTROL: the same shape as an ordinary permission row, equally old — it MUST still go amber with Nudge
+  // mgr, or the absence assertions below would pass on a page that never renders the watchdog at all.
+  const plainOld = await loomDaemon.seedQuestion({
+    sessionId: mgr.sessionId, projectId: mgr.projectId, title: uniq("old-plain-deny"), type: "permission",
+    body: "Push to origin?", permissionAction: "git push origin main",
+    state: "answered", chosenOption: "deny", answeredAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+  });
+  try {
+    const held = await w.sshExec("reboot");
+    const id = held.approvalRequestId!;
+    await api(`${loomDaemon.baseURL}/api/questions/${id}/answer`, { method: "POST", body: JSON.stringify({ decision: "deny" }) });
+
+    for (const [label, aheadMs, status] of [["in-cooldown", 2 * 3_600_000, "in effect"], ["after-cooldown", 25 * 3_600_000, "no longer in effect"]] as const) {
+      await page.clock.setFixedTime(new Date(Date.now() + aheadMs));
+      await gotoInbox(page, loomDaemon.baseURL);
+      const group = page.getByTestId("ssh-holds-group");
+      await expect(group.getByText("Answered · Loom applies it, no pickup needed")).toBeVisible();
+
+      const control = row(page, plainOld);
+      await expect(control.getByRole("button", { name: "Nudge mgr" })).toBeVisible();
+      await expect(control).toContainText("answered, not picked up");
+      expect(await control.evaluate((el) => getComputedStyle(el).borderLeftColor), "the control row does paint the watchdog edge").not.toBe("rgba(0, 0, 0, 0)");
+
+      for (const [rid, rowStatus] of [[id, status], [seededOld, "no longer in effect"]] as const) {
+        const r = group.locator(`[data-testid="request-row"][data-question-id="${rid}"]`);
+        await expect(r, `${label}: the ssh hold sits in its own group`).toBeVisible();
+        await expect(r.getByRole("button", { name: "Nudge mgr" })).toHaveCount(0);
+        await expect(r).not.toContainText("not picked up");
+        await expect(r).not.toContainText("Waiting on mgr");
+        await expect(r.getByText("Answered", { exact: true })).toBeVisible();
+        await expect(r.getByTestId("ssh-hold-status")).toHaveText(` · ${rowStatus}`);
+        const edge = await r.evaluate((el) => getComputedStyle(el).borderLeftColor);
+        expect(edge, `${label}: no amber watchdog edge`).toBe("rgba(0, 0, 0, 0)");
+      }
+      const live = row(page, id);
+      if (status === "in effect") await expect(live.getByRole("button", { name: "Clear denial" })).toBeVisible();
+      else await expect(live.getByRole("button", { name: "View" })).toBeVisible();
+      await shot(group, `stale-${label}`);
+    }
+  } finally {
+    await w.dismissHolds();
+    await server.close();
   }
 });

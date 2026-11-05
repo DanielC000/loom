@@ -225,9 +225,10 @@ test.describe("requests inbox (card 695ebab0)", () => {
     expect(body.note).toBeUndefined();
 
     await expect(dialog.getByText("Answered", { exact: true })).toBeVisible();
-    // The note was left blank, so the recorded readout falls back to the no-note phrasing — the
-    // scope/expiry the human picked is persisted structurally (proven above), not shown here.
-    await expect(dialog.getByText("authorized · this action", { exact: true })).toBeVisible();
+    // The readout names what was actually granted (card 97ca3b74): the standing scope and the exact expiry
+    // the POST carried, never the blanket "this action" it used to fall back to with no note.
+    const expiresUtc = `${new Date(body.expiresAt!).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    await expect(dialog.getByText(`authorized · standing · expires ${expiresUtc}`, { exact: true })).toBeVisible();
   });
 
   test("a credential request is masked with a working show/hide toggle and never echoes the value back", async ({ page, loomDaemon }) => {

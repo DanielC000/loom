@@ -10,6 +10,7 @@ import {
   requestFilerLabel, requestRoutedLabel, requestProvenanceText,
   formatAttachmentSize, attachmentDetail, attachmentCountChip, attachmentStateChip,
   attachmentPreviewMode, attachmentOpenRefusal, isViewerKind, ATTACHMENT_VIEWER_MAX_BYTES, sshClearAction,
+  isSshHold, sshHoldStatus, permissionGrantText,
 } from "../src/lib/questions.ts";
 
 let pass = 0;
@@ -279,6 +280,69 @@ check("sshClearAction: only an answered, human-stamped ssh hold that still gover
   assert.equal(sshClearAction({ ...ssh, answeredVia: null }, NOW), null, "not written by the human answer route");
   assert.equal(sshClearAction({ ...ssh, permissionAction: "git push origin main" }, NOW), null, "a non-ssh permission row");
   assert.equal(sshClearAction({ ...ssh, type: "decision" }, NOW), null);
+});
+
+// ── card 97ca3b74 ──────────────────────────────────────────────────────────────────────────────
+const SSH_ACTION = 'ssh_exec connection=c1 target=u@h:22 pin=ab command="reboot"';
+const sshRow = (over = {}) => ({
+  type: "permission", state: "answered", answeredVia: "human", chosenOption: "deny", answeredAt: ago(60_000),
+  decidedScope: null, decidedExpiresAt: null, permissionAction: SSH_ACTION, ...over,
+});
+
+check("(d) sshClearAction mirrors resolveSshApproval at every edge, via the shared isPermissionLapsed", () => {
+  const grant = (scope, expiresAt) => sshRow({ chosenOption: "authorize", decidedScope: scope, decidedExpiresAt: expiresAt });
+  // a standing grant with NO expiry is not honoured by the daemon ⇒ nothing to revoke
+  assert.equal(sshClearAction(grant("standing", null), NOW), null, "standing + null expiry");
+  // an unparseable expiry fails closed as lapsed on the daemon ⇒ nothing to revoke
+  assert.equal(sshClearAction(grant("standing", "not-a-date"), NOW), null, "unparseable expiry");
+  // exactly at the expiry instant the daemon still approves (t < now is false) ⇒ still revocable
+  assert.equal(sshClearAction(grant("standing", new Date(NOW).toISOString()), NOW), "revoke", "t == now");
+  assert.equal(sshClearAction(grant("standing", new Date(NOW - 1).toISOString()), NOW), null, "t == now - 1");
+  // a once grant carries no expiry and governs until it is spent (consumed)
+  assert.equal(sshClearAction(grant("once", null), NOW), "revoke", "once, unspent");
+  // the deny cooldown edge: answeredAt + 24h is exclusive on the daemon (nowMs >= until ⇒ none)
+  const DAY = 24 * 3_600_000;
+  assert.equal(sshClearAction(sshRow({ answeredAt: new Date(NOW - DAY + 1).toISOString() }), NOW), "clear-denial", "1 ms before the cooldown ends");
+  assert.equal(sshClearAction(sshRow({ answeredAt: new Date(NOW - DAY).toISOString() }), NOW), null, "exactly at the cooldown end");
+  assert.equal(sshClearAction(sshRow({ answeredAt: null }), NOW), null, "deny with no answeredAt");
+  // anything that is not "authorize" is the deny branch on the daemon (it compares against PERMISSION_ANSWERS[0])
+  assert.equal(sshClearAction(sshRow({ chosenOption: null }), NOW), "clear-denial", "a non-authorize answer is a deny");
+});
+
+check("(a)(c) an answered ssh hold is NEVER the pickup watchdog, before or after the deny cooldown", () => {
+  for (const answeredAt of [ago(DECISION_WATCHDOG_MS + 1), ago(25 * 3_600_000), ago(30 * 86_400_000)]) {
+    for (const chosenOption of ["deny", "authorize"]) {
+      const q = sshRow({ answeredAt, chosenOption });
+      assert.equal(isDecisionWatchdog(q, NOW), false, `${chosenOption} @ ${answeredAt}`);
+      const chip = questionStateChip(q, NOW);
+      assert.deepEqual([chip.tone, chip.label], ["muted", "Answered"], `chip ${chosenOption} @ ${answeredAt}`);
+    }
+  }
+  // the SAME row, as an ordinary (non-ssh) permission request, IS still the watchdog: the exclusion is scoped
+  assert.equal(isDecisionWatchdog(sshRow({ answeredAt: ago(DECISION_WATCHDOG_MS + 1), permissionAction: "git push origin main" }), NOW), true);
+  assert.equal(isSshHold(sshRow()), true);
+  assert.equal(isSshHold({ type: "decision", permissionAction: SSH_ACTION }), false);
+  assert.equal(isSshHold({ state: "answered", answeredAt: null }), false, "a lifecycle-only caller is never an ssh hold");
+});
+
+check("(c) sshHoldStatus: 'in effect' exactly while the daemon applies it, else 'no longer in effect'", () => {
+  assert.equal(sshHoldStatus(sshRow(), NOW), "in effect");
+  assert.equal(sshHoldStatus(sshRow({ answeredAt: ago(25 * 3_600_000) }), NOW), "no longer in effect");
+  assert.equal(sshHoldStatus(sshRow({ chosenOption: "authorize", decidedScope: "standing", decidedExpiresAt: ago(1) }), NOW), "no longer in effect");
+  assert.equal(sshHoldStatus(sshRow({ state: "consumed" }), NOW), null);
+  assert.equal(sshHoldStatus(sshRow({ permissionAction: "git push" }), NOW), null);
+});
+
+check("(b) requestOutcome names the granted scope + expiry, never a blanket 'this action'", () => {
+  const p = { type: "permission", chosenOption: "authorize", note: null, state: "answered", cancelledReason: null };
+  assert.equal(requestOutcome({ ...p, decidedScope: "standing", decidedExpiresAt: "2026-07-08T14:30:00.000Z" }), "authorized · standing · expires 2026-07-08 14:30 UTC");
+  assert.equal(requestOutcome({ ...p, decidedScope: "standing", decidedExpiresAt: null }), "authorized · standing · no expiry");
+  assert.equal(requestOutcome({ ...p, decidedScope: "standing", decidedExpiresAt: "garbage" }), "authorized · standing · expiry unreadable");
+  assert.equal(requestOutcome({ ...p, decidedScope: "once", decidedExpiresAt: null }), "authorized · this action only");
+  assert.equal(requestOutcome({ ...p, decidedScope: null, decidedExpiresAt: null }), "authorized", "an old row with no recorded scope names none");
+  assert.equal(requestOutcome({ ...p, decidedScope: "standing", decidedExpiresAt: null, note: "ok for the deploy" }), "authorized · standing · no expiry · ok for the deploy");
+  assert.equal(requestOutcome({ ...p, chosenOption: "deny", note: "no" }), "denied · no");
+  assert.equal(permissionGrantText("once", "2026-07-08T14:30:00.000Z"), "this action only");
 });
 
 console.log(`\n${pass} passed — decision-inbox helpers`);
