@@ -46,6 +46,10 @@ function classifySshParseError(message: string): string {
   return SSH2_ECHOES_SUBMISSION_BYTES_RE.test(message) ? "unrecognized or corrupt private key format" : message;
 }
 
+const PUBLIC_KEY_REFUSAL = "that is a public key; paste the PRIVATE key file";
+const PEM_PUBLIC_KEY_ARMOR_RE = /-----BEGIN (?:RSA |EC |DSA )?PUBLIC KEY-----/;
+const NO_STORABLE_FORM_REFUSAL = "could not produce a storable form of this key";
+
 const ED25519_PKCS8_DER_LEN = 48; // RFC 8410 — fixed length for every Ed25519 PKCS8 PrivateKeyInfo, no optional fields.
 
 /** Extract the raw 32-byte Ed25519 private seed from an unencrypted PKCS8 PEM (RFC 8410's fixed, 48-byte
@@ -101,6 +105,8 @@ export function stripSshKeyPassphrase(privateKey: unknown, passphrase: unknown):
   if (passphrase !== undefined && typeof passphrase !== "string") {
     return { ok: false, error: "passphrase, when given, must be a string" };
   }
+  // PEM public-key armor (SPKI / PKCS#1) is not parsed by ssh2 at all ("Unsupported key format"), so name it here.
+  if (PEM_PUBLIC_KEY_ARMOR_RE.test(privateKey)) return { ok: false, error: PUBLIC_KEY_REFUSAL };
   const parsed = sshUtils.parseKey(privateKey, passphrase || undefined);
   if (parsed instanceof Error) {
     // ssh2's own message distinguishes "encrypted, no passphrase given" from "bad passphrase" from
@@ -109,7 +115,26 @@ export function stripSshKeyPassphrase(privateKey: unknown, passphrase: unknown):
     return { ok: false, error: `invalid private key: ${classifySshParseError(parsed.message)}` };
   }
 
-  let candidatePem = parsed.getPrivatePEM();
+  // A PUBLIC key parses fine (parseKey returns a ParsedKey) but has no private half: getPrivatePEM() returns
+  // null for it. Refuse with FIXED text, never echo the submission (card c4e959be).
+  if (!parsed.isPrivateKey()) return { ok: false, error: PUBLIC_KEY_REFUSAL };
+  let candidatePem: string | null;
+  try {
+    candidatePem = parsed.getPrivatePEM();
+  } catch {
+    return { ok: false, error: NO_STORABLE_FORM_REFUSAL };
+  }
+  if (typeof candidatePem !== "string" || candidatePem.length === 0) return { ok: false, error: NO_STORABLE_FORM_REFUSAL };
+  try {
+    return finishStrip(parsed, candidatePem);
+  } catch {
+    // Fail closed on any unexpected ssh2/derivation throw; the thrown message is never forwarded (it can
+    // carry submission-derived text).
+    return { ok: false, error: NO_STORABLE_FORM_REFUSAL };
+  }
+}
+
+function finishStrip(parsed: ParsedKey, candidatePem: string): StripPassphraseResult {
   if (sshUtils.parseKey(candidatePem) instanceof Error) {
     if (parsed.type !== "ssh-ed25519") {
       return { ok: false, error: `could not produce a storable form of this ${parsed.type} key` };
