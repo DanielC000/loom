@@ -173,8 +173,10 @@ async function openProfileEditor(page: Page): Promise<void> {
   // (verified: with this wait removed, a deliberately re-broken capability row measured 0 here while a
   // direct census of the same page saw it at 302px in a 264px panel). Keyed on a seeded capability's
   // own badge, which doubles as the fixture-identity check for this part of the editor.
-  await expect(scope.getByTestId("capability-network-image-gen"),
-    "the seeded image-gen capability row has not rendered — the editor is only half populated")
+  // Since eae230d9 the Profiles editor lists only the two BUILTIN capabilities (registry capabilities
+  // are granted per AGENT), so the key is the document-conversion row's network badge (python-venv).
+  await expect(scope.getByTestId("capability-network-document-conversion"),
+    "the document-conversion capability row has not rendered — the editor is only half populated")
     .toBeVisible();
 }
 

@@ -2,6 +2,14 @@
 // Profiles editor's provisioning row is genuinely SLUG-KEYED rather than the one hardcoded markitdown panel
 // it replaced, and that the `network` badge discriminates by provision kind.
 //
+// RETARGETED (card ed39d432) after eae230d9 moved credential/registry capability grants onto the AGENT:
+// the Profiles editor now lists ONLY the two builtins (`browser-testing` node-package, `document-conversion`
+// python-venv). So the tracked/untracked pair below is `document-conversion` (its row reads the daemon-wide
+// python status, `/api/python/provisioning`) vs `browser-testing`, and the registry capabilities (`image-gen`
+// …) are asserted ABSENT from the profile picker — their per-slug row and network badge no longer exist in
+// any editor (the agent editor's grant list renders neither). The old per-slug endpoint-agreement leg has no
+// UI subject left and now agrees with the python endpoint instead.
+//
 // Three observables, each a real before/after rather than a render check:
 //   1. Granting a TRACKED capability (`image-gen`, kind npm-pinned) mounts its own provisioning row, keyed
 //      by that slug — absent before the toggle, present after, and gone again when the toggle is cleared.
@@ -43,8 +51,7 @@ const seedProfile = (baseURL: string, name: string) =>
 
 const listCapabilities = (baseURL: string) => apiJson<CatalogRow[]>(`${baseURL}/api/capabilities`);
 
-const capabilityProvisioning = (baseURL: string, slug: string) =>
-  apiJson<ProvisionStatus>(`${baseURL}/api/capabilities/${encodeURIComponent(slug)}/provisioning`);
+const pythonProvisioning = (baseURL: string) => apiJson<ProvisionStatus>(`${baseURL}/api/python/provisioning`);
 
 /** A capability's picker entry: the <label> wrapping its checkbox, pinned by the catalog row's own name. */
 const pickerRow = (page: import("@playwright/test").Page, name: string) =>
@@ -53,8 +60,10 @@ const pickerRow = (page: import("@playwright/test").Page, name: string) =>
 // The two slugs this spec depends on, and the kind each one's behaviour hangs off. Asserted against the
 // live catalog in every test rather than assumed — if a future card changes `image-gen`'s kind away from a
 // tracked one, this spec must fail LOUDLY on the premise rather than silently stop testing the gate.
-const TRACKED = { slug: "image-gen", kind: "npm-pinned" };
+const TRACKED = { slug: "document-conversion", kind: "python-venv" };
 const UNTRACKED = { slug: "browser-testing", kind: "node-package" };
+// A REGISTRY capability: granted per agent since eae230d9, so the Profiles editor must not list it.
+const REGISTRY = { slug: "image-gen", kind: "npm-pinned" };
 
 test.describe("capability provisioning status", () => {
   test("a granted tracked capability mounts its own slug-keyed row; an untracked one mounts none", async ({ page, loomDaemon }) => {
@@ -74,6 +83,14 @@ test.describe("capability provisioning status", () => {
     const untrackedToggle = pickerRow(page, untracked!.name).locator('input[type="checkbox"]');
     const trackedRow = page.getByTestId(`capability-provisioning-${TRACKED.slug}`);
     const untrackedRow = page.getByTestId(`capability-provisioning-${UNTRACKED.slug}`);
+
+    // eae230d9: a registry capability is no longer a profile-level grant — no picker row, no network
+    // badge, no provisioning row. Controlled by the builtin picker row resolving through the same helper.
+    const registry = catalog.find((c) => c.slug === REGISTRY.slug);
+    expect(registry, `this daemon must still seed ${REGISTRY.slug} (else this absence proves nothing)`).toBeTruthy();
+    expect(registry!.kind).toBe(REGISTRY.kind);
+    await expect(trackedToggle).toBeVisible();
+    await expect(pickerRow(page, registry!.name), "registry capabilities are granted per agent, not listed on a profile").toHaveCount(0);
 
     // BEFORE: a freshly seeded profile grants nothing, so NO provisioning row exists for either slug.
     await expect(trackedToggle).not.toBeChecked();
@@ -103,7 +120,7 @@ test.describe("capability provisioning status", () => {
     await expect(trackedRow).toHaveCount(0);
   });
 
-  test("the row's state agrees with the per-slug provisioning endpoint", async ({ page, loomDaemon }) => {
+  test("the row's state agrees with the daemon's python provisioning endpoint", async ({ page, loomDaemon }) => {
     const catalog = await listCapabilities(loomDaemon.baseURL);
     const tracked = catalog.find((c) => c.slug === TRACKED.slug);
     expect(tracked, `this daemon must seed the ${TRACKED.slug} capability`).toBeTruthy();
@@ -117,7 +134,7 @@ test.describe("capability provisioning status", () => {
     // The daemon's own answer for this slug. On a fixture daemon that has never spawned a session granting
     // it, this is `idle` — but the assertion is written against whatever the endpoint SAYS, so it holds on
     // a warm daemon too rather than pinning one incidental state.
-    const status = await capabilityProvisioning(loomDaemon.baseURL, TRACKED.slug);
+    const status = await pythonProvisioning(loomDaemon.baseURL);
     const expectedLabel = { idle: "not provisioned yet", installing: "installing…", ready: "ready", failed: "install failed" }[status.state];
     await expect(page.getByTestId(`provisioning-state-${TRACKED.slug}`)).toContainText(expectedLabel, { ignoreCase: true });
   });
@@ -135,16 +152,20 @@ test.describe("capability provisioning status", () => {
     // the real rule (pip / GitHub release / npm install fetch; a daemon-bundled node dependency doesn't)
     // as the catalog grows. `bundled`/`command` deliberately carry NO badge: their recipe never reaches the
     // REST summary, so the absence is "not known to fetch", never "known to be local".
+    // Only the BUILTINS are profile-level since eae230d9, so the rule is exercised on them; every
+    // registry capability (fetching or not) carries NO badge here because it is not listed at all.
     const fetching = new Set(["python-venv", "github-binary", "npm-pinned"]);
     let withBadge = 0;
     let withoutBadge = 0;
     for (const c of catalog) {
       const badge = page.getByTestId(`capability-network-${c.slug}`);
-      if (fetching.has(c.kind)) { await expect(badge, `${c.slug} (${c.kind}) must badge`).toBeVisible(); withBadge++; }
+      if (c.builtin && fetching.has(c.kind)) { await expect(badge, `${c.slug} (${c.kind}) must badge`).toBeVisible(); withBadge++; }
       else { await expect(badge, `${c.slug} (${c.kind}) must not badge`).toHaveCount(0); withoutBadge++; }
     }
     // Both polarities must be genuinely exercised, or one half of the rule went untested.
-    expect(withBadge, "the catalog must contain at least one fetching capability").toBeGreaterThan(0);
-    expect(withoutBadge, "the catalog must contain at least one non-fetching capability").toBeGreaterThan(0);
+    expect(withBadge, "the catalog must contain at least one fetching builtin").toBeGreaterThan(0);
+    expect(withoutBadge, "the catalog must contain at least one non-badged capability").toBeGreaterThan(0);
+    expect(catalog.some((c) => !c.builtin && fetching.has(c.kind)),
+      "the registry must carry a fetching non-builtin, or the 'not listed' half is untested").toBe(true);
   });
 });

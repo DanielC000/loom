@@ -3,8 +3,10 @@
 // `01-parity-checklist.md` §G listed both rows as "NOT VERIFIED AGAINST ATLAS'S OWN URL SCHEME".
 //
 //   `?task=<id>`                      → opens THAT card's dialog (pages/Board.tsx)
-//   `?profile=<id>&grant=<connId>`    → pre-selects THAT profile with the connection pre-ticked,
-//                                       unsaved (pages/Profiles.tsx, card 12dc7fc9)
+//   `?profile=<id>[&grant=<connId>]`  → pre-selects THAT profile (pages/Profiles.tsx). The `grant=`
+//                                       pre-tick (card 12dc7fc9) was RETIRED by eae230d9 — connection
+//                                       grants moved to the AGENT editor — so a carried `grant=` is
+//                                       inert: it must select nothing and grant nothing.
 //
 // Neither param is read by the Atlas frame; both are consumed by the page component, which phase 1
 // mounts verbatim under both shells. So the question this spec answers is NOT "does Board still read
@@ -413,7 +415,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 5. The profile + grant deep link ────────────────────────────────────────────────────────────
-  test("switch ON: ?profile=&grant= pre-selects that profile with the connection unsaved, and Save confirms rather than grants", async ({ page, loomDaemon }) => {
+  test("switch ON: ?profile=&grant= pre-selects that profile, the retired grant= is inert, and a widening Save confirms rather than writes", async ({ page, loomDaemon }) => {
     const base = loomDaemon.baseURL;
     const connection = await apiJson<{ id: string; name: string }>(`${base}/api/connections`, {
       method: "POST",
@@ -460,17 +462,19 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
       expect(profile.name).not.toBe(decoyProfile.name);
       await expect(nameField).not.toHaveValue(decoyProfile.name);
 
-      // THE GRANT IS PRE-SELECTED, NOT GRANTED. The banner is the editor's own statement of that.
-      await expect(page.getByText(/is pre-selected below/)).toBeVisible();
-      await expect(page.getByText(connection.name, { exact: false }).first()).toBeVisible();
-
-      // …and the stored row still carries nothing, read back over REST rather than inferred from the UI.
+      // THE RETIRED `grant=` IS INERT (eae230d9 moved connection grants onto the AGENT editor). The
+      // profile editor no longer pre-selects a connection or says so: the connection's name is nowhere
+      // on the page, and the stored row carries nothing, read back over REST rather than inferred.
+      await expect(page.getByText(/is pre-selected below/)).toHaveCount(0);
+      await expect(page.getByText(connection.name, { exact: false })).toHaveCount(0);
       const atRest = await apiJson<{ connections?: string[] }>(`${base}/api/profiles/${profile.id}`);
       expect(atRest.connections ?? [], "arriving on the deep link grants nothing").not.toContain(connection.id);
 
-      // THE FAIL-CLOSED CONFIRM IS INTACT UNDER ATLAS (@decision 3c4e0df6). Save does not write — it
-      // opens the blast-radius confirm naming the bound agent, because a profile is global.
+      // THE FAIL-CLOSED CONFIRM IS INTACT UNDER ATLAS (@decision 3c4e0df6). The still-profile-level
+      // widening key (vault write) stands in for the retired connection pre-tick: Save does not write,
+      // it opens the blast-radius confirm naming the bound agent, because a profile is global.
       await expect(page.getByTestId("grant-reach-confirm")).toHaveCount(0);
+      await page.getByTestId("profile-vault-write").check();
       await page.getByRole("button", { name: "Save", exact: true }).click();
 
       const confirm = page.getByTestId("grant-reach-confirm");
@@ -479,8 +483,8 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
       await expect(confirm.getByTestId("grant-reach-agents")).toContainText(agent.name);
 
       // The observable that makes "it does not auto-grant" a real claim: still nothing stored.
-      const afterSaveClick = await apiJson<{ connections?: string[] }>(`${base}/api/profiles/${profile.id}`);
-      expect(afterSaveClick.connections ?? [], "the click opened a confirm, it did not grant").not.toContain(connection.id);
+      const afterSaveClick = await apiJson<{ vaultWrite?: boolean }>(`${base}/api/profiles/${profile.id}`);
+      expect(afterSaveClick.vaultWrite ?? false, "the click opened a confirm, it did not write the widening").toBe(false);
     } finally {
       await fetch(`${base}/api/agents/${agent.id}`, { method: "DELETE" }).catch(() => {});
       await fetch(`${base}/api/profiles/${profile.id}`, { method: "DELETE" }).catch(() => {});
@@ -560,8 +564,8 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
       await expect(nameField, "the carried ?profile= pre-selected its profile").toHaveValue(profile.name);
       expect(profile.name).not.toBe(decoyProfile.name);
       await expect(nameField).not.toHaveValue(decoyProfile.name);
-      // …and the `?grant=` half arrived too, which is the editor's own statement that it did.
-      await expect(page.getByText(/is pre-selected below/)).toBeVisible();
+      // (The `?grant=` half still rides the URL — asserted below — but the editor no longer acts on it:
+      // eae230d9 retired the profile-level connection pre-tick, so there is no banner to look for.)
       // The CONTRAST CASE for the assertion above: the placeholder is what this address showed before
       // the query survived the redirect, so its absence is the measured difference.
       await expect(page.getByText(PLACEHOLDER, { exact: false }),
@@ -578,7 +582,6 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
         await expect(classic.locator(".loom-rail"), "the classic shell really mounted").toBeVisible();
         await expect(classic.getByTestId("atlas-shell")).toHaveCount(0);
         await expect(classic.getByLabel("Name", { exact: true })).toHaveValue(profile.name);
-        await expect(classic.getByText(/is pre-selected below/)).toBeVisible();
         await expect(classic.getByText(PLACEHOLDER, { exact: false })).toHaveCount(0);
         await expect(classic).toHaveURL(CLASSIC_URL);
         expect(classic.url()).toContain("profile=");
@@ -628,7 +631,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
       await expect(page.locator(".loom-rail")).toBeVisible();
       await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
       await expect(page.getByLabel("Name", { exact: true })).toHaveValue(profile.name);
-      await expect(page.getByText(/is pre-selected below/)).toBeVisible();
+      await expect(page.getByText(/is pre-selected below/)).toHaveCount(0);
       const atRest = await apiJson<{ connections?: string[] }>(`${base}/api/profiles/${profile.id}`);
       expect(atRest.connections ?? []).not.toContain(connection.id);
     } finally {

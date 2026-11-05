@@ -550,14 +550,16 @@ test("Profiles: a codex switch sends the cleared fields even when they already e
   expect(stored.browserTesting).toBe(false);
   expect(stored.restrictedTools).toBe(false);
   expect(stored.documentConversion).toBe(false);
-  // MECHANISM — the four rejected fields were on the wire explicitly, not left to the delta.
+  // MECHANISM — the three profile-level rejected fields were on the wire explicitly, not left to the delta.
   expect(bodies.length).toBe(1);
   const sent = JSON.parse(bodies[0] ?? "{}") as Record<string, unknown>;
   expect(sent.harness).toBe("codex");
   expect(sent.browserTesting).toBe(false);
   expect(sent.restrictedTools).toBe(false);
   expect(sent.documentConversion).toBe(false);
-  expect(sent.capabilities).toEqual([]);
+  // `capabilities` is an AGENT-level grant now (afe1bc90 / eae230d9), so the profile payload must NOT
+  // carry it any more — the three profile-level rejected fields above are the whole forced include.
+  expect(Object.keys(sent), "capabilities left the profile payload when grants moved to agents").not.toContain("capabilities");
   // ...and the editor settles rather than latching dirty against a store it just changed.
   await expect(page.getByText("saved", { exact: true })).toBeVisible();
 });
