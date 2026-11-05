@@ -57,9 +57,9 @@ check("(2) every pre-existing orchestration key resolves exactly as its platform
   [...new Set([...Object.keys(restResolved), ...Object.keys(restDefaults)])].every((k) => JSON.stringify(restResolved[k]) === JSON.stringify(restDefaults[k])));
 const good = [{ id: "review-feat", name: "Review features", match: { types: ["feat"], scopes: ["daemon"] }, require: [{ kind: "code-review-report" }, { kind: "approved-request", requestKind: "mockup" }] }];
 check("(2) an override survives resolve verbatim", JSON.stringify(resolveConfig({ orchestration: { cardPolicies: good } }).orchestration.cardPolicies) === JSON.stringify(good));
-check("(2) corrupt stored JSON (non-array) resolves to [] without throwing", (() => { try { return resolveConfig({ orchestration: { cardPolicies: "{not json" } }).orchestration.cardPolicies.length === 0; } catch { return false; } })());
+check("(2) a JSON-valid but wrong-typed stored value (a string, not an array) resolves to [] without throwing", (() => { try { return resolveConfig({ orchestration: { cardPolicies: "{not json" } }).orchestration.cardPolicies.length === 0; } catch { return false; } })());
 check("(2) corrupt stored entry (unknown kind) resolves to [] without throwing", (() => { try { return resolveConfig({ orchestration: { cardPolicies: [{ id: "x", match: { types: ["feat"] }, require: [{ kind: "nope" }] }] } }).orchestration.cardPolicies.length === 0; } catch { return false; } })());
-check("(2) parseCardPolicies surfaces the corruption (ok:false) for enforcement callers", parseCardPolicies("{not json").ok === false && parseCardPolicies([{ id: "x", match: { types: ["feat"] }, require: [{ kind: "nope" }] }]).ok === false);
+check("(2) parseCardPolicies surfaces the wrong-typed/invalid value (ok:false) for enforcement callers", parseCardPolicies("{not json").ok === false && parseCardPolicies([{ id: "x", match: { types: ["feat"] }, require: [{ kind: "nope" }] }]).ok === false);
 check("(2) parseCardPolicies(undefined) is ok + empty (absent is not corrupt)", (() => { const r = parseCardPolicies(undefined); return r.ok && r.policies.length === 0; })());
 check("(2) the resolved default list is not shared by reference with PLATFORM_DEFAULTS", resolveConfig({}).orchestration.cardPolicies !== PLATFORM_DEFAULTS.orchestration.cardPolicies);
 
@@ -81,6 +81,25 @@ check("(3) REJECTS more than the policy-count cap", !okv(hv(Array.from({ length:
 check("(3) REJECTS more than the requirement-count cap", !okv(hv([mk({ require: Array.from({ length: CARD_POLICY_LIMITS.maxRequirements + 1 }, () => ({ kind: "code-review-report" })) })])));
 check("(3) REJECTS an over-long match list", !okv(hv([mk({ match: { cardIds: Array.from({ length: CARD_POLICY_LIMITS.maxMatchEntries + 1 }, (_, i) => `id${i}xxxxx`) } })])));
 check("(3) REJECTS an unsafe policy id", !okv(hv([mk({ id: "has space" })])));
+
+// ---- (3b) selectors that can never match are rejected (card d2bc231e); each has an accept-at-boundary control ----
+const errOf = (match) => { const r = parseCardPolicies([mk({ match })]); return r.ok ? null : r.error; };
+const rejectsNaming = (match, re) => { const e = errOf(match); return e !== null && re.test(e) && !okv(hv([mk({ match })])); };
+check("(3b) REJECTS types:[] naming the field", rejectsNaming({ types: [] }, /match\.types.*empty/));
+check("(3b) REJECTS scopes:[] naming the field", rejectsNaming({ scopes: [] }, /match\.scopes.*empty/));
+check("(3b) REJECTS cardIds:[] naming the field", rejectsNaming({ cardIds: [] }, /match\.cardIds.*empty/));
+check("(3b) REJECTS an empty list even beside a valid one", rejectsNaming({ types: ["feat"], scopes: [] }, /match\.scopes.*empty/));
+check("(3b) REJECTS a cardIds entry under 8 chars (the owner's \"78a9\" specimen)", rejectsNaming({ cardIds: ["78a9"] }, /match\.cardIds.*78a9.*8/) && rejectsNaming({ cardIds: ["78a9ae1"] }, /match\.cardIds/));
+check("(3b) ACCEPTS an 8-char cardId and a full id (boundary controls)", errOf({ cardIds: ["78a9ae1c"] }) === null && errOf({ cardIds: [ID] }) === null && okv(hv([mk({ match: { cardIds: ["78a9ae1c"] } })])));
+check("(3b) REJECTS a scope with surrounding whitespace", rejectsNaming({ scopes: [" web"] }, /match\.scopes/) && rejectsNaming({ scopes: ["web "] }, /match\.scopes/) && rejectsNaming({ scopes: ["a b"] }, /match\.scopes/));
+check("(3b) REJECTS an uppercase scope", rejectsNaming({ scopes: ["Web"] }, /match\.scopes/));
+check("(3b) REJECTS a scope containing )", rejectsNaming({ scopes: ["web)"] }, /match\.scopes/));
+check("(3b) ACCEPTS valid scopes incl. hyphen/dot/slash (boundary controls)", ["web", "mcp", "a-b", "a.b", "a/b", "x1"].every((s) => errOf({ scopes: [s] }) === null));
+// Drift guard: whatever the parser accepts as a scope must be exactly what parseConventionalTitle extracts from a title carrying it.
+check("(3b) every accepted scope round-trips through the title parser (parser and matcher share one scope grammar)",
+  ["web", "mcp", "a-b", "a.b", "a/b", "x1"].every((s) => parseConventionalTitle(`feat(${s}): x`)?.scope === s && cardPolicyMatches(pol({ scopes: [s] }), task(`feat(${s}): x`))));
+check("(3b) at-cap ACCEPT: maxRequirements requirements", okv(hv([mk({ require: Array.from({ length: CARD_POLICY_LIMITS.maxRequirements }, () => ({ kind: "code-review-report" })) })])));
+check("(3b) at-cap ACCEPT: maxMatchEntries cardIds", okv(hv([mk({ match: { cardIds: Array.from({ length: CARD_POLICY_LIMITS.maxMatchEntries }, (_, i) => `id${i}xxxxx`) } })])));
 
 // ============ (4) human-only trust boundary ============
 const agentSet = validateAgentProjectConfigOverride({ orchestration: { cardPolicies: good } });

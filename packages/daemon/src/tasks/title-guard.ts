@@ -5,6 +5,7 @@
 // card f324e8fa) cannot import this predicate back FROM `mcp/tasks.ts` without a cycle. Living here lets
 // every caller — the write boundary, `sessions/service.ts`'s pre-gate merge check, and
 // `git/worktrees.ts`'s squash-subject check — share the ONE pattern instead of each re-deriving it.
+import { CONVENTIONAL_SCOPE_GROUP_SOURCE } from "@loom/shared";
 
 /**
  * @decision 267fd215 — an HTML-entity title shipped as a PERMANENT mainline subject once (commit
@@ -84,7 +85,7 @@ export const CONVENTIONAL_TYPES = [
  * must never touch (the bare-prose → `chore:` coercion net at merge time already handles it correctly, and
  * two legitimate non-work cards on this board rely on that).
  */
-const TYPE_PREFIXED_TITLE_RE = /^([a-z][a-z-]*)(?:\(([^)]*)\))?!?: .+/;
+const TYPE_PREFIXED_TITLE_RE = new RegExp(`^([a-z][a-z-]*)(?:\\((${CONVENTIONAL_SCOPE_GROUP_SOURCE})\\))?!?: .+`);
 
 /**
  * Card 78a9ae1c: the single parse of a card title's Conventional `type(scope)` prefix, sharing

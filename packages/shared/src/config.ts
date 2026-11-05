@@ -245,20 +245,45 @@ export interface CardPolicy { id: string; name?: string; match: CardPolicyMatch;
 export const CARD_POLICY_LIMITS = { maxPolicies: 50, maxRequirements: 10, maxMatchEntries: 100, maxIdLen: 64, maxNameLen: 200, maxEntryLen: 200 } as const;
 export type CardPoliciesParse = { ok: true; policies: CardPolicy[] } | { ok: false; error: string };
 const isPlainObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-function parseMatchList(v: unknown, label: string): string[] | string | undefined {
+/**
+ * Source of the `(scope)` capture group inside a Conventional title prefix. The daemon's title-guard builds its
+ * title regex FROM this string (it is the only definition), and {@link isValidCardPolicyScope} validates policy
+ * scopes against it, so the parser and the matcher cannot drift on what a scope is.
+ */
+export const CONVENTIONAL_SCOPE_GROUP_SOURCE = "[^)]*";
+/** Minimum length of a `cardIds` entry: the matcher only prefix-matches ids of 8+ chars, so anything shorter than a full id is inert. */
+export const CARD_POLICY_MIN_CARD_ID_LEN = 8;
+const SCOPE_FULL_RE = new RegExp(`^${CONVENTIONAL_SCOPE_GROUP_SOURCE}$`);
+/**
+ * A `match.scopes` entry can only ever equal a scope parsed from a title if it is a non-empty, whitespace-free,
+ * all-lowercase token that the title regex's scope group can capture (so no `)`). Anything else never matches.
+ */
+export function isValidCardPolicyScope(s: string): boolean {
+  return s !== "" && SCOPE_FULL_RE.test(s) && !/\s/.test(s) && s === s.toLowerCase();
+}
+function parseMatchList(v: unknown, label: string, entryCheck?: (e: string) => string | null): string[] | string | undefined {
   if (v === undefined) return undefined;
   if (!Array.isArray(v)) return `${label} must be an array of strings`;
+  if (v.length === 0) return `${label} must not be empty (an empty list can never match)`;
   if (v.length > CARD_POLICY_LIMITS.maxMatchEntries) return `${label} has more than ${CARD_POLICY_LIMITS.maxMatchEntries} entries`;
   for (const e of v) {
     if (typeof e !== "string" || e.trim() === "" || e.length > CARD_POLICY_LIMITS.maxEntryLen) return `${label} entries must be non-empty strings up to ${CARD_POLICY_LIMITS.maxEntryLen} chars`;
+    const bad = entryCheck?.(e);
+    if (bad) return `${label}: ${bad}`;
   }
   return v as string[];
 }
+const MATCH_ENTRY_CHECKS: Record<"types" | "scopes" | "cardIds", ((e: string) => string | null) | undefined> = {
+  types: undefined,
+  scopes: (e) => (isValidCardPolicyScope(e) ? null : `scope ${JSON.stringify(e)} can never match a title scope (must be a non-empty lowercase token with no whitespace or ")")`),
+  cardIds: (e) => (e.length >= CARD_POLICY_MIN_CARD_ID_LEN ? null : `card id ${JSON.stringify(e)} is shorter than ${CARD_POLICY_MIN_CARD_ID_LEN} chars and can never match (use a full id or an ${CARD_POLICY_MIN_CARD_ID_LEN}+-char prefix)`),
+};
 /**
  * Card 78a9ae1c: the ONE structural parser/validator for `orchestration.cardPolicies` (strict: unknown keys,
  * unknown requirement kinds, duplicate ids and over-cap lists are all rejected). Structure only — whether a
  * `match.types` entry is a real Conventional type is checked by the daemon's write-time schema, which owns
- * CONVENTIONAL_TYPES. `undefined` parses to an empty list; any other non-array (corrupt stored JSON) is `ok:false`
+ * CONVENTIONAL_TYPES. Rejects selectors that can never match (empty match lists, `cardIds` under 8 chars, `scopes`
+ * that are not valid title scopes). `undefined` parses to an empty list; any other non-array (wrong-typed stored value) is `ok:false`
  * so an enforcement caller can fail closed, while `resolveConfig` itself degrades to an empty list.
  */
 export function parseCardPolicies(raw: unknown): CardPoliciesParse {
@@ -279,7 +304,7 @@ export function parseCardPolicies(raw: unknown): CardPoliciesParse {
     for (const k of Object.keys(p.match)) if (!["types", "scopes", "cardIds"].includes(k)) return { ok: false, error: `${at}.match: unknown key "${k}"` };
     const match: CardPolicyMatch = {};
     for (const key of ["types", "scopes", "cardIds"] as const) {
-      const r = parseMatchList(p.match[key], `${at}.match.${key}`);
+      const r = parseMatchList(p.match[key], `${at}.match.${key}`, MATCH_ENTRY_CHECKS[key]);
       if (typeof r === "string") return { ok: false, error: r };
       if (r !== undefined) match[key] = r;
     }
