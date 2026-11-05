@@ -121,7 +121,15 @@ async function startRig(): Promise<Rig> {
   const seeded = execFileSync(process.execPath, [SEED_SCRIPT], {
     env: {
       ...process.env, LOOM_HOME: home, LOOM_TEST: "1",
-      LOOM_E2E_REMOTE_ACCESS: JSON.stringify({ enabled: true, bindHost: "127.0.0.1", proxyPort: 0, trustedProxyOrigins: [origin] }),
+      // `rateLimit` is set explicitly (and replaces the default whole): every test here shares ONE daemon and
+      // ONE peer ip, each page load costs dozens of API calls, and the default per-ip cap is 120/minute. By the
+      // 7th test the window is spent, the daemon answers 429 to the vault tree fetch, and the page renders
+      // "Empty vault folder" — an artefact of the rig sharing a daemon, not of the feature under test. The
+      // auth-fail lockout is kept at its default values; only the request caps are lifted.
+      LOOM_E2E_REMOTE_ACCESS: JSON.stringify({
+        enabled: true, bindHost: "127.0.0.1", proxyPort: 0, trustedProxyOrigins: [origin],
+        rateLimit: { perIpPerMin: 100_000, perTokenPerMin: 100_000, authFailLockout: { maxAttempts: 5, windowMs: 600_000, lockoutMs: 900_000 } },
+      }),
       LOOM_E2E_REPO_PATH: repoDir, LOOM_E2E_VAULT_PATH: vaultDir,
     },
     encoding: "utf8",
