@@ -18,3 +18,11 @@ Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY` — that name wa
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`WORKER_GATE_ENV_OVERRIDE`'s top-of-const doc): lines 1059-1087, as of this tranche's HEAD. Relocated by card 5dcc1e98 (tranche 6); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## Section: why the `run_gate` pin is what it is (relocated from CLAUDE.md, card `e0ba98c1`)
+
+`run_gate` pins `LOOM_GATE_TEST_CONCURRENCY=3` (owner decision, card `68920f5b`; raised 2→3 by card `2ff32b5c` alongside `DEFAULT_CONCURRENCY`'s own 2→3 raise in `packages/daemon/scripts/test-daemon.mjs`; renamed from the generic `LOOM_TEST_CONCURRENCY` by card `ba3c9580`, because that name was unconditionally injected into every project's gate child whether or not its harness read the same generic name). It matches the merge gate's default parallelism and is safe because both are admitted through the SAME `GateSemaphore` (`orchestration.maxConcurrentGates`, daemon-global; read the live value from `gate_queue`'s `cap` field), so a `run_gate` peaks at the lanes a merge gate already reaches, whatever the cap.
+
+The raw fallback (only a project with NO `gateCommand`, never this repo) stays pinned at `LOOM_GATE_TEST_CONCURRENCY=1`, because that path runs OUTSIDE the semaphore with no structural cap on concurrent gates. The two pins differ deliberately in VALUE, not by inconsistency; both share the same project-qualified NAME because they control the same reader (`packages/daemon/scripts/test-daemon.mjs`).
+
+Incident (2026-07-15): a single UNPINNED gate spiked to 8 lanes and starved the host. The safety arithmetic is a function of the live cap: a pin of `N` lanes peaks at `N × cap` concurrent test processes. At cap=2 (checked when this was written) a 3-lane pin peaks at 6, below the 8-lane incident level; raising the pin to 4 at that cap reaches 8 (`4 × 2`), exactly the incident level. If the live cap changed, recompute both products before trusting this rule.

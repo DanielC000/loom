@@ -2214,3 +2214,7 @@ Fix: both texts reworded to tell the manager to HOLD any further landing on the 
 ### Named residual (round 23) — found, NOT fixed
 
 **`verifyLandedAsOwnCommit`'s `cat-file -p` read is immune to grafts and replace refs, but not to canonical-INDEX tampering before `write-tree`, nor to a content-identical racer's own trailers** — both residuals round 22 already named are UNCHANGED by this round's fix; grafts/replace-refs are a third, now-closed mechanism, structurally independent of either. Do not read Finding 1's fix as closing either of round 22's own two residuals.
+
+## Note carried over from CLAUDE.md (docs relocation, card `e0ba98c1`)
+
+`project_checkout_branch`'s unmerged-worker-branch refusal (round 6, S1) covers a worker branch that is LIVE or whose worktree still exists on disk. An EXITED worker whose worktree was already removed is excluded from that check; card `0eaaa693`'s merge-time fork-point backstop is the landing-time net for that excluded case, not this tool.
