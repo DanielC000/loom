@@ -117,11 +117,18 @@ fs.writeFileSync(path.join(q1Dir, "2-evil.svg"), EVIL_SVG);
 const TAMPER_HTML = `<!doctype html><html><body><script>document.title = "TAMPER-PWNED";</script></body></html>`;
 fs.writeFileSync(path.join(q1Dir, "3-tamper.html"), TAMPER_HTML);
 
+const NOTES_MD = "# Notes\n\n<script>alert(1)</script>\n";
+fs.writeFileSync(path.join(q1Dir, "4-notes.md"), NOTES_MD);
+fs.writeFileSync(path.join(q1Dir, "5-run.log"), NOTES_MD);
+
 const q1Attachments = [
   { id: "0", label: "Screenshot.png", kind: "image", sizeBytes: PNG_BYTES.length, imageDimensions: { width: 1, height: 1 }, storedFilename: "0-pic.png", originalPath: "C:\\secret\\0-pic.png", openedAt: null },
   { id: "1", label: "Mockup.html", kind: "html", sizeBytes: EVIL_HTML.length, imageDimensions: null, storedFilename: "1-mockup.html", originalPath: "C:\\secret\\1-mockup.html", openedAt: null },
   { id: "2", label: 'evil"; \r\nX-Injected: yes.svg', kind: "other", sizeBytes: EVIL_SVG.length, imageDimensions: null, storedFilename: "2-evil.svg", originalPath: "C:\\secret\\2-evil.svg", openedAt: null },
   { id: "3", label: "Tampered.png", kind: "image", sizeBytes: TAMPER_HTML.length, imageDimensions: null, storedFilename: "3-tamper.html", originalPath: "C:\\secret\\3-tamper.html", openedAt: null },
+  // Card c7f999f4 — a NEW markdown row, and a LEGACY row stored as "other" before the viewer kinds existed.
+  { id: "4", label: "Notes.md", kind: "markdown", sizeBytes: NOTES_MD.length, imageDimensions: null, storedFilename: "4-notes.md", originalPath: "C:\\secret\\4-notes.md", openedAt: null },
+  { id: "5", label: "Legacy log", kind: "other", sizeBytes: NOTES_MD.length, imageDimensions: null, storedFilename: "5-run.log", originalPath: "C:\\secret\\5-run.log", openedAt: null },
 ];
 db.insertQuestion(baseQuestion(q1), q1Attachments);
 
@@ -175,6 +182,27 @@ try {
   check("(1-other/svg) nosniff", other.headers["x-content-type-options"] === "nosniff");
   check("(1-other/svg) Content-Type is NOT image/svg+xml (no inline-render path exists for it)", other.headers["content-type"] !== "image/svg+xml");
   check("(1-other/svg) body is served byte-exact", other.rawPayload.toString("utf8") === EVIL_SVG);
+
+  // ===================== (1c) card c7f999f4: the viewer kinds still DOWNLOAD on navigation ==========
+  // The web inbox fetches these bytes into its own viewer; the route's posture for them is unchanged from
+  // "other" — octet-stream, attachment disposition, the inert sandbox CSP.
+  for (const [n, what] of [["4", "markdown"], ["5", "legacy other .log"]]) {
+    const r = await get(`/api/questions/${q1}/attachments/${n}`);
+    check(`(1c-${what}) 200`, r.statusCode === 200);
+    check(`(1c-${what}) Content-Disposition: attachment`, /^attachment;/.test(r.headers["content-disposition"] ?? ""));
+    check(`(1c-${what}) Content-Type application/octet-stream`, r.headers["content-type"] === "application/octet-stream");
+    check(`(1c-${what}) CSP: ${SANDBOX_CSP_INERT}`, r.headers["content-security-policy"] === SANDBOX_CSP_INERT);
+    check(`(1c-${what}) body byte-exact`, r.rawPayload.toString("utf8") === NOTES_MD);
+  }
+  // The READ projection: a new row keeps its kind; a legacy "other" row whose daemon-written storedFilename
+  // is a text format is projected as "text"; an "other" svg is NOT upgraded; image/html never change.
+  const projected = Object.fromEntries((db.getQuestion(q1)?.attachments ?? []).map((a) => [a.id, a.kind]));
+  check("(1c-projection) new markdown row → markdown", projected["4"] === "markdown");
+  check("(1c-projection) legacy other .log row → text", projected["5"] === "text");
+  check("(1c-projection) other .svg row stays other", projected["2"] === "other");
+  check("(1c-projection) tampered image row (stored .html) stays image — never re-derived", projected["3"] === "image");
+  check("(1c-projection) no stored path leaks onto the projected shape",
+    (db.getQuestion(q1)?.attachments ?? []).every((a) => !("storedFilename" in a) && !("originalPath" in a)));
 
   // ===================== (1b) the CSP tracks the SERVED type, never record.kind =====================
   const tampered = await get(`/api/questions/${q1}/attachments/3`);

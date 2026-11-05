@@ -227,7 +227,14 @@ function resolveRelative(href: string, currentPath: string, files: string[]): st
   return files.find((f) => base(f) === wanted) ?? null;
 }
 
-export default function Markdown({ source, files, currentPath = "", onOpen, AssetImage }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void; AssetImage?: ComponentType<{ path: string; alt: string; className?: string }> }) {
+/**
+ * `untrusted` (card c7f999f4 — a Request attachment written by an agent): an external image is NOT
+ * fetched (an `<img src>` to an arbitrary host is a read beacon), it renders as a labelled placeholder
+ * instead. Everything else that keeps agent bytes inert holds for every caller, not just this one: raw
+ * HTML is never rendered (no `rehype-raw`, so `<script>`/`on*` attributes never reach the DOM), and
+ * `defaultUrlTransform` empties a `javascript:`/`data:` URL, which then renders as an unresolved span.
+ */
+export default function Markdown({ source, files, currentPath = "", onOpen, AssetImage, untrusted = false }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void; AssetImage?: ComponentType<{ path: string; alt: string; className?: string }>; untrusted?: boolean }) {
   const { props, body } = splitFrontmatter(source);
   const transformed = transformWikilinks(body);
 
@@ -258,6 +265,9 @@ export default function Markdown({ source, files, currentPath = "", onOpen, Asse
         if (path && AssetImage) return <AssetImage className="md-img" path={path} alt={altText || baseName(path)} />;
         return <span className="md-broken" title="unresolved image">{altText || decodeURIComponent(target)}</span>;
       }
+      if (isExternalHref(s) && untrusted) {
+        return <span className="md-ext-img" title={`External image not loaded: ${s}`}>image not loaded · {altText || "untitled"}</span>;
+      }
       if (isExternalHref(s)) return <img className="md-img" src={s} alt={altText} loading="lazy" />;
       const path = resolveRelative(s, currentPath, files);
       if (path && AssetImage) return <AssetImage className="md-img" path={path} alt={altText || baseName(path)} />;
@@ -274,7 +284,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, Asse
         return <span className={cls} title="unresolved link">{label}</span>;
       }
       // True external links (http/https/mailto/…) open normally in a new tab.
-      if (isExternalHref(h)) return <a href={h} target="_blank" rel="noreferrer">{children}</a>;
+      if (isExternalHref(h)) return <a href={h} target="_blank" rel="noopener noreferrer">{children}</a>;
       // In-page anchors (`#heading`) stay default — same doc, browser scrolls.
       if (h.startsWith("#")) return <a href={h}>{children}</a>;
       // Otherwise it's a relative in-vault link: resolve it to a vault file and open it in the pane,
@@ -305,7 +315,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, Asse
       const level = head && head.type === "element" && /^h[1-6]$/.test(head.tagName) ? Number(head.tagName.slice(1)) : 1;
       return <CollapsibleSection level={level}>{children}</CollapsibleSection>;
     },
-  }), [files, currentPath, AssetImage]);
+  }), [files, currentPath, AssetImage, untrusted]);
 
   return (
     <div className="loom-md">
@@ -351,6 +361,7 @@ const MD_CSS = `
 .loom-md .md-wikilink { color: #b39ddb; cursor: pointer; }
 .loom-md .md-embed { display: inline-block; color: #9ad; cursor: pointer; background: #161618; border: 1px solid #2a2a2e; border-radius: 4px; padding: 0 6px; font-size: 0.92em; }
 .loom-md .md-broken { color: #c77; cursor: default; text-decoration: none; }
+.loom-md .md-ext-img { display: inline-block; color: #8a8a92; background: #161618; border: 1px dashed #3a3a40; border-radius: 4px; padding: 0 6px; font-size: 0.85em; font-family: ui-monospace, Consolas, monospace; }
 .loom-md .md-callout { border: 1px solid #2a2a2e; border-left: 4px solid #5a8dee; border-radius: 6px; padding: 8px 12px; margin: 0.8em 0; background: rgba(90,141,238,0.07); }
 .loom-md .md-callout-title { font-weight: 600; color: #fff; margin-bottom: 0.2em; }
 .loom-md .md-callout-body > :first-child { margin-top: 0; } .loom-md .md-callout-body > :last-child { margin-bottom: 0; }

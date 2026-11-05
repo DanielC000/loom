@@ -7088,8 +7088,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // the round-1 probe found.
       reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
     }
-    if (record.kind === "other") {
-      // Download (includes .svg — see QuestionAttachmentKind's own doc for why SVG is never "image"):
+    if (record.kind !== "image" && record.kind !== "html") {
+      // Download for every kind this route does not render inline — "other" (includes .svg — see
+      // QuestionAttachmentKind's own doc for why SVG is never "image") and the "markdown"/"text" kinds
+      // (card c7f999f4: the web inbox fetches those bytes into its own viewer; a direct navigation still
+      // downloads). Keyed as a deny-by-default so an unknown/tampered kind also downloads.
       // nosniff + a forced attachment disposition means the browser never tries to render this inline
       // even if `attachmentServeContentType`'s octet-stream fallback understated it.
       reply.header("Content-Disposition", attachmentContentDisposition(record.label));

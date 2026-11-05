@@ -128,7 +128,7 @@ import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
 import type { MergeGateOutcomeEntry } from "@loom/shared";
 import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
-import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig, isProjectMemoryExpired } from "@loom/shared";
+import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig, isProjectMemoryExpired, projectedAttachmentKind } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 import { findControlCharViolation, stripEscapeAndControlChars, type ControlByteClass } from "./security/control-chars.js";
@@ -12715,7 +12715,7 @@ function toQuestionAttachments(questionId: string, json: string | null): Questio
   // (see HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS, mcp/platform.ts, for the live resolved value), so this
   // can never scale past "a few stat calls per row," regardless of how many rows a caller reads at once.
   return stored.map((a) => ({
-    id: a.id, label: a.label, kind: a.kind, sizeBytes: a.sizeBytes, imageDimensions: a.imageDimensions,
+    id: a.id, label: a.label, kind: projectedAttachmentKind(a.kind, a.storedFilename), sizeBytes: a.sizeBytes, imageDimensions: a.imageDimensions,
     available: fs.existsSync(path.join(dir, a.storedFilename)),
     openedAt: a.openedAt,
   }));

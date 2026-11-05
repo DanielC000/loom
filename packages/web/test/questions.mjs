@@ -9,7 +9,7 @@ import {
   requestAttentionLabel, requestOutcome,
   requestFilerLabel, requestRoutedLabel, requestProvenanceText,
   formatAttachmentSize, attachmentDetail, attachmentCountChip, attachmentStateChip,
-  attachmentPreviewMode, attachmentOpenRefusal,
+  attachmentPreviewMode, attachmentOpenRefusal, isViewerKind, ATTACHMENT_VIEWER_MAX_BYTES,
 } from "../src/lib/questions.ts";
 
 let pass = 0;
@@ -244,6 +244,25 @@ check("attachmentOpenRefusal: openable only on loopback, and never for a gone fi
   assert.match(String(attachmentOpenRefusal({ available: true }, true)), /loopback/i);
   assert.match(String(attachmentOpenRefusal({ available: false }, false)), /bytes are gone/i);
   assert.match(String(attachmentOpenRefusal({ available: false }, true)), /bytes are gone/i);
+});
+
+check("card c7f999f4: markdown/text kinds open in the in-app viewer, on either origin", () => {
+  for (const kind of ["markdown", "text"]) {
+    assert.equal(isViewerKind(kind), true, kind);
+    assert.equal(attachmentPreviewMode({ kind, available: true }, false), "viewer", `${kind}/loopback`);
+    assert.equal(attachmentPreviewMode({ kind, available: true }, true), "viewer", `${kind}/remote`);
+    assert.equal(attachmentPreviewMode({ kind, available: false }, false), "missing", `${kind}/gone`);
+    // The viewer fetches THROUGH the api client (credential attached), so a remote origin can open it.
+    assert.equal(attachmentOpenRefusal({ kind, available: true }, true), null, `${kind}/remote open`);
+    assert.match(String(attachmentOpenRefusal({ kind, available: false }, true)), /bytes are gone/i);
+  }
+  // Polarity control: the new-tab kinds are still refused remotely, and "other" still downloads.
+  for (const kind of ["image", "html", "other"]) {
+    assert.equal(isViewerKind(kind), false, kind);
+    assert.match(String(attachmentOpenRefusal({ kind, available: true }, true)), /loopback/i, kind);
+  }
+  assert.equal(attachmentPreviewMode({ kind: "other", available: true }, true), "download");
+  assert.equal(ATTACHMENT_VIEWER_MAX_BYTES, 2 * 1024 * 1024);
 });
 
 console.log(`\n${pass} passed — decision-inbox helpers`);

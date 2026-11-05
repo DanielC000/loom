@@ -245,6 +245,8 @@ export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note
 export const ATTACHMENT_GLYPH: Record<QuestionAttachmentKind, string> = {
   image: "▨",
   html: "‹›",
+  markdown: "¶",
+  text: "≡",
   other: "▤",
 };
 
@@ -258,12 +260,14 @@ export const ATTACHMENT_CHIP_GLYPH = "▨";
 const ATTACHMENT_KIND_WORD: Record<QuestionAttachmentKind, string> = {
   image: "image",
   html: "html",
+  markdown: "md",
+  text: "text",
   other: "file",
 };
 
 /** Fixed order for the chip's parts, so it reads the same across reads instead of echoing the asker's own
  *  attach order (which would make the same composition render differently from one ask to the next). */
-const ATTACHMENT_KIND_ORDER: QuestionAttachmentKind[] = ["image", "html", "other"];
+const ATTACHMENT_KIND_ORDER: QuestionAttachmentKind[] = ["image", "html", "markdown", "text", "other"];
 
 /** A byte count as the manifest spells it — "640 B" / "88 KB" / "1.2 MB". 1024-based; MB keeps one decimal
  *  so a 1.2 MB mockup doesn't flatten to "1 MB". A negative/non-finite count reads "—", never a fake 0. */
@@ -341,20 +345,32 @@ export function attachmentStateChip(a: Pick<QuestionAttachment, "available" | "o
  * blob:/srcdoc fallback and never with `allow-same-origin`; a remote origin gets `html-needs-loopback`
  * instead of a frame that silently 401'd.
  */
-export type AttachmentPreviewMode = "missing" | "image" | "html" | "html-needs-loopback" | "download";
+export type AttachmentPreviewMode = "missing" | "image" | "html" | "html-needs-loopback" | "viewer" | "download";
 
 export function attachmentPreviewMode(a: Pick<QuestionAttachment, "kind" | "available">, remote: boolean): AttachmentPreviewMode {
   if (!a.available) return "missing";
   if (a.kind === "image") return "image";
   if (a.kind === "html") return remote ? "html-needs-loopback" : "html";
+  if (isViewerKind(a.kind)) return "viewer";
   return "download";
 }
 
-/** Whether the row's `Open ↗` action can do anything, and the reason when it can't. A new-tab navigation
- *  carries no Authorization header, so on a remote origin EVERY kind's open would 401 — the action is
- *  disabled there with the reason spelled out, rather than left to land a JSON error page in a new tab. */
-export function attachmentOpenRefusal(a: Pick<QuestionAttachment, "available">, remote: boolean): string | null {
+/** The kinds `Open` shows in the in-app text viewer instead of a new tab (card c7f999f4). Keyed on the
+ *  daemon-derived `kind` only — never on the label's extension, which is the asker's free text. */
+export function isViewerKind(kind: QuestionAttachmentKind): kind is "markdown" | "text" {
+  return kind === "markdown" || kind === "text";
+}
+
+/** Above this the viewer does not fetch at all and offers Download instead — the bytes are untrusted and
+ *  rendered on the main thread, so the cap bounds both memory and render time. */
+export const ATTACHMENT_VIEWER_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Whether the row's `Open` action can do anything, and the reason when it can't. A new-tab navigation
+ *  carries no Authorization header, so on a remote origin a new-tab kind's open would 401 — the action is
+ *  disabled there with the reason spelled out, rather than left to land a JSON error page in a new tab.
+ *  A viewer kind is fetched THROUGH the api client (which attaches the credential), so it opens on any origin. */
+export function attachmentOpenRefusal(a: Pick<QuestionAttachment, "available" | "kind">, remote: boolean): string | null {
   if (!a.available) return "The bytes are gone — nothing to open";
-  if (remote) return "Opening an attachment needs loopback access — this origin authenticates with a header a new tab cannot send";
+  if (remote && !isViewerKind(a.kind)) return "Opening an attachment needs loopback access — this origin authenticates with a header a new tab cannot send";
   return null;
 }

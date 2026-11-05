@@ -2,6 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import type { Project, QuestionAttachmentKind } from "@loom/shared";
+import { attachmentKindForFilename } from "@loom/shared";
 import { WORKTREES_DIR, LOOM_HOME, projectWorkDir, questionAttachmentDir } from "../paths.js";
 import { canonicalizeForContainment, isProperlyUnder } from "../projects/vault-path.js";
 import { comparisonKey } from "../projects/repos.js";
@@ -229,15 +230,10 @@ export async function resolveAttachmentPath(
   return openAndCheckRegularFile(targetCanon.value, rawPath);
 }
 
-const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-const HTML_EXTENSIONS: ReadonlySet<string> = new Set([".html", ".htm"]);
-
-/** Derived SERVER-SIDE from the copied file's own extension — never from the asker's say-so. */
+/** Derived SERVER-SIDE from the copied file's own extension — never from the asker's say-so. The table
+ *  itself lives in `@loom/shared` (`attachmentKindForFilename`) so the read-side projection uses the same one. */
 export function deriveAttachmentKind(absPath: string): QuestionAttachmentKind {
-  const ext = path.extname(absPath).toLowerCase();
-  if (HTML_EXTENSIONS.has(ext)) return "html";
-  if (IMAGE_EXTENSIONS.has(ext)) return "image";
-  return "other";
+  return attachmentKindForFilename(absPath);
 }
 
 /** Generous bound on how much of the file's head we read to find PNG/JPEG dimensions — real header/SOF

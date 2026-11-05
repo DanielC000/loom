@@ -976,6 +976,33 @@ export const api = {
     if (!r.ok) throw new Error(await errorMessageFrom(url, r));
     return { blob: await r.blob(), contentType: r.headers.get("content-type") };
   },
+  // Card c7f999f4 — a "markdown"/"text" attachment's bytes as a STRING for the in-app viewer, through the
+  // SAME route by id (the route's `Content-Disposition: attachment` only governs a navigation; a fetch
+  // reads the body regardless). Read as a bounded stream: once `maxBytes` is exceeded the read is
+  // cancelled and `tooLarge` comes back instead of text, so an under-reported `sizeBytes` can never make
+  // the viewer pull an unbounded body into memory.
+  questionAttachmentText: async (questionId: string, attachmentId: string, maxBytes: number, signal?: AbortSignal): Promise<{ text: string } | { tooLarge: true }> => {
+    const url = questionAttachmentPath(questionId, attachmentId);
+    const r = await guardedFetch(url, { signal });
+    if (!r.ok) throw new Error(await errorMessageFrom(url, r));
+    const declared = Number(r.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) { void r.body?.cancel(); return { tooLarge: true }; }
+    if (!r.body) return { text: await r.text() };
+    const reader = r.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) { void reader.cancel(); return { tooLarge: true }; }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { bytes.set(c, off); off += c.byteLength; }
+    return { text: new TextDecoder("utf-8").decode(bytes) };
+  },
   // Open-tracking write (POST …/opened) — FIRST-OPEN-WINS server-side (`markQuestionAttachmentOpened`,
   // db.ts), so a repeat call is a harmless no-op returning the ORIGINAL stamp, never a refreshed one.
   // `postErr` like every other write above, so the route's `{ error }` (a 400 on a malformed id, a 404 on

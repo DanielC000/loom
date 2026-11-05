@@ -4120,9 +4120,38 @@ export interface FulfillmentTarget {
 /** `Question.attachments` entry kind (card 432765ab) — derived SERVER-SIDE from the copied file's own
  *  content type at send time, never from the asker's say-so: `"image"` (png/jpeg/gif/webp — the only
  *  kinds `cheapImageDimensions` probes), `"html"` (served sandboxed by the serving route, card 8f050b79),
- *  `"other"` (everything else — including `.svg`, which is deliberately NOT in the `"image"` extension
- *  set: an SVG is a scriptable document, so it is classified `"other"` and always downloads). */
-export type QuestionAttachmentKind = "image" | "html" | "other";
+ *  `"markdown"` / `"text"` (card c7f999f4 — plain-text formats the web inbox opens in an in-app viewer
+ *  instead of downloading; still served as a download by the route itself), `"other"` (everything else —
+ *  including `.svg`, which is deliberately NOT in the `"image"` extension set: an SVG is a scriptable
+ *  document, so it is classified `"other"` and always downloads). */
+export type QuestionAttachmentKind = "image" | "html" | "markdown" | "text" | "other";
+
+const ATTACHMENT_KIND_BY_EXT: Readonly<Record<string, QuestionAttachmentKind>> = {
+  ".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image",
+  ".html": "html", ".htm": "html",
+  ".md": "markdown", ".markdown": "markdown",
+  ".txt": "text", ".log": "text", ".json": "text", ".yaml": "text", ".yml": "text", ".csv": "text",
+};
+
+/** The ONE extension → kind table (card c7f999f4 moved it here from the daemon so the inbox read path can
+ *  re-derive a legacy row's text kind without importing the copy pipeline). Pass the daemon-owned STORED
+ *  filename (or the copied source path), never the asker's `label` — the label is free text. */
+export function attachmentKindForFilename(filename: string): QuestionAttachmentKind {
+  const base = filename.slice(Math.max(filename.lastIndexOf("/"), filename.lastIndexOf("\\")) + 1);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) return "other";
+  return ATTACHMENT_KIND_BY_EXT[base.slice(dot).toLowerCase()] ?? "other";
+}
+
+/** The kind a STORED attachment row is projected with on every read. A row written before the
+ *  `"markdown"`/`"text"` kinds existed carries `"other"`; it is upgraded from its own daemon-written
+ *  `storedFilename` — and ONLY to one of those two viewer kinds, never to `"image"`/`"html"`, so this read
+ *  path can never widen what a stored row renders as beyond a plain-text viewer. */
+export function projectedAttachmentKind(stored: QuestionAttachmentKind, storedFilename: string): QuestionAttachmentKind {
+  if (stored !== "other") return stored;
+  const derived = attachmentKindForFilename(storedFilename);
+  return derived === "markdown" || derived === "text" ? derived : "other";
+}
 
 /**
  * ONE attachment on a `question_ask` Request (card 432765ab, epic 7d1d66ab phase 1 — manifest; served by

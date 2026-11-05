@@ -735,10 +735,14 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
 // from the count: the three GETs read a project's doctrine dir, and the POST is a human-only loopback
 // write with no MCP path at all (docs/decisions/8b38b920-*.md is explicit that no agent surface exposes
 // it), which is why it is also pinned by name below.
-check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair, card dec4959a's updateCapabilityPassEnv write and card 75ea3f73's released-skill three reads + one write (98 reads / 125 writes / 223 members)", () => {
-  assert.equal(API_MEMBERS.total, 223, `api.ts now has ${API_MEMBERS.total} members, not 223`);
+// Card c7f999f4 added `questionAttachmentText` (the inbox text viewer's bounded read of the SAME Tier-1
+// attachment GET route). It calls `guardedFetch` directly, like its sibling `questionAttachmentBlob`, so
+// the fail-closed classifier counts it as a WRITE — the conservative verdict, kept rather than special-cased.
+// 223→224 total, writes 125→126, reads unchanged at 98.
+check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair, card dec4959a's updateCapabilityPassEnv write, card 75ea3f73's released-skill three reads + one write and card c7f999f4's questionAttachmentText (98 reads / 126 writes / 224 members)", () => {
+  assert.equal(API_MEMBERS.total, 224, `api.ts now has ${API_MEMBERS.total} members, not 224`);
   assert.equal(API_MEMBERS.reads.size, 98, `api.ts now has ${API_MEMBERS.reads.size} reads, not 98`);
-  assert.equal(API_MEMBERS.writes.size, 125, `api.ts now has ${API_MEMBERS.writes.size} writes, not 125`);
+  assert.equal(API_MEMBERS.writes.size, 126, `api.ts now has ${API_MEMBERS.writes.size} writes, not 126`);
   // Pinned by name, not just by the count above: this member must stay a READ. If it ever starts
   // classifying as a write, the route or its helper changed shape and the Tier-1 allowlisting of
   // GET /api/web-bundle (gateway/trust-tier.ts) needs re-reviewing, not just this number bumping.

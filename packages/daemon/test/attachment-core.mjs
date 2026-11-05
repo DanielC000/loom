@@ -374,6 +374,12 @@ try {
     check("(C3) .jpg -> image", deriveAttachmentKind("/x/y.jpg") === "image");
     check("(C4) .html -> html", deriveAttachmentKind("/x/y.html") === "html");
     check("(C5) .pdf -> other", deriveAttachmentKind("/x/y.pdf") === "other");
+    // Card c7f999f4 — the in-app viewer kinds.
+    check("(C5a) .md / .MARKDOWN -> markdown", deriveAttachmentKind("/x/y.md") === "markdown" && deriveAttachmentKind("C:\\x\\y.MARKDOWN") === "markdown");
+    check("(C5b) .txt/.log/.json/.yaml/.yml/.csv -> text",
+      [".txt", ".log", ".json", ".yaml", ".yml", ".csv"].every((e) => deriveAttachmentKind(`/x/y${e}`) === "text"));
+    check("(C5c) .svg stays other (never a viewer kind); a dotfile / no extension -> other",
+      deriveAttachmentKind("/x/y.svg") === "other" && deriveAttachmentKind("/x/.md") === "other" && deriveAttachmentKind("/x/README") === "other");
 
     // A minimal, valid 8x4 PNG header: signature + IHDR chunk carrying width=8, height=4 at the fixed
     // offsets readPngDimensions reads (16/20) — the rest of a real PNG (CRC, IDAT, ...) is irrelevant to

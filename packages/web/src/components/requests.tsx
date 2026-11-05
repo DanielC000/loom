@@ -17,8 +17,9 @@ import {
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
   requestProvenanceText,
   ATTACHMENT_CHIP_GLYPH, ATTACHMENT_GLYPH, attachmentCountChip, attachmentDetail, attachmentOpenRefusal,
-  attachmentPreviewMode, attachmentStateChip,
+  attachmentPreviewMode, attachmentStateChip, isViewerKind,
 } from "../lib/questions";
+import { AttachmentTextViewer } from "./AttachmentTextViewer";
 import {
   EMPTY_REQUEST_DRAFT, clearRequestDraft, getRequestDraft, isRequestDraftDirty, setRequestDraft,
 } from "../lib/requestDrafts";
@@ -291,6 +292,9 @@ function AttachmentPreviewPane({ questionId, a, remote }: { questionId: string; 
         {mode === "html-needs-loopback" && (
           <PreviewNote glyph={ATTACHMENT_GLYPH.html}>HTML preview needs loopback access — this origin signs requests with a header a frame can’t send</PreviewNote>
         )}
+        {mode === "viewer" && (
+          <PreviewNote glyph={ATTACHMENT_GLYPH[a.kind]}>{a.kind === "markdown" ? "markdown" : "plain text"} — Open reads it here, no download</PreviewNote>
+        )}
         {mode === "download" && (
           <PreviewNote glyph={ATTACHMENT_GLYPH.other}>no inline preview — this one downloads when opened</PreviewNote>
         )}
@@ -320,6 +324,7 @@ function AttachmentPreviewPane({ questionId, a, remote }: { questionId: string; 
 function AttachmentOpenAction({ questionId, a, remote }: { questionId: string; a: QuestionAttachment; remote: boolean }) {
   const qc = useQueryClient();
   const refusal = attachmentOpenRefusal(a, remote);
+  const [viewing, setViewing] = useState(false);
   const stamp = useMutation({
     mutationFn: () => api.markQuestionAttachmentOpened(questionId, a.id),
     onSuccess: () => {
@@ -328,9 +333,21 @@ function AttachmentOpenAction({ questionId, a, remote }: { questionId: string; a
     },
   });
   const geometry = { padding: "2px 8px", fontSize: 11, whiteSpace: "nowrap" as const };
+  const viewer = isViewerKind(a.kind);
   if (refusal) {
     return (
-      <Button data-testid="attachment-open" variant="default" disabled title={refusal} style={geometry}>Open ↗</Button>
+      <Button data-testid="attachment-open" variant="default" disabled title={refusal} style={geometry}>{viewer ? "Open" : "Open ↗"}</Button>
+    );
+  }
+  if (viewer) {
+    // Card c7f999f4 — a markdown/text attachment opens IN the app, never as a download or a new tab.
+    return (
+      <>
+        <Button data-testid="attachment-open" variant={a.openedAt ? "default" : "primary"} style={geometry}
+          title={`Read ${a.label} in a viewer`} aria-haspopup="dialog"
+          onClick={() => { setViewing(true); stamp.mutate(); }}>Open</Button>
+        {viewing && <AttachmentTextViewer questionId={questionId} a={a} remote={remote} onClose={() => setViewing(false)} />}
+      </>
     );
   }
   return (

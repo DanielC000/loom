@@ -495,7 +495,7 @@ export interface LoomDaemon {
     // manifest must keep rendering struck through. `kind` defaults to the server's own extension
     // derivation over `label`, so a spec gets the real classification rather than one it asserted.
     attachments?: {
-      label: string; kind?: "image" | "html" | "other"; content?: string; contentBase64?: string;
+      label: string; kind?: "image" | "html" | "markdown" | "text" | "other"; content?: string; contentBase64?: string;
       sizeBytes?: number; imageDimensions?: { width: number; height: number } | null; openedAt?: string | null;
     }[];
   }) => Promise<string>;
