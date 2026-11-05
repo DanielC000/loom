@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import chokidar, { type FSWatcher } from "chokidar";
-import { resolveExecutable } from "./resolve-bin.js";
-import { SKILLS_DIR } from "../paths.js";
+import { resolveExecutable, resolveCodexLaunchTarget, isOpenAiSpawnEnvKey } from "./resolve-bin.js";
+import { SKILLS_DIR, isPassOpenAiEnvEnabled } from "../paths.js";
 import { roleDoctrineSkillName } from "../skills/inject.js";
 import { resolveGitDirsSync } from "../git/repo-lock.js";
 import { resolveGitBinaryForSpawn } from "../git/bounded.js";
@@ -331,20 +331,34 @@ export function prewarmCodexVersionAsync(): void {
   if (cachedCodexVersion) return;
   try {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
-    // shell:true on Windows ONLY (real-spawn-caught, card 353f6dc4): an npm-global install of codex
-    // resolves to a `.cmd` shim on Windows (confirmed against this host's real install), and plain
-    // `execFile` — unlike `execSync`/node-pty's Windows agent, both of which already go through a
-    // shell/equivalent — refuses to run a `.cmd` directly, silently swallowed by this function's own
-    // best-effort `if (err) return`. A mocked exec could never have caught this; the real-spawn test
-    // (test/codex-version-real-spawn.mjs) reproduced it against a real `.cmd`-wrapped child process
-    // before this fix (timed out waiting for the cache to populate) and passes after. Args are a static
-    // literal (`["--version"]`, no interpolation), so shell:true here carries no injection surface.
-    execFile(bin, ["--version"], { timeout: 8000, windowsHide: true, shell: process.platform === "win32" }, (err, stdout) => {
-      if (err) return;
+    // @decision d1614667 — no shell:true here (a timeout would kill only cmd.exe); same shim resolver and
+    // OPENAI_* env scrub as a codex session. A refused prewarm logs and leaves the cache unset.
+    const target = resolveCodexLaunchTarget(bin, ["--version"]);
+    execFile(target.command, target.args, { timeout: 8000, windowsHide: true, env: buildCodexVersionProbeEnv(process.env) }, (err, stdout) => {
+      if (err) {
+        console.warn(`[codex-doctrine] codex version prewarm failed (continuing): ${err.message}`);
+        return;
+      }
       const v = stdout.match(/(\d+\.\d+\.\d+)/)?.[1];
       if (v) cachedCodexVersion = v;
     });
-  } catch { /* best-effort — cache simply stays unset */ }
+  } catch (err) {
+    console.warn(`[codex-doctrine] codex version prewarm failed (continuing): ${(err as Error)?.message ?? String(err)}`);
+  }
+}
+
+/** The env for the `codex --version` exec: the daemon's env minus the OPENAI_ prefix plus CODEX_API_KEY and
+ *  CODEX_ACCESS_TOKEN (`isOpenAiSpawnEnvKey`), unless the human-only LOOM_PASS_OPENAI_ENV=1 hatch is set. `CODEX_HOME` and the
+ *  rest flow. Pure of side effects; no logging (a session spawn already logs the scrub once). */
+export function buildCodexVersionProbeEnv(processEnv: Record<string, string | undefined>): Record<string, string> {
+  const pass = isPassOpenAiEnvEnabled();
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(processEnv)) {
+    if (v === undefined) continue;
+    if (!pass && isOpenAiSpawnEnvKey(k)) continue;
+    env[k] = v;
+  }
+  return env;
 }
 
 const CODEX_SESSIONS_DIR = () => path.join(realCodexHome(), "sessions");

@@ -21,6 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
+import { writeNpmCodexShim } from "./_codex-npm-shim.mjs";
 
 const FIXTURE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-codex-cli.mjs");
 
@@ -37,11 +38,9 @@ if (process.platform !== "win32") {
 
 const tmpHome = mkdtempManaged("loom-codex-version-");
 
-// A .cmd wrapper so a plain `execFile(bin, ["--version"])` (no shell/interpreter indirection) can launch
-// `node fake-codex-cli.mjs` as the substitute "codex" binary — mirrors kickoff-real-spawn.mjs exactly.
-const wrapperPath = path.join(tmpHome, "fake-codex.cmd");
-fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`);
-process.env.LOOM_CODEX_BIN = wrapperPath;
+// Card d1614667: the prewarm now resolves a `.cmd` through winCmdShimSpawnTarget (fail closed on a non-npm
+// shim), so the substitute "codex" must be a real npm cmd-shim-shaped wrapper (shared fixture writer).
+process.env.LOOM_CODEX_BIN = writeNpmCodexShim(tmpHome, FIXTURE_PATH);
 
 const { getCachedCodexVersion, prewarmCodexVersionAsync } = await import("../dist/pty/codex-doctrine.js");
 

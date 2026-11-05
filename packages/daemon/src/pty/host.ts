@@ -10,7 +10,7 @@ import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, Capabi
 import { CODEX_PROVIDER_KEY_ENV_VAR, isBuiltinCodexProviderId, codexProviderBindingError } from "../profiles/codex-provider.js";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES, isLoomDrivenRole } from "@loom/shared";
-import { resolveExecutable, winCmdShimSpawnTarget } from "./resolve-bin.js";
+import { resolveExecutable, winCmdShimSpawnTarget, resolveCodexLaunchTarget, isOpenAiSpawnEnvKey } from "./resolve-bin.js";
 import { wrapStdioMountWithEnvIsolation } from "./env-isolation.js";
 import {
   type OrphanSweepRow, parseWin32SweepTicks, parseOrphanSweepLine, WIN32_SWEEP_PS_COMMAND,
@@ -4747,13 +4747,9 @@ export function isAnthropicSpawnEnvKey(key: string): boolean {
   return upper.startsWith("ANTHROPIC_") || upper === "AWS_BEARER_TOKEN_BEDROCK";
 }
 
-/** True for an env-var NAME that can re-bill or reroute a CODEX session: any `OPENAI_*` (case-insensitive) plus
- * the exact names `CODEX_API_KEY` / `CODEX_ACCESS_TOKEN`. Deliberately NOT the `CODEX_` prefix — `CODEX_HOME`
- * (where the ChatGPT login lives) and the other CODEX_* knobs must keep flowing. Card 6a94d4f0. */
-export function isOpenAiSpawnEnvKey(key: string): boolean {
-  const upper = key.toUpperCase();
-  return upper.startsWith("OPENAI_") || upper === "CODEX_API_KEY" || upper === "CODEX_ACCESS_TOKEN";
-}
+// Card 6a94d4f0 / d1614667: the predicate moved to resolve-bin.ts (shared with the codex --version prewarm);
+// re-exported so existing importers of host.ts's name are unchanged.
+export { isOpenAiSpawnEnvKey };
 
 /** Process-lifetime latch for buildSpawnEnv's silent-scrub diagnostic (card c8eeda93): one line per daemon process. */
 let anthropicScrubLogged = false;
@@ -7272,11 +7268,7 @@ export class PtyHost {
    */
   private resolveCodexLaunch(): { bin: string; launch: { command: string; args: string[] } } {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
-    try {
-      return { bin, launch: winCmdShimSpawnTarget(bin, []) };
-    } catch (err) {
-      throw new Error(`cannot spawn codex: found "${bin}", but it is not a standard npm shim, and Loom refuses to run it through cmd.exe. Install codex as an npm global (npm i -g @openai/codex) so that %APPDATA%\\npm\\codex.cmd is a standard npm shim (a pnpm-global or hand-written codex.cmd is not supported). Cause: ${(err as Error)?.message ?? String(err)}`);
-    }
+    return { bin, launch: resolveCodexLaunchTarget(bin, []) };
   }
 
   protected createCodexPty(opts: SpawnOpts, mcpToken?: string): IPty {

@@ -174,3 +174,27 @@ export function winCmdShimSpawnTarget(command: string, args: string[]): { comman
   const { entry, nodeBin } = parseNpmCmdShim(command);
   return { command: nodeBin, args: [entry, ...args] };
 }
+
+/**
+ * Resolve a codex binary's launch target through {@link winCmdShimSpawnTarget}, FAIL CLOSED: an unparsable
+ * shim throws the remedy text below, never falling back to the implicit cmd.exe. Shared by every codex
+ * exec (the session pty in `host.ts` and the `--version` prewarm in `codex-doctrine.ts`) so the two paths
+ * can never disagree. `args` is appended after the shim's real entry script.
+ * @decision e92cd4a3 — do not add a cmd.exe/implicit-shell fallback for an unparsable codex shim.
+ */
+export function resolveCodexLaunchTarget(bin: string, args: string[] = []): { command: string; args: string[] } {
+  try {
+    return winCmdShimSpawnTarget(bin, args);
+  } catch (err) {
+    throw new Error(`cannot spawn codex: found "${bin}", but it is not a standard npm shim, and Loom refuses to run it through cmd.exe. Install codex as an npm global (npm i -g @openai/codex) so that %APPDATA%\\npm\\codex.cmd is a standard npm shim (a pnpm-global or hand-written codex.cmd is not supported). Cause: ${(err as Error)?.message ?? String(err)}`);
+  }
+}
+
+/** True for an env-var NAME that can re-bill or reroute a CODEX session: any `OPENAI_*` (case-insensitive) plus
+ * the exact names `CODEX_API_KEY` / `CODEX_ACCESS_TOKEN`. Deliberately NOT the `CODEX_` prefix — `CODEX_HOME`
+ * (where the ChatGPT login lives) and the other CODEX_* knobs must keep flowing. Card 6a94d4f0. Lives here
+ * (re-exported by `host.ts`) so `codex-doctrine.ts` can use it without importing the pty host. */
+export function isOpenAiSpawnEnvKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  return upper.startsWith("OPENAI_") || upper === "CODEX_API_KEY" || upper === "CODEX_ACCESS_TOKEN";
+}
