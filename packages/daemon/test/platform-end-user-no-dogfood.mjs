@@ -269,22 +269,18 @@ function assertAllowlistEntriesSeen(surfaceLabel, renderedToolNames) {
 // zero-tolerance, matching the id-citation ratchet's own default.
 const ROUTER_NON_ID_HIT_ALLOWLIST = [
   {
-    surface: "OrchestrationMcpRouter(manager)", tool: "worker_list", pattern: "daemon_restart tool name", expectedCount: 2,
+    surface: "OrchestrationMcpRouter(manager)", tool: "worker_spawn", pattern: "daemon_restart tool name", expectedCount: 2,
     reason: "conditional phrasing (\"via daemon_restart where your surface has it, or a human relaunch " +
       "otherwise\") naming the tool for a reader who may not have it — the orchestrate/SKILL.md precedent " +
       "(SKILL_SURFACE_ALLOWLIST above), never a flat claim the reader holds it.",
   },
   {
-    surface: "OrchestrationMcpRouter(manager)", tool: "worker_spawn", pattern: "daemon_restart tool name", expectedCount: 2,
-    reason: "same conditional-phrasing precedent as worker_list above.",
-  },
-  {
     surface: "OrchestrationMcpRouter(manager)", tool: "worker_stop", pattern: "daemon_restart tool name", expectedCount: 1,
-    reason: "same conditional-phrasing precedent as worker_list above.",
+    reason: "same conditional-phrasing precedent as worker_spawn above.",
   },
   {
     surface: "OrchestrationMcpRouter(manager)", tool: "served_status", pattern: "daemon_restart tool name", expectedCount: 2,
-    reason: "same conditional-phrasing precedent as worker_list above.",
+    reason: "same conditional-phrasing precedent as worker_spawn above.",
   },
 ];
 
