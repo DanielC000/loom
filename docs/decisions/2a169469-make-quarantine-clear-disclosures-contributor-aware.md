@@ -19,7 +19,7 @@ Repro: Y unresolvable, holds its OWN active record at kY; unrelated active X has
    still refused, naming X.
 2. **clear-by-path** (`clearMergeQuarantineByRecordedPath`) never checked the queried identity's own
    post-clear status at all. It correctly reported `liftedRepoPaths:[]` (via
-   `resolveGenuinelyLiftedRepoPaths`, which already used the widened `ownIdentityEntryFor`), but with no
+   `resolveReleasedAndLiftedRepoPaths`, which already used the widened `ownIdentityEntryFor`), but with no
    `stillQuarantined`/`reason` field — the human was never told WHY nothing lifted.
 3. **`/clear`** (`clearMergeQuarantineReporting`) already gated on `if (after)` (correct, since `after`
    being truthy at all — regardless of whose identity it is — is the right lift/block decision), but its
@@ -75,7 +75,7 @@ active one as a side effect of this card's own NEW disclosure check, so a later 
 
 Switching all three new/widened `after` computations to `ownIdentityEntryFor` (matching the card's own
 "Direction" text verbatim — "clear-by-id's lifted/still-blocked decision asks 'does ANY surviving entry
-still name this identity' (`ownIdentityEntryFor`, as `resolveGenuinelyLiftedRepoPaths` does)") closed the
+still name this identity' (`ownIdentityEntryFor`, as `resolveReleasedAndLiftedRepoPaths` does)") closed the
 regression (3/3 clean reruns of the regression file, both `LOOM_DEV` states) while leaving every scenario
 in this card's own new test file green, unchanged.
 
@@ -170,7 +170,7 @@ proof. Also fixed a stale comment at `gateway/server.ts` (~3287-3293): it claime
 
 ### The `liftedRepoPaths`-vs-`stillQuarantined` contradiction, found and fixed while closing finding 3
 
-Closing finding 3 surfaced a genuine self-contradiction: `resolveGenuinelyLiftedRepoPaths` (UNCHANGED —
+Closing finding 3 surfaced a genuine self-contradiction: `resolveReleasedAndLiftedRepoPaths` (UNCHANGED —
 still `ownIdentityEntryFor`-only, deliberately never widened to the ancestor tier, to avoid re-litigating
 that function's own, separately-reviewed mutation-safety argument) could still list the QUERIED repoPath
 itself as "lifted" even when `stillBlockedEntryFor`'s wider ancestor check correctly found it still
@@ -262,7 +262,7 @@ Verified directly in the new test file's scenario (A): `stillBlockedCoOccupants`
   3 too), but `wasQuarantined` keeps its OWN, route-specific, pre-existing meaning at each route (route 3's
   `wasQuarantined` has always meant "was ANYTHING blocking you"; routes 1/2's has always meant "did I find
   YOUR OWN record" — this asymmetry PRE-DATES this card and is not something it tries to unify).
-- Do not let `resolveGenuinelyLiftedRepoPaths` (the `liftedRepoPaths` computation) see the ancestor tier —
+- Do not let `resolveReleasedAndLiftedRepoPaths` (the `liftedRepoPaths` computation) see the ancestor tier —
   it stays `ownIdentityEntryFor`-only, deliberately, to avoid re-litigating that function's own,
   separately-reviewed mutation-safety argument for an unrelated widening. Instead, filter the QUERIED
   identity back out of its result whenever `stillBlockedEntryFor` finds it still blocked — never report a

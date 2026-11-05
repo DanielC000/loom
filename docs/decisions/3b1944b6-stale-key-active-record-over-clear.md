@@ -648,7 +648,7 @@ real child-process reboot between the two). Both through the real `/clear` entry
 After a reduce, `/clear(R)` genuinely lifts `sub`'s still-outstanding token too (its token never left the
 union's flat token set — see Round 3's own "THE TOKEN QUESTION") and genuinely unblocks `sub` — but
 `liftedRepoPaths` named only `[R]`, never `[R, sub]`, because the candidate-identity seeding at every
-`resolveGenuinelyLiftedRepoPaths` call site only ever read `contributorRepoPaths` (already stripped by
+`resolveReleasedAndLiftedRepoPaths` call site only ever read `contributorRepoPaths` (already stripped by
 the reduce), never `reducedContributorRepoPaths`. Fixed by feeding `reducedContributorRepoPaths` into
 `candidateIdentities` too, at all three seeding sites (`clearMergeQuarantineByKey`'s own active-entry seed
 and its pending-loop seed, and `tryClearMergeQuarantineByOwnIdentity`'s own pending-loop seed — its
@@ -657,7 +657,7 @@ call's own `result.liftedRepoPaths`).
 
 **(SUPERSEDED BY ROUND 6 — do NOT follow this safety claim.)** This originally read "safe
 unconditionally: every candidate is re-resolved... so it can never cause an over-report." CR4 (Round 6,
-probe2) measured that FALSE: `ownIdentityEntryFor`/`resolveGenuinelyLiftedRepoPaths` run AFTER this
+probe2) measured that FALSE: `ownIdentityEntryFor`/`resolveReleasedAndLiftedRepoPaths` run AFTER this
 clear's own mutations, so once the OWNER entry is genuinely, fully deleted (unlike probe2's own kept/
 protected construction, where it survives), the post-clear re-resolution finds nothing either way and
 cannot tell a genuinely-entangled candidate apart from a ghost that never was. See Round 6's own item 3
@@ -709,10 +709,10 @@ this round's fix. HEAD — 0 FAILED for the whole file. Solo runtime timed separ
   check in `clearMergeQuarantine` is a single `.includes(identity)` test regardless of which of the two
   functions actually wrote the mark.
 - **(SUPERSEDED BY ROUND 6 — do NOT follow this bullet)** This used to say never to filter
-  `reducedContributorRepoPaths` candidates by hand, reasoning that `resolveGenuinelyLiftedRepoPaths`'s own
+  `reducedContributorRepoPaths` candidates by hand, reasoning that `resolveReleasedAndLiftedRepoPaths`'s own
   post-clear re-resolution already covers it. CR4 (Round 6) measured that false: once the OWNER entry is
   genuinely, fully deleted (the normal case for a full lift, not probe2's own kept/protected construction),
-  `resolveGenuinelyLiftedRepoPaths` runs AFTER the evidence is gone and finds nothing either way — it
+  `resolveReleasedAndLiftedRepoPaths` runs AFTER the evidence is gone and finds nothing either way — it
   cannot discriminate a candidate that was genuinely entangled from one that never was. See Round 6's own
   item 3 for the real fix: a hand-rolled "blocked-before" snapshot, taken BEFORE the owner's own deletion.
 - Do not read item 6's wording defect as part of this card's own scope — it is carded separately; fixing
@@ -812,7 +812,7 @@ was never blocked by anything. Two independent root causes, both fixed:
 1. **`ownIdentityEntryFor` never consulted `reducedContributorRepoPaths`.** Widened its own `isContributor`
    check to also test `entry.reducedContributorRepoPaths?.includes(identity)` (already normalized, never
    re-mapped through `directPathIdentity`). This is the ONE function shared by `resolveQuarantineFor`,
-   `stillBlockedEntryFor`, and `resolveGenuinelyLiftedRepoPaths` — widening it here also makes
+   `stillBlockedEntryFor`, and `resolveReleasedAndLiftedRepoPaths` — widening it here also makes
    `assertRepoNotQuarantined`/`clearMergeQuarantineReporting` correctly report a reduced-out identity as
    still blocked once it becomes unresolvable, closing a related (previously silent) gap as a side effect.
 2. **The `~5004` protected-occupant exclusion propagated `contributorRepoPaths` but not
@@ -822,7 +822,7 @@ was never blocked by anything. Two independent root causes, both fixed:
    only helps when the owner entry SURVIVES the clear (probe2's own construction, via its degraded-ghost
    protection); the NORMAL case for a genuine full lift is that the owner entry is fully, durably DELETED
    — at which point even the widened `ownIdentityEntryFor`, evaluated AFTER the delete (inside
-   `resolveGenuinelyLiftedRepoPaths`), finds nothing regardless of whether the candidate was ever
+   `resolveReleasedAndLiftedRepoPaths`), finds nothing regardless of whether the candidate was ever
    genuinely entangled. Every `reducedContributorRepoPaths`-sourced candidate add is now gated on
    `ownIdentityEntryFor(c)` evaluated BEFORE any deletion: inline, at the two `clearMergeQuarantineByKey`
    seed sites (both run before their own entry's/pending-twin's removal); via a pre-filter SNAPSHOT

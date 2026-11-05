@@ -50,7 +50,7 @@ index or state.
    `candidateIdentities` for lift-disclosure). This is its ONLY use (grepped) — it never reaches
    `wasQuarantined` (`anythingProcessed = !!entry || pendingPlan.size > 0`, independent). Widening can only
    add a contributor's own path as a disclosure CANDIDATE in a case it previously wasn't; the SAME
-   post-mutation re-check in `resolveGenuinelyLiftedRepoPaths` (below) re-queries the (also widened)
+   post-mutation re-check in `resolveReleasedAndLiftedRepoPaths` (below) re-queries the (also widened)
    `ownIdentityEntryFor` afterward, so a surviving host still correctly suppresses the false "lifted"
    report. Verified no change in outcome by direct reasoning through every reachable shape (a clear
    targeting the host's own key leaves `entry` truthy regardless of this widening; a clear targeting some
@@ -58,7 +58,7 @@ index or state.
    armed key at all, so the host — and therefore the widened re-check — is unaffected either way).
 2. **`resolveQuarantineFor`** — the actual fix target; drives `assertRepoNotQuarantined` and
    `clearMergeQuarantineReporting`'s own before/after diagnostic reads.
-3. **`resolveGenuinelyLiftedRepoPaths`** (`4b6c8d24`'s lift-disclosure re-resolve, called from both
+3. **`resolveReleasedAndLiftedRepoPaths`** (`4b6c8d24`'s lift-disclosure re-resolve, called from both
    `clearMergeQuarantineByKey` and `clearMergeQuarantineByRecordedPath`) — `4b6c8d24` round 3's own Q fix
    already adds a protected entry's `contributorRepoPaths` to `excludeRepoPaths` whenever the entry itself
    is excluded, so the widened `ownIdentityEntryFor` is REDUNDANT with that explicit guard for the shape
@@ -118,7 +118,7 @@ passes in both RED and GREEN phases (never broken by round 1 either — a true n
 disguised repeat of item 2's own repro).
 
 **4. Noted, not fixed (reviewer's own Q4) — disclosure and enforcement apply the resolvability gate
-asymmetrically.** `4b6c8d24`'s disclosure (`resolveGenuinelyLiftedRepoPaths`) honours a contributor
+asymmetrically.** `4b6c8d24`'s disclosure (`resolveReleasedAndLiftedRepoPaths`) honours a contributor
 regardless of whether that contributor is CURRENTLY resolvable — it only asks whether a surviving entry
 still names it. Enforcement (`resolveQuarantineFor`) reaches `ownIdentityEntryFor` only for an
 UNRESOLVABLE query (`resolveQuarantineFor`'s own gate, unchanged by this card). In a CONTRIVED shape where

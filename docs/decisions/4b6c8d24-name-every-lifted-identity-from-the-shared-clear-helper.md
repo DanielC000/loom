@@ -152,7 +152,7 @@ by the blocking-decision functions at any lifecycle stage, only by this card's o
 and `82032b5c`'s clear-by-id ambiguity refusal. Fixed by widening `ownIdentityEntryFor` to also match
 `contributorRepoPaths`, scoped to the enforcement check only (never the clear routes) — see
 `docs/decisions/58ae4b34-contributor-enforcement-via-ownidentityentryfor.md` for the full fix and why it
-leaves `resolveGenuinelyLiftedRepoPaths` (this card's own M2/Q guard) unaffected. Scenario (L) in
+leaves `resolveReleasedAndLiftedRepoPaths` (this card's own M2/Q guard) unaffected. Scenario (L) in
 `packages/daemon/test/merge-quarantine-4b6c8d24-lifted-identities-disclosure.mjs` — formerly a
 `[4b6c8d24][L][FINDING]` console-logged probe — now asserts the fixed behavior directly.
 
@@ -191,7 +191,7 @@ leaves `resolveGenuinelyLiftedRepoPaths` (this card's own M2/Q guard) unaffected
   Use `ownIdentityEntryFor` (a pure scan) instead — see "the mutation hazard" above; this regressed FIVE
   unrelated test files the first time it was tried, caught only by the full corpus run.
 - Do not let an identity appear in both `liftedRepoPaths` and `stillBlockedCoOccupants` — the explicit
-  `excludeRepoPaths` guard in `resolveGenuinelyLiftedRepoPaths` exists on top of the `ownIdentityEntryFor`
+  `excludeRepoPaths` guard in `resolveReleasedAndLiftedRepoPaths` exists on top of the `ownIdentityEntryFor`
   scan specifically so this invariant holds even if some future shape makes the two disagree.
 - Do not route `clearMergeQuarantineLatchFile`'s own, already-correct `liftedRepoPaths` computation
   through `clearMergeQuarantineByKey`'s new fields — they answer the same QUESTION from two different,

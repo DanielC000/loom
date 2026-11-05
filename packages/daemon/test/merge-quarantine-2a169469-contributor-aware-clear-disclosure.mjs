@@ -22,7 +22,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // of (NEW wording, scenarios A/B/C/D), or a genuinely different, unrelated repo's own separate
 // quarantine (unchanged wording, scenario F). Both clear-by-id branches, and a new top-priority branch in
 // clear-by-path, now gate on `ownIdentityEntryFor(<queried identity>)` (PURE — own-identity-or-contributor,
-// exactly what `resolveGenuinelyLiftedRepoPaths` already uses) rather than `resolveQuarantineFor`'s own
+// exactly what `resolveReleasedAndLiftedRepoPaths` already uses) rather than `resolveQuarantineFor`'s own
 // identity-equality test OR `resolveQuarantineFor` itself.
 //
 // ROUND 1 (round-1 regression, fixed before round 1 was even reported): a first draft used
