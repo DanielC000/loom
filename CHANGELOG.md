@@ -4,6 +4,17 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Added
+- **A Codex profile can point at your own model endpoint.** In Profiles, a profile on the Codex harness
+  has a new "Model provider" field: pick Codex's built-in local `ollama` or `lmstudio`, or give a custom
+  `https` endpoint (plain `http` only to a loopback address). A custom endpoint is paired with one of your
+  stored API-key or bearer Connections, and its host must match that Connection's host, so a key is only
+  ever sent to the host it was stored for. The key never sits on the profile: it is handed to the Codex
+  process through its environment only. This is a human-only setting, not available to agents. If the
+  session ends up not running on Codex (for example a default-harness fallback), the endpoint is not
+  applied and a `codex_provider_dropped` event records which Connection it named; a Connection that can no
+  longer be resolved fails the launch rather than falling back to a different provider.
+
 ### Changed
 - **Connection and capability grants now live on the agent, not the profile.** A profile no longer
   carries a list of connections or registry capabilities; each is granted per agent (agent editor), so a

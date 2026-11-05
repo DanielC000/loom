@@ -40,6 +40,8 @@ export interface ProfileGrantFormValues {
   /** The editor holds an unset role as `""`; `grantFieldsOfValues` normalizes it to `null`. */
   role: SessionRole | "";
   restrictedTools: boolean;
+  /** The codex model-provider endpoint (card 2ef54430); `null` = none. A spend grant, so read LIVE below. */
+  codexProvider: ProfileWideningFields["codexProvider"];
 }
 
 /** The editor's textarea spelling of `allowDelta`, normalized to the array the wire carries. */
@@ -65,6 +67,7 @@ export function grantFieldsOfValues(v: ProfileGrantFormValues): ProfileWideningF
     allowDelta: parseAllowDelta(v.allowText),
     role: v.role || null,
     restrictedTools: v.restrictedTools,
+    codexProvider: v.codexProvider,
   };
 }
 
@@ -84,6 +87,7 @@ export function grantFieldsOfProfile(p: ProfileWideningFields): ProfileWideningF
     allowDelta: p.allowDelta,
     role: p.role,
     restrictedTools: p.restrictedTools,
+    codexProvider: p.codexProvider,
   };
 }
 

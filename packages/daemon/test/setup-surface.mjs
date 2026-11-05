@@ -288,6 +288,11 @@ try {
   check("(c) profile_create: returns a profile with an id", !!prof.id && prof.role === "worker" && !prof.error);
   const badProf = await call("profile_create", { profile: { name: "Bad", role: "auditor" } });
   check("(c) profile_create: an unmintable role (auditor) is rejected", typeof badProf.error === "string" && !badProf.id);
+  // card 2ef54430: codexProvider is a human-only SPEND surface on the Setup operator's profile writers too.
+  const provCreate = await call("profile_create", { profile: { name: "Provider Rig", role: "worker", codexProvider: { id: "ollama" } } });
+  check("(c) profile_create: REJECTS codexProvider (human-only, card 2ef54430)", typeof provCreate.error === "string" && /codexProvider/.test(provCreate.error) && !provCreate.id);
+  const provUpdate = await call("profile_update", { profileId: prof.id, patch: { codexProvider: { id: "ollama" } } });
+  check("(c) profile_update: REJECTS a patch introducing codexProvider (card 2ef54430)", typeof provUpdate.error === "string" && /codexProvider/.test(provUpdate.error));
   const updProf = await call("profile_update", { profileId: prof.id, patch: { icon: "⚙️" } });
   check("(c) profile_update: partial patch applied", updProf.icon === "⚙️" && updProf.name === "Dev Rig" && !updProf.error);
   const assigned = await call("profile_assign", { agentId: agent.id, profileId: prof.id });

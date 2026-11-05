@@ -297,12 +297,21 @@ try {
   check("profile_create: REJECTS documentConversion even on the elevated Platform Lead surface (card 8c27ae8e)",
     typeof pcDocConv.error === "string" && !pcDocConv.id);
 
+  // card 2ef54430: codexProvider is a SPEND surface — human-only even on this ELEVATED Platform Lead surface.
+  const pcProvider = await call("profile_create", { profile: { name: "ProviderRig", role: "worker", codexProvider: { id: "ollama" } } });
+  check("profile_create: REJECTS codexProvider even on the elevated Platform Lead surface (card 2ef54430)",
+    typeof pcProvider.error === "string" && /codexProvider/.test(pcProvider.error) && !pcProvider.id && db.listProfiles().length === nProfBefore + 1);
+
   const pu = await call("profile_update", { profileId: pc.id, patch: { description: "edited", icon: "🔍" } });
   check("profile_update: partial patch merges + persists", pu.description === "edited" && pu.icon === "🔍" && pu.role === "worker" && !pu.error);
   check("profile_update: 404 on an unknown id", (await call("profile_update", { profileId: "ghost", patch: { name: "x" } })).error === "profile not found");
   const puBad = await call("profile_update", { profileId: pc.id, patch: { role: "wizard" } });
   check("profile_update: an invalid merged result is rejected; stored profile unchanged",
     typeof puBad.error === "string" && db.getProfile(pc.id)?.role === "worker");
+
+  const puProvider = await call("profile_update", { profileId: pc.id, patch: { codexProvider: { id: "ollama" } } });
+  check("profile_update: REJECTS a patch that INTRODUCES codexProvider even on the elevated surface (card 2ef54430)",
+    typeof puProvider.error === "string" && /codexProvider/.test(puProvider.error) && !db.getProfile(pc.id)?.codexProvider);
 
   // card 8c27ae8e: profile_update may not INTRODUCE browserTesting even on this elevated surface...
   const puIntroduceBrowser = await call("profile_update", { profileId: pc.id, patch: { browserTesting: true } });

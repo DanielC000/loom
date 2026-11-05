@@ -203,6 +203,9 @@ export function grantFieldsOf(p: ProfileWideningFields): ProfileWideningFields {
     allowDelta: p.allowDelta,
     role: p.role,
     restrictedTools: p.restrictedTools,
+    // Card 2ef54430: read live like its siblings — `ProfileGrantFields` types it optional (no null member on
+    // the stored shape), so the compiler would NOT have flagged this omission; the REST test did.
+    codexProvider: p.codexProvider,
   };
 }
 

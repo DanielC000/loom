@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, ProfileGrantReach, SessionRole } from "@loom/shared";
+import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, ProfileGrantReach, SessionRole, CodexProvider } from "@loom/shared";
+import { CodexProviderField } from "../components/CodexProviderField";
 import type { CapabilitySummary } from "@loom/shared";
 import { api, type ProfileFieldResolution } from "../lib/api";
 import {
@@ -343,6 +344,8 @@ interface ProfileFields {
   restrictedTools: boolean;
   noCommit: boolean;
   harness: Harness;
+  /** Card 2ef54430: the codex model-provider endpoint; `null` = codex's default. Only meaningful on codex. */
+  codexProvider: CodexProvider | null;
   skills: string[];
 }
 
@@ -360,6 +363,7 @@ const profileFieldsOf = (p: ProfileSummary): ProfileFields => ({
   restrictedTools: p.restrictedTools ?? false,
   noCommit: p.noCommit ?? false,
   harness: harnessOf(p.harness),
+  codexProvider: p.codexProvider ?? null,
   skills: p.skills ?? [],
 });
 
@@ -379,6 +383,19 @@ const PROFILE_FIELD_COMPARERS: FieldComparers<ProfileFields> = {
   icon: (a, b) => a.trim() === b.trim(),
   model: (a, b) => a.trim() === b.trim(),
   skills: (a, b) => sortedJson(a) === sortedJson(b),
+  // Normalizes exactly as `submit` does (empty optional strings ⇒ absent, trimmed URL), so an untouched
+  // custom row never reads as a human edit.
+  codexProvider: (a, b) => JSON.stringify(normCodexProvider(a)) === JSON.stringify(normCodexProvider(b)),
+};
+
+/** The wire spelling of the editor's provider value: empty optional strings dropped, URL trimmed, a blank id ⇒ none. */
+const normCodexProvider = (p: CodexProvider | null): CodexProvider | null => {
+  if (!p) return null;
+  const id = p.id.trim();
+  const baseUrl = p.baseUrl?.trim();
+  const connectionId = p.connectionId?.trim();
+  if (!id && !baseUrl && !connectionId) return null;
+  return { id, ...(baseUrl ? { baseUrl } : {}), ...(connectionId ? { connectionId } : {}) };
 };
 
 // Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
@@ -410,6 +427,8 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
   // profile never reads as having chosen a harness. HUMAN-only: `harness` sits on the daemon's
   // AGENT_FORBIDDEN_PROFILE_KEYS, so this editor and the loopback REST it drives are the ONLY grant path.
   const [harness, setHarness] = useState<Harness>(harnessOf(profile.harness));
+  // The codex model-provider endpoint (card 2ef54430). HUMAN-only (AGENT_FORBIDDEN_PROFILE_KEYS); a spend surface.
+  const [codexProvider, setCodexProvider] = useState<CodexProvider | null>(profile.codexProvider ?? null);
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
   // A pending save held back by the grant confirm (card 3c4e0df6): the already-built patch plus the plan
@@ -464,6 +483,9 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
   // @decision afe1bc90 — only the two RESERVED builtins (browser-testing / document-conversion) are still
   // profile-level; every other registry capability is granted per AGENT (agent editor), not here.
   const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
+  // Card 2ef54430: the stored Connections a custom codex endpoint can bind (the field filters to api-key/bearer).
+  const connectionList = useQuery({ queryKey: ["connections"], queryFn: api.connections });
+  const availableConnections = connectionList.data ?? [];
   const availableCapabilities = (capabilityList.data ?? []).filter((c) => c.slug === "browser-testing" || c.slug === "document-conversion");
   const isCapabilityChecked = (slug: string) =>
     slug === "browser-testing" ? browserTesting : slug === "document-conversion" ? documentConversion : false;
@@ -475,14 +497,14 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
   // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a patch below.
   const values: ProfileFields = {
     name, role, description, allowText, icon, model, browserTesting, documentConversion, vaultWrite,
-    restrictedTools, noCommit, harness, skills,
+    restrictedTools, noCommit, harness, codexProvider, skills,
   };
   const applyFields = (v: ProfileFields) => {
     setName(v.name); setRole(v.role); setDescription(v.description); setAllowText(v.allowText);
     setIcon(v.icon); setModel(v.model); setBrowserTesting(v.browserTesting);
     setDocumentConversion(v.documentConversion); setVaultWrite(v.vaultWrite);
     setRestrictedTools(v.restrictedTools);
-    setNoCommit(v.noCommit); setHarness(v.harness); setSkills(v.skills);
+    setNoCommit(v.noCommit); setHarness(v.harness); setCodexProvider(v.codexProvider); setSkills(v.skills);
   };
 
   // Seed / delta / re-sync / conflict bookkeeping, shared with Settings' ConfigEditor and AgentEditor
@@ -520,7 +542,10 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
   // @decision 65aa951c — narrow the payload to the CHANGED fields, and do it AFTER the codex clear: a
   // field the clear moved must still reach the wire, and diffing the pre-clear values would drop it.
   const submit = () => {
-    const sent = clearCodexRejectedFields(harness, values);
+    // Card 2ef54430: a provider is codex-only (validateProfile refuses it on claude), so leaving codex drops
+    // it from what is sent — and reconciles local state to match, like the four fields below.
+    const sent = { ...clearCodexRejectedFields(harness, values), codexProvider: harness === "codex" ? normCodexProvider(codexProvider) : null };
+    setCodexProvider(sent.codexProvider);
     setRestrictedTools(sent.restrictedTools);
     setBrowserTesting(sent.browserTesting);
     setDocumentConversion(sent.documentConversion);
@@ -556,6 +581,9 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
     if (delta.has("restrictedTools")) patch.restrictedTools = sent.restrictedTools;
     if (delta.has("noCommit")) patch.noCommit = sent.noCommit;
     if (delta.has("harness")) patch.harness = sent.harness;
+    // null clears (updateProfile: undefined leaves the column). Sent when the provider changed OR the harness
+    // did — switching a rig OFF codex must clear a stored provider in the same save, or the merge is refused.
+    if (delta.has("codexProvider") || delta.has("harness")) patch.codexProvider = sent.codexProvider;
     if (delta.has("skills")) patch.skills = sent.skills.length ? sent.skills : null;
 
     // Card 3c4e0df6 (grants) + be447b3f (role change / restrictedTools relaxing). Profiles are GLOBAL, so
@@ -656,6 +684,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         <span style={fieldLabel}>Harness · which CLI this rig spawns</span>
         <HarnessPicker value={harness} onChange={setHarness} />
         <HarnessDropSummary harness={harness} />
+        {harness === "codex" && <CodexProviderField value={codexProvider} onChange={setCodexProvider} connections={availableConnections} />}
         {/* Named BEFORE the Save click, and only while this rig actually holds something codex refuses to
             store — see card 6232fe9d. Sits here rather than beside each field because the loss is a
             consequence of THIS choice, and a reader who has just picked codex is looking right at it. */}

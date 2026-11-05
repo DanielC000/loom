@@ -118,7 +118,7 @@ import type {
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession, SessionUsageTask,
-  ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
+  ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind, CodexProvider,
   ProjectLink, ProjectMemoryEntry, ProjectMemoryHistoryEntry,
   DeferredItem, DeferredItemStatus, TaskRelationType,
   GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
@@ -365,7 +365,10 @@ CREATE TABLE IF NOT EXISTS profiles (
   -- Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI a session under this rig
   -- spawns as. NULL = "claude" (today's only harness, byte-identical spawn) — HUMAN-set only, same
   -- trust class as gateCommand (selects which binary gets spawned).
-  harness TEXT
+  harness TEXT,
+  -- Card 2ef54430: opt-in custom codex model-provider endpoint (JSON {id,baseUrl?,connectionId?}). NULL =
+  -- none. HUMAN-set only. Holds a Connection REFERENCE, never a key.
+  codex_provider TEXT
 );
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
@@ -538,6 +541,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- no DEFAULT (mirrors repo_key's shape): NULL means "claude" — every legacy row keeps today's exact
   -- behavior with zero data migration.
   harness TEXT,
+  -- Card 2ef54430: the codex model-provider endpoint pinned at spawn (JSON {id,baseUrl?,connectionId?}),
+  -- carried across resume/recycle like harness. NULL on every legacy row. No index on this column.
+  codex_provider TEXT,
   parent_session_id TEXT,
   task_id TEXT,
   worktree_path TEXT,
@@ -2192,6 +2198,8 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // browser_testing's pinning shape, repo_key's nullable/no-DEFAULT shape). NULL on every legacy row =
   // "claude" — today's only harness, zero data migration.
   harness: "TEXT",
+  // Card 2ef54430: pinned codex model-provider endpoint (JSON). Nullable; NULL on every legacy row.
+  codex_provider: "TEXT",
   parent_session_id: "TEXT",
   task_id: "TEXT",
   worktree_path: "TEXT",
@@ -2337,6 +2345,8 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: vendor-CLI selection. Nullable; legacy rows
   // backfill to NULL = "claude" (zero data migration, byte-identical spawn).
   harness: "TEXT",
+  // Card 2ef54430: opt-in codex model-provider endpoint (JSON). Nullable; legacy rows = NULL = none.
+  codex_provider: "TEXT",
 };
 
 /** Columns added to `schedules` after phase-2; applied to existing DBs by migrateSchedules(). */
@@ -7161,8 +7171,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,harness)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@harness)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,harness,codex_provider)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@harness,@codexProvider)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -7175,6 +7185,7 @@ export class Db {
       restrictedTools: p.restrictedTools ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       harness: p.harness ?? null, // NULL = "claude" (absent ⇒ today's only harness)
+      codexProvider: p.codexProvider ? JSON.stringify(p.codexProvider) : null, // card 2ef54430; NULL = none
       // COMPILE-TIME FIELD TOTALITY (card 4dfa3c04, extending 635e347e's write-path coverage down to the
       // DB-binding layer itself): forces every key of Profile (id included — this literal binds it too)
       // to be named above. Unlike validate.ts's Omit<Profile,"id"> literal, this one binds `id` as well,
@@ -7206,6 +7217,8 @@ export class Db {
       restrictedTools: { column: "restricted_tools", value: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0 },
       noCommit: { column: "no_commit", value: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0 },
       harness: { column: "harness", value: patch.harness === undefined ? undefined : patch.harness ?? null },
+      // Card 2ef54430: undefined leaves the column, null (an explicit clear) writes NULL.
+      codexProvider: { column: "codex_provider", value: patch.codexProvider === undefined ? undefined : patch.codexProvider === null ? null : JSON.stringify(patch.codexProvider) },
     } satisfies Record<keyof Omit<Profile, "id">, { column: string; value: unknown }>;
     const entries = Object.values(bindings).filter((b) => b.value !== undefined);
     if (entries.length === 0) return;
@@ -7561,12 +7574,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,harness,parent_session_id,task_id,worktree_path,branch,review_base_sha,cut_base_sha,review_of_task_id,repo_key,gen,recycled_from,
+         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,harness,codex_provider,parent_session_id,task_id,worktree_path,branch,review_base_sha,cut_base_sha,review_of_task_id,repo_key,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline,scheduled_spawn,forced_plain)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@harness,@parentSessionId,@taskId,@worktreePath,@branch,@reviewBaseSha,@cutBaseSha,@reviewOfTaskId,@repoKey,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@harness,@codexProvider,@parentSessionId,@taskId,@worktreePath,@branch,@reviewBaseSha,@cutBaseSha,@reviewOfTaskId,@repoKey,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline,@scheduledSpawn,@forcedPlain)`,
     ).run({
       ...s,
@@ -7578,6 +7591,19 @@ export class Db {
       // explicit null both bind as NULL; only a real true/false bind as 1/0.
       forcedPlain: s.forcedPlain == null ? null : (s.forcedPlain ? 1 : 0),
       harness: s.harness ?? null, // NULL = "claude" (absent ⇒ today's only harness) on every plain session literal
+      // Card 2ef54430: the pin is written at the ONE insert chokepoint rather than threaded through the ~15
+      // session-literal sites. An explicit `s.codexProvider` (a worker recycle carrying its predecessor's pin)
+      // wins; otherwise a CODEX row takes its agent's CURRENT profile endpoint, so a fresh spawn, a manager/lead
+      // recycle (which re-resolves) and every other start path pin without a per-site edit. A non-codex row
+      // NEVER pins one (resolveAgentSpawn files the loud drop for that case). Never throws: any lookup failure
+      // pins nothing, and the codex spawn then simply has no custom provider.
+      codexProvider: (() => {
+        let p = s.codexProvider;
+        if (!p && s.harness === "codex") {
+          try { p = this.getProfile(this.getAgent(s.agentId)?.profileId ?? "")?.codexProvider ?? undefined; } catch { p = undefined; }
+        }
+        return p ? JSON.stringify(p) : null;
+      })(),
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
       documentConversion: s.documentConversion ? 1 : 0, // off (0) on every plain session literal
       vaultWrite: s.vaultWrite ? 1 : 0, // off (0) on every plain session literal
@@ -11812,7 +11838,21 @@ function toProfile(r0: unknown): Profile {
     // migration is their last reader; credential grants live on the agent row).
     // multi-harness epic Phase 1 (card 353f6dc4): NULL ⇒ undefined = "claude" (today's only harness).
     harness: (r.harness as "claude" | "codex" | null) ?? undefined,
+    codexProvider: parseCodexProviderColumn(r.codex_provider),
   };
+}
+/** Card 2ef54430: NULL / empty reads as undefined (no custom provider); a NON-empty malformed value reads as an always-invalid sentinel so the spawn fails closed. */
+function parseCodexProviderColumn(raw: unknown): CodexProvider | undefined {
+  if (typeof raw !== "string" || !raw) return undefined;
+  // FAIL CLOSED: a non-empty value that does not parse to a provider reads back as an always-invalid sentinel,
+  // never as "none" — "none" would let the spawn fall through to codex's DEFAULT (billed) provider, exactly what
+  // the card's decision record forbids. The sentinel id fails `codexProviderShapeError` (not a valid id, and not
+  // a built-in), so buildCodexProviderArgs returns [] and applyCodexProvider throws.
+  const malformed: CodexProvider = { id: "<malformed-stored-value>" };
+  try {
+    const v = JSON.parse(raw) as CodexProvider;
+    return v && typeof v.id === "string" ? v : malformed;
+  } catch { return malformed; }
 }
 function toSession(r0: unknown): Session {
   const r = r0 as Row;
@@ -11846,6 +11886,7 @@ function toSession(r0: unknown): Session {
     capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
     // pinned vendor-CLI selection (multi-harness epic Phase 1, card 353f6dc4); NULL ⇒ undefined = "claude".
     harness: (r.harness as "claude" | "codex" | null) ?? undefined,
+    codexProvider: parseCodexProviderColumn(r.codex_provider),
     parentSessionId: (r.parent_session_id as string) ?? null,
     taskId: (r.task_id as string) ?? null,
     worktreePath: (r.worktree_path as string) ?? null,

@@ -756,6 +756,11 @@ async function main(): Promise<void> {
     // Card 5eace211: read LIVE per-spawn (like every callback above) so a project rename reaches the
     // project work dir's marker file on the very next spawn, with no daemon restart.
     resolveProjectName: (projectId: string) => db.getProject(projectId)?.name,
+    // Card 2ef54430: the codex model-provider endpoint pinned on the session ROW (a connection reference,
+    // never a secret), read LIVE per-spawn so resume/recycle successors see the row's pin.
+    getCodexProvider: (sessionId: string) => db.getSession(sessionId)?.codexProvider,
+    // Card 2ef54430: spawn-time re-check of the URL-host == Connection-host rule (see PtyHost.applyCodexProvider).
+    getConnectionForBinding: (connectionId: string) => db.getConnection(connectionId),
     // @decision 9d73e537 — keyed on CURRENT processState (live/starting), never resumability: the
     // resumability-keyed version under-pruned the common exited-but-resumable case, and DB process_state
     // (not PtyHost's own live/liveCodex maps) is the reliable source for a sibling mid-spawn.

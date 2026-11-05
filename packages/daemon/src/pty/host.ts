@@ -6,7 +6,8 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn as spawnProcess, execFileSync } from "node:child_process";
 import { CODEX_RESTRICTED_TOOLS_REASON, TRANSCRIPT_ROOT_DENY_ROLES, codexPermissionDenyReason, CodexRoleSpawnRefusedError } from "../profiles/codex-compat.js";
 import { spawn, type IPty } from "node-pty";
-import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
+import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant, CodexProvider } from "@loom/shared";
+import { CODEX_PROVIDER_KEY_ENV_VAR, isBuiltinCodexProviderId, codexProviderBindingError } from "../profiles/codex-provider.js";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES, isLoomDrivenRole } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
@@ -53,7 +54,7 @@ import { resolveGitDirsSync } from "../git/repo-lock.js";
  */
 export const CODEX_CODESCAPE_REASON = `codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness "claude" for codescape access`;
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine, withCodexRoleDoctrine, removeStaleCodexDoctrineArtifact } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, buildCodexProviderArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn, resolveTranscriptFile as resolveCodexRolloutFile } from "./codex-transcript.js";
 import { restoreArchivedCodexRollout } from "./codex-rollout-archive.js";
 
@@ -4789,7 +4790,9 @@ export function buildSpawnEnv(
     // this function returns and always wins for a real spawn. Scrubbed in THIS loop (the base-copy from
     // processEnv) rather than after the sessionEnv merge below, so a future deliberate sessionEnv override
     // would still win — consistent with every other var in this function.
-    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === MCP_TOKEN_ENV_VAR || k === "LOOM_PROJECT_WORK_DIR") continue;
+    // Card 2ef54430: same scrub for the codex model-provider key — its only legitimate source is the explicit
+    // per-spawn assignment in createCodexPty (from the stored Connection), never the daemon's own env.
+    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_") || k === MCP_TOKEN_ENV_VAR || k === "LOOM_PROJECT_WORK_DIR" || k === CODEX_PROVIDER_KEY_ENV_VAR) continue;
     if (v !== undefined) env[k] = v;
   }
   // Git-safety vars for the unattended worker pty (close the "git blocks the pty" wedge class). Set
@@ -6589,6 +6592,20 @@ export class PtyHost {
    * prunes NOTHING, byte-identical to before this field existed.
    */
   private readonly isSessionLive: (sessionId: string) => boolean;
+  /**
+   * Card 2ef54430: the codex model-provider endpoint PINNED on a session's row (a connection reference, never
+   * a secret), wired in by index.ts at boot (it holds `db`; PtyHost deliberately does not). Read PER-SPAWN by
+   * `createCodexPty`, so a fresh spawn, a resume and a recycle successor all see the row's pin. Defaults to
+   * `() => undefined` — no custom provider — so every existing hermetic test is byte-identical.
+   */
+  private readonly getCodexProvider: (sessionId: string) => CodexProvider | undefined;
+  /**
+   * Card 2ef54430: the stored Connection's {host, authScheme} for the SPAWN-TIME re-check of the save-time
+   * binding rule (URL host == Connection host). Wired by index.ts (PtyHost holds no `db`). Defaults to
+   * "no such connection", which FAILS CLOSED for a custom provider — the injected-secret test seam must
+   * supply it explicitly alongside `resolveConnectionSecret`.
+   */
+  private readonly getConnectionForBinding: (connectionId: string) => { host: string; authScheme: string } | undefined | null;
   constructor(
     private events: PtyHostEvents,
     opts?: {
@@ -6603,6 +6620,8 @@ export class PtyHost {
       resolveCredentialSessionEnv?: (projectId: string) => Record<string, string>;
       resolveProjectName?: (projectId: string) => string | undefined;
       isSessionLive?: (sessionId: string) => boolean;
+      getCodexProvider?: (sessionId: string) => CodexProvider | undefined;
+      getConnectionForBinding?: (connectionId: string) => { host: string; authScheme: string } | undefined | null;
     },
   ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
@@ -6617,6 +6636,8 @@ export class PtyHost {
     this.resolveCredentialSessionEnv = opts?.resolveCredentialSessionEnv ?? (() => ({}));
     this.resolveProjectName = opts?.resolveProjectName ?? (() => undefined);
     this.isSessionLive = opts?.isSessionLive ?? (() => true);
+    this.getCodexProvider = opts?.getCodexProvider ?? (() => undefined);
+    this.getConnectionForBinding = opts?.getConnectionForBinding ?? (() => undefined);
   }
 
   spawn(opts: SpawnOpts): void {
@@ -7170,6 +7191,41 @@ export class PtyHost {
    * @decision 9346ed5b — `LOOM_OBSIDIAN_PREFLIGHT` reaches a codex spawn's env, but codex has no skill file
    * to append the run-instruction fragment to — a known, disclosed asymmetry (path set, no instruction).
    */
+  /**
+   * Card 2ef54430 — resolve the session's pinned custom codex model-provider into its `-c` argv AND, for a
+   * custom endpoint, put the Connection's secret into `env` under the fixed {@link CODEX_PROVIDER_KEY_ENV_VAR}.
+   * Extracted from `createCodexPty` so the argv/env contract is unit-testable without a pty. Returns `[]` when
+   * no provider is pinned (byte-identical spawn). FAIL CLOSED — throws on an invalid pin or an unresolvable
+   * connection, because falling back to codex's default provider would silently bill a different account.
+   * Error/log text carries session and connection IDs only, never the secret.
+   */
+  protected applyCodexProvider(opts: Pick<SpawnOpts, "sessionId" | "projectId">, env: Record<string, string>): string[] {
+    const codexProvider = this.getCodexProvider(opts.sessionId);
+    const codexProviderArgs = buildCodexProviderArgs(codexProvider);
+    if (!codexProvider) return codexProviderArgs;
+    if (codexProviderArgs.length === 0) {
+      throw new Error(`codex spawn ${opts.sessionId}: the pinned model-provider "${codexProvider.id}" is invalid — refusing to fall back to codex's default provider`);
+    }
+    if (!isBuiltinCodexProviderId(codexProvider.id)) {
+      // Re-check the save-time binding NOW: the Connection's host (or scheme) may have been edited, or the row
+      // deleted, since the profile was saved — the key must only ever go to the host it was stored for.
+      const bindingError = codexProviderBindingError(codexProvider, { getConnection: this.getConnectionForBinding });
+      if (bindingError) {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${opts.sessionId} codex model-provider "${codexProvider.id}": connection ${codexProvider.connectionId ?? "(none)"} no longer satisfies the binding rule — refusing to spawn`);
+        throw new Error(`codex spawn ${opts.sessionId}: the model-provider connection ${codexProvider.connectionId ?? "(none)"} no longer matches the endpoint (${bindingError}) — refusing to fall back to codex's default provider`);
+      }
+      const providerSecret = codexProvider.connectionId ? this.resolveConnectionSecret(codexProvider.connectionId, opts.projectId) : undefined;
+      if (!providerSecret) {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${opts.sessionId} codex model-provider "${codexProvider.id}": connection ${codexProvider.connectionId ?? "(none)"} did not resolve (missing, revoked, out of project scope, or undecryptable) — refusing to spawn`);
+        throw new Error(`codex spawn ${opts.sessionId}: the model-provider connection ${codexProvider.connectionId ?? "(none)"} did not resolve — refusing to fall back to codex's default provider`);
+      }
+      env[CODEX_PROVIDER_KEY_ENV_VAR] = providerSecret;
+    }
+    return codexProviderArgs;
+  }
+
   protected createCodexPty(opts: SpawnOpts, mcpToken?: string): IPty {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
     // Card 8d828fa4: was a bare `process.env` copy — silently dropped opts.sessionEnv (despite
@@ -7201,6 +7257,12 @@ export class PtyHost {
     // @decision 2e7373ab — on POSIX this env-carried token is readable by same-UID processes; accepted
     // residual, don't claim otherwise.
     if (mcpToken) env[MCP_TOKEN_ENV_VAR] = mcpToken;
+    // Card 2ef54430: the pinned custom model-provider endpoint (human-only Profile field). The key rides ONLY
+    // this child's env, assigned AFTER buildSpawnEnv so a project sessionEnv can never win; argv carries just
+    // the variable NAME. FAIL CLOSED on an invalid pin or an unresolvable connection: falling back to codex's
+    // default provider would silently bill a different account than the one the human configured. Error text
+    // names the session/connection ids only — never the secret.
+    const codexProviderArgs = this.applyCodexProvider(opts, env);
     const scratchDir = sessionScratchDir(opts.sessionId);
     try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }
     Object.assign(env, scratchDirEnv(opts.sessionId));
@@ -7350,7 +7412,7 @@ export class PtyHost {
     // @decision d7657543 — no writable-roots lever (`--add-dir`) fixes a codex worktree's `git commit`
     // denial on Windows — the sandbox's DENY ACE on `.git` wins over any inherited ALLOW. Do not reach for
     // `-s danger-full-access`/`--dangerously-bypass-approvals-and-sandbox` to route around it; report up.
-    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs, ...buildCodexModelArgs(opts.model)];
+    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs, ...buildCodexModelArgs(opts.model), ...codexProviderArgs];
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
     return spawn(bin, args, {

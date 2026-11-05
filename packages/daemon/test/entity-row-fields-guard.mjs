@@ -65,6 +65,7 @@ const EXPECTED_PROFILE_KEYS = [
   "id", "name", "role", "description", "allowDelta", "skills", "model", "icon", "browserTesting",
   "documentConversion", "restrictedTools", "noCommit", "vaultWrite",
   "harness", // multi-harness epic df1f94b0 Phase 1 (card 353f6dc4)
+  "codexProvider", // card 2ef54430: a connection REFERENCE + endpoint URL, never a secret (same posture as connections ids)
 ];
 
 const projected = {

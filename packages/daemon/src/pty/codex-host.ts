@@ -1,3 +1,5 @@
+import type { CodexProvider } from "@loom/shared";
+import { CODEX_PROVIDER_KEY_ENV_VAR, codexProviderShapeError, isBuiltinCodexProviderId } from "../profiles/codex-provider.js";
 import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITLE_SPINNER_RE, CODEX_BUSY_MARKER_MAX_CHARS, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, normalizeCodexScreenText } from "./codex-doctrine.js";
 
 /**
@@ -260,6 +262,37 @@ export function buildCodexModelArgs(model: string | undefined | null): string[] 
     return [];
   }
   return ["-c", `model="${model}"`];
+}
+
+/**
+ * Card `2ef54430`: translate a session's pinned codex model-provider selection into codex's per-invocation
+ * `-c model_provider=...` / `-c model_providers.<id>.*` overrides (config reference: `model_providers.<id>`
+ * takes `base_url`/`env_key`/`wire_api`/`name`; `openai`/`ollama`/`lmstudio` are reserved built-in ids).
+ *
+ * The API key is NEVER an argument: `env_key` is only the NAME of the fixed Loom-owned env var
+ * ({@link CODEX_PROVIDER_KEY_ENV_VAR}) that `createCodexPty` fills from the stored Connection. A built-in
+ * id emits only `model_provider`. Re-validates through the same pure shape check the save-time validator
+ * uses (defense in depth for a pre-existing or hand-edited row), and returns `[]` — never a partial set —
+ * for anything invalid, so the caller can fail closed on `buildCodexProviderArgs(p).length === 0`.
+ * Every value is a TOML basic string built from a charset-checked input, one argv element each.
+ */
+export function buildCodexProviderArgs(p: CodexProvider | undefined | null): string[] {
+  if (!p) return [];
+  if (codexProviderShapeError(p)) return [];
+  const args = ["-c", `model_provider="${p.id}"`];
+  if (isBuiltinCodexProviderId(p.id)) return args;
+  const base = `model_providers.${p.id}`;
+  args.push(
+    "-c", `${base}.name="${p.id}"`,
+    "-c", `${base}.base_url="${p.baseUrl}"`,
+    "-c", `${base}.env_key="${CODEX_PROVIDER_KEY_ENV_VAR}"`,
+    "-c", `${base}.wire_api="responses"`,
+    // The key rides codex's own env, so keep it out of the env codex hands to model-run shell commands: without
+    // this a model `env`/`printenv` could print the billed key into the rollout transcript. Codex's default
+    // excludes (KEY/SECRET/TOKEN globs) already cover the name today; pinning it makes that deterministic.
+    "-c", `shell_environment_policy.exclude=["${CODEX_PROVIDER_KEY_ENV_VAR}"]`,
+  );
+  return args;
 }
 
 /**

@@ -342,6 +342,25 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
     ],
   },
 
+  // Card 2ef54430: the codex model-provider endpoint. Read ONLY by the codex spawn (createCodexPty); claude
+  // has no equivalent (it is a codex `model_providers` config feature) and validateProfile REFUSES the field
+  // on a non-codex harness, so the claude exemption cannot hide a silently-ignored value.
+  codexProvider: {
+    kind: "consumed",
+    proofs: [
+      {
+        harnesses: ["codex"],
+        file: "packages/daemon/src/pty/host.ts",
+        region: "codex-spawn",
+        pattern: `this.applyCodexProvider(opts, env)`,
+        note: "createCodexPty calls applyCodexProvider, which reads the session's pinned provider and returns buildCodexProviderArgs's -c model_provider/model_providers.<id>.* overrides (the key itself rides the child's env, never argv).",
+      },
+    ],
+    exempt: [
+      { harness: "claude", reason: "harness-lacks-equivalent-mechanism", note: "A custom model-provider endpoint is a codex config feature; claude has no equivalent, and validateProfile rejects codexProvider on a non-codex profile at save time." },
+    ],
+  },
+
   vaultWrite: {
     kind: "consumed",
     proofs: [

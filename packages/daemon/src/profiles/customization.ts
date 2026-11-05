@@ -48,6 +48,11 @@ const MERGEABLE_INCLUSION = {
   // to an arbitrary or possibly-uninstalled vendor binary, so the blast-radius concern that motivated
   // the original exclusion does not apply in the reset direction.
   harness: true,
+  // Card 2ef54430: true, and it MUST track `harness` — a reset that restored harness to "claude" while
+  // keeping a codexProvider would leave the invalid codex-only-field-on-claude combination validateProfile
+  // refuses. Shipped profiles never carry one, so a reset clears it; the 3-way merge protects a user's own
+  // endpoint across an adopt (mine != base, shipped == base).
+  codexProvider: true,
 } as const satisfies Record<Exclude<keyof Profile, "id">, boolean>;
 
 /** The subset of `MERGEABLE_INCLUSION`'s keys marked `true` — derived, not hand-copied, so this can
@@ -67,7 +72,7 @@ export const MERGEABLE_PROFILE_FIELDS = (Object.keys(MERGEABLE_INCLUSION) as (ke
 type _ExpectedMergeableField =
   | "role" | "description" | "allowDelta" | "skills" | "model" | "icon"
   | "browserTesting" | "documentConversion" | "restrictedTools" | "noCommit"
-  | "vaultWrite" | "harness";
+  | "vaultWrite" | "harness" | "codexProvider";
 type _AssertMergeableFieldUnchanged = [MergeableField] extends [_ExpectedMergeableField]
   ? [_ExpectedMergeableField] extends [MergeableField] ? true : never
   : never;
@@ -89,6 +94,10 @@ const OBJECT_ARRAY_FIELDS = new Set<string>(["capabilities"]);
  *    canonical strings are sorted and compared as one array — same ATOMIC, no-element-merge contract.
  */
 function fieldEqual(field: string, a: unknown, b: unknown): boolean {
+  if (field === "codexProvider") { // single object | null — key-sorted JSON compare
+    if (a == null || b == null) return a === b;
+    return JSON.stringify(a, Object.keys(a as object).sort()) === JSON.stringify(b, Object.keys(b as object).sort());
+  }
   if (OBJECT_ARRAY_FIELDS.has(field)) {
     if (a == null || b == null) return a === b;
     const canon = (arr: unknown[]) => arr.map((o) => JSON.stringify(o, Object.keys(o as object).sort())).sort();
@@ -130,6 +139,7 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     // comment on the same field): `Profile.harness` is `?: "claude" | "codex"` with NO null member, so
     // absence — not a null — is how "claude" (the shipped default) is expressed.
     harness: p.harness ?? "claude",
+    codexProvider: p.codexProvider ?? null, // null = none (also the shape updateProfile needs to CLEAR it)
   };
 }
 

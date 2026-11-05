@@ -88,6 +88,9 @@ const PROFILE_FIELDS: Record<keyof Profile, 1> = {
   id: 1, name: 1, role: 1, description: 1, allowDelta: 1, skills: 1, model: 1,
   icon: 1, browserTesting: 1, documentConversion: 1, restrictedTools: 1, noCommit: 1,
   vaultWrite: 1, harness: 1,
+  // Card 2ef54430: {id, baseUrl?, connectionId?} — a connection REFERENCE and an endpoint URL, never a secret
+  // (same disclosure posture as connection ids elsewhere); absent when none is set.
+  codexProvider: 1,
 };
 const PROFILE_KEYS = Object.keys(PROFILE_FIELDS) as (keyof Profile)[];
 

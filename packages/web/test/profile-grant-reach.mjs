@@ -165,7 +165,7 @@ const FORM = {
   name: "Rig", role: "", description: "", icon: "", model: "",
   allowText: "", connections: [], capabilities: [], vaultWrite: false,
   harness: "claude", browserTesting: false, documentConversion: false,
-  restrictedTools: false, noCommit: false, skills: [],
+  restrictedTools: false, noCommit: false, skills: [], codexProvider: null,
 };
 const form = (over = {}) => ({ ...FORM, ...over });
 
@@ -205,6 +205,7 @@ check("ADAPTER: NO grant key is pinned — each one alone is detected as added",
     browserTesting: { browserTesting: true },
     documentConversion: { documentConversion: true },
     allowDelta: { allowText: "Read(*)" },
+    codexProvider: { codexProvider: { id: "ollama" } }, // card 2ef54430
   };
   // Positive control on the loop itself: a missing key would silently test fewer fields than it claims.
   assert.deepEqual(Object.keys(FLIP).sort(), [...AGENT_FORBIDDEN_PROFILE_KEYS].sort());

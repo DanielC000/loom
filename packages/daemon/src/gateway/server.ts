@@ -89,6 +89,7 @@ import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, pu
 import { releasedSkillsAt, releasedSkillDiffSummary, releasedSkillDiffFile, reAdoptReleasedSkill } from "../skills/inject.js";
 import { permissionWideningField } from "../skills/permissionWidening.js";
 import { validateProfile, capabilityGrantBindingError, agentCapabilitiesCodexProfileError, boundAgentCapabilitiesCodexFlipError } from "../profiles/validate.js";
+import { codexProviderBindingError } from "../profiles/codex-provider.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { validateAgentPatch, agentCredentialGrantCrossProjectError } from "../agents/validate.js";
@@ -4698,6 +4699,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/profiles", async (req, reply) => {
     const v = validateProfile(req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
+    // Card 2ef54430: the codex endpoint's Connection must exist, be api-key/bearer and match the URL host.
+    const providerBindingError = v.value.codexProvider ? codexProviderBindingError(v.value.codexProvider, deps.db) : null;
+    if (providerBindingError) return reply.code(400).send({ error: `${providerBindingError} — until the codex model provider is fixed or cleared on this profile, no save of this profile can succeed` });
     const profile = { id: randomUUID(), ...v.value };
     deps.db.insertProfile(profile);
     // Pre-warm the shared markitdown venv NOW (off the event loop, best-effort) so the first session under
@@ -4730,6 +4734,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       deps.db.listAllAgents().filter((a) => a.profileId === id), existing.harness, v.value.harness,
     );
     if (codexFlipErr) return reply.code(400).send({ error: codexFlipErr });
+    // Card 2ef54430: same Connection-binding guard as POST (a clear/null passes straight through).
+    const providerBindingError = v.value.codexProvider ? codexProviderBindingError(v.value.codexProvider, deps.db) : null;
+    if (providerBindingError) return reply.code(400).send({ error: `${providerBindingError} — until the codex model provider is fixed or cleared on this profile, no save of this profile can succeed` });
     deps.db.updateProfile(id, v.value);
     // Blast radius (card 3c4e0df6): if this save ADDED a human-only grant, record which agents — in which
     // projects — were already bound to this GLOBAL profile, and hand the same list back on the response.

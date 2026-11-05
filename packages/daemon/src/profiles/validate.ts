@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Profile, ProfileWideningFields, SessionRole } from "@loom/shared";
 import { AGENT_FORBIDDEN_PROFILE_KEYS, RETIRED_PROFILE_CREDENTIAL_KEYS } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOffenders, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleUnsupportedReason } from "./codex-compat.js";
+import { codexProviderShapeError } from "./codex-provider.js";
 
 /**
  * The ONE spelling of the harness enum's runtime values. Shared by the profile validator below and the
@@ -105,6 +106,14 @@ const profileSchema = z
     // is the same trust class as gateCommand — rejected even on the elevated Setup Assistant's/Platform
     // Lead's own profile-writing MCP tools, human REST is the ONLY grant path.
     harness: HARNESS_ID_SCHEMA.optional(),
+    // Card 2ef54430: opt-in custom codex model-provider endpoint. Human-only (AGENT_FORBIDDEN_PROFILE_KEYS):
+    // it bills the key in the referenced Connection. Shape rules live in `codexProviderShapeError`; the
+    // connection binding is checked by the REST handlers (`codexProviderBindingError`), like capabilities.
+    codexProvider: z.object({
+      id: z.string(),
+      baseUrl: z.string().optional(),
+      connectionId: z.string().optional(),
+    }).strict().nullable().optional(), // null = clear (updateProfile: undefined leaves the column, null clears it)
   })
   .strict();
 
@@ -160,6 +169,7 @@ const AGENT_FORBIDDEN_PROFILE_KEY_REASONS: Record<(typeof AGENT_FORBIDDEN_PROFIL
   browserTesting: "it launches a per-session browser-automation capability (arbitrary web navigation)",
   documentConversion: "it launches a host subprocess (markitdown) capability",
   allowDelta: "an unreviewed entry (e.g. \"Bash(*)\") widens a rig's spawn permission allowlist — the same trust class as gateCommand",
+  codexProvider: "it points the codex harness at a model endpoint billed to a stored Connection's API key — a spend surface",
 };
 
 /**
@@ -196,6 +206,7 @@ const AGENT_FORBIDDEN_PROFILE_KEY_CARRIED: Record<
   browserTesting: (existing) => !!existing.browserTesting,
   documentConversion: (existing) => !!existing.documentConversion,
   allowDelta: (existing) => existing.allowDelta.length > 0,
+  codexProvider: (existing) => !!existing.codexProvider,
 };
 
 /**
@@ -447,7 +458,7 @@ export function boundAgentCredentialGrantRoleChangeError(
  * non-empty allowDelta; browserTesting stays deliberately unchecked. See the decision record for why.
  */
 export function agentAssignableProfileError(
-  profile: Pick<Profile, "role" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta">,
+  profile: Pick<Profile, "role" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta"> & Partial<Pick<Profile, "codexProvider">>,
   opts?: { allowElevatedRoles?: boolean; skipRoleCheck?: boolean; humanAuthorized?: boolean },
 ): string | null {
   if (!opts?.allowElevatedRoles && !opts?.skipRoleCheck && profile.role != null && LOCKED_PROFILE_ROLES.has(profile.role)) {
@@ -462,6 +473,11 @@ export function agentAssignableProfileError(
   }
   if (profile.harness != null && profile.harness !== "claude") {
     return `cannot assign profile: it carries harness "${profile.harness}" (selects a different vendor CLI binary — the same trust class as gateCommand) — human-only, via the Profiles UI / REST`;
+  }
+  // Card 2ef54430: transitively covered by the harness check above (a provider requires harness "codex"), but
+  // named on its own so this predicate stays correct if that coupling is ever relaxed.
+  if (profile.codexProvider) {
+    return "cannot assign profile: it carries a codexProvider (a model endpoint billed to a stored connection's key) — human-only, via the Profiles UI / REST";
   }
   if (profile.allowDelta && profile.allowDelta.length > 0) {
     return "cannot assign profile: it carries a non-empty allowDelta (widens the rig's spawn permission allowlist — the same trust class as gateCommand) — human-only, via the Profiles UI / REST";
@@ -655,6 +671,12 @@ export function validateProfile(
   if (codexStdioCapabilityError) return { ok: false, error: codexStdioCapabilityError };
   const codexTranscriptRoleError = codexTranscriptRoleUnsupportedError(d.harness, d.role);
   if (codexTranscriptRoleError) return { ok: false, error: codexTranscriptRoleError };
+  // Card 2ef54430: a provider is codex-only (claude never reads it) and must be well-formed.
+  if (d.codexProvider) {
+    if (d.harness !== "codex") return { ok: false, error: 'codexProvider requires harness "codex" — the claude harness never reads a codex model-provider endpoint' };
+    const providerError = codexProviderShapeError(d.codexProvider);
+    if (providerError) return { ok: false, error: providerError };
+  }
   // COMPILE-TIME FIELD TOTALITY (card 1059b3b9): the `satisfies Record<keyof Omit<Profile,"id">,
   // unknown>` below forces every key of Omit<Profile,"id"> to be named in this literal — the write-path
   // counterpart of entityRowFields.ts's `PROFILE_FIELDS: Record<keyof Profile, 1>` on the READ path. A
@@ -695,6 +717,9 @@ export function validateProfile(
       // — and both REST handlers persist `v.value`, never `req.body`. So no route could set it at all,
       // while a db-layer grep still read green because insertProfile/updateProfile do bind the column.
       harness: d.harness,
+      // Card 2ef54430: normalized to null (not undefined) so an explicit clear reaches updateProfile, whose
+      // undefined means "leave the column as-is"; toProfile maps a stored NULL back to absent.
+      codexProvider: d.codexProvider ?? null,
     } satisfies Record<keyof Omit<Profile, "id">, unknown>,
   };
 }

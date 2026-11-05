@@ -31,6 +31,8 @@ export const AGENT_FORBIDDEN_PROFILE_KEYS = [
   "browserTesting",
   "documentConversion",
   "allowDelta",
+  // Card 2ef54430: a custom codex endpoint bills the key in the referenced Connection — a spend surface.
+  "codexProvider",
 ] as const;
 
 export type AgentForbiddenProfileKey = (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number];
@@ -92,7 +94,14 @@ const GRANT_ADDED: Record<
   // Absent means "claude" (the default harness, no grant), so only a move ONTO a non-default binary is a
   // grant. Moving BACK to claude, or an unrelated save on a rig already pinned to codex, is not.
   harness: (b, a) => isDefaultHarness(b.harness) && !isDefaultHarness(a.harness),
+  // Value-level (spend reach): a new or CHANGED endpoint/connection hands the rig a different billed key
+  // target; removing it, or re-saving it unchanged, grants nothing new.
+  codexProvider: (b, a) => !!a.codexProvider && codexProviderKey(b.codexProvider) !== codexProviderKey(a.codexProvider),
 };
+
+function codexProviderKey(p: Profile["codexProvider"]): string {
+  return p ? `${p.id}\u0000${p.baseUrl ?? ""}\u0000${p.connectionId ?? ""}` : "";
+}
 
 /** A capability grant's identity for "is this new" (and for de-duplicating a union of grants, card
  *  `caca806c`): the slug, plus the connection it is bound to — a re-bind onto a DIFFERENT connection
@@ -229,6 +238,7 @@ export const AGENT_FORBIDDEN_PROFILE_KEY_LABELS: Record<AgentForbiddenProfileKey
   browserTesting: "browser testing",
   documentConversion: "document conversion",
   allowDelta: "permission allowlist delta",
+  codexProvider: "codex model endpoint (bills a stored connection's key)",
 };
 
 /**

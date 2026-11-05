@@ -291,6 +291,28 @@ export interface Profile {
    * trust class as `gateCommand` — NEVER exposed via an agent MCP tool.
    */
   harness?: "claude" | "codex";
+  /**
+   * Opt-in custom model-provider endpoint for the codex harness (card `2ef54430`). Absent = codex's own
+   * configured default provider, byte-identical spawn. Only meaningful with `harness:"codex"` (a save with
+   * any other harness is refused). HUMAN-set only (Profiles UI / REST): it is a SPEND surface (it bills the
+   * key stored in the referenced Connection) — NEVER exposed via an agent MCP tool; it is in
+   * `AGENT_FORBIDDEN_PROFILE_KEYS`. The key itself is never on the Profile: `connectionId` names a stored
+   * Connection whose secret is delivered to the codex child's env only. See {@link CodexProvider}.
+   */
+  codexProvider?: CodexProvider | null;
+}
+
+/**
+ * A codex model-provider selection (card `2ef54430`). Two shapes, told apart by `id`:
+ *  - a codex BUILT-IN id (`ollama` / `lmstudio`): no `baseUrl`, no `connectionId` (local, keyless);
+ *  - a CUSTOM id: `baseUrl` (https, or http to loopback) + `connectionId` (an api-key/bearer Connection whose
+ *    host equals the baseUrl host) are both required.
+ * Validated by `profiles/validate.ts` › `codexProviderError`; never a plaintext key.
+ */
+export interface CodexProvider {
+  id: string;
+  baseUrl?: string;
+  connectionId?: string;
 }
 
 /**
@@ -988,6 +1010,12 @@ export interface Session {
    * the default claude one.
    */
   harness?: "claude" | "codex";
+  /**
+   * The codex model-provider endpoint, resolved from the session's Profile at spawn and PINNED here (card
+   * `2ef54430`, mirrors `harness`): persisted so resume/recycle keep the same endpoint. Only ever set when
+   * `harness === "codex"`. Holds the connection REFERENCE, never a secret — the secret is resolved at spawn.
+   */
+  codexProvider?: CodexProvider;
   /**
    * Per-project session Archive: the ISO instant a session was archived (moving a stopped session out
    * of the Workspace rail). null = not archived (every live/normal session). Archived sessions are
@@ -1946,6 +1974,13 @@ export type OrchestrationEventKind =
   // workerSessionId/taskId convention as `harness_default_skipped`; `detail` carries { role, agentId,
   // profileId: string | null, reason }.
   | "harness_role_forced_claude"
+  // Card 2ef54430 — a profile's human-only `codexProvider` was DROPPED at resolveAgentSpawn because the
+  // session's final harness is not codex (e.g. the codex harness was forced back to claude for a locked
+  // role). The spawn still proceeds on claude; the endpoint is never applied. Same managerSessionId/
+  // workerSessionId/taskId convention as `harness_role_forced_claude`; `detail` carries { agentId,
+  // profileId: string | null, providerId, connectionId: string | null, reason } — the connection ID only,
+  // never a secret. Audit-only, same posture as `harness_role_forced_claude`.
+  | "codex_provider_dropped"
   // Card b8aabf5b — a session's skills subset was DROPPED at the resolveAgentSpawn chokepoint (or
   // the carry-forward sibling in resume()/forkSession()/recyclePlatformLead) because the RESOLVED session
   // role is LOCKED and the subset came from a profile whose OWN role differs — an explicit-role
@@ -2317,7 +2352,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, watermark_finalize_withheld: true, commondir_trust_pinned: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, skill_permission_frontmatter_warning: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, locked_role_skills_dropped: true, codex_isolation_gap_disclosed: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, skill_permission_frontmatter_warning: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_provider_dropped: true, locked_role_skills_dropped: true, codex_isolation_gap_disclosed: true,
   codex_auto_commit: true, ssh_command_run: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
   credential_revoked: true,
   vault_autocommit_refused_code_repo: true,

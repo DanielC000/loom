@@ -3679,7 +3679,7 @@ export class SessionService {
     // @decision acd3c688 — spawnHumanAuthorized/skipGrantCarryoverCheck gate the explicit-role-grant-carryover
     // check below; see the decision record for which callers pass which, and why.
     opts?: { spawnHumanAuthorized?: boolean; skipGrantCarryoverCheck?: boolean },
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; profileRole: SessionRole | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined; harnessDefaultSkipped: CodexIncompatibility[] | undefined; harnessRoleForced: { role: SessionRole; agentId: string; profileId: string | null; reason: string } | undefined; skillsDropped: { sessionRole: SessionRole; agentId: string; profileId: string | null; profileRole: SessionRole | null } | undefined } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; profileRole: SessionRole | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined; harnessDefaultSkipped: CodexIncompatibility[] | undefined; harnessRoleForced: { role: SessionRole; agentId: string; profileId: string | null; reason: string } | undefined; codexProviderDropped: { agentId: string; profileId: string | null; providerId: string; connectionId: string | null; reason: string } | undefined; skillsDropped: { sessionRole: SessionRole; agentId: string; profileId: string | null; profileRole: SessionRole | null } | undefined } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -3760,6 +3760,18 @@ export class SessionService {
     // whatever bypasses it.
     const rawHarness = resolved.harness || harnessFromDefault.harness;
     const roleForcesClaude = rawHarness === "codex" && role != null && TRANSCRIPT_ROOT_DENY_ROLES.has(role);
+    const finalHarness = roleForcesClaude ? undefined : rawHarness;
+    const codexProviderDropped = resolved.codexProvider && finalHarness !== "codex"
+      ? {
+          agentId: agent.id, profileId: profile?.id ?? null, providerId: resolved.codexProvider.id,
+          connectionId: resolved.codexProvider.connectionId ?? null,
+          reason: `the profile's codex model-provider "${resolved.codexProvider.id}" was NOT applied: this session's final harness is ${finalHarness ?? "claude"}, not codex`,
+        }
+      : undefined;
+    if (codexProviderDropped) {
+      // eslint-disable-next-line no-console
+      console.warn(`[codex-provider-dropped] agent ${agent.id} profile ${codexProviderDropped.profileId ?? "(none)"}: provider "${codexProviderDropped.providerId}" (connection ${codexProviderDropped.connectionId ?? "(none)"}) dropped — final harness is not codex`);
+    }
     // @decision 509176c8 — `resolved.role` is the PROFILE's own raw role (never clamped); `role` is the
     // RESOLVED SESSION role. An explicit-role override can make them diverge; sessionSkillsForRole below
     // drops the subset when that happens and the session role is locked.
@@ -3803,7 +3815,11 @@ export class SessionService {
       // spawn recipe. `|| undefined` mirrors the model coercion (null/absent ⇒ "engine default", i.e.
       // "claude") — RESOLVED ONCE HERE, at the same chokepoint as every other profile-conferred field;
       // see `createPty`'s own doc comment for where this feeds the actual binary choice.
-      harness: roleForcesClaude ? undefined : rawHarness,
+      harness: finalHarness,
+      // Card 2ef54430: the endpoint itself is pinned at the db.insertSession chokepoint (codex rows only); a
+      // drop (final harness not codex, whatever the reason) is reported via codexProviderDropped, filed once per
+      // spawn by `recordCodexProviderDropped` at every call site that consumes this result.
+      codexProviderDropped,
       harnessDefaultSkipped: resolved.harness ? undefined : harnessFromDefault.skipped,
       harnessRoleForced: roleForcesClaude
         ? { role: role!, agentId: agent.id, profileId: profile?.id ?? null, reason: codexTranscriptRoleForcedClaudeReason(role!) }
@@ -3857,6 +3873,25 @@ export class SessionService {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(`[harness-default-skipped] ${session.id} failed to record audit event — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
+  /**
+   * Card 2ef54430: file the durable `codex_provider_dropped` audit row — once per spawn — when a profile carried a
+   * codexProvider but the FINAL resolved harness is not codex (role force, default-harness skip, or simply no
+   * codex harness). Names the connection id only. Same call convention as `recordHarnessDefaultSkipped`.
+   */
+  private recordCodexProviderDropped(session: { id: string; taskId?: string | null }, managerSessionId: string, dropped: { agentId: string; profileId: string | null; providerId: string; connectionId: string | null; reason: string } | undefined, trigger?: "recycle" | "resume"): void {
+    if (!dropped) return;
+    try {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId: session.id,
+        taskId: session.taskId ?? null, kind: "codex_provider_dropped",
+        detail: { agentId: dropped.agentId, profileId: dropped.profileId, providerId: dropped.providerId, connectionId: dropped.connectionId, reason: dropped.reason, ...(trigger ? { trigger } : {}) },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[codex-provider-dropped] ${session.id} failed to record audit event — swallowed: ${(err as Error)?.message ?? String(err)}`);
     }
   }
 
@@ -4202,7 +4237,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessDefaultSkipped, harnessRoleForced, skillsDropped } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessDefaultSkipped, harnessRoleForced, codexProviderDropped, skillsDropped } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
     // @decision 37e15c26 — round 2: a role-omitted "+New"/poll/webhook spawn can ALSO resolve role==="manager"
     // via a Profile — refuse it here too, at the same resolved-role chokepoint startManager now uses.
     this.refuseManagerIntoReservedHome(role, project);
@@ -4243,6 +4278,7 @@ export class SessionService {
     // event — with NO manager, attributed to the session itself (the handleCodexUnsupportedCapability convention).
     this.recordHarnessDefaultSkipped(session, session.id, harnessDefaultSkipped);
     this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
+    this.recordCodexProviderDropped(session, session.id, codexProviderDropped);
     this.recordSkillsDropped(session, session.id, skillsDropped);
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
     // wins — there is no post-spawn 'live' write left to clobber it back to live.
@@ -4355,7 +4391,7 @@ export class SessionService {
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
     // @decision acd3c688 — spawnHumanAuthorized (set ONLY by the human-REST session-start route) bypasses the
     // explicit-role-grant-carryover check; every other caller (session_spawn, the Scheduler) is checked.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, skillsDropped } = this.resolveAgentSpawn(agent, config, "manager", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, codexProviderDropped, skillsDropped } = this.resolveAgentSpawn(agent, config, "manager", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
     // @decision 37e15c26 — round 2: refuse at the RESOLVED role, not the explicit-role call site, so
     // startNew's profile-derived manager role is covered too. See the shared helper's own doc.
     this.refuseManagerIntoReservedHome(role, project);
@@ -4391,6 +4427,7 @@ export class SessionService {
     };
     this.db.insertSession(session);
     this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
+    this.recordCodexProviderDropped(session, session.id, codexProviderDropped);
     this.recordSkillsDropped(session, session.id, skillsDropped);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
@@ -4485,7 +4522,7 @@ export class SessionService {
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
     // @decision acd3c688 — spawnHumanAuthorized bypasses the explicit-role-grant-carryover check; today's
     // only caller is the human-REST session-start route, which passes it.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, skillsDropped } = this.resolveAgentSpawn(agent, config, "platform", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, codexProviderDropped, skillsDropped } = this.resolveAgentSpawn(agent, config, "platform", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -4514,6 +4551,7 @@ export class SessionService {
     };
     this.db.insertSession(session);
     this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
+    this.recordCodexProviderDropped(session, session.id, codexProviderDropped);
     this.recordSkillsDropped(session, session.id, skillsDropped);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
@@ -4578,7 +4616,7 @@ export class SessionService {
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
     // @decision acd3c688 — spawnHumanAuthorized (human-REST only) bypasses the grant-carryover check; the
     // Scheduler (schedule_create kind:"auditor") is NOT authorized and stays checked.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, skillsDropped } = this.resolveAgentSpawn(agent, config, "auditor", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, codexProviderDropped, skillsDropped } = this.resolveAgentSpawn(agent, config, "auditor", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -4608,6 +4646,7 @@ export class SessionService {
     };
     this.db.insertSession(session);
     this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
+    this.recordCodexProviderDropped(session, session.id, codexProviderDropped);
     this.recordSkillsDropped(session, session.id, skillsDropped);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
@@ -4657,7 +4696,7 @@ export class SessionService {
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
     // @decision acd3c688 — spawnHumanAuthorized (human-REST only) bypasses the grant-carryover check; the
     // Scheduler (schedule_create kind:"workspace-auditor") is NOT authorized and stays checked.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, skillsDropped } = this.resolveAgentSpawn(agent, config, "workspace-auditor", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, codexProviderDropped, skillsDropped } = this.resolveAgentSpawn(agent, config, "workspace-auditor", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -4687,6 +4726,7 @@ export class SessionService {
     };
     this.db.insertSession(session);
     this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
+    this.recordCodexProviderDropped(session, session.id, codexProviderDropped);
     this.recordSkillsDropped(session, session.id, skillsDropped);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
@@ -4757,7 +4797,7 @@ export class SessionService {
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
     // @decision acd3c688 — spawnHumanAuthorized (today's only caller, the human-REST route) bypasses the
     // grant-carryover check; today's only caller passes it.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, skillsDropped } = this.resolveAgentSpawn(agent, config, "setup", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness, harnessRoleForced, codexProviderDropped, skillsDropped } = this.resolveAgentSpawn(agent, config, "setup", false, undefined, { spawnHumanAuthorized: opts?.spawnHumanAuthorized });
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -4786,6 +4826,7 @@ export class SessionService {
     };
     this.db.insertSession(session);
     this.recordHarnessRoleForced(session, session.id, harnessRoleForced);
+    this.recordCodexProviderDropped(session, session.id, codexProviderDropped);
     this.recordSkillsDropped(session, session.id, skillsDropped);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
@@ -5262,6 +5303,7 @@ export class SessionService {
     // this redirect from scratch instead of a harness/engine-id mismatch sweepDeadSessions marks dead.
     this.db.setSessionHarness(session.id, undefined);
     this.recordHarnessRoleForced(session, session.id, forcedDetail, "resume");
+    this.recordCodexProviderDropped(session, session.id, resolvedSpawn?.codexProviderDropped, "resume");
     // @decision 509176c8 (round 3) — same PERSIST-the-drop-onto-the-ROW rule as the ordinary resume()
     // path just above: a reduction, never a re-resolve (547d5fc4).
     if (forcedSkillsDropped) this.db.setSessionCapabilitySurface(session.id, { skills: null });
@@ -10334,6 +10376,8 @@ export class SessionService {
       this.db.insertSession(worker);
       // A revive's harness is pinned, never default-derived — a "default skipped" record would be misleading.
       this.recordHarnessDefaultSkipped(worker, managerSessionId, internal?.revive ? undefined : workerSpawn.harnessDefaultSkipped);
+      // Card 2ef54430: same revive exemption — a revive's harness is pinned, not re-derived, so no fresh drop.
+      this.recordCodexProviderDropped(worker, managerSessionId, internal?.revive ? undefined : workerSpawn.codexProviderDropped);
       // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
       this.db.setProcessState(worker.id, "live");
       // @decision 16637a9e — release the cap-count claim HERE, synchronously, the instant the row is
@@ -16242,6 +16286,7 @@ export class SessionService {
         connections: old.connections ?? [], // a recycled worker keeps its authenticated-egress allowlist
         vaultWrite: old.vaultWrite ?? false, // a recycled worker keeps its confined vault-write grant
         harness: old.harness ?? undefined, // a recycled worker keeps its pinned vendor CLI (undefined ⇒ "claude")
+        codexProvider: old.codexProvider, // card 2ef54430: and its pinned codex model-provider endpoint
         parentSessionId: managerSessionId,
         taskId,
         worktreePath,
@@ -17618,6 +17663,8 @@ export class SessionService {
     this.db.insertRecycleSuccessor(fresh, oldManagerId);
     this.recordHarnessDefaultSkipped(fresh, oldManagerId, managerHarnessSkipped, "recycle");
     this.recordHarnessRoleForced(fresh, oldManagerId, managerSpawn?.harnessRoleForced ?? managerHarnessAgentMissingForced, "recycle");
+    // Only when the recycle's FINAL harness is not codex (recycleHarness may keep old.harness over the re-resolve).
+    this.recordCodexProviderDropped(fresh, oldManagerId, managerHarness === "codex" ? undefined : managerSpawn?.codexProviderDropped, "recycle");
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
     // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
@@ -18105,6 +18152,7 @@ export class SessionService {
     this.db.insertRecycleSuccessor(fresh, oldLeadId);
     this.recordHarnessDefaultSkipped(fresh, oldLeadId, leadHarnessSkipped, "recycle");
     this.recordHarnessRoleForced(fresh, oldLeadId, leadSpawn?.harnessRoleForced ?? leadHarnessAgentMissingForced, "recycle");
+    this.recordCodexProviderDropped(fresh, oldLeadId, leadHarness === "codex" ? undefined : leadSpawn?.codexProviderDropped, "recycle");
     // @decision 509176c8 (round 3) — fresh's own row already carries leadSkills; also PERSIST the drop
     // onto the PREDECESSOR row (a reduction, never a re-resolve — 547d5fc4), same as fork's source clear.
 

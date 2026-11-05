@@ -1,6 +1,6 @@
 // Config model: platform default -> per-project override, resolved through ONE merge fn.
 // This is also the machine-writable schema phase-2 AI-driven project creation will target.
-import type { Profile, SessionRole, OrchestrationEventKind, CapabilityGrant } from "./types.js";
+import type { Profile, SessionRole, OrchestrationEventKind, CapabilityGrant, CodexProvider } from "./types.js";
 
 /**
  * Semantic role a board column plays in the worker lifecycle. Columns are identified by stable ROLE,
@@ -1990,6 +1990,11 @@ export interface ResolvedProfile {
    * same trust class as `gateCommand`) — never resolved from anywhere but the profile.
    */
   harness: "claude" | "codex" | null;
+  /**
+   * Card 2ef54430: the profile's human-only custom codex model-provider endpoint (a connection REFERENCE,
+   * never a key). `null` = none (also the no-profile backstop). Only honoured when the final harness is codex.
+   */
+  codexProvider: CodexProvider | null;
 }
 
 /** The permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
@@ -2072,7 +2077,7 @@ export function resolveProfile(
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's
     // behavior. No profile also means nothing to union with — the agent's own grants stand alone.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: agentConnections, vaultWrite: false, capabilities: agentCapabilities, harness: null };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: agentConnections, vaultWrite: false, capabilities: agentCapabilities, harness: null, codexProvider: null };
   }
   return {
     role: profile.role ?? null,
@@ -2098,6 +2103,7 @@ export function resolveProfile(
     // Multi-harness epic (df1f94b0) Phase 1: which vendor CLI to spawn. Backstop null (engine default,
     // "claude") — mirrors model's null-backstop shape, not a boolean-flag backstop.
     harness: profile.harness ?? null,
+    codexProvider: profile.codexProvider ?? null,
   };
 }
 
