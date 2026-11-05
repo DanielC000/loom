@@ -232,6 +232,75 @@ export const MEMORY_CONFIG_MAX = {
   duplicateReportIntervalHours: 720,
 } as const;
 
+/** Card 78a9ae1c: closed vocabulary of card-policy requirement kinds. Schema + selector only; enforcement is a later card. */
+export const POLICY_REQUIREMENT_KINDS = ["code-review-report", "approved-request", "investigate-checkpoint"] as const;
+export type PolicyRequirementKind = (typeof POLICY_REQUIREMENT_KINDS)[number];
+export type PolicyRequirement =
+  | { kind: "code-review-report" }
+  | { kind: "approved-request"; requestKind?: "mockup" | "any" }
+  | { kind: "investigate-checkpoint" };
+export interface CardPolicyMatch { types?: string[]; scopes?: string[]; cardIds?: string[] }
+export interface CardPolicy { id: string; name?: string; match: CardPolicyMatch; require: PolicyRequirement[] }
+/** Write-time caps so the list stays bounded in every refusal message and prompt. */
+export const CARD_POLICY_LIMITS = { maxPolicies: 50, maxRequirements: 10, maxMatchEntries: 100, maxIdLen: 64, maxNameLen: 200, maxEntryLen: 200 } as const;
+export type CardPoliciesParse = { ok: true; policies: CardPolicy[] } | { ok: false; error: string };
+const isPlainObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+function parseMatchList(v: unknown, label: string): string[] | string | undefined {
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v)) return `${label} must be an array of strings`;
+  if (v.length > CARD_POLICY_LIMITS.maxMatchEntries) return `${label} has more than ${CARD_POLICY_LIMITS.maxMatchEntries} entries`;
+  for (const e of v) {
+    if (typeof e !== "string" || e.trim() === "" || e.length > CARD_POLICY_LIMITS.maxEntryLen) return `${label} entries must be non-empty strings up to ${CARD_POLICY_LIMITS.maxEntryLen} chars`;
+  }
+  return v as string[];
+}
+/**
+ * Card 78a9ae1c: the ONE structural parser/validator for `orchestration.cardPolicies` (strict: unknown keys,
+ * unknown requirement kinds, duplicate ids and over-cap lists are all rejected). Structure only — whether a
+ * `match.types` entry is a real Conventional type is checked by the daemon's write-time schema, which owns
+ * CONVENTIONAL_TYPES. `undefined` parses to an empty list; any other non-array (corrupt stored JSON) is `ok:false`
+ * so an enforcement caller can fail closed, while `resolveConfig` itself degrades to an empty list.
+ */
+export function parseCardPolicies(raw: unknown): CardPoliciesParse {
+  if (raw === undefined) return { ok: true, policies: [] };
+  if (!Array.isArray(raw)) return { ok: false, error: "cardPolicies must be an array" };
+  if (raw.length > CARD_POLICY_LIMITS.maxPolicies) return { ok: false, error: `cardPolicies has more than ${CARD_POLICY_LIMITS.maxPolicies} policies` };
+  const out: CardPolicy[] = [];
+  const seen = new Set<string>();
+  for (const [i, p] of raw.entries()) {
+    const at = `cardPolicies[${i}]`;
+    if (!isPlainObj(p)) return { ok: false, error: `${at} must be an object` };
+    for (const k of Object.keys(p)) if (!["id", "name", "match", "require"].includes(k)) return { ok: false, error: `${at}: unknown key "${k}"` };
+    if (typeof p.id !== "string" || !/^[A-Za-z0-9._-]+$/.test(p.id) || p.id.length > CARD_POLICY_LIMITS.maxIdLen) return { ok: false, error: `${at}.id must match [A-Za-z0-9._-]+ (max ${CARD_POLICY_LIMITS.maxIdLen} chars)` };
+    if (seen.has(p.id)) return { ok: false, error: `${at}: duplicate policy id "${p.id}"` };
+    seen.add(p.id);
+    if (p.name !== undefined && (typeof p.name !== "string" || p.name.length > CARD_POLICY_LIMITS.maxNameLen)) return { ok: false, error: `${at}.name must be a string up to ${CARD_POLICY_LIMITS.maxNameLen} chars` };
+    if (!isPlainObj(p.match)) return { ok: false, error: `${at}.match must be an object` };
+    for (const k of Object.keys(p.match)) if (!["types", "scopes", "cardIds"].includes(k)) return { ok: false, error: `${at}.match: unknown key "${k}"` };
+    const match: CardPolicyMatch = {};
+    for (const key of ["types", "scopes", "cardIds"] as const) {
+      const r = parseMatchList(p.match[key], `${at}.match.${key}`);
+      if (typeof r === "string") return { ok: false, error: r };
+      if (r !== undefined) match[key] = r;
+    }
+    if (!match.types && !match.scopes && !match.cardIds) return { ok: false, error: `${at}.match must set at least one of types, scopes, cardIds` };
+    if (!Array.isArray(p.require) || p.require.length < 1 || p.require.length > CARD_POLICY_LIMITS.maxRequirements) return { ok: false, error: `${at}.require must be an array of 1..${CARD_POLICY_LIMITS.maxRequirements} requirements` };
+    const req: PolicyRequirement[] = [];
+    for (const [j, r] of p.require.entries()) {
+      const rat = `${at}.require[${j}]`;
+      if (!isPlainObj(r) || typeof r.kind !== "string" || !(POLICY_REQUIREMENT_KINDS as readonly string[]).includes(r.kind)) return { ok: false, error: `${rat}.kind must be one of ${POLICY_REQUIREMENT_KINDS.join(", ")}` };
+      const allowed = r.kind === "approved-request" ? ["kind", "requestKind"] : ["kind"];
+      for (const k of Object.keys(r)) if (!allowed.includes(k)) return { ok: false, error: `${rat}: unknown key "${k}"` };
+      if (r.kind === "approved-request") {
+        if (r.requestKind !== undefined && r.requestKind !== "mockup" && r.requestKind !== "any") return { ok: false, error: `${rat}.requestKind must be "mockup" or "any"` };
+        req.push(r.requestKind === undefined ? { kind: "approved-request" } : { kind: "approved-request", requestKind: r.requestKind });
+      } else req.push({ kind: r.kind } as PolicyRequirement);
+    }
+    out.push({ id: p.id, ...(p.name === undefined ? {} : { name: p.name }), match, require: req });
+  }
+  return { ok: true, policies: out };
+}
+
 /** Card 6f13746c: upper bound of `orchestration.mergeGateInterval` (lower bound 1). */
 export const MERGE_GATE_INTERVAL_MAX = 1000;
 export type MergeGateCadence = "every" | "interval" | "never";
@@ -473,6 +542,15 @@ export interface OrchestrationConfig {
    * the other. "off" = the sibling card 9a5d040c's landing code omits the worker-commit-log body.
    */
   commitLogBody: "on" | "off";
+  /**
+   * Card 78a9ae1c: per-project, HUMAN-only card policies (epic 8b6c750a) — rules selecting cards by Conventional
+   * type/scope or explicit card id, each naming requirements from a closed vocabulary. Default `[]`. This card
+   * ships schema + selector only; nothing enforces it yet. Same trust tier as `mergeGate`: on
+   * `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` and omitted from the agent validator, so the agent AND the elevated
+   * Lead `project_configure` reject it in both set and unset directions. A corrupt stored value resolves to `[]`
+   * here; enforcement callers must use {@link parseCardPolicies} on the raw override to detect it and fail closed.
+   */
+  cardPolicies: CardPolicy[];
   /**
    * THE CANONICAL DOC for this field (card bd9a483b) — every other mention (mcp/platform.ts's schema,
    * the `worker_merge_confirm`/`merge_batch` tool descriptions, `sessions/service.ts`'s
@@ -1742,7 +1820,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, workerContextWarnRatio: 0.60, workerContextInterruptRatio: 0.85, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "", commitTrailers: "on", commitLogBody: "on" },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, workerContextWarnRatio: 0.60, workerContextInterruptRatio: 0.85, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "", commitTrailers: "on", commitLogBody: "on", cardPolicies: [] },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -2365,6 +2443,8 @@ export function resolveConfig(
       // ?? default, no env/platform layer. Both default "on" (byte-identical to today's behavior).
       commitTrailers: override.orchestration?.commitTrailers ?? d.orchestration.commitTrailers,
       commitLogBody: override.orchestration?.commitLogBody ?? d.orchestration.commitLogBody,
+      // Card 78a9ae1c: human-only card policies; a corrupt stored value degrades to the default empty list.
+      cardPolicies: (() => { const p = parseCardPolicies(override.orchestration?.cardPolicies); return p.ok ? p.policies : structuredClone(d.orchestration.cardPolicies); })(),
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
       gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
       // Card bd9a483b: the interval-skip safety-net check + its paired timeout — same resolution shape as

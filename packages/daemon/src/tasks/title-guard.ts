@@ -84,7 +84,37 @@ export const CONVENTIONAL_TYPES = [
  * must never touch (the bare-prose → `chore:` coercion net at merge time already handles it correctly, and
  * two legitimate non-work cards on this board rely on that).
  */
-const TYPE_PREFIXED_TITLE_RE = /^([a-z][a-z-]*)(?:\([^)]*\))?!?: .+/;
+const TYPE_PREFIXED_TITLE_RE = /^([a-z][a-z-]*)(?:\(([^)]*)\))?!?: .+/;
+
+/**
+ * Card 78a9ae1c: the single parse of a card title's Conventional `type(scope)` prefix, sharing
+ * {@link TYPE_PREFIXED_TITLE_RE} (no second regex). `null` for bare prose; `scope` is `null` when absent or
+ * empty; a trailing `!` breaking marker is tolerated and not reported.
+ */
+export function parseConventionalTitle(title: string): { type: string; scope: string | null } | null {
+  const m = TYPE_PREFIXED_TITLE_RE.exec(title.trim());
+  if (!m) return null;
+  return { type: m[1]!, scope: m[2] ? m[2] : null };
+}
+
+/**
+ * Card 78a9ae1c: pure card-policy selector. `cardIds` is an INDEPENDENT opt-in (matches regardless of
+ * types/scopes; a full id or an 8+-char prefix of the card id); otherwise every PRESENT list among
+ * `types`/`scopes` must match the parsed title. A bare-prose title therefore matches only via `cardIds`.
+ */
+export function cardPolicyMatches(
+  policy: { match: { types?: readonly string[]; scopes?: readonly string[]; cardIds?: readonly string[] } },
+  task: { id: string; title: string },
+): boolean {
+  const { types, scopes, cardIds } = policy.match;
+  if (cardIds?.some((c) => c === task.id || (c.length >= 8 && task.id.startsWith(c)))) return true;
+  if (!types && !scopes) return false;
+  const parsed = parseConventionalTitle(task.title);
+  if (!parsed) return false;
+  if (types && !types.includes(parsed.type)) return false;
+  if (scopes && (parsed.scope === null || !scopes.includes(parsed.scope))) return false;
+  return true;
+}
 
 /**
  * @decision 3a833d94 — mirrors {@link checkTitleHtmlEntities}'s escape-hatch convention (same argument
