@@ -40,6 +40,8 @@ import { transcriptRootReadDenyRules, otherProjectTranscriptDenyRules } from "./
 import { withLoomHomeWriteDenyForSpawn } from "./loom-home-deny.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
+import { kickWorktreeSettingsRoutingScan } from "./claude-settings-routing-scan.js";
+import { isAnthropicSpawnEnvKey } from "./anthropic-env-key.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled, isPassAnthropicEnvEnabled, isPassOpenAiEnvEnabled, ensureProjectWorkDir, projectWorkDirEnv } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -4738,14 +4740,9 @@ export function preflightWindowsCommandLine(
   };
 }
 
-/** True for an env-var NAME that can redirect or re-bill a claude session: any `ANTHROPIC_*` (case-insensitive,
- * since Windows env names are) plus `AWS_BEARER_TOKEN_BEDROCK`. Deliberately NOT `AWS_*`/`GOOGLE_*`/proxy vars —
- * those have legitimate non-claude uses for every child and cannot divert claude without the (already
- * scrubbed) `CLAUDE_CODE_USE_*` switches. Card c8eeda93. */
-export function isAnthropicSpawnEnvKey(key: string): boolean {
-  const upper = key.toUpperCase();
-  return upper.startsWith("ANTHROPIC_") || upper === "AWS_BEARER_TOKEN_BEDROCK";
-}
+// Card c8eeda93 / 9223fe84: the predicate lives in the leaf `anthropic-env-key.ts` (shared with the settings
+// routing scan, no host.ts import cycle); re-exported so existing importers of host.ts's name are unchanged.
+export { isAnthropicSpawnEnvKey };
 
 // Card 6a94d4f0 / d1614667: the predicate moved to resolve-bin.ts (shared with the codex --version prewarm);
 // re-exported so existing importers of host.ts's name are unchanged.
@@ -6751,6 +6748,9 @@ export class PtyHost {
     // See Live.mcpToken's own doc + the record for why.
     const mcpToken = randomUUID();
     const pty = this.createPty(opts, hookToken, mcpToken);
+    // @decision 9223fe84 — fire-and-forget (void return, never awaited): a worktree-level
+    // `.claude/settings*.json` carrying ANTHROPIC_*/apiKeyHelper is logged by key NAME only, off the hot path.
+    kickWorktreeSettingsRoutingScan(opts.sessionId, opts.cwd);
     // Card cdd8ec44: the respawn reason for the log separator openSessionLogStream writes below — best
     // effort from the fields spawn() already has, not a dedicated plumbed-through label.
     const spawnLogReason = opts.fork ? "fork" : opts.resumeId ? "resume" : "fresh spawn";

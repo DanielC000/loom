@@ -5913,7 +5913,12 @@ export class OrchestrationMcpRouter {
           "name matches NO project row (active or archived), e.g. a permanent project delete whose work-dir " +
           "removal failed. `count` is the TRUE total and can exceed `entries.length`; `truncated:true` = the " +
           "scan hit its entry bound, so even `count` may be partial. VISIBILITY ONLY, never auto-deleted. " +
-          "Cached; may read `{count:0, entries:[], truncated:false}` before the first refresh.",
+          "Cached; may read `{count:0, entries:[], truncated:false}` before the first refresh. " +
+          "`claudeSettingsRouting` `{available, reason?, findings:[{file, keys}]}`: claude's own USER-level " +
+          "settings files (`settings.json`/`settings.local.json`) that carry `ANTHROPIC_*`-style routing env " +
+          "keys or an `apiKeyHelper` and so can redirect or re-bill every session. Key NAMES only, never " +
+          "values. `available:false` = the scan failed or has not landed yet (`reason` says why), UNKNOWN, " +
+          "NOT clean. Covers user-level files only; worktree-level hits are logged at spawn, not served here.",
         inputSchema: strictShape({}),
       },
       async () => ok(buildServedStatus(db)),

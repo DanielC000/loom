@@ -18,4 +18,6 @@
 - Do not widen the scrub to `AWS_*`/`GOOGLE_*`/proxy vars without a new decision — they have legitimate non-claude uses.
 - Do not move the scrub after the `sessionEnv` merge — a deliberate project override must still win.
 
+**Addendum (card 9223fe84):** the scrub covers only the process env. claude's own settings files (`env.ANTHROPIC_*`, `apiKeyHelper`) are detected and warned about, key names only, never neutralized — see `9223fe84-claude-settings-routing-keys-detect-and-warn.md`.
+
 **Migration:** a Bedrock/Vertex/gateway setup that relied on the daemon's own exported `ANTHROPIC_*`/`AWS_BEARER_TOKEN_BEDROCK` reaching sessions must now set them in the project's `sessionEnv` (or, deliberately fleet-wide, the human-only `LOOM_PASS_ANTHROPIC_ENV=1`); the daemon logs the scrubbed key names once per process.

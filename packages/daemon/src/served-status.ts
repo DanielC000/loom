@@ -27,6 +27,8 @@ import {
 import { listStaleAsideWorktrees, repoKeysByProjectFromProjects, staleAsideRepoKeysByProject } from "./git/worktrees.js";
 import { getCachedOrphanedProjectWorkDirs, kickOrphanedProjectWorkDirsRefresh } from "./sessions/orphaned-project-work-dirs.js";
 
+import { getClaudeSettingsRoutingStatus, type ClaudeSettingsRoutingStatus } from "./pty/claude-settings-routing-scan.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -155,6 +157,14 @@ export interface ServedStatus {
    * `sessions/orphaned-project-work-dirs.ts`'s own doc for the full mechanism.
    */
   orphanedProjectWorkDirs: { count: number; entries: { dirName: string }[]; truncated: boolean };
+  /**
+   * Card 9223fe84 — USER-level claude settings files (`<claude config home>/.claude/settings(.local).json`)
+   * carrying `env.ANTHROPIC_*`-style routing keys or an `apiKeyHelper`: they apply to every Loom-spawned
+   * session outside the env scrub. KEY NAMES ONLY, never a value. `available:false` (with `reason`) means
+   * the boot scan failed or has not landed yet — NEVER read it as clean. Worktree-level files are scanned
+   * per spawn and logged only; they are not part of this boot snapshot.
+   */
+  claudeSettingsRouting: ClaudeSettingsRoutingStatus;
 }
 
 /** The `src` of the first `<script type="module">` in a built index.html, or null. Attribute order is not
@@ -291,5 +301,6 @@ export function buildServedStatus(db: Db): ServedStatus {
       entries: orphanedProjectWorkDirs.entries,
       truncated: orphanedProjectWorkDirs.truncated,
     },
+    claudeSettingsRouting: getClaudeSettingsRoutingStatus(),
   };
 }

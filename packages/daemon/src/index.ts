@@ -33,6 +33,7 @@ import { archiveOldCodexRollouts } from "./pty/codex-rollout-archive.js";
 import { sweepStaleGateOnlyFiles } from "./orchestration/gate-spill.js";
 import { SessionService } from "./sessions/service.js";
 import { CodescapeSupervisor, codescapeBootRepoPaths } from "./codescape/supervisor.js";
+import { runBootClaudeSettingsRoutingScan } from "./pty/claude-settings-routing-scan.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
 import { MidTurnContextSampler } from "./sessions/mid-turn-context-sampler.js";
 import { TaskMcpRouter } from "./mcp/server.js";
@@ -1453,6 +1454,10 @@ async function main(): Promise<void> {
   } else {
     console.log("[boot] scheduler disabled (enable it under Settings → Global / Daemon, or set LOOM_SCHEDULER_ENABLED=1)");
   }
+
+  // Card 9223fe84: read-only, async, fire-and-forget scan of the user-level claude settings files for
+  // routing keys (names only). Never throws; the result rides `served_status.claudeSettingsRouting`.
+  void runBootClaudeSettingsRoutingScan();
 
   // Codescape fleet-daemon (C1): fire-and-forget, like the reconcile kick above — ingest-then-serve can
   // take a while (a real repo's initial graph build), and nothing here should delay listen() or later

@@ -29,6 +29,20 @@ export function claudeConfigHome(): string {
 }
 
 /**
+ * The directory the CLI treats as the USER-level claude dir (holds `settings.json`, `projects/`, …).
+ * CLAUDE_CONFIG_DIR set → that dir ITSELF (it REPLACES `~/.claude`, no extra `.claude` level); unset →
+ * `<home>/.claude`. The ONE place this rule lives — `claudeProjectsRoot` (claude-transcript.ts) and the
+ * settings routing scan both consume it. Read fresh each call.
+ *
+ * @decision a92a0913 — the UNSET fallback nests one level deeper than {@link claudeConfigHome}'s bare homedir.
+ */
+export function claudeUserSettingsDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR
+    ? claudeConfigHome()
+    : path.join(claudeConfigHome(), ".claude");
+}
+
+/**
  * Does `key` name `CLAUDE_CONFIG_DIR` under the given OS's env-var-name case rules? win32 env var names
  * are case-insensitive, so any case-variant spelling matches; POSIX is case-sensitive, so only the exact
  * case matches. `platform` defaults to the CURRENT process's `process.platform` — the daemon and the

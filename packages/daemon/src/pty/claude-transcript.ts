@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { TranscriptTurn } from "./adapter.js";
-import { claudeConfigHome } from "./claude-config.js";
+import { claudeUserSettingsDir } from "./claude-config.js";
 import { toClaudeAbsoluteGlob } from "./loom-home-deny.js";
 
 /**
@@ -128,9 +128,7 @@ function rememberResolvedPath(engineSessionId: string, filePath: string): void {
  * the UNSET fallback nests one level deeper, under `.claude/` — never drop that nesting to "simplify".
  */
 function claudeProjectsRoot(): string {
-  return process.env.CLAUDE_CONFIG_DIR
-    ? path.join(claudeConfigHome(), "projects")
-    : path.join(claudeConfigHome(), ".claude", "projects");
+  return path.join(claudeUserSettingsDir(), "projects");
 }
 
 /** {@link claudeProjectsRoot}, converted to the CLI's documented universal-absolute glob form (see
