@@ -97,44 +97,36 @@ export class AuditMcpRouter {
       {
         description:
           "List Requests (decision/input/permission/credential asks) ACROSS ALL PROJECTS — the human's " +
-          "whole Requests inbox, so you can intake requests-friction directly instead of hoping one happens " +
-          "to surface in a transcript. NON-CONSUMING — reading NEVER drains or flips state, unlike " +
-          "question_pull's agent-scoped drain-and-consume (a distinct primitive; mirrors task_requests_list/ " +
-          "task_request_get's non-consuming guarantee). Returns {items, total, returned, offset, hasMore}: " +
-          "`items` per row is {id, projectId, loomSessionId, filedBySessionId, agentId, taskId, type, title, " +
-          "state, createdAt, answeredAt, consumedAt} plus an answer summary by type — chosenOption/note for " +
-          "decision|input, approved/note/scope/expiresAt/lapsed/fulfillment for permission (scope/expiresAt " +
-          "are the human's ACTUAL decided grant, distinct from the ask-time requested scope/expiry; lapsed " +
-          "is read-time-derived, true only once expiresAt is set AND past — advisory only, Loom never " +
-          "itself enforces/revokes it; `fulfillment: {state, detail}` — an APPROVAL is an AUTHORIZATION, " +
-          "not evidence the write happened, so this reports whether it was actually OBSERVED, computed " +
-          "fresh on every read: \"unknown\" (the asker never declared a checkable target — the default), " +
+          "whole Requests inbox, so you can intake requests-friction directly. NON-CONSUMING — reading " +
+          "NEVER drains or flips state, unlike question_pull's drain-and-consume. Returns {items, total, " +
+          "returned, offset, hasMore}: `items` per row is {id, projectId, loomSessionId, filedBySessionId, " +
+          "agentId, taskId, type, title, state, createdAt, answeredAt, consumedAt} plus an answer summary " +
+          "by type — chosenOption/note for decision|input, approved/note/scope/expiresAt/lapsed/fulfillment " +
+          "for permission (scope/expiresAt are the human's ACTUAL decided grant, distinct from the ask-time " +
+          "request; lapsed is read-time-derived, true only once expiresAt is set AND past — advisory only, " +
+          "Loom never enforces/revokes it; `fulfillment: {state, detail}` — an APPROVAL is an " +
+          "AUTHORIZATION, not evidence the write happened, so this reports whether it was OBSERVED, " +
+          "computed fresh on every read: \"unknown\" (no checkable target declared — the default), " +
           "\"unwritable\" (a target was declared but can never be observed — a bad profile key or a deleted " +
-          "profile; `detail` says which), \"not_yet_done\" (a target was declared and checked, but the live " +
-          "value doesn't match yet — a MEASURED false, never confused with \"unknown\"), or \"fulfilled\" " +
-          "(it matches). Set at question_ask time via `fulfillmentTarget` — see that tool's own doc), " +
-          "ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
-          "never-echo shape; a pending row's answer fields read null rather than a misleading false-ish " +
-          "value). `loomSessionId` is the CURRENT routing target — it MUTATES on a manager/Lead recycle, so " +
-          "it does NOT identify who originally filed the request; `filedBySessionId` is the immutable filer " +
-          "(set once at ask time, null on a row that predates this field — that history is unrecoverable). " +
-          "`stale` (card 5ea0153c) is true only for a still-'pending' row whose CURRENT routing target " +
-          "isn't live right now — a SOFT flag, never an auto-cancel (a moot-LOOKING ask can still be one " +
-          "the owner wants to answer); always false for answered/consumed/cancelled/notice. `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
-          "— never assume `items` is everything without checking it. Filters (all optional, AND'd): " +
-          "projectId (one project), state (pending|answered|consumed|cancelled|notice — \"cancelled\" is a " +
-          "moot/superseded ask withdrawn via question_cancel/dismiss, never an answer; \"notice\" is a " +
-          "self-terminal FYI that was never answered either — this audit surface returns EVERY notice " +
-          "regardless of age, unlike the manager's own requests_list or the web Inbox, both of which drop " +
-          "an old one from their default view), type (decision|input|permission|credential|notice), " +
-          "sinceMinutes (only requests " +
-          "created within the last N minutes). Newest-first (createdAt DESC); no filters returns the whole " +
+          "profile; `detail` says which), \"not_yet_done\" (checked, live value doesn't match yet — a " +
+          "MEASURED false, never \"unknown\"), or \"fulfilled\"; set at question_ask time via " +
+          "`fulfillmentTarget`), ack ONLY for credential (NEVER the secret; a pending row's answer fields " +
+          "read null). `loomSessionId` is the CURRENT routing target — it MUTATES on a manager/Lead " +
+          "recycle, so it does NOT identify who filed the request; `filedBySessionId` is the immutable " +
+          "filer (null on a row that predates the field). `stale` is true only for a still-'pending' row " +
+          "whose CURRENT routing target isn't live right now — a SOFT flag, never an auto-cancel; always " +
+          "false for answered/consumed/cancelled/notice. `total` is the FULL matching count and `hasMore` " +
+          "says whether `items` was truncated — never assume `items` is everything without checking. " +
+          "Filters (all optional, AND'd): projectId, state (pending|answered|consumed|cancelled|notice — " +
+          "\"cancelled\" is a moot/superseded ask withdrawn via question_cancel/dismiss, never an answer; " +
+          "\"notice\" is a self-terminal FYI never answered — this surface returns EVERY notice regardless " +
+          "of age, unlike the manager's requests_list or the web Inbox), type " +
+          "(decision|input|permission|credential|notice), sinceMinutes (created within the last N " +
+          "minutes). Newest-first (createdAt DESC); no filters returns the whole " +
           `platform. Bounded to ${DEFAULT_REQUESTS_LIST_CAP} rows by default (see \`hasMore\`) — pass an ` +
-          "explicit limit/offset to page past it. `fields:[...]` (card 40f4cae9, same contract as " +
-          "`tasks_list`'s own `fields`) projects each returned item down to ONLY the given top-level key " +
-          "names — an un-asked-for field is genuinely ABSENT from every item, not merely a smaller " +
-          "preview, and an unmatched/unknown field name is silently ignored rather than erroring. `id` is " +
-          "NOT auto-added.",
+          "explicit limit/offset to page past it. `fields:[...]` (same contract as `tasks_list`'s) " +
+          "projects each item down to ONLY the given top-level keys — others are ABSENT, unknown names " +
+          "are ignored, `id` is NOT auto-added.",
         inputSchema: strictShape({
           projectId: z.string().optional(),
           state: z.enum(QUESTION_STATES).optional(),
@@ -162,14 +154,13 @@ export class AuditMcpRouter {
       {
         description:
           "File a structured audit finding as a DURABLE task on the reserved Loom Platform board (the human " +
-          "triage inbox). This is the ONLY write on THIS router — there is no git/vault/config/spawn/message " +
-          "here (loom-tasks, mounted alongside for every session, still carries its own board writes like " +
-          "tasks_create/tasks_update/memory_forget — this tool is just the one write THIS surface adds). " +
-          "The target board is FIXED server-side (you cannot pick a project). Give a sharp title; put the evidence " +
-          "/ repro, the implicated skill/prompt/feature, and a concrete suggested improvement in detail; set a " +
-          "severity. DEDUPED server-side by title: filing a finding whose title already sits on the Platform " +
-          "board is a no-op that returns {taskId, deduped:true} (the existing card) — still dedupe by judgement " +
-          "first, but you cannot spam the backlog by re-filing. Returns {taskId, projectId} on a novel finding.",
+          "triage inbox). This is the ONLY write on THIS router — no git/vault/config/spawn/message " +
+          "(loom-tasks, mounted alongside, carries its own board writes). The target board is FIXED " +
+          "server-side (you cannot pick a project). Give a sharp title; put the evidence/repro, the " +
+          "implicated skill/prompt/feature, and a concrete suggested improvement in detail; set a " +
+          "severity. DEDUPED server-side by title: a title already on the Platform board is a no-op " +
+          "returning {taskId, deduped:true} (the existing card) — still dedupe by judgement first. " +
+          "Returns {taskId, projectId} on a novel finding.",
         inputSchema: strictShape({
           title: z.string(),
           detail: z.string(),
@@ -225,15 +216,14 @@ export class AuditMcpRouter {
       {
         description:
           "Request graceful termination of YOUR OWN session — a terminal exit, no successor. Call this at " +
-          "the end of a scan pass (the audit doctrine's normal wrap-up). Pass `scanReport`: a short summary " +
-          "of what this pass covered (which sessions/projects, what you found) — the audit doctrine's " +
-          "normal last step before ending. Loom REFUSES (does not stop) if you have unconsumed inbound " +
-          "direction queued (a human composer turn you haven't acted on yet) → {stopped:false, " +
+          "the end of a scan pass. Pass `scanReport`: a short summary of what this pass covered (which " +
+          "sessions/projects, what you found). Loom REFUSES (does not stop) if you have unconsumed " +
+          "inbound direction queued (a human composer turn you haven't acted on yet) → {stopped:false, " +
           "reason:\"queued-inbound\", pending:N} — end this turn so it drains into your next turn, act on " +
-          "it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, clean, resumable — " +
-          "the row lands on Archive) and this tool's own reply is delivered before your pty dies. Calling " +
-          "end_me with NO `scanReport` auto-files a low-severity finding on the Platform backlog flagging " +
-          "this pass as possibly cut short — always include one once you've genuinely finished a pass.",
+          "it, THEN re-call end_me. On pass: your session gracefully stops (clean, resumable — the row " +
+          "lands on Archive) and this tool's own reply is delivered first. Calling end_me with NO " +
+          "`scanReport` auto-files a low-severity finding on the Platform backlog flagging this pass as " +
+          "possibly cut short — include one once you've finished a pass.",
         inputSchema: strictShape({ scanReport: z.string().optional() }),
       },
       async ({ scanReport }) => {

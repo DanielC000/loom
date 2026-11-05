@@ -562,45 +562,34 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
     {
       description:
         "The index over this project's `@decision <id>` (card) and `@decision sha:<id>` (verified commit) " +
-        "source anchors and their out-of-band decision records (docs/adr/, docs/decisions/, " +
-        "docs/investigations/<id>-*/findings.md) — an ESCAPE HATCH for questions the on-Read injection hook " +
-        "can't answer positionally, not the primary way to read a record (a plain Read whose range covers " +
-        "an anchor line already surfaces that record's title + its 'Do not' section(s) — or an explicit " +
-        "no-Do-not note for the minority of records without one — plus a pointer to the full record; " +
-        "never the whole narrative). `query` is optional and its shape picks the mode: " +
-        "an 8-hex-char id (e.g. \"a32533a1\") -> REVERSE lookup on a board-card anchor; \"sha:<8hex>\" " +
-        "(e.g. \"sha:c70a5e0e\") -> the SAME reverse lookup on a verified-commit anchor instead (an " +
-        "unverifiable sha reports record:null, exactly like a bare id with no card record — it is never " +
-        "silently treated as resolved) — either form returns {ns, id, record, anchoredIn: [{file,line}...], " +
-        "orphan, skippedFiles, scopeNote?} (orphan:true if nothing cites this id, OR if the id has no " +
-        "resolvable record but IS cited somewhere — check both `record` and `anchoredIn` to tell which; " +
-        "skippedFiles names every file this call could NOT scan for size — a non-empty " +
-        "list means `orphan` is NOT a proven absence, only \"not found in what was scanned\": double-check " +
-        "with `git grep` before trusting orphan:true when skippedFiles is non-empty; this " +
-        "call ONLY ever searches THIS project's own repoPath, never another project's — orphan:true present " +
-        "alongside `scopeNote` means the id is not anchored+recorded HERE, which is not proof it doesn't " +
-        "exist in a different Loom project); " +
-        "a path-shaped string (contains \"/\" or \"\\\\\", or ends in a file extension) -> every anchor found " +
-        "in that ONE file, each item carrying {ns, id, line, record, orphan}, plus a file-level " +
-        "`skippedForSize` (true means the file exceeded the byte cap and was NOT scanned at all — " +
-        "anchorCount:0/decisions:[] in that case means \"did not look\", not \"has none\") — otherwise " +
-        "resolved, or flagged `orphan:true` when the anchored id has no record (for a sha anchor this " +
-        "includes an id whose commit no longer verifies, even if a same-named record file exists); " +
-        "anything else -> a best-effort, language-agnostic SYMBOL lookup (a trivial declaration-name " +
-        "match, not a real symbol table — resolves 0, 1, or several files, all reported) whose result(s) " +
-        "each run through the path mode above; " +
-        "omitted/blank -> the FULL repo index, enumerating {orphanAnchors, orphanRecords, skippedFiles} " +
-        "(an anchored id with no record, and a record nothing anchors) so neither kind of gap is silently " +
-        "skipped — orphanAnchors items carry `ns` too, and a non-empty skippedFiles means both orphan " +
-        "directions are only as complete as that list is empty. The index is rebuilt fresh on every " +
-        "call by walking this project's own repo (`repoPath`) — never a persisted or cached snapshot, so " +
-        "it can never go stale. Record bodies are NOT inlined here (only {path,title}) — Read the returned " +
-        "record path directly for the full text; the on-Read hook is the place that delivers that same " +
-        "title + Do-not-section guard automatically (still not the full narrative — read the record path " +
-        "directly for that). The no-query index also carries the usage numbers: `recordCount` + " +
-        "`recordsByStore` {adr,decisions,investigations} (records in THIS project's repo) and `injections` " +
+        "source anchors and their decision records (docs/adr/, docs/decisions/, " +
+        "docs/investigations/<id>-*/findings.md) — an ESCAPE HATCH for what the on-Read injection hook " +
+        "can't answer positionally, not the primary way to read a record (a plain Read covering an anchor " +
+        "line already surfaces the record's title + 'Do not' section(s), or a no-Do-not note, plus a pointer " +
+        "to the full record). `query` is optional; its shape picks the mode: " +
+        "an 8-hex id (e.g. \"a32533a1\") -> REVERSE lookup on a card anchor; \"sha:<8hex>\" (e.g. \"sha:c70a5e0e\") -> the same " +
+        "lookup on a verified-commit anchor (an unverifiable sha reports record:null, like a bare id with " +
+        "no card record — never treated as resolved). Either returns {ns, id, record, anchoredIn: " +
+        "[{file,line}...], orphan, skippedFiles, scopeNote?}. orphan:true means nothing cites this id, OR " +
+        "it has no resolvable record but IS cited — check `record` and `anchoredIn` to tell which. " +
+        "skippedFiles names every file NOT scanned for size; when non-empty, `orphan` is NOT a proven " +
+        "absence — double-check with `git grep`. Only THIS project's own repoPath is searched; orphan:true " +
+        "with `scopeNote` means not anchored+recorded HERE, not that it doesn't exist in another project. " +
+        "A path-shaped string (contains \"/\" or \"\\\\\", or ends in a file extension) -> every anchor in that " +
+        "ONE file, each item {ns, id, line, record, orphan}, plus file-level `skippedForSize` (true: the " +
+        "file exceeded the byte cap and was NOT scanned — anchorCount:0/decisions:[] then means \"did not " +
+        "look\", not \"has none\"); an anchored id with no record is flagged `orphan:true` (for a sha anchor " +
+        "this includes a commit that no longer verifies, even if a same-named record file exists). " +
+        "Anything else -> a best-effort, language-agnostic SYMBOL lookup (a trivial declaration-name " +
+        "match, not a symbol table; resolves 0, 1 or several files) whose results each run through the " +
+        "path mode. Omitted/blank -> the FULL repo index {orphanAnchors, orphanRecords, skippedFiles} " +
+        "(an anchored id with no record; a record nothing anchors; orphanAnchors items carry `ns`; a " +
+        "non-empty skippedFiles means both orphan lists are incomplete). The index is rebuilt fresh on " +
+        "every call from this project's `repoPath`, never cached. Record bodies are NOT inlined (only " +
+        "{path,title}) — Read the record path for the full text. The no-query index also carries " +
+        "`recordCount`, `recordsByStore` {adr,decisions,investigations} and `injections` " +
         "{total,truncated,bytes,sessions,byStore,first,last,scope} — how many records the on-Read hook has " +
-        "injected for this repo on this host (a metadata-only counter, never record content).",
+        "injected for this repo on this host (metadata-only counter, never record content).",
       inputSchema: strictShape({ query: z.string().optional() }),
     },
     async ({ query }) => {

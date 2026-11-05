@@ -179,16 +179,14 @@ export class WorkspaceAuditMcpRouter {
         description:
           "Suggest a workspace improvement as a DURABLE board card on the user's OWN \"Platform\" home " +
           "(the inbox where they already triage). This is a SUGGESTION for the user — never an auto-applied " +
-          "change — and one of your only two writes (no git/vault/config/spawn here — just this card and the " +
-          "confined home-operator nudge it fires, below). The " +
-          "target board is FIXED server-side (you cannot pick a project — your suggestion always lands in the " +
-          "user's own home). Give a sharp title; put the evidence/repro, the impact, the implicated " +
+          "change — and one of your only two writes (no git/vault/config/spawn: just this card and the " +
+          "confined home-operator nudge it fires). The target board is FIXED server-side (you cannot pick " +
+          "a project). Give a sharp title; put the evidence/repro, the impact, the implicated " +
           "skill/prompt/feature, and a concrete suggested fix in detail; set a severity. It ALSO fires a " +
-          "best-effort live nudge to your home's Platform operator so the suggestion reaches an actor (the " +
-          "card is the durable record regardless). Returns {taskId, projectId, deliveryStatus} — " +
-          "deliveryStatus is `delivered-live`/`queued` if the operator is live, else `boarded` (the card " +
-          "sits on the now-visible home board) — or {error} if the home is unexpectedly absent (safe; " +
-          "nothing is written).",
+          "best-effort live nudge to your home's Platform operator (the card is the durable record " +
+          "regardless). Returns {taskId, projectId, deliveryStatus} — `delivered-live`/`queued` if the " +
+          "operator is live, else `boarded` — or {error} if the home is unexpectedly absent (nothing is " +
+          "written).",
         inputSchema: strictShape({
           title: z.string(),
           detail: z.string(),
@@ -243,14 +241,12 @@ export class WorkspaceAuditMcpRouter {
       {
         description:
           "Hand your filed suggestions off to your home's Platform operator with a single best-effort live " +
-          "nudge — call it ONCE after filing a batch of audit_suggest_improvement cards so the operator " +
-          "knows to review/apply them. This is your ONLY way to reach an actor, and it is fully confined: " +
-          "it can reach NOTHING but your home's live operator (you name no target), and it sends a fixed " +
-          "framed heads-up, not free-form text — the forwarded text is 100% server-composed, you cannot " +
+          "nudge — call it ONCE after filing a batch of audit_suggest_improvement cards. This is your ONLY " +
+          "way to reach an actor, and it is fully confined: it reaches NOTHING but your home's live " +
+          "operator (you name no target), and the forwarded text is 100% server-composed — you cannot " +
           "inject any payload. Optional `count` (how many suggestions you filed — shown in the nudge). " +
-          "Returns {deliveryStatus}: `delivered-live`/`queued` if the operator is live, else `boarded` (no " +
-          "live operator — your cards already sit on the home board for them to find). The cards are the " +
-          "durable record; this nudge never loses anything.",
+          "Returns {deliveryStatus}: `delivered-live`/`queued` if the operator is live, else `boarded` (your " +
+          "cards already sit on the home board). The cards are the durable record.",
         inputSchema: strictShape({
           count: z.number().int().positive().optional(),
         }),
@@ -274,15 +270,13 @@ export class WorkspaceAuditMcpRouter {
       {
         description:
           "Request graceful termination of YOUR OWN session — a terminal exit, no successor. Call this at " +
-          "the end of a scan pass (the audit doctrine's normal wrap-up). Pass `scanReport`: a short summary " +
-          "of what this pass covered — the audit doctrine's normal last step before ending. Loom REFUSES " +
-          "(does not stop) if you have unconsumed inbound direction queued (a human composer turn you " +
-          "haven't acted on yet) → {stopped:false, reason:\"queued-inbound\", pending:N} — end this turn " +
-          "so it drains into your next turn, act on it, THEN re-call end_me. On pass: your session " +
-          "gracefully stops (Ctrl-C×2, clean, resumable — the row lands on Archive) and this tool's own " +
-          "reply is delivered before your pty dies. Calling end_me with NO `scanReport` files a " +
-          "low-severity suggestion on your home board flagging this pass as possibly cut short — always " +
-          "include one once you've genuinely finished a pass.",
+          "the end of a scan pass. Pass `scanReport`: a short summary of what this pass covered. Loom " +
+          "REFUSES (does not stop) if you have unconsumed inbound direction queued (a human composer turn " +
+          "you haven't acted on yet) → {stopped:false, reason:\"queued-inbound\", pending:N} — end this " +
+          "turn so it drains into your next turn, act on it, THEN re-call end_me. On pass: your session " +
+          "gracefully stops (clean, resumable — the row lands on Archive) and this tool's own reply is " +
+          "delivered first. Calling end_me with NO `scanReport` files a low-severity suggestion on your " +
+          "home board flagging this pass as possibly cut short — include one once you've finished a pass.",
         inputSchema: strictShape({ scanReport: z.string().optional() }),
       },
       async ({ scanReport }) => {

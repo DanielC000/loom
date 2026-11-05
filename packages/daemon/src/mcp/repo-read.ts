@@ -346,14 +346,11 @@ export function registerRepoReadTools(server: McpServer): void {
         "`ignoreCase` for a case-insensitive search. Skips node_modules/.git/dist, and scans a text file of " +
         `any size up to ${MAX_SCAN_FILE_BYTES / (1024 * 1024)} MiB (only matching lines are returned, so a ` +
         `big file never blows the result budget). Capped at ${MAX_GREP_MATCHES} matches (\`capped:true\` ` +
-        "when it hit the cap — tighten the pattern/glob). A pathological line (or a hostile pattern), or a " +
-        "file too big to match within the per-file time budget, can never hang the search — such a file is " +
-        "skipped (and reported in `skipped`, see below) and the search continues; if enough of them chain " +
-        "to blow the OVERALL time budget, the search stops early and returns `timedOut:true` with whatever " +
-        "partial matches it found so far — narrow the glob if you see it. `skipped` is a bounded sample of " +
-        "{file, reason} for every file this call did NOT fully search (binary, unreadable, over the size " +
-        "cap, or a per-file scan-timeout) — a grep that didn't search everything never looks complete; " +
-        "`skippedCount` is the true total even once the sample is full. Returns " +
+        "when it hit the cap — tighten the pattern/glob). A file too slow to match within the per-file " +
+        "time budget is skipped; if enough chain to blow the OVERALL budget the search stops early and " +
+        "returns `timedOut:true` with the partial matches — narrow the glob. `skipped` is a bounded " +
+        "sample of {file, reason} for every file NOT fully searched (binary, unreadable, over the size " +
+        "cap, or a per-file scan-timeout); `skippedCount` is the true total. Returns " +
         "{matches, capped, timedOut, skipped, skippedCount} or {error} on a bad regex.",
       inputSchema: strictShape({
         pattern: z.string(),
@@ -412,10 +409,8 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
     {
       description:
         "Read ONE text file from a project's source tree — `projectId` names ANY project registered on this " +
-        "daemon (from list_sessions), read-only, code-awareness for the structural gap-hunt. `path` is " +
-        "RELATIVE to that project's repo root — an absolute path or a `..` escape is refused (you can only " +
-        "read inside the NAMED project's own repo root for THIS call, never escape it to an arbitrary host " +
-        "file). " +
+        "daemon (from list_sessions), read-only. `path` is RELATIVE to that project's repo root — an " +
+        "absolute path or a `..` escape is refused. " +
         "Returns {path, totalLines, offset, lines, nextOffset}: `lines` is a 0-based window (`offset`, up to " +
         `${MAX_READ_LINES} lines), and \`nextOffset\` is the next index to page from (null when the file is ` +
         `exhausted) — this WINDOWS a large file rather than refusing it, up to ${MAX_SCAN_FILE_BYTES / (1024 * 1024)} ` +
@@ -447,14 +442,11 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
         `node_modules/.git/dist, and scans a text file of any size up to ${MAX_SCAN_FILE_BYTES / (1024 * 1024)} ` +
         "MiB (only matching lines are returned, so a big file never blows the result budget). Capped at " +
         `${MAX_GREP_MATCHES} matches (\`capped:true\` when it hit the cap — tighten the pattern/glob). ` +
-        "A pathological line (or a hostile pattern, e.g. from an untrusted transcript), or a file too big " +
-        "to match within the per-file time budget, can never hang the search — such a file is skipped " +
-        "(and reported in `skipped`, see below) and the search continues; if enough of them chain to blow " +
-        "the OVERALL time budget, the search stops early and returns `timedOut:true` with whatever partial " +
-        "matches it found so far — narrow the glob if you see it. `skipped` is a bounded sample of " +
-        "{file, reason} for every file this call did NOT fully search (binary, unreadable, over the size " +
-        "cap, or a per-file scan-timeout) — a grep that didn't search everything never looks complete; " +
-        "`skippedCount` is the true total even once the sample is full. Returns " +
+        "A file too slow to match within the per-file time budget is skipped; if enough chain to blow the " +
+        "OVERALL budget the search stops early and returns `timedOut:true` with the partial matches — " +
+        "narrow the glob. `skipped` is a bounded sample of {file, reason} for every file NOT fully " +
+        "searched (binary, unreadable, over the size cap, or a per-file scan-timeout); " +
+        "`skippedCount` is the true total. Returns " +
         "{matches, capped, timedOut, skipped, skippedCount} or {error} on a bad regex, an unknown " +
         "projectId, or a project with no readable repo root.",
       inputSchema: strictShape({

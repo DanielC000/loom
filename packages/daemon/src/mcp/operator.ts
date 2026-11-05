@@ -151,7 +151,7 @@ export class OperatorMcpRouter {
     server.registerTool(
       "git_push",
       {
-        description: "Push YOUR OWN project's current branch to its remote — the one genuinely-outward op. Reuses GitWriter.push() VERBATIM: a plain `git push`, retried as `git push -u origin <branch>` ONLY when the branch has no upstream; any other failure (unreachable/auth/rejected) is surfaced unchanged. Bounded + non-interactive so a credential-needing remote FAILS FAST rather than hanging. No force-push via this tool (see the router's HONEST CAVEAT doc — this does not constrain the session's own shell). No projectId — always your own project. Returns { ok:true, branch } or { ok:false, error }.",
+        description: "Push YOUR OWN project's current branch to its remote — the one genuinely-outward op. A plain `git push`, retried as `git push -u origin <branch>` ONLY when the branch has no upstream; any other failure (unreachable/auth/rejected) is surfaced unchanged. Non-interactive, so a credential-needing remote FAILS FAST. No force-push via this tool. No projectId — always your own project. Returns { ok:true, branch } or { ok:false, error }.",
         inputSchema: strictShape({}),
       },
       async () => {
@@ -167,7 +167,7 @@ export class OperatorMcpRouter {
     server.registerTool(
       "vault_write",
       {
-        description: "Write (create or overwrite) a UTF-8 text file under YOUR OWN project's vault, then commit it through the vault auto-committer (reuses vault/writer.ts writeVaultFile — its mandatory path-traversal guard confines the write to the vault root). No projectId — always your own project. Returns { ok:true, committed, committedBlockedReason? } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'hard-link' if the overwrite target is a hard link to another file, 'operational-dir' if this project's vault points at Loom's own home directory, 'error'). The write always lands on disk when ok:true; committed:false with committedBlockedReason:'code-repo-collision' means this project's vaultPath resolves onto a registered code repo, or 'paused' means an advisory auto-commit pause lease is currently held — a later tick commits it once the lease lifts, with no further edit needed — either way the write succeeded but was NOT committed.",
+        description: "Write (create or overwrite) a UTF-8 text file under YOUR OWN project's vault, then commit it through the vault auto-committer; a path-traversal guard confines the write to the vault root. No projectId — always your own project. Returns { ok:true, committed, committedBlockedReason? } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'hard-link' if the target is a hard link to another file, 'operational-dir' if this project's vault points at Loom's own home directory, 'error'). ok:true means the write landed on disk; committed:false with committedBlockedReason:'code-repo-collision' (vaultPath resolves onto a registered code repo) or 'paused' (an auto-commit pause lease is held; a later tick commits it, no further edit needed) means it was written but NOT committed.",
         inputSchema: strictShape({ path: z.string(), content: z.string() }),
       },
       async ({ path: relPath, content }) => {
