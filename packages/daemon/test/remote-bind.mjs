@@ -302,6 +302,11 @@ try {
   check("(2b) 3rd WRONG-token request from the SAME ip → 429 failure throttle", fail3.statusCode === 429 && JSON.parse(fail3.body).error.includes("too many failed attempts"));
   check("(2e) the failed-auth 429 carries the same code:\"gateway-token-required\" as the 401 (a stale token on a throttled shared ip keeps the actionable signal); `error` unchanged", JSON.parse(fail3.body).code === "gateway-token-required" && JSON.parse(fail3.body).error === "too many failed attempts — try again later");
   check("(2e) ...and the 401 body it mirrors still has that code", JSON.parse(fail2.body).code === "gateway-token-required");
+  // Card 11d20bf5: the failed-auth 429 names the FAILED-auth bucket's wait (windowMs 600s here), not the 60s request
+  // window. A wrong-bucket wiring (empty key ⇒ 0ms ⇒ floor 1) or a preAuthRetry/failedRetry swap (≤60) cannot reach ≥550.
+  const failRa = fail3.headers["retry-after"];
+  check(`(2t) the failed-auth 429 carries Retry-After from the 600s failed-auth window (≥550, >60; got ${JSON.stringify(failRa)})`,
+    typeof failRa === "string" && /^\d+$/.test(failRa) && Number(failRa) >= 550 && Number(failRa) <= 600);
   const okAfterGuesser = await goodTokenReq();
   check("(2a) a VALID token from the SAME ip is NOT blocked by the guesser's failures (200, not 429)", okAfterGuesser.statusCode === 200);
   const fail4 = await badTokenReq();
@@ -351,8 +356,9 @@ try {
   // Card 4729d007: the 429 names when a slot frees. Sane = a whole number of seconds in [1, 60] (the window is 60s;
   // the refusing request was made ~now, so the oldest hit is at most 60s from ageing out, and at least 1 by the ceil).
   const c11RetryAfter = c11.headers["retry-after"];
-  check(`(2r) the ip-cap 429 carries Retry-After as whole seconds in [1,60] (got ${JSON.stringify(c11RetryAfter)})`,
-    typeof c11RetryAfter === "string" && /^\d+$/.test(c11RetryAfter) && Number(c11RetryAfter) >= 1 && Number(c11RetryAfter) <= 60);
+  // Lower bound ≥55 (card 11d20bf5): the 10 hits were made within ms, so the real value is ~60; a wrong-bucket wiring returns 1.
+  check(`(2r) the ip-cap 429 carries Retry-After as whole seconds in [55,60] (got ${JSON.stringify(c11RetryAfter)})`,
+    typeof c11RetryAfter === "string" && /^\d+$/.test(c11RetryAfter) && Number(c11RetryAfter) >= 55 && Number(c11RetryAfter) <= 60);
   const capIpValid = await appOn.inject({ method: "GET", url: "/api/version", remoteAddress: capIp, headers: { host: REMOTE_BIND_HOST, authorization: `Bearer ${GOOD_TOKEN}` } });
   check("(2ii) a VALID token from an ip whose pre-auth cap is exhausted is NOT gated by it (200, verify-first — the ip cap only meters unverified requests)", capIpValid.statusCode === 200);
 
@@ -393,8 +399,8 @@ try {
       if (r.statusCode === 200) okHeaders.push(r.headers["retry-after"]);
     }
     const ra = lastHeaders["retry-after"];
-    check(`(2s) the per-TOKEN-cap 429 carries Retry-After as whole seconds in [1,60] (got ${JSON.stringify(ra)}), and a 200 carries none`,
-      typeof ra === "string" && /^\d+$/.test(ra) && Number(ra) >= 1 && Number(ra) <= 60 && okHeaders.every((h) => h === undefined));
+    check(`(2s) the per-TOKEN-cap 429 carries Retry-After as whole seconds in [55,60] (got ${JSON.stringify(ra)}), and a 200 carries none`,
+      typeof ra === "string" && /^\d+$/.test(ra) && Number(ra) >= 55 && Number(ra) <= 60 && okHeaders.every((h) => h === undefined));
     check(`(2i) perTokenPerMin+1 valid-token requests from DIFFERENT ips: the first 3 are 200 and the last is 429 "rate limit exceeded" (got ${statuses.join(",")})`,
       statuses.slice(0, 3).every((c) => c === 200) && statuses[3] === 429 && JSON.parse(lastBody).error === "rate limit exceeded");
   } finally {

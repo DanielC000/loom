@@ -2,7 +2,13 @@
 // source the app ships. Run: node --experimental-strip-types packages/web/test/rate-limit-backoff.mjs
 import assert from "node:assert/strict";
 
+import { register } from "node:module";
+// rateLimitBackoff.ts imports ./gatewayCredential extensionless (bundler style); the loader hook resolves it.
+// Registered before the DYNAMIC imports below (a static import would be hoisted past register()).
+register("./_tsxLoaderHook.mjs", import.meta.url);
+
 const B = await import("../src/lib/rateLimitBackoff.ts");
+const G = await import("../src/lib/gatewayCredential.ts");
 
 const res = (status, headers = {}, body = {}) => new Response(JSON.stringify(body), { status, headers });
 const noJitter = () => 0;
@@ -79,7 +85,7 @@ for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
 }
 {
   let calls = 0;
-  const r = await B.fetchWithRateLimitBackoff("/api/x", undefined, async () => { calls++; return res(429, {}, { error: "too many failed attempts", code: "gateway-token-required" }); }, { sleep: async () => assert.fail("must not sleep") });
+  const r = await B.fetchWithRateLimitBackoff("/api/x", undefined, async () => { calls++; return res(429, {}, { error: "too many failed attempts", code: G.GATEWAY_TOKEN_REQUIRED_CODE }); }, { sleep: async () => assert.fail("must not sleep") });
   assert.equal(r.status, 429); assert.equal(calls, 1, "a bad token is not fixed by waiting");
 }
 

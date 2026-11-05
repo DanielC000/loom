@@ -12,14 +12,19 @@
  * retry the coded failed-auth 429 (a bad token is not fixed by waiting).
  */
 
+import { GATEWAY_TOKEN_REQUIRED_CODE } from "./gatewayCredential";
+
 /** First backoff step when the server sent no usable `Retry-After`. */
 export const RATE_LIMIT_BASE_MS = 1_000;
 /** Ceiling of one exponential step. */
 export const RATE_LIMIT_STEP_CAP_MS = 30_000;
 /** Ceiling honoured for a server-sent `Retry-After` (the daemon's window is 60s). */
 export const RATE_LIMIT_RETRY_AFTER_CAP_MS = 60_000;
-/** Retries per request. 1+2+4+8+16+30 = 61s of waiting — one full 60s window, so a request refused at the very
- *  start of a saturated window still recovers inside its own retry budget. */
+/** Retries per request. WITHOUT a usable `Retry-After`: 1+2+4+8+16+30 = 61s of waiting — one full 60s window.
+ *  The daemon always sends the header now, so the real bound is per retry min(Retry-After, 60s) × up to 1.25
+ *  (jitter): ≤ 75s each, ≤ 6 × 75s = 7.5 min worst case for one request. A caller stops waiting only when an
+ *  AbortSignal reaches `init.signal`; react-query's signal is NOT threaded through `lib/api.ts` today, so a
+ *  cancelled/unmounted query still runs its backoff sleep and its request (follow-up: card 6ef3a2bc). */
 export const RATE_LIMIT_MAX_RETRIES = 6;
 
 /** Parse a `Retry-After` header (delta-seconds or HTTP-date) into ms, or null when absent/unusable/non-positive. */
@@ -114,7 +119,7 @@ const IDEMPOTENT = new Set(["GET", "HEAD"]);
 async function isFailedAuthThrottle(r: Response): Promise<boolean> {
   try {
     const j = (await r.clone().json()) as { code?: string };
-    return j?.code === "gateway-token-required";
+    return j?.code === GATEWAY_TOKEN_REQUIRED_CODE;
   } catch { return false; }
 }
 
