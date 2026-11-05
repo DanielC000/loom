@@ -26,8 +26,8 @@ This couples the web parser to `extractText`'s marker format. `test/mcp-activity
 - Do not show a call time, a duration, a latency, "refused" or a turn cause in this strip. The transcript carries none of them (the parser drops each JSONL line's `timestamp`; a refusal arrives as a successful result). The only outcome facts are `ok`, `error` (the engine's `is_error`) and `pending` (no result yet). Each needs its own plumbing card first.
 - Do not render arguments or result bodies as HTML. They are agent- and tool-authored text; React text nodes only.
 - Do not move argument text into the daemon log to feed this strip (`@decision 16c93a50`). The transcript route is human-only loopback REST, the same exposure the Transcript tab already has.
-- Do not give the strip its own query key for the same transcript URL. Two keys mean two independent interval timers on one multi-hundred-KB response (measured: 4 fetches in 11s instead of 2). A tail-scoped key becomes reasonable only once the route actually serves a tail.
-- Do not poll every 5s unconditionally: the idle backoff exists because every poll is the whole transcript.
+- Do not give the strip its own query key for the same transcript URL. Two keys mean two independent interval timers on one multi-hundred-KB response (measured: 4 fetches in 11s instead of 2). The route now serves a tail (`?offset=`, card 79057de9), but the strip keeps the shared key: its queryFn merges the tail into the cached full array, so the Transcript tab reading that key still sees the whole transcript.
+- Do not poll every 5s unconditionally: the idle backoff stays. A poll is usually a small tail, but the first load and the rotation/shrink fallback are still the whole transcript.
 - Do not count non-Loom tools (Read, Bash, other MCP servers). Only `mcp__loom-*` routers.
 
 ## Marker format pin

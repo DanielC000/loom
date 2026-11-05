@@ -853,6 +853,10 @@ export const api = {
     return r.json() as Promise<{ ok: boolean; removed: boolean }>;
   },
   transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
+  // Tail read: the daemon's page envelope from turn `offset` on (mirrors pageTranscript's TranscriptPage).
+  transcriptTail: (sessionId: string, offset: number) =>
+    get<{ turns: TranscriptTurn[]; totalTurns: number; offset: number; returned: number; nextOffset: number | null }>(
+      `/api/sessions/${sessionId}/transcript?offset=${offset}`),
 
   // --- Agent Runs (R4b Runs UI; HUMAN/loopback REST, project-scoped, no auth — mirrors the other
   // /api/projects/:id surfaces, DELIBERATELY off the R3 key-authed path). list returns FULL AgentRun

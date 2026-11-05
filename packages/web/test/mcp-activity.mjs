@@ -14,7 +14,7 @@ const {
   tally, subsystemOf, columnLabel, mcpPollInterval, MCP_POLL_ACTIVE_MS, MCP_POLL_IDLE_MS,
 } = await import("../src/lib/mcpActivity.ts");
 
-// Poll policy. The transcript route has no tail, so each poll is the whole transcript: the strip
+// Poll policy. A poll can still be a whole transcript (first load, rotation fallback): the strip
 // polls fast only when someone is watching it change, and never while the tab is hidden.
 {
   const base = { hidden: false, expanded: false, busy: false };

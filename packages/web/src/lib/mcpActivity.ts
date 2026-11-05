@@ -269,8 +269,8 @@ export function applyFilter(calls: readonly McpCall[], f: McpFilter): McpCall[] 
 }
 
 // ── How often the strip polls ───────────────────────────────────────────────────────────────────
-// GET /api/sessions/:id/transcript has no tail/paging, so every poll is the WHOLE transcript. The
-// strip therefore polls as little as it can.
+// Each poll fetches only the transcript tail (lib/transcriptTail.ts), but a rotated or shrunk transcript
+// falls back to the whole thing, so the strip still polls as little as it can.
 export const MCP_POLL_ACTIVE_MS = 5_000;
 export const MCP_POLL_IDLE_MS = 15_000;
 

@@ -18,7 +18,7 @@ import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
 import { dbPolicyEvidence, evaluateProjectCardPolicyStatus, policyIdIsConfigured, projectStoresCardPolicies, resolveWrittenCardPolicyIds } from "../orchestration/card-policy.js";
-import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives, pageTranscript, type TranscriptTurn } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
 import type { Db, StoredQuestionAttachment } from "../db.js";
@@ -4985,12 +4985,27 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Transcript = Claude's session JSONL rendered to clean turns (canonical history). For an ARCHIVED
   // session the live JSONL is usually gone, so prefer the on-exit snapshot; fall through to the live
   // transcript when no snapshot exists (a session archived while still dead has neither → []).
-  app.get("/api/sessions/:id/transcript", async (req) => {
+  // Optional `?offset=N[&limit=M]` (card 79057de9) returns the shared pageTranscript envelope
+  // {turns,totalTurns,offset,returned,nextOffset} from turn N on, so a poller fetches only the new tail.
+  // With neither param the response is the bare turn array, byte-identical to before.
+  app.get("/api/sessions/:id/transcript", async (req, reply) => {
+    const q = req.query as { offset?: string; limit?: string };
+    const parseIdx = (v: string | undefined, min: number): number | null | undefined => {
+      if (v === undefined) return undefined;
+      return /^\d{1,9}$/.test(v) && Number(v) >= min ? Number(v) : null;
+    };
+    const offset = parseIdx(q.offset, 0);
+    const limit = parseIdx(q.limit, 1);
+    if (offset === null) return reply.code(400).send({ error: "offset must be a non-negative integer" });
+    if (limit === null) return reply.code(400).send({ error: "limit must be a positive integer" });
     const s = deps.db.getSession((req.params as { id: string }).id);
-    if (!s) return [];
-    if (s.archivedAt && archivedTranscriptExists(s.projectId, s.id)) return readArchivedTranscript(s.projectId, s.id, s.harness);
-    if (!s.engineSessionId) return [];
-    return readTranscript(s.cwd, s.engineSessionId, s.harness);
+    let turns: TranscriptTurn[] = [];
+    if (s) {
+      if (s.archivedAt && archivedTranscriptExists(s.projectId, s.id)) turns = readArchivedTranscript(s.projectId, s.id, s.harness);
+      else if (s.engineSessionId) turns = readTranscript(s.cwd, s.engineSessionId, s.harness);
+    }
+    if (offset === undefined && limit === undefined) return turns;
+    return pageTranscript(turns, { offset: offset ?? 0, limit });
   });
   // A worker's branch diff for the orchestration view (read-only — does NOT call reviewWorkerMerge,
   // so it appends no merge_request event; the manager's two-step gate is the only thing that does).

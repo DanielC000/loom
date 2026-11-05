@@ -3,8 +3,9 @@
 // agent turn, a facet rail, and an inline "Asked Loom / Loom answered" per call. Data and its limits:
 // lib/mcpActivity.ts. Arguments and results are agent-authored text and render as React text only.
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, type TranscriptTurn } from "../lib/api";
+import { fetchTranscriptIncremental } from "../lib/transcriptTail";
 import {
   applyFilter, emptyFilter, filterActive, groupByTurn, linksOf, mcpPollInterval, parseMcpCalls, sentenceOf, tally,
   SUBSYSTEMS, type McpCall, type McpFilter, type McpOutcome, type McpSubsystem,
@@ -60,9 +61,16 @@ export function McpActivity({ sessionId, harness, busy = false }: {
   const hidden = useDocumentHidden();
   // Same key and function as the Transcript tab (TranscriptPane): one cache, one poll cadence.
   // See mcpPollInterval for why the key must stay shared.
+  // The fetch is incremental (first load full, then only the tail); the cached array stays the full
+  // transcript, so the Transcript tab reading the same key is unaffected.
+  const qc = useQueryClient();
   const t = useQuery({
     queryKey: ["transcript", sessionId],
-    queryFn: () => api.transcript(sessionId),
+    queryFn: () => fetchTranscriptIncremental(
+      qc.getQueryData<TranscriptTurn[]>(["transcript", sessionId]),
+      (offset) => api.transcriptTail(sessionId, offset),
+      () => api.transcript(sessionId),
+    ),
     refetchInterval: mcpPollInterval({ hidden, expanded, busy }),
   });
   const calls = useMemo(() => parseMcpCalls(t.data ?? []), [t.data]);

@@ -751,13 +751,14 @@ check("every api.ts member classifies as read or write, fail-CLOSED (unknown sha
 // merged tree is 228 total / 98 reads / 130 writes.
 // Card a56270da added one WRITE (`clearSshApproval`, postErr, POST /api/questions/:id/clear-ssh-approval —
 // the Requests inbox's Clear/Revoke on an answered ssh hold): 228→229 total, reads unchanged at 98, 130→131 writes.
+// Card 79057de9 added one READ (`transcriptTail`, GET /api/sessions/:id/transcript?offset=): +1 total, +1 read (233→234 total, 100→101 reads).
 // Card 61d32daf added the card-policy FOUR: two READS (`taskPolicy`, GET /api/tasks/:id/policy; `cardPolicyStatus`,
 // getOrNull GET /api/projects/:id/card-policy-status — both Tier-1) and two WRITES (`waiveCardPolicy`, postErr POST,
 // and `revokeCardPolicyWaiver`, a DELETE with a body through guardedFetch, both on /api/tasks/:id/policy-waivers —
 // human-only loopback REST, no MCP path): 229→233 total, 98→100 reads, 131→133 writes.
 check("the exact read/write split is unchanged by card 66b9e590's fail-closed fix, plus card 40646822's gitMainlineWatermarkReset write, card e98bf784's webBundle read, card cd9a78bc's capability-provisioning read+write pair, card dec4959a's updateCapabilityPassEnv write, card 75ea3f73's released-skill three reads + one write, card c7f999f4's questionAttachmentText, card b5565d4c's three ssh-connection writes, card 67c43038's reorderProjectColumns write, card a56270da's clearSshApproval write and card 61d32daf's two card-policy reads + two waiver writes (100 reads / 133 writes / 233 members)", () => {
-  assert.equal(API_MEMBERS.total, 233, `api.ts now has ${API_MEMBERS.total} members, not 233`);
-  assert.equal(API_MEMBERS.reads.size, 100, `api.ts now has ${API_MEMBERS.reads.size} reads, not 100`);
+  assert.equal(API_MEMBERS.total, 234, `api.ts now has ${API_MEMBERS.total} members, not 234`);
+  assert.equal(API_MEMBERS.reads.size, 101, `api.ts now has ${API_MEMBERS.reads.size} reads, not 101`);
   assert.equal(API_MEMBERS.writes.size, 133, `api.ts now has ${API_MEMBERS.writes.size} writes, not 133`);
   // Card 61d32daf, pinned by name: the two reads are Tier-1 routes (gateway/trust-tier.ts) and the waiver pair is
   // the human-only escape from a card policy. A flipped verdict means re-reviewing that route's trust posture.

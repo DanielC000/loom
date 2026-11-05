@@ -46,7 +46,13 @@ async function openSession(page: Page, loomDaemon: LoomDaemon) {
     role: "manager", agentName: "McpLead", id: `e2e-mcp-${Date.now()}`,
     ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
   });
-  await page.route(`**/api/sessions/${mgr.sessionId}/transcript`, (route) => route.fulfill({ json: TRANSCRIPT }));
+  // The strip fetches the whole transcript first, then `?offset=N` tails: serve both shapes.
+  await page.route(new RegExp(`/api/sessions/${mgr.sessionId}/transcript(\\?.*)?$`), (route) => {
+    const offset = new URL(route.request().url()).searchParams.get("offset");
+    if (offset === null) return route.fulfill({ json: TRANSCRIPT });
+    const start = Math.min(Number(offset), TRANSCRIPT.length);
+    return route.fulfill({ json: { turns: TRANSCRIPT.slice(start), totalTurns: TRANSCRIPT.length, offset: start, returned: TRANSCRIPT.length - start, nextOffset: null } });
+  });
   await seedAtlasOn(page, mgr.projectId);
   await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
   return mgr;
