@@ -31,7 +31,7 @@ import { canMountTerminal, liveExpandedSession, toggleExpandedSession } from "..
 
 /** The expanded terminal's HUG cap. `TerminalCard` hugs its real content up to this, so a short
  *  session's card does not pad out to a fixed box — the same model the Terminals-page tiles use at
- *  540 and the project Overview's at 520; a little shorter because this one sits inside a card that
+ *  760 and the project Overview's at 520; a little shorter because this one sits inside a card that
  *  already spent height on its own head and row list. */
 export const SESSION_TERMINAL_HEIGHT = 460;
 

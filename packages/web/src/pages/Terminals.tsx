@@ -22,6 +22,15 @@ import { color, font } from "../theme";
 // (which padded a bare card out below its composer). Content-dynamic per-card height is the intended shape.
 const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: AUTO_GRID_TEMPLATE, gap: 12, alignItems: "start" };
 
+/**
+ * A session tile's HUG cap: a MAXIMUM, so a tile is only as tall as its width-bound grid needs.
+ *
+ * @decision 53dfa70c — keep it tall enough that the pinned grid stays WIDTH-bound up to the widest
+ * 1-column `auto` card (~1120px). The font solver fits by both axes, so at 540 the height bound won
+ * from a ~790px card on and the grid stopped growing while the card kept widening.
+ */
+const TILE_MAX_HEIGHT = 760;
+
 /** What each column choice is called in the picker. `auto` names what it does, not its number. */
 const COLUMN_LABELS: Record<GridColumns, string> = {
   auto: "Auto", "1": "1 column", "2": "2 columns", "3": "3 columns",
@@ -175,7 +184,7 @@ export default function Terminals({ projectId, projectName, layoutKey }: {
   // The slim bound-task bar is fetched + rendered by TerminalTile itself (per-session), so no task
   // lookup or prop pass is needed here — every tile shows it automatically, identically to Overview.
   const renderTile = (s: SessionListItem, moveControls?: ReactNode) => (
-    <TerminalTile key={s.id} s={s} height={540} showProject
+    <TerminalTile key={s.id} s={s} height={TILE_MAX_HEIGHT} showProject
       onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
       onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
       queueData={queues.data?.[s.id] ?? []} wakesData={wakes.data?.[s.id] ?? []}
