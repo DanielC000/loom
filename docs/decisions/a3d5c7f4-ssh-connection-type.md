@@ -152,3 +152,4 @@ The form's risky-pattern section (`packages/web/src/components/sshConnection.tsx
 - Do not build a host-group construct (decision 3 above) — one Connection row is one SSH host.
 - Do not let `getSecretForUse` ever return an `ssh` row's secret_blob — it must stay excluded alongside `oauth2`, the same way the module's own `@decision a3d5c7f4` comment marks it.
 - Do not let a `requiresConnection` capability grant bind to an `ssh` connection without rejecting it in `capabilityGrantBindingError` — same reasoning as the existing `oauth2` rejection there.
+- Do not call the bare ssh2 key generator (`utils.generateKeyPairSync` / `generateKeyPair`) from product code: ssh2@1.17.0 emits a malformed ed25519 key about 1 time in 256. Any future key-generation feature uses Node `crypto.generateKeyPairSync('ed25519')` plus Loom's own OpenSSH serialization, or ssh2 plus parse-verify-and-retry. `ssh2-keygen-product-ban-guard.mjs` enforces it over `packages/daemon/src/**`.
