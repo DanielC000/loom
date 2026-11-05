@@ -98,7 +98,7 @@ try {
   // 3-arg form prepends the worktree location block ahead of the brief, naming the cwd as the edit dir.
   const composedCwd = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path");
   check("(1) pure: cwd ⇒ worktree block leads, then brief, then dynamic", order(composedCwd, "/wt/path", "BRIEF") && order(composedCwd, "BRIEF", "DYNAMIC"));
-  check("(1) pure: cwd ⇒ block names the worktree as the edit dir", composedCwd.includes("make ALL edits here") && composedCwd.includes("`/wt/path`"));
+  check("(1) pure: cwd ⇒ block names the worktree as the edit dir", composedCwd.includes("Edit only here") && composedCwd.includes("`/wt/path`"));
   // Block is present even with an EMPTY brief (the QA startupPrompt:"" case) — block then dynamic.
   const composedEmptyCwd = composeWorkerStartupPrompt("", "DYNAMIC", "/wt/path");
   check("(1) pure: empty brief + cwd ⇒ block still present, leads the dynamic part", composedEmptyCwd.includes("`/wt/path`") && order(composedEmptyCwd, "/wt/path", "DYNAMIC"));
@@ -199,7 +199,7 @@ try {
   worktrees.push(wA.worktreePath);
   const oWA = optsFor(wA.id);
   check("(2) spawn (brief): startupPrompt carries the agent brief THEN the kickoff", order(oWA?.startupPrompt ?? "", "DEV_BRIEF", "KICKOFF_A"));
-  check("(2) spawn (brief): startupPrompt names the worktree cwd as the edit dir, ahead of the brief", (oWA?.startupPrompt ?? "").includes(wA.worktreePath) && (oWA?.startupPrompt ?? "").includes("make ALL edits here") && order(oWA?.startupPrompt ?? "", wA.worktreePath, "DEV_BRIEF"));
+  check("(2) spawn (brief): startupPrompt names the worktree cwd as the edit dir, ahead of the brief", (oWA?.startupPrompt ?? "").includes(wA.worktreePath) && (oWA?.startupPrompt ?? "").includes("Edit only here") && order(oWA?.startupPrompt ?? "", wA.worktreePath, "DEV_BRIEF"));
 
   const wQ = await svc.spawnWorker("mgr1", { taskId: taskB, agentId: "agentQA", kickoffPrompt: "KICKOFF_B" });
   worktrees.push(wQ.worktreePath);
@@ -212,7 +212,7 @@ try {
   const oRA = optsFor(rA.id);
   check("(3) recycle (brief): successor startupPrompt carries the agent brief THEN the handoff", order(oRA?.startupPrompt ?? "", "DEV_BRIEF", "HANDOFF_A"));
   check("(3) recycle (brief): the handoff frame is preserved after the brief", (oRA?.startupPrompt ?? "").includes("[loom:handoff]"));
-  check("(3) recycle (brief): successor startupPrompt names the SAME worktree cwd as the edit dir, ahead of the brief", (oRA?.startupPrompt ?? "").includes(rA.worktreePath) && (oRA?.startupPrompt ?? "").includes("make ALL edits here") && order(oRA?.startupPrompt ?? "", rA.worktreePath, "DEV_BRIEF"));
+  check("(3) recycle (brief): successor startupPrompt names the SAME worktree cwd as the edit dir, ahead of the brief", (oRA?.startupPrompt ?? "").includes(rA.worktreePath) && (oRA?.startupPrompt ?? "").includes("Edit only here") && order(oRA?.startupPrompt ?? "", rA.worktreePath, "DEV_BRIEF"));
 
   const rQ = await svc.recycleWorker("mgr1", wQ.id, "HANDOFF_B");
   const oRQ = optsFor(rQ.id);

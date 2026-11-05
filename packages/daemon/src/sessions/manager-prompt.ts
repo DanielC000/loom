@@ -62,10 +62,9 @@ export function composeManagerStartupPrompt(
   // already-oversized doc is flagged before a cold-booting successor's Read breaks on it.
   const sizeNote = resumeDoc ? resumeDocSizeWarning(resumeDoc) : "";
   const invalidNote = vaultPathInvalid
-    ? `[loom:vault-path-invalid] This project's configured vault path (\`${loc.vaultPath}\`) is not an ` +
-      `absolute path, so Loom cannot resolve a real vault dir or resume-doc location from it — neither is ` +
-      `shown below. This needs a HUMAN to re-bind the project's vault path (project settings) to a real, ` +
-      `absolute filesystem path; do not attempt to derive or guess the correct path yourself.`
+    ? `[loom:vault-path-invalid] This project's vault path (\`${loc.vaultPath}\`) is not absolute, so Loom ` +
+      `cannot resolve a vault dir or resume-doc location (neither is shown below). A HUMAN must re-bind it ` +
+      `(project settings) to a real absolute path; do not derive or guess one yourself.`
     : "";
   // @decision 5e30c4bd — derive fresh on every manager spawn/resume/recycle, scoped to ONLY
   // daemon-src/shared commits, and run this SYNCHRONOUSLY (a bounded, rare git call, not the
@@ -100,13 +99,12 @@ export function composeManagerStartupPrompt(
   const deployStaleNote = staleness.available && staleness.stale
     ? `[loom:deploy-stale] ⚠️ THIS DAEMON PROCESS IS RUNNING STALE CODE. Mainline HEAD \`${shortSha(staleness.mainlineHeadSha!)}\` ` +
       `(committed ${staleness.mainlineHeadDate}) carries ${staleness.commitsBehind} \`packages/daemon/src\`/\`packages/shared/src\` ` +
-      `commit(s) this running process was NOT built with (its own EXECUTING code dates to ${staleness.runningCodeBuiltAt}${divergenceNote}). ` +
-      `Those changes are MERGED but NOT LIVE — for EVERY project this shared daemon serves, not just this one. Do not assume a ` +
-      `recently-merged daemon fix or feature is actually in effect; a manager holding it can bring it live via \`daemon_restart\`.`
+      `commit(s) this process was NOT built with (its executing code dates to ${staleness.runningCodeBuiltAt}${divergenceNote}). ` +
+      `Those changes are MERGED but NOT LIVE, for EVERY project this daemon serves. Don't assume a recently-merged ` +
+      `daemon fix is in effect; a manager can bring it live via \`daemon_restart\`.`
     : !staleness.available && staleness.reasonKind === "could-not-measure"
     ? `[loom:deploy-staleness-unknown] Could not determine whether this daemon is current, because ${staleness.reason}. ` +
-      `This is NOT a claim that the daemon is stale — only that the check itself failed. See ` +
-      `\`served_status\`'s \`deployStaleness\` for detail, or re-check later.`
+      `This does NOT claim it is stale, only that the check failed. See \`served_status\`'s \`deployStaleness\`, or re-check later.`
     : "";
   const workDirLine = loc.projectWorkDir?.trim()
     ? `- **Project work dir (shared with workers/gates — survives any one session):** \`${loc.projectWorkDir.trim()}\` (also \`$LOOM_PROJECT_WORK_DIR\`)\n`
@@ -133,9 +131,8 @@ export function composeManagerStartupPrompt(
   const refBlock = refs && refs.length > 0
     ? "\n\n**Also referenced (read-only, not your cwd):**\n" +
       refs.map((r) => `- \`${r}\``).join("\n") +
-      "\n\nYou may read/inspect these repos, but never commit there — there is no worktree, branch, " +
-      "or gate for a reference repo. If a task turns out to need changes IN a reference repo, that's " +
-      "out of scope here; surface it instead of committing there."
+      "\n\nRead these freely, but never commit there (no worktree, branch or gate). If a task needs a " +
+      "change in one, surface it."
     : "";
   // @decision 49136451 — the project's WRITABLE repo registry (distinct from the read-only reference
   // repos above); omitted entirely when the project registers none, so a single-repo project's prompt
@@ -167,13 +164,10 @@ export function composeManagerStartupPrompt(
     ? "\n\n## Orchestration config (this project's RESOLVED values — may differ from Loom's documented defaults)\n" +
       `- **Max concurrent workers (per manager):** \`${loc.orchestration.maxConcurrentWorkers}\`\n` +
       `- **Gate command timeout:** \`${loc.orchestration.gateCommandTimeoutMs}\` ms\n\n` +
-      "These are a snapshot taken at spawn — don't hand-transcribe them into a resume doc, and don't " +
-      "reason from Loom's documented defaults instead of this. For LIVE free-slot capacity (which moves " +
-      "on every spawn/retirement), read the `{cap, live, inFlight, free}` capacity `worker_spawn`'s " +
-      "success response and `worker_list` both carry, not this snapshot. **Max concurrent gates " +
-      "(daemon-global) is deliberately NOT printed here** — it's a daemon-wide value the owner can " +
-      "change live with no restart, so a spawn-time snapshot of it would go stale the moment it's " +
-      "touched; read `gate_queue`'s `cap` field for the current value instead."
+      "A snapshot taken at spawn: don't copy it into a resume doc or reason from Loom's documented defaults " +
+      "instead. For LIVE free-slot capacity read the `{cap, live, inFlight, free}` that `worker_spawn`'s " +
+      "success response and `worker_list` carry. **Max concurrent gates (daemon-global) is deliberately NOT " +
+      "printed** — the owner can change it live; read `gate_queue`'s `cap` instead."
     : "";
   const full = blockWithNote + refBlock + repoBlock + orchBlock;
   const own = startupPrompt?.trim();

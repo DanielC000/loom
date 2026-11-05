@@ -151,7 +151,7 @@ try {
   check("(3j-stale) names the commitsBehind count", staleComposed.includes("2 `packages/daemon/src`"));
   check("(3j-stale) names the short mainline HEAD sha", staleComposed.includes("abc123de"));
   check("(3j-stale) names the EXECUTING code date (runningCodeBuiltAt), not the raw dist artifact clock (card 8ff7ccde)", staleComposed.includes("2026-06-01T00:00:00.000Z"));
-  check("(3j-stale) tells the manager it applies to EVERY project this daemon serves", /EVERY project this shared daemon serves/.test(staleComposed));
+  check("(3j-stale) tells the manager it applies to EVERY project this daemon serves", /EVERY project this daemon serves/.test(staleComposed));
   check("(3j-stale) points at daemon_restart as the remedy", staleComposed.includes("daemon_restart"));
   check("(3j-stale) the note precedes the 'Where things live' block (mirrors sizeNote/invalidNote ordering)", staleComposed.indexOf("[loom:deploy-stale]") < staleComposed.indexOf("Where things live"));
   check("(3j-stale) the agent's own doctrine still rides along", staleComposed.includes("DOCTRINE_BODY"));
@@ -182,7 +182,7 @@ try {
   check("(3j-could-not-measure) fires a distinct notice tag, NOT the full [loom:deploy-stale] alarm", couldNotMeasureComposed.includes("[loom:deploy-staleness-unknown]") && !couldNotMeasureComposed.includes("[loom:deploy-stale]"));
   check("(3j-could-not-measure) the notice names the underlying reason", couldNotMeasureComposed.includes("a build likely raced this read"));
   check("(3j-could-not-measure) the notice does NOT assert staleness (\"THIS DAEMON PROCESS IS RUNNING STALE CODE\" never appears)", !couldNotMeasureComposed.includes("RUNNING STALE CODE"));
-  check("(3j-could-not-measure) the notice explicitly disclaims being a staleness claim", /not a claim/i.test(couldNotMeasureComposed));
+  check("(3j-could-not-measure) the notice explicitly disclaims being a staleness claim", /does NOT claim it is stale/.test(couldNotMeasureComposed));
   check("(3j-could-not-measure) still carries the 'Where things live' header + the agent's own doctrine", couldNotMeasureComposed.includes("## Where things live") && couldNotMeasureComposed.includes("DOCTRINE_BODY"));
   check("(3j-could-not-measure) THE BUG THIS CARD FIXES, RED-PROVEN: this does NOT render byte-identically to CLEAN (a manager can now tell 'checked, verified current' apart from 'the check failed')", couldNotMeasureComposed !== cleanComposed);
   check("(3j-could-not-measure) also does not render byte-identically to the NOT-APPLICABLE case (the two-class split is real, not a relabeling)", couldNotMeasureComposed !== unavailableComposed);
@@ -337,7 +337,7 @@ try {
   check("(3i) relative vaultPath: the note names the offending value", invalidComposed.includes(relVaultPath));
   check("(3i) relative vaultPath: omits the 'Project vault dir' line — no fabricated path is ever shown as trustworthy", !invalidComposed.includes("Project vault dir"));
   check("(3i) relative vaultPath: omits the 'Resume doc' line", !invalidComposed.includes("Resume doc"));
-  check("(3i) relative vaultPath: tells the agent this needs a HUMAN re-bind, not a guess", /human/i.test(invalidComposed) && /do not attempt to derive or guess/i.test(invalidComposed));
+  check("(3i) relative vaultPath: tells the agent this needs a HUMAN re-bind, not a guess", /human/i.test(invalidComposed) && /do not derive or guess/i.test(invalidComposed));
   check("(3i) relative vaultPath: still carries the agent's own doctrine", invalidComposed.includes("DOCTRINE_BODY"));
   check("(3i) relative vaultPath: still carries the repoPath", invalidComposed.includes("/abs/repo"));
   // Control: a genuinely ABSOLUTE vaultPath (the common case) never fires the invalid note.

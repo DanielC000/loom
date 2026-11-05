@@ -152,20 +152,18 @@ export function composeWorkerStartupPrompt(
   const location = cwd?.trim();
   if (!location) return body;
   const workDirLine = projectWorkDir?.trim()
-    ? `\n- **Project work dir (shared with sibling workers/gates — survives this session):** \`${projectWorkDir.trim()}\` (also \`$LOOM_PROJECT_WORK_DIR\`)`
+    ? `\n- Project work dir (shared, survives the session; \`$LOOM_PROJECT_WORK_DIR\`): \`${projectWorkDir.trim()}\``
     : "";
   const block =
-    "## Where you edit (your isolated git worktree)\n" +
-    `- **Your worktree (make ALL edits here, never the main checkout):** \`${location}\`${workDirLine}\n\n` +
-    "This worktree IS your cwd. If anything else in your context names the main repo path, that's for " +
-    "reference, not where you edit — make every change here, on your assigned branch.";
+    "## Worktree\n" +
+    `- Edit only here (your cwd, on your assigned branch; never the main checkout): \`${location}\`${workDirLine}\n` +
+    "A main-repo path named elsewhere in your context is reference only.";
   const refs = referenceRepos?.filter((r) => r.trim());
   const refBlock = refs && refs.length > 0
     ? "\n\n**Also referenced (read-only, not your cwd):**\n" +
       refs.map((r) => `- \`${r}\``).join("\n") +
-      "\n\nYou may read/inspect these repos, but never commit there — there is no worktree, branch, " +
-      "or gate for a reference repo. If your task turns out to need changes IN a reference repo, that's " +
-      "out of scope for this worktree; escalate it up instead of committing there."
+      "\n\nRead these freely, but never commit there (no worktree, branch or gate). If the task needs a " +
+      "change in one, escalate it up."
     : "";
   // Multi-repo epic 49136451, phase 3. Emitted whenever the project HAS a registry — including when this
   // task targets the primary repo, because a worker on the primary of a multi-repo project still needs to
@@ -185,14 +183,12 @@ export function composeWorkerStartupPrompt(
           (repoContext.targetGateCommand
             ? `Your \`run_gate\` self-check and the merge gate both run THIS repo's own gate command (\`${repoContext.targetGateCommand}\`).`
             : repoContext.targetNoGateByDesign
-              ? "This repo has NO gate command configured — **deliberately** (flagged `noGateByDesign`): it has " +
-                "no buildable code/DoD check to run, so a merge here does NOT get the usual unverified warning. " +
-                "Still test your change by hand where that makes sense, and say plainly in your report what you " +
-                "checked."
-              : "This repo has NO gate command configured, so a merge here is reported as **unverified**. It does " +
-                "not fall back to another repo's gate — a gate that passed for an unrelated repo would look like " +
-                "verification without being any. Test your change by hand, and say plainly in your report what you " +
-                "ran and what is unverified.") +
+              ? "This repo has NO gate command configured — **deliberately** (`noGateByDesign`): no buildable " +
+                "DoD check exists, so a merge here gets no unverified warning. Still test by hand where it " +
+                "makes sense, and say plainly in your report what you checked."
+              : "This repo has NO gate command configured, so a merge here is reported as **unverified** (it " +
+                "never falls back to another repo's gate). Test by hand, and say plainly in your report what " +
+                "you ran and what is unverified.") +
           (otherLines.length > 0
             ? "\n\n**Other repos registered on this project (NOT yours for this task):**\n" + otherLines.join("\n")
             : "") +
@@ -204,12 +200,11 @@ export function composeWorkerStartupPrompt(
       })()
     : "";
   const dirtyBlock = reusedDirtyWorktree
-    ? "\n\n**⚠ Reused worktree — reconcile before you start:** this worktree was REUSED from a prior " +
-      "hard-stopped (or rejected-merge) attempt on this task and still has uncommitted changes " +
-      `(run \`git status\`):\n\n\`\`\`\n${reusedDirtyWorktree.statusSummary}\n\`\`\`\n` +
+    ? "\n\n**⚠ Reused worktree — reconcile before you start:** reused from a prior hard-stopped (or " +
+      `rejected-merge) attempt, with uncommitted changes (\`git status\`):\n\n\`\`\`\n${reusedDirtyWorktree.statusSummary}\n\`\`\`\n` +
       (reusedDirtyWorktree.truncated ? `\n(${reusedDirtyWorktree.fileCount} paths total — showing the first ones)\n` : "") +
-      "\nFinish that work if it's good, or revert it (`git checkout .` / `git clean -fd`) before you make " +
-      "any new edits — reconcile BEFORE building on top of an unreviewed leftover."
+      "\nFinish that work if it's good, or revert it (`git checkout .` / `git clean -fd`) before any new " +
+      "edits."
     : "";
   // Board card 13cc2300 — the OPPOSITE fact from dirtyBlock above: dirtyBlock says "this survived, go
   // reconcile it"; this says "this did NOT survive — Loom's own pre-spawn re-cut already destroyed it,
@@ -218,22 +213,19 @@ export function composeWorkerStartupPrompt(
   // branch that dirtyBlock covers instead), but each reads its OWN info object, so nothing here assumes
   // that exclusivity.
   const discardedBlock = discardedOnRecut
-    ? "\n\n**ℹ️ Reused worktree — prior tracked work was DISCARDED, not left for you to reconcile:** this " +
-      "worktree was reused from a prior hard-stopped (or rejected-merge) attempt on this task, but its " +
-      "branch had 0 commits ahead of the mainline, so Loom re-cut it onto the current mainline tip " +
-      "BEFORE you were spawned — a `git reset --hard` that discarded these prior tracked edits (they are " +
-      `gone from this worktree; there is nothing here to finish or revert):\n\n\`\`\`\n${discardedOnRecut.statusSummary}\n\`\`\`\n` +
+    ? "\n\n**ℹ️ Reused worktree — prior tracked work was DISCARDED, not left for you to reconcile:** reused " +
+      "from a prior hard-stopped (or rejected-merge) attempt, but its branch had 0 commits ahead of the " +
+      "mainline, so Loom re-cut it onto the mainline tip BEFORE you were spawned (`git reset --hard`), " +
+      `discarding these tracked edits (nothing here to finish or revert):\n\n\`\`\`\n${discardedOnRecut.statusSummary}\n\`\`\`\n` +
       (discardedOnRecut.truncated ? `\n(${discardedOnRecut.fileCount} paths total — showing the first ones)\n` : "") +
-      "\nThis worktree now starts clean from the current mainline. If this task looks like it should " +
-      "already have progress and doesn't, that discarded work is why — say so in your report so your " +
-      "manager knows prior work was lost, not simply never attempted."
+      "\nThe worktree starts clean. If the task looks like it should already have progress, that lost work " +
+      "is why — say so in your report so your manager knows it was lost, not never attempted."
     : "";
   const staleBlock = staleBase
-    ? "\n\n**⚠ Stale branch base — merge the mainline forward before building:** your branch's history is " +
-      `${staleBase.behindBy} commit(s) behind the project's current mainline tip (this branch forked at ` +
-      `\`${staleBase.baseSha}\`). Merge (or rebase) the mainline forward into your branch BEFORE you start ` +
-      "editing — building on a stale base risks silently reverting or conflicting with work that landed " +
-      "on the mainline after this branch was cut." +
+    ? "\n\n**⚠ Stale branch base — merge the mainline forward before building:** your branch is " +
+      `${staleBase.behindBy} commit(s) behind the mainline tip (forked at \`${staleBase.baseSha}\`). ` +
+      "Merge (or rebase) the mainline forward BEFORE editing — a stale base risks silently reverting or " +
+      "conflicting with work that landed since." +
       (staleBase.changedFiles.length > 0
         ? "\n\nFiles changed on the mainline since this branch's fork point:\n\n```\n" +
           `${staleBase.changedFiles.join("\n")}\n\`\`\`\n` +
@@ -241,14 +233,11 @@ export function composeWorkerStartupPrompt(
         : "")
     : "";
   const reviewBlock = reviewOf
-    ? "\n\n**🧐 This is a REVIEW spawn — your worktree already IS the reviewed content:** your own branch " +
-      `above was cut from the TIP of \`${reviewOf.branch}\` at commit \`${reviewOf.headSha}\` — NOT from ` +
-      "the project's mainline. Ordinary `Read`/`Grep` against your worktree already shows the reviewed " +
-      "branch's code; you do NOT need `git show <branch>:<path>` or a manual diff against another tree " +
-      "to see the right content. This is a PINNED SNAPSHOT taken at spawn time, not a live pointer — if " +
-      "the author has pushed further commits to that branch since, this worktree will not reflect them; " +
-      "say so in your report if the timing matters, and ask for a fresh review spawn if you need the " +
-      "latest tip."
+    ? "\n\n**🧐 This is a REVIEW spawn — your worktree already IS the reviewed content:** your branch was " +
+      `cut from the TIP of \`${reviewOf.branch}\` at commit \`${reviewOf.headSha}\`, not from the mainline. ` +
+      "Ordinary `Read`/`Grep` already shows the reviewed code; no `git show <branch>:<path>` needed. It is " +
+      "a PINNED SNAPSHOT from spawn time: later pushes to that branch are not reflected — say so in your " +
+      "report if timing matters, and ask for a fresh review spawn for the latest tip."
     : "";
   return `${block}${refBlock}${repoBlock}${dirtyBlock}${discardedBlock}${staleBlock}${reviewBlock}\n\n${body}`;
 }

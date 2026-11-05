@@ -81,34 +81,26 @@ export function resumeDocSizeWarning(absPath: string, now: number = Date.now()):
     const measuredAt = new Date(now).toISOString();
     return (
       `[loom:resume-doc-size] Your resume doc (\`${absPath}\`) was ~${kb}KB as of ${measuredAt} ` +
-      `(measured-at — NOT this message's send time; a delayed or re-injected delivery can widen the gap ` +
-      `between the two, so don't assume the two are close together). If you rotated, or otherwise ` +
-      `changed this doc, at or after that timestamp, this number is stale — re-check the doc's own ` +
-      `current size yourself (cheap) before acting on it. Otherwise, treat it as a heads-up, not a ` +
-      `verdict: this KB figure only decides whether this note fires at all — the harness caps are a hard ` +
-      `~256KB byte cap, and a tighter ~25k-token cap that bites first, and bytes-per-token swings a lot ` +
-      `with markup density (as low as ~2 bytes/token for emoji/bold-heavy prose, vs. ~4-5 for plain ` +
-      `prose), so this byte number cannot tell you how close you actually are. **The real test: your ` +
-      `last full \`Read\` of this file already printed its own token count** (the harness reports it ` +
-      `automatically, e.g. "NNNNN tokens, cap 25000") — check THAT number against ~25k, not this KB figure. ` +
-      `If you haven't read it recently and don't recall the count, treat this note as reason enough to ` +
-      `rotate soon rather than guessing.\n\n` +
-      `Rotate per your doctrine's size budget — but deal with the doc's CONTENT first, not just its size: ` +
-      `if it holds mostly standing rules/method rather than transient state (common for a resume doc ` +
-      `written in this genre), those must be CARRIED FORWARD or HOMED (project memory, a design doc, ` +
-      `wherever they actually belong) before you reduce to a state-only doc — a doc that's mostly rules ` +
-      `has no "small fresh doc holding only current state" that stays true, and archiving the old one ` +
-      `unread would discard them silently. Only jump straight to a state-only rewrite if this doc ` +
-      `genuinely holds nothing but transient state.\n\n` +
-      `**Do NOT Read this file and then Write directly back to that SAME path** — a Read that gets ` +
-      `cap-truncated does not satisfy the Write tool's "read it first" guard for that path, and you'll be ` +
-      `stuck (don't fall into a delete-then-rewrite or scratchpad-copy workaround to get around that). ` +
-      `Safe recipe: (1) move the file AS-IS, unread — a plain shell \`mv\` (or PowerShell \`Move-Item\`) ` +
-      `to \`<name>.archive/<YYYY-MM-DD>-NN.md\` needs no Read of its content at all; (2) if you need to ` +
-      `see the old content to decide what must be carried forward, Read the ARCHIVED copy instead (page ` +
-      `with offset/limit if it's large) — that's a different path you will never Write back to, so it's ` +
-      `safe; (3) Write your doc — content carried forward as decided above — at the now-vacant original ` +
-      `path; a Write to a path that no longer exists needs no prior Read either.`
+      `(measured-at — NOT this message's send time; a delayed delivery can widen the gap). If you rotated ` +
+      `or changed this doc after that timestamp the number is stale: re-check its size yourself first. ` +
+      `Otherwise it is a heads-up, not a verdict: the KB figure only decides whether this note fires. The ` +
+      `harness caps are a hard ~256KB byte cap and a tighter ~25k-token cap that bites first, and ` +
+      `bytes-per-token swings with markup density (~2 for emoji/bold-heavy prose, ~4-5 for plain). **The ` +
+      `real test: your last full \`Read\` of this file already printed its own token count** (e.g. ` +
+      `"NNNNN tokens, cap 25000") — check THAT against ~25k. If you don't recall it, rotate soon rather ` +
+      `than guess.\n\n` +
+      `Rotate per your doctrine's size budget, but deal with CONTENT first: if the doc holds mostly standing ` +
+      `rules/method rather than transient state, those must be CARRIED FORWARD or HOMED (project memory, ` +
+      `a design doc, wherever they belong) before you reduce to a state-only doc; archiving it unread ` +
+      `would discard them silently. Jump straight to a state-only rewrite only if it holds nothing but ` +
+      `transient state.\n\n` +
+      `**Do NOT Read this file and then Write directly back to that SAME path** — a cap-truncated Read ` +
+      `does not satisfy the Write tool's "read it first" guard for that path, and you'll be stuck (no ` +
+      `delete-then-rewrite or scratchpad-copy workaround). Safe recipe: (1) move the file AS-IS, unread — ` +
+      `a plain shell \`mv\` (or PowerShell \`Move-Item\`) to \`<name>.archive/<YYYY-MM-DD>-NN.md\`; (2) if you ` +
+      `need the old content to decide what to carry forward, Read the ARCHIVED copy (offset/limit if ` +
+      `large), a path you will never Write back to; (3) Write your doc, carrying forward as decided, at ` +
+      `the now-vacant original path; a Write to a path that no longer exists needs no prior Read either.`
     );
   } catch {
     return "";

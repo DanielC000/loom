@@ -44,10 +44,9 @@ const REGISTRY = [
   // the "---" separator, then the kickoff. Written out by hand so a regression in ANY of the interleaving
   // (not just the presence of the new block) fails this.
   const expected =
-    "## Where you edit (your isolated git worktree)\n" +
-    `- **Your worktree (make ALL edits here, never the main checkout):** \`${cwd}\`\n\n` +
-    "This worktree IS your cwd. If anything else in your context names the main repo path, that's for " +
-    "reference, not where you edit — make every change here, on your assigned branch." +
+    "## Worktree\n" +
+    `- Edit only here (your cwd, on your assigned branch; never the main checkout): \`${cwd}\`\n` +
+    "A main-repo path named elsewhere in your context is reference only." +
     `\n\n${brief}\n\n---\n\n${kickoff}`;
 
   // Every shape a single-repo spawn can take: the param omitted entirely, and explicitly undefined.
@@ -165,7 +164,7 @@ const REGISTRY = [
   check("(5) a gateless target repo reports the merge as unverified",
     out.includes("NO gate command configured") && out.includes("**unverified**"));
   check("(5) it explicitly denies falling back to another repo's gate",
-    out.includes("does not fall back to another repo's gate"));
+    out.includes("never falls back to another repo's gate"));
   check("(5) it tells the worker to say what is unverified in its report",
     out.includes("what is unverified"));
   check("(5) it does NOT claim run_gate will run some other command",
@@ -185,7 +184,7 @@ const REGISTRY = [
     out.includes("deliberately") && out.includes("noGateByDesign"));
   check("(5b) it does NOT use the plain unverified wording", !out.includes("**unverified**"));
   check("(5b) it still tells the worker to test by hand and say what was checked",
-    out.includes("test your change by hand") || out.includes("Test your change by hand") || out.includes("test your change"));
+    out.includes("test by hand") || out.includes("Test by hand"));
   check("(5b) it does NOT claim run_gate will run some other command",
     !out.includes("both run THIS repo's own gate command"));
 }
