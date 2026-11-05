@@ -964,7 +964,14 @@ const SHIPPED_END_USER_MCP_SURFACES = [
       // MAXIMAL render: authenticated_request is ALSO config-gated (session.connections non-empty,
       // mcp/server.ts) — without a pinned connection, the tool never registers and the structural coverage
       // scan below would silently never see it (card a2f2becc round 3).
-      const sid = insertFakeSessionForRole(fx, "manager", { vaultWrite: true, connections: ["fake-connection-id"] });
+      // ssh_exec is gated the same way but additionally needs a REAL ssh connection row to resolve.
+      const { createSshConnection } = await import("../dist/connections/store.js");
+      const sshKey = (await import("ssh2")).default.utils.generateKeyPairSync("ed25519");
+      const sshConn = createSshConnection(fx.db, {
+        name: "render-ssh", host: "ssh.example", port: 22, user: "loom",
+        privateKey: sshKey.private, hostKeyFingerprint: "SHA256:" + "A".repeat(43),
+      });
+      const sid = insertFakeSessionForRole(fx, "manager", { vaultWrite: true, connections: ["fake-connection-id", sshConn.id] });
       const router = new TaskMcpRouter(fx.db, new WakeService({ db: fx.db, pty: {}, resume: () => {} }));
       return renderToolsViaRealClient(router.buildServer(fx.home.id, sid));
     },

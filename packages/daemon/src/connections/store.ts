@@ -485,6 +485,23 @@ export function resolveUsableConnections(
   return out;
 }
 
+/** The `ssh` connections among `sessionConnections` that this caller's project can reach — the list the
+ *  `ssh_exec` tool registers on and describes. `{id,name,host}` only, never any key material. */
+export function resolveUsableSshConnections(
+  db: ConnectionsDbStore,
+  sessionConnections: string[],
+  callerProjectId?: string | null,
+): UsableConnectionSummary[] {
+  const out: UsableConnectionSummary[] = [];
+  for (const id of sessionConnections) {
+    const meta = getConnectionMetadata(db, id);
+    if (!meta || meta.authScheme !== "ssh") continue;
+    if (!isConnectionUsableByProject(meta.projectId, callerProjectId ?? null)) continue;
+    out.push({ id: meta.id, name: meta.name, host: meta.host });
+  }
+  return out;
+}
+
 // --- OAuth2 (agent-tooling epic P5a): authorization-code + PKCE registration + token-bundle seams -------
 // Everything below is HUMAN-only-triggered (REST, `gateway/server.ts`) or server-internal (the lazy
 // refresh-on-use seam in `connections/request.ts` / `connections/oauth.ts`) — no MCP tool ever reaches

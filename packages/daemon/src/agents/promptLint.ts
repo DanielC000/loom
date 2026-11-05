@@ -110,6 +110,9 @@ export const TASKS_ASSISTANT_EXCLUDED_TOOLS: readonly string[] = ["tasks_create"
 // Conditional on the resolved profile, not the role — see resolveKnownToolSurface.
 export const TASKS_VAULT_WRITE_TOOL = "vault_write";
 export const TASKS_AUTHENTICATED_REQUEST_TOOL = "authenticated_request";
+// Registered only for a session whose granted connections include an ssh one; the lint approximates that
+// as "any connection granted" (it cannot see the connection's scheme).
+export const TASKS_SSH_EXEC_TOOL = "ssh_exec";
 
 // Companion-gated (live `companionSessionIds` binding, reachable from manager OR worker OR
 // assistant — unresolvable from role alone). Approximated as always-allowed for the three
@@ -131,7 +134,7 @@ export const ALL_KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   ...PLATFORM_TOOLS, ...SETUP_TOOLS, ...AUDIT_TOOLS, ...USER_AUDIT_TOOLS, ...OPERATOR_TOOLS,
   ...RUN_TOOLS, ...ORCH_MANAGER_TOOLS, ...ORCH_WORKER_TOOLS, ...ORCH_ASSISTANT_TOOLS,
   ...TASKS_UNIVERSAL_TOOLS, ...COMPANION_APPROX_ALLOW,
-  TASKS_VAULT_WRITE_TOOL, TASKS_AUTHENTICATED_REQUEST_TOOL, DOCUMENT_CONVERSION_TOOL,
+  TASKS_VAULT_WRITE_TOOL, TASKS_AUTHENTICATED_REQUEST_TOOL, TASKS_SSH_EXEC_TOOL, DOCUMENT_CONVERSION_TOOL,
 ]);
 
 /** The resolved-profile inputs the surface depends on — mirrors buildMcpServers' inputs (pty/host.ts)
@@ -160,7 +163,10 @@ export function resolveKnownToolSurface(profile: ToolSurfaceProfile): Set<string
   for (const t of TASKS_UNIVERSAL_TOOLS) surface.add(t);
   if (role === "assistant") for (const t of TASKS_ASSISTANT_EXCLUDED_TOOLS) surface.delete(t);
   if (profile.vaultWrite) surface.add(TASKS_VAULT_WRITE_TOOL);
-  if (profile.connections && profile.connections.length > 0) surface.add(TASKS_AUTHENTICATED_REQUEST_TOOL);
+  if (profile.connections && profile.connections.length > 0) {
+    surface.add(TASKS_AUTHENTICATED_REQUEST_TOOL);
+    surface.add(TASKS_SSH_EXEC_TOOL);
+  }
 
   if (role === "manager") for (const t of ORCH_MANAGER_TOOLS) surface.add(t);
   else if (role === "worker") for (const t of ORCH_WORKER_TOOLS) surface.add(t);

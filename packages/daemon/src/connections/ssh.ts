@@ -57,8 +57,24 @@ export type SshExecResult =
   | {
       ok: false;
       error: string;
-      kind: "invalid-input" | "host-key-mismatch" | "timeout" | "connection-failed";
+      kind: SshExecFailureKind;
     };
+
+/** `auth-refused` (the host answered but rejected our key) and `unreachable` (no TCP/DNS path to it) are
+ *  split out of the old catch-all so a caller can tell "fix the authorized_keys entry" from "the host is
+ *  down" — classified ONLY from the `level` tag ssh2 puts on its error object, never from its message
+ *  text. `connection-failed` stays the residual (handshake/protocol errors, exec-open failure). */
+export type SshExecFailureKind =
+  | "invalid-input" | "host-key-mismatch" | "timeout" | "auth-refused" | "unreachable" | "connection-failed";
+
+/** Map an ssh2 'error' event to a failure kind by its `level` tag alone (the message is never read). */
+function classifySsh2ErrorLevel(err: unknown): SshExecFailureKind {
+  const level = typeof (err as { level?: unknown } | null)?.level === "string" ? (err as { level: string }).level : "";
+  if (level === "client-authentication") return "auth-refused";
+  if (level === "client-socket" || level === "client-dns") return "unreachable";
+  if (level === "client-timeout") return "timeout";
+  return "connection-failed";
+}
 
 function validateInput(input: SshExecInput): string | null {
   if (typeof input?.host !== "string" || !input.host) return "host is required";
@@ -196,15 +212,18 @@ export async function runSshExecCommand(input: SshExecInput): Promise<SshExecRes
       resolve(result);
     }
 
-    client.on("error", () => {
+    client.on("error", (err: unknown) => {
       // Never pass ssh2's own error text through (it could embed input). The specific, user-meaningful
-      // cases (fingerprint mismatch, timeout) are classified from our own state, not from the library's
-      // error message.
+      // cases are classified from our own state / ssh2's `level` tag, not from the library's message.
       if (fingerprintMismatch) {
         finish({ ok: false, error: "host key verification failed (fingerprint mismatch)", kind: "host-key-mismatch" });
         return;
       }
-      finish({ ok: false, error: "ssh connection failed", kind: "connection-failed" });
+      const kind = classifySsh2ErrorLevel(err);
+      if (kind === "auth-refused") finish({ ok: false, error: "ssh authentication was refused by the host", kind });
+      else if (kind === "unreachable") finish({ ok: false, error: "ssh host unreachable", kind });
+      else if (kind === "timeout") finish({ ok: false, error: "ssh command timed out", kind });
+      else finish({ ok: false, error: "ssh connection failed", kind: "connection-failed" });
     });
 
     client.on("ready", () => {

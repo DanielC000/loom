@@ -109,6 +109,7 @@ function startTestSshServer() {
         });
         session.once("exec", (accept2, reject2, info) => {
           flags.execRequested = true;
+          if (info.command === "run:rejectexec") { reject2(); return; }
           const stream = accept2();
           if (info.command === "run:echo") {
             stream.write("stdout-line\n");
@@ -567,9 +568,31 @@ try {
       maxOutputBytes: 1000,
     });
     capturedResults.push(authFailResult);
-    check("7b auth failure: refused as connection-failed", authFailResult.ok === false && authFailResult.kind === "connection-failed");
+    check("7b auth failure: classified as auth-refused (distinct from unreachable)", authFailResult.ok === false && authFailResult.kind === "auth-refused");
+    check("7b auth failure: fixed generic text", authFailResult.ok === false && authFailResult.error === "ssh authentication was refused by the host");
     check("7b auth failure: server never opened a session", fixture.flags.sessionOpened === false);
     check("7b auth failure: server received no exec request", fixture.flags.execRequested === false);
+
+    // 7c. unreachable — a loopback port with nothing listening (bound then closed, so it is genuinely free).
+    const probe = net.createServer();
+    const deadPort = await new Promise((resolve) => probe.listen(0, "127.0.0.1", () => resolve(probe.address().port)));
+    await new Promise((resolve) => probe.close(() => resolve()));
+    const unreachableResult = await runSshExecCommand({
+      host: "127.0.0.1", port: deadPort, user: "loom-test", privateKey: clientKeyPair.private,
+      expectedFingerprint: independentHostFingerprint, command: "run:echo", timeoutMs: 5000, maxOutputBytes: 1000,
+    });
+    capturedResults.push(unreachableResult);
+    check("7c connection refused at TCP: classified as unreachable (not auth-refused)", unreachableResult.ok === false && unreachableResult.kind === "unreachable");
+    check("7c unreachable: fixed generic text", unreachableResult.ok === false && unreachableResult.error === "ssh host unreachable");
+
+    // 7d. exec-open failure (host authenticated us, then refused the exec request) stays connection-failed —
+    // neither auth-refused nor unreachable.
+    const execRejectResult = await runSshExecCommand({
+      host: "127.0.0.1", port, user: "loom-test", privateKey: clientKeyPair.private,
+      expectedFingerprint: independentHostFingerprint, command: "run:rejectexec", timeoutMs: 5000, maxOutputBytes: 1000,
+    });
+    capturedResults.push(execRejectResult);
+    check("7d exec rejected by an authenticated host: stays connection-failed", execRejectResult.ok === false && execRejectResult.kind === "connection-failed");
 
     await fixture.stop();
   }

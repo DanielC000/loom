@@ -1074,6 +1074,10 @@ export type OrchestrationEventKind =
   // audit-only marker, not a lifecycle signal any of those four track; the worker's own turn already
   // registers as activity via its surrounding events regardless of whether this one is counted.
   | "codex_auto_commit"
+  // Audit trail for the `ssh_exec` tool: TWO rows per call sharing `detail.callId` — an `attempt` row
+  // written before anything can throw, and an `outcome` row (refused / error / ran). An attempt row with
+  // no outcome row means the daemon died mid-call. Audit-only; not a lifecycle signal.
+  | "ssh_command_run"
   // Card 2897acc4: a session's OS process was found alive after a pty exit signal or a hard-stop kill
   // was believed to have ended it, filed by `SessionService.handleProcessSurvivedKill` (consumes
   // `PtyHostEvents.onProcessSurvivedKill`). `detail` carries {pid, trigger, identityConfirmed,
@@ -2335,7 +2339,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, watermark_finalize_withheld: true, commondir_trust_pinned: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, skill_permission_frontmatter_warning: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, locked_role_skills_dropped: true, codex_isolation_gap_disclosed: true,
-  codex_auto_commit: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
+  codex_auto_commit: true, ssh_command_run: true, code_graph_memory_recycled: true, code_graph_memory_recycle_suspended: true,
   credential_revoked: true,
   vault_autocommit_refused_code_repo: true,
   credential_undeliverable: true,

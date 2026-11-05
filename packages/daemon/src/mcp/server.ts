@@ -15,7 +15,8 @@ import {
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory, readProjectMemoryHistory, MAX_MEMORY_HISTORY_LIMIT } from "./memory.js";
 import { registerDecisionTools } from "./decisions.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
-import { resolveUsableConnections } from "../connections/store.js";
+import { resolveUsableConnections, resolveUsableSshConnections } from "../connections/store.js";
+import { performSshExec } from "../connections/sshExec.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { isConfirmedSubagent, type ToolAttributionResult } from "../pty/tool-attribution.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
@@ -902,6 +903,34 @@ export class TaskMcpRouter {
         },
         async (args) => ok(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args, projectId)),
       );
+
+      // `ssh_exec`: registered on the SAME session-row `connections` read as above, only when at least one
+      // granted connection is a usable `ssh` one — never off the profile or agent row. Host/port/user always
+      // come from the connection row. Loom-side filtering is defense-in-depth only.
+      const sshConnections = resolveUsableSshConnections(db, sessionConnections, projectId);
+      if (sshConnections.length > 0) {
+        const sshListText = sshConnections.map((c) => `id=${JSON.stringify(c.id)} name=${JSON.stringify(c.name)} host=${JSON.stringify(c.host)}`).join("; ");
+        server.registerTool(
+          "ssh_exec",
+          {
+            description:
+              "Run ONE command on a remote host over a pre-configured SSH connection granted to this session. " +
+              "Loom connects as the connection's fixed user to its fixed, host-key-pinned address and you never see " +
+              "the key; you pass only `connectionId` and `command`. The command is checked before anything is sent: " +
+              "shell syntax is always refused (no `;` `&` `|` backticks `$()` redirection, quotes, globbing, " +
+              "newlines or non-ASCII), read-only connections accept only a short list of read verbs (this limits " +
+              "which verbs run, not what the server-side user can read), an owner " +
+              "allowlist may further restrict commands, and risky commands (reboot, rm, service control, …) are " +
+              "refused. Output is size-capped, the call is time-bounded and rate-limited per connection, and every " +
+              "call — run or refused — is audited. This Loom-side filtering is defense-in-depth only: the real " +
+              "security boundary is the server-side dedicated least-privileged user the owner provisions. " +
+              "A refusal returns {ok:false, reason}; a failed connection says whether the host was unreachable or " +
+              `rejected the key. This session's ssh connections: ${sshListText}`,
+            inputSchema: strictShape({ connectionId: z.string(), command: z.string() }),
+          },
+          async (args) => ok(await performSshExec({ db, sessionId, projectId, guard }, sessionConnections, args)),
+        );
+      }
     }
 
     // Card be8be211: the profile-gated confined vault-write tool — same shape as authenticated_request
