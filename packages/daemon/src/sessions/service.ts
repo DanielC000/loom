@@ -18,7 +18,7 @@ import {
 import { resolveHarnessConfig, harnessDefaultForRole } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexIncompatibilities, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleForcedClaudeReason, isForcedRoleFreshStart, type CodexCompatInput, type CodexIncompatibility } from "../profiles/codex-compat.js";
 import { agentAssignableProfileError, agentRebindRestrictedToolsWideningError, agentCredentialGrantRoleChangeOnRebindError, boundAgentCredentialGrantRoleChangeError, explicitRoleGrantCarryoverError, sessionSkillsForRole, lockedRoleSkillsDroppedReason } from "../profiles/validate.js";
-import { computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
+import { grantFieldsOf, PROFILE_DELETE_BACKSTOP_FIELDS, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields, type AgentRebindReach } from "../profiles/grantReach.js";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry, WorkerEventPresence, WedgedWorktreeEntry } from "../db.js";
 import { latestEventSeqMapKey, workerEventPresenceKey } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
@@ -18583,8 +18583,8 @@ export class SessionService {
    * profile_update tool exists on this surface), so a rebind REFUSES a restrictedTools removal; most
    * other widening (e.g. role) is allowed and audited via `rebindReach`.
    *
-   * @decision caca806c — an EXCEPTION to that: a role change is also REFUSED when the agent itself
-   * carries a connections/capabilities grant.
+   * @decision caca806c — an EXCEPTION to that: a role change OR a restrictedTools true->false relax is
+   * also REFUSED when the agent itself carries a connections/capabilities grant.
    */
   assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent & { rebindReach?: AgentRebindReach } {
     this.requireManager(managerSessionId, "agent_assign_profile");
@@ -18604,8 +18604,8 @@ export class SessionService {
     const restrictedErr = agentRebindRestrictedToolsWideningError(beforeFields, afterFields);
     if (restrictedErr) throw new Error(restrictedErr);
     // @decision caca806c — an agent carrying its own connections/capabilities grant refuses a rebind that
-    // changes its resolved role; checked before the write, like restrictedErr above.
-    const grantRoleErr = agentCredentialGrantRoleChangeOnRebindError(agent, beforeFields.role, afterFields.role);
+    // changes its resolved role or relaxes restrictedTools true->false; checked before the write, like restrictedErr above.
+    const grantRoleErr = agentCredentialGrantRoleChangeOnRebindError(agent, beforeFields, afterFields);
     if (grantRoleErr) throw new Error(grantRoleErr);
     const rebindReach = recordAgentProfileRebindReach(this.db, {
       agentId: agent.id, agentName: agent.name, projectId: agent.projectId,
@@ -18808,7 +18808,7 @@ export class SessionService {
     // @decision caca806c (round 4) — deleting a role-bearing profile drops each bound agent to role null;
     // refuse when any carries its own grant (same predicate as profile_update's role change).
     const boundAgentGrantErr = boundAgentCredentialGrantRoleChangeError(
-      this.db.listAllAgents().filter((a) => a.profileId === profileId), existing.role, null,
+      this.db.listAllAgents().filter((a) => a.profileId === profileId), grantFieldsOf(existing), PROFILE_DELETE_BACKSTOP_FIELDS,
     );
     if (boundAgentGrantErr) throw new Error(boundAgentGrantErr);
     // @decision 8fd36112 — compute BEFORE delete, file only after it succeeds.

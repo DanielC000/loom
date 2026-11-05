@@ -52,6 +52,34 @@ top of the pre-existing profile-level grant (`resolveProfile`'s `unionConnection
    `boundAgentCredentialGrantRoleChangeError(…, existing.role, null)`: deleting a role-bearing profile drops
    bound agents to role null, so it is refused when any carries its own grant. Human REST delete stays exempt.
 
+## Round 5 — the restrictedTools axis (card `6baaa83d`, found by Code Review #4; manager-approved design)
+
+The guards above keyed on ROLE only. For a grant-carrying agent, relaxing `restrictedTools` true→false
+reached the same end state as Round 4 item 1 (role-null, unrestricted, holding agent-only grants):
+`profile_update` (Setup, Platform), `profile_delete` (Platform, manager — a role-null restricted profile is
+null→null on role, and the delete backstop is unrestricted), and a rebind onto an unrestricted profile or a
+clear to `profileId: null` (Setup/Platform `agent_update` + `profile_assign`). Fix: ONE core,
+`agentGrantWideningAxes(before, after)` (`profiles/validate.ts`) — role changed, or restrictedTools
+true→false — behind the two existing predicates, which now take before/after `{role, restrictedTools}`
+instead of two role strings. Deletes pass (existing fields, `PROFILE_DELETE_BACKSTOP_FIELDS`); rebinds pass
+`rebindWideningFields`' pair; updates pass `grantFieldsOf(existing)` / `grantFieldsOf(merged)`. Hard refusal
+on every agent-facing path, human REST still exempt, role-bearing restricted profiles guarded on this axis
+too. The manager's `agent_assign_profile` already refused any restrictedTools removal regardless of grants
+(`agentRebindRestrictedToolsWideningError`, untouched; regression-tested). Test:
+`agent-grant-restricted-tools-guard.mjs` asserts the END STATE through `resolveAgentSpawn`, not just the text.
+
+**Supersedes** the Do-not below about restrictedTools guards on Setup's rebind path: its premise was that
+Setup's rebind had no grant-bearing agent to protect; an agent-row grant makes the restriction part of the
+context the grant was approved in. The `8b236b22` axis is still unguarded for agents WITHOUT their own grant.
+
+**Fan-out grants ARE counted (deliberate).** Agent-row grants that `afe1bc90`'s fan-out wrote
+(`Db.getFanoutExemption`) count as the agent's own grant for the new guard, unlike
+`explicitRoleGrantCarryoverError`, which exempts them on the null→worker leg. Reason: fail-closed, and
+consistent with the Round 3/4 role-axis guards (which also count them). A human can still relax it via REST.
+Final round also replaced the old source-text grep of `gateway/server.ts` with a behavioural REST-exemption
+check (real `buildServer` + `app.inject`: human profile DELETE and agent rebind to `profileId:null` succeed),
+and added a capabilities-only fixture and a pre-dangling-`profileId` fixture to the test.
+
 ## Do not
 
 - Do not widen the null→worker check beyond `connections`/`capabilities` — with no bound profile, every
@@ -67,6 +95,11 @@ top of the pre-existing profile-level grant (`resolveProfile`'s `unionConnection
   item 1 bypass; read the agent row's own raw grants unconditionally.
 - Do not fold `boundAgentCredentialGrantRoleChangeError` into `roleChangeCapabilityCarryoverError` — they
   check different data; keep two calls.
-- Do not add a `restrictedTools`/role-flip-into-`manager` guard to Setup's REBIND path citing this card
-  (`8b236b22`'s axis).
+- ~~Do not add a `restrictedTools`/role-flip-into-`manager` guard to Setup's REBIND path citing this card
+  (`8b236b22`'s axis).~~ **SUPERSEDED by Round 5** for the `restrictedTools` axis, and only when the agent
+  carries its own connections/capabilities grant; a role flip into `manager` for a grant-free agent stays
+  unguarded.
+- Do not add a second, parallel restrictedTools check beside `agentGrantWideningAxes`; extend that core.
+- Do not make the human REST profile/agent routes call either predicate (human intent, exempt).
+- Do not hand-copy the delete backstop for the `profile_delete` guards; pass `PROFILE_DELETE_BACKSTOP_FIELDS`.
 - Do not strip the agent row's grants per caller on a plain spawn, or refuse it — `resolveAgentSpawn` only.

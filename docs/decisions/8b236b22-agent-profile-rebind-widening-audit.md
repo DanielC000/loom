@@ -132,3 +132,5 @@ UNCHANGED and stays — the manager surface genuinely has no `profile_create`/`p
   `reservedProjectManagerProfileError`, or `nonReservedElevatedProfileError` — all four are unchanged;
   this card adds a SEPARATE audit+guard layer alongside them, computed from the agent's OLD vs. NEW bound
   profile rather than from the profile being bound in isolation.
+
+> Forward note: for an agent carrying its OWN connections/capabilities grant, Setup/Platform rebind and clear now hard-refuse a restrictedTools removal (decision caca806c, Round 5); the audit-only posture above still holds for agents without their own grant.

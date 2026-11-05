@@ -391,40 +391,60 @@ export function boundAgentCapabilitiesCodexFlipError(
   return "cannot switch this profile to the codex harness: at least one agent bound to it carries its own capabilities grant, and codex mounts no stdio capability servers — remove the agent-level capabilities first (agent editor)";
 }
 
+/** The two profile axes that, changed under an agent carrying its own grant, put that grant in a different trust context. */
+export type AgentGrantWideningAxisFields = { role?: string | null; restrictedTools?: boolean | null };
+
 /**
- * @decision caca806c — an agent-facing REBIND refuses when the AGENT ROW itself carries a grant and the
- * resolved role would change; mirrors `roleChangeCapabilityCarryoverError`, but reads the agent's own
- * `connections`/`capabilities`, not the profile's.
+ * @decision caca806c — the ONE discriminator behind both agent-grant guards below; never add a parallel check.
+ * Callers pass resolved fields (unbind/deleted profile = `PROFILE_DELETE_BACKSTOP_FIELDS`); restrictedTools: true→false only.
  */
-export function agentCredentialGrantRoleChangeOnRebindError(
-  agentGrants: { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null },
-  previousRole: string | null | undefined,
-  newRole: string | null | undefined,
-): string | null {
-  if ((previousRole ?? null) === (newRole ?? null)) return null; // not a role change
-  const carried: string[] = [];
-  if (agentGrants.connections && agentGrants.connections.length > 0) carried.push("connections");
-  if (agentGrants.capabilities && agentGrants.capabilities.length > 0) carried.push("capabilities");
-  if (carried.length === 0) return null;
-  return `cannot rebind: this agent carries its own ${carried.join(", ")} grant, and this rebind would change its resolved role from "${previousRole ?? "null"}" to "${newRole ?? "null"}" — ask the human to rebind this agent's profile in the Profiles/Agents UI`;
+export function agentGrantWideningAxes(
+  before: AgentGrantWideningAxisFields,
+  after: AgentGrantWideningAxisFields,
+): ("role" | "restrictedTools")[] {
+  const axes: ("role" | "restrictedTools")[] = [];
+  if ((before.role ?? null) !== (after.role ?? null)) axes.push("role");
+  if (before.restrictedTools && !after.restrictedTools) axes.push("restrictedTools");
+  return axes;
+}
+
+function widenedContextClause(axes: readonly ("role" | "restrictedTools")[], before: AgentGrantWideningAxisFields, after: AgentGrantWideningAxisFields): string {
+  const parts: string[] = [];
+  if (axes.includes("role")) parts.push(`change its resolved role from "${before.role ?? "null"}" to "${after.role ?? "null"}"`);
+  if (axes.includes("restrictedTools")) parts.push("remove its tool restriction (restrictedTools)");
+  return parts.join(" and ");
 }
 
 /**
- * @decision caca806c (round 3, item 2) — the ONE shared predicate for BOTH `profile_update` handlers:
- * refuses a PROFILE role CHANGE when ANY bound agent carries its own agent-row connections/capabilities.
- * See the decision record for why this is distinct from `roleChangeCapabilityCarryoverError` above.
+ * @decision caca806c — an agent-facing REBIND refuses when the AGENT ROW carries a grant and the resolved
+ * role changes or restrictedTools is removed; reads the agent's own grants, not the profile's.
+ */
+export function agentCredentialGrantRoleChangeOnRebindError(
+  agentGrants: { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null },
+  before: AgentGrantWideningAxisFields,
+  after: AgentGrantWideningAxisFields,
+): string | null {
+  const axes = agentGrantWideningAxes(before, after);
+  if (axes.length === 0) return null;
+  const carried = agentCarriedCredentialGrants(agentGrants);
+  if (carried.length === 0) return null;
+  return `cannot rebind: this agent carries its own ${carried.join(", ")} grant, and this rebind would ${widenedContextClause(axes, before, after)} — ask the human to rebind this agent's profile in the Profiles/Agents UI`;
+}
+
+/**
+ * @decision caca806c — shared by every profile_update/profile_delete handler: refuses a role change or
+ * restrictedTools removal while ANY bound agent carries its own grant. A delete passes (existing, backstop).
  */
 export function boundAgentCredentialGrantRoleChangeError(
   boundAgents: readonly { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null }[],
-  previousRole: string | null | undefined,
-  newRole: string | null | undefined,
+  before: AgentGrantWideningAxisFields,
+  after: AgentGrantWideningAxisFields,
 ): string | null {
-  if ((previousRole ?? null) === (newRole ?? null)) return null; // not a role change
-  const offending = boundAgents.some(
-    (a) => (a.connections && a.connections.length > 0) || (a.capabilities && a.capabilities.length > 0),
-  );
+  const axes = agentGrantWideningAxes(before, after);
+  if (axes.length === 0) return null;
+  const offending = boundAgents.some((a) => agentCarriedCredentialGrants(a).length > 0);
   if (!offending) return null;
-  return `cannot change role: at least one agent bound to this profile carries its own human-set connections/capabilities grant, and this change would change its resolved role from "${previousRole ?? "null"}" to "${newRole ?? "null"}" — ask the human to change the role in the Profiles UI`;
+  return `cannot ${axes.includes("role") ? "change role" : "remove the tool restriction"}: at least one agent bound to this profile carries its own human-set connections/capabilities grant, and this change would ${widenedContextClause(axes, before, after)} — ask the human to do it in the Profiles UI`;
 }
 
 /**
